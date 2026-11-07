@@ -32,7 +32,8 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
 import { spawn } from "node:child_process"
 
 const log = (o) => { if (process.env.FAKE_ACP_LOG) appendFileSync(process.env.FAKE_ACP_LOG, JSON.stringify(o) + "\n") }
-log({ spawn: { argv: process.argv.slice(2), cwd: process.cwd(), claude: process.env.CLAUDE_CODE_EXECUTABLE ?? null, pid: process.pid } })
+log({ spawn: { argv: process.argv.slice(2), cwd: process.cwd(), claude: process.env.CLAUDE_CODE_EXECUTABLE ?? null, pid: process.pid,
+  env: { NPM_TOKEN: process.env.NPM_TOKEN ?? null, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? null, HOME: process.env.HOME ?? null, PATH0: (process.env.PATH ?? "").split(":")[0] } } })
 if (process.env.FAKE_ACP_GRANDCHILD) {
   const c = spawn("sleep", ["300"], { stdio: "ignore" })
   writeFileSync(process.env.FAKE_ACP_GRANDCHILD, String(c.pid))

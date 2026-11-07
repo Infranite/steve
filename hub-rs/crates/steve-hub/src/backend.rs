@@ -567,6 +567,24 @@ pub trait Repo {
     fn setting_raw(&self, ws: &str, key: &str) -> BResult<Option<String>> {
         todo_backend!("setting_raw")
     }
+    /// `principal`'s variables on `node` (`node_env`), if `me` in `ws` may see them (403 otherwise).
+    fn node_env_list(&self, me: &str, ws: &str, node: &str, principal: &str) -> BResult<Value> {
+        todo_backend!("node_env_list")
+    }
+    /// Sets one of them (`value`), or removes it (`None`).
+    #[allow(clippy::too_many_arguments)]
+    fn node_env_put(
+        &self,
+        me: &str,
+        ws: &str,
+        node: &str,
+        principal: &str,
+        key: &str,
+        value: Option<&str>,
+        note: &str,
+    ) -> BResult<()> {
+        todo_backend!("node_env_put")
+    }
     /// Upserts one raw `settings` value (JSON text) without a revision row and without publishing.
     fn setting_put_raw(&self, ws: &str, key: &str, value: &str) -> BResult<()> {
         todo_backend!("setting_put_raw")

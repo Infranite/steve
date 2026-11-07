@@ -623,6 +623,7 @@ mod tests {
         let own = steve_acp::AdapterProperties {
             self_read_only: true,
             nested_sandbox: false,
+            state: Default::default(),
         };
         let required = SandboxRequirement::Required {
             guarantees: vec![FS_READONLY.into()],
@@ -636,6 +637,7 @@ mod tests {
         let plain = steve_acp::AdapterProperties {
             self_read_only: false,
             nested_sandbox: true,
+            state: Default::default(),
         };
         assert_eq!(
             sandbox_mode(&preferred, plain).unwrap(),

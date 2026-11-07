@@ -25,6 +25,7 @@ mod procs;
 mod research;
 mod scan;
 mod secrets;
+mod toolchain;
 mod tools;
 pub mod workspace;
 

@@ -13,6 +13,7 @@
 pub mod blob;
 pub mod common;
 pub mod discovery;
+pub mod env;
 pub mod events;
 pub mod glob;
 pub mod ids;

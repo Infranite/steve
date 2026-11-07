@@ -209,7 +209,7 @@ pub(crate) async fn run(
             );
             program = steve_research::sandbox::SANDBOX_EXEC.into();
         } else if let Some(c) = req.confine {
-            (program, args) = c.wrap_in(program, args, &[], Some(req.cwd));
+            (program, args) = c.wrap_in(program, args, &[], &[], Some(req.cwd));
         }
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bytes = AtomicU64::new(0);

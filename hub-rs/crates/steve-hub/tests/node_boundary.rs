@@ -232,6 +232,7 @@ const ALLOWED: &[Entry] = &[
     e(Spawn, "steve-acp/src/config.rs", 1, Hub, "`npm root -g`, to find the adapters"),
     e(Spawn, "steve-vault/src/harness.rs", 1, Library, "whether seatbelt starts here (sandbox-exec on /usr/bin/true): the Node's sandbox and the pre-switch check"),
     e(Dir, "steve-vault/src/harness.rs", 1, Library, "the protected name prefixes the Node hides from a bubblewrap run"),
+    e(Dir, "steve-toolchains/src/lib.rs", 2, Library, "a project's marker files, for the Node to set its toolchains' places"),
     e(Dir, "steve-knowledge/src/scan.rs", 1, Library, "the folder walk the Node's scan reuses"),
     e(Fs, "steve-acp/src/codex.rs", 4, Library, "CODEX_HOME config and the adapter's instructions file"),
     e(Dir, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),

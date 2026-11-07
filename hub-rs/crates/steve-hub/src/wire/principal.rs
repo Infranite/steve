@@ -177,6 +177,59 @@ pub fn record_in(
     Ok(())
 }
 
+/// A name for a path segment: what the Node accepts, and a short digest of the original so that
+/// two names cleaned to the same text stay apart.
+fn segment(s: &str) -> String {
+    use sha2::Digest as _;
+    let clean: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    let d = hex::encode(sha2::Sha256::digest(s.as_bytes()));
+    format!("{clean}-{}", &d[..8])
+}
+
+/// `session`'s principal's own directory for `harness` on `node` (path model §4.5.1): one per
+/// (workspace, principal, bot, adapter), recorded as `runtime_sessions.state_dir`. The principal
+/// who owns the Node starts it from their own settings and login there.
+pub fn harness_state_in(
+    c: &Connection,
+    session: &str,
+    node: &str,
+    harness: &str,
+) -> Result<Option<steve_node_api::HarnessState>, StoreError> {
+    let Some((ws, p)) = of_session(c, session)? else {
+        return Ok(None);
+    };
+    let bot: Option<String> = c
+        .query_row("SELECT bot_id FROM sessions WHERE id=?", [session], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten();
+    let dir = [
+        segment(&ws),
+        segment(&p.key()),
+        segment(bot.as_deref().unwrap_or("none")),
+        segment(harness),
+    ]
+    .join("/");
+    let owner = super::node_env::node_owner(c, node)?;
+    let import_owner = p.user().is_some() && owner.as_deref() == p.user();
+    c.execute(
+        "UPDATE runtime_sessions SET state_dir=? WHERE session_id=?",
+        rusqlite::params![dir, session],
+    )?;
+    Ok(Some(steve_node_api::HarnessState { dir, import_owner }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

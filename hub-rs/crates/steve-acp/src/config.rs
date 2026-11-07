@@ -12,15 +12,52 @@ use std::time::Duration;
 pub struct AdapterProperties {
     pub self_read_only: bool,
     pub nested_sandbox: bool,
+    /// Where the harness keeps its configuration, logins and history, when it can be moved: what
+    /// gives each principal its own (`None`: it cannot, and every run uses the Node's).
+    pub state: Option<StateDir>,
 }
 
-const BUNDLED_PROPERTIES: &[(&str, AdapterProperties)] = &[(
-    "codex",
-    AdapterProperties {
-        self_read_only: true,
-        nested_sandbox: false,
-    },
-)];
+/// A harness's own directory (path model §4.5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateDir {
+    /// The variable that moves it.
+    pub env: &'static str,
+    /// Where it is under the user's home when the variable is not set.
+    pub default: &'static str,
+    /// What of the Node owner's own directory the owner's state starts with (their own settings,
+    /// never anyone else's; a login only where a copy cannot sign the original out).
+    pub import: &'static [&'static str],
+}
+
+const CLAUDE_STATE: StateDir = StateDir {
+    env: "CLAUDE_CONFIG_DIR",
+    default: ".claude",
+    import: &["settings.json"],
+};
+
+const BUNDLED_PROPERTIES: &[(&str, AdapterProperties)] = &[
+    (
+        "claude-code",
+        AdapterProperties {
+            self_read_only: false,
+            nested_sandbox: true,
+            state: Some(CLAUDE_STATE),
+        },
+    ),
+    (
+        "codex",
+        AdapterProperties {
+            self_read_only: true,
+            nested_sandbox: false,
+            state: Some(StateDir {
+                env: "CODEX_HOME",
+                default: ".codex",
+                // not its login: copies refreshing on their own would sign the owner's out
+                import: &["config.toml"],
+            }),
+        },
+    ),
+];
 
 /// Everything the ACP driver needs from the configuration (the Node's, built from the Hub's).
 #[derive(Debug, Clone)]
@@ -116,6 +153,7 @@ impl AcpConfig {
             .unwrap_or(AdapterProperties {
                 self_read_only: false,
                 nested_sandbox: true,
+                state: None,
             })
     }
 
