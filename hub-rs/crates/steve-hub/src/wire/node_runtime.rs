@@ -1612,6 +1612,34 @@ impl NodeRuntime {
             .unwrap_or(1) as usize
     }
 
+    /// The same durable work counted by `working`, for the instance administrator's upgrade receipt.
+    /// Do not include prompts, command bodies or permission payloads in a maintenance view.
+    pub fn working_details(&self) -> Vec<Value> {
+        if self.stopped.lock().unwrap().is_some() {
+            return vec![];
+        }
+        self.store.reader(|c| {
+            let mut q = c.prepare(
+                "SELECT r.session_id, s.item_id, t.active_attempt, t.state, 'node_turn'
+                 FROM runtime_turns t JOIN runtime_sessions r USING(session_id)
+                 LEFT JOIN sessions s ON s.id=r.session_id
+                 WHERE r.node_id=?1 AND t.state<>'finished'
+                 UNION ALL
+                 SELECT r.session_id, s.item_id, r.active_attempt, r.phase, 'node_session'
+                 FROM runtime_sessions r LEFT JOIN sessions s ON s.id=r.session_id
+                 WHERE r.node_id=?1 AND r.phase IN ('opening','configuring','releasing')
+                 AND NOT EXISTS(SELECT 1 FROM runtime_turns t WHERE t.session_id=r.session_id AND t.state<>'finished')
+                 ORDER BY 1 LIMIT 100")?;
+            let rows = q.query_map([self.node_id.as_str()], |r| Ok(json!({
+                "kind": r.get::<_, String>(4)?, "node_id": self.node_id.as_str(),
+                "session_id": r.get::<_, String>(0)?, "item_id": r.get::<_, Option<String>>(1)?,
+                "attempt_id": r.get::<_, Option<String>>(2)?, "state": r.get::<_, String>(3)?,
+                "reason": "waiting_for_node_work"
+            })))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(StoreError::from)
+        }).unwrap_or_else(|_| vec![json!({"kind":"node_session","node_id":self.node_id.as_str(),"state":"unknown","reason":"node_state_unavailable"})])
+    }
+
     pub fn hold(&self, on: bool) {
         self.holding.store(on, Ordering::SeqCst);
     }
@@ -3017,6 +3045,12 @@ impl NodeRuntime {
     /// goes one event per transaction for the rest of the pass, so the events before a bad one are
     /// still applied and the bad one stops its stream as before.
     fn apply_some(&self) -> bool {
+        self.apply_some_observed(|| {})
+    }
+
+    /// The observer runs after an empty inbox observation releases the commit lock. Tests receive
+    /// another event at that exact boundary; ordinary workers use the no-op observer above.
+    fn apply_some_observed(&self, mut empty_observed: impl FnMut()) -> bool {
         let mut streams: std::collections::VecDeque<(String, String)> =
             self.dirty.lock().unwrap().iter().cloned().collect();
         let node = self.node_id.to_string();
@@ -3042,6 +3076,10 @@ impl NodeRuntime {
                 earlier = self.take_settled();
                 let pending = rt::next_events_in(tx, k, limit)?;
                 let Some(last) = pending.last().map(|p| p.seq) else {
+                    // The empty observation and retiring its dirty marker share receive()'s commit
+                    // lock. Otherwise a receiver can commit/mark new events between this read and
+                    // an out-of-transaction remove, losing the only wakeup for that durable batch.
+                    self.dirty.lock().unwrap().remove(&key);
                     return Ok(None);
                 };
                 let mut told = Vec::with_capacity(pending.len());
@@ -3128,6 +3166,9 @@ impl NodeRuntime {
                 rt::mark_applied_through_in(tx, k, through)?;
                 Ok(Some(told))
             });
+            if matches!(&r, Ok(None)) {
+                empty_observed();
+            }
             self.book(earlier);
             match r {
                 Ok(Some(told)) => {
@@ -3145,7 +3186,6 @@ impl NodeRuntime {
                     streams.push_back(key);
                 }
                 Ok(None) => {
-                    self.dirty.lock().unwrap().remove(&key);
                     self.caught_up_on(&stream, &epoch);
                 }
                 Err(e) if limit > 1 => {
@@ -4765,6 +4805,123 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(seen.finished.lock().unwrap().len(), 1);
         assert_eq!(seen.ended.lock().unwrap().len(), 1);
+    }
+
+    /// A receiver commits the next batch immediately after the apply worker observed an empty
+    /// stream. That new batch must stay dirty even if it is the last thing the Node ever sends.
+    #[test]
+    fn a_batch_received_after_an_empty_observation_is_not_forgotten() {
+        const S: &str = "s1";
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
+                    [S],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let rt = NodeRuntime::new(
+            store.clone(),
+            FakeNode::new("n1"),
+            Arc::new(Seen::default()),
+        );
+        // No background workers: the two passes and the receiving interleaving are deterministic.
+        let batch = |seq, body| EventBatch {
+            events: vec![NodeEvent {
+                schema: 1,
+                id: idv(format!("event_{seq}")).unwrap(),
+                at: Timestamp(seq as i64),
+                cursor: Watermark {
+                    stream: idv("stream1").unwrap(),
+                    epoch: idv("epoch1").unwrap(),
+                    seq,
+                },
+                subject: Subject::Session {
+                    session: idv(S).unwrap(),
+                },
+                body,
+            }],
+        };
+        let head = || {
+            store
+                .reader(|c| {
+                    Ok::<_, StoreError>(c.query_row(
+                        "SELECT durable,applied FROM node_streams WHERE node_id='n1' AND stream='stream1' AND epoch='epoch1'",
+                        [],
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                    )?)
+                })
+                .unwrap()
+        };
+        rt.receive(&batch(
+            1,
+            EventBody::MessageStarted {
+                message: "m1".into(),
+                block: "b1".into(),
+                role: Role::Assistant,
+            },
+        ))
+        .unwrap();
+        let mut inserted = false;
+        assert!(rt.apply_some_observed(|| {
+            assert!(!inserted, "only the first pass uses the observer");
+            inserted = true;
+            assert_eq!(head(), (1, 1));
+            // Before the fix, this insert was erased by the outer Ok(None) branch's dirty.remove.
+            rt.receive(&batch(
+                2,
+                EventBody::TextDelta {
+                    message: "m1".into(),
+                    block: "b1".into(),
+                    utf8_offset: 0,
+                    text: "perm:selected:once".into(),
+                },
+            ))
+            .unwrap();
+            // A newer reconcile can register this head before the old empty observation's
+            // caught-up callback runs. That callback must not release the new execution hold.
+            rt.lagging
+                .lock()
+                .unwrap()
+                .insert(S.into(), ("stream1".into(), "epoch1".into(), 2));
+        }));
+        assert!(inserted);
+        assert_eq!(
+            head(),
+            (2, 1),
+            "received durably but not projected in the old pass"
+        );
+        assert!(
+            rt.dirty
+                .lock()
+                .unwrap()
+                .contains(&("stream1".into(), "epoch1".into()))
+        );
+        assert!(
+            rt.is_uncertain(S),
+            "the old empty observation must not release a hold on the new head"
+        );
+        assert!(
+            rt.apply_some(),
+            "the next pass needs no third event, retry or restart"
+        );
+        assert_eq!(head(), (2, 2));
+        assert!(!rt.is_uncertain(S), "the new head was actually applied");
+        let projected: i64 = store
+            .reader(|c| {
+                Ok::<_, StoreError>(c.query_row(
+                    "SELECT count(*) FROM events WHERE session_id=? AND format='steve.v1' AND kind='text' AND instr(data,'perm:selected:once')>0",
+                    [S],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(projected, 1);
     }
 
     /// The role of a delta is found at the same cost however long its message already is: from

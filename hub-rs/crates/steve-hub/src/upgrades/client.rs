@@ -86,6 +86,14 @@ impl Updates {
         }))
     }
     async fn fetch(&self, url: &str, limit: u64) -> Result<Vec<u8>> {
+        self.fetch_progress(url, limit, None).await
+    }
+    async fn fetch_progress(
+        &self,
+        url: &str,
+        limit: u64,
+        mut op: Option<&mut Operation>,
+    ) -> Result<Vec<u8>> {
         let u = reqwest::Url::parse(url)?;
         if u.scheme() != "https" && !(cfg!(test) && u.host_str() == Some("127.0.0.1")) {
             bail!("release asset requires HTTPS")
@@ -96,12 +104,47 @@ impl Updates {
         }
         let mut bytes = Vec::new();
         let mut stream = r.bytes_stream();
+        let mut reported = std::time::Instant::now();
+        if let Some(op) = op.as_deref_mut() {
+            self.progress(
+                op,
+                "downloading",
+                Some(DownloadProgress {
+                    received_bytes: 0,
+                    total_bytes: limit,
+                }),
+            )?;
+        }
         while let Some(b) = stream.next().await {
             let b = b?;
             if bytes.len() as u64 + b.len() as u64 > limit {
                 bail!("asset exceeds size limit")
             };
-            bytes.extend_from_slice(&b)
+            bytes.extend_from_slice(&b);
+            // Each receipt is fsynced; bound writes independently of chunk size or network speed.
+            if reported.elapsed() >= Duration::from_millis(500) {
+                if let Some(op) = op.as_deref_mut() {
+                    self.progress(
+                        op,
+                        "downloading",
+                        Some(DownloadProgress {
+                            received_bytes: bytes.len() as u64,
+                            total_bytes: limit,
+                        }),
+                    )?;
+                }
+                reported = std::time::Instant::now();
+            }
+        }
+        if let Some(op) = op {
+            self.progress(
+                op,
+                "downloading",
+                Some(DownloadProgress {
+                    received_bytes: bytes.len() as u64,
+                    total_bytes: limit,
+                }),
+            )?;
         }
         Ok(bytes)
     }
@@ -235,7 +278,16 @@ impl Updates {
         if self.operation(&op.id)?.phase != "staging" {
             return Ok(());
         }
+        self.progress(op, "resolving", None)?;
         let (r, manifest) = self.resolve(&op.version).await?;
+        if op
+            .runner
+            .as_ref()
+            .and_then(|s| s.commit.as_deref())
+            .is_some_and(|expected| expected != manifest.commit)
+        {
+            bail!("release commit changed since the upgrade was requested")
+        }
         let asset = manifest
             .assets
             .iter()
@@ -247,11 +299,13 @@ impl Updates {
             .find(|a| a.name == asset.name)
             .context("bundle missing from release")?;
         let bytes = self
-            .fetch(
+            .fetch_progress(
                 &remote.browser_download_url,
                 asset.size.min(512 * 1024 * 1024),
+                Some(op),
             )
             .await?;
+        self.progress(op, "verifying", None)?;
         if bytes.len() as u64 != asset.size
             || hex::encode(Sha256::digest(&bytes)) != asset.sha256.to_lowercase()
         {
@@ -263,6 +317,7 @@ impl Updates {
             .join(format!("{}-{}", manifest.version, op.id));
         let stage = dir.with_extension("staging");
         fs::create_dir_all(&stage)?;
+        self.progress(op, "unpacking", None)?;
         let stage_clone = stage.clone();
         let manifest_clone = manifest.clone();
         let unpacked =
@@ -275,7 +330,16 @@ impl Updates {
         fs::rename(stage, &dir)?;
         File::open(dir.parent().unwrap())?.sync_all()?;
         op.target = Some(dir.to_string_lossy().into());
-        self.phase(op, "ready", None)?;
+        if op
+            .runner
+            .as_ref()
+            .is_some_and(|r| r.kind == "release_bundle")
+        {
+            // The local signing identity still has to be applied before the bundle is deployable.
+            self.save(op)?;
+        } else {
+            self.phase(op, "ready", None)?;
+        }
         Ok(())
     }
 }

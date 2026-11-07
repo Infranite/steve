@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package already-built Hub/Web; merge independently built platform manifests.
+"""Package already-built Hub/Node/Web and explicitly selected runtime scripts; merge independently built platform manifests.
 
 Only explicit build outputs enter a release. Never archive the checkout or STEVE_HOME.
 """
@@ -14,6 +14,9 @@ import tempfile
 from pathlib import Path
 
 
+RUNTIME_OPS = ("run.sh", "run-managed.sh", "backup.sh", "schema_gate.py", "local-release.py", "steve-service.py", "sign-setup.sh", "release-lib.sh")
+
+
 def write(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
@@ -26,14 +29,27 @@ def package(a):
     if a.target not in {"aarch64-apple-darwin", "x86_64-unknown-linux-gnu"}:
         raise ValueError("unsupported release target")
     binary, web, out = Path(a.binary), Path(a.web), Path(a.out)
+    node = Path(a.node)
+    helper = Path(a.keyhelper) if getattr(a, "keyhelper", None) else None
+    ops = Path(getattr(a, "ops", None) or Path(__file__).resolve().parent.parent / "ops")
+    if not node.is_file():
+        raise ValueError("build Node before packaging")
+    if a.target == "aarch64-apple-darwin" and (not helper or not helper.is_file()):
+        raise ValueError("build keyhelper before packaging for macOS")
+    runtime = [ops / name for name in RUNTIME_OPS]
+    if any(not p.is_file() for p in runtime):
+        raise ValueError("missing runtime ops scripts")
     if not binary.is_file() or not (web / "index.html").is_file():
         raise ValueError("build Hub and Web before packaging")
-    for path in [binary, web, *web.rglob("*")]:
+    for path in [binary, node, *([helper] if helper else []), *runtime, web, *web.rglob("*")]:
         if path.is_symlink():
             raise ValueError(f"symlink in build output: {path}")
     identity = json.loads(subprocess.check_output([str(binary.resolve()), "--build-info"], timeout=15))
     if identity.get("version") != a.version or identity.get("commit") != a.commit or identity.get("target") != a.target:
         raise ValueError("binary build identity does not match release")
+    node_identity = json.loads(subprocess.check_output([str(node.resolve()), "--build-info"], timeout=15))
+    if any(node_identity.get(k) != getattr(a, k) for k in ("version", "commit", "target")):
+        raise ValueError("Node build identity does not match release")
     schema = identity.get("schema")
     if not isinstance(schema, int) or schema < 1:
         raise ValueError("binary did not report a valid schema")
@@ -46,6 +62,15 @@ def package(a):
         (root / "bin").mkdir()
         shutil.copyfile(binary, root / "bin/steve-hub")
         (root / "bin/steve-hub").chmod(0o755)
+        shutil.copyfile(node, root / "bin/steve-node")
+        (root / "bin/steve-node").chmod(0o755)
+        if helper:
+            shutil.copyfile(helper, root / "bin/steve-keyhelper")
+            (root / "bin/steve-keyhelper").chmod(0o755)
+        (root / "ops").mkdir()
+        for path in runtime:
+            shutil.copyfile(path, root / "ops" / path.name)
+            (root / "ops" / path.name).chmod(0o755)
         shutil.copytree(web, root / "web/dist")
         index = root / "web/dist/index.html"
         html = index.read_text()
@@ -88,8 +113,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     pack = sub.add_parser("package")
-    for name in ("version", "commit", "target", "binary", "web", "out"):
+    for name in ("version", "commit", "target", "binary", "node", "web", "out"):
         pack.add_argument("--" + name, required=True)
+    pack.add_argument("--keyhelper")
+    pack.add_argument("--ops")
     join = sub.add_parser("merge")
     join.add_argument("--out", required=True)
     join.add_argument("--expected-target", action="append")

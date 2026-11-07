@@ -32,6 +32,8 @@ export default {
     work: "Work", review: "Independent review", integrate: "Integration acceptance", optional: "Optional",
     pause: "Pause workflow", resume: "Resume workflow", retry: "Retry",
     pauseHint: "The workflow is paused. Resume to continue with the current plan.",
+    unavailable: "This version has not connected the full Node isolation required for collaborative execution. The plan is saved but cannot start. Resuming, retrying or reconnecting a device cannot remove this limitation; a version supporting this capability is required.",
+    unavailableUnit: "Execution capability unavailable",
     blockers: "The parent item cannot finish yet",
     attempt: "Attempt {{n}}/{{max}}",
     depends: "Depends on: {{names}}", resources: "Shared scope: {{names}}",

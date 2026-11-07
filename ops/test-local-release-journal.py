@@ -65,6 +65,22 @@ class Journal(unittest.TestCase):
         with self.assertRaises(m.Refused):
             m.Journal(str(uuid.uuid4()))
 
+    def test_drain_snapshots_keep_step_start_and_skip_unchanged_writes(self):
+        m = self.module()
+        j = m.Journal(self.id)
+        j("draining", drain={"running": 2, "ready": False})
+        first = json.loads(self.op.read_text())
+        self.assertEqual(first["progress"]["step"], "waiting")
+        before = self.op.stat().st_mtime_ns
+        j("draining", drain={"running": 2, "ready": False})
+        self.assertEqual(self.op.stat().st_mtime_ns, before)
+        j("draining", drain={"running": 1, "ready": False})
+        after = json.loads(self.op.read_text())
+        self.assertEqual(after["progress"]["started_at"], first["progress"]["started_at"])
+        self.assertEqual(after["drain"]["running"], 1)
+        j("backing_up", step="probing")
+        self.assertEqual(json.loads(self.op.read_text())["progress"]["step"], "probing")
+
     def test_a_deploy_refused_before_anything_changed_says_so_in_the_journal(self):
         # no signing identity in this STEVE_HOME: refused before the drain
         r = self.run_script("deploy", str(self.home / "releases/none"), "--operation", self.id)

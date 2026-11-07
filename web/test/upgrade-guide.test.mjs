@@ -1,19 +1,20 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { checkStale, committedFailure, enableOneClick, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
+import { checkStale, committedFailure, downloadPercent, enableOneClick, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
 
 const home = "/Users/example/.steve", repo = "/Users/example/Agents/steve"
 
-test("a signed local build is told to build the Release tag here and deploy it, with this machine's paths", () => {
+test("a local signing identity uses release packages and has an offline diagnostic entry", () => {
   const g = upgradeGuide({ kind: "local_release", home, release: "0.2.17-local-51826fc", repo }, "v0.2.20")
   const commands = g.steps.map(s => s.command).filter(Boolean)
-  assert.deepEqual(commands, [
-    `git -C ${repo} fetch --tags origin && git -C ${repo} rev-parse --verify v0.2.20^{commit}`,
-    `python3 ${repo}/ops/local-release.py build v0.2.20`,
-    `python3 ${repo}/ops/local-release.py deploy ${home}/releases/0.2.20-local-*`,
-  ])
+  assert.deepEqual(commands, [], "a missing upgrade prerequisite must not send ordinary users to a compiler")
+  assert.match(g.summary, /预编译发行包/)
   assert.match(g.backup, /\/Users\/example\/\.steve\/backups/)
-  assert.match(g.recovery.join("\n"), /deploy \/Users\/example\/\.steve\/releases\/0\.2\.17-local-51826fc/, "the way back names the release running now")
+  assert.match(g.recovery.join("\n"), /新版本和数据库会保留/)
+  assert.deepEqual(serviceCommands("/opt/Steve data"), [
+    "python3 '/opt/Steve data/current/ops/steve-service.py' hub status --home '/opt/Steve data'",
+    "python3 '/opt/Steve data/current/ops/steve-service.py' hub doctor --home '/opt/Steve data'",
+  ])
   assert.equal(g.steps.at(-1).title, "回到本页核对")
 })
 
@@ -27,9 +28,6 @@ test("each other installation gets its own way, never another's script", () => {
   const external = upgradeGuide({ kind: "external", home }, "0.2.20")
   assert.equal(external.steps.filter(s => s.command).length, 0, "nothing to run when Steve can't tell who owns the files")
   for (const g of [script, source, external]) assert.ok(!JSON.stringify(g).includes("local-release.py"))
-  // without a checkout on this machine the command says where to fill it in; paths with spaces are quoted
-  assert.match(upgradeGuide({ kind: "local_release", home: "/Users/a b/.steve" }, "0.2.20").steps[1].command, /^python3 <Steve 源码目录>\/ops/)
-  assert.match(upgradeGuide({ kind: "local_release", home: "/Users/a b/.steve", repo }, "0.2.20").steps[2].command, /deploy '\/Users\/a b\/\.steve'\/releases\/0\.2\.20-local-\*$/)
 })
 
 test("progress follows the supervisor's journal and ends with this page's own check", () => {
@@ -55,10 +53,18 @@ test("upgraded only when the Hub, the served web, this page and health all agree
   assert.deepEqual([down.done, down.items[0].detail], [false, "暂时连不上服务"])
 })
 
-test("a local build's first step is the build, and it needs no migration to upgrade here", () => {
-  assert.equal(stageLabel("staging", "local_release"), "拉取标签并本机构建")
-  assert.equal(stageLabel("staging", "managed"), "下载并校验")
-  assert.equal(stageLabel("backingUp", "local_release"), "备份数据库")
+test("only measured download bytes supply a percentage", () => {
+  const p = (received_bytes, total_bytes, step = "downloading") => ({ step, download: { received_bytes, total_bytes } })
+  assert.equal(downloadPercent(p(5, 10)), 50)
+  assert.equal(downloadPercent(p(999, 1000)), 99, "rounding must not announce a finished download")
+  assert.equal(downloadPercent(p(1000, 1000)), 100)
+  for (const progress of [undefined, p(0, 0), p(20, 10), p(-1, 10), p(1, Infinity), p(10, 10, "signing")]) {
+    assert.equal(downloadPercent(progress), undefined, "unknown progress is not a fabricated percent")
+  }
+  assert.equal(stageLabel("staging"), "下载并校验")
+  assert.equal(stageLabel("staging", "release_bundle"), "下载并校验")
+  assert.equal(stageLabel("staging", "local_release"), "本机构建（历史升级）")
+  assert.equal(stageLabel("backingUp"), "备份数据库")
   assert.equal(enableOneClick("local_release"), undefined, "no Keychain migration asked of a local build any more")
   assert.match(enableOneClick("release_script"), /run-managed\.sh/)
 })

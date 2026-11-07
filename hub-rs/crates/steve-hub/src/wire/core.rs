@@ -1344,8 +1344,21 @@ impl Domain for CoreDomain {
             })
             .map_err(|e| BackendError::msg(e.to_string()))?;
         let sealed = quiet && self.core.node_working() == 0 && store.maintenance_seal();
+        let mut blockers = self
+            .routed
+            .node
+            .as_ref()
+            .map_or_else(Vec::new, |n| n.working_details());
+        for (kind, count) in &running {
+            if *count > 0 {
+                blockers.push(json!({"kind":"activity","state":kind,"count":count,"reason":"waiting_for_activity"}));
+            }
+        }
+        if source_release_busy {
+            blockers.push(json!({"kind":"source_release","state":"running","reason":"waiting_for_source_release"}));
+        }
         // `acp` and `adapters_stopped` stay for older upgraders: the Hub runs no adapter itself
-        Ok(json!({"maintenance":active,"ready":sealed,"running":running,"acp":0,"node":node,"adapters_stopped":true,"unknown_mail":unknown,"source_release_busy":source_release_busy}).as_object().unwrap().clone())
+        Ok(json!({"maintenance":active,"ready":sealed,"running":running,"acp":0,"node":node,"adapters_stopped":true,"unknown_mail":unknown,"source_release_busy":source_release_busy,"blockers":blockers}).as_object().unwrap().clone())
     }
     /// Never fails the Hub: what could not be resumed is logged and reported on `/healthz`
     /// (`recovery`), and its durable intent stays for the next boot.

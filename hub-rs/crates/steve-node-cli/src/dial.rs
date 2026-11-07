@@ -131,10 +131,49 @@ pub async fn run(home: &Home) -> Result<()> {
     let id = Identity::load(&home.identity()).context("identity key")?;
     let trust = trust(&p)?;
     let node_id = NodeId::new(p.node_id.clone()).map_err(|_| anyhow!("bad node id"))?;
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("installing the termination signal handler")?;
+    let stopping = async {
+        #[cfg(unix)]
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r.context("waiting for Ctrl-C"),
+            _ = terminate.recv() => Ok(()),
+        }
+        #[cfg(not(unix))]
+        tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")
+    };
     let node = LocalNode::open(home.node_config(node_id)?).map_err(|e| anyhow!("{e}"))?;
-    let r = serve(node.clone(), &p, &id, &trust).await;
+    run_until(&node, serve(node.clone(), &p, &id, &trust), stopping).await
+}
+
+/// Dropping the dial future first closes its connection and stops new commands. Shutdown then
+/// joins owned work and records uncertain outcomes; an interrupted turn is never called finished.
+async fn run_until(
+    node: &LocalNode,
+    serving: impl std::future::Future<Output = Result<()>>,
+    stopping: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    let r = tokio::select! {
+        biased;
+        r = stopping => r,
+        r = serving => r,
+    };
     node.shutdown().await;
+    tracing::info!("node shutdown completed; unresolved outcomes remain in its journal");
     r
+}
+
+/// A cancelled dial future must not leave Conn's reader accepting requests in the background.
+struct CloseLink(Arc<HubLink>);
+
+impl Drop for CloseLink {
+    fn drop(&mut self) {
+        if let Some(conn) = self.0.current() {
+            conn.close(None, close::GOODBYE, "node stopping");
+        }
+        self.0.set(None);
+    }
 }
 
 /// The dial loop around an open LocalNode. Returns only when the Hub refuses this Node (revoked,
@@ -142,6 +181,7 @@ pub async fn run(home: &Home) -> Result<()> {
 /// happened meanwhile.
 pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -> Result<()> {
     let link = HubLink::new();
+    let _close_link = CloseLink(link.clone());
     node.connect(
         Arc::new(RemoteSink(link.clone())),
         Some(Arc::new(RemoteFiles(link.clone()))),
@@ -250,6 +290,84 @@ mod tests {
             code: code.into(),
             detail: String::new(),
         }
+    }
+
+    /// The service's stop path cancels a live connection, then lets another process open the
+    /// same Node home. Dropping the serving future alone leaves LocalNode's owned tasks alive.
+    #[tokio::test]
+    async fn stopping_closes_the_connection_and_releases_the_node_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home(dir.path().into());
+        let config = || {
+            home.node_config(NodeId::new("shutdown-test").unwrap())
+                .unwrap()
+        };
+        let node = LocalNode::open(config()).unwrap();
+        let link = HubLink::new();
+        let (wire, _peer) = steve_node_wire::testkit::pair();
+        let conn = Conn::spawn(
+            wire.sink,
+            wire.stream,
+            1,
+            NodeServer::new(Arc::new(node.clone())),
+            ConnOptions::default(),
+        );
+        link.set(Some(conn.clone()));
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let serving = {
+            let link = link.clone();
+            async move {
+                let _close_link = CloseLink(link);
+                started.send(()).unwrap();
+                std::future::pending::<Result<()>>().await
+            }
+        };
+        let stopping = async {
+            waiting.await.unwrap();
+            Ok(())
+        };
+        tokio::time::timeout(Duration::from_secs(5), run_until(&node, serving, stopping))
+            .await
+            .expect("stop must finish")
+            .unwrap();
+        assert!(link.current().is_none());
+        assert!(conn.is_closed());
+        drop(conn);
+        drop(node);
+        // The connection's reader releases its handler asynchronously after close.
+        let again = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match LocalNode::open(config()) {
+                    Ok(node) => break node,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .expect("the stopped service must release its home lock");
+        again.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_dial_failure_is_preserved_after_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home(dir.path().into());
+        let config = || {
+            home.node_config(NodeId::new("refusal-test").unwrap())
+                .unwrap()
+        };
+        let node = LocalNode::open(config()).unwrap();
+        let error = run_until(
+            &node,
+            async { bail!("the hub refused this node") },
+            std::future::pending(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "the hub refused this node");
+        drop(node);
+        let again = LocalNode::open(config()).expect("failed dial must release its home lock");
+        again.shutdown().await;
     }
 
     #[test]

@@ -49,14 +49,16 @@ jobs:
           python3 ops/test-schema-gate.py
           python3 ops/test-local-release-journal.py
           python3 ops/test-local-release-prune.py
+          python3 ops/test-prepare-bundle.py
+          python3 ops/test-steve-service.py
           python3 -m py_compile ops/local-release.py ops/test-local-release.py
           bash ops/check-migration-lock.sh "$GITHUB_REF_NAME"
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
-      - name: Build Hub
+      - name: Build Hub, Node and keyhelper
         shell: bash
-        run: STEVE_RELEASE_VERSION="${GITHUB_REF_NAME#v}" STEVE_RELEASE_COMMIT="$GITHUB_SHA" cargo build --locked --release --manifest-path hub-rs/Cargo.toml -p steve-hub
-      - name: Package matching Hub and Web
+        run: STEVE_RELEASE_VERSION="${GITHUB_REF_NAME#v}" STEVE_RELEASE_COMMIT="$GITHUB_SHA" cargo build --locked --release --manifest-path hub-rs/Cargo.toml -p steve-hub -p steve-node-cli -p steve-keyhelper
+      - name: Package matching Hub, Node, Web and runtime scripts
         env:
           TARGET: ${{ matrix.target }}
         shell: bash
@@ -64,6 +66,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           python3 scripts/package-release.py package --version "$version" --commit "$GITHUB_SHA" \
             --target "$TARGET" --binary hub-rs/target/release/steve-hub \
+            --node hub-rs/target/release/steve-node --keyhelper hub-rs/target/release/steve-keyhelper \
             --web web/dist --out release-assets
       - name: Verify actual release binary identity and health
         run: python3 ops/test-release-identity.py hub-rs/target/release/steve-hub --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA" --target "${{ matrix.target }}"

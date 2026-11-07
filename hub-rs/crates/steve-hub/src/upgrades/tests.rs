@@ -248,7 +248,20 @@ async fn github_bundle_stages_only_after_hash_and_pair_validation() {
                 if switch.load(std::sync::atomic::Ordering::Relaxed) {
                     b[0] ^= 1
                 }
-                async move { b }
+                // A real streamed body leaves time to observe a durable, partial download.
+                async move {
+                    axum::body::Body::from_stream(futures::stream::unfold(
+                        (b, 0),
+                        |(b, at)| async move {
+                            if at >= b.len() {
+                                return None;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(650)).await;
+                            let end = (at + b.len().div_ceil(2)).min(b.len());
+                            Some((Ok::<_, std::io::Error>(b[at..end].to_vec()), (b, end)))
+                        },
+                    ))
+                }
             }),
         );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -267,7 +280,26 @@ async fn github_bundle_stages_only_after_hash_and_pair_validation() {
         launch: crate::upgrades::runner::Launch::Launchd,
     };
     let mut op = u.request("0.2.0", "download", "owner", true).unwrap();
-    u.stage(&mut op).await.unwrap();
+    let id = op.id.clone();
+    let observe = async {
+        for _ in 0..60 {
+            let receipt = u.operation(&id).unwrap();
+            if let Some(p) = receipt.progress.and_then(|p| p.download)
+                && p.received_bytes > 0
+                && p.received_bytes < p.total_bytes
+            {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    };
+    let (staged, partial) = tokio::join!(u.stage(&mut op), observe);
+    staged.unwrap();
+    assert!(
+        partial,
+        "the journal exposes measured progress before download completes"
+    );
     assert_eq!(op.phase, "ready");
     assert!(
         PathBuf::from(op.target.clone().unwrap())
@@ -544,8 +576,9 @@ async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside
     let app = release_server_app(&base);
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (u, started) = local(home.path(), repo.path(), base);
+    fs::remove_dir_all(repo.path().join(".git")).unwrap();
 
-    // ready: everything a local build needs is on this machine
+    // An installed release remains upgradable without a source checkout.
     assert_eq!(u.execution_reason(), None);
     assert_eq!(
         u.status().unwrap()["capability"]["reason"],
@@ -568,8 +601,8 @@ async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside
     let mut op = u.request("v0.3.0", "k1", "owner", true).unwrap();
     assert_eq!(op.phase, "staging");
     let spec = op.runner.clone().unwrap();
-    assert_eq!(spec.kind, "local_release");
-    assert_eq!(spec.repo, repo.path().to_string_lossy());
+    assert_eq!(spec.kind, "release_bundle");
+    assert!(spec.repo.is_empty() && spec.cargo.is_empty());
     assert!(spec.source.ends_with("/test/good.git"), "{}", spec.source);
     assert_eq!(
         spec.commit, None,
@@ -774,6 +807,9 @@ phase("succeeded", error=None)
 fn runner_op(u: &Updates, key: &str, commit: &str, python: &str) -> Operation {
     let mut op = u.request("0.3.0", key, "owner", true).unwrap();
     let spec = op.runner.as_mut().unwrap();
+    // Compatibility fixture: only already-persisted source requests use the legacy runner.
+    spec.kind = "local_release".into();
+    spec.repo = u.repo.to_string_lossy().into_owned();
     spec.commit = Some(commit.into());
     spec.python = python.into();
     spec.source = spec.repo.clone();
@@ -786,6 +822,55 @@ fn runner_op(u: &Updates, key: &str, commit: &str, python: &str) -> Operation {
     spec.launched_at = Some(now());
     u.save(&op).unwrap();
     op
+}
+
+/// Signing an artifact passes only the installation password over stdin. No build or checkout
+/// command runs, and a changed release identity is rejected before the installer gets that secret.
+#[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "local signing needs macOS")]
+fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
+    let python = python().expect("Python is an installer prerequisite");
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let (u, _) = local(home.path(), repo.path(), String::new());
+    fs::remove_dir_all(repo.path().join(".git")).unwrap();
+    let mut op = u.request("0.3.0", "artifact", "owner", true).unwrap();
+    let candidate = home
+        .path()
+        .join("releases")
+        .join(format!("0.3.0-{}", op.id));
+    fs::create_dir_all(candidate.join("ops")).unwrap();
+    for name in ["schema_gate.py", "run.sh"] {
+        fs::write(candidate.join("ops").join(name), "").unwrap();
+    }
+    fs::write(
+        candidate.join("ops/local-release.py"),
+        r#"import sys,pathlib,os
+assert sys.argv[1]=='prepare-bundle'
+assert sys.argv[3:]==['--version','0.3.0','--commit','b'*40,'--keychain-pass-stdin']
+assert sys.stdin.readline().strip()=='0123456789abcdef'*4
+pathlib.Path(os.environ['STEVE_HOME'],'prepared').write_text(sys.argv[2])
+"#,
+    )
+    .unwrap();
+    let mut spec = op.runner.clone().unwrap();
+    spec.commit = Some("b".repeat(40));
+    spec.python = python.clone();
+    let source = spec.source.clone();
+    let trust = runner::Trust {
+        home: Some(home.path().into()),
+        python_dirs: vec![Path::new(&python).parent().unwrap().into()],
+        release: Box::new(move |_| Ok((source.clone(), "b".repeat(40)))),
+    };
+    runner::prepare_bundle(&u, &mut op, &spec, &candidate, &trust).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.path().join("prepared")).unwrap(),
+        candidate.to_string_lossy()
+    );
+    fs::remove_file(home.path().join("prepared")).unwrap();
+    spec.commit = Some("a".repeat(40));
+    assert!(runner::prepare_bundle(&u, &mut op, &spec, &candidate, &trust).is_err());
+    assert!(!home.path().join("prepared").exists());
 }
 
 #[test]
@@ -1061,10 +1146,10 @@ fn fake_python(dir: &Path, name: &str, code: i32) {
 
 #[cfg(unix)]
 #[test]
-fn a_python3_without_data_filter_is_not_offered_for_a_local_upgrade() {
+fn an_unusable_python_is_not_offered_for_an_artifact_upgrade() {
     let old = tempfile::tempdir().unwrap();
     let brew = tempfile::tempdir().unwrap();
-    // macOS's /usr/bin/python3 (3.9): on PATH, but local-release.py can't run on it
+    // An interpreter failing the installer prerequisites is never selected.
     fake_python(old.path(), "python3", 1);
     let path = Some(old.path().as_os_str().to_owned());
     assert_eq!(runner::find_python(None, path.clone(), &[]), None);

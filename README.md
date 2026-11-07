@@ -264,6 +264,8 @@ flowchart LR
 
 ## Quick start
 
+For an installed service, use the prebuilt [Release bundle](https://github.com/Infranite/steve/releases): it includes Hub, Node, Web and runtime scripts. After configuring the home (including the explicit first-time Keychain setup on macOS), `python3 <bundle>/ops/steve-service.py hub install --release <bundle>` registers a user service; the same entry point supports `node`, start, stop, restart, status and doctor. See [deployment](docs/deployment.md#hub-and-node-service-commands) for verification, pairing and updates. Existing signed macOS installations upgrade from Settings using their original signing identity, without rebuilding locally.
+
 ### Requirements
 
 | | |

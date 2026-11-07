@@ -1,7 +1,8 @@
 //! One-click upgrade of a local_release install (ops/local-release.py). The Hub is the process the deploy
 //! replaces, so the work runs in a one-shot launchd job (`steve-hub --upgrade-runner <home> <id>`): it
-//! fetches the release tag, checks it is the commit the release manifest names, and runs that tag's own
-//! `local-release.py build` and `deploy --operation <id>`, which write their steps into the same journal
+//! downloads the published release bundle, verifies its identity, preserves the installation's signing
+//! identity and runs `local-release.py deploy --operation <id>`. No checkout or compiler is needed.
+//! The deployment writes its steps into the same journal
 //! the managed supervisor uses. The page follows it across the restart by reading the journal.
 use super::*;
 use std::process::{Command, Stdio};
@@ -62,18 +63,11 @@ pub(super) fn held(p: &Path) -> bool {
     rc == 0 && fl.l_type != libc::F_UNLCK as libc::c_short
 }
 
-fn on_path(name: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
-}
-
 struct Tools {
     python: PathBuf,
-    cargo: PathBuf,
 }
 
-/// Whether `python` has what local-release.py needs: `tarfile.data_filter` (Python 3.12+). The answer is
+/// Whether `python` can run the bundled installer (Python 3.9+). The answer is
 /// remembered per path and modification time, since the update page asks on every load.
 fn python_ok(python: &Path) -> bool {
     use std::collections::HashMap;
@@ -88,7 +82,11 @@ fn python_ok(python: &Path) -> bool {
         return *ok;
     }
     let ok = Command::new(python)
-        .args(["-I", "-c", "import tarfile; tarfile.data_filter"])
+        .args([
+            "-I",
+            "-c",
+            "import sys,ssl,sqlite3; assert sys.version_info >= (3,9)",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -102,8 +100,7 @@ fn python_ok(python: &Path) -> bool {
 
 /// The first python new enough for local-release.py: `STEVE_PYTHON`, then python3.13, python3.12 and
 /// python3 on `path`, then the same names in `extra` (Homebrew's bin, which launchd's PATH may lack and
-/// which has no `python3` link when only a versioned formula is installed). A bare `python3` is often
-/// macOS's 3.9, which can't run it.
+/// which has no `python3` link when only a versioned formula is installed). The installer supports the system Python 3.9 as well as newer interpreters.
 pub(super) fn find_python(
     steve_python: Option<PathBuf>,
     path: Option<std::ffi::OsString>,
@@ -260,45 +257,24 @@ fn released(version: &str) -> Result<(String, String)> {
     .map_err(|_| anyhow::anyhow!("the release check stopped"))?
 }
 
-/// The tools a local build needs, found the way the runner's environment will find them; the names of
-/// those missing otherwise.
+/// The interpreter for the bundled installer. Builds remain an explicit maintainer operation;
+/// installing a release never needs git, cargo, npm or a source checkout.
 fn tools(u: &Updates) -> std::result::Result<Tools, Vec<String>> {
     #[cfg(test)]
     if matches!(u.launch, Launch::Fake(_)) {
         return Ok(Tools {
             python: "python3".into(),
-            cargo: "cargo".into(),
         });
     }
     let _ = u;
-    let env_file = |k: &str| {
-        std::env::var_os(k)
-            .map(PathBuf::from)
-            .filter(|p| p.is_file())
-    };
-    let cargo = env_file("STEVE_CARGO")
-        .or_else(|| on_path("cargo"))
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".cargo/bin/cargo"))
-                .filter(|p| p.is_file())
-        });
     // the build gets the signing keychain's password: only a Python of the system's directories
     let python = find_python(None, None, &PYTHON_DIRS.map(PathBuf::from));
     let mut missing = vec![];
-    if cargo.is_none() {
-        missing.push("cargo (STEVE_CARGO)".to_owned());
-    }
     if python.is_none() {
-        missing.push(format!("python3 ≥3.12 ({})", PYTHON_DIRS.join(", ")));
+        missing.push(format!("python3 ≥3.9 ({})", PYTHON_DIRS.join(", ")));
     }
-    for tool in ["git", "npm"] {
-        if on_path(tool).is_none() {
-            missing.push(tool.to_owned());
-        }
-    }
-    match (cargo, python) {
-        (Some(cargo), Some(python)) if missing.is_empty() => Ok(Tools { python, cargo }),
+    match python {
+        Some(python) if missing.is_empty() => Ok(Tools { python }),
         _ => Err(missing),
     }
 }
@@ -319,6 +295,25 @@ fn identity_label(home: &Path) -> Result<String> {
 /// What this machine lacks for a one-click local build and deploy; empty when it has everything.
 pub fn local_missing(u: &Updates) -> Vec<String> {
     let mut missing = vec![];
+    // Match the signing runner's trust boundary before offering the action. Custom-home managed
+    // installs do not use this signing path; never advertise a local signer that will refuse later.
+    let check_home = match &u.launch {
+        Launch::Launchd => true,
+        #[cfg(test)]
+        Launch::Fake(_) => false,
+    };
+    if check_home {
+        let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        match account_home().map(|h| h.join(".steve")) {
+            Some(home) if real(&home) == real(&u.home) => {}
+            Some(home) => missing.push(steve_i18n::t!(
+                "hub.upgrade.local.untrusted_home",
+                home = home.to_string_lossy().as_ref(),
+                got = u.home.to_string_lossy().as_ref()
+            )),
+            None => missing.push("the account's installation home cannot be established".into()),
+        }
+    }
     if !cfg!(target_os = "macos") {
         missing.push("macOS (codesign, launchd)".to_owned());
     }
@@ -332,9 +327,6 @@ pub fn local_missing(u: &Updates) -> Vec<String> {
     let store = super::signing::helper(&u.home);
     if !super::signing::present(&u.home, store.as_deref()) {
         missing.push(super::signing::FILE.to_owned());
-    }
-    if !u.repo.join(".git").exists() {
-        missing.push(format!("STEVE_REPO ({})", u.repo.display()));
     }
     if let Err(tools) = tools(u) {
         missing.extend(tools);
@@ -380,12 +372,12 @@ pub(super) fn prepare(u: &Updates, version: &semver::Version) -> Result<Spec> {
         )
     })?;
     Ok(Spec {
-        kind: "local_release".into(),
-        repo: u.repo.to_string_lossy().into_owned(),
+        kind: "release_bundle".into(),
+        repo: String::new(),
         source: format!("{}/{}.git", u.web_base, u.repository),
         commit: None,
         python: tools.python.to_string_lossy().into_owned(),
-        cargo: tools.cargo.to_string_lossy().into_owned(),
+        cargo: String::new(),
         log: None,
         launched_at: None,
     })
@@ -460,7 +452,9 @@ fn job_env(u: &Updates, spec: &Spec) -> Vec<(String, String)> {
     .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v)))
     .collect();
     env.push(("STEVE_HOME".into(), u.home.to_string_lossy().into_owned()));
-    env.push(("STEVE_CARGO".into(), spec.cargo.clone()));
+    if spec.kind == "local_release" {
+        env.push(("STEVE_CARGO".into(), spec.cargo.clone()));
+    }
     env.push(("NO_COLOR".into(), "1".into()));
     env
 }
@@ -684,6 +678,11 @@ fn lock_file(p: &Path) -> Result<File> {
 }
 
 fn run(u: &Updates, op: &mut Operation, ops: &Path, trust: &Trust) -> Result<()> {
+    match op.runner.as_ref().map(|s| s.kind.as_str()) {
+        Some("release_bundle") => return run_bundle(u, op, trust),
+        Some("local_release") => {} // a persisted request from an older Hub
+        _ => bail!("unsupported upgrade runner"),
+    }
     let spec = op.runner.clone().context("not a local upgrade")?;
     let commit = spec
         .commit
@@ -701,7 +700,7 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path, trust: &Trust) -> Result<()>
         op.id
     ));
 
-    // a python whose tarfile has the safe extraction filter local-release.py uses (prepare checked it too)
+    // the interpreter recorded by the legacy request
     if !python_ok(Path::new(&spec.python)) {
         bail!(
             "{}",
@@ -888,14 +887,126 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path, trust: &Trust) -> Result<()>
     op.target = Some(candidate.to_string_lossy().into_owned());
     u.phase(op, "ready", None)?;
 
+    deploy(u, op, &spec, &script, &candidate)
+}
+
+/// A published artifact takes the same verified deployment path as an explicit maintainer build.
+/// Nothing in this path invokes a compiler, package manager or Git checkout.
+fn run_bundle(u: &Updates, op: &mut Operation, trust: &Trust) -> Result<()> {
+    let spec = op.runner.clone().context("not a bundle upgrade")?;
+    let commit = spec.commit.as_deref().context("release commit missing")?;
+    if let Some(why) = trust.refuses(&u.home, &op.version, &spec, commit) {
+        bail!("{why}")
+    }
+    let home = u.home.clone();
+    let repository = repository()?;
+    let mut staged = op.clone();
+    // The CLI already runs within Tokio. Keep this one-shot runner's network on its own runtime.
+    *op = std::thread::spawn(move || -> Result<Operation> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let network = Updates {
+            home,
+            repository,
+            api_base: "https://api.github.com".into(),
+            web_base: "https://github.com".into(),
+            client: reqwest::Client::builder()
+                .user_agent("Steve-updater/1")
+                .timeout(Duration::from_secs(600))
+                .build()?,
+            ..Updates::journal(Path::new("/"))
+        };
+        rt.block_on(network.stage(&mut staged))?;
+        Ok(staged)
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("release download stopped"))??;
+    let candidate = PathBuf::from(op.target.as_ref().context("download has no candidate")?);
+    prepare_bundle(u, op, &spec, &candidate, trust)?;
+    u.phase(op, "ready", None)?;
+    deploy(
+        u,
+        op,
+        &spec,
+        &candidate.join("ops/local-release.py"),
+        &candidate,
+    )
+}
+
+pub(super) fn prepare_bundle(
+    u: &Updates,
+    op: &mut Operation,
+    spec: &Spec,
+    candidate: &Path,
+    trust: &Trust,
+) -> Result<()> {
+    let commit = spec.commit.as_deref().context("release commit missing")?;
+    if let Some(why) = trust.refuses(&u.home, &op.version, spec, commit) {
+        bail!("{why}")
+    }
+    let script = candidate.join("ops/local-release.py");
+    for file in [
+        &script,
+        &candidate.join("ops/schema_gate.py"),
+        &candidate.join("ops/run.sh"),
+    ] {
+        if !file.is_file() {
+            bail!(
+                "release bundle lacks its installer ({}); publish a complete release",
+                file.display()
+            )
+        }
+    }
+    u.progress(op, "signing", None)?;
+    let store = super::signing::installed_helper(&u.home);
+    let pass = super::signing::password(&u.home, store.as_deref())?
+        .context("no existing installation signing identity")?;
+    let mut command = Command::new(&spec.python);
+    command
+        .arg("-I")
+        .arg(&script)
+        .arg("prepare-bundle")
+        .arg(candidate)
+        .args([
+            "--version",
+            &op.version,
+            "--commit",
+            commit,
+            "--keychain-pass-stdin",
+        ])
+        .env("STEVE_HOME", &u.home)
+        .stdin(Stdio::piped());
+    let mut child = command.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let line = zeroize::Zeroizing::new(format!("{}\n", pass.as_str()));
+        let _ = stdin.write_all(line.as_bytes());
+    }
+    drop(pass);
+    if !child.wait()?.success() {
+        bail!("release bundle preparation failed; the running version has not been stopped")
+    }
+    Ok(())
+}
+
+fn deploy(
+    u: &Updates,
+    op: &mut Operation,
+    spec: &Spec,
+    script: &Path,
+    candidate: &Path,
+) -> Result<()> {
+    let log = spec.log.clone().unwrap_or_default();
+
     say(format!("deploy {}", candidate.display()));
-    let journaled = fs::read_to_string(&script).is_ok_and(|s| s.contains("--operation"));
+    let journaled = fs::read_to_string(script).is_ok_and(|s| s.contains("--operation"));
     let mut deploy = Command::new(&spec.python);
     deploy
         .arg("-I")
-        .arg(&script)
+        .arg(script)
         .arg("deploy")
-        .arg(&candidate)
+        .arg(candidate)
+        .env("STEVE_HOME", &u.home)
         .stdin(Stdio::null());
     if journaled {
         deploy.args(["--operation", &op.id]);

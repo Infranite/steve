@@ -28,9 +28,17 @@ try {
       { action: "pause", expected_revision: 7 }, { action: "resume", expected_revision: 8 }, { action: "retry", expected_revision: 9 },
     ])
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
+    await page.goto(base + "/test/fixtures/workflow.html?unavailable")
+    await page.locator("[data-workflow-unavailable]").waitFor()
+    assert.match(await page.locator("[data-workflow-unavailable]").innerText(), /当前版本尚未接入/)
+    assert.equal(await page.locator("[data-workflow-toggle]").isDisabled(), true, "resume cannot bypass unavailable execution")
+    assert.equal(await page.locator('[data-workflow-retry="review"]').isDisabled(), true)
+    assert.equal(await page.getByText("编排已暂停，恢复后按当前计划继续。").count(), 0, "no false promise to resume")
+    assert.match(await page.locator('[data-workflow-unit="integrate"]').innerText(), /执行能力尚未就绪/)
+    assert.deepEqual(await page.evaluate(() => window.__workflowChanges ?? []), [])
     if (process.env.STEVE_TEST_SHOTS) await page.screenshot({ path: `${process.env.STEVE_TEST_SHOTS}/workflow-${width}-${theme}.png`, fullPage: true })
     await page.close()
   }
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["dependency order", "acceptance blockers", "shared outputs", "pause/resume/retry revisions", "1066/390px", "dark/light"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["dependency order", "acceptance blockers", "shared outputs", "pause/resume/retry revisions", "unavailable execution disables resume and retry", "1066/390px", "dark/light"] }))
 } finally { await browser.close() }

@@ -2,6 +2,7 @@
 
 [README](../README.md) gets a local instance running in a few minutes. This page covers running Steve as a long-lived service: a source-based macOS installation, managed Release bundles with automatic upgrades, and how an upgrade behaves.
 
+- [Hub and Node service commands](#hub-and-node-service-commands)
 - [Source-based macOS service installation](#source-based-macos-service-installation)
 - [Managed Release bundles and automatic upgrades](#managed-release-bundles-and-automatic-upgrades)
 - [Pairing a separate Node](#pairing-a-separate-node)
@@ -33,14 +34,7 @@ Snapshots are sampled reads, not a distributed transaction. `changed_during_read
 
 ## Pairing a separate Node
 
-Remote Nodes are experimental. They run `steve-node`, a separate binary from `steve-hub`. Current Release bundles contain the Hub and Web, so build the Node from a compatible source revision on the target OS and architecture:
-
-```sh
-cargo build --locked --release --manifest-path hub-rs/Cargo.toml \
-  -p steve-node-cli --bin steve-node
-```
-
-The binary is `hub-rs/target/release/steve-node` (or under `CARGO_TARGET_DIR` when set). Record its source revision and SHA256 before copying it to the target machine. Keep it in a stable location independent of the Hub's release directory.
+Remote Nodes are experimental. They run `bin/steve-node`, shipped alongside the Hub and Web in the platform Release bundle. Download the same release for the Node's OS and architecture, verify its manifest, size and SHA256, then extract it into a permanent release directory on that machine. `bin/steve-node --build-info` reports its release version, full commit and target; packaging rejects a Node whose identity differs from the Hub. Source builds remain available for development with `cargo build --locked --release --manifest-path hub-rs/Cargo.toml -p steve-node-cli`.
 
 Before pairing, verify that the Hub has `STEVE_NODE_LISTEN=1` and that its HTTPS reverse proxy forwards `/node/pair` and WebSocket upgrades at `/node/ws` to the Hub. Loopback TCP peers are accepted by default; a proxy on another machine needs its exact TCP peer IP in `STEVE_NODE_PROXY_PEERS` and must overwrite `X-Forwarded-Proto` with its actual incoming scheme. See [Remote Nodes](#remote-nodes) for the HTTPS header requirements and proxy trust boundary. Back up existing configuration, run `steve-hub --check-config` before applying changes, and use the installation's normal restart procedure.
 
@@ -57,7 +51,7 @@ The signed-in owner can generate a pairing code in **Devices → Add device** an
    ```
 
 3. In Devices, find the pending Node, compare its fingerprint with the CLI output, enter the full fingerprint and confirm it. Save its `node_id` for subsequent checks; do not identify it by name alone. The API equivalent is to read `GET /api/nodes`, match the Node ID and fingerprint, then call `POST /api/nodes/<node_id>/confirm` and check for `{"ok": true}`.
-4. Run the Node in the foreground, or configure its service manager to run this command with absolute paths:
+4. Install and start its own user service with the [service commands](#hub-and-node-service-commands), or run the Node in the foreground:
 
    ```sh
    STEVE_HOME="<absolute-node-data-directory>" <absolute-path-to-steve-node> run
@@ -82,24 +76,64 @@ Registration alone does not move existing projects or change scheduling. Do not 
 
 If deployment fails, stop only the newly installed service. Preserve its logs, identity and journal for diagnosis and retry. If abandoning a confirmed registration, the owner can call `POST /api/nodes/<node_id>/revoke`; a revoked identity cannot reconnect. The local `forget` command only removes pairing files and does not revoke access at the Hub. Restore any backed-up Hub configuration through the same controlled restart procedure if enabling the listener must be rolled back.
 
+## Hub and Node service commands
+
+Every platform bundle includes `ops/steve-service.py` (Python 3.9+). It manages user launchd jobs on macOS and user systemd units on Linux. Use a stable, verified extracted bundle and explicit data directories; Hub and Node must have separate homes. Linux requires a working user systemd session. macOS LaunchAgents run in the signed-in user's session. A new macOS Hub requires the explicit first-time Keychain setup below before `hub install`; the installer will refuse an unsigned home instead of silently selecting another vault backend.
+
+```sh
+python3 <bundle>/ops/steve-service.py hub install --home "$HOME/.steve" --release <bundle>
+python3 <bundle>/ops/steve-service.py hub start --home "$HOME/.steve"
+python3 <bundle>/ops/steve-service.py hub status --home "$HOME/.steve"
+python3 <bundle>/ops/steve-service.py hub doctor --home "$HOME/.steve"
+
+python3 <bundle>/ops/steve-service.py node install --home "$HOME/.steve-node" --release <bundle>
+python3 <bundle>/ops/steve-service.py node start --home "$HOME/.steve-node"
+python3 <bundle>/ops/steve-service.py node doctor --home "$HOME/.steve-node"
+```
+
+Both components also support `stop` and `restart`; these commands work without a reachable Hub. `install` is idempotent and does not start the service, create a pairing, change roots or permissions, install a keyhelper, or rewrite `steve.env`. Reinstalling the same configuration leaves a running process alone. `--label` selects a custom service label at initial installation; signed Hub installations retain the label and launch mode in `signing/identity.json`. Changed service definitions have a `.previous` backup. Service metadata is under `<home>/services/`; macOS logs are `<home>/logs/<component>.log`, and Linux logs are in `journalctl --user -u <label>`.
+
+`status` and `doctor` return JSON with the manager state, PID, configured release/build and separate pairing information. A running process and a saved pairing do not establish that a Node is connected or has no active sessions. Verify connection and sessions in Hub Devices. For installations previously managed by another script, pass their existing label and adopt the same release while stopped; the tool does not discover or terminate arbitrary foreground processes.
+
+To update a separate Node, verify and extract the new bundle, inspect the candidate, finish its sessions in Steve and stop its service, then switch its service definition:
+
+```sh
+python3 <new-bundle>/ops/steve-service.py node doctor --home "$HOME/.steve-node" --release <new-bundle>
+python3 <new-bundle>/ops/steve-service.py node stop --home "$HOME/.steve-node"
+python3 <new-bundle>/ops/steve-service.py node update --home "$HOME/.steve-node" --release <new-bundle>
+python3 <new-bundle>/ops/steve-service.py node start --home "$HOME/.steve-node"
+```
+
+An update refuses a running or unknown service state before changing files. Optional `--wait <seconds>` waits only for the service to stop; it does not drain sessions, stop the service or kill a process. The executable path is pinned to the selected release, and `node/identity.key`, pairing, journals, `roots.json`, `policy.json` and `harness.json` remain in the same home. Keep the previous bundle. Selecting it uses the same stopped-service `update` procedure, but an older Node may reject a newer journal format; verify compatibility before rollback and verify the original fingerprint reconnects. Use **Settings → About** for Hub upgrades: direct service replacement would skip its drain, database backup and migration checks.
+
 ## Source-based macOS service installation
 
 Copy `ops/steve.env.example` to `~/.steve/steve.env` and adjust it to your deployment. Keep secrets outside this checkout, using the supported `*_FILE` configuration. On macOS the vault master keys live in the login keychain and only `~/.steve/bin/steve-keyhelper` reads or writes them; `ops/release.sh` rebuilds it only when its own source changes, so rebuilt Hubs keep access to the keys. Run `zsh ops/install.sh` from the checkout to build a source release and install user launchd jobs. Logs are under `~/.steve/logs`.
 
 `ops/release.sh` builds from `main` and switches source releases after checks. `STEVE_REPO`, `STEVE_HOME`, `STEVE_LABEL` and `STEVE_BACKUP_LABEL` support custom locations and service labels. Existing installations must preserve their original signing identities and keychain service: set `STEVE_KEYHELPER_SERVICE`, `STEVE_KEYHELPER_HUB_IDENTIFIER`, `STEVE_KEYHELPER_IDENTIFIER` and `STEVE_LABEL` to the original values in the build environment (they are compile-time identities, not `steve.env` settings) and sign with the original certificate. Changing a namespace or vault backend does not migrate keys. Back up data and verify recovery material before changes.
 
-This source-based service can check GitHub Releases; it does not use the bundle supervisor and cannot execute automatic Release upgrades. Keep using your source deployment process unless you explicitly migrate to the managed bundle layout below.
+Existing signed macOS installations can upgrade from **Settings → About** using the local release runner described below. Their original signing identity and installed keyhelper are retained; no vault migration is needed.
 
 ## Managed Release bundles and automatic upgrades
 
-Automatic upgrades require a published bundle matching your platform and a service running Steve's supervisor. Release builds target Apple Silicon macOS 14+ and Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+ or Debian 12+); release-asset availability determines which platform can actually upgrade. Windows is not supported. Source development and externally managed containers expose checks only.
+Automatic upgrades require a published bundle matching your platform and either Steve's supervisor or the signed macOS local release runner. Release builds target Apple Silicon macOS 14+ and Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+ or Debian 12+); release-asset availability determines which platform can actually upgrade. Windows is not supported. Source development and externally managed containers expose checks only.
 
-Initial installation is a manual deployment step:
+Initial installation uses a verified bundle:
 
 1. Select a stable release from [Infranite/steve Releases](https://github.com/Infranite/steve/releases) with a bundle for your OS and architecture. Verify its manifest and SHA256 before extracting it. If no matching release asset has been published, this installation path is not available yet.
-2. Install the extracted, paired Hub/Web bundle under `$STEVE_HOME/releases/<version>` and point `$STEVE_HOME/current` at that directory. A bundle contains `bin/steve-hub`, `web/dist`, and `release.json`; do not substitute a source checkout or mix separate frontend/backend builds.
-3. Configure `$STEVE_HOME/steve.env`, authentication, the optional public URL, and a supported persistent vault backend. New installations can explicitly use `STEVE_VAULT_KEYSTORE=dir` with `STEVE_VAULT_KEY_DIR` outside `STEVE_HOME`, on protected storage owned by the Hub user with mode 0700, kept mounted across releases. The `file` backend is for isolated development and tests only. Existing macOS Keychain/helper installations cannot use generic precompiled upgrades because those binaries do not preserve their private signing identity; plan a separate, validated migration if needed.
-4. Configure your service manager to run the absolute path to `ops/run-managed.sh` in the foreground. This launcher starts `steve-hub --supervise`; it does not download or install the initial bundle or create a service-manager job. For systemd use `Type=simple`, `Restart=on-failure`, `KillMode=control-group` and `TimeoutStopSec=600` (more if database backups take longer); for launchd use a foreground `ProgramArguments` entry and `KeepAlive`. Do not wrap the script in anything that discards the supervisor PID.
+2. Install the extracted, paired Hub/Web bundle under `$STEVE_HOME/releases/<version>` and use the service `install --release` command to create `$STEVE_HOME/current`. A bundle contains `bin/steve-hub`, `bin/steve-node`, `bin/steve-keyhelper`, `web/dist`, `release.json` and the runtime `ops/` scripts; do not substitute a source checkout or mix separate frontend/backend builds.
+3. Configure `$STEVE_HOME/steve.env`, authentication, the optional public URL, and a supported persistent vault backend. New Linux installations can explicitly use `STEVE_VAULT_KEYSTORE=dir` with `STEVE_VAULT_KEY_DIR` outside `STEVE_HOME`, on protected storage owned by the Hub user with mode 0700, kept mounted across releases. The `file` backend is for isolated development and tests only. Existing macOS Keychain/helper installations use the local release runner below, which signs the downloaded Hub with the original certificate. Do not change their vault backend or namespace.
+4. Run `python3 <bundle>/ops/steve-service.py hub install --home "$STEVE_HOME" --release <bundle>`, then `hub start --home "$STEVE_HOME"`. New managed installations run `ops/run-managed.sh` as the foreground service process (`steve-hub --supervise`). An existing signed installation keeps `ops/run.sh` and its original launchd label. Use `hub doctor` and `/healthz` to verify startup.
+
+
+For a new macOS home, extract the verified bundle under `$STEVE_HOME/releases/<version>` and run this once before step 4:
+
+```sh
+STEVE_HOME="$HOME/.steve" python3 "$HOME/.steve/releases/<version>/ops/local-release.py" \
+  setup-keychain "$HOME/.steve/releases/<version>"
+```
+
+This explicit setup creates a private local signing certificate, signs the already compiled Hub and keyhelper, installs the helper once outside the release directory and writes `signing/identity.json`. It uses the system `security`, `codesign`, `openssl` and `zsh`, with no Cargo or npm. It refuses an existing helper, signing identity, current Hub or nonempty data directory; existing installations must use their preserved identity and the upgrade path. Repeating a completed setup is a no-op. An interrupted partial installation is left for inspection, never overwritten. The initial password file is private; the signed Hub moves it into the login Keychain and removes it on startup. The bundled helper remains untouched during every subsequent upgrade.
 
 ```text
 Service manager
@@ -118,9 +152,17 @@ An upgrade downloads and validates the bundle, waits for active work to drain, s
 
 The Hub checks for a newer release shortly after it starts and then every six hours (`STEVE_UPDATE_CHECK=0` turns this off; debug builds only check with `STEVE_UPDATE_CHECK=1`). When it finds one, the sidebar and Settings show a notice, and the owner sees it once as a toast. Only the owner can start a check from the page.
 
-A macOS install built locally with `ops/local-release.py` (signed Hub, Keychain vault) also upgrades from this page. It needs `signing/identity.json`, the signing keychain and its password (`signing/keychain-pass` from `ops/sign-setup.sh`; the Hub moves it into the login keychain at start, through `steve-keyhelper`, changes the keychain's password to a new one so that copies of the old file (earlier daily backups) open nothing, and removes the file, so agents can't read it; the upgrade job gets it from the Hub over a pipe, and only for an upgrade of this account's `~/.steve`, through its own `bin/steve-keyhelper`, with a Python from the system's or Homebrew's directories, for the commit the release manifest names when the job reads it again; `ops/release.sh`, `ops/sign-setup.sh` or `local-release.py build` run by hand in a terminal meet a macOS prompt, where you click Allow, never Always Allow; run any other way, including a release the Hub starts with `ops/release.sh`, they stop and ask for the upgrade from this page instead. The signing keychain is unlocked only while codesign runs, and its password never appears on a command line), a checkout at `STEVE_REPO`, and `cargo` (or `STEVE_CARGO`), `npm`, `git` and Python 3.12+ (the first of `python3.13`, `python3.12`, `python3` in `/opt/homebrew/bin`, `/usr/local/bin`, the python.org framework's bin or `/usr/bin` that is new enough; `STEVE_PYTHON` and `PATH` are not used, since that Python gets the signing password). The page lists anything missing. The Hub resolves the release from `STEVE_UPDATE_REPOSITORY` and accepts only a stable version newer than the running one. It then starts a one-shot launchd job (`<label>.upgrade`) with a minimal environment. The job fetches the tag, refuses it when it doesn't point at the commit in the release manifest, and runs that tag's own `local-release.py build` and `deploy --operation <id>`. Each step goes into the same journal, so the page follows it across the restart. Its log is `$STEVE_HOME/logs/release/upgrade-<version>-<id>.log`. Only one release runs at a time: `ops/release.sh`, `local-release.py` and the job all share `releases/.release.lock`.
+A signed macOS installation uses the same published Hub/Web bundle without compiling locally. The Hub downloads the matching archive and verifies its size and SHA256 against the release manifest before safe extraction. `local-release.py prepare-bundle` verifies the manifest, Hub build and Web identity, then signs only the candidate Hub with the existing certificate and Hub identifier. It never overwrites `$STEVE_HOME/bin/steve-keyhelper`; the bundled generic helper is not installed during an upgrade. The deployment probe must read the existing vault before switching the service. A missing signing identity, helper or keychain stops the upgrade instead of changing the vault backend or namespace.
 
-Eligible interrupted work resumes through task recovery. Paused work and pending approvals remain waiting; uncertain external delivery outcomes require reconciliation. Keep `$STEVE_HOME/updates` journals, backups and old versions until you accept the upgrade. The initial implementation does not automatically prune them.
+The signed automatic runner grants Keychain access only for the account's default `~/.steve` home. A custom macOS Hub home can still use the service commands, but upgrading it requires an explicit terminal invocation of `local-release.py prepare-bundle <verified-extracted-bundle> --version <version> --commit <full-sha>`, followed by `deploy <bundle>`, with `STEVE_HOME` set to that home and its original signing identity; this may show a one-time macOS Keychain prompt. `hub doctor` reports this limitation. Linux managed installations and separate Nodes support custom homes normally.
+
+This path needs Python 3.9+, `codesign`, the original `signing/identity.json` and signing keychain. It does not require a checkout, Cargo, npm or Git. The signed Hub passes the signing password to the one-shot runner through stdin; it is never an argument or a log value. The signing keychain is unlocked only while codesign runs and locked again afterwards. Run upgrades from the authenticated Settings page. Explicit developer source builds remain available as `local-release.py build <commit> --version <version> --from-source --repo <checkout>` and require Cargo, npm, Git and Python 3.12+.
+
+For the first upgrade from an older local runner, its legacy `build` call now downloads and prepares the release bundle by default; it does not compile. That older runner still needs its existing checkout and bootstrap tools to read the new tag's scripts once. Subsequent upgrades use the bundle path directly. A failed download or integrity check never falls back to an unrequested source build.
+
+The operation journal records download bytes, preparation, the actual drain snapshot, backup, probe, restart and health verification. Waiting for active work is a separate phase, not a simulated percentage. Its log is `$STEVE_HOME/logs/release/upgrade-<version>-<id>.log`. `ops/release.sh`, `local-release.py` and the runner share `releases/.release.lock`, so only one release can switch the installation at a time.
+
+Eligible interrupted work resumes through task recovery. Paused work and pending approvals remain waiting; uncertain external delivery outcomes require reconciliation. Keep `$STEVE_HOME/updates` journals, backups and old versions until you accept the upgrade. After a healthy local deployment, pruning keeps the current and previous releases plus the newest three recognized release directories and eight pre-deployment database backups. UUID-named bundle directories are eligible only when their manifest identifies the same version; unrelated directories are not pruned.
 
 ## Remote Nodes
 

@@ -52,11 +52,16 @@ async fn maintenance(cfg: &Config, u: &Updates, method: reqwest::Method) -> Resu
         .json()
         .await?)
 }
-async fn drain(cfg: &Config, u: &Updates) -> Result<()> {
+async fn drain(cfg: &Config, u: &Updates, op: &mut Operation) -> Result<()> {
     maintenance(cfg, u, reqwest::Method::POST).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     while tokio::time::Instant::now() < deadline {
-        if maintenance(cfg, u, reqwest::Method::GET).await?["ready"] == true {
+        let observed = maintenance(cfg, u, reqwest::Method::GET).await?;
+        if op.drain.as_ref() != Some(&observed) {
+            op.drain = Some(observed.clone());
+            u.progress(op, "waiting", None)?;
+        }
+        if observed["ready"] == true {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -262,7 +267,7 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
     check_candidate(cfg, &target, &manifest).await?;
     op.previous = Some(previous.to_string_lossy().into());
     u.phase(op, "draining", None)?;
-    if let Err(e) = drain(cfg, u).await {
+    if let Err(e) = drain(cfg, u, op).await {
         let cancel = release_maintenance(cfg, u).await;
         return Err(anyhow::anyhow!(
             "{e:#}; maintenance cancellation: {cancel:?}"
