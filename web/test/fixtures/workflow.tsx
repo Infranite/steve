@@ -14,7 +14,7 @@ const unit = (id: string, title: string, kind: WorkflowUnit["kind"], status: str
   attempt: status === "pending" ? 0 : 1, summary: "", outputs: [], checks: [], reason: "",
 })
 const initial: Workflow = {
-  item_id: "ST-60", revision: 7, paused: false, max_parallel: 2, max_attempts: 3,
+  item_id: "ST-60", revision: 7, paused: new URLSearchParams(location.search).has("unavailable"), execution_ready: !new URLSearchParams(location.search).has("unavailable"), max_parallel: 2, max_attempts: 3,
   units: [
     unit("integrate", "集成并统一验收", "integrate", "pending", ["review"]),
     { ...unit("api", "实现接口与主体隔离", "work", "succeeded"), summary: "接口已实现，检查通过。", outputs: [{ kind: "文件", title: "工作图 API", location: "src/workflow.ts" }], checks: [{ name: "接口实际回读", passed: true, operated: true }] },

@@ -11,6 +11,7 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
   const t = useT()
   const [busy, setBusy] = useState(false), [error, setError] = useState("")
   const progress = workflowProgress(workflow)
+  const unavailable = workflow.execution_ready === false
   const labels: Record<string, string> = {
     pending: t("views:workflow.pending"), dispatching: t("views:workflow.ready"),
     running: t("views:workflow.running"), succeeded: t("views:workflow.passed"),
@@ -39,12 +40,13 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
         <h2 className="flex items-center gap-2 type-headline"><GitBranchIcon className="size-4" />{t("views:workflow.title")}</h2>
         <p className="mt-1 type-footnote text-muted-foreground">{t("views:workflow.progress", { done: progress.passed, total: progress.total, running: progress.running, max: workflow.max_parallel, revision: workflow.revision })}</p>
       </div>
-      <Button size="sm" variant="outline" disabled={busy} onClick={() => void change(workflow.paused ? "resume" : "pause")} data-workflow-toggle>
+      <Button size="sm" variant="outline" disabled={busy || workflow.paused && unavailable} onClick={() => void change(workflow.paused ? "resume" : "pause")} data-workflow-toggle>
         {workflow.paused ? <PlayIcon /> : <PauseIcon />}{workflow.paused ? t("views:workflow.resume") : t("views:workflow.pause")}
       </Button>
     </div>
     {error && <p role="alert" className="mb-3 break-words type-callout text-destructive">{error}</p>}
-    {workflow.paused && <p className="mb-3 type-callout text-muted-foreground">{t("views:workflow.pauseHint")}</p>}
+    {unavailable && <p className="mb-3 rounded-xl border p-3 type-callout text-muted-foreground" role="status" data-workflow-unavailable>{t("views:workflow.unavailable")}</p>}
+    {workflow.paused && !unavailable && <p className="mb-3 type-callout text-muted-foreground">{t("views:workflow.pauseHint")}</p>}
     {workflow.blockers.length > 0 && <div className="mb-4 rounded-xl border bg-muted/40 p-3" data-workflow-blockers>
       <p className="type-callout font-medium">{t("views:workflow.blockers")}</p>
       <ul className="mt-1 list-disc space-y-1 pl-4 type-footnote text-muted-foreground">{workflow.blockers.map((text, n) => <li key={n} className="break-words">{text}</li>)}</ul>
@@ -52,7 +54,7 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
     <ol className="divide-y rounded-xl border px-3">
       {orderedUnits(workflow.units).map((unit) => <li key={unit.id} className="min-w-0 py-3" data-workflow-unit={unit.id}>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 type-footnote">
-          <span className={cn("rounded-md px-1.5 py-0.5", unit.status === "succeeded" ? "bg-muted text-foreground" : unit.status === "failed" ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground")}>{labels[unit.status] ?? unit.status}</span>
+          <span className={cn("rounded-md px-1.5 py-0.5", unit.status === "succeeded" ? "bg-muted text-foreground" : unit.status === "failed" ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground")}>{unit.status === "pending" && unavailable ? t("views:workflow.unavailableUnit") : labels[unit.status] ?? unit.status}</span>
           <span className="text-muted-foreground">{kinds[unit.kind]}</span>
           <span className="text-muted-foreground">{st.bots[unit.bot_id]?.n ?? unit.bot_id}</span>
           {!unit.required && <span className="text-muted-foreground">{t("views:workflow.optional")}</span>}
@@ -60,7 +62,7 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
         </div>
         <div className="mt-1 flex items-start justify-between gap-2">
           <h3 className="min-w-0 break-words type-callout font-medium">{unit.item_id ? <a href={`#/items/${encodeURIComponent(unit.item_id)}`} className="hover:underline">{unit.title}</a> : unit.title}</h3>
-          {unit.status === "failed" && <Button size="sm" variant="ghost" disabled={busy || unit.attempt >= workflow.max_attempts} onClick={() => void change("retry", unit.id)} data-workflow-retry={unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
+          {unit.status === "failed" && <Button size="sm" variant="ghost" disabled={busy || unavailable || unit.attempt >= workflow.max_attempts} onClick={() => void change("retry", unit.id)} data-workflow-retry={unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
         </div>
         {unit.depends_on.length > 0 && <p className="mt-1 break-words type-footnote text-muted-foreground">{t("views:workflow.depends", { names: unit.depends_on.map((id) => workflow.units.find((u) => u.id === id)?.title ?? id).join(" · ") })}</p>}
         {unit.resources.length > 0 && <p className="mt-1 break-words type-footnote text-muted-foreground">{t("views:workflow.resources", { names: unit.resources.join(" · ") })}</p>}

@@ -1,7 +1,7 @@
 import { HubError, Unauthenticated } from "@/api"
 import { useEffect, useRef, useState } from "react"
 import { readableVersion, updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, checkStale, committedFailure, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
-import { enableOneClick, installLabel, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install, type InstallKind } from "@/upgrade-guide"
+import { downloadPercent, enableOneClick, installLabel, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
 import { CheckIcon, CircleAlertIcon, CopyIcon, LoaderCircleIcon, RefreshCwIcon } from "lucide-react"
 import { Markdown } from "@/components/markdown"
 import { Button } from "@/components/ui/button"
@@ -11,7 +11,7 @@ import { Group, Row, SectionLabel } from "@/ui"
 import { cn } from "cn"
 import { LOADED_WEB_VERSION, st, toast, useStore } from "@/store"
 import { useT } from "@/i18n"
-import { date } from "@/i18n/format"
+import { clockDur, date, num } from "@/i18n/format"
 
 function VersionValue({ v, label }: { v: string; label: string }) {
   const t = useT()
@@ -164,13 +164,24 @@ export function UpgradeSettings() {
       {op && <div className="rounded-lg border p-3 space-y-2" data-upgrade-phase={op.phase} role="status">
         <p>{updatePhaseLabel[op.phase]} · <span className="font-mono break-all">{op.version}</span></p>
         {op.phase === "awaiting_approval" && <><p className="text-muted-foreground">{t("pages:upgrade.requested", { who: op.requested_by })}</p>{canExecute && <div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || !!connection} onClick={() => void action("approve")} data-upgrade-approve>{t("pages:upgrade.approve")}</Button><Button size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("reject")} data-upgrade-reject>{t("pages:upgrade.reject")}</Button></div>}</>}
-        {(active || op.phase === "succeeded") && stageIndex(op.phase) >= 0 && <UpgradeProgress phase={op.phase} verified={verified === op.id} kind={install?.kind} />}
+        {(active || op.phase === "succeeded") && stageIndex(op.phase) >= 0 && <UpgradeProgress phase={op.phase} verified={verified === op.id} runnerKind={op.runner?.kind} />}
+        {op.progress && <UpgradeActivity op={op} connected={!connection} />}
+        {op.phase === "draining" && op.drain && <UpgradeWaiting drain={op.drain} />}
         {active && op.phase !== "awaiting_approval" && <p className="text-muted-foreground">{t("pages:upgrade.restartNote")}</p>}
         {canExecute && !repair && ["failed", "rolled_back"].includes(op.phase) && check?.status === "available" && check.version === op.version && <Button size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("retry")} data-upgrade-retry>{t("pages:upgrade.retry")}</Button>}
         {op.error && <p className="text-destructive break-words">{op.error}</p>}
         {op.phase !== "awaiting_approval" && op.phase !== "succeeded" && <UpgradeRecovery op={op} backup={state.backup ?? null} install={install} />}
         {op.phase === "succeeded" && <UpgradeVerify target={op.version} embedded onResult={done => setVerified(done ? op.id : null)} />}
       </div>}
+      <div className="rounded-lg border p-3 space-y-2" data-upgrade-services>
+        <p className="font-medium">{t("pages:upgrade.services.title")}</p>
+        <a href="#/devices" className="underline underline-offset-4">{t("pages:upgrade.services.devices")}</a>
+        {owner && install?.home && ["managed", "local_release"].includes(install.kind) && <details>
+          <summary className="cursor-pointer">{t("pages:upgrade.services.terminal")}</summary>
+          <p className="mt-2 text-muted-foreground">{t("pages:upgrade.services.note")}</p>
+          {serviceCommands(install.home).map(command => <Command key={command} command={command} />)}
+        </details>}
+      </div>
     </div>}
     {error && <p className="mt-2 type-footnote text-destructive" role="alert">{error}</p>}
   </div>
@@ -233,7 +244,7 @@ function ManualGuide({ install, version, onVerify }: { install: Install; version
 }
 
 /** The supervisor's journal as steps; the last one is this page's own check after reconnecting. */
-function UpgradeProgress({ phase, verified, kind }: { phase: string; verified: boolean; kind?: InstallKind }) {
+function UpgradeProgress({ phase, verified, runnerKind }: { phase: string; verified: boolean; runnerKind?: string }) {
   const t = useT()
   const at = verified ? upgradeStages.length : stageIndex(phase)
   return <ol className="grid gap-1.5 sm:grid-cols-2" data-upgrade-progress aria-label={t("pages:upgrade.progressAria")}>
@@ -241,10 +252,77 @@ function UpgradeProgress({ phase, verified, kind }: { phase: string; verified: b
       const state = n < at ? "done" : n === at ? "current" : "pending"
       return <li key={s.key} className={cn("flex items-center gap-2 type-footnote", state === "pending" && "text-muted-foreground")} data-stage={state}>
         {state === "done" ? <CheckIcon className="size-3.5 text-success" /> : state === "current" ? <LoaderCircleIcon className="size-3.5 animate-spin text-primary" /> : <span className="size-3.5 flex items-center justify-center"><span className="size-1.5 rounded-full bg-muted-foreground/40" /></span>}
-        {stageLabel(s.key, kind)}
+        {stageLabel(s.key, runnerKind)}
       </li>
     })}
   </ol>
+}
+
+const activityLabels = {
+  resolving: "resolving", downloading: "downloading", verifying: "verifying", unpacking: "unpacking",
+  signing: "signing", preflight: "preflight", probing: "probing", waiting: "waiting", stopping: "stopping",
+  backing_up: "backingUp", switching: "switching", starting: "starting", checking: "checking",
+  complete: "complete", rollback: "rollback",
+} as const
+
+function byteSize(bytes: number) {
+  const unit = bytes >= 1024 ** 3 ? 3 : bytes >= 1024 ** 2 ? 2 : bytes >= 1024 ? 1 : 0
+  return `${num(bytes / 1024 ** unit, { maximumFractionDigits: unit ? 1 : 0 })} ${["B", "KiB", "MiB", "GiB"][unit]}`
+}
+
+/** A persisted observation, not an estimate of the whole upgrade. Disconnection preserves it. */
+function UpgradeActivity({ op, connected }: { op: UpdateOperation; connected: boolean }) {
+  const t = useT(), p = op.progress!, active = updateActive(op)
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!active) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [active])
+  const key = activityLabels[p.step as keyof typeof activityLabels] ?? "unknown"
+  const label = t(`pages:upgrade.activity.${key}`)
+  const percent = downloadPercent(p)
+  const measuring = percent !== undefined && !!p.download
+  return <div className="space-y-1.5 rounded-md bg-muted/40 p-3" data-upgrade-activity={p.step}>
+    <p className="flex items-center gap-2 font-medium">
+      {active && connected && p.step !== "complete" && <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin" />}
+      {active ? label : t("pages:upgrade.activity.last", { step: label })}
+    </p>
+    {p.detail && <p className="break-words type-footnote text-muted-foreground">{p.detail}</p>}
+    {measuring && <>
+      <div role="progressbar" aria-label={t("pages:upgrade.activity.downloadProgress")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} className="h-1.5 overflow-hidden rounded-full bg-muted" data-upgrade-download>
+        <div className="h-full bg-primary" style={{ width: `${percent}%` }} />
+      </div>
+      <p className="type-footnote tabular-nums">{byteSize(p.download!.received_bytes)} / {byteSize(p.download!.total_bytes)} · {percent}%</p>
+    </>}
+    <p className="type-footnote text-muted-foreground">
+      {t("pages:upgrade.activity.updated", { time: date(p.updated_at, { hour: "numeric", minute: "2-digit", second: "2-digit" }) })}
+      {active && <span> · {t("pages:upgrade.activity.elapsed", { time: clockDur(Math.max(0, now - p.started_at)) })}</span>}
+    </p>
+    {!connected && <p className="type-footnote text-muted-foreground">{t("pages:upgrade.activity.disconnected")}</p>}
+  </div>
+}
+
+function UpgradeWaiting({ drain }: { drain: NonNullable<UpdateOperation["drain"]> }) {
+  const t = useT()
+  const running = Object.values(drain.running).filter(n => Number.isFinite(n) && n > 0).reduce((sum, n) => sum + n, 0)
+  return <div className="space-y-1.5 type-footnote" data-upgrade-waiting>
+    <p className="font-medium">{t(drain.ready ? "pages:upgrade.drain.ready" : "pages:upgrade.drain.waiting")}</p>
+    {!drain.ready && <ul className="list-disc space-y-1 pl-4 text-muted-foreground">
+      {drain.blockers?.length ? drain.blockers.map((b, n) => <li key={`${b.kind}:${b.attempt_id ?? b.session_id ?? n}`}>
+        {b.item_id ? <a href={`#/items/${encodeURIComponent(b.item_id)}`} className="underline underline-offset-4">{b.item_id}</a> : b.session_id ? <a href={`#/sessions/${encodeURIComponent(b.session_id)}`} className="underline underline-offset-4">{b.session_id}</a> : null}
+        {(b.item_id || b.session_id) && " · "}{b.reason}
+      </li>) : <>
+        {drain.node > 0 && <li>{t("pages:upgrade.drain.node", { count: drain.node })}</li>}
+        {running > 0 && <li>{t("pages:upgrade.drain.activities", { count: running })}</li>}
+        {drain.acp > 0 && <li>{t("pages:upgrade.drain.adapters", { count: drain.acp })}</li>}
+        {drain.source_release_busy && <li>{t("pages:upgrade.drain.release")}</li>}
+      </>}
+      {!drain.blockers?.length && !drain.node && !running && !drain.acp && !drain.source_release_busy && <li>{t("pages:upgrade.drain.confirming")}</li>}
+    </ul>}
+    {drain.node > 0 && <a href="#/devices" className="inline-block underline underline-offset-4">{t("pages:upgrade.drain.devices")}</a>}
+    <p className="text-muted-foreground">{t("pages:upgrade.drain.note")}</p>
+  </div>
 }
 
 /** Where an upgrade's data is and what happened to it; the instance manager gets the paths. */

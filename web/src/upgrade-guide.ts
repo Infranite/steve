@@ -1,6 +1,6 @@
 // What finishing an upgrade takes, per installation. node --test loads this directly, so imports carry .ts extensions.
 import { t } from "./i18n/index.ts"
-import type { UpdateOperation, UpdateState } from "@/updates"
+import type { UpdateOperation, UpdateProgress, UpdateState } from "@/updates"
 
 /** How the Hub was installed (Hub `upgrades/install.rs`). Paths are only sent to the instance manager. */
 export type InstallKind = "managed" | "local_release" | "release_script" | "source" | "external"
@@ -18,6 +18,10 @@ export const enableOneClick = (kind: InstallKind): string | undefined =>
 
 const sh = (s: string) => /^[\w@%+=:,./~-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`
 
+/** The release package carries the same read-only maintenance entry when the Hub is unavailable. */
+export const serviceCommands = (home: string) => ["status", "doctor"].map(action =>
+  `python3 ${sh(`${home}/current/ops/steve-service.py`)} hub ${action} --home ${sh(home)}`)
+
 /** Commands for an installation Steve does not switch itself, with this machine's paths filled in. */
 export function upgradeGuide(install: Install, version: string): Guide {
   const v = version.replace(/^v/, ""), tag = `v${v}`
@@ -29,15 +33,14 @@ export function upgradeGuide(install: Install, version: string): Guide {
       label: t("pages:guide.local.label"),
       summary: t("pages:guide.local.summary"),
       steps: [
-        { title: t("pages:guide.local.fetch"), command: `git -C ${repo} fetch --tags origin && git -C ${repo} rev-parse --verify ${tag}^{commit}`, note: t("pages:guide.local.fetchNote") },
-        { title: t("pages:guide.local.build"), command: `python3 ${repo}/ops/local-release.py build ${tag}`, note: t("pages:guide.local.buildNote", { dir: `${home}/releases/${v}-local-${t("pages:guide.commitPlaceholder")}` }) },
-        { title: t("pages:guide.local.deploy"), command: `python3 ${repo}/ops/local-release.py deploy ${home}/releases/${v}-local-*`, note: t("pages:guide.local.deployNote") },
+        { title: t("pages:guide.local.prepare"), note: t("pages:guide.local.prepareNote") },
+        { title: t("pages:guide.local.deploy"), note: t("pages:guide.local.deployNote") },
         verify,
       ],
       backup: t("pages:guide.local.backup", { home, file: `${home}/logs/release/local-${v}-${t("pages:guide.timePlaceholder")}.json` }),
       recovery: [
         t("pages:guide.local.before"),
-        t("pages:guide.local.after", { home, command: `python3 ${repo}/ops/local-release.py deploy ${home}/releases/${install.release ? sh(install.release) : t("pages:guide.oldDirPlaceholder")}` }),
+        t("pages:guide.local.after", { home }),
       ],
     }
     case "release_script": return {
@@ -93,10 +96,18 @@ export const upgradeStages = [
   stage("verifying", ["verifying", "committed"] as const),
   stage("succeeded", ["succeeded"] as const),
 ] as const
-/** a step's name for this installation: a local build's first step is the build, not a download */
-export const stageLabel = (key: (typeof upgradeStages)[number]["key"], kind?: InstallKind) =>
-  key === "staging" && kind === "local_release" ? t("pages:guide.stage.stagingLocal") : upgradeStages.find(s => s.key === key)!.label
+/** Old local_release receipts really did compile; only their history keeps that label. */
+export const stageLabel = (key: (typeof upgradeStages)[number]["key"], runnerKind?: string) =>
+  key === "staging" && runnerKind === "local_release" ? t("pages:guide.stage.stagingSource") : upgradeStages.find(s => s.key === key)!.label
 export const stageIndex = (phase: string) => upgradeStages.findIndex(s => (s.phases as readonly string[]).includes(phase))
+
+/** Only the measured download has a percentage. Missing or inconsistent byte counts stay unknown. */
+export function downloadPercent(progress?: UpdateProgress): number | undefined {
+  const d = progress?.step === "downloading" ? progress.download : undefined
+  if (!d || !Number.isSafeInteger(d.received_bytes) || !Number.isSafeInteger(d.total_bytes)
+    || d.total_bytes <= 0 || d.received_bytes < 0 || d.received_bytes > d.total_bytes) return undefined
+  return Math.floor(d.received_bytes / d.total_bytes * 100)
+}
 
 export type Health = { ok?: boolean; version?: string; web_version?: string; drain?: boolean | null; recovery?: { state?: string } | null }
 export type VerifyItem = { key: "health" | "hub" | "web" | "page"; label: string; ok: boolean; detail: string }
