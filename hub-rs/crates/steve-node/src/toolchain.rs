@@ -42,18 +42,10 @@ pub(crate) fn for_run(node_home: &Path, cwd: &Path, state: Option<&HarnessState>
 
 /// Each name a real directory made here (0700), never a link someone left on the way.
 fn real_dirs(base: &Path, parts: &[&str]) -> Result<PathBuf, String> {
-    use std::os::unix::fs::DirBuilderExt;
     let mut dir = base.to_path_buf();
     for part in parts {
         dir.push(part);
-        match std::fs::symlink_metadata(&dir) {
-            Ok(m) if m.file_type().is_dir() => {}
-            Ok(_) => return Err(format!("{} is not a directory", dir.display())),
-            Err(_) => std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&dir)
-                .map_err(|e| format!("{}: {e}", dir.display()))?,
-        }
+        crate::attachments::private_dir(&dir)?;
     }
     Ok(dir)
 }
@@ -142,6 +134,32 @@ fn for_run_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_first_runs_keep_their_cache_redirection() {
+        let t = tempfile::tempdir().unwrap();
+        let (home, work) = (t.path().join("node"), t.path().join("work"));
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(work.join("go.mod"), "").unwrap();
+        let state = HarnessState {
+            dir: "ws-1/u1-2/dev-3/claude-code-4".into(),
+            import_owner: false,
+        };
+        let defs = Toolchains::builtin();
+        let barrier = std::sync::Barrier::new(12);
+        std::thread::scope(|scope| {
+            for _ in 0..12 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    let run = for_run_with(&defs, &home, &work, Some(&state));
+                    assert_eq!(run.person, Some(home.join("cache/ws-1/u1-2")));
+                    assert!(run.env.iter().any(|(key, _)| key == "GOCACHE"));
+                    assert!(run.env.iter().any(|(key, _)| key == "GOMODCACHE"));
+                });
+            }
+        });
+    }
 
     #[test]
     fn a_cargo_project_builds_in_its_item_and_caches_in_its_person() {

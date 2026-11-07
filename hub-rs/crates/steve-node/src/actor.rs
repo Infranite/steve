@@ -1916,7 +1916,6 @@ fn harness_state(
     s: &HarnessState,
     sd: steve_acp::StateDir,
 ) -> ApiResult<std::path::PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
     if !s.valid() {
         return Err(ApiError::new(
             ErrorCode::Invalid,
@@ -1930,14 +1929,8 @@ fn harness_state(
         .chain(std::iter::once("harness"));
     for part in parts {
         dir.push(part);
-        match std::fs::symlink_metadata(&dir) {
-            Ok(m) if m.file_type().is_dir() => {}
-            Ok(_) => return Err(internal("harness state: not a directory")),
-            Err(_) => std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&dir)
-                .map_err(|e| internal(format!("harness state: {e}")))?,
-        }
+        crate::attachments::private_dir(&dir)
+            .map_err(|e| internal(format!("harness state: {e}")))?;
     }
     if s.import_owner {
         let own = std::env::var_os(sd.env)
@@ -1949,18 +1942,10 @@ fn harness_state(
             if !from.is_file() || std::fs::symlink_metadata(&to).is_ok() {
                 continue;
             }
-            // a new file of its own: never through a link left there
-            let copied = std::fs::read(&from).and_then(|bytes| {
-                use std::io::Write as _;
-                use std::os::unix::fs::OpenOptionsExt as _;
-                let mut out = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&to)?;
-                out.write_all(&bytes)
-            });
-            copied.map_err(|e| internal(format!("harness state: {f}: {e}")))?;
+            let bytes =
+                std::fs::read(&from).map_err(|e| internal(format!("harness state: {f}: {e}")))?;
+            crate::attachments::publish_private_if_absent(&to, &bytes)
+                .map_err(|e| internal(format!("harness state: {f}: {e}")))?;
         }
     }
     Ok(dir)
