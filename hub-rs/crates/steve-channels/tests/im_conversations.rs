@@ -8,7 +8,9 @@
 //!   automatic replies are not instructions;
 //! - every space Steve answers in has one conversation (`chan:<space>`): turns go there, Steve's
 //!   reply there goes out to the space, an item made there is linked back to the chat message, a
-//!   failure sends a short note.
+//!   failure sends a short note;
+//! - once the space's connection was removed: the reaction ends here without a provider call, and
+//!   Steve's reply there is recorded as not sent (`chan_out.status = "disconnected"`).
 
 use std::sync::{Arc, Mutex};
 
@@ -235,6 +237,7 @@ async fn setup(with_thread: bool) -> H {
         ConnectionsConfig::new(Vec::new(), true, |_| None),
     )
     .provider(fake.clone())
+    .usage(Arc::new(steve_channels::usage::ChannelUsage))
     .build();
     let outbox = Arc::new(Outbox::new(link));
     let replies = Arc::new(Replies::new().outbound(outbox.clone()));
@@ -460,6 +463,93 @@ async fn an_item_keeps_the_ack_until_it_ends() {
     let msgs = h.env.store().messages().list(WS, &conv, 50).unwrap();
     assert_eq!(msgs.len(), 4);
     assert_eq!(msgs[1].item_id.as_deref(), Some(item.as_str()));
+}
+
+/// Removes the bot's connection the way 接入 does (`DELETE /connections/:id`): its spaces are left,
+/// `spaces.connection_id` becomes NULL.
+async fn remove_bot(h: &H) {
+    h.ch.connections()
+        .disconnect(&caller(WS, ME), &h.bot)
+        .await
+        .expect("disconnect");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_ends_locally_once_the_connection_is_removed() {
+    let h = setup(false).await;
+    set_rules(
+        &h,
+        &h.bot.clone(),
+        json!([{"when": {"kind": "mention_or_dm"}, "act": "create_item", "mode": "start"}]),
+    );
+    let i = push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "o1", "ulilei", "告警脚本坏了，修一下", true, false),
+    )
+    .await;
+    let item = i.response.unwrap().item_id.expect("item");
+    assert_eq!(h.fake.reactions_on("o1"), [ReactionKind::Ack]);
+    remove_bot(&h).await;
+    assert_eq!(
+        one(
+            &h,
+            "SELECT connection_id FROM spaces WHERE id = ?",
+            &[&i.space_id]
+        ),
+        Value::Null,
+        "the space keeps no connection"
+    );
+    let before = log(&h);
+    // the item ends after the connection is gone: done, recorded here, no provider call
+    h.ch.react_item_ended(WS, &item, true).await;
+    assert_eq!(state(&h, &i.message_id), "done");
+    assert_eq!(log(&h), before, "nothing asked of the provider");
+    assert_eq!(
+        one(
+            &h,
+            "SELECT error FROM chan_reactions WHERE message_id = ?",
+            &[&i.message_id]
+        ),
+        Value::Null
+    );
+    // and nothing to acknowledge any more
+    h.ch.react_ack(&i.message_id).await;
+    assert_eq!(state(&h, &i.message_id), "done");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_to_a_space_whose_connection_was_removed_is_recorded_as_not_sent() {
+    let h = setup(true).await;
+    let a = push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "o1", "ulilei", "部署挂了怎么办", true, false),
+    )
+    .await;
+    let (turn, _) = h.thread.as_ref().unwrap().turns.lock().unwrap()[0].clone();
+    let text = h.ch.conv_answer(WS, &turn).await.expect("answer");
+    remove_bot(&h).await;
+    let ops = conversations::conv_space(&a.space_id);
+    let reply = h
+        .env
+        .store()
+        .messages()
+        .add(WS, "steve", &text, None, &json!({"origin": turn}), &ops)
+        .unwrap();
+    let before = log(&h);
+    let d = h.ch.conv_deliver(WS, &reply).await.expect("no error");
+    assert!(d.is_none(), "{d:?}");
+    assert!(sent(&h).is_empty());
+    let m = h.env.store().messages().get(&reply).unwrap().unwrap();
+    assert_eq!(
+        m.meta["chan_out"]["status"],
+        json!(conversations::DISCONNECTED)
+    );
+    assert_eq!(state(&h, &a.message_id), "failed");
+    assert_eq!(log(&h), before, "nothing asked of the provider");
+    // recorded once
+    assert!(h.ch.conv_deliver(WS, &reply).await.unwrap().is_none());
 }
 
 // ---------------------------------------------------------------- one response per message
