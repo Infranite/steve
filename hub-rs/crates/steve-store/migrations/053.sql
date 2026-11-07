@@ -1,4 +1,4 @@
--- 51: the path model's view of each Node session, in shadow (S2): what the run would be given
+-- 53: the path model's view of each Node session, in shadow (S2): what the run would be given
 -- (`view`: principal, audience, read-write and read-only directories) and how that differs from
 -- what the Node lets it reach today: `extra` are today's roots outside the view, `missing` the
 -- view's directories no root covers (JSON samples; the counts are all of them; NULL: not known,
