@@ -173,8 +173,8 @@ impl Confine {
                 }
                 let p = steve_vault::harness::bwrap_plan(steve_home, node_home);
                 let mut a: Vec<OsString> = vec!["--dev-bind".into(), "/".into(), "/".into()];
-                for d in &p.read_only {
-                    a.extend(["--ro-bind".into(), d.into(), d.into()]);
+                for d in &p.masked {
+                    a.extend(["--tmpfs".into(), d.into()]);
                 }
                 for d in &p.writable {
                     a.extend(["--bind".into(), d.into(), d.into()]);
@@ -220,11 +220,10 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_seals_the_home_hides_dirs_with_tmpfs_and_files_with_null() {
+    fn bwrap_masks_the_home_then_binds_the_run_dirs_back() {
         let t = tempfile::tempdir().unwrap();
         let home = t.path().join("home");
         std::fs::create_dir_all(home.join("signing")).unwrap();
-        std::fs::create_dir_all(home.join("worktrees")).unwrap();
         std::fs::write(home.join("steve.env"), "").unwrap();
         let c = Confine::Bwrap {
             bwrap: "/usr/bin/bwrap".into(),
@@ -238,21 +237,21 @@ mod tests {
         let at = |s: &str| a.iter().position(|x| x == s).unwrap();
         let r = |rel: &str| real.join(rel).to_string_lossy().into_owned();
         let home_s = real.to_string_lossy().into_owned();
-        assert_eq!(a[at(&home_s) - 1], "--ro-bind", "the home read-only first");
+        assert_eq!(a[at(&home_s) - 1], "--tmpfs", "the whole home masked first");
+        // the run directories exist and are bound back writable, then the Node's secrets hidden
         assert_eq!(a[at(&r("worktrees")) - 1], "--bind");
-        assert_eq!(a[at(&r("signing")) - 1], "--tmpfs");
-        // the Node's protected directories are made first, so one it fills later is hidden too
+        assert_eq!(a[at(&r("scratch")) - 1], "--bind");
+        assert_eq!(a[at(&r("data/node")) - 1], "--bind");
         assert_eq!(a[at(&r("data/node/secrets")) - 1], "--tmpfs");
         assert!(real.join("data/node/secrets").is_dir());
         assert!(
-            real.join("scratch").is_dir(),
-            "the run directories exist and are writable"
+            at(&home_s) < at(&r("data/node")) && at(&r("data/node")) < at(&r("data/node/secrets"))
         );
-        assert_eq!(
-            a[at(&r("steve.env")) - 2..at(&r("steve.env"))],
-            ["--ro-bind", "/dev/null"]
+        // nothing else of the home is named: the mask hides it
+        assert!(
+            !a.iter()
+                .any(|x| x.ends_with("signing") || x.ends_with("steve.env"))
         );
-        assert!(at(&home_s) < at(&r("worktrees")) && at(&r("worktrees")) < at(&r("signing")));
         assert_eq!(&a[a.len() - 4..], ["--", "/bin/sh", "-c", "x"]);
     }
 

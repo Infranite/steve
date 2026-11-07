@@ -244,66 +244,50 @@ pub fn seatbelt_works() -> bool {
 /// Node's own directories for them (its jobs, its worktrees).
 pub const RUN_DIRS: [&str; 3] = ["worktrees", "scratch", "data/node"];
 
-/// The same rules as [`seatbelt_rules`] for bubblewrap (Linux `bwrap`): `steve_home` read-only, the
-/// run directories in it and `node_home` writable again, then what is protected hidden: a
-/// directory by an empty tmpfs (created first when missing, so one made later is hidden too), a
-/// file by `/dev/null` (a name prefix matches the files there now). Real, absolute paths.
+/// The same protection as [`seatbelt_rules`] for bubblewrap (Linux `bwrap`), as an allowlist: all
+/// of `steve_home` is covered by an empty tmpfs (so nothing there is readable, including files the
+/// Hub writes later), the run directories in it and `node_home` are bound back writable, and inside
+/// those [`NODE_PROTECTED`] is hidden again: a directory by its own tmpfs, a file by `/dev/null` (a
+/// name prefix matches the files there now; the journal's are made when the Node opens). Real,
+/// absolute paths, in mount order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BwrapPlan {
-    pub read_only: Vec<PathBuf>,
+    pub masked: Vec<PathBuf>,
     pub writable: Vec<PathBuf>,
     pub hidden_dirs: Vec<PathBuf>,
     pub hidden_files: Vec<PathBuf>,
 }
 
 pub fn bwrap_plan(steve_home: &Path, node_home: &Path) -> BwrapPlan {
-    fn files(root: &Path, entry: &str, out: &mut Vec<PathBuf>) {
-        match entry.strip_suffix('*') {
-            Some(prefix) => {
-                let (dir, name) = match prefix.rsplit_once('/') {
-                    Some((d, n)) => (root.join(d), n.to_string()),
-                    None => (root.to_path_buf(), prefix.to_string()),
-                };
-                if let Ok(rd) = std::fs::read_dir(&dir) {
-                    for e in rd.flatten() {
-                        if e.file_name().to_string_lossy().starts_with(&name) {
-                            out.push(e.path());
-                        }
-                    }
-                }
-            }
-            None => {
-                let p = root.join(entry);
-                if p.is_file() {
-                    out.push(p);
-                }
-            }
-        }
-    }
     let (sh, nh) = (real(steve_home), real(node_home));
     let mut p = BwrapPlan::default();
     if sh.is_dir() {
-        p.read_only.push(sh.clone());
+        p.masked.push(sh.clone());
     }
     for d in RUN_DIRS {
         if sh.join(d).is_dir() {
             p.writable.push(sh.join(d));
         }
     }
-    if nh.is_dir() && !p.writable.contains(&nh) {
+    if nh.is_dir() && !p.writable.iter().any(|w| nh.starts_with(w)) {
         p.writable.push(nh.clone());
     }
-    for (root, e) in PROTECTED
-        .iter()
-        .chain(NODE_FILES.iter())
-        .map(|e| (&sh, *e))
-        .chain(NODE_PROTECTED.iter().map(|e| (&nh, *e)))
-    {
-        match e.strip_suffix('/') {
-            Some(dir) => p.hidden_dirs.push(root.join(dir)),
-            None => files(root, e, &mut p.hidden_files),
+    for e in NODE_PROTECTED {
+        match (e.strip_suffix('/'), e.strip_suffix('*')) {
+            (Some(dir), _) => p.hidden_dirs.push(nh.join(dir)),
+            (_, Some(prefix)) => {
+                if let Ok(rd) = std::fs::read_dir(&nh) {
+                    for f in rd.flatten() {
+                        if f.file_name().to_string_lossy().starts_with(prefix) {
+                            p.hidden_files.push(f.path());
+                        }
+                    }
+                }
+            }
+            _ => p.hidden_files.push(nh.join(e)),
         }
     }
+    p.hidden_files.retain(|f| f.is_file());
     for v in [&mut p.hidden_dirs, &mut p.hidden_files] {
         v.sort();
         v.dedup();
@@ -536,42 +520,48 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_plan_seals_the_home_and_opens_the_run_dirs() {
+    fn bwrap_plan_masks_the_home_and_opens_the_run_dirs() {
         let t = std::env::temp_dir().join(format!("steve-bwrap-{}", std::process::id()));
         let home = t.join("home");
-        for d in ["signing", "worktrees", "data/node/jobs"] {
+        for d in [
+            "signing",
+            "worktrees",
+            "data/node/jobs",
+            "data/node/secrets",
+        ] {
             std::fs::create_dir_all(home.join(d)).unwrap();
         }
         std::fs::write(home.join("steve.env"), "").unwrap();
-        std::fs::write(home.join("steve.env.bak"), "").unwrap();
         std::fs::write(home.join("data/node/node.sqlite3"), "").unwrap();
+        std::fs::write(home.join("data/node/node.sqlite3-wal"), "").unwrap();
         let p = bwrap_plan(&home, &home.join("data/node"));
         let real = std::fs::canonicalize(&home).unwrap();
-        assert_eq!(p.read_only, vec![real.clone()]);
+        assert_eq!(
+            p.masked,
+            vec![real.clone()],
+            "all of it, files made later too"
+        );
         assert_eq!(
             p.writable,
             vec![real.join("worktrees"), real.join("data/node")]
         );
-        for d in [
-            "signing",
-            "secrets",
-            "backups",
-            "data/node/secrets",
-            "data/node/push",
-        ] {
-            assert!(
-                p.hidden_dirs.contains(&real.join(d)),
-                "{d}: hidden, made when missing"
-            );
+        for d in ["data/node/secrets", "data/node/push", "data/node/blobs"] {
+            assert!(p.hidden_dirs.contains(&real.join(d)), "{d}");
         }
         assert_eq!(
             p.hidden_files,
             vec![
                 real.join("data/node/node.sqlite3"),
-                real.join("steve.env"),
-                real.join("steve.env.bak")
+                real.join("data/node/node.sqlite3-wal")
             ]
         );
+        // a remote Node: its own home masked, only its Node directory bound back
+        let remote = t.join("steve-node");
+        std::fs::create_dir_all(remote.join("node/local")).unwrap();
+        let p = bwrap_plan(&remote, &remote.join("node/local"));
+        let r = std::fs::canonicalize(&remote).unwrap();
+        assert_eq!(p.masked, vec![r.clone()]);
+        assert_eq!(p.writable, vec![r.join("node/local")]);
         let _ = std::fs::remove_dir_all(&t);
     }
 
