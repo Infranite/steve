@@ -6,7 +6,8 @@ python3 ops/steve-service.py {hub|node} {install|start|stop|restart|status|docto
 
 install registers a service without starting it or pairing a Node. update switches only a stopped Node;
 it cannot establish that a running Node has drained, and never kills one to perform an update. Hub updates
-use Settings > About so migrations, backups and task drain remain owned by the upgrade coordinator.
+use Settings > About, or ops/upgrade.py for a signed macOS Hub at the OS account's default ~/.steve,
+so migrations, backups and task drain remain owned by the upgrade coordinator.
 """
 import argparse
 import json
@@ -194,9 +195,9 @@ class Service:
     def install(self, release, update=False, wait=0):
         release, info = self.bundle(release)
         if update and self.component == "hub":
-            raise Refused("Hub updates must use Settings > About for task drain, backup and schema checks")
+            raise Refused("Hub updates use Settings > About, or ops/upgrade.py for signed macOS default-home installs, for task drain, backup and schema checks")
         if self.component == "hub" and (self.home / "current").exists() and (self.home / "current").resolve() != release:
-            raise Refused("current Hub already exists; use Settings > About to update it")
+            raise Refused("current Hub already exists; use Settings > About or the supported ops/upgrade.py entry to update it")
         if self.component == "hub" and self.system == "Darwin" and not self.signed:
             raise Refused("new macOS Hub needs explicit Keychain setup: run local-release.py setup-keychain <bundle> first")
         data = self.definition(release)
@@ -285,9 +286,13 @@ class Service:
             default_home = (self.user_home / ".steve").resolve()
             supported = self.home == default_home
             report["automatic_upgrade"] = dict(supported=supported,
-                entry="Settings > About" if supported else "local-release.py prepare-bundle, then deploy",
+                entry="Settings > About or ops/upgrade.py" if supported else "local-release.py prepare-bundle, then deploy",
                 reason=None if supported else "signed runner grants Keychain access only to the default ~/.steve home; "
                 "custom homes require explicit terminal preparation/deployment with their original signing identity")
+            if supported:
+                report["upgrade_check_command"] = shlex.join([sys.executable, str(Path(__file__).with_name("upgrade.py")), "check"])
+                if candidate:
+                    report["update_command"] = "Settings > About or ops/upgrade.py"
         if doctor:
             issues = []
             if not state["installed"]:
