@@ -103,7 +103,7 @@ impl ItemScope {
         Ok(Self::Conversation(ids.into_iter().collect()))
     }
 
-    fn sees(&self, item: &str) -> bool {
+    pub(super) fn sees(&self, item: &str) -> bool {
         match self {
             Self::All => true,
             Self::Conversation(ids) => ids.contains(item),

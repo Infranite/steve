@@ -27,7 +27,7 @@ use steve_node_api::OperationId;
 use steve_vault::redact::Redactor;
 use zeroize::Zeroizing;
 
-use crate::procs::{self, Stopped};
+use crate::procs::{self, GONE_WAIT};
 
 /// What the Hub's own processes carry and a command must not (as the vault's `inject::run`).
 const HUB_ONLY: [&str; 3] = [
@@ -35,9 +35,6 @@ const HUB_ONLY: [&str; 3] = [
     "STEVE_SUPERVISOR_PID",
     "STEVE_UPGRADE_ID",
 ];
-
-/// How long what is left of the group may take to go once it was killed.
-const GONE_WAIT: Duration = Duration::from_secs(3);
 
 pub(crate) struct Run {
     pub dir: PathBuf,
@@ -207,16 +204,7 @@ fn settle(
     pid: i64,
     started: Option<u64>,
 ) -> bool {
-    let until = Instant::now() + GONE_WAIT;
-    loop {
-        if procs::state(pid, started) == Stopped::Gone {
-            return inner.j.tx(|t| t.drop_proc(session, pid)).is_ok();
-        }
-        if Instant::now() >= until {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    procs::wait_gone(pid, started).gone() && inner.j.tx(|t| t.drop_proc(session, pid)).is_ok()
 }
 
 /// Whether the leader exited (its code, `None` for a signal), without reaping it.

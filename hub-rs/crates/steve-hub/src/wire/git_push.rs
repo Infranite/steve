@@ -247,7 +247,10 @@ impl GitPush {
             let op = op_of(p.key, n);
             let entry = runtime.ledger(&op).map_err(node_error)?;
             let entry = match entry {
-                Some(l) if moved_meanwhile(&l) => continue,
+                Some(l) if moved_meanwhile(&l) => {
+                    self.secrets.retire_push(&op);
+                    continue;
+                }
                 Some(l) => l,
                 None => {
                     // the branch where it was approved, and the facts the Node checks again
@@ -289,36 +292,57 @@ impl GitPush {
                             }),
                         },
                     };
-                    // given before it can be sent
-                    self.give(&op, placed, p);
-                    if let Err(e) = runtime.submit(&op, &subject, "git_apply", apply) {
-                        self.secrets.end(&op);
-                        return Err(node_error(e));
-                    }
+                    // Given before it can be sent; a failed submission withdraws only this
+                    // call's new grant without retiring an operation that never existed.
+                    self.secrets
+                        .submit_push(
+                            &op,
+                            placed.node_id.clone(),
+                            vec![SECRET_ID.into()],
+                            Arc::new(HeaderValue::of(p.token)),
+                            || {
+                                runtime
+                                    .ledger(&op)
+                                    .map(|entry| entry.is_none_or(|entry| !entry.is_settled()))
+                            },
+                            || runtime.submit(&op, &subject, "git_apply", apply),
+                        )
+                        .map_err(node_error)?;
+                    self.secrets.watch_push(runtime, &op);
                     self.wait(placed, &op).await?
                 }
             };
             if !entry.is_settled() {
                 // written before a restart and not answered yet: what it may take is given again
-                self.give(&op, placed, p);
+                self.give(&op, placed, p)?;
+                self.secrets.watch_push(runtime, &op);
                 let l = self.wait(placed, &op).await?;
                 return self.result(placed, w, &l, p).await;
             }
             if moved_meanwhile(&entry) {
                 continue;
             }
+            self.secrets.retire_push(&op);
             return self.result(placed, w, &entry, p).await;
         }
         Err(PushError::Git("仓库的引用一直在变，没有推送".into()))
     }
 
-    fn give(&self, op: &str, placed: &Placement, p: &NodePush<'_>) {
-        self.secrets.give(
-            op,
-            placed.node_id.clone(),
-            vec![SECRET_ID.into()],
-            Arc::new(HeaderValue::of(p.token)),
-        );
+    fn give(&self, op: &str, placed: &Placement, p: &NodePush<'_>) -> Result<(), PushError> {
+        self.secrets
+            .give_once(
+                op,
+                placed.node_id.clone(),
+                vec![SECRET_ID.into()],
+                Arc::new(HeaderValue::of(p.token)),
+                || {
+                    placed
+                        .runtime
+                        .ledger(op)
+                        .map(|entry| entry.is_some_and(|entry| !entry.is_settled()))
+                },
+            )
+            .map_err(node_error)
     }
 
     /// The settled entry of `op`; its secret is over then. Not settled within the wait (still in
@@ -326,12 +350,19 @@ impl GitPush {
     /// still land, so it is [`PushError::Running`], never lost (nothing compares it with GitHub
     /// yet); asked again, the ledger's entry is waited for again.
     async fn wait(&self, placed: &Placement, op: &str) -> Result<LedgerEntry, PushError> {
-        let l = self.settled(&placed.runtime, op).await;
-        self.secrets.end(op);
-        match l {
-            Some(l) => Ok(l),
-            None if matches!(placed.runtime.ledger(op), Ok(None)) => Err(PushError::Lost),
-            None => Err(PushError::Running),
+        match self.settled(&placed.runtime, op).await {
+            Some(l) => {
+                self.secrets.retire_push(op);
+                Ok(l)
+            }
+            None if matches!(placed.runtime.ledger(op), Ok(None)) => {
+                self.secrets.retire_push(op);
+                Err(PushError::Lost)
+            }
+            None => {
+                self.secrets.watch_push(&placed.runtime, op);
+                Err(PushError::Running)
+            }
         }
     }
 
@@ -559,6 +590,10 @@ mod tests {
     /// project in `root/work`, whose origin is github.com/o/r and whose branch is one commit past
     /// `main`; pushes go to `root/remotes/o/r.git`.
     fn hub_at(root: &Path) -> T {
+        hub_at_started(root, true)
+    }
+
+    fn hub_at_started(root: &Path, start_runtime: bool) -> T {
         let work = root.join("work");
         let fresh = !work.exists();
         if fresh {
@@ -613,7 +648,9 @@ mod tests {
         node.connect_secrets(secrets.for_node(NodeId::new("local").unwrap()));
         let runtime = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Ends));
         node.connect(Arc::new(Sink(Arc::downgrade(&runtime))), None);
-        runtime.start();
+        if start_runtime {
+            runtime.start();
+        }
         let ws = Workspaces::new(
             store.clone(),
             Some(LocalFace {
@@ -891,6 +928,155 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(*seen.lock().unwrap(), 1);
         assert_eq!(t.pushes(), 1);
+    }
+
+    /// With the sender stopped, the wait necessarily ends before the Node can take its secret.
+    /// Repeated waits keep that same one-use grant; settlement retires it without another push.
+    #[tokio::test]
+    async fn a_pending_push_keeps_one_grant_until_it_settles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = hub_at_started(tmp.path(), false);
+        let short = GitPush {
+            workspaces: t.git.workspaces.clone(),
+            secrets: t.git.secrets.clone(),
+            answer_wait: Duration::ZERO,
+        };
+        let (url, tip) = (t.url(), t.tip());
+        let spec = spec("dec_pending", &url, &tip);
+        let op = op_of(spec.key, 0);
+        assert_eq!(short.push(&spec).await.unwrap(), Err(PushError::Running));
+        assert_eq!(t.runtime.ledger(&op).unwrap().unwrap().state, "pending");
+
+        let secrets = t.git.secrets.for_node(NodeId::new("local").unwrap());
+        let take = || secrets.take(OperationId::new(&op).unwrap(), SECRET_ID.into());
+        let value = take().await.unwrap();
+        assert!(value.expose() == HeaderValue::of(TOKEN).0.as_slice());
+        drop(value);
+        assert_eq!(short.push(&spec).await.unwrap(), Err(PushError::Running));
+        let error = take().await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.safe_detail, "already taken");
+        assert_eq!(t.pushes(), 1);
+
+        // No subsequent push/wait call: the observer must retire the original grant.
+        t.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "UPDATE node_commands SET state='finished' WHERE operation_id=?",
+                    [&op],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            let error = take().await.unwrap_err();
+            assert_eq!(error.code, ErrorCode::Stale);
+            if error.safe_detail == "the operation ended" {
+                break;
+            }
+            assert!(Instant::now() < until, "the settled grant was not retired");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(t.pushes(), 1);
+        assert_eq!(t.remote(), None);
+
+        // A caller holding an old pending snapshot must still consult the ledger, even
+        // after the bounded diagnostic tombstones no longer contain this operation.
+        for n in 0..1024 {
+            t.git.secrets.retire_push(&format!("op_other_{n}"));
+        }
+        let (placed, _) = t.git.item(ITEM).await.unwrap().unwrap();
+        t.git.give(&op, &placed, &spec).unwrap();
+        assert_eq!(take().await.unwrap_err().code, ErrorCode::Denied);
+    }
+
+    #[tokio::test]
+    async fn a_failed_submission_does_not_retire_a_push_that_never_existed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = hub_at_started(tmp.path(), false);
+        let (url, tip) = (t.url(), t.tip());
+        let spec = spec("dec_submit_failure", &url, &tip);
+        let op = op_of(spec.key, 0);
+        t.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute_batch(
+                    "CREATE TRIGGER refuse_push BEFORE INSERT ON node_commands
+                     BEGIN SELECT RAISE(ABORT, 'test submit failure'); END",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            t.git.push(&spec).await.unwrap(),
+            Err(PushError::Node(_))
+        ));
+        assert!(t.runtime.ledger(&op).unwrap().is_none());
+        let error = t
+            .git
+            .secrets
+            .for_node(NodeId::new("local").unwrap())
+            .take(OperationId::new(&op).unwrap(), SECRET_ID.into())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Denied);
+        assert_eq!(error.safe_detail, "no secret for this operation");
+        t.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute_batch("DROP TRIGGER refuse_push")?;
+                Ok(())
+            })
+            .unwrap();
+        t.runtime.start();
+        assert_eq!(t.git.push(&spec).await.unwrap(), Ok(tip.clone()));
+        assert_eq!(t.pushes(), 1);
+        assert_eq!(t.remote().as_deref(), Some(tip.as_str()));
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_wait_does_not_abandon_the_push_grant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = hub_at_started(tmp.path(), false);
+        let (url, tip) = (t.url(), t.tip());
+        let git = t.git.clone();
+        let waiting =
+            tokio::spawn(async move { git.push(&spec("dec_cancelled_wait", &url, &tip)).await });
+        let op = op_of("dec_cancelled_wait", 0);
+        let until = Instant::now() + Duration::from_secs(5);
+        while t.runtime.ledger(&op).unwrap().is_none() {
+            assert!(Instant::now() < until, "the push was not queued");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        assert_eq!(t.runtime.ledger(&op).unwrap().unwrap().state, "pending");
+        t.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "UPDATE node_commands SET state='finished' WHERE operation_id=?",
+                    [&op],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let secrets = t.git.secrets.for_node(NodeId::new("local").unwrap());
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Err(error) = secrets
+                .take(OperationId::new(&op).unwrap(), SECRET_ID.into())
+                .await
+            {
+                assert_eq!(error.code, ErrorCode::Stale);
+                if error.safe_detail == "the operation ended" {
+                    break;
+                }
+            }
+            assert!(Instant::now() < until, "the cancelled wait left its grant");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(t.pushes(), 1);
+        assert_eq!(t.remote(), None);
     }
 
     /// Runs in a child process (see the test below): a Hub whose push hangs when it is killed.

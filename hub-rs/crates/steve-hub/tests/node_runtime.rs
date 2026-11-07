@@ -719,6 +719,70 @@ async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
 }
 
 #[tokio::test]
+async fn workflow_pause_cancel_and_replan_expire_late_permission_allows() {
+    for change in [
+        "UPDATE workflows SET paused=1",
+        "UPDATE workflow_units SET status='cancelled'",
+        "UPDATE item_goals SET version=2 WHERE item_id='parent'",
+        "DELETE FROM workflow_units",
+    ] {
+        let h = hub();
+        h.bind();
+        h.rt.prompt(S, "hello", "user", &[]).unwrap();
+        until("started", || h.methods().contains(&"start_turn")).await;
+        h.store.transaction::<_, StoreError>(|tx| {
+            tx.execute_batch(
+                "INSERT INTO items(id,workspace_id,no,title,status,stage,source,created,updated)
+                 VALUES ('parent','default',1,'主事项','run','执行','[\"测试\",\"test\"]',1,1),
+                        ('child','default',2,'工作','run','执行','[\"协作工作\",\"workflow\"]',1,1);
+                 INSERT INTO item_goals(item_id,version,text,created)
+                 VALUES ('parent',1,'验证旧授权失效',1);
+                 UPDATE sessions SET item_id='child' WHERE id='s1';
+                 INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
+                 VALUES ('parent',1,2,3,1,1);
+                 INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
+                 VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作\",\"goal\":\"测试\",\"bot_id\":\"dev\"}','running','child','s1');",
+            )?;
+            Ok(())
+        }).unwrap();
+        h.node
+            .ask_permission(perm("p1", h.attempts()[0].clone(), "git push"))
+            .await
+            .unwrap();
+        until("permission card", || {
+            h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE status='open'") == 1
+        })
+        .await;
+        let decision: String = h.q("SELECT id FROM decisions WHERE status='open'");
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute_batch(change)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            !h.rt
+                .answer_permission(&decision, Some("allow_once"))
+                .unwrap(),
+            "{change}",
+        );
+        assert_eq!(h.perm_state(&decision), "expired");
+        assert_eq!(
+            h.q::<String>("SELECT status FROM decisions WHERE subject_type='tool_call'"),
+            "expired",
+        );
+        until("rejection reached Node", || {
+            h.methods().contains(&"resolve_permission")
+        })
+        .await;
+        let request: String =
+            h.q("SELECT request FROM node_commands WHERE method='resolve_permission'");
+        let command: Command<PermissionResolution> = serde_json::from_str(&request).unwrap();
+        assert_eq!(command.body.decision, PermissionDecision::Reject);
+    }
+}
+
+#[tokio::test]
 async fn a_card_expires_with_its_attempt() {
     let h = hub();
     h.bind();

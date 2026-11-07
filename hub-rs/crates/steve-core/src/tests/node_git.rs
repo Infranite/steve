@@ -34,6 +34,7 @@ struct OnNode {
     /// Runs once, right before the next apply (something moves meanwhile).
     before_apply: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     applies: Mutex<Vec<String>>,
+    read_errors: Mutex<Vec<ApiError>>,
 }
 
 fn command<T>(op: &str, body: T) -> Command<T> {
@@ -112,6 +113,7 @@ impl OnNode {
             slow: Mutex::new(Duration::ZERO),
             before_apply: Mutex::new(None),
             applies: Mutex::new(vec![]),
+            read_errors: Mutex::new(vec![]),
         });
         k.core.set_node_git(me.clone());
         me
@@ -182,7 +184,8 @@ impl NodeGit for OnNode {
         tokio::time::sleep(slow).await;
         let w = self.workspace(item).await?;
         let node = self.node.clone();
-        self.rt
+        let result = self
+            .rt
             .spawn(async move {
                 node.git_facts(GitQuery {
                     workspace: w,
@@ -195,7 +198,11 @@ impl NodeGit for OnNode {
                 .await
             })
             .await
-            .unwrap()
+            .unwrap();
+        if let Err(error) = &result {
+            self.read_errors.lock().unwrap().push(error.clone());
+        }
+        result
     }
 
     async fn apply(
@@ -659,7 +666,9 @@ fn nothing_to_release_on_another_devices_node_asks_for_no_release() {
     let mut t = k.core.tx();
     assert!(
         t.nothing_to_release(&item).unwrap(),
-        "its Node says: nothing"
+        "its Node must say nothing to release: seen={:?}, read_errors={:?}",
+        t.git_seen(&i),
+        port.read_errors.lock().unwrap()
     );
     let e = t.tool_publish(&s, &name, "说明").unwrap_err().to_string();
     drop(t);

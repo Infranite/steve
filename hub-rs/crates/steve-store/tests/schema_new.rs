@@ -67,8 +67,8 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 49);
+fn schema_version_is_52() {
+    assert_eq!(db::SCHEMA_VERSION, 52);
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn empty_database_migrates_to_v20() {
 #[test]
 fn v2_v3_v4_databases_migrate_to_the_fresh_schema() {
     let want = schema_of(fresh().store.path());
-    for v in [2, 3, 4, 12, 16, 17, 18, 19] {
+    for v in [2, 3, 4, 12, 16, 17, 18, 19, 49] {
         let (_dir, path) = at_version(v);
         let s = Store::open(&path, NoPublisher).unwrap();
         s.with_conn(|c| {

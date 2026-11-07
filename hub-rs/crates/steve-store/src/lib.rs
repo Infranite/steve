@@ -24,6 +24,7 @@ pub mod outbox;
 mod repo;
 mod tx;
 mod types;
+pub mod workflow_gate;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};

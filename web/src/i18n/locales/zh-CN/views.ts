@@ -1,5 +1,21 @@
 /* zh-CN strings for the "views" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
+  workflow: {
+    title: "多 Bot 协作",
+    progress: "关键工作 {{done}}/{{total}} · 运行 {{running}}/{{max}} · 计划第 {{revision}} 版",
+    pending: "等待前置", ready: "待调度", running: "执行中", passed: "已通过", failed: "未通过",
+    cancelled: "已取消", blocked: "受阻", paused: "已暂停",
+    work: "工作", review: "独立评审", integrate: "集成验收", optional: "非必需",
+    pause: "暂停编排", resume: "恢复编排", retry: "重试",
+    pauseHint: "编排已暂停，恢复后按当前计划继续。",
+    blockers: "主事项暂不能完成",
+    attempt: "第 {{n}}/{{max}} 次",
+    depends: "依赖：{{names}}", resources: "协同范围：{{names}}",
+    details: "目标与交付", outputs: "共享交付物",
+    checkPassed: "通过", checkFailed: "未通过", operated: "实际操作",
+    history_other: "计划调整记录（{{count}}）", revision: "第 {{n}} 版",
+    reason: { pause: "用户在事项页暂停编排", resume: "用户在事项页恢复编排", retry: "用户在事项页重试未通过的工作" },
+  },
   /* the 待处理 page: decisions waiting on the user, and the ones made lately */
   inbox: {
     title: "待处理",

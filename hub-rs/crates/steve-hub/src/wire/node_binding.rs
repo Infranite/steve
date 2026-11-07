@@ -126,6 +126,22 @@ pub fn plan(
     if item.workspace_id != s.workspace_id {
         return Err(NoItem);
     }
+    // This is a pure plan, not permission to dispatch it: RoutedRuntime's workflow preflight
+    // also requires a verified execution principal before a binding can be persisted. Keep the
+    // requested sandbox explicit so a future Node cannot silently interpret ACP modes as one.
+    let sandbox = if item.source.1 == "workflow"
+        || store
+            .workflows()
+            .by_child(&item.id)
+            .map_err(|_| Unreadable)?
+            .is_some()
+    {
+        SandboxRequirement::Required {
+            guarantees: vec!["os-sandbox".into(), "principal-isolation".into()],
+        }
+    } else {
+        SandboxRequirement::None
+    };
     // an archived project's directories are no roots any more ([`roots`]), its items' included
     if let Some(pid) = &item.project_id
         && store
@@ -140,9 +156,12 @@ pub fn plan(
         Some(id) => Some(store.bots().get(id).map_err(|_| Unreadable)?.ok_or(Bot)?),
         None => None,
     };
-    if bot
-        .as_ref()
-        .is_some_and(|b| b.workspace_id != s.workspace_id || !b.enabled)
+    if let Some(b) = &bot
+        && (!b.enabled
+            || !store
+                .bots()
+                .in_workspace(&b.id, &s.workspace_id)
+                .map_err(|_| Unreadable)?)
     {
         return Err(Bot);
     }
@@ -226,7 +245,7 @@ pub fn plan(
             revision: Revision::new(format!("host-{}", bot.as_ref().map_or(0, |b| b.revision)))
                 .map_err(|_| Unreadable)?,
             permissions,
-            sandbox: SandboxRequirement::None,
+            sandbox,
             readable: vec![],
             network: NetworkScope::Unrestricted,
             tools: GrantId::new("hub").map_err(|_| Unreadable)?,
@@ -639,6 +658,7 @@ mod bot_tests {
             .transaction::<_, StoreError>(|tx| {
                 tx.execute_batch(
                     "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('dev','default','Steve 开发','claude-code','auto',3,1);
+                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('dev','default',1);
                      INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','dev',1,1);
                      INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','dev','claude-code','','active',1,1);",
                 )?;
@@ -649,6 +669,56 @@ mod bot_tests {
             binding_for(&store, "s1", Some("auto"), &|_| true).expect("the Steve 开发 bot binds");
         assert_eq!(b.policy.permissions, PermissionMode::Auto);
         assert_eq!(b.policy.revision.as_str(), "host-3");
+    }
+
+    #[test]
+    fn binding_requires_current_membership_and_enabled_bot_not_its_home_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO workspaces(id,name,created) VALUES ('home','Home',1);
+                     INSERT INTO bots(id,workspace_id,name,harness,revision,updated) VALUES ('shared','home','Shared','fixture',2,1);
+                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('shared','home',1),('shared','default',1);
+                     INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','shared',1,1);
+                     INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','shared','fixture','','active',1,1);",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let bind = || plan(&store, "s1", None, &|_| true, None);
+        assert_eq!(
+            bind()
+                .expect("a member can serve outside its home")
+                .policy
+                .revision
+                .as_str(),
+            "host-2"
+        );
+        store
+            .bots()
+            .set_workspaces("shared", &["home".into()])
+            .unwrap();
+        assert!(matches!(bind(), Err(Unbound::Bot)));
+        store
+            .bots()
+            .set_workspaces("shared", &["home".into(), "default".into()])
+            .unwrap();
+        assert!(bind().is_ok());
+        store
+            .bots()
+            .patch(
+                "shared",
+                &steve_store::BotPatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+                "test",
+            )
+            .unwrap();
+        assert!(matches!(bind(), Err(Unbound::Bot)));
     }
 
     /// The Node path starts a session with the permissions the legacy runner gave it: the
@@ -673,7 +743,8 @@ mod bot_tests {
             let bot_id = match bot {
                 Some(m) => {
                     sql += &format!(
-                        "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('b{n}','default','b{n}','claude-code','{m}',1,1);"
+                        "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('b{n}','default','b{n}','claude-code','{m}',1,1);
+                         INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('b{n}','default',1);"
                     );
                     format!("'b{n}'")
                 }
@@ -758,6 +829,7 @@ mod bot_tests {
             .transaction::<_, StoreError>(|tx| {
                 tx.execute_batch(
                     "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,revision,updated) VALUES ('dev','default','Steve 开发','claude-code','auto',3,1),('ask','default','b','claude-code','default',1,1);
+                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('dev','default',1),('ask','default',1);
                      INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i1','default',1,'t','run','执行','dev',1,1),('i2','default',2,'t','run','执行','ask',1,1);
                      INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','dev','claude-code','','active',1,1),('s2','default','i2','ask','claude-code','','active',1,1);
                      INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1);
@@ -1057,5 +1129,318 @@ mod host_tests {
         assert_eq!(permission_mode("auto"), Some(PermissionMode::Auto));
         assert_eq!(permission_mode(""), None);
         assert_eq!(permission_mode("dontAsk"), None);
+    }
+
+    /// Boot migration must use the same isolation gate as prompts, before a Node binding or
+    /// workspace prepare. A retired attempt and a missing cwd must not turn a hold into closure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_adoption_parks_workflow_before_binding_or_workspace_access() {
+        use steve_core::AgentRuntime;
+        struct NoModel;
+        #[async_trait::async_trait]
+        impl steve_core::gateway::ModelGateway for NoModel {
+            async fn call(
+                &self,
+                _: &str,
+                _: steve_core::gateway::Tier,
+                _: std::time::Duration,
+                _: &steve_core::gateway::ThinkTools,
+            ) -> steve_core::Result<steve_core::gateway::Printed> {
+                panic!("adoption of blocked work must not call a model");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        let cfg = crate::config::Config::from_vars(|k| match k {
+            "STEVE_HOME" => Some(dir.path().join("steve").to_string_lossy().into()),
+            "STEVE_REPO" => Some(dir.path().join("unused").to_string_lossy().into()),
+            _ => None,
+        })
+        .unwrap();
+        store.transaction::<_, StoreError>(|tx| {
+            tx.execute_batch(
+                "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
+                 VALUES ('parent','default',601,'主事项','run','执行',1,1),
+                        ('child','default',602,'工作单元','run','执行',1,1);
+                 INSERT INTO item_goals(item_id,version,text,created)
+                 VALUES ('parent',1,'验证启动迁移隔离',1);
+                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated)
+                 VALUES ('work','default','child','unused-acp','','active',1,1);
+                 INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
+                 VALUES ('parent',1,2,3,1,1);
+                 INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
+                 VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作单元\",\"goal\":\"验证隔离\",\"bot_id\":\"test\"}','running','child','work');"
+            )?;
+            Ok(())
+        }).unwrap();
+        let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
+        let mut jobs = vec![];
+        let super::super::NodeHost {
+            runtime,
+            tools,
+            node,
+        } = super::super::node_runtime(
+            &cfg,
+            &store,
+            Arc::new(Ends),
+            &on,
+            &super::super::node_secrets::NodeSecrets::new(),
+            &mut jobs,
+        )
+        .unwrap()
+        .unwrap();
+        tools.install(Arc::new(NoTools)).unwrap();
+        for job in jobs {
+            job.await;
+        }
+        let host = Arc::new(super::super::core::HubHost {
+            store: store.clone(),
+            data_dir: cfg.data_dir.clone(),
+            core: Default::default(),
+            flow: Default::default(),
+            yolo: Default::default(),
+            local_node: Default::default(),
+        });
+        let _ = host.local_node.set(node.clone());
+        let routed = Arc::new(super::super::core::RoutedRuntime {
+            node: Some(runtime),
+            fleet: None,
+            bind_remote: None,
+            store: store.clone(),
+            host,
+            workspaces: super::super::workspaces::Workspaces::new(
+                store.clone(),
+                None,
+                None,
+                vec![],
+            ),
+            worktrees: None,
+        });
+        let core = steve_core::Core::new(
+            steve_core::repo::Db::new(store.clone()),
+            routed.clone(),
+            Arc::new(NoModel),
+            super::super::core_config(&cfg),
+        );
+        let missing = dir.path().join("unprepared-work");
+        let journal = rusqlite::Connection::open(cfg.data_dir.join("node/node.sqlite3")).unwrap();
+        for detached in [false, true] {
+            if detached {
+                store.transaction::<_, StoreError>(|tx| {
+                    tx.execute("UPDATE items SET source='[\"协作工作\",\"workflow\"]' WHERE id='child'", [])?;
+                    tx.execute("DELETE FROM workflow_units WHERE item_id='child'", [])?;
+                    Ok(())
+                }).unwrap();
+            }
+            for cwd in ["", missing.to_str().unwrap()] {
+                store
+                    .transaction::<_, StoreError>(|tx| {
+                        tx.execute("UPDATE sessions SET cwd=? WHERE id='work'", [cwd])?;
+                        Ok(())
+                    })
+                    .unwrap();
+                for before in [None, Some(steve_store::now())] {
+                    let moved = super::super::core::move_legacy(&routed, &core, before);
+                    assert_eq!(moved.adopted, 0);
+                    assert_eq!(moved.ended, 0);
+                    assert_eq!(moved.left, 1);
+                    assert!(!super::super::node_runtime::bound(&store, "work"));
+                    assert!(
+                        !routed.is_busy("work"),
+                        "an unbound session holds no process"
+                    );
+                    assert!(matches!(
+                        routed.release("work").unwrap(),
+                        steve_core::Released::Gone
+                    ));
+                    assert_eq!(
+                        store.sessions().get("work").unwrap().unwrap().status,
+                        "active"
+                    );
+                    assert_eq!(
+                        store.items().get("parent").unwrap().unwrap().phase,
+                        "active"
+                    );
+                    for table in ["ops", "workspaces", "sessions", "procs"] {
+                        let count: i64 = journal
+                            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                            .unwrap();
+                        assert_eq!(count, 0, "{table}: detached={detached}, cwd={cwd}");
+                    }
+                    assert!(!missing.exists(), "no work directory is prepared");
+                }
+            }
+        }
+        node.shutdown().await;
+    }
+
+    /// A work graph cannot adopt an unbound ACP session onto a Node without isolation. Check the
+    /// real routed runtime, including a retired attempt whose row a replan no longer keeps.
+    #[tokio::test]
+    async fn workflow_sessions_require_isolation_and_never_fall_back() {
+        use steve_core::AgentRuntime;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config::from_vars(|k| match k {
+            "STEVE_HOME" => Some(dir.path().join("steve").to_string_lossy().into()),
+            "STEVE_REPO" => Some(dir.path().join("unused").to_string_lossy().into()),
+            _ => None,
+        })
+        .unwrap();
+        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store.transaction::<_, StoreError>(|tx| {
+            tx.execute_batch(
+                "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
+                 VALUES ('parent','default',1,'主事项','run','执行',1,1),
+                        ('child','default',2,'工作单元','run','执行',1,1);
+                 INSERT INTO item_goals(item_id,version,text,created)
+                 VALUES ('parent',1,'验证运行隔离',1);
+                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated)
+                 VALUES ('work','default','child','unused-acp','','active',1,1);
+                 INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
+                 VALUES ('parent',1,2,3,1,1);
+                 INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
+                 VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作单元\",\"goal\":\"验证隔离\",\"bot_id\":\"test\"}','running','child','work');"
+            )?;
+            Ok(())
+        }).unwrap();
+        let host = Arc::new(super::super::core::HubHost {
+            store: store.clone(),
+            data_dir: cfg.data_dir.clone(),
+            core: Default::default(),
+            flow: Default::default(),
+            yolo: Default::default(),
+            local_node: Default::default(),
+        });
+        let routed = super::super::core::RoutedRuntime {
+            node: None,
+            fleet: None,
+            bind_remote: None,
+            store: store.clone(),
+            host,
+            workspaces: super::super::workspaces::Workspaces::new(
+                store.clone(),
+                None,
+                None,
+                vec![],
+            ),
+            worktrees: None,
+        };
+        for (change, restore, message) in [
+            (
+                "UPDATE items SET cycle=2 WHERE id='parent'",
+                "UPDATE items SET cycle=1 WHERE id='parent'",
+                "目标或周期已变化",
+            ),
+            (
+                "UPDATE item_goals SET version=2 WHERE item_id='parent'",
+                "UPDATE item_goals SET version=1 WHERE item_id='parent'",
+                "目标或周期已变化",
+            ),
+            (
+                "UPDATE workflows SET paused=1",
+                "UPDATE workflows SET paused=0",
+                "已暂停",
+            ),
+            (
+                "UPDATE items SET status='pause' WHERE id='parent'",
+                "UPDATE items SET status='run' WHERE id='parent'",
+                "已暂停",
+            ),
+            (
+                "UPDATE items SET phase='closed' WHERE id='parent'",
+                "UPDATE items SET phase='active' WHERE id='parent'",
+                "已结束",
+            ),
+            (
+                "UPDATE items SET phase='closing',closing='{\"kind\":\"cancel\"}' WHERE id='parent'",
+                "UPDATE items SET phase='active',closing=NULL WHERE id='parent'",
+                "正在停止",
+            ),
+            (
+                "UPDATE workflow_units SET status='succeeded'",
+                "UPDATE workflow_units SET status='running'",
+                "已经停止或交付",
+            ),
+            (
+                "UPDATE workflow_units SET status='cancelled'",
+                "UPDATE workflow_units SET status='running'",
+                "已经停止或交付",
+            ),
+            (
+                "UPDATE workflow_units SET session_id=NULL",
+                "UPDATE workflow_units SET session_id='work'",
+                "当前的执行会话",
+            ),
+            (
+                "UPDATE sessions SET status='ended' WHERE id='work'",
+                "UPDATE sessions SET status='active' WHERE id='work'",
+                "当前的执行会话",
+            ),
+        ] {
+            store
+                .transaction::<_, StoreError>(|tx| {
+                    tx.execute_batch(change)?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                routed
+                    .prompt("work", "排队的下一回合", "user", &[])
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message),
+                "{change}"
+            );
+            assert_eq!(routed.flush("work", None), steve_core::Flushed::Held);
+            assert_eq!(routed.running_turns(), 0);
+            store
+                .transaction::<_, StoreError>(|tx| {
+                    tx.execute_batch(restore)?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        for detached in [false, true] {
+            if detached {
+                store.transaction::<_, StoreError>(|tx| {
+                    tx.execute("UPDATE items SET source='[\"协作工作\",\"workflow\"]' WHERE id='child'", [])?;
+                    tx.execute("DELETE FROM workflow_units WHERE item_id='child'", [])?;
+                    Ok(())
+                }).unwrap();
+            }
+            let planned = binding_for(&store, "work", None, &|_| true).unwrap();
+            assert_eq!(
+                planned.policy.sandbox,
+                SandboxRequirement::Required {
+                    guarantees: vec!["os-sandbox".into(), "principal-isolation".into()],
+                },
+            );
+            routed.created("work", None);
+            assert!(!super::super::node_runtime::bound(&store, "work"));
+            let error = routed
+                .prompt("work", "必须不能启动", "user", &[])
+                .unwrap_err()
+                .to_string();
+            if detached {
+                assert!(error.contains("已被替换"));
+            } else {
+                assert!(error.contains("OS 沙箱") && error.contains("主体"));
+            }
+            assert_eq!(routed.flush("work", None), steve_core::Flushed::Held);
+            assert!(!routed.is_busy("work"), "an unbound attempt can be retired");
+            assert!(matches!(
+                routed.release("work").unwrap(),
+                steve_core::Released::Gone
+            ));
+            assert_eq!(routed.running_turns(), 0);
+            assert_eq!(routed.agent_pid("work"), None);
+            assert!(
+                !cfg.data_dir.exists(),
+                "the Hub must not prepare a workspace"
+            );
+        }
     }
 }

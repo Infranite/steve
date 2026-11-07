@@ -398,6 +398,8 @@ impl Tx<'_> {
                 if overtaken
                     || i.phase != ACTIVE
                     || i.is_settled()
+                    || i.status == "block"
+                    || self.dependency_waiting(item_id)?
                     || self.busy(&session)
                     || !self.db().queued(&session)?.is_empty()
                     || self
@@ -857,6 +859,80 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_late_completion_probe_cannot_finish_or_continue_a_new_dependency_wait() {
+        for explicit in [false, true] {
+            for met in [false, true] {
+                let k = crate::testkit::Kit::with(|c| c.takeover_continues = 1);
+                let item = k.item("run", "执行", None);
+                let dep = k.item("run", "执行", None);
+                let sid = k.session(&item, "idle");
+                // The probe began before the dependency was registered. Deliver its callback
+                // only after registration, without relying on network timing.
+                k.core.tx().st.probing.insert(
+                    item.clone(),
+                    Looking {
+                        since: now(),
+                        seq: 1,
+                        stale: false,
+                    },
+                );
+                if explicit {
+                    let s = k.db().session(&sid).unwrap().unwrap();
+                    k.core
+                        .tool_item_dependencies(
+                            &s,
+                            json!({"action":"wait","deps":[dep],"reason":"等待前置验收","resume":"automatic"}),
+                        )
+                        .unwrap();
+                } else {
+                    k.core.add_dep(&item, &dep).unwrap();
+                }
+                assert_eq!(k.status(&item).0, "block");
+                k.core
+                    .tx()
+                    .probed(
+                        &item,
+                        1,
+                        DONE_MERGE,
+                        "head".into(),
+                        Probe {
+                            met,
+                            branch: "origin/main".into(),
+                            landed: met.then(|| "commit".into()),
+                            ..Default::default()
+                        },
+                        Probing::Stall {
+                            session: sid.clone(),
+                            stop: Stop::Idle {
+                                why: "旧回合停下了".into(),
+                            },
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(k.status(&item).0, "block");
+                assert_eq!(k.phase(&item), ACTIVE);
+                assert!(k.rt.prompts_of(&sid).is_empty());
+                assert!(k.open_kinds(&item).is_empty());
+                if explicit {
+                    assert!(k.core.tx().dependency_waiting(&item).unwrap());
+                }
+
+                k.db()
+                    .exec(
+                        "UPDATE items SET status='done',phase='closed',outcome='completed' WHERE id=?",
+                        &[&dep],
+                    )
+                    .unwrap();
+                k.core.lifecycle_tick().unwrap();
+                assert_eq!(k.status(&item).0, "run");
+                assert_eq!(k.rt.prompts_of(&sid).len(), 1);
+                k.core.lifecycle_tick().unwrap();
+                assert_eq!(k.rt.prompts_of(&sid).len(), 1);
+            }
+        }
+    }
 
     #[test]
     fn builds_read_from_gh_runs() {
