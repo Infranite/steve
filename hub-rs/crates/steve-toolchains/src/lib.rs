@@ -1,6 +1,6 @@
 //! Toolchains as data (path model §6.5): which build tools a project uses, where each one's
 //! caches and outputs go (one item's own, or one person's, shared by their items), and what Steve
-//! sets for them. The definitions ship in `data/builtin.toml`; this code knows no tool by name, so
+//! sets for them. The definitions ship in `src/builtin.toml`; this code knows no tool by name, so
 //! a new language is a new entry, never a code change.
 //!
 //! What a run gets from it is a list of variables ([`Toolchain::env`]) that move the caches out of
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-const BUILTIN: &str = include_str!("../data/builtin.toml");
+const BUILTIN: &str = include_str!("builtin.toml");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -372,23 +372,58 @@ mod tests {
         let cargo = t.get("cargo").unwrap();
         let env: BTreeMap<String, String> = cargo.env(&at, &BTreeMap::new()).into_iter().collect();
         assert_eq!(env["CARGO_TARGET_DIR"], "/w/ST-1/.steve/build/cargo/target");
-        assert_eq!(env["CARGO_HOME"], "/n/cache/ws/u1/cargo");
+        assert!(!env.contains_key("CARGO_HOME"), "never a tool's whole home");
         assert_eq!(env["CARGO_INCREMENTAL"], "0", "light is on by default");
         let off = BTreeMap::from([("light".to_string(), false)]);
         let env: BTreeMap<String, String> = cargo.env(&at, &off).into_iter().collect();
         assert!(!env.contains_key("CARGO_INCREMENTAL"));
-        let maven = t.get("maven").unwrap();
+        let go = t.get("go").unwrap();
+        let env: BTreeMap<String, String> = go.env(&at, &BTreeMap::new()).into_iter().collect();
+        assert_eq!(env["GOCACHE"], "/n/cache/ws/u1/go/build");
+        assert!(!env.contains_key("GOPATH") && !env.contains_key("GOFLAGS"));
         assert_eq!(
-            maven.env(&at, &BTreeMap::new()),
-            [(
-                "MAVEN_ARGS".to_string(),
-                "-Dmaven.repo.local=/n/cache/ws/u1/maven/repository".to_string()
-            )]
+            go.dirs_to_make(&at),
+            [
+                PathBuf::from("/n/cache/ws/u1/go/build"),
+                PathBuf::from("/n/cache/ws/u1/go/mod")
+            ]
         );
-        assert_eq!(
-            maven.dirs_to_make(&at),
-            [PathBuf::from("/n/cache/ws/u1/maven/repository")]
-        );
+    }
+
+    /// What may never be moved or set: a tool's home with its config and credentials, what the
+    /// project or its user sets themselves.
+    #[test]
+    fn no_tool_home_and_no_users_variable_is_taken_over() {
+        let t = Toolchains::builtin();
+        let taken: Vec<String> = t
+            .all()
+            .iter()
+            .flat_map(|tc| {
+                tc.env
+                    .keys()
+                    .cloned()
+                    .chain(tc.dirs.iter().filter_map(|d| d.env.clone()))
+            })
+            .collect();
+        for home in [
+            "CARGO_HOME",
+            "GRADLE_USER_HOME",
+            "GOPATH",
+            "GOFLAGS",
+            "MAVEN_ARGS",
+            "MIX_HOME",
+            "HEX_HOME",
+            "PUB_CACHE",
+            "CP_HOME_DIR",
+            "CCACHE_DIR",
+            "YARN_CACHE_FOLDER",
+            "npm_config_store_dir",
+            "UV_PROJECT_ENVIRONMENT",
+            "BUNDLE_PATH",
+            "NUGET_PACKAGES",
+        ] {
+            assert!(!taken.iter().any(|k| k == home), "{home}");
+        }
     }
 
     #[test]

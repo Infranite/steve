@@ -124,13 +124,14 @@ pub fn codex_deny_filesystem(steve_home: &Path) -> String {
 
 /// The parts of a Node's own home (its journal, and the secrets, pushes and attachments it keeps
 /// for runs) no run reads, relative to it. For the Hub's local Node they are also in [`PROTECTED`].
-pub const NODE_PROTECTED: [&str; 5] = [
+pub const NODE_PROTECTED: [&str; 6] = [
     "node.sqlite3*",
     "secrets/",
     "push/",
     "blobs/",
-    // every principal's own harness directories: a session is given back its own one
+    // every principal's own harness directories and caches: a run is given back its own
     "state/",
+    "cache/",
 ];
 
 /// A remote Node's own files, relative to its `$STEVE_HOME` (`~/.steve-node`): its identity, its

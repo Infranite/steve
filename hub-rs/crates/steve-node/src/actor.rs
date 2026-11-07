@@ -2029,13 +2029,23 @@ async fn open_harness(
         (Some(s), Some(sd)) => Some((sd.env, harness_state(inner, s, sd)?)),
         _ => None,
     };
+    // its toolchains' outputs and caches in the item's and the person's own places
+    let tools = crate::toolchain::for_run(
+        &inner.cfg.home,
+        std::path::Path::new(&cwd),
+        row.open.state.as_ref(),
+    );
     // in the OS sandbox, unless the harness sandboxes its own shell (macOS nests none)
     let (program, args) = if inner.cfg.acp.adapter_properties(&harness).nested_sandbox {
         inner.confine.wrap_in(
             program,
             args,
             &[],
-            &state.iter().map(|(_, d)| d.clone()).collect::<Vec<_>>(),
+            &state
+                .iter()
+                .map(|(_, d)| d.clone())
+                .chain(tools.person.clone())
+                .collect::<Vec<_>>(),
             Some(std::path::Path::new(&cwd)),
         )
     } else {
@@ -2069,15 +2079,12 @@ async fn open_harness(
                     &row.open.env,
                     inner.cfg.acp.claude_executable.clone().into_os_string(),
                 );
+                // the toolchains', then Steve's own last: nothing before overrides them
+                let at = env.len().saturating_sub(1);
+                env.splice(at..at, tools.env);
                 if let Some((var, dir)) = &state {
                     env.push(((*var).into(), dir.clone().into_os_string()));
                 }
-                // its toolchains' outputs and caches in the item's and the person's own places
-                env.extend(crate::toolchain::env(
-                    &inner.cfg.home,
-                    std::path::Path::new(&cwd),
-                    row.open.state.as_ref(),
-                ));
                 env
             },
             log_tag: format!("[node {session}]"),

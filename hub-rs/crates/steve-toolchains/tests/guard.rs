@@ -56,5 +56,8 @@ fn no_tool_is_named_where_builds_and_disks_are_handled() {
             }
         }
     }
-    assert!(found.is_empty(), "name these in the toolchain data instead: {found:#?}");
+    assert!(
+        found.is_empty(),
+        "name these in the toolchain data instead: {found:#?}"
+    );
 }
