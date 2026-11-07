@@ -4,6 +4,58 @@
 
 - [Source-based macOS service installation](#source-based-macos-service-installation)
 - [Managed Release bundles and automatic upgrades](#managed-release-bundles-and-automatic-upgrades)
+- [Pairing a separate Node](#pairing-a-separate-node)
+
+## Pairing a separate Node
+
+Remote Nodes are experimental. They run `steve-node`, a separate binary from `steve-hub`. Current Release bundles contain the Hub and Web, so build the Node from a compatible source revision on the target OS and architecture:
+
+```sh
+cargo build --locked --release --manifest-path hub-rs/Cargo.toml \
+  -p steve-node-cli --bin steve-node
+```
+
+The binary is `hub-rs/target/release/steve-node` (or under `CARGO_TARGET_DIR` when set). Record its source revision and SHA256 before copying it to the target machine. Keep it in a stable location independent of the Hub's release directory.
+
+Before pairing, verify that the Hub has `STEVE_NODE_LISTEN=1` and that its HTTPS reverse proxy forwards `/node/pair` and WebSocket upgrades at `/node/ws` to the Hub over loopback. The Node listener rejects non-loopback TCP peers; exposing the Hub's HTTP port directly to another machine is not sufficient. Back up existing configuration before enabling the listener, and apply it through the installation's normal restart procedure.
+
+Give the Node its own data directory. Set `STEVE_HOME` explicitly for every Node invocation and in its service environment; never inherit the Hub's data directory. The default, when unset, is `~/.steve-node`. Preserve an existing Node's `node/identity.key`, `node/node.json` and `node/local/` journal when updating it. Do not re-pair an existing identity as a way to reconnect.
+
+Pairing and confirmation currently use the owner's authenticated Hub API session; there is no device pairing page yet. Agent bearer tokens do not replace that session. API writes also require the selected workspace's `x-steve-ws` header.
+
+1. As the signed-in owner, call `POST /api/nodes/pairings`. Keep the returned `code` private: it expires after ten minutes and can be used once.
+2. On the Node, run the following command and enter the code at its stdin prompt. The code is **not** a positional argument. With a publicly trusted HTTPS certificate, no `--pin` is needed. For a pinned certificate, add `--pin sha256:<verified-certificate-DER-hash>`, obtained through a trusted channel.
+
+   ```sh
+   STEVE_HOME="<absolute-node-data-directory>" \
+     <absolute-path-to-steve-node> pair "https://<hub>" --name "<node-name>"
+   ```
+
+3. Call `GET /api/nodes` as the same owner. Save the pending Node's `node_id` from this list and match its fingerprint with the CLI output, then call `POST /api/nodes/<node_id>/confirm` and check for `{"ok": true}`. Use that Node ID for subsequent checks; do not identify it by name alone.
+4. Run the Node in the foreground, or configure its service manager to run this command with absolute paths:
+
+   ```sh
+   STEVE_HOME="<absolute-node-data-directory>" <absolute-path-to-steve-node> run
+   ```
+
+On macOS, use a dedicated user LaunchAgent with `RunAtLoad`, `KeepAlive`, an explicit `STEVE_HOME` and `PATH`, and separate stdout/stderr logs. This starts in the user's login session. Do not attach it to the Hub's service or restart all Node processes during deployment. On Linux, use a separate foreground systemd service with `Restart=on-failure`.
+
+The Node can register with no `roots.json`; in that case it exposes no project roots. To enable execution later, configure only the intended directories in `roots.json` and the installed ACP adapters and Node.js executable in `harness.json`. Adapter paths should be absolute because a service's `PATH` can differ from an interactive shell. These files live directly under the Node's data directory:
+
+```json
+{
+  "adapters": {"<harness-id>": "/absolute/path/to/acp-adapter"},
+  "node": "/absolute/path/to/node"
+}
+```
+
+Registration alone does not move existing projects or change scheduling. Do not set `STEVE_NODE_BIND` merely to register a Node. The current remote Node configuration advertises session capacity; jobs and execs have zero capacity.
+
+### Verify and recover a Node
+
+`steve-node status` reports the saved pairing and fingerprint; it does not establish that the process is online. Verify `GET /api/nodes` reports the same Node ID with `state: "active"` and `linked: true`, and that its own log contains `linked to the hub`. After restarting only the new service, verify the same identity reconnects. Verify execution separately with a bounded test session when an ACP adapter and a project root are configured.
+
+If deployment fails, stop only the newly installed service. Preserve its logs, identity and journal for diagnosis and retry. If abandoning a confirmed registration, the owner can call `POST /api/nodes/<node_id>/revoke`; a revoked identity cannot reconnect. The local `forget` command only removes pairing files and does not revoke access at the Hub. Restore any backed-up Hub configuration through the same controlled restart procedure if enabling the listener must be rolled back.
 
 ## Source-based macOS service installation
 

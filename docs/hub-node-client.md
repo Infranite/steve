@@ -124,9 +124,12 @@ harness 自带的工具（Bash、Edit…）不经过 `tool.call`。其中需要�
 
 ## 6. 注册 Node
 
-1. 已登录的用户在 Hub 设备页发起配对，拿到短时有效、只能用一次的配对码。
-2. 在新机器上运行 `steve-node pair https://<hub> <码>`。
-3. Hub 的确认页显示 Node 公钥指纹，确认后 Node 即上线。之后可以改名、暂停接活、吊销。
+当前配对通过 CLI 和已登录用户的 Hub API 完成，设备配对页面尚未实现。实际部署步骤见 [部署手册](deployment.md#pairing-a-separate-node)。
+
+1. 已登录的用户调用 `POST /api/nodes/pairings`，拿到短时有效、只能用一次的配对码。
+2. 在新机器上使用独立的 `STEVE_HOME` 运行 `steve-node pair https://<hub> --name <节点名>`，从标准输入提供配对码，不把码放进命令参数。
+3. 调用 `GET /api/nodes`，将待确认 Node 的公钥指纹与 CLI 输出核对，再调用 `POST /api/nodes/<node_id>/confirm`。
+4. 在新机器上使用配对时同一个独立 `STEVE_HOME` 运行 `steve-node run`，回读 Hub 中该 Node 的 `state=active`、`linked=true`。之后可以改名、暂停接活、吊销。
 
 细节：
 
