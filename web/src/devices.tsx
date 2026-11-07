@@ -1,6 +1,5 @@
-/* 设备页：Hub 是中心节点；运行环境是这台机器上实际检测到的 harness。配对其他设备需要 steve-node，还没有做。 */
-import { useState } from "react"
-import { Trans } from "react-i18next"
+/* 设备与远程 Node 配对；身份与确认由所有者 API 校验。 */
+import { useEffect, useState } from "react"
 import { cn } from "cn"
 import { ChevronRightIcon, PlusIcon, ServerIcon, CpuIcon, FolderIcon, PauseIcon, PlayIcon, RefreshCwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -8,7 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { st, toast, refresh, tm } from "@/store"
-import { api, type RDevice } from "@/api"
+import { api, type RDevice, type RNode, type RPairing } from "@/api"
 import { go, Page, Group, Row, SectionLabel, StatusDot, Meta, Empty, Status, closeSheet, openSheet } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
 import { t, useT } from "@/i18n"
@@ -70,12 +69,45 @@ export function DeviceView({ id }: { id: string }) {
 
 export function PairDialog() {
   const t = useT()
+  const [pairing, setPairing] = useState<RPairing | null>(null)
+  const [nodes, setNodes] = useState<RNode[]>([])
+  const [busy, setBusy] = useState(false), [error, setError] = useState("")
+  const [fingerprints, setFingerprints] = useState<Record<string, string>>({})
+  const [now, setNow] = useState(Date.now())
+  const reload = async () => { const r = await api.nodes(); setNodes(r.nodes.filter(n => !n.local)) }
+  const act = async (f: () => Promise<void>) => {
+    setBusy(true); setError("")
+    try { await f() } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+  useEffect(() => {
+    let live = true
+    void api.nodes().then(r => { if (live) setNodes(r.nodes.filter(n => !n.local)) }).catch(e => { if (live) setError((e as Error).message) })
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => { live = false; clearInterval(timer) }
+  }, [])
   return (
     <Dialog open onOpenChange={(x) => !x && closeSheet()}>
-      <DialogContent className="gap-4 rounded-2xl sm:max-w-[480px]" data-pair-dialog>
+      <DialogContent className="gap-4 rounded-2xl sm:max-w-[600px] max-h-[85vh] overflow-y-auto" data-pair-dialog>
         <DialogHeader><DialogTitle className="type-headline">{t("shell:devices.add")}</DialogTitle><DialogDescription className="type-callout">{t("shell:devices.pairDesc")}</DialogDescription></DialogHeader>
-        <div className="rounded-xl border px-4 py-3 type-callout text-muted-foreground"><Trans t={t} i18nKey="shell:devices.pairNotYet" components={{ code: <span className="font-mono text-foreground" /> }} /></div>
-        <DialogFooter><Button onClick={closeSheet}>{t("shell:devices.gotIt")}</Button></DialogFooter>
+        {error && <p role="alert" className="type-callout text-destructive">{error}</p>}
+        <p className="type-callout text-muted-foreground">{t("shell:devices.pairHelp")}</p>
+        <Button disabled={busy || !!pairing && now < pairing.expires} onClick={() => void act(async () => { setPairing(await api.createPairing()) })}>{t("shell:devices.createCode")}</Button>
+        {pairing && <div className="rounded-xl border p-4 space-y-2 type-callout">
+          {now < pairing.expires ? <><p>{t("shell:devices.codeExpires", { time: new Date(pairing.expires).toLocaleTimeString() })}</p><code className="block break-all select-all">{pairing.code}</code></> : <p>{t("shell:devices.codeExpired")}</p>}
+          <p>{t("shell:devices.hubPin")}</p><code className="block break-all select-all">{pairing.pin}</code>
+          <p>{t("shell:devices.pairCommand")}</p><code className="block break-all select-all">steve-node pair {window.location.origin}</code>
+        </div>}
+        <Button variant="outline" disabled={busy} onClick={() => void act(reload)}><RefreshCwIcon />{t("shell:devices.refreshNodes")}</Button>
+        {nodes.map(n => <div key={n.node_id} className="rounded-xl border p-4 space-y-2 type-callout">
+          <p className="font-medium">{n.name} · {t(`shell:devices.nodeState.${n.state}`)} · {n.linked ? t("shell:devices.linked") : t("shell:devices.disconnected")}</p>
+          <code className="block break-all">{n.node_id}</code><code className="block break-all">{n.fingerprint}</code>
+          {n.state === "pending" && <>
+            <label className="block" htmlFor={`fingerprint-${n.node_id}`}>{t("shell:devices.checkFingerprint")}</label>
+            <input id={`fingerprint-${n.node_id}`} className="w-full rounded-md border bg-background px-3 py-2 font-mono" value={fingerprints[n.node_id] ?? ""} onChange={e => setFingerprints(v => ({ ...v, [n.node_id]: e.target.value }))} autoComplete="off" spellCheck={false} />
+            <Button disabled={busy || !n.fingerprint || fingerprints[n.node_id]?.trim() !== n.fingerprint} onClick={() => void act(async () => { await api.confirmNode(n.node_id); await reload() })}>{t("shell:devices.confirmFingerprint")}</Button>
+          </>}
+        </div>)}
+        <DialogFooter><Button variant="outline" onClick={closeSheet}>{t("shell:devices.gotIt")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )

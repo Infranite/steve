@@ -56,6 +56,8 @@ export type RKindReview = { id: string; kind: string; why: string }
 export type RKindBackfill = { checked: number; kept: number; dry: boolean; filled: { id: string; title: string; kind: string; by: "model" | "rule"; confidence: number; uncertain: boolean; why: string; had?: string[] }[] }
 export type RMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
 export type RDevice = { id: string; name: string; roles: string[]; os: string; version: string; status: string; max_sessions: number; seen: number; created: number }
+export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean }
+export type RPairing = { code: string; expires: number; pin: string; hub_id: string }
 export type RRuntime = { id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string }
 export type REvent = { seq: number; ts: number; kind: string; data: any }
 export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[] }
@@ -222,6 +224,9 @@ export const api = {
   settings: (p: Record<string, string>) => patch("/settings", p),
   draft: (target: { kind: string; id?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
   devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),
+  nodes: () => get<{ nodes: RNode[] }>("/nodes"),
+  createPairing: () => post<RPairing>("/nodes/pairings"),
+  confirmNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/confirm`),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
     const r = await fetch("/api/files?name=" + encodeURIComponent(name), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "same-origin" })
