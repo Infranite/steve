@@ -295,6 +295,25 @@ fn identity_label(home: &Path) -> Result<String> {
 /// What this machine lacks for a one-click local build and deploy; empty when it has everything.
 pub fn local_missing(u: &Updates) -> Vec<String> {
     let mut missing = vec![];
+    // Match the signing runner's trust boundary before offering the action. Custom-home managed
+    // installs do not use this signing path; never advertise a local signer that will refuse later.
+    let check_home = match &u.launch {
+        Launch::Launchd => true,
+        #[cfg(test)]
+        Launch::Fake(_) => false,
+    };
+    if check_home {
+        let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        match account_home().map(|h| h.join(".steve")) {
+            Some(home) if real(&home) == real(&u.home) => {}
+            Some(home) => missing.push(steve_i18n::t!(
+                "hub.upgrade.local.untrusted_home",
+                home = home.to_string_lossy().as_ref(),
+                got = u.home.to_string_lossy().as_ref()
+            )),
+            None => missing.push("the account's installation home cannot be established".into()),
+        }
+    }
     if !cfg!(target_os = "macos") {
         missing.push("macOS (codesign, launchd)".to_owned());
     }
