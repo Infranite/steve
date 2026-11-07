@@ -405,7 +405,33 @@ impl Core {
 
     /// A turn ended (acp.ts turn-end handler).
     pub fn on_turn_end(&self, t: TurnEnd) -> Result<()> {
-        self.tx().on_turn_end(t)
+        let sid = t.session_id.clone();
+        let attempt = t.attempt.clone();
+        let started = std::time::Instant::now();
+        let span = tracing::info_span!("core.turn_end", session_id = %sid, attempt = ?attempt);
+        let result = span.in_scope(|| self.tx().on_turn_end(t));
+        let _ = self
+            .store()
+            .store()
+            .diagnostics()
+            .record(steve_store::diagnostics::Record {
+                session_id: Some(sid),
+                attempt_id: attempt,
+                kind: "core.turn_end".into(),
+                reason_code: if result.is_ok() { "returned" } else { "failed" }.into(),
+                severity: if result.is_ok() {
+                    steve_store::diagnostics::Severity::Info
+                } else {
+                    steve_store::diagnostics::Severity::Error
+                },
+                detail: result.is_ok(),
+                details: steve_store::diagnostics::Details {
+                    duration_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        result
     }
 
     pub fn add_dep(&self, item: &str, dep: &str) -> Result<()> {
@@ -1871,6 +1897,14 @@ impl Tx<'_> {
         if let Some(e) = &end {
             // the same end told twice (a redelivery): handled once
             if self.st.ended.get(&e.session) == Some(&e.attempt) {
+                self.diagnostic_session(
+                    &e.session,
+                    Some(&e.attempt),
+                    "turn.end_evaluated",
+                    "duplicate_attempt",
+                    true,
+                    Default::default(),
+                );
                 return Ok(());
             }
             self.st.ended.insert(e.session.clone(), e.attempt.clone());
@@ -1887,6 +1921,14 @@ impl Tx<'_> {
             {
                 self.st.pending.remove(sid);
             }
+            self.diagnostic_session(
+                sid,
+                t.attempt.as_deref(),
+                "turn.end_evaluated",
+                "stale_attempt",
+                true,
+                Default::default(),
+            );
             return Ok(());
         }
         let Some(session) = self.db().session(&t.session_id)? else {
@@ -1898,6 +1940,14 @@ impl Tx<'_> {
         };
         let mark = self.st.pending.remove(&session.id).map(|(m, _)| m);
         if self.workflow_turn_end(&session, &t)? {
+            self.diagnostic_session(
+                &session.id,
+                t.attempt.as_deref(),
+                "turn.end_evaluated",
+                "workflow_handled",
+                true,
+                Default::default(),
+            );
             return Ok(());
         }
         /* the turn answered something forwarded from the conversation: its reply goes back there.
@@ -1927,6 +1977,14 @@ impl Tx<'_> {
         };
         /* a closing waits for this turn (among others): look at it again; what it still waits on is said */
         if item.phase == crate::cycle::CLOSING {
+            self.diagnostic_session(
+                &session.id,
+                t.attempt.as_deref(),
+                "turn.end_evaluated",
+                "closing_gate",
+                true,
+                Default::default(),
+            );
             /* the turn may have merged or tagged: a completion rule is looked up afresh */
             self.forget_probe(item_id);
             if !self.lc_try_close(item_id)? {
@@ -1935,26 +1993,79 @@ impl Tx<'_> {
             return Ok(());
         }
         if item.is_settled() {
+            self.diagnostic_session(
+                &session.id,
+                t.attempt.as_deref(),
+                "turn.end_evaluated",
+                "item_settled",
+                true,
+                Default::default(),
+            );
             return Ok(());
         }
         if self.dependency_waiting(item_id)? {
+            self.diagnostic_session(
+                &session.id,
+                t.attempt.as_deref(),
+                "turn.end_evaluated",
+                "dependency_wait",
+                true,
+                Default::default(),
+            );
             self.check_blocked(item_id)?;
             return Ok(());
         }
         let error = t.error.as_deref().filter(|e| !e.is_empty());
         if mark.is_some() {
+            self.diagnostic_session(
+                &session.id,
+                t.attempt.as_deref(),
+                "turn.end_evaluated",
+                "tool_mark",
+                true,
+                Default::default(),
+            );
             return settle(self.db(), item_id);
         }
         if error.is_none() && t.stop_reason == "end_turn" && self.workflow_waiting(item_id)? {
             return Ok(());
         }
         if t.stop_reason == "cancelled" {
+            self.diagnostic_session(
+                &session.id,
+                t.attempt.as_deref(),
+                "turn.end_evaluated",
+                "cancelled",
+                false,
+                Default::default(),
+            );
             return self
                 .db()
                 .item_patch(item_id, patch![now: "你中断了这一回合"]);
         }
         let why = match error {
-            Some(e) => format!("会话出错：{e}"),
+            Some(e) => {
+                let _ = self
+                    .db()
+                    .store()
+                    .diagnostics()
+                    .record(steve_store::diagnostics::Record {
+                        workspace_id: item.workspace_id.clone(),
+                        item_id: Some(item.id.clone()),
+                        session_id: Some(session.id.clone()),
+                        attempt_id: t.attempt.clone(),
+                        kind: "turn.failed".into(),
+                        reason_code: "execution_error".into(),
+                        severity: steve_store::diagnostics::Severity::Error,
+                        details: steve_store::diagnostics::Details {
+                            item_cycle: Some(item.cycle),
+                            item_revision: Some(item.revision),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    });
+                format!("会话出错：{e}")
+            }
             None => {
                 let last = self.last_agent_text(&session.id)?;
                 let tail = if last.is_empty() {

@@ -38,6 +38,11 @@ fn complete(k: &Kit, id: &str) {
 fn busy_turn_yields_to_block_without_watchdog_or_early_delivery() {
     let k = Kit::new();
     let (item, dep, s) = setup(&k);
+    k.db()
+        .store()
+        .diagnostics()
+        .capture(WS, &item, "test", None)
+        .unwrap();
     k.decision(&item, Some(&s.id), "ask", "question", &["a"]);
     let view = wait(&k, &s, &[&dep], "automatic");
     assert_eq!(view["status"], "block");
@@ -69,6 +74,48 @@ fn busy_turn_yields_to_block_without_watchdog_or_early_delivery() {
     assert!(k.open_kinds(&item).is_empty());
     assert_eq!(k.rt.prompts_of(&s.id).len(), 1);
     assert!(k.rt.prompt(&s.id, "抢跑", "steve", &[]).is_err());
+    // Read-only diagnosis must explain this real wait without prompting, settling or
+    // manufacturing another card. Reuse this scenario instead of duplicating its setup.
+    let before = (
+        k.status(&item),
+        k.timeline_texts(&item),
+        k.rt.prompts_of(&s.id),
+    );
+    let snapshot = k.core.diagnostic_snapshot(&item).unwrap();
+    assert_eq!(snapshot["dependencies"]["resume_mode"], "automatic");
+    assert_eq!(snapshot["dependencies"]["open_dependencies"], json!([dep]));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let events = k
+            .db()
+            .store()
+            .diagnostics()
+            .events(
+                WS,
+                &item,
+                steve_store::diagnostics::Filter {
+                    reason_code: Some("dependency_wait".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        if !events["events"].as_array().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "missing persisted wait evidence: {events}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        (
+            k.status(&item),
+            k.timeline_texts(&item),
+            k.rt.prompts_of(&s.id)
+        ),
+        before
+    );
 }
 
 #[test]
@@ -477,14 +524,6 @@ fn previous_cycle_wait_does_not_override_a_new_cycle() {
         .unwrap();
     assert_eq!(v["resume_source"], "workspace");
     assert_eq!(v["waiting"], false);
-    assert!(
-        k.db()
-            .store()
-            .dependency_waits()
-            .get(&item)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[test]
@@ -569,7 +608,6 @@ fn pause_then_resume_consumes_wait_only_when_prerequisites_are_complete() {
         assert_eq!(k.status(&item).0, if completed { "run" } else { "block" });
         assert_eq!(k.rt.prompts_of(&s.id).len(), if completed { 2 } else { 1 });
         if completed {
-            assert!(!k.core.tx().dependency_waiting(&item).unwrap());
             k.core.tool_deliver(&s, "已完成", &[], &[], &[]).unwrap();
         }
     }

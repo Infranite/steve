@@ -485,6 +485,7 @@ fn fit(subject: &Subject, body: EventBody) -> Vec<EventBody> {
         severity: Severity::Warning,
         code: "event_too_large".into(),
         safe_text: format!("a {kind} event of {was} bytes was too big to report"),
+        details: None,
     }]
 }
 
@@ -1078,7 +1079,7 @@ pub(crate) fn bind_permission(
                 .strip_prefix("mcp__steve__")
                 .unwrap_or(&fact.name)
                 .to_string(),
-            args: fact.raw.get("rawInput").cloned().unwrap_or(Value::Null),
+            args: fact.input().clone(),
         },
         ToolCategory::Exec => {
             let command = match &fact.command {

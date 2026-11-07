@@ -44,7 +44,9 @@ pub fn open(tx: &Tx, p: &NewDecision) -> Result<Decision> {
         id: id.clone(),
         item_id: Some(p.item_id.clone()),
     });
-    crate::repo::must(get(tx, &id)?)
+    let d = crate::repo::must(get(tx, &id)?)?;
+    tx.diagnostic(crate::diagnostics::decision_event(&d, "created", None));
+    Ok(d)
 }
 
 /// The open decision about one subject, if any (e.g. “同一连接最多一个打开的”).
@@ -79,7 +81,15 @@ pub fn settle(tx: &Tx, id: &str, result: &Value, status: &str, undo: &Value) -> 
         params![status, to_json(result)?, now(), undo, id],
     )?;
     if n > 0 {
-        let item_id = get(tx, id)?.and_then(|d| d.item_id);
+        let d = get(tx, id)?;
+        if let Some(d) = &d {
+            tx.diagnostic(crate::diagnostics::decision_event(
+                d,
+                "resolved",
+                Some("open"),
+            ));
+        }
+        let item_id = d.and_then(|d| d.item_id);
         tx.publish(ChangeEvent::Decision {
             id: id.into(),
             item_id: Some(item_id),

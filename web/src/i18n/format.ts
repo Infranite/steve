@@ -1,6 +1,5 @@
 /* Locale-aware formatting: numbers, dates, relative times and durations in the current UI language.
- * The zh-CN output of every helper is exactly what the hand-written helpers printed before
- * (web/test/i18n.test.mjs pins it), so routing a helper through here changes nothing for zh-CN users. */
+ * web/test/i18n.test.mjs pins the user-visible words and unit/calendar boundaries. */
 import { lang, t } from "./index.ts"
 
 const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000

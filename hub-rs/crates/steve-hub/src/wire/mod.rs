@@ -9,6 +9,7 @@ pub mod acp_stats;
 pub mod auth;
 pub mod chan;
 pub mod core;
+pub mod diagnostics;
 pub mod flow_cmd;
 pub mod git_push;
 pub mod item_git;

@@ -27,6 +27,7 @@ pub struct Extra {
 /// Which module answers a tool name.
 #[derive(Clone, Copy)]
 enum Owner {
+    Diagnostics,
     Items,
     Workflow,
     Upgrade,
@@ -59,7 +60,9 @@ fn reply_source_tool() -> Value {
 }
 
 fn owner_of(name: &str) -> Option<Owner> {
-    if super::item_mcp::handles(name) {
+    if name == super::diagnostics::TOOL {
+        Some(Owner::Diagnostics)
+    } else if super::item_mcp::handles(name) {
         Some(Owner::Items)
     } else if name == "steve_workflow" {
         Some(Owner::Workflow)
@@ -91,6 +94,7 @@ fn owner_of(name: &str) -> Option<Owner> {
 /// The module tool definitions appended to `tools/list`, in this order.
 fn extra_tools() -> Vec<Value> {
     let mut v: Vec<Value> = mcp::tools().to_vec();
+    v.push(super::diagnostics::tool());
     v.extend(super::item_mcp::tools());
     v.push(workflow_tool());
     v.extend(steve_knowledge::tools::tools().iter().cloned());
@@ -314,6 +318,27 @@ async fn call_owned(
     name: &str,
     args: Value,
 ) -> Result<String, String> {
+    let observation = super::diagnostics::ToolObservation::new(&x.store, &s, name);
+    observation
+        .run(call_owned_inner(x, s, tool_owner, name, args))
+        .await
+}
+
+async fn call_owned_inner(
+    x: &Extra,
+    s: steve_store::Session,
+    tool_owner: Owner,
+    name: &str,
+    args: Value,
+) -> Result<String, String> {
+    if matches!(tool_owner, Owner::Diagnostics) {
+        let (store, core) = (x.store.clone(), x.tools.core.clone());
+        return tokio::task::spawn_blocking(steve_i18n::carry(move || {
+            super::diagnostics::for_session(&store, &core, &s, args)
+        }))
+        .await
+        .map_err(|_| "Diagnostic query unavailable.".to_string())?;
+    }
     if matches!(tool_owner, Owner::Items) {
         let (store, core, name) = (x.store.clone(), x.tools.core.clone(), name.to_owned());
         return tokio::task::spawn_blocking(steve_i18n::carry(move || {
@@ -356,6 +381,7 @@ async fn call_owned(
         session_id: Some(s.id),
     };
     let out: Result<String, String> = match tool_owner {
+        Owner::Diagnostics => unreachable!("diagnostics preserve the session above"),
         Owner::Items => unreachable!("item management preserves the session above"),
         Owner::Workflow => unreachable!("workflow preserves the session above"),
         Owner::Upgrade => {

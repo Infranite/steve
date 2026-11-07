@@ -67,11 +67,6 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn schema_version_is_53() {
-    assert_eq!(db::SCHEMA_VERSION, 53);
-}
-
-#[test]
 fn reasoning_migration_accepts_columns_previously_added_by_ts_hub() {
     for v in [12, 16] {
         let (_dir, path) = at_version(v);

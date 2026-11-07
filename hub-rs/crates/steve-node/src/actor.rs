@@ -25,7 +25,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use steve_acp::normalize::{Fact, Normalizer};
 use steve_acp::permission::{self, Asked};
-use steve_acp::rpc::{Conn, Incoming, RpcError, Spawn};
+use steve_acp::rpc::{Conn, ExitReport, Incoming, RpcError, Spawn};
 use steve_acp::session::{self as acp_session, OpenConfig, Reports, Strictness};
 use steve_node_api::*;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -128,6 +128,7 @@ pub(crate) enum Msg {
     },
     Exited {
         generation: u64,
+        report: ExitReport,
     },
 }
 
@@ -750,7 +751,7 @@ impl Actor {
                 rpc_id,
                 params,
             } => self.permission(generation, token, rpc_id, &params),
-            Msg::Exited { generation } => self.exited(generation).await,
+            Msg::Exited { generation, report } => self.exited(generation, report).await,
         }
     }
 
@@ -835,7 +836,46 @@ impl Actor {
         }
     }
 
-    async fn exited(&mut self, generation: u64) {
+    async fn exited(&mut self, generation: u64, report: ExitReport) {
+        // Observation uses the existing delivery ledger, but its failure must not fault or
+        // stop the actor. A session subject avoids attributing a late exit to a newer attempt.
+        let evidence = EventBody::Diagnostic {
+            severity: if report.exit_code != Some(0) || report.wait_error || report.reader_failed {
+                Severity::Error
+            } else if report.parse_errors > 0 || report.drain_timed_out {
+                Severity::Warning
+            } else {
+                Severity::Info
+            },
+            code: "adapter_exited".into(),
+            safe_text: "Adapter process exited; structured process evidence is available.".into(),
+            details: Some(DiagnosticDetails {
+                exit_code: report.exit_code,
+                signal: report.signal,
+                generation: Some(generation),
+                parse_errors: report.parse_errors,
+                reader_failed: report.reader_failed,
+                drain_timed_out: report.drain_timed_out,
+                wait_error: report.wait_error,
+            }),
+        };
+        let saved = self.inner.j.tx(|t| {
+            crate::emit_all(
+                &self.inner,
+                t,
+                vec![(
+                    Subject::Session {
+                        session: self.session.clone(),
+                    },
+                    evidence,
+                )],
+            )
+        });
+        if saved.is_ok() {
+            self.inner.wake.notify_one();
+        } else {
+            tracing::warn!(session = %self.session, generation, "adapter exit diagnostic was not persisted");
+        }
         if !self
             .live
             .as_ref()
@@ -2054,7 +2094,7 @@ async fn open_harness(
         retired,
         stall: inner.cfg.storage.ingress_stall,
     };
-    let conn = Conn::spawn_registered(
+    let conn = Conn::spawn_registered_observed(
         Spawn {
             program,
             args,
@@ -2160,8 +2200,8 @@ async fn open_harness(
             }
             None
         },
-        move || {
-            let _ = tx2.send(Msg::Exited { generation });
+        move |report| {
+            let _ = tx2.send(Msg::Exited { generation, report });
         },
     )
     .map_err(|e| ApiError::new(ErrorCode::Unsupported, e.message))?;

@@ -10,12 +10,13 @@ use std::path::{Component, Path, PathBuf};
 pub const READ_TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
 
 /// Steve's read-only MCP tools, as the harness names them (`mcp__<server>__<tool>`, server `steve`).
-pub const MCP_TOOLS: [&str; 5] = [
+pub const MCP_TOOLS: [&str; 6] = [
     "mcp__steve__steve_knowledge_search",
     "mcp__steve__steve_knowledge_read",
     "mcp__steve__steve_items_search",
     "mcp__steve__steve_item_read",
     "mcp__steve__steve_sessions_list",
+    "mcp__steve__steve_debug",
 ];
 
 /// Harness-internal tools that neither read files nor act: `ToolSearch` only loads the schemas of
@@ -602,6 +603,11 @@ mod tests {
                 None,
             ),
             ("mcp__steve__steve_item_read", json!({"id": "ST-1"}), None),
+            (
+                "mcp__steve__steve_debug",
+                json!({"action":"explain","item_id":"ST-1"}),
+                None,
+            ),
             ("ToolSearch", json!({"query": "select:x"}), None),
             ("Bash", json!({"command": "rm -rf src"}), Some("tool")),
             (
