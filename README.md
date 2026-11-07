@@ -221,7 +221,7 @@ There is no runtime plugin store yet; the Plugins page is a placeholder. Today y
 ## Experimental and planned
 
 - **Sessions run on a Node.** The Hub does not start agent processes itself: every session, Steve's own judgment calls and inline research run on the local Node, which is on by default (`STEVE_NODE_MODE=off` parks it).
-- **Multiple devices** (experimental, off by default). A `steve-node` on another machine can pair with the Hub and run harnesses there. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. Turn remote Nodes on with `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND`. Pairing is CLI-only for now ([docs/deployment.md](docs/deployment.md)).
+- **Multiple devices** (experimental, off by default). A `steve-node` on another machine can pair with the Hub and run harnesses there. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. Turn remote Nodes on with `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND`. The owner generates a code and confirms the device in Devices; the Node claims the code through its CLI ([docs/deployment.md](docs/deployment.md#remote-nodes)).
 - **Not built yet:** the Plugins page (use the extension points above), quiet hours and a daily digest (marked *Works once push is connected* in Settings), Gmail and Outlook API mail adapters, Feishu docs, calendar and approvals, and external vault backends (1Password, Bitwarden).
 
 ## How it works
@@ -324,6 +324,7 @@ Steve reads its settings from the environment. For a service, put them in `$STEV
 | `STEVE_VAULT_KEYSTORE` | `auto` (Keychain / Secret Service), `dir` with `STEVE_VAULT_KEY_DIR`, or `file` for tests |
 | `STEVE_NODE_MODE` | `local` (default) runs sessions on the local Node; `off` parks them |
 | `STEVE_NODE_LISTEN`, `STEVE_NODE_BIND` | Experimental multi-device Nodes, off by default |
+| `STEVE_NODE_PROXY_PEERS` | Optional exact IPs of TLS-terminating proxies for remote Node ingress; default is loopback only |
 
 > [!IMPORTANT]
 > Review authentication before you expose the listener beyond localhost. Agents running under Steve act with your local user's permissions.
