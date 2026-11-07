@@ -16,7 +16,7 @@ export default {
     stopped: {
       user: "你停下了",
       budget: "没读完",
-      violation: "越界停下",
+      violation: "工具检查未通过",
       restart: "Hub 重启",
       failed: "失败",
     },

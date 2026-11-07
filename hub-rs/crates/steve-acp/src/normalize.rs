@@ -400,9 +400,30 @@ fn tool_name(u: &Value) -> String {
                 .and_then(Value::as_str)
         })
         .or_else(|| u.pointer("/rawInput/tool_name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .or_else(|| mcp_invocation(u).map(|(server, tool, _)| format!("mcp__{server}__{tool}")))
         // unknown: empty, never a made-up name
-        .unwrap_or("")
-        .to_string()
+        .unwrap_or_default()
+}
+
+/// A structured MCP invocation as emitted by ACP adapters (including codex-acp 0.16).
+/// Explicit tool names take precedence: an ordinary tool's argument keys must not rename it.
+/// Display titles such as `Tool: server/tool` are deliberately never an identity source.
+fn mcp_invocation(u: &Value) -> Option<(&str, &str, &Value)> {
+    if u.get("name").and_then(Value::as_str).is_some()
+        || u.pointer("/_meta/claudeCode/toolName")
+            .and_then(Value::as_str)
+            .is_some()
+        || u.pointer("/rawInput/tool_name")
+            .and_then(Value::as_str)
+            .is_some()
+    {
+        return None;
+    }
+    let input = u.get("rawInput")?;
+    let server = input.get("server")?.as_str().filter(|s| !s.is_empty())?;
+    let tool = input.get("tool")?.as_str().filter(|s| !s.is_empty())?;
+    Some((server, tool, input.get("arguments")?))
 }
 
 fn category(kind: &str) -> ToolCategory {
@@ -595,11 +616,18 @@ fn content_parts(u: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Par
 }
 
 impl ToolFact {
+    /// The tool's actual arguments, without an adapter's MCP routing envelope.
+    pub fn input(&self) -> &Value {
+        mcp_invocation(&self.raw)
+            .map(|(_, _, arguments)| arguments)
+            .unwrap_or(&self.raw["rawInput"])
+    }
+
     /// Display projection only. The Node builds the authoritative permission Action from these
     /// facts: it must bind paths/cwd, preserve argv, and capture/recheck resource preconditions.
     /// In particular an argv or explicit cwd cannot be represented as a root-relative shell Exec.
     pub fn view(&self, root: &Path) -> ToolView {
-        let input = &self.raw["rawInput"];
+        let input = self.input();
         let action = if self.origin == ToolOrigin::Steve {
             Some(Action::Tool {
                 name: self
@@ -684,13 +712,16 @@ fn tool_fact(raw_id: &str, raw: Value, root: &Path) -> (ToolFact, Vec<Fact>) {
     let name = tool_name(&raw);
     let input = &raw["rawInput"];
     // server_name is programmatic routing metadata, unlike a title or a command's text.
-    let server = input.get("server_name").and_then(Value::as_str);
-    let origin = if name.starts_with("mcp__steve__") || server == Some("steve") {
-        ToolOrigin::Steve
-    } else if name.starts_with("mcp__") || server.is_some() {
-        ToolOrigin::External
-    } else {
-        ToolOrigin::Harness
+    let server = input
+        .get("server_name")
+        .and_then(Value::as_str)
+        .or_else(|| mcp_invocation(&raw).map(|(server, _, _)| server));
+    let origin = match server {
+        Some("steve") => ToolOrigin::Steve,
+        Some(_) => ToolOrigin::External,
+        None if name.starts_with("mcp__steve__") => ToolOrigin::Steve,
+        None if name.starts_with("mcp__") => ToolOrigin::External,
+        None => ToolOrigin::Harness,
     };
     let category = if origin == ToolOrigin::Steve {
         ToolCategory::Steve

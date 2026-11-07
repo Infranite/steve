@@ -572,6 +572,8 @@ pub enum Step {
     /// a tool call finished
     Tool(&'static str, &'static str),
     ToolFailure(&'static str, &'static str, &'static str),
+    /// the executor stops the run with this outcome
+    End(crate::thread::RunEnd),
     /// pause (lets drafts go out, lets a test act while it runs)
     Sleep(u64),
     /// wait until the test opens the gate (or the run is stopped)
@@ -637,6 +639,10 @@ impl crate::thread::Researcher for FakeResearch {
                     error: Some(error.into()),
                     ms: 1,
                 }),
+                Step::End(reason) => {
+                    end = reason;
+                    break;
+                }
                 Step::Sleep(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
                 Step::Gate => loop {
                     if req.stop.load(Ordering::SeqCst) {

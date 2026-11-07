@@ -9,8 +9,8 @@ use std::sync::LazyLock;
 pub const MARK_STOPPED: &str = "（已停下）";
 /// Mark appended when a budget (time, turns, tools) ended the run.
 pub const MARK_BUDGET: &str = "（没读完就停了）";
-/// Mark appended when the guard ended the run.
-pub const MARK_VIOLATION: &str = "（我越界去读了不该读的东西，已停下）";
+/// A tool check stopped the run; this does not prove that protected data was read.
+pub const MARK_VIOLATION: &str = "（本次查询在工具检查时停止，尚未完成。）";
 
 /// "Want me to change it?" — a suggested item (`meta.offer`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

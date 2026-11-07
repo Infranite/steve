@@ -19,7 +19,7 @@ export default {
     stopped: {
       user: "You stopped it",
       budget: "Didn't finish reading",
-      violation: "Stopped for going out of bounds",
+      violation: "Stopped at a tool check",
       restart: "Hub restarted",
       failed: "Failed",
     },

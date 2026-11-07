@@ -45,7 +45,7 @@ pub enum RunEnd {
     Stopped,
     /// time, turns or tool calls ran out
     Budget,
-    /// it tried to read or do something outside what research may (the executor ended it)
+    /// a tool check stopped it; this does not prove that protected data was read
     Violated,
     Failed,
 }
@@ -67,7 +67,7 @@ impl RunEnd {
             RunEnd::Done | RunEnd::Failed => None,
             RunEnd::Stopped => Some("（已停下）"),
             RunEnd::Budget => Some("（没读完就停了）"),
-            RunEnd::Violated => Some("（我越界去读了不该读的东西，已停下）"),
+            RunEnd::Violated => Some("（本次查询在工具检查时停止，尚未完成。）"),
         }
     }
 }

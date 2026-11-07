@@ -33,6 +33,21 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     }
     text("我先");
     if (prompt === "cancel") continue;
+    if (prompt.startsWith("mcp_")) {
+      const input = prompt === "mcp_title_only" ? { id: "ST-1" } : {
+        server: prompt === "mcp_external" ? "other" : "steve",
+        tool: prompt === "mcp_write" ? "steve_deliver" : prompt === "mcp_nested_name" ? "mcp__steve__steve_item_read" : "steve_item_read",
+        arguments: { id: "ST-1" },
+      };
+      // Real ACP MCP notification shape: identity lives in rawInput, never in the title.
+      update({ sessionUpdate: "tool_call", toolCallId: "mcp-1",
+        title: "Tool: steve/steve_item_read", status: "in_progress", rawInput: input });
+      update({ sessionUpdate: "tool_call_update", toolCallId: "mcp-1", status: "completed",
+        rawOutput: { content: [{ type: "text", text: "item progress" }] } });
+      text("已查询事项进度");
+      reply(req.id, { stopReason: "end_turn" });
+      continue;
+    }
     const bad = prompt === "violation";
     for (let i = 0; i < (prompt === "tools" ? 3 : 1); i++) {
       update({

@@ -128,6 +128,7 @@ fn programmatic_names_control_identity_not_titles() {
         "Read steve_config.rs",
         "mcp__steve__steve_deliver",
         "steve_update",
+        "Tool: steve/steve_item_read",
     ] {
         let fs = update(
             &mut n,
@@ -161,6 +162,91 @@ fn programmatic_names_control_identity_not_titles() {
         json!({"toolCallId":"cx", "rawInput":{"server_name":"other", "tool_name":"steve_update"}}),
     );
     assert_eq!(view(&fs).origin, ToolOrigin::External);
+}
+
+#[test]
+fn structured_mcp_invocations_keep_identity_and_arguments_across_updates() {
+    // ACP adapters can report the MCP invocation envelope rather than a flattened tool name.
+    // This is the codex-acp 0.16 notification shape; the title is display-only.
+    let mut n = norm();
+    let args = json!({"id":"ST-1"});
+    let fs = update(
+        &mut n,
+        json!({
+            "toolCallId":"mcp", "title":"Tool: steve/steve_item_read", "status":"in_progress",
+            "rawInput":{"server":"steve", "tool":"steve_item_read", "arguments":args}
+        }),
+    );
+    let f = n.fact("mcp").unwrap();
+    assert_eq!(f.origin, ToolOrigin::Steve);
+    assert_eq!(f.name, "mcp__steve__steve_item_read");
+    assert!(
+        matches!(&view(&fs).action, Some(Action::Tool { name, args: actual })
+        if name == "steve_item_read" && actual == &args)
+    );
+    update(
+        &mut n,
+        json!({"toolCallId":"mcp", "status":"completed", "rawOutput":{"ok":true}}),
+    );
+    assert_eq!(n.fact("mcp").unwrap().name, "mcp__steve__steve_item_read");
+
+    let fs = update(
+        &mut n,
+        json!({
+            "toolCallId":"external", "title":"Tool: steve/steve_item_read",
+            "rawInput":{"server":"other", "tool":"steve_item_read", "arguments":args}
+        }),
+    );
+    assert_eq!(view(&fs).origin, ToolOrigin::External);
+    assert!(!matches!(view(&fs).action, Some(Action::Tool { .. })));
+
+    let fs = update(
+        &mut n,
+        json!({
+            "toolCallId":"external-prefix", "title":"Tool: steve/steve_item_read",
+            "rawInput":{"server":"other", "tool":"mcp__steve__steve_item_read", "arguments":args}
+        }),
+    );
+    assert_eq!(
+        view(&fs).origin,
+        ToolOrigin::External,
+        "the server controls the origin even if the tool name claims Steve"
+    );
+    let fs = update(
+        &mut n,
+        json!({
+            "toolCallId":"external-explicit", "name":"mcp__steve__steve_item_read",
+            "rawInput":{"server_name":"other", "tool_name":"steve_item_read"}
+        }),
+    );
+    assert_eq!(view(&fs).origin, ToolOrigin::External);
+
+    let fs = update(
+        &mut n,
+        json!({
+            "toolCallId":"named", "name":"Read", "kind":"read",
+            "rawInput":{"server":"steve", "tool":"steve_item_read", "arguments":args}
+        }),
+    );
+    assert_eq!(
+        view(&fs).origin,
+        ToolOrigin::Harness,
+        "an explicit tool name takes precedence over argument keys"
+    );
+    assert_eq!(view(&fs).name, "Read");
+
+    let fs = update(
+        &mut n,
+        json!({
+            "toolCallId":"partial", "title":"Tool: steve/steve_item_read",
+            "rawInput":{"server":"steve", "arguments":args}
+        }),
+    );
+    assert_ne!(
+        view(&fs).origin,
+        ToolOrigin::Steve,
+        "an incomplete envelope cannot identify a Steve tool"
+    );
 }
 
 #[test]

@@ -423,6 +423,51 @@ async fn acp_research_keeps_read_only_tool_budget_and_idle_limits() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acp_research_checks_mcp_identity_without_trusting_display_titles() {
+    for (prompt, allowed) in [
+        ("mcp_read", true),
+        ("mcp_write", false),
+        ("mcp_external", false),
+        ("mcp_nested_name", false),
+        ("mcp_title_only", false),
+    ] {
+        let t = T::new();
+        let n = t.acp_node();
+        n.connect_tools(Arc::new(Tools::default())).await.unwrap();
+        let mut spec = acp_job("a_acp_mcp", prompt);
+        research(&mut spec).steve_tools = true;
+        n.start_job(now_cmd("acp_mcp", spec)).await.unwrap();
+        let completion = t.end_of(&n, "acp_mcp").await;
+        let report = completion.job.unwrap();
+        if allowed {
+            assert_eq!(report.end, JobEnd::Done, "{prompt}");
+            assert_eq!(
+                completion.result,
+                vec![Part::Text {
+                    text: "已查询事项进度".into()
+                }]
+            );
+            assert!(t.bodies().iter().any(|e| matches!(e,
+                EventBody::ToolChanged { tool } if tool.origin == ToolOrigin::Steve && tool.name == "mcp__steve__steve_item_read")));
+        } else {
+            assert!(
+                matches!(
+                    report.end,
+                    JobEnd::Violated {
+                        rule: ViolationRule::Tool,
+                        ..
+                    }
+                ),
+                "{prompt}: {:?}",
+                report.end
+            );
+        }
+        assert!(report.files_read.is_empty());
+        n.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acp_research_cancellation_keeps_the_partial_reply() {
     let t = T::new();
     let n = t.acp_node();
@@ -1049,6 +1094,10 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
     .await;
     assert_eq!(s, 200, "{list}");
     assert_eq!(list["result"]["tools"][0]["name"], "steve_knowledge_search");
+    assert_eq!(
+        list["result"]["tools"][0]["annotations"]["readOnlyHint"],
+        true
+    );
     let (_, called) = mcp(
         &url,
         &token,

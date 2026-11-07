@@ -924,6 +924,10 @@ async fn steves_tools_reach_the_hub_as_the_running_attempt() {
     .await;
     assert_eq!(s, 200, "{list}");
     assert_eq!(list["result"]["tools"][0]["name"], "steve_update");
+    assert_eq!(
+        list["result"]["tools"][0]["annotations"]["readOnlyHint"],
+        false
+    );
     let (_, called) = mcp(
         &url,
         &token,
