@@ -124,15 +124,16 @@ harness 自带的工具（Bash、Edit…）不经过 `tool.call`。其中需要�
 
 ## 6. 注册 Node
 
-当前配对通过 CLI 和已登录用户的 Hub API 完成，设备配对页面尚未实现。实际部署步骤见 [部署手册](deployment.md#pairing-a-separate-node)。
+当前已支持所有者在 **Devices → Add device** 页面生成配对码，并在 Devices 页面核对、确认节点指纹；Node 使用官方 CLI 从标准输入认领配对码。已登录所有者的 Hub API 仍可完成相同操作。实际部署步骤见 [部署手册](deployment.md#pairing-a-separate-node)。
 
-1. 已登录的用户调用 `POST /api/nodes/pairings`，拿到短时有效、只能用一次的配对码。
+1. 已登录的所有者打开 **Devices → Add device**（或调用 `POST /api/nodes/pairings`），生成十分钟内有效、只能用一次的配对码。
 2. 在新机器上使用独立的 `STEVE_HOME` 运行 `steve-node pair https://<hub> --name <节点名>`，从标准输入提供配对码，不把码放进命令参数。
-3. 调用 `GET /api/nodes`，将待确认 Node 的公钥指纹与 CLI 输出核对，再调用 `POST /api/nodes/<node_id>/confirm`。
+3. 在 Devices 找到待确认 Node，将公钥指纹与 CLI 输出核对，输入完整指纹并确认，记录其 `node_id`。API 等价操作是读取 `GET /api/nodes`、核对 Node ID 与指纹，再调用 `POST /api/nodes/<node_id>/confirm`；不能只按名称确认。
 4. 在新机器上使用配对时同一个独立 `STEVE_HOME` 运行 `steve-node run`，回读 Hub 中该 Node 的 `state=active`、`linked=true`。之后可以改名、暂停接活、吊销。
 
 细节：
 
+- Hub 需要 `STEVE_NODE_LISTEN=1`；节点入口默认只接受回环 TCP 对端，独立代理需通过 `STEVE_NODE_PROXY_PEERS` 配置 Hub 实际看到的精确 IP，并覆盖 `X-Forwarded-Proto` 为真实来访协议。非回环代理必须提供唯一的 `https` 值，不能依赖来客提供的转发地址头授权；配置预检及代理链路要求见 [Remote Nodes](deployment.md#remote-nodes)。
 - Node 用私钥证明身份，Hub 存公钥和吊销记录。连接走 TLS，Node 固定 Hub 的身份。
 - 本机 Node 自动建立身份，但走同一套授权和绑定。
 - Node 上线后上报能力：驱动、harness 版本、是否支持续接/取消/权限/图片、可用模型、沙箱能力、OS、允许的根目录（逻辑 id）、三类并发容量。
