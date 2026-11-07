@@ -4327,16 +4327,29 @@ async fn a_cancel_and_a_shutdown_get_past_a_full_ingress_queue() {
 /// with why, once the queue was full for the stall limit; the actor is never wedged by it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_harness_stuck_behind_a_stuck_journal_is_stopped_with_why() {
-    let t = T::new(&[]);
-    let stuck: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let gates = tempfile::tempdir().unwrap();
+    let flood = gates.path().join("flood");
+    let closed = gates.path().join("stdout-closed");
+    std::fs::write(&flood, "0").unwrap();
+    let t = T::new(&[
+        ("FAKE_ACP_FLOOD_GATE", flood.to_str().unwrap()),
+        ("FAKE_ACP_STDOUT_CLOSED", closed.to_str().unwrap()),
+    ]);
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (entered, blocked) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    let (release, wait) = std::sync::mpsc::channel();
+    let wait = Mutex::new(wait);
     let mut cfg = t.config();
-    let s = stuck.clone();
+    let arm = armed.clone();
     cfg.storage.free_space = Some(Arc::new(move || {
-        // slow, and stuck for a while (past the stall limit); it comes back to end the attempt
-        std::thread::sleep(Duration::from_millis(1));
-        let until = *s.lock().unwrap();
-        while until.is_some_and(|u| Instant::now() < u) {
-            std::thread::sleep(Duration::from_millis(10));
+        if arm.swap(false, Ordering::SeqCst) {
+            // Freeze one real journal write, without also starving the RPC reader's runtime.
+            // Dropping the release sender on failure always frees the journal again.
+            tokio::task::block_in_place(|| {
+                let _ = entered.lock().unwrap().take().unwrap().send(());
+                let _ = wait.lock().unwrap().recv();
+            });
         }
         1 << 40
     }));
@@ -4347,8 +4360,46 @@ async fn a_harness_stuck_behind_a_stuck_journal_is_stopped_with_why() {
     let mut spec = turn("s_1", "t_1", "a_1", "@flood");
     spec.run.limits.max_output_bytes = 64 << 20;
     n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
-    t.until("the flood", |t| t.text().len() > 64 * 4096).await;
-    *stuck.lock().unwrap() = Some(Instant::now() + Duration::from_secs(3));
+    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+        .await;
+    armed.store(true, Ordering::SeqCst);
+    // Let the first chunk reach the journal before releasing enough output to fill ingress.
+    // No amount of test-runner delay can let the whole flood finish before the disk is stuck.
+    std::fs::write(&flood, "1").unwrap();
+    tokio::time::timeout(Duration::from_secs(15), blocked)
+        .await
+        .expect("journal reached the barrier")
+        .unwrap();
+    std::fs::write(&flood, "2000").unwrap();
+    let (observed, pipe_error) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let result = loop {
+            if Instant::now() >= deadline {
+                break None;
+            }
+            if let Ok(code) = std::fs::read_to_string(&closed)
+                && !code.is_empty()
+            {
+                break Some(code);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // A separate observer also releases the journal if a broken stall gate leaves every
+        // runtime worker waiting on it. This deadline is cleanup on failure, not a success signal.
+        let _ = release.send(());
+        let _ = observed.send(result);
+    });
+    let pipe_error = pipe_error.await.unwrap();
+    if pipe_error.is_none() {
+        tokio::time::timeout(Duration::from_secs(15), n.shutdown())
+            .await
+            .expect("shutdown after releasing the stuck journal");
+    }
+    assert_eq!(
+        pipe_error.expect("stalled ingress closed the reader"),
+        "EPIPE"
+    );
     t.until("the end", |t| !t.ended().is_empty()).await;
     let end = &t.ended()[0];
     assert_eq!(end.outcome, Outcome::Interrupted, "{end:?}");
