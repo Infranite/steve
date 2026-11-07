@@ -1356,6 +1356,7 @@ impl Domain for CoreDomain {
             opening: p.opening,
             files: vec![],
             actor: Some(p.actor),
+            requester: None,
         };
         to_obj(blocking(move || c.create_item(n)).await?)
     }

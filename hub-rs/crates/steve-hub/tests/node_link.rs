@@ -412,6 +412,21 @@ async fn a_remote_node_takes_only_its_owners_work() {
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
     assert_eq!(phase(&h, "s1"), "ready", "{}", h.dump());
+    // recorded at bind (path model S1): nobody asked for it, so the workspace's service principal
+    let (p, a): (String, String) = h
+        .store
+        .reader(|c| {
+            Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT principal, audience FROM runtime_sessions WHERE session_id='s1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        (p.as_str(), a.as_str()),
+        ("svc:default", r#"["workspace:default"]"#)
+    );
     let member = |on: bool| {
         h.store
             .transaction::<_, steve_store::StoreError>(|tx| {

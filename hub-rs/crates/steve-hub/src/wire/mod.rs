@@ -22,6 +22,7 @@ pub mod node_secrets;
 pub mod node_tools;
 pub mod outbox;
 pub mod ports;
+pub mod principal;
 pub mod research;
 pub mod research_mcp;
 pub mod signals;

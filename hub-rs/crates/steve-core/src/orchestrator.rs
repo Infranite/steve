@@ -61,6 +61,8 @@ pub struct CreateItem {
     /// Attachments for the first session's prompt.
     pub files: Vec<FileRef>,
     pub actor: Option<String>,
+    /// Who asked for it when that is not the actor (a chat message's sender); `None`: the actor.
+    pub requester: Option<String>,
 }
 
 /// What [`Core::queued_send_now`] did with a queued message.
@@ -1105,6 +1107,11 @@ impl Tx<'_> {
         let project = project.filter(|p| p.workspace_id == ws);
         /* exactly one category, in the same write as the item: Steve's pick if nobody named one */
         let (tags, guessed) = crate::kinds::settle(db, ws, &n.tag_ids, &n.title, &n.goal)?;
+        /* whose access its runs use: the member who asked (Steve, a flow or a stranger: nobody) */
+        let requested_by = match n.requester.as_deref().or(n.actor.as_deref()) {
+            Some(a) if db.store().workspaces().is_member(ws, a)? => Some(a.to_string()),
+            _ => None,
+        };
         let item = db.item_create(
             ws,
             &NewItem {
@@ -1118,6 +1125,7 @@ impl Tx<'_> {
                 source: n.source.clone(),
                 parent: n.parent.clone(),
                 tags,
+                requested_by,
             },
         )?;
         let where_ = project
@@ -3843,6 +3851,7 @@ impl Tx<'_> {
             propose: false,
             opening: Some(opening),
             actor: Some(actor.into()),
+            requester: None,
             files: vec![],
         })?;
         if let Some(pi) = s.item_id.as_deref() {

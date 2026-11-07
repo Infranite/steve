@@ -646,6 +646,7 @@ impl Core {
             from_question: r.signals.iter().any(|s| s == "question"),
             answer: None,
             start,
+            by: user.map(String::from),
         });
         let item = Steps::end(
             steps,

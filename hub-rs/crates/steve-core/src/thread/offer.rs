@@ -59,6 +59,8 @@ pub(crate) struct ThreadItem<'a> {
     /// the owner asked for it: work starts. Anyone else: a proposal the owner says yes to first, from a
     /// source of its own (`chat_proposal`) so that nothing (YOLO included) takes it for the owner's
     pub start: bool,
+    /// The member who said it (`None`: not known), whose access the item's runs use.
+    pub by: Option<String>,
 }
 
 fn hm(t: i64) -> String {
@@ -244,6 +246,7 @@ impl Core {
             opening,
             files: n.files,
             propose: !n.start,
+            requester: n.by,
             ..Default::default()
         })?;
         self.store()
@@ -381,6 +384,7 @@ impl Core {
             from_question,
             start,
             answer: Some(&m),
+            by: None,
         })?;
         meta["offer"]["state"] = json!("taken");
         meta["offer"]["item"] = json!(item.id);

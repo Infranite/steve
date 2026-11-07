@@ -50,6 +50,7 @@ impl steve_flow::Core for FlowCore {
                     opening: None,
                     files: vec![],
                     actor: Some("steve".into()),
+                    requester: None,
                 })
                 .map_err(|e| e.to_string())?;
             if req.accept_auto {
