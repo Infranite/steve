@@ -22,7 +22,7 @@
 
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -176,6 +176,13 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         env!("CARGO_MANIFEST_DIR"),
         "/../steve-acp/tests/fake-acp.js"
     );
+    // tracing_subscriber writes to stdout by default. Capture both streams so a failed end-to-end
+    // assertion retains the Hub's event/permission errors instead of showing an empty log.
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(h.dir.path().join("hub.log"))
+        .expect("hub log");
     let mut c = Command::new(env!("CARGO_BIN_EXE_steve-hub"));
     c.env("HOME", h.dir.path())
         .env("STEVE_HOME", h.steve())
@@ -207,14 +214,8 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         .env_remove("STEVE_OPENVIKING_URL")
         .env_remove("STEVE_OPENVIKING_ACCOUNT")
         .env_remove("STEVE_OIDC_ISSUER")
-        .stdout(Stdio::null())
-        .stderr(
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(h.dir.path().join("hub.log"))
-                .expect("hub log"),
-        )
+        .stdout(log.try_clone().expect("hub stdout log"))
+        .stderr(log)
         .process_group(0);
     if let Some(mode) = mode {
         c.env("STEVE_NODE_MODE", mode);
