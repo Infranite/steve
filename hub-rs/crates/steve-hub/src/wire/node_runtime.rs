@@ -4882,6 +4882,12 @@ mod tests {
                 },
             ))
             .unwrap();
+            // A newer reconcile can register this head before the old empty observation's
+            // caught-up callback runs. That callback must not release the new execution hold.
+            rt.lagging
+                .lock()
+                .unwrap()
+                .insert(S.into(), ("stream1".into(), "epoch1".into(), 2));
         }));
         assert!(inserted);
         assert_eq!(
@@ -4896,10 +4902,15 @@ mod tests {
                 .contains(&("stream1".into(), "epoch1".into()))
         );
         assert!(
+            rt.is_uncertain(S),
+            "the old empty observation must not release a hold on the new head"
+        );
+        assert!(
             rt.apply_some(),
             "the next pass needs no third event, retry or restart"
         );
         assert_eq!(head(), (2, 2));
+        assert!(!rt.is_uncertain(S), "the new head was actually applied");
         let projected: i64 = store
             .reader(|c| {
                 Ok::<_, StoreError>(c.query_row(

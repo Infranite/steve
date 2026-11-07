@@ -500,20 +500,40 @@ impl NodeRuntime {
         Ok(())
     }
 
-    /// The apply worker found nothing more to apply on `stream` (all it holds is applied, or the
-    /// stream faulted): a session held for lagging on it goes on (what waited is planned now).
+    /// The apply worker found nothing more to apply on `stream`. Release only holds whose head
+    /// is applied (or whose stream faulted): a newer reconcile may have installed a later head
+    /// since the worker's empty observation. What waited on a released hold is planned now.
     pub(super) fn caught_up_on(&self, stream: &str, epoch: &str) {
-        let freed: Vec<String> = {
+        let freed = self.tx(|tx| {
+            let row: Option<(i64, Option<String>)> = tx
+                .query_row(
+                    "SELECT applied, fault FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
+                    rusqlite::params![self.node_id.as_str(), stream, epoch],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let (applied, faulted) = row.map_or((0, false), |(applied, fault)| {
+                (applied as u64, fault.is_some())
+            });
             let mut lagging = self.lagging.lock().unwrap();
             let freed = lagging
                 .iter()
-                .filter(|(_, (s, e, _))| s == stream && e == epoch)
+                .filter(|(_, (s, e, head))| {
+                    s == stream && e == epoch && (faulted || applied >= *head)
+                })
                 .map(|(k, _)| k.clone())
                 .collect::<Vec<_>>();
             for k in &freed {
                 lagging.remove(k);
             }
-            freed
+            Ok(freed)
+        });
+        let freed = match freed {
+            Ok(freed) => freed,
+            Err(e) => {
+                tracing::error!("check {stream} after its stream caught up: {e}");
+                return;
+            }
         };
         for s in freed {
             if let Err(e) = self.tx(|tx| self.plan_after_in(tx, &s)) {
