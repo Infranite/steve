@@ -51,6 +51,9 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
     if let Err(e) = crate::wire::local_node_mode(&vars, cfg.no_resume) {
         errors.push(e.to_string());
     }
+    if let Err(e) = crate::nodes::Ingress::from_vars(|k| vars(k)) {
+        errors.push(e);
+    }
     if let Err(e) = steve_modules::vault::keystore::from_env(&cfg.home, |k| vars(k)) {
         errors.push(format!("vault key store (STEVE_VAULT_KEYSTORE): {e}"));
     }
@@ -162,6 +165,14 @@ mod tests {
 
     #[test]
     fn the_other_startup_refusals_are_found_too() {
+        let r = run(&[("STEVE_NODE_PROXY_PEERS", "192.0.2.0/24")]);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.contains("STEVE_NODE_PROXY_PEERS"))
+        );
+        let r = run(&[("STEVE_NODE_PROXY_PEERS", "192.0.2.10")]);
+        assert!(r.ok, "{r:?}");
         let r = run(&[("STEVE_NODE_MODE", "sometimes")]);
         assert!(
             r.errors.iter().any(|e| e.contains("STEVE_NODE_MODE")),
