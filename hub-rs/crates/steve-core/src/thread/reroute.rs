@@ -346,7 +346,11 @@ impl Core {
             }
         };
         let r = cell
-            .get_or_init(|| async { self.promote_now(ws, &m, by).await.map_err(|e| e.to_string()) })
+            .get_or_init(|| async {
+                self.promote_now(ws, &m, by)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
             .await
             .clone();
         lock(&self.0.thread.promoting).remove(msg_id);

@@ -244,7 +244,10 @@ mod tests {
         // the Node's protected directories are made first, so one it fills later is hidden too
         assert_eq!(a[at(&r("data/node/secrets")) - 1], "--tmpfs");
         assert!(real.join("data/node/secrets").is_dir());
-        assert!(real.join("scratch").is_dir(), "the run directories exist and are writable");
+        assert!(
+            real.join("scratch").is_dir(),
+            "the run directories exist and are writable"
+        );
         assert_eq!(
             a[at(&r("steve.env")) - 2..at(&r("steve.env"))],
             ["--ro-bind", "/dev/null"]

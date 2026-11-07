@@ -1807,7 +1807,12 @@ impl Domain for CoreDomain {
         }
     }
     async fn promote(&self, ws: &str, message: &str, by: &str) -> BResult<Obj> {
-        to_obj(self.core.promote(ws, message, Some(by)).await.map_err(cerr)?)
+        to_obj(
+            self.core
+                .promote(ws, message, Some(by))
+                .await
+                .map_err(cerr)?,
+        )
     }
     async fn reroute(&self, ws: &str, message: &str, to: &str, by: &str) -> BResult<(Obj, bool)> {
         let to = steve_core::thread::RerouteTo::parse(to).ok_or_else(|| BackendError {

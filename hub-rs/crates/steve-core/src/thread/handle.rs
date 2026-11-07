@@ -536,7 +536,9 @@ impl Core {
             if let Some(t) = target
                 && let Some(rm) = t.reply_msg.clone()
             {
-                let h = self.reroute(ws, &rm, super::RerouteTo::Inline, user).await?;
+                let h = self
+                    .reroute(ws, &rm, super::RerouteTo::Inline, user)
+                    .await?;
                 reply(
                     &format!("好，{} 不做了，改在这里回答。", t.item_id),
                     None,
@@ -556,7 +558,9 @@ impl Core {
                     m.author == "steve" && m.meta.get("chat").is_some_and(crate::gateway::truthy)
                 });
             if let Some(m) = target.cloned() {
-                let h = self.reroute(ws, &m.id, super::RerouteTo::Item, user).await?;
+                let h = self
+                    .reroute(ws, &m.id, super::RerouteTo::Item, user)
+                    .await?;
                 let item = h.item.map(|i| i.id);
                 if let Some(i) = &item {
                     reply(&format!("好，已经做成 {i}。"), Some(i), None);

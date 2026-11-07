@@ -925,7 +925,13 @@ pub trait Domain: Send + Sync + 'static {
         todo_backend!("offer")
     }
     /// `choice`: `here` | `item` | `new`.
-    async fn suggest(&self, ws: &str, message: &str, choice: &str, by: &str) -> BResult<(Obj, bool)> {
+    async fn suggest(
+        &self,
+        ws: &str,
+        message: &str,
+        choice: &str,
+        by: &str,
+    ) -> BResult<(Obj, bool)> {
         todo_backend!("suggest")
     }
     /// An A2UI button in Steve's reply `message` (ST-46): `{already, message_id?, action}`.

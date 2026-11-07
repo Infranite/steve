@@ -346,7 +346,11 @@ async fn a4a_an_item_goes_back_into_the_conversation() {
         .db()
         .message_add(WS, "steve", "建了", Some(&done), None)
         .unwrap();
-    let e = k.core.reroute(WS, &m, RerouteTo::Inline, None).await.unwrap_err();
+    let e = k
+        .core
+        .reroute(WS, &m, RerouteTo::Inline, None)
+        .await
+        .unwrap_err();
     assert_eq!(e.to_string(), "这件事项已经验收，不能改回对话");
     assert!(matches!(e, crate::CoreError::Status(409, _)));
     let e = k
