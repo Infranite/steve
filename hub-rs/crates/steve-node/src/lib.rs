@@ -13,6 +13,7 @@
 
 mod acp_job;
 mod actor;
+mod artifact;
 mod attachments;
 mod confine;
 
@@ -2280,6 +2281,14 @@ impl SessionExecutor for LocalNode {
                 ));
             }
             t.take_attempt(&exec, &c.id)?;
+            if let Some(digest) = &row.open.artifact_view {
+                t.put_artifact_grant(&artifact::Grant::capture(
+                    exec.clone(),
+                    digest.clone(),
+                    row.open.workspace.clone(),
+                    &w,
+                )?)?;
+            }
             row.view.phase = SessionPhase::Active;
             row.view.active = Some(exec.clone());
             t.put_session(&row)?;
@@ -3480,6 +3489,34 @@ impl WorkspaceExecutor for LocalNode {
         .await
     }
 
+    async fn read_artifact(&self, q: ArtifactRead) -> ApiResult<ReadChunk> {
+        let grant = self.0.j.read(|t| {
+            let grant = t.artifact_grant(q.execution.attempt())?.ok_or_else(|| {
+                ApiError::new(ErrorCode::Unsupported, "execution has no artifact view")
+            })?;
+            if grant.execution != q.execution || grant.view_digest != q.view_digest {
+                return Err(ApiError::new(ErrorCode::Denied, "another execution view"));
+            }
+            let current = t.workspace(&grant.workspace.id)?.ok_or_else(|| {
+                ApiError::new(ErrorCode::Denied, "artifact workspace no longer available")
+            })?;
+            if current.incarnation != grant.incarnation || current.path != grant.dir {
+                return Err(ApiError::new(
+                    ErrorCode::Denied,
+                    "artifact workspace replaced",
+                ));
+            }
+            Ok(grant)
+        })?;
+        // Current configured roots still apply (including revocation), independently of what
+        // the Hub recorded when the execution was accepted.
+        let base = workspace_dir(&self.0, &grant.workspace)?;
+        if base != Path::new(&grant.dir) {
+            return Err(ApiError::new(ErrorCode::Denied, "artifact workspace moved"));
+        }
+        blocking(move || artifact::read(&grant, &q)).await
+    }
+
     /// Accepted now; finished once the tree is walked, its manifest kept for [`Self::scan_page`]
     /// (until a restart: then scan again). `busy` while too many scans are being read: one being
     /// read is never dropped for a new one.
@@ -3680,7 +3717,7 @@ impl Discovery for LocalNode {
                 .collect(),
             capacity: self.0.cfg.capacity.clone(),
             // a command's secret as a temp file on this machine
-            features: vec![FEATURE_SECRET_FILE.into()],
+            features: vec![FEATURE_SECRET_FILE.into(), FEATURE_ARTIFACT_READ.into()],
         })
     }
     /// Newest first; the cursor is the position in that order.

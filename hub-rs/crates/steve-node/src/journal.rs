@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS procs (
   started INTEGER);
 CREATE TABLE IF NOT EXISTS reservations (key TEXT PRIMARY KEY, op TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS command_specs (op TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS artifact_grants (
+  attempt TEXT PRIMARY KEY, workspace TEXT NOT NULL, body TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS artifact_grants_workspace ON artifact_grants(workspace);
 CREATE TABLE IF NOT EXISTS answers (
   op TEXT PRIMARY KEY, permission TEXT NOT NULL, resolution TEXT NOT NULL);
 ";
@@ -237,6 +240,35 @@ impl Journal {
 impl Tx<'_> {
     fn c(&self) -> &Connection {
         &self.0
+    }
+
+    /// Additive auxiliary state: old Nodes ignore this table. There is no new startup refusal
+    /// or journal version bump; grants are independently checked against workspace generation.
+    pub fn put_artifact_grant(&self, grant: &crate::artifact::Grant) -> ApiResult<()> {
+        self.c()
+            .execute(
+                "INSERT INTO artifact_grants(attempt,workspace,body) VALUES (?1,?2,?3)",
+                params![
+                    grant.execution.attempt().as_str(),
+                    grant.workspace.id.as_str(),
+                    json(grant)
+                ],
+            )
+            .map_err(internal)?;
+        Ok(())
+    }
+
+    pub fn artifact_grant(&self, attempt: &AttemptId) -> ApiResult<Option<crate::artifact::Grant>> {
+        let body: Option<String> = self
+            .c()
+            .query_row(
+                "SELECT body FROM artifact_grants WHERE attempt=?1",
+                [attempt.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        body.map(|s| from(&s).map_err(internal)).transpose()
     }
 
     /// A counter that never goes back (incarnations, revisions, event ids).
@@ -787,6 +819,14 @@ impl Tx<'_> {
     }
 
     pub fn put_workspace(&self, w: &WorkspaceRow) -> ApiResult<()> {
+        // Re-preparing the same resource creates a new directory generation. Its predecessors'
+        // artifact grants must neither survive as authorization nor accumulate in the journal.
+        self.c()
+            .execute(
+                "DELETE FROM artifact_grants WHERE workspace=?1",
+                [w.view.workspace.id.as_str()],
+            )
+            .map_err(internal)?;
         self.c()
             .execute(
                 "INSERT OR REPLACE INTO workspaces (id, resource, spec, kind, view, path, repo, incarnation)
@@ -807,6 +847,12 @@ impl Tx<'_> {
     }
 
     pub fn drop_workspace(&self, id: &WorkspaceId) -> ApiResult<()> {
+        self.c()
+            .execute(
+                "DELETE FROM artifact_grants WHERE workspace = ?1",
+                [id.as_str()],
+            )
+            .map_err(internal)?;
         self.c()
             .execute("DELETE FROM workspaces WHERE id = ?1", [id.as_str()])
             .map_err(internal)?;

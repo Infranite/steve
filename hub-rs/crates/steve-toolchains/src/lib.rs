@@ -83,6 +83,14 @@ struct File {
 #[derive(Debug, Clone)]
 pub struct Toolchains(Vec<Toolchain>);
 
+/// A marker match at a particular project directory. A monorepo may use the same
+/// toolchain at several locations; callers must not lose those locations.
+#[derive(Debug)]
+pub struct DiscoveredToolchain<'a> {
+    pub toolchain: &'a Toolchain,
+    pub project: PathBuf,
+}
+
 impl Toolchains {
     pub fn builtin() -> Toolchains {
         Toolchains::parse(BUILTIN).expect("the built-in toolchains parse")
@@ -113,7 +121,9 @@ impl Toolchains {
     }
 
     /// The toolchains a project in `root` uses: a marker at its root or one level down (as the
-    /// lane's lockfiles are looked for), in definition order.
+    /// lane's lockfiles are looked for), in definition order. This compatibility
+    /// API retains its original link and lossy filename behavior; use [`Self::discover`]
+    /// for per-project discovery that ignores links.
     pub fn detect(&self, root: &Path) -> Vec<&Toolchain> {
         let mut names: Vec<String> = Vec::new();
         let mut look = |dir: &Path| {
@@ -143,6 +153,73 @@ impl Toolchains {
                 t.detect
                     .iter()
                     .any(|pat| names.iter().any(|n| matches(pat, n)))
+            })
+            .collect()
+    }
+
+    /// Match each project at the root and one level down, in definition order,
+    /// with the root before children sorted by name. Neither links nor hidden
+    /// directories nor declared in-tree output directories are entered.
+    ///
+    /// This is discovery, not a filesystem capability: a Node must still anchor
+    /// and recheck directories before opening or changing anything in them.
+    pub fn discover(&self, root: &Path) -> Vec<DiscoveredToolchain<'_>> {
+        if !std::fs::symlink_metadata(root).is_ok_and(|m| m.is_dir()) {
+            return Vec::new();
+        }
+        let mut projects = vec![root.to_path_buf()];
+        if let Ok(rd) = std::fs::read_dir(root) {
+            let output_names = self.in_tree_names();
+            let mut children: Vec<_> = rd
+                .flatten()
+                .filter(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    e.file_type().is_ok_and(|t| t.is_dir())
+                        && !name.starts_with('.')
+                        && !output_names.iter().any(|output| {
+                            relative_path(output).ok().is_some_and(|path| {
+                                path.components()
+                                    .find_map(|c| match c {
+                                        std::path::Component::Normal(n) => Some(n),
+                                        _ => None,
+                                    })
+                                    .is_some_and(|n| n == e.file_name())
+                            })
+                        })
+                })
+                .collect();
+            children.sort_by_key(|e| e.file_name());
+            projects.extend(children.into_iter().map(|e| e.path()));
+        }
+        let projects: Vec<_> = projects
+            .into_iter()
+            .map(|project| {
+                let names: Vec<_> = std::fs::read_dir(&project)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_file() || t.is_dir()))
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect();
+                (project, names)
+            })
+            .collect();
+        self.0
+            .iter()
+            .flat_map(|toolchain| {
+                projects
+                    .iter()
+                    .filter(move |(_, names)| {
+                        toolchain
+                            .detect
+                            .iter()
+                            .any(|pat| names.iter().any(|name| matches(pat, name)))
+                    })
+                    .map(move |(project, _)| DiscoveredToolchain {
+                        toolchain,
+                        project: project.clone(),
+                    })
             })
             .collect()
     }
@@ -218,17 +295,91 @@ pub struct Places {
     pub person: PathBuf,
 }
 
+/// Why a declaration cannot yet be used as a directory. Unknown or malformed
+/// declarations stay in the plan; consumers must not count them as zero bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryError {
+    InvalidToolchainId,
+    InvalidProject,
+    InvalidPlace,
+    NonUtf8Path,
+    MissingPath,
+    ConflictingPaths,
+    EnvValueMismatch,
+    InvalidRelativePath,
+    InvalidTemplate,
+    ScopeMismatch,
+}
+
+/// One declared directory at one project. The original declaration retains its
+/// scope and disposal hints; they are not authority to access or delete it.
+#[derive(Debug)]
+pub struct PlannedDirectory<'a> {
+    pub declaration: &'a Dir,
+    pub project: PathBuf,
+    pub path: Result<PathBuf, DirectoryError>,
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains(['/', '\\', ':'])
+        && !id.chars().any(char::is_control)
+        && id != "."
+        && id != ".."
+}
+
+fn relative_path(path: &str) -> Result<PathBuf, DirectoryError> {
+    // Check both separators even on Unix, so a definition cannot change meaning
+    // when it is sent to a Node on another OS.
+    if path.is_empty() || path.contains(['\\', ':', '\0', '{', '}']) {
+        return Err(DirectoryError::InvalidRelativePath);
+    }
+    let path = Path::new(path);
+    if path.is_absolute()
+        || path.components().any(|c| {
+            !matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(DirectoryError::InvalidRelativePath);
+    }
+    Ok(path.to_path_buf())
+}
+
+fn fill_template(value: &str, item: &str, person: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        if let Some(tail) = rest.strip_prefix("{item}") {
+            out.push_str(item);
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("{person}") {
+            out.push_str(person);
+            rest = tail;
+        } else {
+            out.push('{');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 impl Toolchain {
     /// What a run sets for this toolchain: its fixed settings, the chosen options' variables
     /// (`options`: a project's choice by name, else the default), and the variables that move its
-    /// directories into `at`.
+    /// directories into `at`. Placeholders are expanded once; text in a real path
+    /// is never reinterpreted as a template. This compatibility interface retains
+    /// lossy conversion of non-UTF-8 places: strict consumers must first call
+    /// [`Self::validate_places`] and inspect [`Self::directory_plan`].
     pub fn env(&self, at: &Places, options: &BTreeMap<String, bool>) -> Vec<(String, String)> {
         let item = at.item.join(&self.id);
         let person = at.person.join(&self.id);
-        let fill = |v: &str| {
-            v.replace("{item}", &item.to_string_lossy())
-                .replace("{person}", &person.to_string_lossy())
-        };
+        let fill = |v: &str| fill_template(v, &item.to_string_lossy(), &person.to_string_lossy());
         let mut out: Vec<(String, String)> =
             self.env.iter().map(|(k, v)| (k.clone(), fill(v))).collect();
         for (name, o) in &self.options {
@@ -244,23 +395,106 @@ impl Toolchain {
         out
     }
 
-    /// The directories [`Self::env`] points at, to make before the run starts.
+    /// Check the directory context, even for a toolchain with no directory
+    /// declarations. Strict consumers must call this before environment injection;
+    /// an empty directory plan does not imply that the context is valid.
+    pub fn validate_places(&self, at: &Places) -> Result<(), DirectoryError> {
+        if !valid_id(&self.id) {
+            return Err(DirectoryError::InvalidToolchainId);
+        }
+        for place in [&at.item, &at.person] {
+            if place.to_str().is_none() {
+                return Err(DirectoryError::NonUtf8Path);
+            }
+            if !place.is_absolute()
+                || place
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir)
+            {
+                return Err(DirectoryError::InvalidPlace);
+            }
+        }
+        Ok(())
+    }
+
+    /// The resolvable directories [`Self::env`] points at, to make before the run
+    /// starts. This compatibility helper omits errors; new consumers must inspect
+    /// [`Self::directory_plan`] before injecting environment or accounting bytes.
     pub fn dirs_to_make(&self, at: &Places) -> Vec<PathBuf> {
-        let item = at.item.join(&self.id);
-        let person = at.person.join(&self.id);
+        self.directory_plan(Path::new(""), at)
+            .into_iter()
+            .filter(|d| d.declaration.env.is_some())
+            .filter_map(|d| d.path.ok())
+            .collect()
+    }
+
+    /// Resolve declarations without filesystem access. Paths under the project
+    /// are relative; moved paths must start with the placeholder for their scope.
+    /// No flag syntax is inferred from `value`: `=` can be part of a directory.
+    ///
+    /// The result is input to a Node's safe traversal, not OS authorization.
+    pub fn directory_plan(&self, project: &Path, at: &Places) -> Vec<PlannedDirectory<'_>> {
         self.dirs
             .iter()
-            .filter(|d| d.env.is_some())
-            .filter_map(|d| {
-                let v = d.value.as_deref()?;
-                // the path in it: a flag's value after `=`, or the whole value
-                let p = v.rsplit_once('=').map_or(v, |(_, p)| p);
-                let p = p
-                    .replace("{item}", &item.to_string_lossy())
-                    .replace("{person}", &person.to_string_lossy());
-                Path::new(&p).is_absolute().then(|| PathBuf::from(p))
+            .map(|declaration| PlannedDirectory {
+                declaration,
+                project: project.to_path_buf(),
+                path: self.resolve_directory(declaration, project, at),
             })
             .collect()
+    }
+
+    fn resolve_directory(
+        &self,
+        dir: &Dir,
+        project: &Path,
+        at: &Places,
+    ) -> Result<PathBuf, DirectoryError> {
+        self.validate_places(at)?;
+        if dir.env.is_some() != dir.value.is_some() {
+            return Err(DirectoryError::EnvValueMismatch);
+        }
+        match (&dir.in_tree, &dir.value) {
+            (Some(_), Some(_)) => Err(DirectoryError::ConflictingPaths),
+            (None, None) => Err(DirectoryError::MissingPath),
+            (Some(path), None) => {
+                if dir.scope == Scope::Person {
+                    return Err(DirectoryError::ScopeMismatch);
+                }
+                if project.to_str().is_none() {
+                    return Err(DirectoryError::NonUtf8Path);
+                }
+                if !project.is_absolute()
+                    || project
+                        .components()
+                        .any(|c| c == std::path::Component::ParentDir)
+                {
+                    return Err(DirectoryError::InvalidProject);
+                }
+                Ok(project.join(relative_path(path)?))
+            }
+            (None, Some(value)) => {
+                let (placeholder, base) = match dir.scope {
+                    Scope::Item | Scope::Seed => ("{item}", &at.item),
+                    Scope::Person => ("{person}", &at.person),
+                };
+                let suffix = match value.strip_prefix(placeholder) {
+                    Some(suffix) => suffix,
+                    None if value.starts_with("{item}") || value.starts_with("{person}") => {
+                        return Err(DirectoryError::ScopeMismatch);
+                    }
+                    None => return Err(DirectoryError::InvalidTemplate),
+                };
+                let root = base.join(&self.id);
+                if suffix.is_empty() {
+                    return Ok(root);
+                }
+                let suffix = suffix
+                    .strip_prefix('/')
+                    .ok_or(DirectoryError::InvalidTemplate)?;
+                Ok(root.join(relative_path(suffix)?))
+            }
+        }
     }
 }
 

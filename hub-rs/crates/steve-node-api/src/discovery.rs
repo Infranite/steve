@@ -67,6 +67,8 @@ pub struct Capabilities {
 /// The Node writes a secret to a temporary file for a command ([`crate::SecretDelivery::File`]).
 /// Only the Hub's own machine offers it; a remote Node's claim is dropped.
 pub const FEATURE_SECRET_FILE: &str = "secret-file";
+/// Strict artifact reads bound to an accepted execution and its recorded view.
+pub const FEATURE_ARTIFACT_READ: &str = "artifact-read-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryRef {

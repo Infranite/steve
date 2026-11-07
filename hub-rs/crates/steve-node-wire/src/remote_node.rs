@@ -261,6 +261,10 @@ impl WorkspaceExecutor for RemoteNode {
         q.max = q.max.min(crate::envelope::CHUNK_BYTES);
         self.go(FS_READ, &q, None, false).await
     }
+    async fn read_artifact(&self, mut q: ArtifactRead) -> ApiResult<ReadChunk> {
+        q.max = q.max.min(crate::envelope::CHUNK_BYTES);
+        self.go(ARTIFACT_READ, &q, None, false).await
+    }
     async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt> {
         if c.body.limits != ScanLimits::default() {
             self.needs(2, "scan limits")?;

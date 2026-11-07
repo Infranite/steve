@@ -753,6 +753,7 @@ impl NodeRuntime {
             // set in the bind's transaction, once its principal is recorded
             env: vec![],
             state: None,
+            artifact_view: None,
         };
         let fresh = self.tx(|tx| {
             self.session_owners_work_in(tx, &b.session)?;
