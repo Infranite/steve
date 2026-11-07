@@ -45,6 +45,8 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(bundle.getmember("bin/steve-keyhelper").mode, 0o755)
             self.assertEqual(set(n for n in bundle.getnames() if n.startswith("ops/")),
                              {"ops/" + n for n in release.RUNTIME_OPS})
+            self.assertIn("ops/upgrade.py", bundle.getnames())
+            self.assertEqual(bundle.getmember("ops/upgrade.py").mode, 0o755)
             self.assertEqual(bundle.getmember("bin/steve-hub").mode, 0o755)
             self.assertEqual(json.load(bundle.extractfile("release.json"))["version"], "0.2.0")
             self.assertIn(b'content="0.2.0"', bundle.extractfile("web/dist/index.html").read())

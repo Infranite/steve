@@ -548,7 +548,8 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--build-info") {
         println!(
             "{}",
-            serde_json::json!({"version":option_env!("STEVE_BUILD_VERSION"),"commit":option_env!("STEVE_BUILD_COMMIT"),"target":env!("STEVE_BUILD_TARGET"),"schema":steve_store::db::SCHEMA_VERSION,"check_config":true})
+            serde_json::json!({"version":option_env!("STEVE_BUILD_VERSION"),"commit":option_env!("STEVE_BUILD_COMMIT"),"target":env!("STEVE_BUILD_TARGET"),"schema":steve_store::db::SCHEMA_VERSION,"check_config":true,
+                "upgrade_runner":{"journal":1,"kinds":["release_bundle","local_release"]}})
         );
         return Ok(());
     }

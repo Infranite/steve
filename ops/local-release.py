@@ -258,7 +258,7 @@ def sign(binary, keychain, password, identifier):
     subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
 
 
-BUNDLE_OPS = {"run.sh", "run-managed.sh", "backup.sh", "schema_gate.py", "local-release.py", "steve-service.py", "sign-setup.sh", "release-lib.sh"}
+BUNDLE_OPS = {"run.sh", "run-managed.sh", "backup.sh", "schema_gate.py", "local-release.py", "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh"}
 MAX_BUNDLE_BYTES = 2 * 1024 * 1024 * 1024
 
 

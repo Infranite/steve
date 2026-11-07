@@ -73,4 +73,40 @@ fn a_good_environment_passes_and_build_info_says_the_check_exists() {
         .expect("build info");
     let info: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_eq!(info["check_config"], true, "{info}");
+    assert_eq!(info["upgrade_runner"]["journal"], 1, "{info}");
+    assert!(
+        info["upgrade_runner"]["kinds"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("release_bundle")),
+        "{info}"
+    );
+}
+
+#[test]
+fn local_cli_requests_use_the_hubs_operation_contract() {
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../ops/test-upgrade.py");
+    let out = Command::new("python3")
+        .arg(script)
+        .arg("--contract")
+        .output()
+        .expect("isolated CLI fixture");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let op: steve_hub::upgrades::Operation =
+        serde_json::from_slice(&out.stdout).expect("Hub Operation contract");
+    assert_eq!(op.phase, "staging");
+    assert_eq!(op.approved_by.as_deref(), Some(op.requested_by.as_str()));
+    assert!(op.requested_by.starts_with("local-os:"));
+    let runner = op.runner.unwrap();
+    assert_eq!(runner.kind, "release_bundle");
+    assert!(runner.repo.is_empty());
+    assert_eq!(
+        runner.commit.as_deref(),
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    );
 }

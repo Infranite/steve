@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 
-RUNTIME_OPS = ("run.sh", "run-managed.sh", "backup.sh", "schema_gate.py", "local-release.py", "steve-service.py", "sign-setup.sh", "release-lib.sh")
+RUNTIME_OPS = ("run.sh", "run-managed.sh", "backup.sh", "schema_gate.py", "local-release.py", "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh")
 
 
 def write(path, value):
