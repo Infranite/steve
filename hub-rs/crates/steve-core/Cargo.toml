@@ -6,6 +6,7 @@ publish.workspace = true
 description = "Steve Hub domain logic: item lifecycle, decisions, main thread routing, model gateway, conversational config"
 
 [dependencies]
+steve-toolchains = { path = "../steve-toolchains" }
 async-trait = "=0.1.92"
 base64 = "=0.23.1"
 chrono = "=0.4.45"

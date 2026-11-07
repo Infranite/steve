@@ -80,7 +80,7 @@ pub(crate) fn rel_path(f: &Fetched) -> String {
 
 /// A directory of the workspace, made if missing; refused when it is anything but a real
 /// directory (a link could point out of the workspace).
-fn real_dir(p: &Path) -> Result<(), String> {
+pub(crate) fn real_dir(p: &Path) -> Result<(), String> {
     match fs::create_dir(p) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -106,7 +106,7 @@ fn holds(p: &Path, size: u64, sha256: &str) -> bool {
 
 /// Writes `bytes` to `dst` whole: a temporary file next to it, then one rename (which replaces a
 /// link at `dst` rather than writing through it).
-fn publish(dst: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn publish(dst: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = dst.parent().ok_or("no directory")?;
     let tmp = dir.join(format!(
         ".{}.{}.tmp",

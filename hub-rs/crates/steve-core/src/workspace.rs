@@ -37,20 +37,20 @@ pub const GB: u64 = 1 << 30;
 const CHECK_EVERY: Duration = Duration::from_secs(600);
 /// Where removed caches wait to be deleted, inside the worktrees directory (same volume: a rename).
 const TRASH: &str = ".trash";
-/// Dependency and tool caches by name; anything else counts as a cache only with a `CACHEDIR.TAG`
-/// (Cargo writes one into every `target/`).
-const CACHE_NAMES: &[&str] = &[
-    "node_modules",
-    ".next",
-    ".nuxt",
-    ".turbo",
-    ".parcel-cache",
-    ".svelte-kit",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".gradle",
-];
+/// Dependency and tool caches by name: the toolchains' disposable directories (`steve-toolchains`,
+/// data, not a list kept here). Anything else counts as a cache only with a `CACHEDIR.TAG` (Cargo
+/// writes one into every `target/`).
+fn cache_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        steve_toolchains::Toolchains::builtin()
+            .disposable_names()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    })
+}
+
 /// How deep caches are looked for (`hub-rs/target`, `web/node_modules`).
 const CACHE_DEPTH: usize = 4;
 /// How long listing the processes may take before Steve treats them as unknown.
@@ -175,7 +175,9 @@ fn marked_caches(wt: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let p = e.path();
-            if CACHE_NAMES.iter().any(|n| e.file_name() == *n) || p.join("CACHEDIR.TAG").is_file() {
+            if cache_names().iter().any(|n| e.file_name() == n.as_str())
+                || p.join("CACHEDIR.TAG").is_file()
+            {
                 found.push(p);
             } else if depth + 1 < CACHE_DEPTH {
                 todo.push((p, depth + 1));

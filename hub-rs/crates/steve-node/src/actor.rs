@@ -2072,6 +2072,12 @@ async fn open_harness(
                 if let Some((var, dir)) = &state {
                     env.push(((*var).into(), dir.clone().into_os_string()));
                 }
+                // its toolchains' outputs and caches in the item's and the person's own places
+                env.extend(crate::toolchain::env(
+                    &inner.cfg.home,
+                    std::path::Path::new(&cwd),
+                    row.open.state.as_ref(),
+                ));
                 env
             },
             log_tag: format!("[node {session}]"),
