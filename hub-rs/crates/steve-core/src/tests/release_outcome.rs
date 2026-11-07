@@ -60,7 +60,9 @@ fn release_decision(k: &Kit, i: &str, s: &str, branch: &str) -> String {
 }
 
 fn result(k: &Kit, d: &str) -> Value {
-    k.db().decision(d).unwrap().unwrap().result
+    // The outcome, item and failure card are written under the same core lock, in that
+    // order. Wait for the entire update, not just the first observable database write.
+    k.core.tx().db().decision(d).unwrap().unwrap().result
 }
 
 fn fail_notices(k: &Kit) -> Vec<String> {
@@ -265,7 +267,7 @@ fn a_release_while_another_runs_is_not_released_and_a_failed_script_reopens() {
     )
     .unwrap();
     std::fs::write(k.home().join("go"), "").unwrap();
-    // the outcome is written first, the item and its card right after (one core transaction, read without it)
+    // result() waits until the outcome, item and card update has released the core lock.
     assert!(k.wait(|| result(&k, &da)["outcome"] == "failed" && k.status(&a).0 == "wait"));
     let res = result(&k, &da);
     assert_eq!(res["reason"], "构建失败");
