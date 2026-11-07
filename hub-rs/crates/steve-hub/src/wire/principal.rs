@@ -252,4 +252,144 @@ mod tests {
             Principal::User("u2".into())
         );
     }
+
+    #[test]
+    fn workflow_child_binding_preserves_the_requester_but_resolves_current_membership() {
+        use steve_store::{NewBot, NewItem, NewSession, NoPublisher, Store, UnitSpec, WS};
+
+        for (requested, leaves, expected) in [
+            (
+                Some("requester"),
+                false,
+                Principal::User("requester".into()),
+            ),
+            (None, false, Principal::Svc(WS.into())),
+            (Some("requester"), true, Principal::Svc(WS.into())),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path().join("principal.sqlite3"), NoPublisher).unwrap();
+            store.ensure_workspace().unwrap();
+            store
+                .transaction::<_, StoreError>(|tx| {
+                    tx.execute(
+                        "INSERT INTO users(id,workspace_id,subject,name,role,created)
+                         VALUES ('requester',?,'requester','requester','member',1)",
+                        [WS],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO workspace_members(workspace_id,user_id,role,created)
+                         VALUES (?,'requester','member',1)",
+                        [WS],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            for id in ["writer", "reviewer"] {
+                store
+                    .bots()
+                    .seed(
+                        id,
+                        false,
+                        &NewBot {
+                            name: id.into(),
+                            harness: "fixture".into(),
+                            ..Default::default()
+                        },
+                        WS,
+                    )
+                    .unwrap();
+            }
+            let parent = store
+                .items()
+                .create(
+                    WS,
+                    &NewItem {
+                        title: "Collaborative work".into(),
+                        bot_id: "writer".into(),
+                        requested_by: requested.map(str::to_string),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .unwrap();
+            let units = [
+                ("work", "writer", "work", vec![]),
+                ("review", "reviewer", "review", vec!["work".into()]),
+                ("integrate", "writer", "integrate", vec!["review".into()]),
+            ]
+            .into_iter()
+            .map(|(id, bot, kind, depends_on)| UnitSpec {
+                id: id.into(),
+                title: id.into(),
+                goal: id.into(),
+                bot_id: bot.into(),
+                kind: kind.into(),
+                depends_on,
+                resources: vec![],
+                required: true,
+            })
+            .collect::<Vec<_>>();
+            store
+                .workflows()
+                .replace(&parent.id, 0, "Split the requested work", &units, 1, 1)
+                .unwrap();
+            let child = store.workflows().claim(&parent.id, "work").unwrap();
+            let session = store
+                .sessions()
+                .create(&NewSession {
+                    workspace_id: WS.into(),
+                    item_id: child.item_id.clone(),
+                    bot_id: Some("writer".into()),
+                    harness: "fixture".into(),
+                    cwd: dir.path().to_string_lossy().into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            store
+                .transaction::<_, StoreError>(|tx| {
+                    if leaves {
+                        tx.execute(
+                            "DELETE FROM workspace_members WHERE workspace_id=? AND user_id='requester'",
+                            [WS],
+                        )?;
+                    }
+                    tx.execute(
+                        "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
+                         VALUES (?,'node','{}',?,'r','ready',1)",
+                        rusqlite::params![session.id, session.id],
+                    )?;
+                    record_in(tx, &session.id, Some("node-owner"))?;
+                    Ok(())
+                })
+                .unwrap();
+            store
+                .reader::<_, StoreError>(|c| {
+                    let original: Option<String> = c.query_row(
+                        "SELECT requested_by FROM items WHERE id=?",
+                        [child.item_id.as_deref().unwrap()],
+                        |r| r.get(0),
+                    )?;
+                    assert_eq!(original.as_deref(), requested);
+                    let (recorded, audience): (String, String) = c.query_row(
+                        "SELECT principal, audience FROM runtime_sessions WHERE session_id=?",
+                        [&session.id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    assert_eq!(recorded, expected.key());
+                    assert_eq!(
+                        serde_json::from_str::<Vec<String>>(&audience).unwrap(),
+                        vec![
+                            expected
+                                .user()
+                                .map(|u| format!("user:{u}"))
+                                .unwrap_or_else(|| format!("workspace:{WS}")),
+                            "user:node-owner".into(),
+                        ]
+                    );
+                    assert_eq!(of_session(c, &session.id)?.unwrap().1, expected);
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
 }

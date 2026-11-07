@@ -31,6 +31,16 @@ pub(crate) fn authorize(
     exec: &ExecutionRef,
     active: bool,
 ) -> ApiResult<(Session, TurnSpec)> {
+    authorize_session(store, node, exec, active, false).map(|(s, spec, _)| (s, spec))
+}
+
+fn authorize_session(
+    store: &Store,
+    node: &NodeId,
+    exec: &ExecutionRef,
+    active: bool,
+    allow_dependency_management: bool,
+) -> ApiResult<(Session, TurnSpec, bool)> {
     let ExecutionRef::Turn {
         session,
         turn,
@@ -76,11 +86,14 @@ pub(crate) fn authorize(
     // Steve tools enter through the Node without a harness permission card. Recheck the same
     // persisted gate used for turns before every fresh call, including the check after its fence.
     // A known ToolKey must still be readable when a wait/replan stops further work.
-    if active
+    let gated = active
         && store
             .reader(|c| steve_store::workflow_gate::session_blocker(c, &s.id))
             .map_err(internal)?
-            .is_some()
+            .is_some();
+    if gated
+        && !(allow_dependency_management
+            && super::item_mcp::dependency_management_allowed(store, &s).map_err(internal)?)
     {
         return Err(denied());
     }
@@ -109,7 +122,7 @@ pub(crate) fn authorize(
             return Err(denied());
         }
     }
-    Ok((s, spec))
+    Ok((s, spec, gated))
 }
 
 /// A research job of this Node (grant [`RESEARCH_GRANT`]) and its thread run: the job attempt must
@@ -165,15 +178,19 @@ pub(crate) fn authorize_research(
 #[derive(Clone)]
 pub enum Caller {
     Session(Session),
+    DependencyManagement(Session),
     Research(ThreadRun),
 }
 
 impl Caller {
     fn ids(&self) -> (&str, &str) {
         match self {
-            Caller::Session(s) => (&s.id, &s.workspace_id),
+            Caller::Session(s) | Caller::DependencyManagement(s) => (&s.id, &s.workspace_id),
             Caller::Research(r) => (&r.id, &r.workspace_id),
         }
+    }
+    fn permits(&self, name: &str) -> bool {
+        !matches!(self, Self::DependencyManagement(_)) || name == super::item_mcp::DEPENDENCIES
     }
 }
 
@@ -306,6 +323,11 @@ impl NodeTools {
     fn catalog_of(service: &dyn Service, caller: &Caller) -> ApiResult<Catalog> {
         let tools = match caller {
             Caller::Session(_) => service.catalog(),
+            Caller::DependencyManagement(_) => service
+                .catalog()
+                .into_iter()
+                .filter(|t| caller.permits(&t.name))
+                .collect(),
             Caller::Research(_) => service.research_catalog(),
         };
         let digest = digest_of(&tools)?;
@@ -337,7 +359,13 @@ impl NodeTools {
 fn caller(store: &Store, node: &NodeId, exec: &ExecutionRef, active: bool) -> ApiResult<Caller> {
     match exec {
         ExecutionRef::Turn { .. } => {
-            authorize(store, node, exec, active).map(|(s, _)| Caller::Session(s))
+            authorize_session(store, node, exec, active, true).map(|(s, _, gated)| {
+                if gated {
+                    Caller::DependencyManagement(s)
+                } else {
+                    Caller::Session(s)
+                }
+            })
         }
         ExecutionRef::Job { .. } => {
             authorize_research(store, node, exec, active).map(Caller::Research)
@@ -395,6 +423,9 @@ impl HubTools for NodeTools {
             )
         })?;
         let session = self.authorized(&q.execution, true).await?;
+        if !session.permits(&q.name) {
+            return Err(denied());
+        }
         let service = self.service()?;
         let catalog = Self::catalog_of(&*service, &session)?;
         if catalog.revision != q.catalog {
@@ -468,10 +499,18 @@ impl HubTools for NodeTools {
             })
             .await?;
             let exec = q.execution.clone();
+            let name = q.name.clone();
             let authorized = if cancelled {
                 Ok(())
             } else {
-                blocking(move || caller(&store, &node, &exec, true).map(|_| ())).await
+                blocking(move || {
+                    let current = caller(&store, &node, &exec, true)?;
+                    if !current.permits(&name) {
+                        return Err(denied());
+                    }
+                    Ok(())
+                })
+                .await
             };
             let result = match authorized {
                 _ if cancelled => ToolResult::Failed {
@@ -485,7 +524,9 @@ impl HubTools for NodeTools {
                     error: ApiError::new(ErrorCode::Expired, "tool expired before invocation"),
                 },
                 Ok(_) => match match session {
-                    Caller::Session(s) => service.call(s, &q.name, q.args).await,
+                    Caller::Session(s) | Caller::DependencyManagement(s) => {
+                        service.call(s, &q.name, q.args).await
+                    }
                     Caller::Research(r) => service.research_call(r, &q.name, q.args).await,
                 } {
                     Ok(text) => ToolResult::Completed {
@@ -787,6 +828,98 @@ pub(crate) mod tests {
             ));
         }
         assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The service catalog is read between initial authorization and the durable call fence.
+    /// Change persisted state there to deterministically exercise the second authorization.
+    #[tokio::test]
+    async fn prerequisite_management_is_rechecked_after_the_call_fence() {
+        struct Changes {
+            store: Store,
+            armed: std::sync::atomic::AtomicBool,
+            replace: bool,
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl Service for Changes {
+            fn catalog(&self) -> Vec<ToolDescriptor> {
+                if self.armed.swap(false, Ordering::SeqCst) {
+                    self.store.transaction::<_, StoreError>(|tx| {
+                        tx.execute("INSERT INTO item_deps(item_id,dep_id,created) VALUES('i1','dep',1)", [])?;
+                        if self.replace {
+                            tx.execute("INSERT INTO sessions(id,workspace_id,item_id,bot_id,no,harness,cwd,status,created,updated) VALUES('s2','default','i1','manager',2,'test-adapter','','active',2,2)", [])?;
+                        }
+                        Ok(())
+                    }).unwrap();
+                }
+                ["test", super::super::item_mcp::DEPENDENCIES]
+                    .into_iter()
+                    .map(|name| ToolDescriptor {
+                        name: name.into(),
+                        description: "test".into(),
+                        input_schema: json!({"type":"object"}),
+                        read_only: false,
+                    })
+                    .collect()
+            }
+            async fn call(
+                &self,
+                _: Session,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<String, String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok("ok".into())
+            }
+        }
+        for (name, replace, allowed) in [
+            ("test", false, false),
+            (super::super::item_mcp::DEPENDENCIES, false, true),
+            (super::super::item_mcp::DEPENDENCIES, true, false),
+        ] {
+            let h = fixture(vec![]).await;
+            h.store
+                .bots()
+                .seed(
+                    "manager",
+                    false,
+                    &steve_store::NewBot {
+                        name: "Manager".into(),
+                        ..Default::default()
+                    },
+                    "default",
+                )
+                .unwrap();
+            h.store.transaction::<_, StoreError>(|tx| {
+                tx.execute("UPDATE items SET bot_id='manager' WHERE id='i1'", [])?;
+                tx.execute("UPDATE sessions SET bot_id='manager' WHERE id='s1'", [])?;
+                tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('dep','default',2,'prerequisite','run','执行',1,1)", [])?;
+                Ok(())
+            }).unwrap();
+            let tools =
+                NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path())
+                    .unwrap();
+            let service = Arc::new(Changes {
+                store: h.store.clone(),
+                armed: false.into(),
+                replace,
+                calls: AtomicUsize::new(0),
+            });
+            tools.install(service.clone()).unwrap();
+            let mut q = request(&tools, h.exec.clone()).await;
+            q.name = name.into();
+            q.args = json!({"action":"get"});
+            service.armed.store(true, Ordering::SeqCst);
+            let r = tools.call(q).await.unwrap();
+            if allowed {
+                assert!(matches!(r, ToolResult::Completed { .. }), "{r:?}");
+            } else {
+                assert!(
+                    matches!(r, ToolResult::Failed { error } if error.code == ErrorCode::Denied)
+                );
+            }
+            assert_eq!(service.calls.load(Ordering::SeqCst), usize::from(allowed));
+        }
     }
 
     #[tokio::test]
@@ -1130,6 +1263,118 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(now, "bridging tools", "the tool ran for the bound item");
 
+        // A prerequisite entered through the UI must not strand the current Node agent before it
+        // can register a durable wait. Only dependency management survives, not tools or files.
+        let origin = store
+            .messages()
+            .add(
+                "default",
+                "user",
+                "manage this item",
+                Some("i1"),
+                &json!(null),
+                steve_core::thread::MAIN,
+            )
+            .unwrap();
+        store
+            .thread()
+            .item_add("i1", "default", &origin, None, false)
+            .unwrap();
+        store.transaction::<_, StoreError>(|tx| {
+            tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('dep','default',2,'prerequisite','run','执行',1,1)", [])?;
+            tx.execute("INSERT INTO item_deps(item_id,dep_id,created) VALUES('i1','dep',123)", [])?;
+            Ok(())
+        }).unwrap();
+        let restricted = tools.catalog(host.exec.clone()).await.unwrap();
+        assert_eq!(
+            restricted
+                .tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![super::super::item_mcp::DEPENDENCIES],
+        );
+        assert_eq!(
+            tools.call(call("no_update")).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+        let mut deliver = call("no_deliver");
+        deliver.name = steve_mcp::tools::DELIVER.into();
+        assert_eq!(
+            tools.call(deliver).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            authorize(&store, &NodeId::new("local").unwrap(), &host.exec, true)
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied,
+            "file/exec authorization remains gated",
+        );
+        for (id, args, ends) in [
+            ("dep_get", json!({"action":"get"}), false),
+            (
+                "dep_wait",
+                json!({"action":"wait","deps":["dep"],"reason":"wait for isolation","resume":"automatic"}),
+                true,
+            ),
+            ("dep_readback", json!({"action":"get"}), false),
+        ] {
+            let r = tools
+                .call(ToolCall {
+                    id: CallId::new(id).unwrap(),
+                    catalog: restricted.revision.clone(),
+                    execution: host.exec.clone(),
+                    name: super::super::item_mcp::DEPENDENCIES.into(),
+                    args,
+                    deadline: Timestamp(steve_store::now() + 60_000),
+                })
+                .await
+                .unwrap();
+            assert!(
+                matches!(r, ToolResult::Completed { end_turn, .. } if end_turn == ends),
+                "{id}: {r:?}"
+            );
+        }
+        let wait = store.dependency_waits().get("i1").unwrap().unwrap();
+        assert_eq!(wait.state, "waiting");
+        assert_eq!(wait.resume, "automatic");
+        assert_eq!(store.items().get("i1").unwrap().unwrap().status, "block");
+        let created: i64 = store
+            .reader(|c| {
+                Ok::<_, StoreError>(c.query_row(
+                    "SELECT created FROM item_deps WHERE item_id='i1' AND dep_id='dep'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            created, 123,
+            "registering the wait preserves the UI's original edge"
+        );
+        // A detached old work unit cannot use the management exception even with the same deps.
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "UPDATE items SET source='[\"work\",\"workflow\"]' WHERE id='i1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            tools.catalog(host.exec.clone()).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("UPDATE items SET source='[\"\",\"\"]' WHERE id='i1'", [])?;
+                Ok(())
+            })
+            .unwrap();
+
+        let before_end = store.items().get("i1").unwrap().unwrap().now;
         store
             .transaction::<_, StoreError>(|tx| {
                 tx.execute("UPDATE sessions SET status='ended' WHERE id='s1'", [])?;
@@ -1149,6 +1394,6 @@ pub(crate) mod tests {
                 )?)
             })
             .unwrap();
-        assert_eq!(now, "bridging tools", "nothing ran for an ended session");
+        assert_eq!(now, before_end, "nothing ran for an ended session");
     }
 }

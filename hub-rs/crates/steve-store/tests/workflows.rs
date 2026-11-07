@@ -235,6 +235,52 @@ fn independent_work_runs_in_parallel_dependencies_and_final_gate_wait() {
 }
 
 #[test]
+fn claiming_work_preserves_the_requester_and_never_rebinds_an_existing_attempt() {
+    for requested in [Some("requester"), None] {
+        let (t, parent, specs) = setup();
+        t.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "UPDATE items SET requested_by=? WHERE id=?",
+                    rusqlite::params![requested, parent],
+                )?;
+                // The Bot owner is not the requester, including for autonomous service work.
+                tx.execute("UPDATE bots SET owner='bot-owner'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        plan(&t, &parent, &specs);
+        let claimed = t.store.workflows().claim(&parent, "a").unwrap();
+        let requester = || {
+            t.store
+                .reader::<_, StoreError>(|c| {
+                    Ok(c.query_row(
+                        "SELECT requested_by FROM items WHERE id=?",
+                        [claimed.item_id.as_deref().unwrap()],
+                        |r| r.get::<_, Option<String>>(0),
+                    )?)
+                })
+                .unwrap()
+        };
+        assert_eq!(requester().as_deref(), requested);
+        t.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "UPDATE items SET requested_by='someone-else' WHERE id=?",
+                    [&parent],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            t.store.workflows().claim(&parent, "a").unwrap().item_id,
+            claimed.item_id
+        );
+        assert_eq!(requester().as_deref(), requested);
+    }
+}
+
+#[test]
 fn overlapping_resources_serialize_without_consuming_attempts() {
     let (t, parent, mut specs) = setup();
     specs[1].resources = specs[0].resources.clone();

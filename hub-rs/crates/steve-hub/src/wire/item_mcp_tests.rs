@@ -340,6 +340,63 @@ fn previous_session_cannot_reuse_its_identity_after_replacement() {
 }
 
 #[test]
+fn dependency_management_exception_is_only_for_a_current_waiting_parent() {
+    let f = Fixture::new();
+    let own = f.item("default", "current");
+    let dep = f.item("default", "prerequisite");
+    let s = f.session(&own);
+    f.store
+        .with_conn(|c| {
+            c.execute("UPDATE items SET status='run' WHERE id=?", [&own.id])?;
+            c.execute(
+                "INSERT INTO item_deps(item_id,dep_id,created) VALUES(?,?,1)",
+                params![own.id, dep.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(dependency_management_allowed(&f.store, &s).unwrap());
+    for (mutation, restore) in [
+        ("status='pause'", "status='run'"),
+        ("archived=1", "archived=0"),
+        ("source='[\"work\",\"workflow\"]'", "source='[\"\",\"\"]'"),
+    ] {
+        f.store
+            .with_conn(|c| {
+                c.execute(
+                    &format!("UPDATE items SET {mutation} WHERE id=?"),
+                    [&own.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            !dependency_management_allowed(&f.store, &s).unwrap(),
+            "{mutation}"
+        );
+        f.store
+            .with_conn(|c| {
+                c.execute(&format!("UPDATE items SET {restore} WHERE id=?"), [&own.id])?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    let replacement = f.session(&own);
+    assert!(!dependency_management_allowed(&f.store, &s).unwrap());
+    assert!(dependency_management_allowed(&f.store, &replacement).unwrap());
+    f.store
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE sessions SET workspace_id='other' WHERE id=?",
+                [&replacement.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(!dependency_management_allowed(&f.store, &replacement).unwrap());
+}
+
+#[test]
 fn disabled_or_removed_bot_no_longer_has_item_search_authority() {
     for mutation in [
         "UPDATE bots SET enabled=0 WHERE id='bot_default'",

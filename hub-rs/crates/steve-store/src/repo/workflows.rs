@@ -677,11 +677,13 @@ impl Workflows<'_> {
             let child = format!("{prefix}-{no}");
             let t = now();
             let link = Parent { item: Some(Some(parent.into())), ..Parent::default() };
+            // Splitting work preserves who asked for it, not the assigned Bot's or Node's owner.
+            // Membership is resolved when the child's Node session is bound, just as for its parent.
             tx.execute(
-                "INSERT INTO items(id,workspace_id,no,kind,title,status,stage,bot_id,project_id,source,parent,created,updated)
-                 VALUES (?,?,?,'task',?,'run','执行',?,?,?,?,?,?)",
+                "INSERT INTO items(id,workspace_id,no,kind,title,status,stage,bot_id,project_id,source,parent,created,updated,requested_by)
+                 VALUES (?,?,?,'task',?,'run','执行',?,?,?,?,?,?,(SELECT requested_by FROM items WHERE id=?))",
                 params![child,item.workspace_id,no,unit.spec.title,unit.spec.bot_id,item.project_id,
-                    to_json(&("协作工作", "workflow"))?,to_json(&link)?,t,t],
+                    to_json(&("协作工作", "workflow"))?,to_json(&link)?,t,t,parent],
             )?;
             tx.execute(
                 "INSERT INTO item_tags(item_id,tag_id) SELECT ?,tag_id FROM item_tags WHERE item_id=?",
