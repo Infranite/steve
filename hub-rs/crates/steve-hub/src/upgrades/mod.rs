@@ -84,6 +84,19 @@ impl CachedCheck {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DownloadProgress {
+    pub received_bytes: u64,
+    pub total_bytes: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Progress {
+    pub step: String,
+    pub started_at: u64,
+    pub updated_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download: Option<DownloadProgress>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Operation {
     pub id: String,
     pub idempotency_key: String,
@@ -105,6 +118,11 @@ pub struct Operation {
     /// The verified database copy a local deploy took before switching (`ops/local-release.py`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Progress>,
+    /// The last actual drain observation. Kept across reconnects, never guessed from item status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain: Option<Value>,
 }
 impl Operation {
     pub fn terminal(&self) -> bool {
@@ -333,6 +351,39 @@ impl Updates {
         op.phase = phase.into();
         op.updated_at = now();
         op.error = error;
+        let step = match phase {
+            "staging" => "resolving",
+            "ready" => "preflight",
+            "draining" => "waiting",
+            "stopping" => "stopping",
+            "backing_up" => "backing_up",
+            "restarting" => "starting",
+            "verifying" | "committed" => "checking",
+            "succeeded" => "complete",
+            "rolling_back" | "rolled_back_pending_health" | "rolled_back" => "rollback",
+            _ => return self.save(op),
+        };
+        self.progress(op, step, None)
+    }
+    pub(super) fn progress(
+        &self,
+        op: &mut Operation,
+        step: &str,
+        download: Option<DownloadProgress>,
+    ) -> Result<()> {
+        let at = now();
+        let started_at = op
+            .progress
+            .as_ref()
+            .filter(|p| p.step == step)
+            .map_or(at, |p| p.started_at);
+        op.updated_at = at;
+        op.progress = Some(Progress {
+            step: step.into(),
+            started_at,
+            updated_at: at,
+            download,
+        });
         self.save(op)
     }
     pub fn status(&self) -> Result<Value> {
@@ -558,6 +609,8 @@ impl Updates {
             target: None,
             runner,
             backup: None,
+            progress: None,
+            drain: None,
         };
         self.save(&op)?;
         atomic(&self.dir().join("active.json"), &json!({"id":op.id}))?;

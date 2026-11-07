@@ -848,6 +848,17 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     assert_eq!(d["maintenance"], true, "{d}");
     assert_eq!(d["ready"], false, "not sealed under a running turn: {d}");
     assert_eq!(d["node"], 1, "{d}");
+    assert!(
+        d["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["kind"] == "node_turn"
+                && b["session_id"] == sid
+                && b["item_id"].is_string()
+                && b["attempt_id"].is_string()),
+        "the upgrade identifies the actual waiting item: {d}"
+    );
     tokio::time::sleep(Duration::from_secs(1)).await;
     let d = drain(&h, "POST", &token).await;
     assert_eq!((&d["ready"], &d["node"]), (&json!(false), &json!(1)), "{d}");

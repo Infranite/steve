@@ -1567,6 +1567,34 @@ impl NodeRuntime {
             .unwrap_or(1) as usize
     }
 
+    /// The same durable work counted by `working`, for the instance administrator's upgrade receipt.
+    /// Do not include prompts, command bodies or permission payloads in a maintenance view.
+    pub fn working_details(&self) -> Vec<Value> {
+        if self.stopped.lock().unwrap().is_some() {
+            return vec![];
+        }
+        self.store.reader(|c| {
+            let mut q = c.prepare(
+                "SELECT r.session_id, s.item_id, t.active_attempt, t.state, 'node_turn'
+                 FROM runtime_turns t JOIN runtime_sessions r USING(session_id)
+                 LEFT JOIN sessions s ON s.id=r.session_id
+                 WHERE r.node_id=?1 AND t.state<>'finished'
+                 UNION ALL
+                 SELECT r.session_id, s.item_id, r.active_attempt, r.phase, 'node_session'
+                 FROM runtime_sessions r LEFT JOIN sessions s ON s.id=r.session_id
+                 WHERE r.node_id=?1 AND r.phase IN ('opening','configuring','releasing')
+                 AND NOT EXISTS(SELECT 1 FROM runtime_turns t WHERE t.session_id=r.session_id AND t.state<>'finished')
+                 ORDER BY 1 LIMIT 100")?;
+            let rows = q.query_map([self.node_id.as_str()], |r| Ok(json!({
+                "kind": r.get::<_, String>(4)?, "node_id": self.node_id.as_str(),
+                "session_id": r.get::<_, String>(0)?, "item_id": r.get::<_, Option<String>>(1)?,
+                "attempt_id": r.get::<_, Option<String>>(2)?, "state": r.get::<_, String>(3)?,
+                "reason": "waiting_for_node_work"
+            })))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(StoreError::from)
+        }).unwrap_or_else(|_| vec![json!({"kind":"node_session","node_id":self.node_id.as_str(),"state":"unknown","reason":"node_state_unavailable"})])
+    }
+
     pub fn hold(&self, on: bool) {
         self.holding.store(on, Ordering::SeqCst);
     }

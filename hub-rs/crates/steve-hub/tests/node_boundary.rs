@@ -290,7 +290,7 @@ const ALLOWED: &[Entry] = &[
     e(Spawn, "steve-core/src/yolo/procs.rs", 1, Hub, "`ps`: the process table"),
     e(Spawn, "steve-hub/src/config.rs", 1, Hub, "npm config"),
     e(Spawn, "steve-hub/src/system.rs", 1, Hub, "host facts (sw_vers, sysctl, uname, hostname)"),
-    e(Spawn, "steve-hub/src/upgrades/runner.rs", 6, Hub, "the upgrader"),
+    e(Spawn, "steve-hub/src/upgrades/runner.rs", 7, Hub, "the upgrader, including preparing a verified release bundle with the installation's existing signature"),
     e(Spawn, "steve-hub/src/upgrades/signing.rs", 2, Hub, "security -i: the signing keychain's new password"),
     e(Spawn, "steve-hub/src/upgrades/supervisor.rs", 2, Hub, "the supervisor starts the Hub, and asks a candidate's binary about this environment first"),
     e(Spawn, "steve-keyhelper/src/mac.rs", 2, Hub, "the keychain helper"),
