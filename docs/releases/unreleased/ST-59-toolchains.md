@@ -1,6 +1,6 @@
 - 工具链改为数据定义：Steve 内置 23 种常见构建工具的定义，包括 Rust、Node（npm / pnpm / yarn / bun）、Python（pip / uv / poetry / conda）、Go、JVM（Gradle / Maven）、Swift / Xcode / CocoaPods、C/C++、.NET、Ruby、Dart / Flutter、Elixir，以及常见前端框架和 Python 工具的缓存目录。每份定义写明怎么识别、哪些目录只是缓存，代码里不再写具体工具的名字。磁盘不够时释放哪些缓存、合并时哪些锁文件可以重新生成，也改为读这份数据，行为和以前完全一样。
   - 新增可选开关：在 Node 的环境里设 `STEVE_TOOLCHAINS=on`，并且同时开启 `STEVE_PRINCIPAL_STATE=on`（需要知道运行属于谁）后，会话里检测到的工具会这样放：
     - cargo 的构建输出 `target/` 放进事项自己的 `.steve/build/cargo`，不会进 git；为 agent 默认打开轻量调试构建（`CARGO_INCREMENTAL=0`、只保留行号信息）。
-    - 只是缓存的下载和构建缓存（npm、bun、pip、uv、poetry、conda、Go、NuGet、Bundler）放进这个人在这台 Node 上自己的缓存目录，沙箱里其他运行读写不了。
-  - 工具自己的 home、配置和凭据不会被移走，例如 `CARGO_HOME`、`GRADLE_USER_HOME`、`GOPATH` 和 Maven 的设置。项目或用户自己设置的变量也不会被覆盖。其他工具的输出照旧留在项目目录里。
+    - 只是缓存的下载和构建缓存（npm、bun、pip、uv、poetry、conda、Go、NuGet、Bundler）放进这个人在这台 Node 上自己的缓存目录，启用 Steve 系统沙箱的其他主体读写不了这些缓存；仍使用自身沙箱的 harness（当前 Codex）没有这层隔离。
+  - 工具自己的 home、配置和凭据不会被移走，例如 `CARGO_HOME`、`GRADLE_USER_HOME`、`GOPATH` 和 Maven 的设置。其他项目或用户设置保持原样；启用此开关后，工具链的缓存重定向与瘦构建变量会覆盖同名环境变量。其他工具的输出照旧留在项目目录里。
   - 默认关闭，因为换位置以后第一次构建要从头开始。用前估算磁盘、种子缓存和定期清理会在后续加入。
