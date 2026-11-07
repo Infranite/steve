@@ -16,6 +16,7 @@ pub mod attachments;
 pub mod changes;
 pub mod config;
 pub mod cycle;
+mod dependencies;
 pub mod error;
 pub mod gateway;
 pub mod git;

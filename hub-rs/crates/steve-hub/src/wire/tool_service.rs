@@ -18,6 +18,8 @@ pub struct ToolService {
 
 /// Tools the agent only reads with (they change nothing).
 const READ_ONLY: &[&str] = &[
+    "steve_items_search",
+    "steve_item_read",
     "steve_event_get",
     "steve_knowledge_search",
     "steve_knowledge_get",
@@ -93,6 +95,16 @@ mod tests {
         let names = mcp_names();
         assert!(names.contains(&"steve_update".to_string()));
         assert!(names.contains(&mcp_extra::REPLY_SOURCE.to_string()));
+        for name in [
+            "steve_items_search",
+            "steve_item_read",
+            "steve_item_dependencies",
+        ] {
+            assert!(names.contains(&name.to_string()), "{name}");
+        }
+        assert!(READ_ONLY.contains(&"steve_items_search"));
+        assert!(READ_ONLY.contains(&"steve_item_read"));
+        assert!(!READ_ONLY.contains(&"steve_item_dependencies"));
         let mut unique = names.clone();
         unique.sort();
         unique.dedup();

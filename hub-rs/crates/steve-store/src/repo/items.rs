@@ -376,12 +376,15 @@ impl Deps<'_> {
     }
 
     pub fn add(&self, item: &str, dep: &str) -> Result<()> {
-        self.0.write(|w| {
-            w.c.run(
+        self.0.transaction(|tx| {
+            let added = tx.execute(
                 "INSERT OR IGNORE INTO item_deps (item_id, dep_id, created) VALUES (?, ?, ?)",
                 params![item, dep, now()],
             )?;
-            w.publish(ChangeEvent::Item { id: item.into() });
+            if added > 0 {
+                super::dependency_waits::rearm_in(tx, item)?;
+            }
+            tx.publish(ChangeEvent::Item { id: item.into() });
             Ok(())
         })
     }
@@ -521,7 +524,7 @@ pub fn artifact_add_in(
 }
 
 /// The `item_marks` row for a status change; the actor is unknown at this layer (`""`).
-fn status_mark(
+pub(super) fn status_mark(
     c: &rusqlite::Connection,
     ws: &str,
     item: &str,
@@ -633,7 +636,7 @@ pub fn timeline_add_in(
     Ok(())
 }
 
-fn timeline_on(
+pub(super) fn timeline_on(
     c: &rusqlite::Connection,
     item_id: &str,
     actor: &str,

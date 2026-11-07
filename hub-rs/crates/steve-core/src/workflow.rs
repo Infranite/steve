@@ -103,7 +103,7 @@ impl Tx<'_> {
         }
     }
 
-    fn workflow_busy(&self, u: &WorkUnit) -> Result<bool> {
+    pub(crate) fn workflow_busy(&self, u: &WorkUnit) -> Result<bool> {
         let Some(id) = u.item_id.as_deref() else {
             return Ok(false);
         };
@@ -120,10 +120,19 @@ impl Tx<'_> {
     }
 
     pub(crate) fn workflow_blockers(&self, item: &str, complete: bool) -> Result<Vec<String>> {
-        let Some(g) = self.db().store().workflows().get(item)? else {
-            return Ok(vec![]);
-        };
         let mut out = vec![];
+        if complete {
+            let deps = crate::lifecycle::deps_open(self.db(), item)?;
+            if !deps.is_empty() {
+                out.push(format!("前置事项尚未完成：{}", deps.join("、")));
+            }
+            if self.dependency_waiting(item)? {
+                out.push("事项仍在等待前置完成后续跑".into());
+            }
+        }
+        let Some(g) = self.db().store().workflows().get(item)? else {
+            return Ok(out);
+        };
         if complete && !self.workflow_current(&g)? {
             out.push("主事项目标或周期已变化，请重规划并重新验证旧成果".into());
         }
@@ -353,19 +362,19 @@ impl Tx<'_> {
     }
 
     pub(crate) fn workflow_item_action(&mut self, item: &str, action: ItemAction) -> Result<()> {
+        if action == ItemAction::Finish {
+            let blockers = self.workflow_blockers(item, true)?;
+            if !blockers.is_empty() {
+                return Err(conflict(format!(
+                    "协作尚未完成，不能关闭主事项：{}",
+                    blockers.join("；")
+                )));
+            }
+        }
         let Some(g) = self.db().store().workflows().get(item)? else {
             return Ok(());
         };
         match action {
-            ItemAction::Finish => {
-                let blockers = self.workflow_blockers(item, true)?;
-                if !blockers.is_empty() {
-                    return Err(conflict(format!(
-                        "协作尚未完成，不能关闭主事项：{}",
-                        blockers.join("；")
-                    )));
-                }
-            }
             ItemAction::Pause | ItemAction::Drop => {
                 self.db()
                     .store()
@@ -442,6 +451,8 @@ impl Tx<'_> {
         if g.paused
             || item.phase == CLOSED
             || item.status == "pause"
+            || item.status == "block"
+            || !crate::lifecycle::deps_open(self.db(), parent)?.is_empty()
             || crate::cycle::stopping(&item)
             || !self.workflow_current(&g)?
         {

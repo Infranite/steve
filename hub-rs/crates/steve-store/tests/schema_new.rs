@@ -67,8 +67,8 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 41);
+fn schema_version_is_42() {
+    assert_eq!(db::SCHEMA_VERSION, 42);
 }
 
 #[test]

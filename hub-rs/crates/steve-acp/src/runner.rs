@@ -488,9 +488,12 @@ static CODEX_TOOL: LazyLock<Regex> = LazyLock::new(|| {
 /// see, save a candidate the user still confirms, or (`steve_mail_draft`) only draft and open an
 /// approval; none reaches outside Steve. Not here: `steve_secret_use` (runs commands) and the
 /// GitHub comment / open-PR tools.
-const OWN_TOOLS: [&str; 20] = [
+const OWN_TOOLS: [&str; 23] = [
     "steve_update",
     "steve_workflow",
+    "steve_items_search",
+    "steve_item_read",
+    "steve_item_dependencies",
     "steve_ask",
     "steve_deliver",
     "steve_request_approval",
@@ -1973,6 +1976,9 @@ mod tests {
             "steve_knowledge_search",
             "steve_knowledge_read",
             "steve_remember",
+            "steve_items_search",
+            "steve_item_read",
+            "steve_item_dependencies",
         ] {
             assert_eq!(
                 auto_allow(&cc(&format!("mcp__steve__{t}"))).as_deref(),

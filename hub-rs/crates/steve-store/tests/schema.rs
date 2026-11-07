@@ -83,7 +83,7 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
         }
     }
     // What module migrations create, on stubs of the original tables they touch.
-    const STUBS: [&str; 8] = [
+    const STUBS: [&str; 9] = [
         "workspaces",
         "users",
         "tags",
@@ -92,6 +92,7 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
         "decisions",
         "queued",
         "events",
+        "items",
     ];
     let only = Connection::open_in_memory().unwrap();
     for t in STUBS {
@@ -144,7 +145,8 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
             only.execute_batch(statement).unwrap();
         }
     }
-    // 036 and later: module tables only
+    // 036 and later: module objects, including 042's trigger on the existing items table.
+    // Its stub is excluded below, but the trigger stays in the full schema comparison.
     for m in &db::MIGRATIONS[35..] {
         only.execute_batch(m).unwrap();
     }
@@ -167,8 +169,8 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
 
 #[test]
 fn migrations_are_the_ts_strings() {
-    assert_eq!(db::MIGRATIONS.len(), 41);
-    assert_eq!(db::SCHEMA_VERSION, 41);
+    assert_eq!(db::MIGRATIONS.len(), 42);
+    assert_eq!(db::SCHEMA_VERSION, 42);
     assert!(db::MIGRATIONS[0].starts_with("\n  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL);"));
     assert!(
         db::MIGRATIONS[1]

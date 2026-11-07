@@ -855,7 +855,7 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
     let exe = t.harness(
         "claude.sh",
         &format!(
-            "for a in \"$@\"; do case \"$a\" in --mcp-config=*) cp \"${{a#--mcp-config=}}\" '{copy}';; esac; done\n{}\nsleep 30 &\necho $! > '{pid}'\nwait",
+            "for a in \"$@\"; do case \"$a\" in --mcp-config=*) cp \"${{a#--mcp-config=}}\" '{copy}';; esac; done\n{}\nsleep 30 &\necho $! > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nwait",
             emit(&[init(), start("m1"), text("我先看看")]),
             copy = copy.display(),
             pid = pid.display(),
@@ -1040,7 +1040,7 @@ async fn shutdown_stops_a_running_job_and_says_so() {
     let exe = t.harness(
         "claude.sh",
         &format!(
-            "{}\nsleep 30 &\necho $! > '{pid}'\nwait",
+            "{}\nsleep 30 &\necho $! > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nwait",
             emit(&[init(), start("m1"), text("写到一半")]),
             pid = pid.display(),
         ),
@@ -1102,13 +1102,14 @@ async fn finished(n: &LocalNode, op: &str) -> Completion {
 }
 
 /// A harness that writes a little, then (while `hold` exists) waits with a child whose pid goes
-/// to `pid`, then answers.
+/// to `pid`, then answers. Publish the PID atomically: cancellation may interrupt a redirect
+/// after it creates the file but before `echo` writes, leaving an empty file forever.
 fn holding(t: &T) -> (PathBuf, PathBuf, PathBuf) {
     let (hold, pid) = (t.root.join("hold"), t.root.join("pid"));
     let exe = t.harness(
         "claude.sh",
         &format!(
-            "{}\nif [ -e '{hold}' ]; then sleep 30 & echo $! > '{pid}'; wait; fi\n{}",
+            "{}\nif [ -e '{hold}' ]; then sleep 30 & echo $! > '{pid}.tmp'; mv '{pid}.tmp' '{pid}'; wait; fi\n{}",
             emit(&[init(), start("m1"), text("写到一半")]),
             emit(&[result("好")]),
             hold = hold.display(),
@@ -1256,7 +1257,17 @@ async fn a_job_stops_when_the_hub_is_unreachable_past_its_lease() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_job_stops_at_its_output_cap() {
     let t = T::new();
-    let (exe, _hold, pid) = holding(&t);
+    let pid = t.root.join("pid");
+    // Publish the child before producing the output that triggers cancellation, so this test
+    // must verify cleanup of a known child rather than treating an unpublished PID as success.
+    let exe = t.harness(
+        "claude.sh",
+        &format!(
+            "sleep 30 &\necho $! > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\n{}\nwait",
+            emit(&[init(), start("m1"), text("写到一半")]),
+            pid = pid.display(),
+        ),
+    );
     let n = t.node(&exe);
     let mut spec = job("a_1", "claude-sonnet-5-5", "q");
     // "写到一半" is 12 bytes
@@ -1267,11 +1278,8 @@ async fn a_job_stops_at_its_output_cap() {
     assert_eq!(c.stop_reason, "max_output");
     assert_eq!(c.error.unwrap().code, ErrorCode::Exhausted);
     assert_eq!(c.job.unwrap().end, JobEnd::Stopped);
-    // stopped as it wrote, perhaps before it started its child
-    until("the harness's child is gone", || {
-        !pid.exists() || !alive(pid_of(&pid))
-    })
-    .await;
+    let child = pid_of(&pid);
+    until("the harness's child is gone", || !alive(child)).await;
     n.shutdown().await;
 }
 

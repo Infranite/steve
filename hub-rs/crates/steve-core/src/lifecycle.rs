@@ -10,7 +10,9 @@ use serde_json::json;
 pub fn deps_open(db: &Store, item: &str) -> Result<Vec<String>> {
     let mut out = vec![];
     for d in db.deps_of(item)? {
-        if db.item(&d)?.is_none_or(|i| i.status != "done") {
+        if db.item(&d)?.is_none_or(|i| {
+            i.status != "done" || i.phase != "closed" || i.outcome.as_deref() != Some("completed")
+        }) {
             out.push(d);
         }
     }
@@ -24,6 +26,14 @@ pub fn settle(db: &Store, item: &str) -> Result<()> {
     };
     if i.is_settled() {
         return Ok(());
+    }
+    if db
+        .store()
+        .dependency_waits()
+        .get(item)?
+        .is_some_and(|w| w.state == "waiting")
+    {
+        return db.item_patch(item, patch![status: "block"]);
     }
     if db
         .decisions_of_item(item)?

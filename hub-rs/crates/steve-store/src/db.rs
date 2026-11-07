@@ -93,6 +93,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/040.sql"),
     // 41: durable multi-Bot work graphs, their unit attempts and replanning history.
     include_str!("../migrations/041.sql"),
+    // 42: per-item prerequisite waiting and durable automatic continuation.
+    include_str!("../migrations/042.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
