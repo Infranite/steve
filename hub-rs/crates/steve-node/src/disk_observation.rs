@@ -166,6 +166,9 @@ pub enum Interpretation {
 }
 
 /// Bounded host-only readback. Skipped counts are cumulative per journal, not per retained page.
+/// The cursor orders insertions, not completions: a pending record is updated at the same sequence.
+/// Each page has its own read snapshot; rows may change or expire between pages. This is not an
+/// incremental completion feed. Restart at zero to refresh retained rows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page {
     pub journal: String,
@@ -220,7 +223,7 @@ impl Observer {
             return Ok(());
         };
         let triggered_at = now();
-        t.queue_disk_record(&Record {
+        let record = Record {
             interpretation: Interpretation::AsynchronousUnattributedPathStock,
             operation: operation.clone(),
             execution: execution.clone(),
@@ -244,7 +247,8 @@ impl Observer {
                 work.kind,
                 PrepareKind::Existing { .. } | PrepareKind::Worktree { at: Some(_), .. }
             ),
-        })
+        };
+        t.optional_disk_update(|| t.queue_disk_record(&record))
     }
 
     pub(crate) fn wake(&self) {
@@ -284,7 +288,9 @@ impl LocalNode {
         saved
     }
 
-    /// Host-only cursor readback of private accounting evidence, never arbitrary filesystem access.
+    /// Host-only current-state pagination of private accounting evidence. `after` is an insertion
+    /// sequence; transitions update that same row, so refresh from zero to see later completions.
+    /// Never an incremental completion feed or arbitrary filesystem access.
     pub fn disk_observations(&self, after: u64, max: u32) -> ApiResult<Page> {
         self.0.j.read(|t| t.disk_records(self.0.j.id(), after, max))
     }

@@ -3,7 +3,44 @@
 use super::*;
 use crate::disk_observation::{Page, Record, State, Unavailable};
 
+#[cfg(test)]
+mod tests;
+
 impl Tx<'_> {
+    /// Keep optional statistics from rolling back the business phase that records them. SQLite
+    /// errors such as RAISE(ROLLBACK) or a full journal can end the outer transaction: those must
+    /// still fail the caller. Only a successful rollback of this savepoint permits degradation.
+    pub(crate) fn optional_disk_update(
+        &self,
+        update: impl FnOnce() -> ApiResult<()>,
+    ) -> ApiResult<()> {
+        let c = self.c();
+        if c.is_autocommit() {
+            return Err(internal("disk statistics require the business transaction"));
+        }
+        c.execute_batch("SAVEPOINT steve_optional_disk_statistics")
+            .map_err(internal)?;
+        match update() {
+            Ok(()) => c
+                .execute_batch("RELEASE steve_optional_disk_statistics")
+                .map_err(internal),
+            Err(error) => {
+                if c.is_autocommit() {
+                    return Err(error);
+                }
+                c.execute_batch(
+                    "ROLLBACK TO steve_optional_disk_statistics; RELEASE steve_optional_disk_statistics",
+                )
+                .map_err(internal)?;
+                if c.is_autocommit() {
+                    return Err(error);
+                }
+                tracing::warn!(code = ?error.code, "node: optional disk statistics were not recorded");
+                Ok(())
+            }
+        }
+    }
+
     pub(crate) fn queue_disk_record(&self, record: &Record) -> ApiResult<()> {
         let exists: bool = self
             .c()

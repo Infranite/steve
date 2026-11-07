@@ -199,10 +199,12 @@ impl Journal {
                     .map_err(internal)?;
                 let inc = t.bump("incarnation")?;
                 t.mark_unknown()?;
-                t.interrupt_disk_records(
-                    crate::disk_observation::Unavailable::Restarted,
-                    crate::now(),
-                )?;
+                t.optional_disk_update(|| {
+                    t.interrupt_disk_records(
+                        crate::disk_observation::Unavailable::Restarted,
+                        crate::now(),
+                    )
+                })?;
                 Ok((inc, id))
             })?;
         j.id = id;

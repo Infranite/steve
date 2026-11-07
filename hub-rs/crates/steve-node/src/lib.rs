@@ -1427,7 +1427,9 @@ impl LocalNode {
         // All effects have quiesced. Preserve unresolved outcomes for explicit Hub recovery.
         let _ = self.0.j.tx(|t| {
             t.mark_unknown()?;
-            t.interrupt_disk_records(disk_observation::Unavailable::Stopping, now())
+            t.optional_disk_update(|| {
+                t.interrupt_disk_records(disk_observation::Unavailable::Stopping, now())
+            })
         });
         self.0.wake.notify_one();
     }

@@ -288,6 +288,98 @@ async fn disk_observations_done(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_statistics_abort_does_not_abort_turn_acceptance_or_completion() {
+    use steve_node::disk_observation::Policy;
+    for phase in ["started", "finished"] {
+        let t = T::new(&[]);
+        let n = t.node();
+        ready(&n, "disk").await;
+        n.configure_disk_observations(Some(Policy::default()))
+            .unwrap();
+        let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TRIGGER fail_statistics BEFORE INSERT ON disk_observations
+             WHEN NEW.phase='{phase}' BEGIN SELECT RAISE(ABORT,'statistics only'); END;"
+        ))
+        .unwrap();
+        n.start_turn(now_cmd(
+            "disk_turn",
+            turn("disk", "t_disk", "a_disk", "@say business committed"),
+        ))
+        .await
+        .unwrap();
+        assert!(ok(&finished(&n, "disk_turn").await), "{phase}");
+        t.until("the business end despite statistics failure", |t| {
+            t.ended().len() == 1
+        })
+        .await;
+        assert_eq!(t.text(), "business committed", "{phase}");
+        let rejected_rows: i64 = db
+            .query_row(
+                "SELECT count(*) FROM disk_observations WHERE phase=?",
+                [phase],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rejected_rows, 0, "{phase}");
+        // A completed actor releases its gate even when the optional end record failed.
+        n.start_turn(now_cmd(
+            "disk_next",
+            turn("disk", "t_next", "a_next", "@say continued"),
+        ))
+        .await
+        .unwrap();
+        assert!(ok(&finished(&n, "disk_next").await), "{phase}");
+        n.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_statistics_rollback_does_not_hide_a_lost_business_transaction() {
+    use steve_node::disk_observation::Policy;
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "disk").await;
+    n.configure_disk_observations(Some(Policy::default()))
+        .unwrap();
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    let view_before: String = db
+        .query_row("SELECT view FROM sessions WHERE id='disk'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER rollback_statistics BEFORE INSERT ON disk_observations
+         BEGIN SELECT RAISE(ROLLBACK,'the whole journal transaction was lost'); END;",
+    )
+    .unwrap();
+    let command = now_cmd(
+        "disk_turn",
+        turn("disk", "t_disk", "a_disk", "@say only after repair"),
+    );
+    let error = n.start_turn(command.clone()).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Internal);
+    let accepted: i64 = db
+        .query_row("SELECT count(*) FROM ops WHERE id='disk_turn'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(accepted, 0);
+    let view_after: String = db
+        .query_row("SELECT view FROM sessions WHERE id='disk'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(view_after, view_before);
+    assert_eq!(t.sent("session/prompt"), 0);
+    db.execute_batch("DROP TRIGGER rollback_statistics")
+        .unwrap();
+    n.start_turn(command).await.unwrap();
+    assert!(ok(&finished(&n, "disk_turn").await));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disk_records_follow_real_turns_and_survive_resend_compaction_and_restart() {
     use steve_node::disk_observation::{Interpretation, Phase, Policy, State};
     use steve_node::disk_usage::{Budget, Outcome};
