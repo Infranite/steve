@@ -86,6 +86,14 @@ fn types_survive_the_wire() {
         offset: 0,
         max: 10,
     });
+    roundtrip(&ArtifactRead {
+        execution: exec_turn("s_1", "t_1", "a_1"),
+        view_digest: Digest::sha256(b"view"),
+        location: RelPath::new("report.txt").unwrap(),
+        expected: Some(Revision::new("v1").unwrap()),
+        offset: 123,
+        max: 10,
+    });
 }
 
 #[test]

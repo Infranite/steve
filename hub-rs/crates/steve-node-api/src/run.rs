@@ -188,6 +188,10 @@ pub struct OpenSession {
     /// Node's, as before. An older Node ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<HarnessState>,
+    /// The Hub's recorded view for artifact reads. Absent on older sessions: artifact reads
+    /// are unsupported until the Hub explicitly opens a session with a view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_view: Option<Digest>,
 }
 
 /// A principal's own directory for one harness (path model §4.5.1): its configuration, logins,
