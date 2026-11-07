@@ -3,12 +3,13 @@
 
 use rusqlite::{Connection, OptionalExtension};
 
-/// Why an item or work-unit session cannot start another turn. Persisted prerequisite waits apply
-/// to both. This is a state gate only: an execution runtime must separately establish sandbox and
-/// principal isolation.
+/// Why an item or work-unit session cannot start another turn. Persisted pauses and prerequisite
+/// waits apply to both. This is a state gate only: an execution runtime must separately establish
+/// sandbox and principal isolation.
 pub fn session_blocker(c: &Connection, session: &str) -> crate::Result<Option<String>> {
     Ok(c.query_row(
         "SELECT CASE
+          WHEN i.status='pause' THEN '事项已暂停，恢复后再执行。'
           WHEN i.status='block' THEN '事项正在等待前置完成，不能开始执行。'
           WHEN EXISTS(SELECT 1 FROM item_dependency_waits dw WHERE dw.item_id=i.id AND dw.cycle=i.cycle AND dw.state='waiting')
             THEN '事项正在等待前置完成后续跑，不能开始执行。'
