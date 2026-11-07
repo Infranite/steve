@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -127,6 +128,27 @@ class Services(unittest.TestCase):
         self.assertIsNone(s.status()["running_build"])
         self.assertEqual(s.status()["configured_build"]["version"], "0.2.1")
         self.assert_preserved()
+
+    def test_doctor_update_command_preserves_legacy_custom_label_before_adoption(self):
+        label = "test.legacy.node"
+        manager = Manager("Darwin")
+        service = m.Service("node", self.home, label=label, system="Darwin", user_home=self.root, runner=manager)
+        # Legacy services have a plist but no services/node.json record. The suggested command must
+        # still address that job, so its running-state guard cannot be bypassed by a default label.
+        service.config.parent.mkdir(parents=True)
+        old = plistlib.dumps(dict(Label=label, ProgramArguments=[str(self.home / "bin/steve-node"), "run"],
+                                  EnvironmentVariables=dict(STEVE_HOME=str(self.home))))
+        service.config.write_bytes(old)
+        manager.loaded = manager.running = True
+        args = shlex.split(service.status(self.next, doctor=True)["update_command"])
+        emitted_label = args[args.index("--label") + 1]
+        emitted_home = args[args.index("--home") + 1]
+        self.assertEqual((emitted_label, emitted_home), (label, str(self.home)))
+        resumed = m.Service("node", emitted_home, label=emitted_label, system="Darwin", user_home=self.root, runner=manager)
+        with self.assertRaisesRegex(m.Refused, "no files changed"):
+            resumed.install(self.next, update=True)
+        self.assertEqual(service.config.read_bytes(), old)
+        self.assertFalse((self.root / "Library/LaunchAgents/io.github.infranite.steve.node.plist").exists())
 
     def test_unknown_manager_state_never_allows_replacement(self):
         for system in ("Darwin", "Linux"):

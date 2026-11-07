@@ -267,7 +267,7 @@ class Service:
             path, info = self.bundle(candidate)
             report["candidate"] = dict(release=str(path), build=info)
             report["update_command"] = shlex.join([sys.executable, str(Path(__file__).resolve()), self.component,
-                "update", "--home", str(self.home), "--release", str(path)]) if self.component == "node" else "Settings > About"
+                "update", "--home", str(self.home), "--label", self.label, "--release", str(path)]) if self.component == "node" else "Settings > About"
         if self.component == "hub" and self.system == "Darwin" and self.signed:
             default_home = (self.user_home / ".steve").resolve()
             supported = self.home == default_home
