@@ -390,16 +390,48 @@ fn persisted_pause_intent_is_reconciled_after_losing_in_memory_cancels() {
         k.gw.clone(),
         k.core.config().clone(),
     );
-    restarted.lifecycle_tick().unwrap();
-    for u in graph(&k, &parent)
+    let turns: Vec<_> = graph(&k, &parent)
         .units
-        .iter()
+        .into_iter()
         .filter(|u| u.status == "running")
-    {
-        assert!(k.rt.st().cancelled.contains(u.session_id.as_ref().unwrap()));
-    }
+        .map(|u| {
+            let session = u.session_id.unwrap();
+            let attempt = k.rt.st().attempts[&session].clone();
+            (session, attempt)
+        })
+        .collect();
+    assert_eq!(turns.len(), 2, "both independent children were running");
+    // Tx::drop dispatches stops outside the core lock. A tick only schedules them; it cannot
+    // promise that the runtime has received them yet, regardless of the platform's scheduling.
+    let gate = k.rt.stop_gate.write().unwrap();
+    restarted.lifecycle_tick().unwrap();
+    assert!(k.rt.st().cancelled.is_empty());
+    assert!(
+        restarted
+            .item_action(&parent, ItemAction::Finish, "me")
+            .is_err()
+    );
+    drop(gate);
+    assert!(
+        k.wait(|| {
+            let st = k.rt.st();
+            turns.iter().all(|(session, attempt)| {
+                st.stops.iter().any(|(turn, result)| {
+                    &turn.session == session
+                        && &turn.attempt == attempt
+                        && *result == crate::Stop::Requested
+                })
+            })
+        }),
+        "the restarted core must send a stop for every persisted running attempt"
+    );
+    // A cancellation request is still not proof that either execution has stopped.
     assert_eq!(k.rt.st().turning.len(), 2);
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        restarted
+            .item_action(&parent, ItemAction::Finish, "me")
+            .is_err()
+    );
 }
 
 #[tokio::test]
