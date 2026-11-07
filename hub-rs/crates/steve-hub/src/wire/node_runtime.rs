@@ -747,6 +747,14 @@ impl NodeRuntime {
             choice: b.choice.clone(),
             policy: b.policy.clone(),
             resume: adopted.clone().flatten(),
+            // the principal's own variables on this Node (node_env): a read that fails sends none
+            env: self
+                .store
+                .reader(|c| super::node_env::for_session(c, self.node_id.as_str(), &b.session))
+                .unwrap_or_else(|e| {
+                    tracing::warn!(session = %b.session, "node_env: {e}");
+                    vec![]
+                }),
         };
         let fresh = self.tx(|tx| {
             self.session_owners_work_in(tx, &b.session)?;

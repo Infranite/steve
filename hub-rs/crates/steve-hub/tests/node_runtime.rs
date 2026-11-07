@@ -5040,3 +5040,28 @@ async fn a_stopped_node_adopts_nothing() {
     assert_eq!(bound, 0);
     assert_eq!(h.rt.adopted(), 0);
 }
+
+/// The principal's own variables on this Node (`node_env`) go with the open, and only theirs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_open_carries_the_principals_variables_on_this_node() {
+    let h = hub();
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute_batch(
+                "INSERT INTO node_env(node_id,principal,key,value,updated_by,updated) VALUES
+                   ('n1','svc:default','NPM_TOKEN','tok','u',1),
+                   ('n2','svc:default','ELSEWHERE','x','u',1),
+                   ('n1','someone','THEIRS','y','u',1);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.bind();
+    let request: String = h.q("SELECT request FROM node_commands WHERE method='open_session'");
+    let v: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(
+        v["body"]["env"],
+        serde_json::json!([["NPM_TOKEN", "tok"]]),
+        "{v}"
+    );
+}

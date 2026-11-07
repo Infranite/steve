@@ -795,6 +795,60 @@ impl Repo for StoreBackend {
             })
             .map_err(err)
     }
+    fn node_env_list(&self, me: &str, ws: &str, node: &str, principal: &str) -> BResult<Value> {
+        use super::node_env as ne;
+        self.0
+            .with_conn(|c| {
+                if let Some(why) = ne::refusal(c, me, ws, node, principal)? {
+                    return Ok(Err(why));
+                }
+                Ok(Ok(ne::list(c, node, principal)?))
+            })
+            .map_err(err)?
+            .map(|rows| serde_json::json!({ "node": node, "principal": principal, "env": rows }))
+            .map_err(|why| BackendError {
+                status: 403,
+                message: why,
+            })
+    }
+    fn node_env_put(
+        &self,
+        me: &str,
+        ws: &str,
+        node: &str,
+        principal: &str,
+        key: &str,
+        value: Option<&str>,
+        note: &str,
+    ) -> BResult<()> {
+        use super::node_env as ne;
+        if let Some(v) = value
+            && let Some(why) = ne::value_refusal(key, v)
+        {
+            return Err(BackendError {
+                status: 400,
+                message: why,
+            });
+        }
+        self.0
+            .with_conn(|c| {
+                if let Some(why) = ne::refusal(c, me, ws, node, principal)? {
+                    return Ok(Err(why));
+                }
+                match value {
+                    Some(v) => ne::put(c, node, principal, key, v, note, me)?,
+                    None => {
+                        ne::delete(c, node, principal, key)?;
+                    }
+                }
+                Ok(Ok(()))
+            })
+            .map_err(err)?
+            .map_err(|why| BackendError {
+                status: 403,
+                message: why,
+            })
+    }
     fn setting_put_raw(&self, ws: &str, key: &str, value: &str) -> BResult<()> {
         let t = steve_store::now();
         self.0

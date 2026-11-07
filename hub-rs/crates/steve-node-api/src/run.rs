@@ -179,6 +179,11 @@ pub struct OpenSession {
     pub policy: ExecutionPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<ResumeHandle>,
+    /// The principal's own variables on this Node (`node_env`): set in the harness's environment
+    /// over the Node's, `PATH_PREPEND` in front of `PATH`; a key [`crate::env::user_env_refusal`]
+    /// refuses is dropped. An older Node ignores them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
 }
 
 /// One attempt of a turn. At most one attempt per session runs at a time: a busy session refuses

@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod mcp_extra;
 pub mod modules;
 pub mod node_binding;
+pub mod node_env;
 pub mod node_files;
 pub mod node_runtime;
 pub mod node_secrets;

@@ -2390,6 +2390,7 @@ pub mod build {
             choice: choice(),
             policy: policy(),
             resume: None,
+            env: Default::default(),
         }
     }
 

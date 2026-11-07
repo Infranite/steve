@@ -203,6 +203,7 @@ fn open_body(session: &str) -> OpenSession {
         choice: choice(),
         policy: policy(),
         resume: None,
+        env: Default::default(),
     }
 }
 
@@ -4089,4 +4090,37 @@ async fn a_harness_cannot_read_the_control_plane() {
         .unwrap();
     t.until("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.text(), "cat:EPERM cat:EPERM cat:ok ", "{:?}", t.ended());
+}
+
+/// The principal's own variables on this Node (`node_env`) reach its harness, `PATH_PREPEND` in
+/// front of `PATH`; a key Steve sets itself is not theirs to set, whatever the Hub sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_users_own_variables_reach_the_harness_and_steves_stay_steves() {
+    let t = T::new(&[]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let mut body = open_body("s_1");
+    body.env = vec![
+        ("NPM_TOKEN".into(), "tok-1".into()),
+        ("PATH_PREPEND".into(), "/opt/mine/bin".into()),
+        ("HOME".into(), "/elsewhere".into()),
+    ];
+    n.open_session(now_cmd("op_open_s_1", body)).await.unwrap();
+    let s = finished(&n, "op_open_s_1").await;
+    assert!(ok(&s), "{s:?}");
+    let spawn = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .find_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).ok()?["spawn"]["env"]
+                .as_object()
+                .cloned()
+        })
+        .unwrap();
+    assert_eq!(spawn["NPM_TOKEN"], "tok-1");
+    assert_eq!(spawn["PATH0"], "/opt/mine/bin");
+    assert_ne!(spawn["HOME"], "/elsewhere");
 }

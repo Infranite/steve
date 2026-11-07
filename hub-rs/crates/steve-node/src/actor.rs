@@ -1908,6 +1908,36 @@ impl Actor {
     }
 }
 
+/// The environment a session's harness gets over the Node's: the principal's own variables
+/// (`node_env`; a key the Node refuses is dropped, `PATH_PREPEND` goes in front of `PATH`), then
+/// what Steve sets itself.
+fn harness_env(
+    user: &[(String, String)],
+    claude_executable: std::ffi::OsString,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    use steve_node_api::env::{PATH_PREPEND, user_env_refusal};
+    let mut env: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+    for (k, v) in user {
+        if let Some(why) = user_env_refusal(k) {
+            tracing::warn!("node: {k} is not set for the harness: {why}");
+            continue;
+        }
+        if k == PATH_PREPEND {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let mut joined = std::ffi::OsString::from(v);
+            if !path.is_empty() {
+                joined.push(":");
+                joined.push(path);
+            }
+            env.push(("PATH".into(), joined));
+        } else {
+            env.push((k.into(), v.into()));
+        }
+    }
+    env.push(("CLAUDE_CODE_EXECUTABLE".into(), claude_executable));
+    env
+}
+
 /// Starts and opens a harness for `session` (in a task). Its group is recorded before the handshake
 /// (never over one not confirmed gone) and stopped again if anything after fails.
 async fn open_harness(
@@ -1964,10 +1994,10 @@ async fn open_harness(
             program,
             args,
             cwd: cwd.clone().into(),
-            env: vec![(
-                "CLAUDE_CODE_EXECUTABLE".into(),
+            env: harness_env(
+                &row.open.env,
                 inner.cfg.acp.claude_executable.clone().into_os_string(),
-            )],
+            ),
             log_tag: format!("[node {session}]"),
         },
         1 << 20,

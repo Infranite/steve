@@ -1,0 +1,4 @@
+- 新增“每个人在每台 Node 上自己的环境变量”：用 `PUT /api/node-env/{node}/{key}`（`{"value": …, "note": …}`）保存，`GET /api/node-env/{node}` 查看，`DELETE` 删除。本机 Node 的编号是 `local`。这些变量只注入你自己发起的运行，而且只在那台 Node 上；`PATH_PREPEND` 会把目录加到 `PATH` 前面。工作区所有者还可以为工作区本身（`principal: "svc:<工作区>"`）设置，用于没有记录发起人的运行。
+  - 只能改自己的，并且只能用在本机 Node 或你自己配对的 Node 上；别人的变量谁都看不到。
+  - Steve 自己设置的键不能改：`HOME`、`TMPDIR`、`PATH`、`XDG_*`、git 全局配置、`STEVE_*`、`*_FILE`，以及 `DYLD_*`、`LD_*` 这类会把代码注入其他进程的键。
+  - 改动对之后新开的会话生效。保存在保险箱里的值（引用）还不支持。网页上的编辑界面也还没做。
