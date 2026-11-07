@@ -221,6 +221,11 @@ impl Tx<'_> {
             )));
         }
         let reason = required_text(&args, "reason")?;
+        if matches!(action, "resume" | "retry") {
+            self.rt()
+                .check_workflow_execution(item)
+                .map_err(|e| conflict(e.to_string()))?;
+        }
         match action {
             "plan" => {
                 if let Some(p) = self.db().project(parent.project_id.as_deref())?

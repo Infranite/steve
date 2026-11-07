@@ -102,6 +102,30 @@ fn no_confined_node_plans_but_never_creates_or_runs_children() {
             .any(|s| s.as_str().unwrap().contains("隔离"))
     );
     k.core.lifecycle_tick().unwrap();
+    // Planning, pausing and cancelling remain useful before an isolated Node is
+    // available. Requests to execute must leave this saved state intact.
+    change(&k, &parent, "pause", None).unwrap();
+    change(&k, &parent, "cancel", Some("a")).unwrap();
+    let blocked = graph(&k, &parent);
+    let parent_revision = k.db().item(&parent).unwrap().unwrap().revision;
+    assert!(blocked.paused);
+    for (action, unit_id) in [("resume", None), ("retry", Some("a"))] {
+        let error = change(&k, &parent, action, unit_id).unwrap_err();
+        assert!(
+            matches!(&error, crate::CoreError::Status(409, reason) if reason.contains("隔离")),
+            "{action}: {error}"
+        );
+        assert_eq!(
+            graph(&k, &parent),
+            blocked,
+            "{action} changed the work graph"
+        );
+        assert_eq!(
+            k.db().item(&parent).unwrap().unwrap().revision,
+            parent_revision,
+            "{action} changed the parent revision"
+        );
+    }
     assert!(graph(&k, &parent).units.iter().all(|u| u.item_id.is_none()));
     assert!(k.rt.st().created.is_empty());
     assert!(k.finish(&parent).is_err());
