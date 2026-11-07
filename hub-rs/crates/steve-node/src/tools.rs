@@ -25,7 +25,7 @@ use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
         ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
-        ToolsCapability,
+        ToolAnnotations, ToolsCapability,
     },
     service::RequestContext,
     transport::{
@@ -351,7 +351,10 @@ impl ServerHandler for Handler {
                     serde_json::Value::Object(m) => m,
                     _ => serde_json::Map::new(),
                 };
+                // Preserve the Hub's description for clients; calls still require the live
+                // execution and current catalog authorization in the Hub.
                 Tool::new(t.name, t.description, Arc::new(schema))
+                    .with_annotations(ToolAnnotations::new().read_only(t.read_only))
             })
             .collect();
         Ok(ListToolsResult::with_all_items(tools))

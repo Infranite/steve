@@ -1560,6 +1560,38 @@ async fn failed_research_tool_keeps_a_safe_diagnostic_in_reply_metadata() {
 }
 
 #[tokio::test]
+async fn a_research_guard_stop_keeps_one_neutral_note_in_the_saved_reply() {
+    for partial in [
+        "已有部分结果。",
+        "已有部分结果。\n\n（本次查询在工具检查时停止，尚未完成。）",
+    ] {
+        let k = Kit::new();
+        assert!(k.core.set_researcher(FakeResearch::new(vec![
+            Step::Text(partial),
+            Step::End(crate::thread::RunEnd::Violated),
+        ])));
+        router(
+            &k,
+            |_| json!({"kind":"research","confidence":0.9,"signals":["lookup"],"title":"查询事项"}),
+        );
+        let mid = k.core.say(WS, "查询 ST-23 的进展", &[]).unwrap();
+        until(|| route_opt(&k, &mid).is_some_and(|l| l.reply_id.is_some())).await;
+        let reply = k
+            .db()
+            .message(&route_log(&k, &mid).reply_id.unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reply.text,
+            "已有部分结果。\n\n（本次查询在工具检查时停止，尚未完成。）"
+        );
+        assert_eq!(reply.meta["steps"]["research"]["stopped"], "violation");
+        let runs = k.db().store().thread().runs_of_message(&mid).unwrap();
+        assert_eq!(runs[0].status, "violated");
+    }
+}
+
+#[tokio::test]
 async fn research_reads_the_items_the_conversation_names_up_front() {
     let k = Kit::new();
     let item = k.item("run", "执行", None);

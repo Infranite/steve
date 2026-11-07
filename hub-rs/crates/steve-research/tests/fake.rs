@@ -128,11 +128,16 @@ async fn assert_violation(name: &str, input: serde_json::Value) {
     );
     assert_eq!(out.status.as_str(), "violated");
     assert!(
-        out.answer.ends_with("（我越界去读了不该读的东西，已停下）"),
+        out.answer
+            .ends_with("（本次查询在工具检查时停止，尚未完成。）"),
         "{}",
         out.answer
     );
     assert!(out.answer.starts_with("我先看看"));
+    assert!(
+        out.files_read.is_empty(),
+        "a refused call is not a completed read"
+    );
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert!(!survived.exists(), "harness process group was killed");
     assert_eq!(
