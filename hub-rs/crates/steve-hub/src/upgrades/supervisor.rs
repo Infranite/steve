@@ -574,7 +574,11 @@ mod tests {
             "#!/bin/sh\nexit 1\n".to_string()
         } else {
             r#"#!/usr/bin/env python3
-import os,json,http.server,threading,time
+import os,json,http.server,threading,time,sys
+# Build metadata is a CLI query, not a request to start a server. In particular,
+# never bind an inherited STEVE_PORT when these tests run inside a live Node.
+if '--build-info' in sys.argv:
+ print(json.dumps(dict(check_config=False))); sys.exit(0)
 home=os.environ['STEVE_HOME']; version=os.environ['STEVE_VERSION']; op=os.environ.get('STEVE_UPGRADE_ID')
 class Server(http.server.HTTPServer): allow_reuse_address=True
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -652,6 +656,29 @@ Server(('127.0.0.1',int(os.environ['STEVE_PORT'])),Handler).serve_forever()
             "before-upgrade"
         );
         stop(&mut child).await.unwrap();
+    }
+    #[tokio::test]
+    async fn fixture_build_info_does_not_start_a_server_or_need_runtime_env() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = bundle(home.path(), "0.2.0", false);
+        let out = tokio::time::timeout(
+            Duration::from_secs(5),
+            Command::new(dir.join("bin/steve-hub"))
+                .arg("--build-info")
+                .env_remove("STEVE_HOME")
+                .env_remove("STEVE_VERSION")
+                .env("STEVE_PORT", "must-not-bind")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("metadata must exit without starting a server")
+        .unwrap();
+        assert!(out.status.success(), "{:?}", out.stderr);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out.stdout).unwrap()["check_config"],
+            false
+        );
     }
     #[tokio::test]
     async fn real_process_upgrade_commits_pair() {
