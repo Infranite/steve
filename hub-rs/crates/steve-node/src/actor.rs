@@ -317,8 +317,8 @@ enum Opening {
 
 /// How long text deltas of one message block may be held back to go out as one event, and how
 /// much text at most. The Hub stores, sends and renders one event where the harness sent many
-/// small chunks; the final text is the same bytes (docs/node-protocol.md: increments that have no
-/// sequence number yet may be merged in memory).
+/// small chunks; the final text is the same bytes (increments that have no sequence number yet may
+/// be merged in memory).
 const HOLD_FOR: Duration = Duration::from_millis(50);
 const HOLD_BYTES: usize = 4096;
 

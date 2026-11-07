@@ -1,4 +1,4 @@
-//! The Hub's coordinator for sessions that run on a Node (docs/hub-node-client.md, D3).
+//! The Hub's coordinator for sessions that run on a Node.
 //!
 //! The Hub decides, the Node executes. Here the Hub's decisions become durable commands and the
 //! Node's facts become the Hub's state, each in one store transaction:

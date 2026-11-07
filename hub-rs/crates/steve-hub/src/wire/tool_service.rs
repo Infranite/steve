@@ -1,4 +1,4 @@
-//! Steve's tools, independent of any tool protocol (docs/hub-node-client.md §4): the five Steve tools
+//! Steve's tools, independent of any tool protocol: the five Steve tools
 //! (steve-mcp) and the modules' tools (`mcp_extra`), listed and run for one session. The Hub's MCP
 //! endpoint is one way to reach them (for harnesses the in-process runner starts); a Node's
 //! `tool.call` is the other. Both get the same definitions, checks and texts.

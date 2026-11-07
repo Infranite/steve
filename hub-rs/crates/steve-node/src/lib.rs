@@ -1,4 +1,4 @@
-//! A Steve Node: the host of harnesses on one machine (docs/hub-node-client.md).
+//! A Steve Node: the host of harnesses on one machine.
 //!
 //! It runs exactly what the Hub asks, one attempt at a time per session, and reports facts. It never
 //! retries, never picks the next message, never decides about permissions: the Hub does. Agent
