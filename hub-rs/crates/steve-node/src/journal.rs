@@ -19,6 +19,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Serialize, de::DeserializeOwned};
 use steve_node_api::*;
 
+mod disk_records;
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS ops (
@@ -50,6 +52,11 @@ CREATE TABLE IF NOT EXISTS artifact_grants (
 CREATE INDEX IF NOT EXISTS artifact_grants_workspace ON artifact_grants(workspace);
 CREATE TABLE IF NOT EXISTS answers (
   op TEXT PRIMARY KEY, permission TEXT NOT NULL, resolution TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS disk_observations (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, phase TEXT NOT NULL,
+  node_incarnation INTEGER NOT NULL, triggered INTEGER NOT NULL, completed INTEGER,
+  stage TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(op,phase));
+CREATE INDEX IF NOT EXISTS disk_observations_stage ON disk_observations(stage,seq);
 ";
 
 /// The journal's schema version (`PRAGMA user_version`). 3: the journal has its own identity.
@@ -192,6 +199,12 @@ impl Journal {
                     .map_err(internal)?;
                 let inc = t.bump("incarnation")?;
                 t.mark_unknown()?;
+                t.optional_disk_update(|| {
+                    t.interrupt_disk_records(
+                        crate::disk_observation::Unavailable::Restarted,
+                        crate::now(),
+                    )
+                })?;
                 Ok((inc, id))
             })?;
         j.id = id;
