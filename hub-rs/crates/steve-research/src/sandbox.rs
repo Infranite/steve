@@ -19,9 +19,12 @@ pub enum SandboxMode {
     Off,
 }
 
-/// True on macOS with `sandbox-exec` installed.
+/// True on macOS with `sandbox-exec` installed and usable from here (not from inside another
+/// sandbox, which macOS cannot nest: Steve's own tests run in a confined session). Asked once.
 pub fn available() -> bool {
-    cfg!(target_os = "macos") && Path::new(SANDBOX_EXEC).exists()
+    static WORKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WORKS
+        .get_or_init(|| Path::new(SANDBOX_EXEC).exists() && steve_vault::harness::seatbelt_works())
 }
 
 /// Whether a run under `mode` is sandboxed; `None` when `Required` but unavailable.
@@ -67,6 +70,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn writes_outside_the_profile_fail() {
+        if !available() {
+            eprintln!("skipped: no seatbelt here (inside a sandbox already?)");
+            return;
+        }
         let t = tempfile::tempdir().unwrap();
         let root = t.path().canonicalize().unwrap();
         let proj = root.join("proj");

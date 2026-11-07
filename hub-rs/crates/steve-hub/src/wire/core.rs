@@ -1806,28 +1806,50 @@ impl Domain for CoreDomain {
             None => Ok(None),
         }
     }
-    async fn promote(&self, ws: &str, message: &str) -> BResult<Obj> {
-        to_obj(self.core.promote(ws, message).await.map_err(cerr)?)
+    async fn promote(&self, ws: &str, message: &str, by: &str) -> BResult<Obj> {
+        to_obj(
+            self.core
+                .promote(ws, message, Some(by))
+                .await
+                .map_err(cerr)?,
+        )
     }
-    async fn reroute(&self, ws: &str, message: &str, to: &str) -> BResult<(Obj, bool)> {
+    async fn reroute(&self, ws: &str, message: &str, to: &str, by: &str) -> BResult<(Obj, bool)> {
         let to = steve_core::thread::RerouteTo::parse(to).ok_or_else(|| BackendError {
             status: 400,
             message: steve_i18n::t!("hub.error.invalid", fields = "to"),
         })?;
-        handled(self.core.reroute(ws, message, to).await.map_err(cerr)?)
+        handled(
+            self.core
+                .reroute(ws, message, to, Some(by))
+                .await
+                .map_err(cerr)?,
+        )
     }
-    async fn offer(&self, ws: &str, message: &str, take: bool) -> BResult<(Obj, bool)> {
-        let (c, ws, m) = (self.core.clone(), ws.to_string(), message.to_string());
-        handled(blocking(move || c.offer(&ws, &m, take)).await?)
+    async fn offer(&self, ws: &str, message: &str, take: bool, by: &str) -> BResult<(Obj, bool)> {
+        let (c, ws, m, by) = (
+            self.core.clone(),
+            ws.to_string(),
+            message.to_string(),
+            by.to_string(),
+        );
+        handled(blocking(move || c.offer(&ws, &m, take, Some(&by))).await?)
     }
-    async fn suggest(&self, ws: &str, message: &str, choice: &str) -> BResult<(Obj, bool)> {
-        let (c, ws, m, ch) = (
+    async fn suggest(
+        &self,
+        ws: &str,
+        message: &str,
+        choice: &str,
+        by: &str,
+    ) -> BResult<(Obj, bool)> {
+        let (c, ws, m, ch, by) = (
             self.core.clone(),
             ws.to_string(),
             message.to_string(),
             choice.to_string(),
+            by.to_string(),
         );
-        handled(blocking(move || c.suggest(&ws, &m, &ch)).await?)
+        handled(blocking(move || c.suggest(&ws, &m, &ch, Some(&by))).await?)
     }
     async fn a2ui_action(
         &self,

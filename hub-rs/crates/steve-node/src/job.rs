@@ -342,6 +342,11 @@ async fn acp_think(
         let Some(profile) = steve_research::sandbox::profile(&writable) else {
             return failed(PrintError::Failed("invalid read-only sandbox paths".into()));
         };
+        // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
+        let profile = format!(
+            "{profile}{}",
+            inner.confine.seatbelt_rules().unwrap_or_default()
+        );
         let path = dir.join("readonly.sb");
         if let Err(e) =
             std::fs::create_dir_all(dir.join("tmp")).and_then(|_| std::fs::write(&path, profile))
@@ -386,6 +391,7 @@ async fn acp_think(
         prompt,
         mcp_servers: json!([]),
         sandbox: sandbox.as_deref(),
+        confine: properties.nested_sandbox.then_some(&inner.confine),
         timeout: Duration::from_millis((spec.run.limits.deadline.0 - now()).max(0) as u64),
         prefix: spec.run.attempt.as_str(),
         on_session: None,

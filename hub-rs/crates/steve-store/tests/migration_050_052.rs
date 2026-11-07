@@ -52,7 +52,10 @@ fn published_v49_upgrades_and_reopens_with_existing_data_and_new_gates() {
     store
         .with_conn(|c| {
             let compat = db::compat(c)?;
-            assert_eq!((compat.schema, compat.min_reader), (52, 52));
+            assert_eq!(
+                (compat.schema, compat.min_reader),
+                (db::SCHEMA_VERSION, db::SCHEMA_VERSION)
+            );
             assert_eq!(
                 c.query_row("SELECT title FROM items WHERE id='parent'", [], |r| {
                     r.get::<_, String>(0)

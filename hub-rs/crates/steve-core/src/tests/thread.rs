@@ -150,7 +150,7 @@ async fn chat_is_answered_with_history_and_can_be_promoted() {
         json!({"kind": "chat", "title": "写诗", "goal": "写一首关于秋天的诗", "bot": "dev"}),
         "",
     );
-    let item = k.core.promote(WS, &ms[1].id).await.unwrap();
+    let item = k.core.promote(WS, &ms[1].id, None).await.unwrap();
     assert_eq!(item.title, "写诗");
     assert_eq!(k.db().goal(&item.id).unwrap(), "写一首关于秋天的诗");
     assert_eq!(item.bot_id.as_deref(), Some("dev"));
@@ -607,7 +607,7 @@ async fn chat_attachments_are_read_by_steve_and_carried_into_promote() {
         std::fs::read_to_string(scratch.join(".steve/attachments/.gitignore")).unwrap(),
         "*\n"
     );
-    let item = k.core.promote(WS, &ms[1].id).await.unwrap();
+    let item = k.core.promote(WS, &ms[1].id, None).await.unwrap();
     let s = k.db().sessions_of_item(&item.id).unwrap().pop().unwrap();
     let sent =
         k.rt.st()

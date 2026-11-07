@@ -754,6 +754,17 @@ async fn a_node_session_shows_its_status_and_harness_id() {
         "the first turn ran; log:\n{}",
         hub_log(&h)
     );
+    // its view under the path model, in shadow (S2), against the local Node's roots today
+    let (rw, extra): (String, Option<i64>) = h
+        .db()
+        .query_row(
+            "SELECT json_extract(view,'$.rw'), extra_count FROM view_shadow WHERE session_id=?",
+            [&sid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("the session's view is recorded at bind");
+    assert!(rw.contains("worktrees") || rw.contains("scratch"), "{rw}");
+    assert!(extra.is_some(), "the local Node's roots are known");
     let status = |v: &Value| v["status"].as_str().unwrap_or_default().to_string();
     let get = || async {
         let (st, v) = c.call("GET", &format!("/api/sessions/{sid}"), None).await;

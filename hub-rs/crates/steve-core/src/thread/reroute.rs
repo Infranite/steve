@@ -49,8 +49,15 @@ fn files_of(m: &Message, key: &str) -> Vec<FileRef> {
 }
 
 impl Core {
-    /// `POST /api/thread/:id/reroute`. `msg_id` is Steve's reply or the user's own message.
-    pub async fn reroute(&self, ws: &str, msg_id: &str, to: RerouteTo) -> Result<Handled> {
+    /// `POST /api/thread/:id/reroute`. `msg_id` is Steve's reply or the user's own message; `by`:
+    /// the member who asked, whose access an item made here runs with.
+    pub async fn reroute(
+        &self,
+        ws: &str,
+        msg_id: &str,
+        to: RerouteTo,
+        by: Option<&str>,
+    ) -> Result<Handled> {
         let m = self
             .store()
             .message(msg_id)?
@@ -73,9 +80,9 @@ impl Core {
             RerouteTo::Inline => self.to_inline(ws, &origin, reply.as_ref()),
             RerouteTo::Supplement(item) => self.to_supplement(ws, &origin, &item),
             RerouteTo::Item => match reply {
-                Some(r) if r.meta["offer"]["state"] == "open" => self.offer(ws, &r.id, true),
+                Some(r) if r.meta["offer"]["state"] == "open" => self.offer(ws, &r.id, true, by),
                 Some(r) if r.meta.get("suggest").is_some_and(Value::is_object) => {
-                    self.suggest(ws, &r.id, "item")
+                    self.suggest(ws, &r.id, "item", by)
                 }
                 Some(r) if r.item_id.is_some() => Ok(Handled {
                     message_id: r.id.clone(),
@@ -89,7 +96,7 @@ impl Core {
                         || r.meta.get("promoted").is_some() =>
                 {
                     let before = r.meta.get("promoted").is_some();
-                    let item = self.promote(ws, &r.id).await?;
+                    let item = self.promote(ws, &r.id, by).await?;
                     let id = self
                         .conv_messages(ws, &r.space)?
                         .into_iter()
@@ -102,7 +109,7 @@ impl Core {
                         already: before,
                     })
                 }
-                _ => self.user_message_to_item(ws, &origin).await,
+                _ => self.user_message_to_item(ws, &origin, by).await,
             },
         }
     }
@@ -262,7 +269,12 @@ impl Core {
     }
 
     /// A user message nothing became an item: route it as “做成事项” and make the item.
-    async fn user_message_to_item(&self, ws: &str, origin: &str) -> Result<Handled> {
+    async fn user_message_to_item(
+        &self,
+        ws: &str,
+        origin: &str,
+        by: Option<&str>,
+    ) -> Result<Handled> {
         let om = self.store().message(origin)?.ok_or_else(not_found)?;
         let history = self.history_before(ws, origin)?;
         let r = self.route(ws, &om.text, &history, true).await?;
@@ -289,7 +301,7 @@ impl Core {
             from_question: super::decide::pure_question(&om.text),
             answer: None,
             start: true, // your action in the web
-            by: None,
+            by: by.map(String::from),
         })?;
         th.route_override(origin, "to_item", Some(&item.id))?;
         let text = format!("好，做成事项 {} 交给{}了。", item.id, self.bot_name(&item));
@@ -304,7 +316,7 @@ impl Core {
     /// Turn a chat answer into an item, with the conversation as context. A message becomes at most one item:
     /// clicking again (or from another tab, or while routing) returns the same one. Counts as a correction
     /// (`to_item`) unless the answer offered that work.
-    pub async fn promote(&self, ws: &str, msg_id: &str) -> Result<Item> {
+    pub async fn promote(&self, ws: &str, msg_id: &str, by: Option<&str>) -> Result<Item> {
         let refuse = || crate::error::msg(steve_i18n::t!("core.thread.not_promotable"));
         let m = self
             .store()
@@ -317,7 +329,7 @@ impl Core {
             return Ok(i);
         }
         if m.meta["offer"]["state"] == "open" {
-            return self.offer(ws, msg_id, true)?.item.ok_or_else(refuse);
+            return self.offer(ws, msg_id, true, by)?.item.ok_or_else(refuse);
         }
         let cell = {
             let mut p = lock(&self.0.thread.promoting);
@@ -334,14 +346,18 @@ impl Core {
             }
         };
         let r = cell
-            .get_or_init(|| async { self.promote_now(ws, &m).await.map_err(|e| e.to_string()) })
+            .get_or_init(|| async {
+                self.promote_now(ws, &m, by)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
             .await
             .clone();
         lock(&self.0.thread.promoting).remove(msg_id);
         r.map_err(crate::CoreError::Msg)
     }
 
-    async fn promote_now(&self, ws: &str, m: &Message) -> Result<Item> {
+    async fn promote_now(&self, ws: &str, m: &Message, by: Option<&str>) -> Result<Item> {
         let meta = if m.meta.is_object() {
             m.meta.clone()
         } else {
@@ -384,7 +400,7 @@ impl Core {
             from_question: super::decide::pure_question(&q),
             answer: Some(m),
             start: true, // your action in the web
-            by: None,
+            by: by.map(String::from),
         })?;
         let mut meta = meta_of(m);
         meta.remove("chat");

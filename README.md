@@ -323,11 +323,12 @@ Steve reads its settings from the environment. For a service, put them in `$STEV
 | `STEVE_KB_STORE` | `openviking` to use the optional vector backend (default: SQLite FTS) |
 | `STEVE_VAULT_KEYSTORE` | `auto` (Keychain / Secret Service), `dir` with `STEVE_VAULT_KEY_DIR`, or `file` for tests |
 | `STEVE_NODE_MODE` | `local` (default) runs sessions on the local Node; `off` parks them |
+| `STEVE_CONFINE` | What a Node starts for a run goes into the OS sandbox with Steve's secrets, keys, databases and programs out of reach: on by default on macOS (seatbelt), `on` to opt in on Linux (bubblewrap), `off` to run unconfined. A harness with its own seatbelt sandbox (Codex) keeps that one instead, and tools that start their own `sandbox-exec` fail inside it |
 | `STEVE_NODE_LISTEN`, `STEVE_NODE_BIND` | Experimental multi-device Nodes, off by default |
 | `STEVE_NODE_PROXY_PEERS` | Optional exact IPs of TLS-terminating proxies for remote Node ingress; default is loopback only |
 
 > [!IMPORTANT]
-> Review authentication before you expose the listener beyond localhost. Agents running under Steve act with your local user's permissions.
+> Review authentication before you expose the listener beyond localhost. Agents running under Steve act with your local user's permissions; the Node's sandbox keeps only Steve's own control files out of their reach so far.
 
 ## Deployment
 

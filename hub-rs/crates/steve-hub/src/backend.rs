@@ -912,19 +912,26 @@ pub trait Domain: Send + Sync + 'static {
     async fn thread_queued_withdraw(&self, ws: &str, message: &str) -> BResult<Option<Obj>> {
         todo_backend!("thread_queued_withdraw")
     }
-    async fn promote(&self, ws: &str, message: &str) -> BResult<Obj> {
+    /// `by`: the member acting, whose access an item made here runs with (as for the next three).
+    async fn promote(&self, ws: &str, message: &str, by: &str) -> BResult<Obj> {
         todo_backend!("promote")
     }
     /// Thread routing: the result `{message_id, item?}` and whether it had been
     /// handled before (the API answers 409 then). `to`: `inline` | `item` | `item:<ST-n>`.
-    async fn reroute(&self, ws: &str, message: &str, to: &str) -> BResult<(Obj, bool)> {
+    async fn reroute(&self, ws: &str, message: &str, to: &str, by: &str) -> BResult<(Obj, bool)> {
         todo_backend!("reroute")
     }
-    async fn offer(&self, ws: &str, message: &str, take: bool) -> BResult<(Obj, bool)> {
+    async fn offer(&self, ws: &str, message: &str, take: bool, by: &str) -> BResult<(Obj, bool)> {
         todo_backend!("offer")
     }
     /// `choice`: `here` | `item` | `new`.
-    async fn suggest(&self, ws: &str, message: &str, choice: &str) -> BResult<(Obj, bool)> {
+    async fn suggest(
+        &self,
+        ws: &str,
+        message: &str,
+        choice: &str,
+        by: &str,
+    ) -> BResult<(Obj, bool)> {
         todo_backend!("suggest")
     }
     /// An A2UI button in Steve's reply `message` (ST-46): `{already, message_id?, action}`.

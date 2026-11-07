@@ -164,9 +164,31 @@ async fn a1_a_question_is_researched_in_the_conversation() {
     assert_eq!(runs[0].reply_id.as_deref(), Some(a.id.as_str()));
     assert!(runs[0].first_text_ms.is_some());
 
-    /* taking the offer is not a correction */
-    let h = k.core.offer(WS, &a.id, true).unwrap();
+    /* taking the offer is not a correction; who took it asked for the item (a member only) */
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "INSERT OR IGNORE INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1);
+                 INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let h = k.core.offer(WS, &a.id, true, Some("usr_dev")).unwrap();
     let item = h.item.unwrap();
+    let by: Option<String> = k
+        .db()
+        .store()
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT requested_by FROM items WHERE id=?",
+                [&item.id],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(by.as_deref(), Some("usr_dev"));
     assert_eq!(item.title, "讲解知识系统");
     let l = route_log(&k, &mid);
     assert_eq!(l.override_, None);
@@ -179,7 +201,7 @@ async fn a1_a_question_is_researched_in_the_conversation() {
     assert_eq!(ti.origin_msg, mid);
     assert!(ti.from_question);
     /* a second click: 409 with the same result */
-    let again = k.core.offer(WS, &a.id, true).unwrap();
+    let again = k.core.offer(WS, &a.id, true, None).unwrap();
     assert!(again.already);
     assert_eq!(again.item.unwrap().id, item.id);
 }
@@ -198,7 +220,7 @@ async fn a4b_making_an_answer_an_item_is_a_correction_with_the_answer_as_context
     let mid = k.core.say(WS, A1, &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert!(ms[1].meta.get("offer").is_none());
-    let item = k.core.promote(WS, &ms[1].id).await.unwrap();
+    let item = k.core.promote(WS, &ms[1].id, None).await.unwrap();
     let s = k.db().sessions_of_item(&item.id).unwrap().pop().unwrap();
     let opening = &k.rt.prompts_of(&s.id)[0];
     assert!(
@@ -216,7 +238,7 @@ async fn a4b_making_an_answer_an_item_is_a_correction_with_the_answer_as_context
     /* reroute {to: item} is the same button */
     let h = k
         .core
-        .reroute(WS, &ms[1].id, RerouteTo::Item)
+        .reroute(WS, &ms[1].id, RerouteTo::Item, None)
         .await
         .unwrap();
     assert_eq!(h.item.unwrap().id, item.id);
@@ -276,7 +298,7 @@ async fn a3_an_unclear_request_is_planned_here_and_offered() {
         ("research", Some("plan"))
     );
     /* the offer makes the item in one click */
-    let h = k.core.offer(WS, &a.id, true).unwrap();
+    let h = k.core.offer(WS, &a.id, true, None).unwrap();
     assert_eq!(h.item.unwrap().title, "事项页布局优化");
     assert_eq!(items(&k), before + 1);
 }
@@ -295,7 +317,7 @@ async fn a4a_an_item_goes_back_into_the_conversation() {
     let s = k.db().sessions_of_item(&id).unwrap().pop().unwrap();
     let h = k
         .core
-        .reroute(WS, &ms[1].id, RerouteTo::Inline)
+        .reroute(WS, &ms[1].id, RerouteTo::Inline, None)
         .await
         .unwrap();
     // the item is being cancelled: its running turn is stopped, the close follows the turn's end
@@ -324,12 +346,16 @@ async fn a4a_an_item_goes_back_into_the_conversation() {
         .db()
         .message_add(WS, "steve", "建了", Some(&done), None)
         .unwrap();
-    let e = k.core.reroute(WS, &m, RerouteTo::Inline).await.unwrap_err();
+    let e = k
+        .core
+        .reroute(WS, &m, RerouteTo::Inline, None)
+        .await
+        .unwrap_err();
     assert_eq!(e.to_string(), "这件事项已经验收，不能改回对话");
     assert!(matches!(e, crate::CoreError::Status(409, _)));
     let e = k
         .core
-        .reroute(WS, "msg_nope", RerouteTo::Item)
+        .reroute(WS, "msg_nope", RerouteTo::Item, None)
         .await
         .unwrap_err();
     assert!(matches!(e, crate::CoreError::Status(404, _)));
@@ -540,14 +566,14 @@ async fn status_and_supplement_and_unsure_supplement() {
         "{}",
         ms[5].text
     );
-    k.core.suggest(WS, &ms[5].id, "item").unwrap();
+    k.core.suggest(WS, &ms[5].id, "item", None).unwrap();
     /* the session is busy with the first one: the second waits in its queue */
     let sent = |k: &Kit| k.rt.prompts_of(&s).len() + k.db().queued(&s).unwrap().len();
     assert_eq!(sent(&k), 2);
     /* the menu on a user message: send it to an item */
     let h = k
         .core
-        .reroute(WS, &ms[4].id, RerouteTo::Supplement(i.clone()))
+        .reroute(WS, &ms[4].id, RerouteTo::Supplement(i.clone()), None)
         .await
         .unwrap();
     assert_eq!(h.item.unwrap().id, i);
@@ -602,12 +628,12 @@ async fn an_unsure_supplement_explains_and_asks_append_or_new() {
     assert_eq!(labels, [format!("追加到 {i}").as_str(), "单独建项"]);
     assert_eq!(choices[0]["recommended"], true);
     assert!(
-        k.core.suggest(WS, &card.id, "here").is_err(),
+        k.core.suggest(WS, &card.id, "here", None).is_err(),
         "“在这里回答” is not a choice of this card"
     );
     /* 单独建项: an item of its own, done by the bot of the item it was close to */
     let before = items(&k);
-    let h = k.core.suggest(WS, &card.id, "new").unwrap();
+    let h = k.core.suggest(WS, &card.id, "new", None).unwrap();
     let made = h.item.expect("an item of its own");
     assert_ne!(made.id, i);
     assert_eq!(made.title, "今日统计按小时展示");
@@ -627,7 +653,7 @@ async fn an_unsure_supplement_explains_and_asks_append_or_new() {
     let ms = settle(&k, ms.len() + 2).await;
     let card = ms.last().unwrap();
     assert!(card.meta.get("suggest").is_some(), "{}", card.text);
-    let h = k.core.suggest(WS, &card.id, "item").unwrap();
+    let h = k.core.suggest(WS, &card.id, "item", None).unwrap();
     assert_eq!(h.item.unwrap().id, i);
     let sent = k.rt.prompts_of(&s).len() + k.db().queued(&s).unwrap().len();
     assert_eq!(sent, 2);

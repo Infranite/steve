@@ -1238,6 +1238,8 @@ pub(crate) fn push_run(
         secret_env,
         stdin: None,
         mask,
+        confined: false,
+        readable: vec![],
     }
 }
 

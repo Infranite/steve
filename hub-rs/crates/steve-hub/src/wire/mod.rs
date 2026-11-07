@@ -29,6 +29,7 @@ pub mod research_mcp;
 pub mod signals;
 pub mod store;
 pub mod tool_service;
+pub mod view;
 pub mod workspaces;
 
 use std::sync::Arc;
@@ -235,6 +236,7 @@ fn node_runtime(
         },
     });
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
+    runtime.set_configured_roots(workspaces::configured(cfg));
     // legacy's idle kill: an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
     runtime.set_idle_release(cfg.idle_release_ms as i64);
     runtime.set_cost_caps(cost_caps(vars));
