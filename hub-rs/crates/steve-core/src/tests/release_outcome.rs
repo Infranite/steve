@@ -477,6 +477,7 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
 }
 
 /// Hold `releases/.release.lock` the way ops/release.sh does (`zsystem flock`) until killed.
+/// Keep the lock across exec so the Child PID owns the wait too, with no orphan sleep or pipes.
 fn hold_release_lock(k: &Kit) -> std::process::Child {
     let rel = k.home().join("releases");
     std::fs::create_dir_all(&rel).unwrap();
@@ -484,7 +485,7 @@ fn hold_release_lock(k: &Kit) -> std::process::Child {
     let child = std::process::Command::new("/bin/zsh")
         .arg("-c")
         .arg(format!(
-            "zmodload zsh/system; touch '{0}'; zsystem flock -t 0 '{0}' && sleep 60",
+            "zmodload zsh/system; touch '{0}'; zsystem flock -e -t 0 '{0}' && exec sleep 60",
             lock.display()
         ))
         .spawn()
