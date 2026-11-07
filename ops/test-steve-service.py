@@ -158,6 +158,7 @@ class Services(unittest.TestCase):
         s, _ = self.service(component="hub")
         s.install(self.release)
         self.assertEqual(s.label, "test.original.hub")
+        self.assertFalse(s.status(doctor=True)["automatic_upgrade"]["supported"])
         self.assertEqual((self.home / "web/current").resolve(), self.release / "web/dist")
         self.assertEqual(plistlib.loads(s.config.read_bytes())["ProgramArguments"],
                          ["/bin/zsh", str(self.home / "current/ops/run.sh")])

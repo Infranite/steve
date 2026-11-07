@@ -268,6 +268,13 @@ class Service:
             report["candidate"] = dict(release=str(path), build=info)
             report["update_command"] = shlex.join([sys.executable, str(Path(__file__).resolve()), self.component,
                 "update", "--home", str(self.home), "--release", str(path)]) if self.component == "node" else "Settings > About"
+        if self.component == "hub" and self.system == "Darwin" and self.signed:
+            default_home = (self.user_home / ".steve").resolve()
+            supported = self.home == default_home
+            report["automatic_upgrade"] = dict(supported=supported,
+                entry="Settings > About" if supported else "local-release.py prepare-bundle, then deploy",
+                reason=None if supported else "signed runner grants Keychain access only to the default ~/.steve home; "
+                "custom homes require explicit terminal preparation/deployment with their original signing identity")
         if doctor:
             issues = []
             if not state["installed"]:
@@ -287,6 +294,8 @@ class Service:
                 if not report["pairing"]["identity_present"]:
                     issues.append("Node identity is missing")
                 issues.append("connection and active sessions require Hub Devices verification")
+            if report.get("automatic_upgrade", {}).get("supported") is False:
+                issues.append(report["automatic_upgrade"]["reason"])
             report["diagnostics"] = issues
         return report
 
