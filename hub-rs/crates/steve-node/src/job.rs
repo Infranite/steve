@@ -391,6 +391,7 @@ async fn acp_think(
         prompt,
         mcp_servers: json!([]),
         sandbox: sandbox.as_deref(),
+        confine: properties.nested_sandbox.then_some(&inner.confine),
         timeout: Duration::from_millis((spec.run.limits.deadline.0 - now()).max(0) as u64),
         prefix: spec.run.attempt.as_str(),
         on_session: None,

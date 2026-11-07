@@ -16,15 +16,6 @@ mod actor;
 mod attachments;
 mod confine;
 
-/// The OS sandbox a Node with these homes and this `STEVE_CONFINE` would give its runs
-/// (`seatbelt`, `bubblewrap`), or why none: what `steve-hub --check-config` reports before a switch.
-pub fn confinement(
-    steve_home: &Path,
-    node_home: &Path,
-    mode: Option<String>,
-) -> Result<&'static str, String> {
-    confine::Confine::choose(steve_home, node_home, mode).state()
-}
 mod exec;
 pub mod git;
 pub mod history;
@@ -54,6 +45,16 @@ use actor::{Actor, Msg};
 pub use job::JobHarnesses;
 use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
 pub use workspace::Root;
+
+/// The OS sandbox a Node with these homes and this `STEVE_CONFINE` would give its runs
+/// (`seatbelt`, `bubblewrap`), or why none: what `steve-hub --check-config` reports before a switch.
+pub fn confinement(
+    steve_home: &Path,
+    node_home: &Path,
+    mode: Option<String>,
+) -> Result<&'static str, String> {
+    confine::Confine::choose(steve_home, node_home, mode).state()
+}
 
 /// What this Node is and where it keeps its things.
 pub struct NodeConfig {
@@ -1295,14 +1296,14 @@ pub struct LocalDir {
 }
 
 impl LocalNode {
-    /// Takes the home (one Node per journal), opens the journal (a new incarnation: what was running
-    /// is `unknown` now) and stops nothing: groups left by the old incarnation keep their sessions
-    /// held until the Hub abandons them.
     /// The OS sandbox this Node's runs get (`seatbelt`, `bubblewrap`), or why they get none.
     pub fn confinement(&self) -> Result<&'static str, String> {
         self.0.confine.state()
     }
 
+    /// Takes the home (one Node per journal), opens the journal (a new incarnation: what was running
+    /// is `unknown` now) and stops nothing: groups left by the old incarnation keep their sessions
+    /// held until the Hub abandons them.
     pub fn open(cfg: NodeConfig) -> ApiResult<LocalNode> {
         std::fs::create_dir_all(&cfg.home)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;

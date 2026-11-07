@@ -192,8 +192,7 @@ mod tests {
             r.warnings.is_empty(),
             "no local Node, no runs of its own: {r:?}"
         );
-        #[cfg(target_os = "macos")]
-        {
+        if steve_vault::harness::seatbelt_works() {
             let r = run(&[]);
             assert!(r.warnings.is_empty(), "this Mac sandboxes the runs: {r:?}");
         }

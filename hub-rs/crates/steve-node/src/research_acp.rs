@@ -413,6 +413,13 @@ impl LocalNode {
                 prompt: prepared.prompt,
                 mcp_servers: mcp,
                 sandbox: prepared.profile.as_deref(),
+                confine: self
+                    .0
+                    .cfg
+                    .acp
+                    .adapter_properties(&req.harness)
+                    .nested_sandbox
+                    .then_some(&self.0.confine),
                 timeout: budget.hard.unwrap_or(Duration::from_secs(86400)),
                 prefix: exec.attempt().as_str(),
                 allow_tool: &allow,

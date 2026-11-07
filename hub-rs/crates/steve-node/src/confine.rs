@@ -13,6 +13,7 @@
 //! macOS refuses a sandbox inside a sandbox; it keeps its own.
 
 use std::ffi::OsString;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -65,6 +66,12 @@ impl Confine {
                 None => return Confine::Off("a Steve path cannot be written in a profile".into()),
             }
         } else if cfg!(target_os = "linux") {
+            // not yet tried on real Linux Nodes: only when asked for
+            if mode.as_deref().map(str::trim) != Some("on") {
+                return Confine::Off(
+                    "on Linux the sandbox is opt-in for now (STEVE_CONFINE=on)".into(),
+                );
+            }
             let Some(bwrap) = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"]
                 .iter()
                 .map(PathBuf::from)
@@ -151,17 +158,26 @@ impl Confine {
                 steve_home,
                 node_home,
             } => {
-                let (hidden, sealed) = steve_vault::harness::bwrap_paths(steve_home, node_home);
+                let p = steve_vault::harness::bwrap_plan(steve_home, node_home);
                 let mut a: Vec<OsString> = vec!["--dev-bind".into(), "/".into(), "/".into()];
-                for p in &sealed {
-                    a.extend(["--ro-bind".into(), p.into(), p.into()]);
+                for d in &p.read_only {
+                    a.extend(["--ro-bind".into(), d.into(), d.into()]);
                 }
-                for p in &hidden {
-                    if p.is_dir() {
-                        a.extend(["--tmpfs".into(), p.into()]);
-                    } else {
-                        a.extend(["--ro-bind".into(), "/dev/null".into(), p.into()]);
+                for d in &p.writable {
+                    a.extend(["--bind".into(), d.into(), d.into()]);
+                }
+                for d in &p.hidden_dirs {
+                    // one the Hub or the Node makes later is hidden too
+                    let _ = std::fs::DirBuilder::new()
+                        .recursive(true)
+                        .mode(0o700)
+                        .create(d);
+                    if d.is_dir() {
+                        a.extend(["--tmpfs".into(), d.into()]);
                     }
+                }
+                for f in &p.hidden_files {
+                    a.extend(["--ro-bind".into(), "/dev/null".into(), f.into()]);
                 }
                 for r in readable {
                     a.extend(["--ro-bind".into(), r.into(), r.into()]);
@@ -196,11 +212,11 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_hides_dirs_with_tmpfs_and_files_with_null() {
+    fn bwrap_seals_the_home_hides_dirs_with_tmpfs_and_files_with_null() {
         let t = tempfile::tempdir().unwrap();
         let home = t.path().join("home");
         std::fs::create_dir_all(home.join("signing")).unwrap();
-        std::fs::create_dir_all(home.join("releases")).unwrap();
+        std::fs::create_dir_all(home.join("worktrees")).unwrap();
         std::fs::write(home.join("steve.env"), "").unwrap();
         let c = Confine::Bwrap {
             bwrap: "/usr/bin/bwrap".into(),
@@ -212,10 +228,19 @@ mod tests {
         assert_eq!(p, PathBuf::from("/usr/bin/bwrap"));
         let a: Vec<String> = a.iter().map(|s| s.to_string_lossy().into_owned()).collect();
         let at = |s: &str| a.iter().position(|x| x == s).unwrap();
-        let signing = real.join("signing").to_string_lossy().into_owned();
-        let env = real.join("steve.env").to_string_lossy().into_owned();
-        assert_eq!(a[at(&signing) - 1], "--tmpfs");
-        assert_eq!(a[at(&env) - 2..at(&env)], ["--ro-bind", "/dev/null"]);
+        let r = |rel: &str| real.join(rel).to_string_lossy().into_owned();
+        let home_s = real.to_string_lossy().into_owned();
+        assert_eq!(a[at(&home_s) - 1], "--ro-bind", "the home read-only first");
+        assert_eq!(a[at(&r("worktrees")) - 1], "--bind");
+        assert_eq!(a[at(&r("signing")) - 1], "--tmpfs");
+        // a protected directory that did not exist is made, so it is hidden too
+        assert_eq!(a[at(&r("secrets")) - 1], "--tmpfs");
+        assert!(real.join("secrets").is_dir());
+        assert_eq!(
+            a[at(&r("steve.env")) - 2..at(&r("steve.env"))],
+            ["--ro-bind", "/dev/null"]
+        );
+        assert!(at(&home_s) < at(&r("worktrees")) && at(&r("worktrees")) < at(&r("signing")));
         assert_eq!(&a[a.len() - 4..], ["--", "/bin/sh", "-c", "x"]);
     }
 
@@ -223,6 +248,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_wrapped_command_cannot_read_the_control_plane() {
+        if !steve_vault::harness::seatbelt_works() {
+            eprintln!("skipped: no seatbelt here (inside a sandbox already?)");
+            return;
+        }
         let t = tempfile::tempdir().unwrap();
         let home = t.path().canonicalize().unwrap().join("home");
         let node = home.join("data/node");

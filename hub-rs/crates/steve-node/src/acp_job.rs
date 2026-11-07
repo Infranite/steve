@@ -28,6 +28,9 @@ pub(crate) struct Request<'a> {
     pub prompt: Vec<Value>,
     pub mcp_servers: Value,
     pub sandbox: Option<&'a Path>,
+    /// The Node's sandbox for a run without a profile of its own (`None`: the harness keeps its
+    /// own sandbox, which macOS cannot nest in another).
+    pub confine: Option<&'a crate::confine::Confine>,
     pub timeout: Duration,
     pub prefix: &'a str,
     pub on_session: Option<&'a (dyn Fn(&str) + Send + Sync)>,
@@ -205,6 +208,8 @@ pub(crate) async fn run(
                 ],
             );
             program = steve_research::sandbox::SANDBOX_EXEC.into();
+        } else if let Some(c) = req.confine {
+            (program, args) = c.wrap(program, args, &[]);
         }
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bytes = AtomicU64::new(0);
@@ -419,6 +424,7 @@ for line in sys.stdin:
             prompt: vec![json!({"type":"text","text":"answer"})],
             mcp_servers: json!([]),
             sandbox: None,
+            confine: None,
             timeout: Duration::from_secs(5),
             prefix: "attempt_test",
             on_session: None,

@@ -183,38 +183,81 @@ fn roots_of(root: &Path) -> Vec<String> {
     out
 }
 
+/// Every directory a rule's path goes through, from `/` down to the entry's parent: renaming one
+/// would move the entry to a path no rule names (`mv ~/.steve/data d2; cat d2/files/…`).
+fn ancestors_of(root: &str, entry: &str, out: &mut std::collections::BTreeSet<String>) {
+    let mut p = PathBuf::from(format!("{root}/{}", entry.trim_end_matches(['/', '*'])));
+    while let Some(up) = p.parent() {
+        out.insert(up.to_string_lossy().into_owned());
+        p = up.to_path_buf();
+    }
+}
+
 /// The control plane as seatbelt (macOS `sandbox-exec`) rules, for any process a Node starts for a
 /// run: [`PROTECTED`] and [`NODE_FILES`] under `steve_home` and [`NODE_PROTECTED`] under `node_home`
-/// can be neither read nor written, and [`SEALED`] under `steve_home` not written. They go after a
-/// profile's own rules, so they win over its allows. `None`: a path SBPL cannot quote.
+/// can be neither read nor written, [`SEALED`] under `steve_home` not written, and no directory on
+/// the way to them renamed or removed (making files inside those stays open). Seatbelt checks the
+/// real path whatever a process names: a symlink, a hard link it would make, another case, `..`.
+/// They go after a profile's own rules, so they win over its allows. `None`: a path SBPL cannot
+/// quote.
 pub fn seatbelt_rules(steve_home: &Path, node_home: &Path) -> Option<String> {
     let mut hidden = Vec::new();
     let mut sealed = Vec::new();
+    let mut ways = std::collections::BTreeSet::new();
     for root in roots_of(steve_home) {
         for e in PROTECTED.iter().chain(NODE_FILES.iter()) {
             hidden.extend(sbpl_filter(&root, e)?);
+            ancestors_of(&root, e, &mut ways);
         }
         for e in SEALED {
             sealed.extend(sbpl_filter(&root, e)?);
+            ancestors_of(&root, e, &mut ways);
         }
     }
     for root in roots_of(node_home) {
         for e in NODE_PROTECTED {
             hidden.extend(sbpl_filter(&root, e)?);
+            ancestors_of(&root, e, &mut ways);
         }
     }
+    let ways: Vec<String> = ways.iter().map(|w| format!("(literal \"{w}\")")).collect();
     Some(format!(
-        "(deny file-read* file-write*\n  {})\n(deny file-write*\n  {})\n",
+        "(deny file-read* file-write*\n  {})\n(deny file-write*\n  {})\n(deny file-write*\n  {})\n",
         hidden.join("\n  "),
-        sealed.join("\n  ")
+        sealed.join("\n  "),
+        ways.join("\n  ")
     ))
 }
 
-/// The paths bubblewrap (Linux `bwrap`) hides or seals for the same rules as [`seatbelt_rules`]: a
-/// name prefix is expanded to what exists now. `(hidden, sealed)`, each existing and absolute.
-pub fn bwrap_paths(steve_home: &Path, node_home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    fn expand(root: &Path, entry: &str, out: &mut Vec<PathBuf>) {
-        let entry = entry.trim_end_matches('/');
+/// Whether this process can start a seatbelt sandbox at all: not on another platform, and not
+/// from inside one (macOS nests none), as when Steve's own tests run in a confined session.
+pub fn seatbelt_works() -> bool {
+    cfg!(target_os = "macos")
+        && std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+}
+
+/// Where runs write under `STEVE_HOME`: the items' worktrees, the scratch directories and the
+/// Node's own directories for them (its jobs, its worktrees).
+pub const RUN_DIRS: [&str; 3] = ["worktrees", "scratch", "data/node"];
+
+/// The same rules as [`seatbelt_rules`] for bubblewrap (Linux `bwrap`): `steve_home` read-only, the
+/// run directories in it and `node_home` writable again, then what is protected hidden: a
+/// directory by an empty tmpfs (created first when missing, so one made later is hidden too), a
+/// file by `/dev/null` (a name prefix matches the files there now). Real, absolute paths.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BwrapPlan {
+    pub read_only: Vec<PathBuf>,
+    pub writable: Vec<PathBuf>,
+    pub hidden_dirs: Vec<PathBuf>,
+    pub hidden_files: Vec<PathBuf>,
+}
+
+pub fn bwrap_plan(steve_home: &Path, node_home: &Path) -> BwrapPlan {
+    fn files(root: &Path, entry: &str, out: &mut Vec<PathBuf>) {
         match entry.strip_suffix('*') {
             Some(prefix) => {
                 let (dir, name) = match prefix.rsplit_once('/') {
@@ -231,28 +274,41 @@ pub fn bwrap_paths(steve_home: &Path, node_home: &Path) -> (Vec<PathBuf>, Vec<Pa
             }
             None => {
                 let p = root.join(entry);
-                if std::fs::symlink_metadata(&p).is_ok() {
+                if p.is_file() {
                     out.push(p);
                 }
             }
         }
     }
     let (sh, nh) = (real(steve_home), real(node_home));
-    let (mut hidden, mut sealed) = (Vec::new(), Vec::new());
-    for e in PROTECTED.iter().chain(NODE_FILES.iter()) {
-        expand(&sh, e, &mut hidden);
+    let mut p = BwrapPlan::default();
+    if sh.is_dir() {
+        p.read_only.push(sh.clone());
     }
-    for e in NODE_PROTECTED {
-        expand(&nh, e, &mut hidden);
+    for d in RUN_DIRS {
+        if sh.join(d).is_dir() {
+            p.writable.push(sh.join(d));
+        }
     }
-    for e in SEALED {
-        expand(&sh, e, &mut sealed);
+    if nh.is_dir() && !p.writable.contains(&nh) {
+        p.writable.push(nh.clone());
     }
-    hidden.sort();
-    hidden.dedup();
-    sealed.sort();
-    sealed.dedup();
-    (hidden, sealed)
+    for (root, e) in PROTECTED
+        .iter()
+        .chain(NODE_FILES.iter())
+        .map(|e| (&sh, *e))
+        .chain(NODE_PROTECTED.iter().map(|e| (&nh, *e)))
+    {
+        match e.strip_suffix('/') {
+            Some(dir) => p.hidden_dirs.push(root.join(dir)),
+            None => files(root, e, &mut p.hidden_files),
+        }
+    }
+    for v in [&mut p.hidden_dirs, &mut p.hidden_files] {
+        v.sort();
+        v.dedup();
+    }
+    p
 }
 
 /// A TOML basic string.
@@ -371,7 +427,16 @@ mod tests {
             Path::new("/nonexistent-node-home"),
         )
         .unwrap();
-        let (hidden, sealed) = r.split_once("(deny file-write*\n").unwrap();
+        let (hidden, rest) = r.split_once("(deny file-write*\n").unwrap();
+        let (sealed, ways) = rest.split_once("(deny file-write*\n").unwrap();
+        for w in [
+            "/",
+            "/nonexistent-steve-home",
+            "/nonexistent-steve-home/.steve",
+        ] {
+            assert!(ways.contains(&format!("(literal \"{w}\")")), "{w}");
+        }
+        assert!(ways.contains(r#"(literal "/nonexistent-steve-home/.steve/data/node")"#));
         assert!(hidden.starts_with("(deny file-read* file-write*"));
         assert!(hidden.contains(r#"(subpath "/nonexistent-steve-home/.steve/signing")"#));
         assert!(hidden.contains(r#"(regex #"^/nonexistent-steve-home/\.steve/steve\.env")"#));
@@ -394,6 +459,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_rules_hold_under_sandbox_exec() {
+        if !seatbelt_works() {
+            eprintln!("skipped: no seatbelt here (inside a sandbox already?)");
+            return;
+        }
         let t = std::env::temp_dir().join(format!("steve-confine-{}", std::process::id()));
         let home = t.join("home");
         let node = home.join("data/node");
@@ -440,6 +509,15 @@ mod tests {
             format!("echo y > {h}/releases/0.1/steve-hub"),
             format!("echo y > {h}/signing/new"),
             format!("rm {h}/releases/0.1/steve-hub"),
+            // other names for the same files
+            format!("cat {h}/SIGNING/k"),
+            format!("cat {h}/worktrees/../signing/k"),
+            format!("ln -s {h}/signing/k {h}/worktrees/ST-1/s && cat {h}/worktrees/ST-1/s"),
+            format!("ln {h}/signing/k {h}/worktrees/ST-1/h"),
+            // moving a directory on the way out from under the rules
+            format!("mv {h}/data {h}/d2"),
+            format!("mv {h}/signing {h}/worktrees/s"),
+            format!("mv {h} {h}.x"),
         ] {
             assert!(!sh(&denied), "allowed: {denied}");
         }
@@ -448,6 +526,8 @@ mod tests {
             format!("cat {h}/worktrees/ST-1/a"),
             format!("echo y > {h}/worktrees/ST-1/b"),
             format!("echo y > {h}/data/node/jobs/j"),
+            format!("mkdir {h}/worktrees/ST-2 && mv {h}/worktrees/ST-2 {h}/worktrees/ST-3"),
+            format!("echo y > {h}/new-file"),
         ] {
             assert!(sh(&allowed), "denied: {allowed}");
         }
@@ -455,24 +535,42 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_paths_are_what_exists() {
+    fn bwrap_plan_seals_the_home_and_opens_the_run_dirs() {
         let t = std::env::temp_dir().join(format!("steve-bwrap-{}", std::process::id()));
         let home = t.join("home");
-        std::fs::create_dir_all(home.join("signing")).unwrap();
-        std::fs::create_dir_all(home.join("releases")).unwrap();
+        for d in ["signing", "worktrees", "data/node/jobs"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
         std::fs::write(home.join("steve.env"), "").unwrap();
         std::fs::write(home.join("steve.env.bak"), "").unwrap();
-        let (hidden, sealed) = bwrap_paths(&home, &home.join("data/node"));
+        std::fs::write(home.join("data/node/node.sqlite3"), "").unwrap();
+        let p = bwrap_plan(&home, &home.join("data/node"));
         let real = std::fs::canonicalize(&home).unwrap();
+        assert_eq!(p.read_only, vec![real.clone()]);
         assert_eq!(
-            hidden,
+            p.writable,
+            vec![real.join("worktrees"), real.join("data/node")]
+        );
+        for d in [
+            "signing",
+            "secrets",
+            "backups",
+            "data/node/secrets",
+            "data/node/push",
+        ] {
+            assert!(
+                p.hidden_dirs.contains(&real.join(d)),
+                "{d}: hidden, made when missing"
+            );
+        }
+        assert_eq!(
+            p.hidden_files,
             vec![
-                real.join("signing"),
+                real.join("data/node/node.sqlite3"),
                 real.join("steve.env"),
                 real.join("steve.env.bak")
             ]
         );
-        assert_eq!(sealed, vec![real.join("releases")]);
         let _ = std::fs::remove_dir_all(&t);
     }
 
