@@ -269,6 +269,124 @@ async fn ready(n: &LocalNode, session: &str) {
     assert!(ok(&s), "{s:?}");
 }
 
+async fn disk_observations_done(
+    n: &LocalNode,
+    expected: usize,
+) -> steve_node::disk_observation::Page {
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        let page = n.disk_observations(0, 100).unwrap();
+        if page.records.len() == expected && page.records.iter().all(|r| r.state.terminal()) {
+            return page;
+        }
+        assert!(
+            Instant::now() < until,
+            "disk observations did not finish: {page:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_records_follow_real_turns_and_survive_resend_compaction_and_restart() {
+    use steve_node::disk_observation::{Interpretation, Phase, Policy, State};
+    use steve_node::disk_usage::{Budget, Outcome};
+    let t = T::new(&[]);
+    let n = t.node();
+    n.configure_disk_observations(Some(Policy {
+        budget: Budget {
+            elapsed: Duration::from_secs(2),
+            ..Policy::default().budget
+        },
+        ..Policy::default()
+    }))
+    .unwrap();
+    ready(&n, "disk").await;
+    std::fs::write(t.root.join("work/proj/data"), vec![b'x'; 8192]).unwrap();
+    let command = now_cmd(
+        "disk_turn",
+        turn("disk", "t_disk", "a_disk", "@say finished"),
+    );
+    n.start_turn(command.clone()).await.unwrap();
+    assert!(ok(&finished(&n, "disk_turn").await));
+    n.start_turn(command).await.unwrap();
+    let page = disk_observations_done(&n, 2).await;
+    assert_eq!(
+        page.records.iter().map(|r| r.phase).collect::<Vec<_>>(),
+        vec![Phase::Started, Phase::Finished]
+    );
+    assert!(
+        page.records
+            .iter()
+            .all(|r| r.interpretation == Interpretation::AsynchronousUnattributedPathStock)
+    );
+    let record = &page.records[1];
+    assert_eq!(record.resource, "item:x");
+    assert_eq!(record.execution.attempt().as_str(), "a_disk");
+    let State::Observed(sample) = &record.state else {
+        panic!("{record:?}")
+    };
+    let Outcome::Complete(usage) = sample.outcome else {
+        panic!("{sample:?}")
+    };
+    assert!(usage.apparent_bytes >= 8192);
+    assert_eq!(sample.missing_roots, 0);
+    // Acknowledging and compacting command bodies cannot erase statistics.
+    all_acknowledged(&n).await;
+    assert_eq!(n.disk_observations(0, 100).unwrap(), page);
+    n.shutdown().await;
+    drop(n);
+    let n = LocalNode::open(t.config()).unwrap();
+    assert_eq!(n.disk_observations(0, 100).unwrap(), page);
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_record_limits_preserve_partial_results_and_disabling_does_not_change_turns() {
+    use steve_node::disk_observation::{Phase, Policy, State};
+    use steve_node::disk_usage::{Incomplete, Outcome};
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "disk").await;
+    std::fs::write(t.root.join("work/proj/data"), b"some data").unwrap();
+    n.configure_disk_observations(Some(Policy {
+        budget: steve_node::disk_usage::Budget {
+            entries: 1,
+            elapsed: Duration::from_secs(2),
+            ..Policy::default().budget
+        },
+        ..Policy::default()
+    }))
+    .unwrap();
+    n.start_turn(now_cmd(
+        "disk_partial",
+        turn("disk", "t1", "a1", "@say done"),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "disk_partial").await));
+    let page = disk_observations_done(&n, 2).await;
+    let sample = &page
+        .records
+        .iter()
+        .find(|r| r.phase == Phase::Finished)
+        .unwrap()
+        .state;
+    assert!(
+        matches!(sample, State::Observed(sample) if matches!(sample.outcome, Outcome::Incomplete { reason: Incomplete::EntryBudget, .. }))
+    );
+    n.configure_disk_observations(None).unwrap();
+    n.start_turn(now_cmd(
+        "disk_off",
+        turn("disk", "t2", "a2", "@say still runs"),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "disk_off").await));
+    assert_eq!(n.disk_observations(0, 100).unwrap(), page);
+    n.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn artifact_reads_bind_the_execution_view_and_survive_compaction_and_restart() {
     let t = T::new(&[]);

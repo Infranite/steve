@@ -13,8 +13,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 /// Traversal work limits, not disk quotas. Exhaustion is an incomplete observation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Budget {
     pub entries: u64,
     pub depth: usize,
@@ -22,7 +24,7 @@ pub struct Budget {
 }
 
 /// Both logical bytes and du-style allocation, with each inode counted once per measurement.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub apparent_bytes: u64,
     pub allocated_bytes: u64,
@@ -49,7 +51,8 @@ impl Usage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Incomplete {
     NoRoots,
     InvalidPath,
@@ -60,15 +63,17 @@ pub enum Incomplete {
     DepthBudget,
     TimeBudget,
     Overflow,
+    Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Complete(Usage),
     Incomplete { observed: Usage, reason: Incomplete },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Measurement {
     pub outcome: Outcome,
     /// Roots proven absent during this observation, distinct from an empty input or IO error.
@@ -245,8 +250,12 @@ impl Directory {
         }
     }
 
-    fn next(&mut self) -> Result<Option<CString>, Incomplete> {
+    fn next(
+        &mut self,
+        check: &dyn Fn() -> Result<(), Incomplete>,
+    ) -> Result<Option<CString>, Incomplete> {
         loop {
+            check()?;
             self.unchanged()?;
             // SAFETY: this synchronous traversal owns the stream. errno is thread-local and is
             // checked immediately after readdir to distinguish end-of-directory from failure.
@@ -283,7 +292,7 @@ unsafe fn errno() -> *mut libc::c_int {
     unsafe { libc::__errno_location() }
 }
 
-struct Walk {
+struct Walk<'a> {
     usage: Usage,
     seen: HashMap<(u64, u64), Stamp>,
     budget: Budget,
@@ -291,11 +300,14 @@ struct Walk {
     entries: u64,
     missing: u64,
     device: Option<u64>,
+    cancelled: &'a dyn Fn() -> bool,
 }
 
-impl Walk {
+impl Walk<'_> {
     fn check(&self) -> Result<(), Incomplete> {
-        if self.started.elapsed() >= self.budget.elapsed {
+        if (self.cancelled)() {
+            Err(Incomplete::Cancelled)
+        } else if self.started.elapsed() >= self.budget.elapsed {
             Err(Incomplete::TimeBudget)
         } else {
             Ok(())
@@ -342,7 +354,7 @@ impl Walk {
         let mut stack = vec![Directory::new(file, path.to_path_buf(), before, 0)?];
         while let Some(dir) = stack.last_mut() {
             self.check()?;
-            let Some(name) = dir.next()? else {
+            let Some(name) = dir.next(&|| self.check())? else {
                 stack.pop();
                 continue;
             };
@@ -372,13 +384,7 @@ impl Walk {
         // A final readdir/EOF or missing-root check can cross the deadline. Do not report a
         // complete sample after its budget expires. This is cooperative: it cannot interrupt a
         // single blocked filesystem syscall, only stop at the next operation boundary.
-        let result = result.and_then(|()| {
-            if elapsed >= self.budget.elapsed {
-                Err(Incomplete::TimeBudget)
-            } else {
-                Ok(())
-            }
-        });
+        let result = result.and_then(|()| self.check());
         Measurement {
             outcome: match result {
                 Ok(()) => Outcome::Complete(self.usage),
@@ -399,6 +405,16 @@ impl Walk {
 /// links. Root paths must be absolute with no link ancestors, including `/tmp` aliases on macOS.
 /// A missing root is recorded explicitly. Empty input, IO errors and budget limits are incomplete.
 pub fn measure(paths: &[PathBuf], budget: Budget) -> Measurement {
+    measure_cancellable(paths, budget, &|| false)
+}
+
+/// Cooperative cancellation at traversal boundaries, including "."/".." entries. A single
+/// filesystem syscall cannot be interrupted; cancellation never authorizes replacement work.
+pub(crate) fn measure_cancellable(
+    paths: &[PathBuf],
+    budget: Budget,
+    cancelled: &dyn Fn() -> bool,
+) -> Measurement {
     let mut walk = Walk {
         usage: Usage::default(),
         seen: HashMap::new(),
@@ -407,6 +423,7 @@ pub fn measure(paths: &[PathBuf], budget: Budget) -> Measurement {
         entries: 0,
         missing: 0,
         device: None,
+        cancelled,
     };
     let result = if paths.is_empty() {
         Err(Incomplete::NoRoots)
@@ -599,7 +616,7 @@ mod tests {
         let mut dir = Directory::new(file, work.clone(), before, 0).unwrap();
         fs::rename(&work, root.join("parked")).unwrap();
         fs::create_dir(&work).unwrap();
-        assert!(matches!(dir.next(), Err(Incomplete::Changed)));
+        assert!(matches!(dir.next(&|| Ok(())), Err(Incomplete::Changed)));
         let replacement = anchor(&work, &|| Ok(())).unwrap().unwrap();
         assert!(matches!(
             Directory::new(replacement, work, before, 0),
@@ -621,7 +638,7 @@ mod tests {
         let mut dir = Directory::new(file, root.clone(), before, 0).unwrap();
         fs::write(root.join("new"), b"changes directory metadata").unwrap();
         assert_ne!(before, fstat(dir.file.as_raw_fd()).unwrap());
-        assert!(matches!(dir.next(), Err(Incomplete::Changed)));
+        assert!(matches!(dir.next(&|| Ok(())), Err(Incomplete::Changed)));
     }
 
     #[test]
@@ -669,6 +686,7 @@ mod tests {
             entries: 1,
             missing: 1,
             device: Some(1),
+            cancelled: &|| false,
         };
         let observed = walk.usage;
         assert_eq!(
@@ -693,9 +711,42 @@ mod tests {
             entries: 0,
             missing: 0,
             device: Some(device.wrapping_add(1)),
+            cancelled: &|| false,
         };
         assert_eq!(walk.root(&root), Err(Incomplete::CrossDevice));
         assert_eq!(walk.usage, Usage::default());
+    }
+
+    #[test]
+    fn cancelled_traversals_stop_before_opening_and_during_enumeration() {
+        use std::cell::Cell;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for i in 0..100 {
+            fs::write(root.join(format!("file{i}")), b"x").unwrap();
+        }
+        let stopped = measure_cancellable(std::slice::from_ref(&root), budget(), &|| true);
+        assert!(matches!(
+            stopped.outcome,
+            Outcome::Incomplete {
+                reason: Incomplete::Cancelled,
+                ..
+            }
+        ));
+        assert_eq!(stopped.entries, 0);
+        let checks = Cell::new(0);
+        let stopped = measure_cancellable(&[root], budget(), &|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 30
+        });
+        assert!(matches!(
+            stopped.outcome,
+            Outcome::Incomplete {
+                reason: Incomplete::Cancelled,
+                ..
+            }
+        ));
+        assert!(stopped.entries > 0 && stopped.entries < 101);
     }
 
     #[test]
