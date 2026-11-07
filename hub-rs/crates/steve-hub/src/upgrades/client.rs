@@ -330,7 +330,12 @@ impl Updates {
         fs::rename(stage, &dir)?;
         File::open(dir.parent().unwrap())?.sync_all()?;
         op.target = Some(dir.to_string_lossy().into());
-        self.phase(op, "ready", None)?;
+        if op.runner.as_ref().is_some_and(|r| r.kind == "release_bundle") {
+            // The local signing identity still has to be applied before the bundle is deployable.
+            self.save(op)?;
+        } else {
+            self.phase(op, "ready", None)?;
+        }
         Ok(())
     }
 }
