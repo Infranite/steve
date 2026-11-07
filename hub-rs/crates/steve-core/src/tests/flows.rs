@@ -1376,11 +1376,7 @@ fn dependencies_block_and_start_when_done() {
     k.core.add_dep(&b.id, &a.id).unwrap();
     assert_eq!(
         k.status(&b.id),
-        (
-            "block".into(),
-            "规划".into(),
-            "等前置事项完成后自动开始".into()
-        )
+        ("block".into(), "规划".into(), "等待前置事项完成".into())
     );
     assert_eq!(
         k.core.add_dep(&a.id, &b.id).unwrap_err().to_string(),

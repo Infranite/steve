@@ -1,5 +1,6 @@
 import { api } from "@/api"
 import { WorkflowPanel } from "@/workflow-panel"
+import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
 import { usePeopleOn } from "@/api/people"
 import { Files } from "@/attach"
@@ -478,6 +479,7 @@ export function ItemView({ id }: { id: string }) {
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-2" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
             {(i.plan || i.rounds.length > 0) && <Plan i={i} />}
           </section>
+          {i.dependencyWait && !!i.deps?.length && <DependencyWaitPanel key={`${i.id}:${i.dependencyWait.cycle}`} item={i.id} wait={i.dependencyWait} /> }
           {i.workflow && <WorkflowPanel item={i.id} workflow={i.workflow} />}
           {/* 3 — activity, newest at the bottom, older entries folded */}
           <section className="flex flex-col gap-3">

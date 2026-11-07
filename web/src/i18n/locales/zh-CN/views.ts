@@ -23,6 +23,14 @@ export default {
     more: "加载更多事件", retry: "重试", cursorStalled: "事件游标没有前进，请刷新后重试。", retention: "诊断记录保留窗口：{{days}} 天；实际可查范围以返回的证据为准。",
     copy: "复制证据引用", copyFailed: "复制失败，可展开证据详情手动复制。", noReason: "未提供原因码", evidence: "证据详情",
   },
+  dependencyWait: {
+    title: "前置等待", waiting: "等待前置事项完成",
+    inherited: "尚未单独登记；前置完成后沿用工作区设置", automatic: "自动继续", notify: "提醒我开始", workspace: "沿用工作区设置",
+    policy: "前置完成后：{{mode}}", schedulingHeld: "当前调度暂停：{{reason}}", safety: "续跑仍须通过执行能力和权限检查；登记等待不会启动协作工作。",
+    reason: "等待原因", reasonPlaceholder: "说明需要前置完成哪些工作", save: "保存等待方式", saving: "正在保存…",
+    active: "当前回合结束后进入等待。", fallback: "本次已改为提醒开始：{{reason}}",
+    savedAutomatic: "已登记 · 前置完成后自动继续", savedNotify: "已登记 · 前置完成后提醒开始",
+  },
   workflow: {
     title: "多 Bot 协作",
     progress: "关键工作 {{done}}/{{total}} · 运行 {{running}}/{{max}} · 计划第 {{revision}} 版",

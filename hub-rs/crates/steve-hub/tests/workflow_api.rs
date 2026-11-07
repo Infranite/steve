@@ -24,6 +24,28 @@ impl Domain for Probe {
         Ok(json!({"item_id": id, "revision": 1, "units": []}))
     }
 
+    async fn dependency_get(&self, id: &str) -> BResult<Value> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(json!({"dependency_get": id}));
+        Ok(json!({"item_id": id, "waiting": false}))
+    }
+
+    async fn dependency_wait(
+        &self,
+        id: &str,
+        cycle: i64,
+        resume: &str,
+        reason: &str,
+    ) -> BResult<Value> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(json!({"dependency_wait": id, "cycle":cycle, "resume":resume, "reason":reason}));
+        Ok(json!({"item_id":id, "waiting":true}))
+    }
+
     async fn workflow_change(&self, id: &str, args: Value, actor: &str) -> BResult<Value> {
         self.calls
             .lock()
@@ -109,47 +131,49 @@ async fn workflow_routes_require_login_and_parent_workspace_ownership() {
     )
     .unwrap();
 
-    let r = http
-        .get(format!("{base}/api/items/local-item/workflow"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status().as_u16(), 401);
-    for method in [reqwest::Method::GET, reqwest::Method::POST] {
+    for route in ["workflow", "dependency-wait"] {
         let r = http
-            .request(method, format!("{base}/api/items/other-item/workflow"))
+            .get(format!("{base}/api/items/local-item/{route}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 401);
+        for method in [reqwest::Method::GET, reqwest::Method::POST] {
+            let r = http
+                .request(method, format!("{base}/api/items/other-item/{route}"))
+                .header("cookie", &cookie)
+                .json(&json!({"action": "pause"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status().as_u16(), 404);
+        }
+        let r = http
+            .get(format!("{base}/api/items/other-item/{route}"))
             .header("cookie", &cookie)
+            .header("x-steve-ws", "other")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status().as_u16(),
+            409,
+            "being logged in does not grant another workspace"
+        );
+        let r = http
+            .post(format!("{base}/api/items/local-item/{route}"))
+            .header("cookie", &cookie)
+            .header("sec-fetch-site", "same-origin")
             .json(&json!({"action": "pause"}))
             .send()
             .await
             .unwrap();
-        assert_eq!(r.status().as_u16(), 404);
+        assert_eq!(
+            r.status().as_u16(),
+            409,
+            "browser writes must name their workspace"
+        );
     }
-    let r = http
-        .get(format!("{base}/api/items/other-item/workflow"))
-        .header("cookie", &cookie)
-        .header("x-steve-ws", "other")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        r.status().as_u16(),
-        409,
-        "being logged in does not grant another workspace"
-    );
-    let r = http
-        .post(format!("{base}/api/items/local-item/workflow"))
-        .header("cookie", &cookie)
-        .header("sec-fetch-site", "same-origin")
-        .json(&json!({"action": "pause"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        r.status().as_u16(),
-        409,
-        "browser writes must name their workspace"
-    );
     assert!(
         probe.calls.lock().unwrap().is_empty(),
         "denied requests never reach the domain"
@@ -185,5 +209,40 @@ async fn workflow_routes_require_login_and_parent_workspace_ownership() {
         probe.calls.lock().unwrap()[1],
         json!({"item":"local-item", "args":args, "actor":user})
     );
+    let r = http
+        .get(format!("{base}/api/items/local-item/dependency-wait"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["waiting"], false);
+    let body =
+        json!({"expected_cycle":1,"resume":"automatic","reason":"wait for the prerequisite"});
+    let r = http
+        .post(format!("{base}/api/items/local-item/dependency-wait"))
+        .header("cookie", &cookie)
+        .header("x-steve-ws", "default")
+        .header("sec-fetch-site", "same-origin")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(
+        probe.calls.lock().unwrap().last().unwrap(),
+        &json!({"dependency_wait":"local-item","cycle":1,"resume":"automatic","reason":"wait for the prerequisite"})
+    );
+    let before = probe.calls.lock().unwrap().len();
+    let r = http
+        .post(format!("{base}/api/items/local-item/dependency-wait"))
+        .header("cookie", &cookie)
+        .header("x-steve-ws", "default")
+        .json(&json!({"expected_cycle":1.5,"resume":"automatic","reason":"invalid cycle"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400);
+    assert_eq!(probe.calls.lock().unwrap().len(), before);
     server.abort();
 }

@@ -117,6 +117,7 @@ pub async fn get_one(
     own_item(&st, &c.ws, &id).await?;
     let lifecycle = st.domain.lifecycle_view(&id).await?;
     let workflow = st.domain.workflow_get(&id).await?;
+    let dependency_wait = st.domain.dependency_get(&id).await?;
     st.read(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
@@ -124,6 +125,7 @@ pub async fn get_one(
             out.insert("lifecycle".into(), l);
         }
         out.insert("workflow".into(), workflow);
+        out.insert("dependency_wait".into(), dependency_wait);
         out.insert("cycles".into(), objs(r.item_cycles(&id)?));
         out.insert("goalsList".into(), objs(r.item_goals(&id)?));
         out.insert("planRounds".into(), objs(r.item_plan_rounds(&id)?));
@@ -140,6 +142,42 @@ pub async fn get_one(
         ok(Value::Object(out))
     })
     .await
+}
+
+pub async fn dependency_get(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    own_item(&st, &c.ws, &id).await?;
+    ok(st.domain.dependency_get(&id).await?)
+}
+
+pub async fn dependency_wait(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    own_item(&st, &c.ws, &id).await?;
+    let v = body(&b)?;
+    let mut k = Check::object(&v);
+    let cycle = k.num(
+        "expected_cycle",
+        Num {
+            int: true,
+            min: Some(1.0),
+            max: None,
+            gt: None,
+        },
+    ) as i64;
+    let resume = k.enum_("resume", &["automatic", "notify", "workspace"]);
+    let reason = k.str("reason", Str::len(1, 2000));
+    k.finish()?;
+    ok(st
+        .domain
+        .dependency_wait(&id, cycle, &resume, &reason)
+        .await?)
 }
 
 pub async fn workflow_get(

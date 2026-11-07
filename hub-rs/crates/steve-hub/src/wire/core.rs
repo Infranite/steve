@@ -1525,6 +1525,25 @@ impl Domain for CoreDomain {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.workflow_get(&id)).await
     }
+    async fn dependency_get(&self, id: &str) -> BResult<Value> {
+        let (c, id) = (self.core.clone(), id.to_string());
+        blocking(move || c.dependency_get(&id)).await
+    }
+    async fn dependency_wait(
+        &self,
+        id: &str,
+        expected_cycle: i64,
+        resume: &str,
+        reason: &str,
+    ) -> BResult<Value> {
+        let (c, id, resume, reason) = (
+            self.core.clone(),
+            id.to_string(),
+            resume.to_string(),
+            reason.to_string(),
+        );
+        blocking(move || c.dependency_wait(&id, expected_cycle, &resume, &reason)).await
+    }
     async fn workflow_change(&self, id: &str, args: Value, actor: &str) -> BResult<Value> {
         let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
         blocking(move || c.workflow_change(&id, args, &actor)).await

@@ -719,6 +719,18 @@ pub trait Domain: Send + Sync + 'static {
     async fn workflow_get(&self, id: &str) -> BResult<Value> {
         Ok(Value::Null)
     }
+    async fn dependency_get(&self, id: &str) -> BResult<Value> {
+        Ok(Value::Null)
+    }
+    async fn dependency_wait(
+        &self,
+        id: &str,
+        expected_cycle: i64,
+        resume: &str,
+        reason: &str,
+    ) -> BResult<Value> {
+        todo_backend!("dependency_wait")
+    }
     /// Plan, pause, resume or change a work unit under an optimistic revision check.
     async fn workflow_change(&self, id: &str, args: Value, actor: &str) -> BResult<Value> {
         todo_backend!("workflow_change")
