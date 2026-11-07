@@ -1203,3 +1203,131 @@ fn a_build_goal_whose_tag_build_cant_be_followed_rests_on_the_delivery() {
         "跟踪不了 v2.1.0 的 Release 构建；事项目标要求的构建通过以交付里的构建检查为准"
     )));
 }
+
+fn lane_request(k: &Kit, item: &str, state: &str) {
+    use steve_store::lanes::{self, NewRequest};
+    k.db()
+        .store()
+        .transaction(|tx| {
+            let lane = lanes::lane_for(tx, "github.com/x/y", "main")?;
+            let r = lanes::request_add(
+                tx,
+                &NewRequest {
+                    lane_id: &lane.id,
+                    workspace_id: Some(WS),
+                    item_id: Some(item),
+                    source: "item",
+                    dir: "/nonexistent",
+                    branch: "steve/item",
+                    head: "abc123",
+                    repo: None,
+                },
+            )?;
+            lanes::request_set(tx, &r.id, state, None, None, None)
+        })
+        .unwrap();
+}
+
+#[test]
+fn lane_wait_does_not_consume_continues_or_open_stall_cards() {
+    for state in ["queued", "collecting", "merging", "merged"] {
+        let k = kit(2);
+        let (item, sid) = started(&k);
+        lane_request(&k, &item, state);
+        let before = k.rt.prompts_of(&sid).len();
+        stop(&k, &sid, "已提交队列，等待发布。");
+        let later = crate::util::now() + crate::stall::STALL_AFTER_MS + 1_000;
+        for _ in 0..3 {
+            assert!(k.core.tx().check_stalls(later).unwrap().is_empty());
+        }
+        k.core
+            .tx()
+            .takeover_invalidated(&item, "计划已更新")
+            .unwrap();
+        assert_eq!(k.rt.prompts_of(&sid).len(), before, "{state}");
+        assert!(steve_lines(&k, &item).is_empty(), "{state}");
+        assert!(k.open_fails(&item).is_empty(), "{state}");
+    }
+}
+
+#[test]
+fn a_finished_or_returned_lane_request_does_not_silence_takeover() {
+    for state in ["released", "left"] {
+        let k = kit(2);
+        let (item, sid) = started(&k);
+        lane_request(&k, &item, state);
+        stop(&k, &sid, "这轮结束。");
+        assert_eq!(steve_lines(&k, &item).len(), 1, "{state}");
+    }
+}
+
+#[test]
+fn lane_wait_preserves_questions_and_manual_interrupts() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    lane_request(&k, &item, "merged");
+    stop(&k, &sid, "这项需要改目标吗？");
+    assert_eq!(k.open_fails(&item).len(), 1);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    lane_request(&k, &i, "collecting");
+    k.db()
+        .event_add(&s, "system", json!({"text": "你中断了当前回合"}))
+        .unwrap();
+    let later = crate::util::now() + crate::stall::STALL_AFTER_MS + 1_000;
+    assert_eq!(k.core.tx().check_stalls(later).unwrap(), vec![i]);
+    assert!(k.rt.prompts_of(&s).is_empty());
+}
+
+#[test]
+fn persisted_lane_wait_survives_a_new_core_and_accepts_user_work() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let sid = k.session(&i, "idle");
+    lane_request(&k, &i, "merged");
+    let core = crate::Core::new(
+        k.db().clone(),
+        k.rt.clone(),
+        k.gw.clone(),
+        k.core.config().clone(),
+    );
+    let later = crate::util::now() + crate::stall::STALL_AFTER_MS + 1_000;
+    assert!(core.tx().check_stalls(later).unwrap().is_empty());
+    assert!(k.rt.prompts_of(&sid).is_empty());
+    assert_eq!(
+        core.session_message(&sid, "继续修正文档", false, &[])
+            .unwrap(),
+        crate::Prompted::Sent
+    );
+    assert_eq!(k.rt.prompts_of(&sid).last().unwrap(), "继续修正文档");
+}
+
+#[test]
+fn a_lane_entered_while_the_remote_probe_runs_owns_the_wait() {
+    let k = kit(2);
+    let x = remote(&k, upstream::DONE_MERGE, false);
+    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    k.rt.st().turning.clear();
+    let before = k.rt.prompts_of(&x.session).len();
+    {
+        // Hold the core lock so the probe cannot return until the persisted request exists.
+        let mut tx = k.core.tx();
+        assert!(
+            tx.takeover(
+                &x.item,
+                &x.session,
+                crate::takeover::Stop::Idle {
+                    why: "等待核对".into(),
+                }
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(!tx.st.probing.is_empty());
+        lane_request(&k, &x.item, "collecting");
+    }
+    assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
+    assert_eq!(k.rt.prompts_of(&x.session).len(), before);
+    assert!(steve_lines(&k, &x.item).is_empty());
+    assert!(k.open_fails(&x.item).is_empty());
+}
