@@ -437,7 +437,7 @@ pub(crate) fn read(
 /// Where the file open as `f` really is, links resolved: what the kernel says of the descriptor,
 /// not of the path it was opened by.
 #[cfg(target_os = "macos")]
-fn opened_path(f: &fs::File) -> io::Result<PathBuf> {
+pub(crate) fn opened_path(f: &fs::File) -> io::Result<PathBuf> {
     use std::ffi::CStr;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
@@ -451,7 +451,7 @@ fn opened_path(f: &fs::File) -> io::Result<PathBuf> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn opened_path(f: &fs::File) -> io::Result<PathBuf> {
+pub(crate) fn opened_path(f: &fs::File) -> io::Result<PathBuf> {
     use std::os::fd::AsRawFd;
     fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd()))
 }
