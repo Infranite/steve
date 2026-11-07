@@ -3,10 +3,12 @@
 //! control plane stays out of the run's reach whatever the harness does with its own shell: the
 //! Hub's and the Node's secrets, keys, databases and journal cannot be read or written, and
 //! Steve's own programs cannot be changed (`steve_vault::harness::{PROTECTED, NODE_PROTECTED,
-//! NODE_FILES, SEALED}`). Everything else is as before; a deny-by-default profile built from the
-//! run's view comes later.
+//! NODE_FILES, SEALED}`). A deny-by-default profile built from the run's view comes later.
 //!
-//! macOS uses `sandbox-exec` (seatbelt), Linux `bwrap` (bubblewrap). The Node tries the sandbox
+//! macOS uses `sandbox-exec` (seatbelt) with deny rules, so everything else is as before. Linux
+//! uses `bwrap` (bubblewrap) as an allowlist: all of `STEVE_HOME` is hidden but the run
+//! directories, which is stricter (Steve's programs and logs are not readable there either, and
+//! what a run writes elsewhere in it goes to an empty tmpfs that is gone with the run). The Node tries the sandbox
 //! once when it opens. When it is missing, fails, or `STEVE_CONFINE=off`, runs go unconfined and the
 //! Node says so once at open: starting a run never fails because of this stage. A harness that runs
 //! its own seatbelt sandbox (an adapter declaring `nested_sandbox: false`) is not wrapped, because
@@ -136,6 +138,18 @@ impl Confine {
         args: Vec<OsString>,
         readable: &[PathBuf],
     ) -> (PathBuf, Vec<OsString>) {
+        self.wrap_in(program, args, readable, None)
+    }
+
+    /// [`Self::wrap`] for a run that works in `cwd`: bubblewrap changes into it itself, so a
+    /// directory the sandbox hides fails the start instead of leaving the run in `$HOME`.
+    pub(crate) fn wrap_in(
+        &self,
+        program: PathBuf,
+        args: Vec<OsString>,
+        readable: &[PathBuf],
+        cwd: Option<&Path>,
+    ) -> (PathBuf, Vec<OsString>) {
         match self {
             Confine::Off(_) => (program, args),
             Confine::Seatbelt(rules) => {
@@ -160,8 +174,11 @@ impl Confine {
             } => {
                 // what the Node makes for runs and later for itself (its secrets, pushes,
                 // attachments) exists first: open or hidden from the start
-                for d in steve_vault::harness::RUN_DIRS {
-                    let _ = std::fs::create_dir_all(steve_home.join(d));
+                // the Hub's own home (its local Node lives in it): its run directories exist
+                if node_home.starts_with(steve_home.join("data")) {
+                    for d in steve_vault::harness::RUN_DIRS {
+                        let _ = std::fs::create_dir_all(steve_home.join(d));
+                    }
                 }
                 for d in steve_vault::harness::NODE_PROTECTED {
                     if let Some(d) = d.strip_suffix('/') {
@@ -188,7 +205,12 @@ impl Confine {
                     a.extend(["--ro-bind".into(), "/dev/null".into(), f.into()]);
                 }
                 for r in readable {
-                    a.extend(["--ro-bind".into(), r.into(), r.into()]);
+                    let r = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+                    a.extend(["--ro-bind".into(), r.clone().into(), r.into()]);
+                }
+                if let Some(cwd) = cwd {
+                    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+                    a.extend(["--chdir".into(), cwd.into()]);
                 }
                 a.push("--".into());
                 a.push(program.into());
@@ -231,13 +253,23 @@ mod tests {
             node_home: home.join("data/node"),
         };
         let real = std::fs::canonicalize(&home).unwrap();
-        let (p, a) = c.wrap("/bin/sh".into(), vec!["-c".into(), "x".into()], &[]);
+        let (p, a) = c.wrap_in(
+            "/bin/sh".into(),
+            vec!["-c".into(), "x".into()],
+            &[],
+            Some(&home.join("worktrees")),
+        );
         assert_eq!(p, PathBuf::from("/usr/bin/bwrap"));
         let a: Vec<String> = a.iter().map(|s| s.to_string_lossy().into_owned()).collect();
         let at = |s: &str| a.iter().position(|x| x == s).unwrap();
         let r = |rel: &str| real.join(rel).to_string_lossy().into_owned();
         let home_s = real.to_string_lossy().into_owned();
         assert_eq!(a[at(&home_s) - 1], "--tmpfs", "the whole home masked first");
+        assert_eq!(
+            a[at("--chdir") + 1],
+            r("worktrees"),
+            "into the run's own directory"
+        );
         // the run directories exist and are bound back writable, then the Node's secrets hidden
         assert_eq!(a[at(&r("worktrees")) - 1], "--bind");
         assert_eq!(a[at(&r("scratch")) - 1], "--bind");
@@ -285,5 +317,84 @@ mod tests {
         let given = [node.join("secrets/op1")];
         assert!(run(format!("cat {}/secrets/op1/V", node.display()), &given));
         assert!(run("true".into(), &[]));
+    }
+
+    /// On a Linux machine with bubblewrap: the Hub's home is hidden whole, files the Hub writes
+    /// there after the run started included, the run directories stay writable, a command's own
+    /// secrets stay readable, and `/proc/<parent>/root` is no way around it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_wrapped_command_cannot_reach_the_control_plane_on_linux() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().canonicalize().unwrap().join("home");
+        let node = home.join("data/node");
+        for d in ["signing", "worktrees/ST-1", "data/node/secrets/op1"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join("signing/k"), "k").unwrap();
+        std::fs::write(home.join("steve.env"), "STEVE_X=1").unwrap();
+        std::fs::write(node.join("node.sqlite3"), "j").unwrap();
+        std::fs::write(node.join("secrets/op1/V"), "v").unwrap();
+        let c = Confine::choose(&home, &node, Some("on".into()));
+        if !c.on() {
+            eprintln!("skipped: {c:?}");
+            return;
+        }
+        let h = home.display();
+        let run = |cmd: String, readable: &[PathBuf]| {
+            let (p, a) = c.wrap_in(
+                "/bin/sh".into(),
+                vec!["-c".into(), cmd.into()],
+                readable,
+                Some(&home.join("worktrees/ST-1")),
+            );
+            std::process::Command::new(p).args(a).output().unwrap()
+        };
+        let ok = |cmd: String, readable: &[PathBuf]| {
+            let o = run(cmd.clone(), readable);
+            assert!(o.status.success(), "{cmd}: {o:?}");
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        };
+        let no = |cmd: String| {
+            let o = run(cmd.clone(), &[]);
+            assert!(!o.status.success(), "allowed: {cmd}: {o:?}");
+        };
+        no(format!("cat {h}/signing/k"));
+        no(format!("cat {h}/steve.env"));
+        no(format!("cat {}/node.sqlite3", node.display()));
+        no(format!("cat {}/secrets/op1/V", node.display()));
+        no(format!("cat /proc/$PPID/root{h}/signing/k"));
+        // its own directory, the run's cwd
+        assert_eq!(
+            ok("echo hi > f && cat f && pwd".into(), &[]),
+            format!("hi\n{h}/worktrees/ST-1\n")
+        );
+        assert_eq!(
+            ok(
+                format!("cat {}/secrets/op1/V", node.display()),
+                &[node.join("secrets/op1")]
+            ),
+            "v"
+        );
+        // a file the Hub writes after the run started is hidden too
+        let (p, a) = c.wrap_in(
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                format!("sleep 1; cat {h}/steve.env.new").into(),
+            ],
+            &[],
+            Some(&home.join("worktrees/ST-1")),
+        );
+        let child = std::process::Command::new(p)
+            .args(a)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(home.join("steve.env.new"), "late").unwrap();
+        let o = child.wait_with_output().unwrap();
+        assert!(!o.status.success(), "a late file was readable: {o:?}");
     }
 }

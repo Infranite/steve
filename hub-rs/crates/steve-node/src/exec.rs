@@ -94,7 +94,9 @@ pub(crate) fn run(inner: &Arc<crate::Inner>, op: &OperationId, r: &Run) -> Resul
         .map(Into::into)
         .collect();
     let (program, args) = if r.confined {
-        inner.confine.wrap("/bin/sh".into(), args, &r.readable)
+        inner
+            .confine
+            .wrap_in("/bin/sh".into(), args, &r.readable, Some(&r.dir))
     } else {
         ("/bin/sh".into(), args)
     };

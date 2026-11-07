@@ -15,6 +15,8 @@ use serde::Serialize;
 use sha2::Digest as _;
 use steve_store::StoreError;
 
+use steve_store::base::{Viewer, Visibility};
+
 use super::principal;
 
 /// How many paths of a difference are kept as a sample (the count is of all of them).
@@ -84,10 +86,10 @@ pub fn of_session(c: &Connection, session: &str) -> Result<Option<View>, StoreEr
     }
     let mut q = c.prepare(
         "SELECT json_extract(config,'$.path'), visibility, created_by FROM kb_sources
-          WHERE workspace_id=? AND kind='folder' AND json_type(config,'$.path')='text' AND paused=0",
+          WHERE workspace_id=? AND kind='folder' AND json_valid(config) AND json_type(config,'$.path')='text'
+            AND paused=0",
     )?;
-    let me = p.user().map(str::to_string);
-    let ro: Vec<String> = q
+    let folders = q
         .query_map([&ws], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -95,12 +97,37 @@ pub fn of_session(c: &Connection, session: &str) -> Result<Option<View>, StoreEr
                 r.get::<_, String>(2)?,
             ))
         })?
-        .collect::<Result<Vec<_>, _>>()?
+        .collect::<Result<Vec<_>, _>>()?;
+    // what the principal may read: by the folder's visibility (its documents' default) as the
+    // knowledge module checks it; the service principal reads only what is the workspace's
+    let viewer = match p.user() {
+        Some(u) => Some(Viewer::load(c, &ws, u)?),
+        None => None,
+    };
+    let ro: Vec<String> = folders
         .into_iter()
-        .filter(|(_, vis, by)| vis != "private" || me.as_deref() == Some(by.as_str()))
+        .filter(|(_, vis, by)| {
+            let vis = Visibility::from_db(vis);
+            match &viewer {
+                Some(v) => v.sees(&vis, by),
+                None => vis == Visibility::Workspace,
+            }
+        })
         .map(|(path, _, _)| path)
         .collect();
-    let audience = principal::audience(c, &ws, &p, None)?;
+    // who reads it, as recorded at bind (a remote Node's owner among them)
+    let recorded: Option<String> = c
+        .query_row(
+            "SELECT audience FROM runtime_sessions WHERE session_id=?",
+            [session],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let audience = match recorded.and_then(|a| serde_json::from_str(&a).ok()) {
+        Some(a) => a,
+        None => principal::audience(c, &ws, &p, None)?,
+    };
     let rw = clean(rw);
     let mut ro = clean(ro);
     ro.retain(|r| !rw.contains(r));
@@ -203,6 +230,11 @@ mod tests {
              CREATE TABLE sessions(id TEXT, workspace_id TEXT, item_id TEXT, cwd TEXT);
              CREATE TABLE runtime_sessions(session_id TEXT, principal TEXT, audience TEXT, view_digest TEXT);
              CREATE TABLE kb_sources(id TEXT, workspace_id TEXT, kind TEXT, config TEXT, visibility TEXT, created_by TEXT, paused INTEGER);
+             CREATE TABLE parties(id TEXT, workspace_id TEXT, user_id TEXT, status TEXT);
+             CREATE TABLE team_members(workspace_id TEXT, team_id TEXT, contact_id TEXT);
+             CREATE TABLE team_details(party_id TEXT, parent_id TEXT);
+             INSERT INTO parties VALUES ('c1','team','u1','active');
+             INSERT INTO team_members VALUES ('team','t1','c1');
              CREATE TABLE view_shadow(session_id TEXT PRIMARY KEY, node_id TEXT, kind TEXT, at INTEGER, digest TEXT, view TEXT,
                extra_count INTEGER, extra TEXT, missing_count INTEGER, missing TEXT);
              INSERT INTO workspace_members VALUES ('team','u1','owner',1),('team','u2','member',2),('other','u3','owner',1);
@@ -214,7 +246,9 @@ mod tests {
                ('k1','team','folder','{\"path\":\"/docs/shared\"}','workspace','u1',0),
                ('k2','team','folder','{\"path\":\"/docs/u1-private\"}','private','u1',0),
                ('k3','team','folder','{\"path\":\"/docs/u2-private\"}','private','u2',0),
-               ('k4','other','folder','{\"path\":\"/docs/elsewhere\"}','workspace','u3',0);",
+               ('k4','other','folder','{\"path\":\"/docs/elsewhere\"}','workspace','u3',0),
+               ('k5','team','folder','{\"path\":\"/docs/team-t1\"}','team:t1','u3',0),
+               ('k6','team','folder','not json','workspace','u1',0);",
         )
         .unwrap();
         c
@@ -233,7 +267,16 @@ mod tests {
         let v = of_session(&c, "s2").unwrap().unwrap();
         assert_eq!(v.principal, "svc:team");
         assert_eq!(v.rw, ["/w/dir-proj"], "a directory project's root, once");
-        assert_eq!(v.ro, ["/docs/shared"], "nobody's private folders");
+        assert_eq!(
+            v.ro,
+            ["/docs/shared"],
+            "nobody's private folders, no team's"
+        );
+        // a member of team t1 reads its folder; nobody else does
+        c.execute("UPDATE items SET requested_by='u1' WHERE id='i2'", [])
+            .unwrap();
+        let v = of_session(&c, "s2").unwrap().unwrap();
+        assert_eq!(v.ro, ["/docs/shared", "/docs/team-t1", "/docs/u1-private"]);
         assert_ne!(v.digest(), of_session(&c, "s1").unwrap().unwrap().digest());
     }
 

@@ -1935,7 +1935,9 @@ async fn open_harness(
         .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))?;
     // in the OS sandbox, unless the harness sandboxes its own shell (macOS nests none)
     let (program, args) = if inner.cfg.acp.adapter_properties(&harness).nested_sandbox {
-        inner.confine.wrap(program, args, &[])
+        inner
+            .confine
+            .wrap_in(program, args, &[], Some(std::path::Path::new(&cwd)))
     } else {
         (program, args)
     };

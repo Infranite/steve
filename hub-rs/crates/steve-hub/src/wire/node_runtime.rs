@@ -198,6 +198,8 @@ pub struct Binding {
 }
 
 pub struct NodeRuntime {
+    /// [`Self::set_configured_roots`].
+    configured_roots: OnceLock<Vec<String>>,
     store: Store,
     node: Arc<dyn Node>,
     node_id: NodeId,
@@ -370,6 +372,7 @@ impl NodeRuntime {
     pub fn new(store: Store, node: Arc<dyn Node>, domain: Arc<dyn NodeDomain>) -> Arc<NodeRuntime> {
         let node_id = node.id().clone();
         Arc::new(NodeRuntime {
+            configured_roots: OnceLock::new(),
             store,
             node,
             node_id,
@@ -773,15 +776,6 @@ impl NodeRuntime {
                 None
             };
             super::principal::record_in(tx, &b.session, owner.as_deref())?;
-            // and what it would be given under the path model, in shadow (S2): the local Node's
-            // roots are the Hub's to list, a remote Node's are its own
-            let today = if self.is_remote() {
-                None
-            } else {
-                let (rw, ro) = super::node_binding::root_paths_in(tx)?;
-                Some(rw.into_iter().chain(ro).collect::<Vec<_>>())
-            };
-            super::view::record_in(tx, &b.session, self.node_id.as_str(), today.as_deref())?;
             let (prep, prep_d) = command(
                 &format!("op_prep_{}", b.session),
                 Prepare {
@@ -854,10 +848,48 @@ impl NodeRuntime {
             }
             Ok(true)
         })?;
+        if fresh {
+            self.record_view(&b.session);
+        }
         if fresh && !idle {
             self.wake_send.notify_one();
         }
         Ok(fresh)
+    }
+
+    /// What `session` would be given under the path model, in shadow (S2, [`super::view`]), after
+    /// its bind committed: never a reason for the bind to fail. The local Node's roots today are
+    /// the Hub's to list (with the configured ones, [`Self::set_configured_roots`]); a remote
+    /// Node's are its own.
+    fn record_view(&self, session: &str) {
+        let today = if self.is_remote() {
+            None
+        } else {
+            match self.store.reader(|c| super::node_binding::root_paths_in(c)) {
+                Ok((rw, ro)) => {
+                    let extra = self.configured_roots.get().cloned().unwrap_or_default();
+                    Some(rw.into_iter().chain(ro).chain(extra).collect::<Vec<_>>())
+                }
+                Err(e) => {
+                    tracing::warn!(session, "view shadow: today's roots: {e}");
+                    return;
+                }
+            }
+        };
+        let node = self.node_id.as_str();
+        if let Err(e) = self.tx(|tx| super::view::record_in(tx, session, node, today.as_deref())) {
+            tracing::warn!(session, "view shadow: {e}");
+        }
+    }
+
+    /// The directories the Hub gives the local Node besides its projects, sessions and folders
+    /// (the scratch and worktree directories), for [`Self::record_view`]. Once.
+    pub fn set_configured_roots(&self, dirs: Vec<std::path::PathBuf>) {
+        let _ = self.configured_roots.set(
+            dirs.into_iter()
+                .map(|d| d.to_string_lossy().into_owned())
+                .collect(),
+        );
     }
 
     /// The prepare and open of a session adopted idle ([`Self::adopt_idle`]) go now, as its

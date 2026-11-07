@@ -272,6 +272,8 @@ impl Sessions<'_> {
             let tx = w.tx()?;
             tx.run("DELETE FROM events WHERE session_id = ?", [id])?;
             tx.run("DELETE FROM queued WHERE session_id = ?", [id])?;
+            // its view in shadow names other directories of the machine: it goes with it
+            tx.run("DELETE FROM view_shadow WHERE session_id = ?", [id])?;
             tx.run("DELETE FROM sessions WHERE id = ?", [id])?;
             tx.commit()?;
             // the session's injected values go with it (V4 redactor)
