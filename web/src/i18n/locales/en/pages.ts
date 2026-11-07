@@ -154,6 +154,8 @@ export default {
     drain: {
       waiting: "Waiting for these runs to end safely", ready: "Ready to switch",
       node_one: "{{count}} Node execution is still active or awaiting confirmation", node_other: "{{count}} Node executions are still active or awaiting confirmation",
+      nodeWork: "Waiting for Node execution to end safely", nodeUnknown: "Node execution state is unavailable; waiting for confirmation",
+      unlistedNodes_one: "{{count}} more Node execution is not shown here ({{total}} total)", unlistedNodes_other: "{{count}} more Node executions are not shown here ({{total}} total)",
       activities_one: "{{count}} background activity is still active", activities_other: "{{count}} background activities are still active",
       adapters_one: "{{count}} agent execution is still active", adapters_other: "{{count}} agent executions are still active",
       release: "Another release is still running", confirming: "Confirming execution state and the maintenance lock",

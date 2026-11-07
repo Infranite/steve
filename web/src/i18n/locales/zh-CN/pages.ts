@@ -151,6 +151,8 @@ export default {
     drain: {
       waiting: "等待以下运行安全结束", ready: "已具备切换条件",
       node_other: "{{count}} 个 Node 执行仍在进行或等待确认",
+      nodeWork: "正在等待 Node 执行安全结束", nodeUnknown: "暂时无法读取 Node 执行状态，正在等待确认",
+      unlistedNodes_other: "还有 {{count}} 个 Node 执行未在此列表展示（共 {{total}} 个）",
       activities_other: "{{count}} 项后台活动尚未结束", adapters_other: "{{count}} 个 Agent 执行尚未结束",
       release: "另一次发布仍在进行", confirming: "正在确认执行状态和维护锁",
       devices: "查看设备与执行会话", note: "此处只等待会阻止切换的运行；未完成的事项不会因此被关闭。",

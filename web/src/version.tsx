@@ -306,18 +306,32 @@ function UpgradeActivity({ op, connected }: { op: UpdateOperation; connected: bo
 function UpgradeWaiting({ drain }: { drain: NonNullable<UpdateOperation["drain"]> }) {
   const t = useT()
   const running = Object.values(drain.running).filter(n => Number.isFinite(n) && n > 0).reduce((sum, n) => sum + n, 0)
+  const blockers = drain.blockers ?? []
+  const nodeStateUnknown = blockers.some(b => b.reason === "node_state_unavailable")
+  const unlistedNodes = Math.max(0, drain.node - blockers.filter(b => b.kind === "node_turn" || b.kind === "node_session").length)
+  const reason = (b: typeof blockers[number]) => {
+    switch (b.reason) {
+      case "waiting_for_node_work": return t("pages:upgrade.drain.nodeWork")
+      case "node_state_unavailable": return t("pages:upgrade.drain.nodeUnknown")
+      case "waiting_for_activity": return t("pages:upgrade.drain.activities", { count: b.count ?? 1 })
+      case "waiting_for_source_release": return t("pages:upgrade.drain.release")
+      default: return b.reason
+    }
+  }
   return <div className="space-y-1.5 type-footnote" data-upgrade-waiting>
     <p className="font-medium">{t(drain.ready ? "pages:upgrade.drain.ready" : "pages:upgrade.drain.waiting")}</p>
     {!drain.ready && <ul className="list-disc space-y-1 pl-4 text-muted-foreground">
-      {drain.blockers?.length ? drain.blockers.map((b, n) => <li key={`${b.kind}:${b.attempt_id ?? b.session_id ?? n}`}>
+      {blockers.length ? <>{blockers.map((b, n) => <li key={`${b.kind}:${b.attempt_id ?? b.session_id ?? n}`}>
         {b.item_id ? <a href={`#/items/${encodeURIComponent(b.item_id)}`} className="underline underline-offset-4">{b.item_id}</a> : b.session_id ? <a href={`#/sessions/${encodeURIComponent(b.session_id)}`} className="underline underline-offset-4">{b.session_id}</a> : null}
-        {(b.item_id || b.session_id) && " · "}{b.reason}
-      </li>) : <>
+        {(b.item_id || b.session_id) && " · "}{reason(b)}
+      </li>)}
+        {!nodeStateUnknown && unlistedNodes > 0 && <li>{t("pages:upgrade.drain.unlistedNodes", { count: unlistedNodes, total: drain.node })}</li>}
+      </> : <>
         {drain.node > 0 && <li>{t("pages:upgrade.drain.node", { count: drain.node })}</li>}
         {running > 0 && <li>{t("pages:upgrade.drain.activities", { count: running })}</li>}
-        {drain.acp > 0 && <li>{t("pages:upgrade.drain.adapters", { count: drain.acp })}</li>}
         {drain.source_release_busy && <li>{t("pages:upgrade.drain.release")}</li>}
       </>}
+      {drain.acp > 0 && <li>{t("pages:upgrade.drain.adapters", { count: drain.acp })}</li>}
       {!drain.blockers?.length && !drain.node && !running && !drain.acp && !drain.source_release_busy && <li>{t("pages:upgrade.drain.confirming")}</li>}
     </ul>}
     {drain.node > 0 && <a href="#/devices" className="inline-block underline underline-offset-4">{t("pages:upgrade.drain.devices")}</a>}

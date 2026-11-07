@@ -279,10 +279,16 @@ try {
   await page.locator('[data-upgrade-activity="downloading"]').waitFor()
   assert.equal(await page.locator("[data-upgrade-download]").count(), 0, "an unknown total is indeterminate")
   await page.locator("[data-upgrade-recovery]").getByText(`升级日志：${runnerLog}`).waitFor()
-  state.operation = localOp("draining", { progress: progress("waiting"), drain: { maintenance: true, ready: false, running: {}, acp: 0, node: 1, adapters_stopped: true, unknown_mail: 0, source_release_busy: false, blockers: [{ kind: "node_turn", reason: "正在等待权限答复", item_id: "ST-23", session_id: "session-23", state: "waiting_permission" }] } })
-  await page.locator("[data-upgrade-waiting]").getByText("正在等待权限答复", { exact: false }).waitFor()
+  state.operation = localOp("draining", { progress: progress("waiting"), drain: { maintenance: true, ready: false, running: { http_mutation: 2 }, acp: 0, node: 3, adapters_stopped: true, unknown_mail: 0, source_release_busy: true, blockers: [{ kind: "node_turn", reason: "waiting_for_node_work", item_id: "ST-23", session_id: "session-23", attempt_id: null, state: "running" }, { kind: "activity", reason: "waiting_for_activity", state: "http_mutation", count: 2 }, { kind: "source_release", reason: "waiting_for_source_release", state: "running" }] } })
+  await page.locator("[data-upgrade-waiting]").getByText("正在等待 Node 执行安全结束", { exact: false }).waitFor()
   assert.equal(await page.locator('[data-upgrade-waiting] a').first().getAttribute("href"), "#/items/ST-23")
+  await page.locator("[data-upgrade-waiting]").getByText("2 项后台活动尚未结束").waitFor()
+  await page.locator("[data-upgrade-waiting]").getByText("另一次发布仍在进行").waitFor()
+  await page.locator("[data-upgrade-waiting]").getByText("还有 2 个 Node 执行未在此列表展示（共 3 个）").waitFor()
   if (process.env.STEVE_TEST_ARTIFACTS) await page.locator("[data-upgrade-settings]").screenshot({ path: process.env.STEVE_TEST_ARTIFACTS + "/upgrade-waiting.png" })
+  state.operation.drain.node = 1
+  state.operation.drain.blockers = [{ kind: "node_session", reason: "node_state_unavailable", state: "unknown" }]
+  await page.locator("[data-upgrade-waiting]").getByText("暂时无法读取 Node 执行状态，正在等待确认").waitFor()
   delete state.operation.drain.blockers
   await page.locator("[data-upgrade-waiting]").getByText("1 个 Node 执行仍在进行或等待确认").waitFor()
   // the deploy stops this Hub: the page says it reconnects, then shows where the new one got to
