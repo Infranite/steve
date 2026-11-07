@@ -72,6 +72,43 @@ fn for_run_with(
     if found.is_empty() {
         return none;
     }
+    let build = cwd.join(".steve/build");
+    let at = Places {
+        item: build.clone(),
+        person: node_home.join("cache").join(owner[0]).join(owner[1]),
+    };
+    let found: Vec<_> = found
+        .into_iter()
+        .filter_map(|toolchain| {
+            // Validate even an empty plan. A malformed declaration must not disappear from
+            // dirs_to_make while its environment still points at an unchecked location.
+            let planned = toolchain.validate_places(&at).and_then(|()| {
+                toolchain
+                    .directory_plan(cwd, &at)
+                    .into_iter()
+                    .map(|dir| {
+                        dir.path
+                            .map(|path| (dir.declaration.env.is_some(), path))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            });
+            match planned {
+                Ok(dirs) => Some((
+                    toolchain,
+                    dirs.into_iter()
+                        .filter_map(|(moved, path)| moved.then_some(path))
+                        .collect::<Vec<_>>(),
+                )),
+                Err(reason) => {
+                    tracing::warn!(toolchain = ?toolchain.id, ?reason, "toolchain directory declaration skipped");
+                    None
+                }
+            }
+        })
+        .collect();
+    if found.is_empty() {
+        return none;
+    }
     let person = match real_dirs(node_home, &["cache", owner[0], owner[1]]) {
         Ok(p) => p,
         Err(e) => {
@@ -79,7 +116,6 @@ fn for_run_with(
             return none;
         }
     };
-    let build = cwd.join(".steve/build");
     let made = crate::attachments::real_dir(&cwd.join(".steve"))
         .and_then(|()| crate::attachments::real_dir(&build))
         .and_then(|()| {
@@ -94,14 +130,10 @@ fn for_run_with(
         tracing::warn!("toolchains: {e}");
         return none;
     }
-    let at = Places {
-        item: build.clone(),
-        person: person.clone(),
-    };
     let mut env = vec![];
-    for t in found {
+    for (t, dirs) in found {
         // each directory a real one under the item's or the person's own
-        let made = t.dirs_to_make(&at).iter().try_for_each(|d| {
+        let made = dirs.iter().try_for_each(|d| {
             let (base, rel) = if let Ok(r) = d.strip_prefix(&person) {
                 (&person, r)
             } else if let Ok(r) = d.strip_prefix(&build) {
@@ -134,6 +166,106 @@ fn for_run_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+
+    fn state() -> HarnessState {
+        HarnessState {
+            dir: "ws/user/bot/adapter".into(),
+            import_owner: false,
+        }
+    }
+
+    #[test]
+    fn literal_template_text_and_equals_in_real_paths_are_not_reinterpreted() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("{item}=node");
+        let work = temp.path().join("{person}=work");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(work.join("Example.project"), "").unwrap();
+        let defs = Toolchains::parse(
+            r#"
+[[toolchain]]
+id = "future=工具"
+detect = ["Example.project"]
+dirs = [
+  { name = "output", scope = "item", env = "EXAMPLE_BUILD_DIR", value = "{item}/out=cache" },
+  { name = "cache", scope = "person", env = "EXAMPLE_CACHE_DIR", value = "{person}/cache" },
+]
+"#,
+        )
+        .unwrap();
+        let run = for_run_with(&defs, &home, &work, Some(&state()));
+        let env: std::collections::BTreeMap<_, _> = run.env.into_iter().collect();
+        let output = work.join(".steve/build/future=工具/out=cache");
+        let cache = home.join("cache/ws/user/future=工具/cache");
+        assert_eq!(env[OsStr::new("EXAMPLE_BUILD_DIR")], output.as_os_str());
+        assert_eq!(env[OsStr::new("EXAMPLE_CACHE_DIR")], cache.as_os_str());
+        assert!(output.is_dir() && cache.is_dir());
+        assert_eq!(run.person, Some(home.join("cache/ws/user")));
+    }
+
+    #[test]
+    fn invalid_empty_plans_cannot_inject_environment_or_create_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("node");
+        let work = temp.path().join("work");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(work.join("Example.project"), "").unwrap();
+        let defs = Toolchains::parse(
+            r#"
+[[toolchain]]
+id = "../escape"
+detect = ["Example.project"]
+env = { EXAMPLE_BAD_VALUE = "must-not-be-injected" }
+"#,
+        )
+        .unwrap();
+        let run = for_run_with(&defs, &home, &work, Some(&state()));
+        assert!(run.env.is_empty() && run.person.is_none());
+        assert!(!home.join("cache").exists());
+        assert!(!work.join(".steve").exists());
+    }
+
+    #[test]
+    fn one_invalid_directory_skips_the_whole_toolchain_but_not_other_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("node");
+        let work = temp.path().join("work");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(work.join("Example.project"), "").unwrap();
+        let defs = Toolchains::parse(
+            r#"
+[[toolchain]]
+id = "bad"
+detect = ["Example.project"]
+env = { EXAMPLE_BAD_OPTION = "not-applied" }
+dirs = [
+  { name = "first", scope = "item", env = "EXAMPLE_BAD_DIR", value = "{item}/first" },
+  { name = "second", scope = "item", in_tree = "../escape" },
+]
+[[toolchain]]
+id = "good"
+detect = ["Example.project"]
+dirs = [
+  { name = "output", scope = "item", env = "EXAMPLE_GOOD_DIR", value = "{item}/output" },
+]
+"#,
+        )
+        .unwrap();
+        let run = for_run_with(&defs, &home, &work, Some(&state()));
+        let env: std::collections::BTreeMap<_, _> = run.env.into_iter().collect();
+        assert!(!env.contains_key(OsStr::new("EXAMPLE_BAD_OPTION")));
+        assert!(!env.contains_key(OsStr::new("EXAMPLE_BAD_DIR")));
+        assert_eq!(
+            env[OsStr::new("EXAMPLE_GOOD_DIR")],
+            work.join(".steve/build/good/output").as_os_str()
+        );
+        assert!(!work.join(".steve/build/bad").exists());
+        assert!(work.join(".steve/build/good/output").is_dir());
+    }
 
     #[test]
     fn concurrent_first_runs_keep_their_cache_redirection() {
