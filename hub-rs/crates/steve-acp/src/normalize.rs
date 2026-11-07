@@ -75,6 +75,7 @@ fn diagnostic(code: &str, context: &str) -> Fact {
         severity: Severity::Info,
         code: code.into(),
         safe_text: bound(context, 200),
+        details: None,
     })
 }
 
@@ -179,6 +180,7 @@ impl Normalizer {
                 severity: Severity::Info,
                 code: "unsupported_update".into(),
                 safe_text: bound(other, 80),
+                details: None,
             })],
         }
     }

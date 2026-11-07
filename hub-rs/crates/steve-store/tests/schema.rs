@@ -4,6 +4,7 @@ mod common;
 
 use common::*;
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -211,21 +212,32 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
 }
 
 #[test]
-fn migrations_are_the_ts_strings() {
-    assert_eq!(db::MIGRATIONS.len(), 53);
-    assert_eq!(db::SCHEMA_VERSION, 53);
-    assert!(db::MIGRATIONS[0].starts_with("\n  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL);"));
-    assert!(
-        db::MIGRATIONS[1]
-            .trim_end()
-            .ends_with("ALTER TABLE messages ADD COLUMN meta TEXT;")
+fn compiled_migrations_match_the_release_lock() {
+    // The compatibility test checks disk files against LOCK, including helper
+    // files such as 027_items.sql. This checks what the release actually compiles.
+    let locked: Vec<_> = include_str!("../migrations/LOCK")
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .map(|line| line.split_once(' ').expect("`<file> <sha256>`"))
+        .filter(|(file, _)| {
+            file.len() == "000.sql".len()
+                && file.ends_with(".sql")
+                && file.as_bytes()[..3].iter().all(u8::is_ascii_digit)
+        })
+        .collect();
+    assert_eq!(
+        db::MIGRATIONS.len(),
+        locked.len(),
+        "compiled migration count"
     );
-    assert!(db::MIGRATIONS[2].starts_with("\n  CREATE TABLE files (id TEXT PRIMARY KEY,"));
-    assert!(
-        db::MIGRATIONS[2]
-            .trim_end()
-            .ends_with("ALTER TABLE queued ADD COLUMN files TEXT;")
-    );
+    for (index, ((file, expected), sql)) in locked.iter().zip(db::MIGRATIONS).enumerate() {
+        assert_eq!(*file, format!("{:03}.sql", index + 1), "migration order");
+        let actual: String = Sha256::digest(sql.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(actual, *expected, "compiled migration differs from {file}");
+    }
 }
 
 #[test]

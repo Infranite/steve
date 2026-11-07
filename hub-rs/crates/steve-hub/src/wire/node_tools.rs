@@ -190,7 +190,11 @@ impl Caller {
         }
     }
     fn permits(&self, name: &str) -> bool {
-        !matches!(self, Self::DependencyManagement(_)) || name == super::item_mcp::DEPENDENCIES
+        !matches!(self, Self::DependencyManagement(_))
+            || matches!(
+                name,
+                super::item_mcp::DEPENDENCIES | super::diagnostics::TOOL
+            )
     }
 }
 
@@ -349,8 +353,22 @@ impl NodeTools {
         let (store, node, ledger) = (self.store.clone(), self.node.clone(), self.ledger.clone());
         let (exec, encoded) = (key.execution.clone(), Self::key(key)?);
         blocking(move || {
-            caller(&store, &node, &exec, false)?;
-            saved(&ledger.db.lock().unwrap(), &encoded, digest.as_ref())
+            let current = caller(&store, &node, &exec, false)?;
+            let db = ledger.db.lock().unwrap();
+            let result = saved(&db, &encoded, digest.as_ref())?;
+            let diagnostic = db
+                .query_row("SELECT name FROM calls WHERE key=?", [&encoded], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(internal)?
+                .is_some_and(|name| name == super::diagnostics::TOOL);
+            drop(db);
+            if diagnostic && let Some(ref result) = result {
+                super::diagnostics::authorize_cached(&store, &current, result)
+                    .map_err(|_| denied())?;
+            }
+            Ok(result)
         })
         .await
     }
@@ -471,6 +489,11 @@ impl HubTools for NodeTools {
             .await?
         };
         if let Some(r) = fenced {
+            if q.name == super::diagnostics::TOOL {
+                return self.saved(&key, None).await?.ok_or_else(|| {
+                    ApiError::new(ErrorCode::Invalid, "diagnostic receipt disappeared")
+                });
+            }
             return Ok(r);
         }
         // The task owns execution even if the caller disconnects. Timeout/cancel does not abort
@@ -523,12 +546,21 @@ impl HubTools for NodeTools {
                 Ok(_) if steve_store::now() >= q.deadline.0 => ToolResult::Failed {
                     error: ApiError::new(ErrorCode::Expired, "tool expired before invocation"),
                 },
-                Ok(_) => match match session {
-                    Caller::Session(s) | Caller::DependencyManagement(s) => {
-                        service.call(s, &q.name, q.args).await
-                    }
-                    Caller::Research(r) => service.research_call(r, &q.name, q.args).await,
-                } {
+                Ok(_) => match super::diagnostics::in_execution(
+                    &q.execution,
+                    operation.as_str(),
+                    q.id.as_str(),
+                    async {
+                        match session {
+                            Caller::Session(s) | Caller::DependencyManagement(s) => {
+                                service.call(s, &q.name, q.args).await
+                            }
+                            Caller::Research(r) => service.research_call(r, &q.name, q.args).await,
+                        }
+                    },
+                )
+                .await
+                {
                     Ok(text) => ToolResult::Completed {
                         end_turn: text.ends_with(steve_mcp::tools::END),
                         parts: vec![Part::Text { text }],
@@ -578,10 +610,17 @@ impl HubTools for NodeTools {
         let (store, node, ledger) = (self.store.clone(), self.node.clone(), self.ledger.clone());
         let encoded = Self::key(&key)?;
         let result = blocking(move || {
-            caller(&store, &node, &key.execution, false)?;
+            let current = caller(&store, &node, &key.execution, false)?;
             let db = ledger.db.lock().unwrap();
             let result = saved(&db, &encoded, None)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "unknown ToolKey"))?;
+            let diagnostic = db.query_row("SELECT name FROM calls WHERE key=?", [&encoded], |r| r.get::<_, String>(0))
+                .map_err(internal)? == super::diagnostics::TOOL;
+            drop(db);
+            if diagnostic {
+                super::diagnostics::authorize_cached(&store, &current, &result).map_err(|_| denied())?;
+            }
+            let db = ledger.db.lock().unwrap();
             db.execute("UPDATE calls SET cancel_requested=1,state=CASE WHEN state='running' THEN 'unknown' ELSE state END,updated=?2 WHERE key=?1",params![encoded,steve_store::now()]).map_err(internal)?;
             Ok(result)
         })
@@ -1218,11 +1257,52 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(names, mcp, "the same tools as the MCP endpoint");
         assert!(names.contains(&steve_mcp::tools::UPDATE));
+        assert!(names.contains(&super::super::mcp_extra::REPLY_SOURCE));
+        let unique: std::collections::HashSet<_> = names.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "each real catalog tool occurs once"
+        );
+        for descriptor in &catalog.tools {
+            assert!(descriptor.input_schema.is_object(), "{}", descriptor.name);
+        }
+        for name in [
+            "steve_items_search",
+            "steve_item_read",
+            "steve_lane_status",
+            "steve_debug",
+        ] {
+            assert!(
+                catalog
+                    .tools
+                    .iter()
+                    .find(|t| t.name == name)
+                    .unwrap()
+                    .read_only,
+                "{name}"
+            );
+        }
+        assert!(
+            !catalog
+                .tools
+                .iter()
+                .find(|t| t.name == "steve_item_dependencies")
+                .unwrap()
+                .read_only
+        );
+        w.tool_service
+            .mcp
+            .store
+            .diagnostics()
+            .capture("default", "i1", "test-owner", Some(1))
+            .unwrap();
         for (name, args) in [
             ("steve_items_search", json!({"query": "test"})),
             ("steve_item_read", json!({"id": "i1"})),
             ("steve_item_dependencies", json!({"action": "get"})),
             ("steve_workflow", json!({"action": "get"})),
+            ("steve_debug", json!({"action":"explain","item_id":"i1"})),
         ] {
             assert!(names.contains(&name), "{name}");
             let result = tools
@@ -1241,6 +1321,51 @@ pub(crate) mod tests {
                 "{name}: {result:?}"
             );
         }
+        // Let the real async recorder drain, then verify nested wrappers did not duplicate
+        // observations and diagnostic reads did not generate their own feedback loop.
+        let mut drained = false;
+        for _ in 0..100 {
+            let view = w
+                .tool_service
+                .mcp
+                .store
+                .diagnostics()
+                .explain("default", "i1")
+                .unwrap();
+            if view["coverage"]["instance_pending"] == 0 {
+                drained = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(drained, "diagnostic recorder did not drain");
+        let observed = store
+            .diagnostics()
+            .events(
+                "default",
+                "i1",
+                steve_store::diagnostics::Filter {
+                    kind: Some("tool.call".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let calls = observed["events"].as_array().unwrap();
+        assert_eq!(
+            calls.len(),
+            4,
+            "one observation per actual non-debug invocation: {observed}"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|event| event["details"]["rpc_method"] != "steve_debug")
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|event| event["attempt_id"] == host.exec.attempt().as_str())
+        );
 
         let call = |id: &str| ToolCall {
             id: CallId::new(id).unwrap(),
@@ -1291,8 +1416,30 @@ pub(crate) mod tests {
                 .tools
                 .iter()
                 .map(|t| t.name.as_str())
-                .collect::<Vec<_>>(),
-            vec![super::super::item_mcp::DEPENDENCIES],
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                super::super::item_mcp::DEPENDENCIES,
+                super::super::diagnostics::TOOL
+            ])
+        );
+        let debug_query = ToolCall {
+            id: CallId::new("waiting_debug").unwrap(),
+            catalog: restricted.revision.clone(),
+            execution: host.exec.clone(),
+            name: super::super::diagnostics::TOOL.into(),
+            args: json!({"action":"explain","item_id":"i1"}),
+            deadline: Timestamp(steve_store::now() + 60_000),
+        };
+        let queried = tools.call(debug_query.clone()).await.unwrap();
+        let ToolResult::Completed { ref parts, .. } = queried else {
+            panic!("{queried:?}")
+        };
+        let Part::Text { text } = &parts[0] else {
+            panic!("missing diagnostic text")
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(text).unwrap()["access"],
+            "full"
         );
         assert_eq!(
             tools.call(call("no_update")).await.unwrap_err().code,
@@ -1353,6 +1500,47 @@ pub(crate) mod tests {
             created, 123,
             "registering the wait preserves the UI's original edge"
         );
+        // A saved read remains a disclosure: changing the originating audience revokes full
+        // diagnostic receipts, including replay/status/cancel paths that bypass ToolService.
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE messages SET space='chan:shared' WHERE id=?",
+                    [&origin],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            tools.call(debug_query.clone()).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            tools.call_status(debug_query.key()).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            tools.cancel_call(debug_query.key()).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+        let mut safe_query = debug_query.clone();
+        safe_query.id = CallId::new("shared_debug").unwrap();
+        let ToolResult::Completed { parts, .. } = tools.call(safe_query).await.unwrap() else {
+            panic!("safe summary unavailable")
+        };
+        let Part::Text { text } = &parts[0] else {
+            panic!("missing safe projection")
+        };
+        let safe: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(safe["access"], "summary");
+        assert!(safe.get("state").is_none());
+        let mut forbidden = debug_query.clone();
+        forbidden.id = CallId::new("shared_events").unwrap();
+        forbidden.args = json!({"action":"events","item_id":"i1"});
+        assert!(matches!(
+            tools.call(forbidden).await.unwrap(),
+            ToolResult::Failed { .. }
+        ));
         // A detached old work unit cannot use the management exception even with the same deps.
         store
             .transaction::<_, StoreError>(|tx| {

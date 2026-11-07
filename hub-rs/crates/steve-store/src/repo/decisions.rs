@@ -63,6 +63,7 @@ fn insert(c: &rusqlite::Connection, p: &NewDecision) -> Result<Decision> {
 /// [`Decisions::create`] inside the caller's transaction; published after the commit.
 pub fn decision_create_in(tx: &crate::Tx<'_>, p: &NewDecision) -> Result<Decision> {
     let d = insert(tx, p)?;
+    tx.diagnostic(crate::diagnostics::decision_event(&d, "created", None));
     tx.publish(ChangeEvent::Decision {
         id: d.id.clone(),
         item_id: Some(p.item_id.clone()),
@@ -90,6 +91,15 @@ pub fn decision_resolve_in(
         id: id.into(),
         item_id: item,
     });
+    if n > 0
+        && let Ok(Some(d)) = one(tx, DECISION, [id], Decision::from_row)
+    {
+        tx.diagnostic(crate::diagnostics::decision_event(
+            &d,
+            "resolved",
+            Some("open"),
+        ));
+    }
     Ok(n > 0)
 }
 
@@ -155,14 +165,20 @@ impl Decisions<'_> {
     }
 
     pub fn create(&self, p: &NewDecision) -> Result<Option<Decision>> {
-        self.0.write(|w| {
+        let result = self.0.write(|w| {
             let d = insert(w.c, p)?;
             w.publish(ChangeEvent::Decision {
                 id: d.id.clone(),
                 item_id: Some(p.item_id.clone()),
             });
             Ok(Some(d))
-        })
+        })?;
+        if let Some(d) = &result {
+            self.0
+                .diagnostics()
+                .record(crate::diagnostics::decision_event(d, "created", None));
+        }
+        Ok(result)
     }
 
     /// Settles an open decision (no-op if it is not open, but still publishes). `status` is `resolved`
@@ -174,14 +190,26 @@ impl Decisions<'_> {
         status: &str,
         undo: &Value,
     ) -> Result<Option<Decision>> {
-        self.0.write(|w| {
+        let (result, changed_rows) = self.0.write(|w| {
             let undo = if truthy(undo) { Some(to_json(undo)?) } else { None };
-            w.c.run(
+            let n = w.c.run(
                 "UPDATE decisions SET status = ?, result = ?, resolved = ?, undo = ? WHERE id = ? AND status = 'open'",
                 params![status, to_json(result)?, now(), undo, id],
             )?;
-            changed(w, id)
-        })
+            Ok((changed(w, id)?, n))
+        })?;
+        if changed_rows > 0
+            && let Some(d) = &result
+        {
+            self.0
+                .diagnostics()
+                .record(crate::diagnostics::decision_event(
+                    d,
+                    "resolved",
+                    Some("open"),
+                ));
+        }
+        Ok(result)
     }
 
     /// Replaces the result of a decision already settled, e.g. what became of an approved release after it was
@@ -210,10 +238,23 @@ impl Decisions<'_> {
 
     /// Back to open, clearing result, resolved time and undo.
     pub fn reopen(&self, id: &str) -> Result<Option<Decision>> {
-        self.0.write(|w| {
+        let (result, before) = self.0.write(|w| {
+            let before = one(w.c, DECISION, [id], Decision::from_row).ok().flatten();
             w.c.run("UPDATE decisions SET status = 'open', result = NULL, resolved = NULL, undo = NULL WHERE id = ?", [id])?;
-            changed(w, id)
-        })
+            Ok((changed(w, id)?, before.map(|d| d.status)))
+        })?;
+        if before.as_deref().is_some_and(|status| status != "open")
+            && let Some(d) = &result
+        {
+            self.0
+                .diagnostics()
+                .record(crate::diagnostics::decision_event(
+                    d,
+                    "reopened",
+                    before.as_deref(),
+                ));
+        }
+        Ok(result)
     }
 }
 

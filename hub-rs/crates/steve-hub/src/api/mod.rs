@@ -4,6 +4,7 @@
 mod annotations;
 mod bots;
 pub mod dedupe;
+mod diagnostics;
 mod files;
 mod items;
 mod misc;
@@ -434,6 +435,11 @@ pub fn router(st: AppState, modules: Router) -> Router {
                 .delete(items::delete_one),
         )
         .route("/items/{id}/actions", post(items::actions))
+        .route(
+            "/items/{id}/debug",
+            get(diagnostics::explain).post(diagnostics::capture),
+        )
+        .route("/items/{id}/debug/events", get(diagnostics::events))
         .route(
             "/items/{id}/workflow",
             get(items::workflow_get).post(items::workflow_change),

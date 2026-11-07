@@ -18,6 +18,7 @@ pub mod base;
 mod bus;
 pub mod compact;
 pub mod db;
+pub mod diagnostics;
 mod event_payload;
 pub mod maintenance;
 pub mod outbox;
@@ -124,6 +125,7 @@ struct Inner {
     item_deleted: std::sync::OnceLock<Box<ItemDeletedHook>>,
     /// Notified after a commit that emitted an outbox event ([`outbox`]).
     outbox_wake: Arc<tokio::sync::Notify>,
+    diagnostics: std::sync::OnceLock<diagnostics::Recorder>,
 }
 
 /// The write connection plus the publisher, handed to write closures so events go out under the lock.
@@ -167,7 +169,8 @@ impl Store {
             .test_on_check_out(false)
             .build(manager)?;
         let maintenance = Arc::new(maintenance::Gate::load(&writer)?);
-        Ok(Self {
+        let diagnostic_until = diagnostics::active_until(&writer).unwrap_or(0);
+        let store = Self {
             inner: Arc::new(Inner {
                 maintenance,
                 writer: Mutex::new(writer),
@@ -176,8 +179,15 @@ impl Store {
                 path,
                 item_deleted: std::sync::OnceLock::new(),
                 outbox_wake: Arc::new(tokio::sync::Notify::new()),
+                diagnostics: std::sync::OnceLock::new(),
             }),
-        })
+        };
+        if let Some(recorder) =
+            diagnostics::Recorder::start(Arc::downgrade(&store.inner), diagnostic_until)
+        {
+            let _ = store.inner.diagnostics.set(recorder);
+        }
+        Ok(store)
     }
 
     /// Sets what else goes when an item is deleted (the knowledge module's document and index rows),

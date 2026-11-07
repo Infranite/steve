@@ -1,5 +1,28 @@
 /* zh-CN strings for the "views" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
+  debug: {
+    open: "调试", title: "{{item}} · 调试", description: "查看当前阻塞与执行证据，按需记录判断细节。",
+    current: "当前状态", refresh: "刷新", loading: "正在读取…",
+    itemState: "事项状态：{{status}}", revision: "周期 {{cycle}} · 目标版本 {{revision}}", observed: "采样于 {{time}}",
+    blockers: "当前阻塞", noState: "尚未取得阻塞快照，请刷新后再判断。", noBlocker: "此快照未报告生命周期阻塞；请结合执行事件判断。",
+    dependencies: "等待前置：{{items}}", resumeMode: "前置完成后：{{mode}} · 策略来源：{{source}}",
+    resumeAutomatic: "自动继续", resumeNotify: "提醒开始", unknown: "未知", stateChanged: "读取期间事项发生了变化，请刷新以取得最新快照。", snapshotDetails: "快照详情",
+    recording: "详细记录中 · 剩余 {{duration}}", notRecording: "详细记录未开启", expiryChecking: "采集已到期，正在核对状态…",
+    captureScope: "采集范围为此事项的所有关联会话，筛选只影响查看。", stopReason: "停止原因：{{reason}}",
+    duration: "记录时长", minutes_other: "{{count}} 分钟", start: "开启详细记录", stop: "停止记录", ownerOnly: "由实例管理员开启详细记录",
+    dropped_other: "有 {{count}} 条记录未保存，证据可能不完整。",
+    events: "事件时间线", loaded_other: "已加载 {{count}} 条", session: "会话", allSessions: "全部会话", kind: "事件类别", allKinds: "全部类别",
+    severity: "级别", allLevels: "全部级别", info: "信息", warning: "警告", error: "错误", attempt: "执行次数 ID", allAttempts: "全部执行",
+    historyHint: "未开启调试时仍可查看已有证据；缺失的历史判断过程无法补录。",
+    deliveryHint: "事件采用异步记录，可能存在无法检测的缺口；没有记录不代表没有发生问题。",
+    coverageRefresh: "记录正在更新，部分计数暂不稳定，请刷新。",
+    recorderUnavailable: "记录服务当前不可用，新事件可能无法保存。已有证据仍可查看。",
+    pending_other: "实例还有 {{count}} 条记录等待写入，可能涉及其他事项；请稍后刷新。",
+    incomplete: "这段记录存在截断或缺口，不能据此排除未记录的问题。", gapDetails: "查看缺口说明",
+    empty: "当前范围没有可用事件。这不代表没有发生问题，可以调整筛选或开启详细记录后复现。",
+    more: "加载更多事件", retry: "重试", cursorStalled: "事件游标没有前进，请刷新后重试。", retention: "诊断记录保留窗口：{{days}} 天；实际可查范围以返回的证据为准。",
+    copy: "复制证据引用", copyFailed: "复制失败，可展开证据详情手动复制。", noReason: "未提供原因码", evidence: "证据详情",
+  },
   workflow: {
     title: "多 Bot 协作",
     progress: "关键工作 {{done}}/{{total}} · 运行 {{running}}/{{max}} · 计划第 {{revision}} 版",

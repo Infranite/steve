@@ -1504,6 +1504,10 @@ impl Domain for CoreDomain {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.lifecycle_view(&id).map(Some)).await
     }
+    async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
+        let (c, id) = (self.core.clone(), id.to_string());
+        blocking(move || c.diagnostic_snapshot(&id)).await
+    }
     async fn workflow_get(&self, id: &str) -> BResult<Value> {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.workflow_get(&id)).await
@@ -2010,6 +2014,7 @@ impl steve_mcp::Backend for CoreMcp {
         now: String,
         plan: Vec<steve_mcp::PlanStep>,
     ) -> ToolResult {
+        let observation = super::diagnostics::ToolObservation::new(&self.store, s, "steve_update");
         let (c, s) = (self.core.clone(), s.clone());
         let plan: Vec<steve_core::runtime::PlanStep> = plan
             .into_iter()
@@ -2019,7 +2024,9 @@ impl steve_mcp::Backend for CoreMcp {
                 left: false,
             })
             .collect();
-        tool(move || c.tool_update(&s, &now, &plan)).await
+        observation
+            .run(tool(move || c.tool_update(&s, &now, &plan)))
+            .await
     }
     async fn ask(
         &self,
@@ -2028,17 +2035,19 @@ impl steve_mcp::Backend for CoreMcp {
         options: Vec<String>,
         hint: steve_mcp::AskHint,
     ) -> ToolResult {
+        let observation = super::diagnostics::ToolObservation::new(&self.store, s, "steve_ask");
         let (c, s) = (self.core.clone(), s.clone());
-        tool(move || {
-            c.tool_ask_with(
-                &s,
-                &question,
-                &options,
-                hint.recommended.as_deref(),
-                hint.why.as_deref(),
-            )
-        })
-        .await
+        observation
+            .run(tool(move || {
+                c.tool_ask_with(
+                    &s,
+                    &question,
+                    &options,
+                    hint.recommended.as_deref(),
+                    hint.why.as_deref(),
+                )
+            }))
+            .await
     }
     async fn request_approval(
         &self,
@@ -2046,8 +2055,12 @@ impl steve_mcp::Backend for CoreMcp {
         action: String,
         detail: String,
     ) -> ToolResult {
+        let observation =
+            super::diagnostics::ToolObservation::new(&self.store, s, "steve_request_approval");
         let (c, s) = (self.core.clone(), s.clone());
-        tool(move || c.tool_request_approval(&s, &action, &detail)).await
+        observation
+            .run(tool(move || c.tool_request_approval(&s, &action, &detail)))
+            .await
     }
     async fn deliver(
         &self,
@@ -2057,6 +2070,7 @@ impl steve_mcp::Backend for CoreMcp {
         checks: Vec<steve_mcp::Check>,
         unfinished: Option<Vec<String>>,
     ) -> ToolResult {
+        let observation = super::diagnostics::ToolObservation::new(&self.store, s, "steve_deliver");
         let (c, s) = (self.core.clone(), s.clone());
         let outputs: Vec<steve_core::Output> = outputs
             .into_iter()
@@ -2076,7 +2090,11 @@ impl steve_mcp::Backend for CoreMcp {
             })
             .collect();
         let unfinished = unfinished.unwrap_or_default();
-        tool(move || c.tool_deliver(&s, &summary, &outputs, &checks, &unfinished)).await
+        observation
+            .run(tool(move || {
+                c.tool_deliver(&s, &summary, &outputs, &checks, &unfinished)
+            }))
+            .await
     }
     async fn publish(
         &self,
@@ -2084,15 +2102,26 @@ impl steve_mcp::Backend for CoreMcp {
         branch: String,
         summary: String,
     ) -> ToolResult {
+        let observation = super::diagnostics::ToolObservation::new(&self.store, s, "steve_publish");
         let (c, s) = (self.core.clone(), s.clone());
-        tool(move || c.tool_publish(&s, &branch, &summary)).await
+        observation
+            .run(tool(move || c.tool_publish(&s, &branch, &summary)))
+            .await
     }
     async fn lane_status(&self, s: &steve_store::Session) -> Result<String, steve_mcp::ToolError> {
+        let observation =
+            super::diagnostics::ToolObservation::new(&self.store, s, "steve_lane_status");
         let (c, s) = (self.core.clone(), s.clone());
-        match tokio::task::spawn_blocking(move || c.lane_status(&s).map(|st| st.render())).await {
-            Ok(r) => r.map_err(|e| e.to_string().into()),
-            Err(e) => Err(e.to_string().into()),
-        }
+        observation
+            .run(async {
+                match tokio::task::spawn_blocking(move || c.lane_status(&s).map(|st| st.render()))
+                    .await
+                {
+                    Ok(r) => r.map_err(|e| e.to_string().into()),
+                    Err(e) => Err(e.to_string().into()),
+                }
+            })
+            .await
     }
 }
 

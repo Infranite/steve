@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::future::Future;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
@@ -98,10 +99,22 @@ pub struct Spawn {
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
 
+/// Bounded process facts, with no stderr, environment, arguments or request contents.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExitReport {
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub wait_error: bool,
+    pub reader_failed: bool,
+    pub drain_timed_out: bool,
+    pub parse_errors: u64,
+}
+
 /// A live adapter process.
 pub struct Conn {
     pid: u32,
     reader_failed: AtomicBool,
+    parse_errors: AtomicU64,
     out: mpsc::UnboundedSender<Outbound>,
     pending: Pending,
     next_id: AtomicU64,
@@ -145,12 +158,31 @@ impl Conn {
     /// registrar fails (or Node crashes first), EOF closes the gate without executing the adapter.
     /// `registered` is synchronous and must durably record ownership before returning success.
     pub fn spawn_registered(
-        mut sp: Spawn,
+        sp: Spawn,
         max_frame_bytes: usize,
         admit: impl Fn(usize) -> bool + Send + Sync + 'static,
         registered: impl FnOnce(u32) -> Result<(), RpcError>,
         on_incoming: impl Fn(&Conn, Incoming) -> Option<Backpressure> + Send + Sync + 'static,
         on_exit: impl FnOnce() + Send + 'static,
+    ) -> Result<Arc<Conn>, RpcError> {
+        Self::spawn_registered_observed(
+            sp,
+            max_frame_bytes,
+            admit,
+            registered,
+            on_incoming,
+            move |_| on_exit(),
+        )
+    }
+
+    /// The registered path with typed exit evidence. Observation does not change process control.
+    pub fn spawn_registered_observed(
+        mut sp: Spawn,
+        max_frame_bytes: usize,
+        admit: impl Fn(usize) -> bool + Send + Sync + 'static,
+        registered: impl FnOnce(u32) -> Result<(), RpcError>,
+        on_incoming: impl Fn(&Conn, Incoming) -> Option<Backpressure> + Send + Sync + 'static,
+        on_exit: impl FnOnce(ExitReport) + Send + 'static,
     ) -> Result<Arc<Conn>, RpcError> {
         let mut args: Vec<OsString> = vec![
             "-c".into(),
@@ -161,7 +193,7 @@ impl Conn {
         args.extend(sp.args);
         sp.program = "/bin/sh".into();
         sp.args = args;
-        let conn = Self::spawn_bounded(sp, max_frame_bytes, admit, on_incoming, on_exit)?;
+        let conn = Self::spawn_bounded_observed(sp, max_frame_bytes, admit, on_incoming, on_exit)?;
         registered(conn.pid())?;
         conn.out
             .send(Outbound {
@@ -181,6 +213,16 @@ impl Conn {
         admit: impl Fn(usize) -> bool + Send + Sync + 'static,
         on_incoming: impl Fn(&Conn, Incoming) -> Option<Backpressure> + Send + Sync + 'static,
         on_exit: impl FnOnce() + Send + 'static,
+    ) -> Result<Arc<Conn>, RpcError> {
+        Self::spawn_bounded_observed(sp, max_frame_bytes, admit, on_incoming, move |_| on_exit())
+    }
+
+    pub fn spawn_bounded_observed(
+        sp: Spawn,
+        max_frame_bytes: usize,
+        admit: impl Fn(usize) -> bool + Send + Sync + 'static,
+        on_incoming: impl Fn(&Conn, Incoming) -> Option<Backpressure> + Send + Sync + 'static,
+        on_exit: impl FnOnce(ExitReport) + Send + 'static,
     ) -> Result<Arc<Conn>, RpcError> {
         let mut cmd = Command::new(&sp.program);
         cmd.args(&sp.args)
@@ -222,6 +264,7 @@ impl Conn {
         let conn = Arc::new(Conn {
             pid,
             reader_failed: AtomicBool::new(false),
+            parse_errors: AtomicU64::new(0),
             out,
             pending: Arc::default(),
             next_id: AtomicU64::new(0),
@@ -236,6 +279,8 @@ impl Conn {
         tokio::spawn(stderr_lines(stderr, move |t| tracing::warn!("{tag} {t}")));
 
         let weak = Arc::downgrade(&conn);
+        let read_error = Arc::new(AtomicBool::new(false));
+        let read_error_in = read_error.clone();
         let reader = tokio::spawn(async move {
             let mut rd = BufReader::new(stdout);
             let mut line = Vec::new();
@@ -250,7 +295,11 @@ impl Conn {
                         .await
                 };
                 match read {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
+                    Err(_) => {
+                        read_error_in.store(true, Ordering::Relaxed);
+                        break;
+                    }
                     Ok(_) => {}
                 }
                 let Some(c) = weak.upgrade() else { break };
@@ -272,11 +321,27 @@ impl Conn {
         });
 
         let pending = conn.pending.clone();
+        let observed = Arc::downgrade(&conn);
         tokio::spawn(async move {
             let status = child.wait().await;
             // let the reader drain what the process wrote before exiting (bounded: a grandchild may hold stdout open)
-            let _ = tokio::time::timeout(Duration::from_millis(500), reader).await;
-            let code = match status.ok().and_then(|s| s.code()) {
+            let drain = tokio::time::timeout(Duration::from_millis(500), reader).await;
+            let c = observed.upgrade();
+            let report = ExitReport {
+                exit_code: status.as_ref().ok().and_then(|s| s.code()),
+                signal: status.as_ref().ok().and_then(|s| s.signal()),
+                wait_error: status.is_err(),
+                reader_failed: read_error.load(Ordering::Relaxed)
+                    || matches!(drain, Ok(Err(_)))
+                    || c.as_ref()
+                        .is_some_and(|c| c.reader_failed.load(Ordering::Relaxed)),
+                drain_timed_out: drain.is_err(),
+                parse_errors: c
+                    .as_ref()
+                    .map_or(0, |c| c.parse_errors.load(Ordering::Relaxed)),
+            };
+            drop(c);
+            let code = match report.exit_code {
                 Some(c) => c.to_string(),
                 None => "null".into(),
             };
@@ -288,7 +353,7 @@ impl Conn {
                 let _ = tx.send(Err(RpcError::msg(format!("adapter exited ({code})"))));
             }
             let _ = exit_tx.send(true);
-            on_exit();
+            on_exit(report);
         });
         Ok(conn)
     }
@@ -302,6 +367,7 @@ impl Conn {
             return None;
         }
         let Ok(Value::Object(mut m)) = serde_json::from_str::<Value>(line) else {
+            self.parse_errors.fetch_add(1, Ordering::Relaxed);
             return None;
         };
         let id = m.remove("id").filter(|v| !v.is_null());
@@ -531,6 +597,49 @@ mod stderr_tests {
 #[cfg(test)]
 mod control_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn observed_exits_keep_rpc_failure_semantics_and_distinguish_signal_from_exit_code() {
+        for (script, code, signal, parse_errors) in [
+            ("read line; printf 'not-json\\n'; exit 7", Some(7), None, 1),
+            ("read line; kill -TERM $$", None, Some(15), 0),
+            ("read line; exit 0", Some(0), None, 0),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (tx, rx) = oneshot::channel();
+            let conn = Conn::spawn_bounded_observed(
+                Spawn {
+                    program: "/bin/sh".into(),
+                    args: vec!["-c".into(), script.into()],
+                    cwd: dir.path().into(),
+                    env: vec![],
+                    log_tag: "exit-observation-test".into(),
+                },
+                1024,
+                |_| true,
+                |_, _| None,
+                move |report| {
+                    let _ = tx.send(report);
+                },
+            )
+            .unwrap();
+            let error = conn
+                .request("initialize", json!({}), Some(Duration::from_secs(3)))
+                .await
+                .unwrap_err();
+            let report = tokio::time::timeout(Duration::from_secs(3), rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(report.exit_code, code, "{script}");
+            assert_eq!(report.signal, signal, "{script}");
+            assert_eq!(report.parse_errors, parse_errors, "{script}");
+            assert!(!report.wait_error && !report.drain_timed_out && !report.reader_failed);
+            let shown = code.map_or("null".into(), |n| n.to_string());
+            assert_eq!(error.message, format!("adapter exited ({shown})"));
+        }
+    }
+
     #[tokio::test]
     async fn adapters_never_receive_supervisor_control_environment() {
         let dir = tempfile::tempdir().unwrap();
