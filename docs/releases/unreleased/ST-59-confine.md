@@ -1,5 +1,0 @@
-- macOS 上，Node 为运行启动的进程现在默认放进系统沙箱（seatbelt），这是“每次运行都在沙箱里”的第一步。harness 自己的 shell、流程里的命令、保险箱命令，以及思考和研究作业，都读写不了 Steve 的控制面：签名、秘密、备份、升级记录、`steve.env`、数据库、附件和邮件原件，以及 Node 自己的日志、秘密、推送暂存和身份文件。Steve 自己的程序（releases、current、web、bin、build、plugins）也改不了，通往这些目录的上级目录也不能被改名或移走。工作区和其他目录照旧可用。以前只靠 Claude Code 自己的规则挡住它的文件工具，现在它的 Bash 也挡住了。
-  - 自带沙箱的 harness（目前是 Codex）不再套一层，因为 macOS 不允许沙箱里再开沙箱；它照旧用自己的沙箱，控制面对它的保护在后续版本补上。
-  - 同样的原因，被沙箱包住的运行里，再调用 `sandbox-exec` 的工具会失败，例如 SwiftPM 编译 Package.swift、Xcode 和 Bazel 自带的沙箱、Claude Code 开启的 Bash 沙箱。遇到这种情况，可以给这些工具关掉它们自己的沙箱（例如 `swift build --disable-sandbox`），或者在 `steve.env` 里设 `STEVE_CONFINE=off`，整体关掉这一层。
-  - Linux 上暂时需要手动开启：装好 bubblewrap，并在 `steve.env` 里设 `STEVE_CONFINE=on`。
-  - Node 启动时会先试一次沙箱。系统缺少或启动不了时，运行照常进行、不加沙箱，并在日志里写明原因；`steve-hub --check-config` 也会提示。
