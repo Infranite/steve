@@ -147,6 +147,7 @@ export default {
     toolApproval: "Ask your approval before external actions",
     toolDeliver: "Deliver for your acceptance",
     toolPublish: "Request a release after acceptance (only in projects with releases set up)",
+    toolLaneStatus: "Check its own release progress: which batch, whose approval it waits for, why it failed, the released version (read-only)",
     harnessTools: "Built into {{harness}}",
     builtin: "Read and write files, run commands, search the web",
     builtinSub: "Provided by {{harness}}; whether it can use them directly depends on the permissions below",

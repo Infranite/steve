@@ -5,7 +5,7 @@
 //!   in-process runner any more (B7): a session no Node takes is refused, never run on the Hub.
 //! - [`CoreDomain`]: the HTTP layer's [`Domain`] over [`Core`]. The core's mutating calls are synchronous (and
 //!   may run git under its lock), so they run on the blocking pool.
-//! - [`CoreMcp`]: steve-mcp's backend, the five tools → `core.tool_*`.
+//! - [`CoreMcp`]: steve-mcp's backend, the Steve tools → `core.tool_*` (and `core.lane_status`).
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -1996,6 +1996,13 @@ impl steve_mcp::Backend for CoreMcp {
     ) -> ToolResult {
         let (c, s) = (self.core.clone(), s.clone());
         tool(move || c.tool_publish(&s, &branch, &summary)).await
+    }
+    async fn lane_status(&self, s: &steve_store::Session) -> Result<String, steve_mcp::ToolError> {
+        let (c, s) = (self.core.clone(), s.clone());
+        match tokio::task::spawn_blocking(move || c.lane_status(&s).map(|st| st.render())).await {
+            Ok(r) => r.map_err(|e| e.to_string().into()),
+            Err(e) => Err(e.to_string().into()),
+        }
     }
 }
 

@@ -82,4 +82,8 @@ impl Backend for Recorder {
             serde_json::json!({"branch": branch, "summary": summary})
         ))
     }
+    async fn lane_status(&self, s: &String) -> Result<String, ToolError> {
+        self.rec(format!("{s} lane_status"))?;
+        Ok("在合并通道（github.com/x/y main）的 MQ-3 里".to_owned())
+    }
 }
