@@ -10,8 +10,18 @@ export type RItem = {
   source: [string, string]; parent: { item?: string | null; session?: string | null; at?: number | null } | null; created: number; updated: number
   goal: string; goals: number; tags: string[]; deps: string[]; sessionIds: string[]; open: string[]; queued: number; live: boolean
 }
+export type DependencyWait = {
+  item_id: string; status: ItemStatus; phase: string; cycle: number
+  dependencies: { id: string; status: string | null; phase: string | null }[]; open_dependencies: string[]
+  resume_mode: "automatic" | "notify"; resume_source: "workspace" | "item" | "fallback"
+  resume_override: "workspace" | "automatic" | "notify"; resume_enabled: boolean
+  resume_blocker: string | null; resume_fallback_reason: string | null
+  waiting: boolean; wait_state: string | null; reason: string | null; active_turn: boolean
+  can_register: boolean; register_blocker: string | null
+}
 export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number }[]; decisions: RDecision[]; dependents: string[]
   workflow?: Workflow | null
+  dependency_wait?: DependencyWait | null
   /** outputs delivered as records of the work (self-check screenshots, logs): `{artifact id: "record"}` */
   artifactRoles?: Record<string, string>
   /** the user's notes on the outputs, drafts and sent (ST-38) */
@@ -201,6 +211,8 @@ export const api = {
   deleteItem: (id: string) => del(`/items/${id}`),
   supplement: (id: string, text: string, mode: "auto" | "steer" | "new", files: string[] = []) => post(`/items/${id}/supplement`, { text, mode, files }), deliver: (id: string) => post(`/items/${id}/deliver`),
   reassign: (id: string, bot: string) => post(`/items/${id}/reassign`, { bot }),
+  dependencyWait: (id: string) => get<DependencyWait>(`/items/${id}/dependency-wait`),
+  saveDependencyWait: (id: string, body: { expected_cycle: number; resume: DependencyWait["resume_override"]; reason: string }) => post<DependencyWait>(`/items/${id}/dependency-wait`, body),
   addDep: (id: string, dep: string) => post(`/items/${id}/deps`, { dep }), rmDep: (id: string, dep: string) => del(`/items/${id}/deps/${dep}`),
   snooze: (id: string, label: string | null, until: number | null) => post(`/items/${id}/snooze`, { label, until }),
   events: (id: string, after = 0) => get<REvent[]>(`/sessions/${id}/events?after=${after}&page=bounded`), searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),

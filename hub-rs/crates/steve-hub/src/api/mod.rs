@@ -451,6 +451,10 @@ pub fn router(st: AppState, modules: Router) -> Router {
             get(items::workflow_get).post(items::workflow_change),
         )
         .route("/items/{id}/lifecycle", post(items::lifecycle))
+        .route(
+            "/items/{id}/dependency-wait",
+            get(items::dependency_get).post(items::dependency_wait),
+        )
         .route("/items/{id}/goal", post(items::goal))
         .route("/items/{id}/supplement", post(items::supplement))
         .route("/items/{id}/deliver", post(items::deliver))

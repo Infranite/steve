@@ -35,6 +35,70 @@ fn complete(k: &Kit, id: &str) {
 }
 
 #[test]
+fn item_page_registers_the_existing_dependency_without_running_a_turn() {
+    let k = Kit::new();
+    let (item, dep, s) = setup(&k);
+    k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    k.core.add_dep(&item, &dep).unwrap();
+    let initial = k.core.dependency_get(&item).unwrap();
+    assert_eq!(initial["waiting"], false);
+    assert_eq!(initial["resume_source"], "workspace");
+    assert_eq!(initial["resume_mode"], "automatic");
+    let cycle = initial["cycle"].as_i64().unwrap();
+    let before = k.rt.prompts_of(&s.id);
+    assert!(
+        k.core
+            .dependency_wait(&item, cycle + 1, "automatic", "isolation")
+            .is_err()
+    );
+    assert!(
+        k.db()
+            .store()
+            .dependency_waits()
+            .get(&item)
+            .unwrap()
+            .is_none()
+    );
+    let view = k
+        .core
+        .dependency_wait(&item, cycle, "automatic", "isolation")
+        .unwrap();
+    assert_eq!(view["waiting"], true);
+    assert_eq!(view["resume_source"], "item");
+    assert_eq!(view["resume_override"], "automatic");
+    let saved = k
+        .db()
+        .store()
+        .dependency_waits()
+        .get(&item)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.session_id, s.id);
+    assert_eq!(saved.reason, "isolation");
+    assert_eq!(k.db().deps_of(&item).unwrap(), [dep.clone()]);
+    assert_eq!(k.rt.prompts_of(&s.id), before);
+    k.core
+        .dependency_wait(&item, cycle, "automatic", "isolation")
+        .unwrap();
+    assert_eq!(
+        k.core.dependency_get(&item).unwrap()["wait_state"],
+        "waiting"
+    );
+    assert!(k.db().queued(&s.id).unwrap().is_empty());
+    assert!(k.core.item_action(&item, ItemAction::Finish, "me").is_err());
+    // A saved policy does not bypass missing collaboration isolation.
+    assert!(k.rt.check_workflow_execution(&item).is_err());
+    complete(&k, &dep);
+    k.core.lifecycle_tick().unwrap();
+    k.core.lifecycle_tick().unwrap();
+    assert_eq!(
+        k.core.dependency_get(&item).unwrap()["wait_state"],
+        "started"
+    );
+    assert_eq!(k.rt.prompts_of(&s.id).len(), before.len() + 1);
+}
+
+#[test]
 fn busy_turn_yields_to_block_without_watchdog_or_early_delivery() {
     let k = Kit::new();
     let (item, dep, s) = setup(&k);

@@ -24,6 +24,14 @@ export default {
     more: "Load more events", retry: "Retry", cursorStalled: "The event cursor did not advance. Refresh and try again.", retention: "Diagnostic retention: {{days}} days. Available evidence determines the actual range.",
     copy: "Copy evidence reference", copyFailed: "Copy failed. Open the evidence details to copy manually.", noReason: "No reason code provided", evidence: "Evidence details",
   },
+  dependencyWait: {
+    title: "Prerequisite wait", waiting: "Waiting for prerequisites",
+    inherited: "No item-specific wait is saved; the workspace policy applies when prerequisites finish", automatic: "Continue automatically", notify: "Notify me to start", workspace: "Use workspace setting",
+    policy: "When prerequisites finish: {{mode}}", schedulingHeld: "Scheduling is currently paused: {{reason}}", safety: "Resuming still requires execution capability and permission checks. Saving a wait does not start collaboration.",
+    reason: "Reason for waiting", reasonPlaceholder: "Describe what the prerequisites need to finish", save: "Save wait policy", saving: "Saving…",
+    active: "The current turn will finish before waiting.", fallback: "This wait now requires a notification: {{reason}}",
+    savedAutomatic: "Saved · Continue automatically after prerequisites", savedNotify: "Saved · Notify when prerequisites finish",
+  },
   workflow: {
     title: "Bot collaboration",
     progress: "Required work {{done}}/{{total}} · Running {{running}}/{{max}} · Plan revision {{revision}}",

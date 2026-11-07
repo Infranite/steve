@@ -2419,10 +2419,8 @@ impl Tx<'_> {
             .active_session(item_id)?
             .is_some_and(|s| self.busy(&s.id));
         if self.item(dep)?.status != "done" && status_in(&i, &["run", "prop", "pause"]) && !busy {
-            self.db().item_patch(
-                item_id,
-                patch![status: "block", now: "等前置事项完成后自动开始"],
-            )?;
+            self.db()
+                .item_patch(item_id, patch![status: "block", now: "等待前置事项完成"])?;
         }
         Ok(())
     }
@@ -3226,10 +3224,8 @@ impl Tx<'_> {
                     None,
                 )?;
             }
-            self.db().item_patch(
-                &dep_id,
-                patch![status: "block", now: "等前置事项完成后自动开始"],
-            )?;
+            self.db()
+                .item_patch(&dep_id, patch![status: "block", now: "等待前置事项完成"])?;
             self.db().timeline_add(
                 &dep_id,
                 "steve",
@@ -3576,7 +3572,7 @@ impl Tx<'_> {
                     self.check_blocked(id)?;
                 } else if !deps_open(self.db(), id)?.is_empty() {
                     self.db()
-                        .item_patch(id, patch![status: "block", now: "等前置事项完成后自动开始"])?;
+                        .item_patch(id, patch![status: "block", now: "等待前置事项完成"])?;
                 } else if self
                     .db()
                     .decisions_of_item(id)?
