@@ -2,13 +2,14 @@
 //! void after it was frozen, is not handed to you straight away.
 //!
 //! 1. The agent's last words are a question → the card, as before (YOLO may answer it).
-//! 2. The project has a completion rule (`Release::done_when`: merged, or merged and tagged) and the item
+//! 2. An active persisted merge-lane request owns the wait → no automatic nudge.
+//! 3. The project has a completion rule (`Release::done_when`: merged, or merged and tagged) and the item
 //!    was delivered in this cycle → Steve checks the remote (off the lock, [`upstream::probe`]); when the
 //!    rule holds, the item completes on that evidence, nobody asked.
-//! 3. Otherwise Steve continues the agent with what it found — at most `takeover_continues` times in a
+//! 4. Otherwise Steve continues the agent with what it found — at most `takeover_continues` times in a
 //!    row; anything you do on the item starts the count again. A continue never runs twice for one stop:
 //!    a turn already running or a message already queued is the continue.
-//! 4. Out of continues, or nothing to continue (no session) → one card for you, saying so. A card that
+//! 5. Out of continues, or nothing to continue (no session) → one card for you, saying so. A card that
 //!    is already open for the same thing is not opened again.
 //!
 //! A required release of a project with a completion rule is the rule itself: met when the remote shows
@@ -205,8 +206,8 @@ impl Tx<'_> {
     }
 
     /// A persisted lane request explains an idle agent, including after a restart.
-    /// The lane owns approval/release failure cards and wakes members when it finishes or
-    /// sends them back. This only suppresses automatic nudges, never explicit user messages.
+    /// The lane owns approval/release failure cards. Once it releases or returns the request,
+    /// normal completion checks resume. This never suppresses explicit user messages.
     fn waiting_on_lane(&self, item_id: &str) -> Result<bool> {
         Ok(self
             .db()
