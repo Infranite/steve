@@ -957,10 +957,22 @@ fn the_runner_builds_the_tagged_commit_with_its_own_scripts_and_reports_each_res
     let other_home = tempfile::tempdir().unwrap();
     let mut t = trusted(commit.clone());
     t.home = Some(other_home.path().into());
-    assert!(refused(t, &python, "other-home").contains("密码"));
+    // Installation trust is checked before reading a password; keep the refusal's context,
+    // without tying this boundary test to translated password wording.
+    let e = refused(t, &python, "other-home");
+    assert!(e.contains(&*home.path().to_string_lossy()), "{e}");
+    assert!(
+        e.contains(
+            &*fs::canonicalize(other_home.path())
+                .unwrap()
+                .to_string_lossy()
+        ),
+        "{e}"
+    );
     let mut t = trusted(commit.clone());
     t.home = None;
-    assert!(refused(t, &python, "no-home").contains("密码"));
+    let e = refused(t, &python, "no-home");
+    assert!(e.contains(&*home.path().to_string_lossy()), "{e}");
     // a python of the caller's: a script of the same name elsewhere is not one of the trusted dirs
     let elsewhere = tempfile::tempdir().unwrap();
     let fake = elsewhere.path().join("python3.13");
