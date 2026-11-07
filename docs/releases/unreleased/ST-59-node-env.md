@@ -1,6 +1,0 @@
-- 新增“每个人在每台 Node 上自己的环境变量”：用 `PUT /api/node-env/{node}/{key}`（`{"value": …, "note": …}`）保存，`GET /api/node-env/{node}` 查看，`DELETE` 删除。本机 Node 的编号是 `local`。`PATH_PREPEND` 会把目录加到 `PATH` 前面。
-  - 只能改自己的，且只能用在本机 Node 或自己配对的 Node 上；工作区所有者还可以为工作区本身（`principal: "svc:<工作区>"`）保存。值以明文保存在 Hub 数据库和 Node 的运行记录里，其他用户不能通过 Steve 读取，但能读取数据库的人能看到。
-  - 目前只在一种情况下注入：运行的发起人就是这台 Node 的主人，是这个工作区唯一的成员，而且这台 Node 上不会有别人的运行（本机 Node 要求 Hub 只有这一个用户；远程 Node 本来就只接主人自己的工作）。其他情况先保存、暂不注入。原因是：现在的运行还在用 Node 主人的登录；Hub 还不记录每条消息是谁发的；同一个系统用户下的进程能互相读到环境变量。
-  - 会话每次重新打开时按当时的值注入，删掉或改掉的值不会再带上。正在运行的 harness 要等下次重新打开才会更新。
-  - 这些键不能设置：Steve 自己设置的（`HOME`、`TMPDIR`、`PATH`、`XDG_*`、git 全局配置、`STEVE_*`、`*_FILE`）；会把代码注入其他进程的（`DYLD_*`、`LD_*`、`NODE_*`、`BASH_ENV`、`ENV` 等）；控制 harness 本身的（`CLAUDE_*`、`CODEX_*`、`ANTHROPIC_*`、`OPENAI_*`），这类设置以后随每个人自己的 harness 凭据提供。
-  - 保存在保险箱里的值（引用）还不支持，网页上的编辑界面也还没做。
