@@ -608,13 +608,19 @@ mod tests {
     }
 
     #[test]
-    fn mutation_after_directory_open_is_incomplete() {
+    fn observed_directory_mutation_after_open_is_incomplete() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         let file = anchor(&root, &|| Ok(())).unwrap().unwrap();
+        // A new directory and its first file can share one timestamp tick on Linux, while
+        // size, blocks and link count stay unchanged. Give this fixture an old mtime so the
+        // real directory mutation below has an observable stamp change on either platform.
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
         let before = fstat(file.as_raw_fd()).unwrap();
         let mut dir = Directory::new(file, root.clone(), before, 0).unwrap();
         fs::write(root.join("new"), b"changes directory metadata").unwrap();
+        assert_ne!(before, fstat(dir.file.as_raw_fd()).unwrap());
         assert!(matches!(dir.next(), Err(Incomplete::Changed)));
     }
 
