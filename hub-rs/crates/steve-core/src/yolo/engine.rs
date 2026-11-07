@@ -212,14 +212,15 @@ impl Engine {
 
     /// [`Engine::consider`] for a background caller: errors are logged and trip B5 when they repeat.
     pub fn kick(&self, id: &str) -> Option<ActionRow> {
-        let _permit = self.core().store().store().try_activity("yolo")?;
-        match self.consider(id) {
+        let store = self.core().store().store();
+        let _permit = store.try_activity("yolo")?;
+        store.admitted_sync(|| match self.consider(id) {
             Ok(a) => a,
             Err(e) => {
                 self.fail_hard(id, &e);
                 None
             }
-        }
+        })
     }
 
     pub(super) fn fail_hard(&self, id: &str, e: &ApiError) {
@@ -574,9 +575,14 @@ impl Engine {
     /// One pass: scheduled actions that are due, then every open card where YOLO may apply (cards
     /// that waited for the user, and anything an event missed). Returns the actions written.
     pub fn tick(&self) -> Vec<ActionRow> {
-        let Some(_permit) = self.core().store().store().try_activity("yolo_tick") else {
+        let store = self.core().store().store();
+        let Some(_permit) = store.try_activity("yolo_tick") else {
             return vec![];
         };
+        store.admitted_sync(|| self.tick_admitted())
+    }
+
+    fn tick_admitted(&self) -> Vec<ActionRow> {
         let mut out = Vec::new();
         let now = self.yolo().now();
         match self.yolo().store().reader(|c| repo::due_actions(c, now)) {

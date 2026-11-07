@@ -1350,6 +1350,7 @@ async fn legacy_sessions_move_to_the_node_at_boot() {
     // the upgrade: the first boot of this build on that home, still behind the drain (the
     // release lifts it once the new Hub answers)
     let spawns = h.spawns();
+    let jobs = h.count("SELECT COUNT(*) FROM runtime_jobs WHERE ?<>''", "-");
     let hub = spawn_mode(&h, None, &env);
     serving(&h).await;
     let n = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
@@ -1367,7 +1368,18 @@ async fn legacy_sessions_move_to_the_node_at_boot() {
         "bound, nothing opened"
     );
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(h.spawns(), spawns, "no harness behind the drain");
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM runtime_jobs WHERE ?<>''", "-"),
+        jobs,
+        "no background model job behind the drain; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(
+        h.spawns(),
+        spawns,
+        "no harness behind the drain; ACP:\n{:?}",
+        h.lines()
+    );
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
     for (s, conv, token) in [
