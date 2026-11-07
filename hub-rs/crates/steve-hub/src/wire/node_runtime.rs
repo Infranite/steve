@@ -198,6 +198,8 @@ pub struct Binding {
 }
 
 pub struct NodeRuntime {
+    /// [`Self::set_principal_state`].
+    principal_state: AtomicBool,
     /// [`Self::set_configured_roots`].
     configured_roots: OnceLock<Vec<String>>,
     store: Store,
@@ -372,6 +374,7 @@ impl NodeRuntime {
     pub fn new(store: Store, node: Arc<dyn Node>, domain: Arc<dyn NodeDomain>) -> Arc<NodeRuntime> {
         let node_id = node.id().clone();
         Arc::new(NodeRuntime {
+            principal_state: AtomicBool::new(false),
             configured_roots: OnceLock::new(),
             store,
             node,
@@ -804,6 +807,14 @@ impl NodeRuntime {
             // the principal's own variables on this Node, as recorded just now (node_env)
             let mut open = open.clone();
             open.env = super::node_env::for_session(tx, self.node_id.as_str(), &b.session)?;
+            if self.principal_state.load(Ordering::Relaxed) {
+                open.state = super::principal::harness_state_in(
+                    tx,
+                    &b.session,
+                    self.node_id.as_str(),
+                    &open.choice.harness,
+                )?;
+            }
             let (open_v, open_d) = command(&open_op, open.clone())?;
             rt::insert_command_in(
                 tx,
@@ -886,6 +897,12 @@ impl NodeRuntime {
         if let Err(e) = self.tx(|tx| super::view::record_in(tx, session, node, today.as_deref())) {
             tracing::warn!(session, "view shadow: {e}");
         }
+    }
+
+    /// New sessions get a harness directory of their principal's own on this Node
+    /// ([`super::principal::harness_state_in`]).
+    pub fn set_principal_state(&self, on: bool) {
+        self.principal_state.store(on, Ordering::Relaxed);
     }
 
     /// The directories the Hub gives the local Node besides its projects, sessions and folders

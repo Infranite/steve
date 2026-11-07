@@ -238,6 +238,7 @@ fn node_runtime(
     });
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
     runtime.set_configured_roots(workspaces::configured(cfg));
+    runtime.set_principal_state(principal_state(vars));
     // legacy's idle kill: an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
     runtime.set_idle_release(cfg.idle_release_ms as i64);
     runtime.set_cost_caps(cost_caps(vars));
@@ -337,6 +338,13 @@ fn node_jobs(vars: &Vars) -> NodeJobs {
     j
 }
 
+/// `STEVE_PRINCIPAL_STATE=on`: each session's principal gets their own harness directory on its
+/// Node (path model §4.5.1), new sessions only. Off by default: a principal other than the Node's
+/// owner starts without a login there until their own harness credentials come.
+fn principal_state(vars: &Vars) -> bool {
+    vars("STEVE_PRINCIPAL_STATE").is_some_and(|v| v.trim() == "on")
+}
+
 /// How often sessions the boot pass left are looked at again (`STEVE_LEGACY_MOVE_EVERY_MS`, for
 /// tests); default 5 min.
 fn move_every(vars: &Vars) -> std::time::Duration {
@@ -391,6 +399,7 @@ fn remote_nodes(
         fleet.set_turn_limit(ms);
     }
     fleet.set_idle_release(cfg.idle_release_ms as i64);
+    fleet.set_principal_state(principal_state(vars));
     fleet.set_cost_caps(cost_caps(vars));
     let svc = crate::nodes::from_vars(store, fleet, |k| vars(k));
     let bind = match bind.map(|v| steve_node_api::NodeId::new(v.trim())) {

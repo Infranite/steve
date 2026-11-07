@@ -1908,6 +1908,46 @@ impl Actor {
     }
 }
 
+/// The principal's own directory for a harness (path model §4.5.1), made when missing under the
+/// Node's `state/` (0700). A principal who owns this Node starts with what the adapter declares of
+/// their own directory here (their settings, their login); a file already there is theirs to keep.
+fn harness_state(
+    inner: &Inner,
+    s: &HarnessState,
+    sd: steve_acp::StateDir,
+) -> ApiResult<std::path::PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    if !s.valid() {
+        return Err(ApiError::new(
+            ErrorCode::Invalid,
+            "a harness state directory that is not a plain path",
+        ));
+    }
+    let dir = inner.cfg.home.join("state").join(&s.dir).join("harness");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| internal(format!("harness state: {e}")))?;
+    if s.import_owner {
+        let own = std::env::var_os(sd.env)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| inner.cfg.acp.user_home.join(sd.default));
+        for f in sd.import {
+            let (from, to) = (own.join(f), dir.join(f));
+            if from.is_file() && !to.exists() {
+                std::fs::copy(&from, &to)
+                    .and_then(|_| {
+                        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600))
+                    })
+                    .map_err(|e| internal(format!("harness state: {f}: {e}")))?;
+            }
+        }
+    }
+    Ok(dir)
+}
+
 /// The environment a session's harness gets over the Node's: the principal's own variables
 /// (`node_env`; a key the Node refuses is dropped, `PATH_PREPEND` goes in front of `PATH`), then
 /// what Steve sets itself.
@@ -1963,6 +2003,14 @@ async fn open_harness(
         .acp
         .adapter_command(&harness)
         .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))?;
+    // the principal's own harness directory, when the Hub asks for one and the adapter can move it
+    let state = match (
+        &row.open.state,
+        inner.cfg.acp.adapter_properties(&harness).state,
+    ) {
+        (Some(s), Some(sd)) => Some((sd.env, harness_state(inner, s, sd)?)),
+        _ => None,
+    };
     // in the OS sandbox, unless the harness sandboxes its own shell (macOS nests none)
     let (program, args) = if inner.cfg.acp.adapter_properties(&harness).nested_sandbox {
         inner
@@ -1994,10 +2042,16 @@ async fn open_harness(
             program,
             args,
             cwd: cwd.clone().into(),
-            env: harness_env(
-                &row.open.env,
-                inner.cfg.acp.claude_executable.clone().into_os_string(),
-            ),
+            env: {
+                let mut env = harness_env(
+                    &row.open.env,
+                    inner.cfg.acp.claude_executable.clone().into_os_string(),
+                );
+                if let Some((var, dir)) = &state {
+                    env.push(((*var).into(), dir.clone().into_os_string()));
+                }
+                env
+            },
             log_tag: format!("[node {session}]"),
         },
         1 << 20,

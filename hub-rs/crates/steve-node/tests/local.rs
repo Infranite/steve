@@ -4125,3 +4125,67 @@ async fn a_users_own_variables_reach_the_harness_and_steves_stay_steves() {
     assert_eq!(spawn["PATH0"], "/opt/mine/bin");
     assert_ne!(spawn["HOME"], "/elsewhere");
 }
+
+/// A principal's own harness directory (path model §4.5.1): the harness gets it through the
+/// variable its adapter declares; the Node's owner starts with their own settings, anyone else
+/// with nothing of theirs; a path that is not plain is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_principal_gets_a_harness_directory_of_their_own() {
+    let t = T::new(&[]);
+    std::fs::create_dir_all(t.root.join(".claude")).unwrap();
+    std::fs::write(t.root.join(".claude/settings.json"), r#"{"owner":true}"#).unwrap();
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let open = |s: &str, dir: &str, owner: bool| {
+        let mut b = open_body(s);
+        b.state = Some(HarnessState {
+            dir: dir.into(),
+            import_owner: owner,
+        });
+        b
+    };
+    n.open_session(now_cmd(
+        "op_open_s_1",
+        open("s_1", "default/owner/dev/claude-code", true),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_1").await));
+    n.open_session(now_cmd(
+        "op_open_s_2",
+        open("s_2", "default/other/dev/claude-code", false),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_2").await));
+    let dirs: Vec<String> = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .filter_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).ok()?["spawn"]["env"]["CLAUDE_CONFIG_DIR"]
+                .as_str()
+                .map(String::from)
+        })
+        .collect();
+    let owner = t.home.join("state/default/owner/dev/claude-code/harness");
+    let other = t.home.join("state/default/other/dev/claude-code/harness");
+    assert_eq!(
+        dirs,
+        [owner.display().to_string(), other.display().to_string()]
+    );
+    assert_eq!(
+        std::fs::read_to_string(owner.join("settings.json")).unwrap(),
+        r#"{"owner":true}"#
+    );
+    assert!(
+        !other.join("settings.json").exists(),
+        "nothing of the owner's"
+    );
+    n.open_session(now_cmd("op_open_s_3", open("s_3", "../escape", true)))
+        .await
+        .unwrap();
+    assert!(!ok(&finished(&n, "op_open_s_3").await));
+}

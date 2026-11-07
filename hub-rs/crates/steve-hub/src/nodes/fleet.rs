@@ -42,6 +42,8 @@ pub struct NodeFleet {
     /// How long a session may sit idle before it is let go, for the coordinators started from
     /// now on (ms; -1: their default).
     idle_release: AtomicI64,
+    /// [`NodeRuntime::set_principal_state`] for every coordinator.
+    principal_state: std::sync::atomic::AtomicBool,
     cost_caps: Mutex<crate::wire::node_runtime::CostCaps>,
 }
 
@@ -94,6 +96,7 @@ impl NodeFleet {
             holding: AtomicBool::new(false),
             turn_limit: AtomicI64::new(0),
             idle_release: AtomicI64::new(-1),
+            principal_state: std::sync::atomic::AtomicBool::new(false),
             cost_caps: Mutex::new(Default::default()),
         });
         if let Some(s) = service {
@@ -113,6 +116,11 @@ impl NodeFleet {
 
     pub fn set_idle_release(&self, ms: i64) {
         self.idle_release.store(ms.max(0), Ordering::Relaxed);
+    }
+
+    /// Each principal's own harness directory on the Nodes ([`NodeRuntime::set_principal_state`]).
+    pub fn set_principal_state(&self, on: bool) {
+        self.principal_state.store(on, Ordering::Relaxed);
     }
 
     /// What a Node's usage reports may add to a session's cost, for every coordinator started
@@ -206,6 +214,7 @@ impl NodeFleet {
                     rt.set_idle_release(idle);
                 }
                 rt.set_cost_caps(*self.cost_caps.lock().unwrap());
+                rt.set_principal_state(self.principal_state.load(Ordering::Relaxed));
                 rt.hold(self.holding.load(Ordering::SeqCst));
                 e.runtime = Some(rt.clone());
                 (rt, true)
