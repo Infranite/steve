@@ -146,6 +146,7 @@ impl ResearchAdapter {
             dirs: q
                 .readable
                 .iter()
+                .filter(|p| p.device_id == "hub")
                 .map(|p| r::DirInfo {
                     name: p.name.clone(),
                     path: p.path.clone(),
@@ -189,6 +190,7 @@ impl ResearchAdapter {
         req.add_dirs = q
             .readable
             .iter()
+            .filter(|p| p.device_id == "hub")
             .map(|p| PathBuf::from(&p.path))
             .filter(|p| Some(p) != cwd.as_ref())
             .collect();
@@ -379,6 +381,13 @@ impl ResearchAdapter {
         q: &ResearchRequest,
         sink: &dyn ResearchSink,
     ) -> ResearchOutcome {
+        if q.project.as_ref().is_some_and(|p| p.device_id != "hub") {
+            return ResearchOutcome {
+                end: RunEnd::Failed,
+                error: Some("这个项目位于另一节点，当前研究不能读取其目录".into()),
+                ..Default::default()
+            };
+        }
         let cfg = self.researcher.config();
         let slot = match self.admission.admit(&q.run, &q.ws, cfg.max_global) {
             Ok(s) => s,
@@ -462,14 +471,19 @@ impl ResearchAdapter {
             model: None,
             last: None,
             usage: vec![],
+            text: String::new(),
+            unavailable: false,
         };
         let last_err = r::drive(&plans, &mut runner).await;
         let ms = runner.t0.elapsed().as_millis() as u64;
         let codex = req.harness == "codex" && !runner.usage.is_empty();
-        let usage = std::mem::take(&mut runner.usage)
-            .into_iter()
-            .map(steve_core::gateway::model_usage)
-            .collect();
+        let usage = super::node_runtime::normalized_usage(
+            std::mem::take(&mut runner.usage),
+            runner.model.as_deref().unwrap_or_default(),
+        )
+        .into_iter()
+        .map(steve_core::gateway::model_usage)
+        .collect();
         let out = runner.outcome(&q.run, &q.question, last_err, ms);
         let out = self.conclude(q, out, usage, codex);
         drop(slot);
@@ -543,6 +557,9 @@ struct OnNode<'a> {
     last: Option<api::Completion>,
     /// The last attempt's usage (the statistics book the attempt that ended the run).
     usage: Vec<api::UsageReport>,
+    /// The latest visible draft, kept when the Node disappears before a completion arrives.
+    text: String,
+    unavailable: bool,
 }
 
 impl r::AttemptRunner for OnNode<'_> {
@@ -550,7 +567,9 @@ impl r::AttemptRunner for OnNode<'_> {
         self.model = Some(plan.model.clone());
         self.last = None;
         self.usage.clear();
-        if self.stopped {
+        self.text.clear();
+        if self.stopped || self.stop.load(Ordering::SeqCst) || self.halt.load(Ordering::SeqCst) {
+            self.stopped = true;
             return r::Attempted {
                 killed: true,
                 ..Default::default()
@@ -574,6 +593,7 @@ impl r::AttemptRunner for OnNode<'_> {
         let mut progressed = false;
         let mut ids = std::collections::HashSet::new();
         let mut tick = tokio::time::interval(Duration::from_millis(50));
+        let mut health = tokio::time::interval(Duration::from_secs(1));
         let end = loop {
             tokio::select! {
                 n = job.next() => match n {
@@ -584,6 +604,7 @@ impl r::AttemptRunner for OnNode<'_> {
                                 .get_or_insert(self.t0.elapsed().as_millis() as u64);
                         }
                         self.sink.text(&t);
+                        self.text = t;
                     }
                     Some(News::Tool(v)) => {
                         progressed = true;
@@ -616,13 +637,24 @@ impl r::AttemptRunner for OnNode<'_> {
                         job.cancel();
                     }
                 }
+                _ = health.tick() => {
+                    if job.unavailable().unwrap_or(true) {
+                        self.unavailable = true;
+                        job.cancel();
+                        break None;
+                    }
+                }
             }
         };
         let Some(c) = end else {
             return r::Attempted {
-                killed: self.stopped,
+                killed: self.stopped || self.unavailable,
                 progressed,
-                error: Some("Node 没有回报这次研究的结果".into()),
+                error: Some(if self.unavailable {
+                    "Node 连接中断，已保留当前内容并请求停止；尚未确认执行结束".into()
+                } else {
+                    "Node 没有回报这次研究的结果".into()
+                }),
                 ..Default::default()
             };
         };
@@ -679,7 +711,7 @@ impl OnNode<'_> {
                 })
             }
             // ended by the Hub before the Node ran it
-            None if self.stopped && c.is_some_and(|c| c.outcome == api::Outcome::Cancelled) => {
+            None if self.stopped && c.is_none_or(|c| c.outcome == api::Outcome::Cancelled) => {
                 r::RunStatus::Stopped
             }
             None => r::RunStatus::Failed(last_err),
@@ -694,9 +726,13 @@ impl OnNode<'_> {
                     })
                     .collect()
             })
-            .unwrap_or_default();
+            .filter(|text: &String| !text.is_empty())
+            .unwrap_or_else(|| self.text.clone());
         let files_read = report.map(|j| j.files_read.clone()).unwrap_or_default();
-        let (answer, offer, citations) = r::present(&status, &raw, question, &files_read);
+        let (mut answer, offer, citations) = r::present(&status, &raw, question, &files_read);
+        if self.unavailable && !answer.is_empty() {
+            answer.push_str("\n\n（Node 连接中断，已请求停止，尚未确认执行结束。）");
+        }
         r::ResearchOutcome {
             run_id: run.to_string(),
             status,
@@ -749,6 +785,10 @@ impl steve_core::thread::Researcher for ResearchAdapter {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "research_stream_tests.rs"]
+mod stream_tests;
 
 #[cfg(all(test, unix))]
 mod tests {

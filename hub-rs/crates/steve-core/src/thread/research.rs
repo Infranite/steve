@@ -831,7 +831,11 @@ impl Core {
             .project
             .as_deref()
             .and_then(|id| projects.iter().find(|p| p.id == id))
-            .or_else(|| projects.iter().find(|p| p.path == repo))
+            .or_else(|| {
+                projects
+                    .iter()
+                    .find(|p| p.path == repo && p.device_id == "hub")
+            })
             .cloned();
         let cx = self.chat_context(ws, j.user.as_deref().filter(|_| own), &j.question);
         /* a chat's research knows who hears its answer */

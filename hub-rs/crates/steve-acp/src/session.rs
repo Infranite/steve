@@ -88,6 +88,26 @@ pub async fn open(
     open_with_meta(l, c, None, reports, strictness).await
 }
 
+/// Open a read-only job using a mode declared by the adapter. Never inherit a user's
+/// permissive default; mode names come from ACP capabilities, not from the harness name.
+pub async fn open_read_only(
+    l: &Conn,
+    c: OpenConfig<'_>,
+    reports: &dyn Reports,
+) -> Result<Opened, RpcError> {
+    open_read_only_with_meta(l, c, None, reports).await
+}
+
+/// [`open_read_only`], with the same adapter metadata as ordinary sessions.
+pub async fn open_read_only_with_meta(
+    l: &Conn,
+    c: OpenConfig<'_>,
+    meta: Option<Value>,
+    reports: &dyn Reports,
+) -> Result<Opened, RpcError> {
+    open_with(l, c, meta, reports, Strictness::Strict, true).await
+}
+
 /// [`open`], with `meta` as the `_meta` of `session/new|load` (Claude Code's adapter reads its
 /// options there, `claudeCode.options.settings` among them).
 pub async fn open_with_meta(
@@ -96,6 +116,17 @@ pub async fn open_with_meta(
     meta: Option<Value>,
     reports: &dyn Reports,
     strictness: Strictness,
+) -> Result<Opened, RpcError> {
+    open_with(l, c, meta, reports, strictness, false).await
+}
+
+async fn open_with(
+    l: &Conn,
+    mut c: OpenConfig<'_>,
+    meta: Option<Value>,
+    reports: &dyn Reports,
+    strictness: Strictness,
+    read_only: bool,
 ) -> Result<Opened, RpcError> {
     let strict = strictness == Strictness::Strict;
     let init = json!({
@@ -152,6 +183,16 @@ pub async fn open_with_meta(
     let model = c.model.filter(|m| !m.is_empty());
     if let Some(rep) = reported {
         reports.model(rep);
+    }
+    if read_only {
+        let available = r.pointer("/modes/availableModes").and_then(Value::as_array);
+        c.mode = ["read-only", "plan"]
+            .into_iter()
+            .find(|id| available.is_some_and(|modes| modes.iter().any(|m| m["id"] == *id)))
+            .map(String::from);
+        if c.mode.is_none() {
+            return Err(err("适配器没有声明只读权限模式，无法运行对话回答".into()));
+        }
     }
     // the mode does not survive session/load, so it is set every time the process starts
     if let Some(mode) = c.mode

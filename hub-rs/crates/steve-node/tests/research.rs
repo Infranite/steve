@@ -21,6 +21,27 @@ struct T {
 }
 
 impl T {
+    fn acp_node(&self) -> LocalNode {
+        let mut cfg = self.config(2);
+        cfg.acp.adapters.insert(
+            "sample-adapter".into(),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/research-acp.mjs"),
+        );
+        // A wrapper is executable regardless of whether an adapter entry point ends in .js.
+        let wrapper = self.harness(
+            "research-acp.sh",
+            &format!(
+                "exec node '{}'",
+                cfg.acp.adapters["sample-adapter"].display()
+            ),
+        );
+        cfg.acp.adapters.insert("sample-adapter".into(), wrapper);
+        let n = LocalNode::open(cfg).unwrap();
+        n.connect(self.sink.clone(), Some(Arc::new(Files::default())));
+        n.enable_research(self.research(Path::new("unused"), None));
+        n
+    }
+
     fn new() -> T {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -296,6 +317,142 @@ fn research(spec: &mut JobSpec) -> &mut ResearchJob {
         JobWork::Research(r) => r,
         _ => unreachable!(),
     }
+}
+
+fn acp_job(attempt: &str, text: &str) -> JobSpec {
+    let mut spec = job(attempt, "", text);
+    spec.run.choice.harness = "sample-adapter".into();
+    spec
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acp_research_streams_before_completion_and_keeps_reads_usage_and_continuation() {
+    let t = T::new();
+    let n = t.acp_node();
+    n.start_job(now_cmd("acp_stream", acp_job("a_acp", "stream")))
+        .await
+        .unwrap();
+    until("first ACP chunk", || {
+        t.bodies()
+            .iter()
+            .any(|e| matches!(e, EventBody::TextDelta { text, .. } if text == "答案第一段"))
+    })
+    .await;
+    assert!(
+        t.ended().is_empty(),
+        "the first chunk must precede the final result"
+    );
+    assert_eq!(
+        n.operation(OperationId::new("acp_stream").unwrap())
+            .await
+            .unwrap()
+            .state,
+        Observed::Running
+    );
+    let c = t.end_of(&n, "acp_stream").await;
+    assert_eq!(c.outcome, Outcome::Succeeded, "{c:?}");
+    assert_eq!(
+        c.result,
+        vec![Part::Text {
+            text: "答案第一段，答案第二段。".into()
+        }]
+    );
+    assert_eq!(
+        c.continuation,
+        Some(ResumeHandle::new("research-session").unwrap())
+    );
+    let report = c.job.unwrap();
+    assert_eq!(report.files_read, ["src/lib.rs"]);
+    assert_eq!(report.turns, 2);
+    assert!(
+        t.bodies()
+            .iter()
+            .any(|e| matches!(e, EventBody::Usage { .. }))
+    );
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acp_research_keeps_read_only_tool_budget_and_idle_limits() {
+    for (name, expected) in [
+        (
+            "violation",
+            JobEnd::Violated {
+                rule: ViolationRule::Tool,
+                tool: "arbitrary_reader".into(),
+                target: None,
+            },
+        ),
+        (
+            "tools",
+            JobEnd::Budget {
+                hit: BudgetHit::Tools,
+            },
+        ),
+        (
+            "idle",
+            JobEnd::Budget {
+                hit: BudgetHit::Idle,
+            },
+        ),
+        ("thought", JobEnd::Done),
+    ] {
+        let t = T::new();
+        let n = t.acp_node();
+        let mut spec = acp_job("a_acp", name);
+        research(&mut spec).budget.max_tools = Some(1);
+        research(&mut spec).budget.idle_ms = if matches!(name, "idle" | "thought") {
+            800
+        } else {
+            600_000
+        };
+        n.start_job(now_cmd("acp_limit", spec)).await.unwrap();
+        let c = t.end_of(&n, "acp_limit").await;
+        assert_eq!(c.job.unwrap().end, expected, "{name}");
+        if name == "thought" {
+            assert_eq!(
+                c.result,
+                vec![Part::Text {
+                    text: "完成".into()
+                }]
+            );
+            assert!(!t.bodies().iter().any(|e| matches!(e, EventBody::TextDelta { text, .. } if text.contains("private-thought"))));
+        }
+        n.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acp_research_cancellation_keeps_the_partial_reply() {
+    let t = T::new();
+    let n = t.acp_node();
+    n.start_job(now_cmd("acp_cancel", acp_job("a_acp", "cancel")))
+        .await
+        .unwrap();
+    until("partial ACP reply", || {
+        t.bodies()
+            .iter()
+            .any(|e| matches!(e, EventBody::TextDelta { .. }))
+    })
+    .await;
+    n.cancel(now_cmd(
+        "stop_acp",
+        Cancel {
+            target: OperationId::new("acp_cancel").unwrap(),
+            reason: "stop".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let c = t.end_of(&n, "acp_cancel").await;
+    assert_eq!(c.outcome, Outcome::Cancelled);
+    assert_eq!(
+        c.result,
+        vec![Part::Text {
+            text: "我先".into()
+        }]
+    );
+    n.shutdown().await;
 }
 
 /// Shell that prints these stream-json lines.
@@ -1107,10 +1264,11 @@ async fn finished(n: &LocalNode, op: &str) -> Completion {
 /// to `pid`, then answers.
 fn holding(t: &T) -> (PathBuf, PathBuf, PathBuf) {
     let (hold, pid) = (t.root.join("hold"), t.root.join("pid"));
+    // Cancellation may land between shell redirection and echo; publish only a complete pid.
     let exe = t.harness(
         "claude.sh",
         &format!(
-            "{}\nif [ -e '{hold}' ]; then sleep 30 & echo $! > '{pid}'; wait; fi\n{}",
+            "{}\nif [ -e '{hold}' ]; then sleep 30 & echo $! > '{pid}.tmp'; mv '{pid}.tmp' '{pid}'; wait; fi\n{}",
             emit(&[init(), start("m1"), text("写到一半")]),
             emit(&[result("好")]),
             hold = hold.display(),

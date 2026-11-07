@@ -900,10 +900,11 @@ pub(crate) mod tests {
         for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
             std::fs::create_dir_all(d).unwrap();
         }
-        // STEVE_NODE_MODE=off: the Hub's ToolService as it would be installed for a Node
+        // The Hub now owns its default local job host. Exercise a separate test bridge with
+        // the real ToolService without opening that host's exclusive ledger a second time.
         let w = super::super::wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
         let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
-        let home = cfg.data_dir.join("node");
+        let home = cfg.data_dir.join("test-tool-bridge");
         let host = fixture_on(dir, store.clone(), vec![]).await;
         let tools = NodeTools::open(store.clone(), NodeId::new("local").unwrap(), &home).unwrap();
         tools.install(w.tool_service.clone()).unwrap();

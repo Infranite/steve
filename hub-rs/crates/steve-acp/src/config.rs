@@ -6,6 +6,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+/// Host integration properties of the bundled adapters. Callers select policy by capabilities,
+/// never by a harness name. `self_read_only` applies only after selecting its ACP read-only mode.
+#[derive(Debug, Clone, Copy)]
+pub struct AdapterProperties {
+    pub self_read_only: bool,
+    pub nested_sandbox: bool,
+}
+
+const BUNDLED_PROPERTIES: &[(&str, AdapterProperties)] = &[(
+    "codex",
+    AdapterProperties {
+        self_read_only: true,
+        nested_sandbox: false,
+    },
+)];
+
 /// Everything the ACP driver needs from the configuration (the Node's, built from the Hub's).
 #[derive(Debug, Clone)]
 pub struct AcpConfig {
@@ -92,6 +108,17 @@ fn home_dir() -> PathBuf {
 }
 
 impl AcpConfig {
+    pub fn adapter_properties(&self, harness: &str) -> AdapterProperties {
+        BUNDLED_PROPERTIES
+            .iter()
+            .find(|(name, _)| *name == harness)
+            .map(|(_, properties)| *properties)
+            .unwrap_or(AdapterProperties {
+                self_read_only: false,
+                nested_sandbox: true,
+            })
+    }
+
     /// Reads the same environment variables as config.ts. `npm root -g` only runs when an adapter
     /// path is not given explicitly.
     pub fn from_env() -> Self {

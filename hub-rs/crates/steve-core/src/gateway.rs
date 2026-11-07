@@ -169,6 +169,7 @@ impl Tried {
 fn print_error(e: steve_print::PrintError, codex: bool) -> CoreError {
     use steve_print::PrintError as P;
     match e {
+        P::OutputLimit => msg("输出超出这次运行的限制"),
         P::Timeout(t) => msg(format!("Command timed out after {} ms", t.as_millis())),
         P::Failed(err) if codex => msg(format!("Command failed: {}", js_head(&err, 300))),
         P::Failed(err) => msg(format!("Command failed: {err}")),

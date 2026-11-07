@@ -210,6 +210,14 @@ fn node_runtime(
         })
         .map_err(|e| BackendError::msg(e.to_string()))?,
     );
+    if kinds.research {
+        let mut research = steve_research::ResearchConfig::new(
+            cfg.claude_executable.clone(),
+            cfg.scratch.join("research"),
+        );
+        research.codex_executable = Some(cfg.codex_executable.clone().into());
+        node.enable_research(research);
+    }
     // the history and harnesses the Hub would read itself: its own homes and binaries
     let homes = crate::resume::Homes::of(cfg);
     node.set_discovery(steve_node::history::DiscoveryConfig {
@@ -426,7 +434,7 @@ async fn start_fleet(fleet: Arc<crate::nodes::NodeFleet>, store: steve_store::St
 async fn start_node(
     runtime: Arc<node_runtime::NodeRuntime>,
     node: Arc<steve_node::LocalNode>,
-    tools: Arc<node_tools::NodeTools>,
+    tools: Arc<dyn steve_node_api::HubTools>,
 ) {
     match node.connect_tools(tools).await {
         Ok(()) => runtime.start(),
@@ -492,13 +500,30 @@ pub fn wire_assembly(
         core_cfg.models_research = list("STEVE_MODELS_RESEARCH");
     }
     core_cfg.models_check = list("STEVE_MODELS_CHECK");
-    let NodeJobs {
-        think: think_on_node,
-        research: research_on_node,
-    } = node_jobs(&vars);
     let mut node_jobs = vec![];
     let secrets = node_secrets::NodeSecrets::new();
-    let node_host = node_runtime(cfg, &db, host.clone(), &vars, &secrets, &mut node_jobs)?;
+    // Model calls always execute on a local Node. Session/workspace routing keeps its existing
+    // switch; a NO_RESUME copy never opens the copied Node journal.
+    let model_vars: Vars = if cfg.no_resume {
+        vars.clone()
+    } else {
+        let vars = vars.clone();
+        Arc::new(move |key| match key {
+            "STEVE_NODE_MODE" => Some("local".into()),
+            "STEVE_NODE_JOBS" => Some("think,research".into()),
+            _ => vars(key),
+        })
+    };
+    let model_node = node_runtime(
+        cfg,
+        &db,
+        host.clone(),
+        &model_vars,
+        &secrets,
+        &mut node_jobs,
+    )?;
+    let sessions_on_node = local_node_mode(&vars, cfg.no_resume)?;
+    let node_host = model_node.as_ref().filter(|_| sessions_on_node);
     if let Some(h) = &node_host {
         let _ = host.local_node.set(h.node.clone());
     }
@@ -508,11 +533,11 @@ pub fn wire_assembly(
             steve_core::models::Defaults::of(&core_cfg),
         ))
     };
-    // Steve's own model calls: in process, or one Node job per model tried
-    // (`STEVE_NODE_JOBS=think` with the local Node); the fallback stays here either way
-    let one_model: Arc<dyn steve_core::ModelGateway> = match &node_host {
-        Some(h) if think_on_node => {
-            tracing::info!("think calls run as local Node jobs (STEVE_NODE_JOBS=think)");
+    // One Node job per model tried; the fallback stays on the Hub. Only an inert NO_RESUME
+    // copy retains the legacy gateway, without opening a copied Node journal.
+    let one_model: Arc<dyn steve_core::ModelGateway> = match &model_node {
+        Some(h) => {
+            tracing::info!("conversation model calls stream through local Node jobs");
             Arc::new(steve_core::Fallback {
                 one: node_runtime::NodePrint {
                     runtime: h.runtime.clone(),
@@ -600,12 +625,26 @@ pub fn wire_assembly(
         steve_core::repo::Db::new(db.clone()),
         cfg.data_dir.clone(),
     );
-    // or each attempt as a job on the local Node (`STEVE_NODE_JOBS=research`), with the same
-    // harnesses, homes and limits; admission, the attempts' order and the books stay here
-    if let Some(h) = node_host.as_ref().filter(|_| research_on_node) {
-        tracing::info!("research runs as local Node jobs (STEVE_NODE_JOBS=research)");
+    // Stream every research attempt through the model Node, retaining admission, model fallback,
+    // shutdown, citations and accounting in the existing research adapter.
+    if let Some(h) = &model_node {
+        tracing::info!("research streams through local Node jobs");
         h.node.enable_research(research);
-        let ws = workspaces.clone();
+        let ws = if sessions_on_node {
+            workspaces.clone()
+        } else {
+            let ws = workspaces::Workspaces::new(
+                db.clone(),
+                Some(workspaces::LocalFace {
+                    node: h.node.clone(),
+                    runtime: h.runtime.clone(),
+                }),
+                None,
+                workspaces::configured(cfg),
+            );
+            node_jobs.push(Box::pin(ws.clone().follow(bus.tap(&["project", "kb"]))));
+            ws
+        };
         adapter = adapter.on_node(research::NodeResearch {
             runtime: h.runtime.clone(),
             roots: Arc::new(move || ws.local_roots().map_err(|e| e.to_string())),
@@ -684,10 +723,12 @@ pub fn wire_assembly(
         f.set_service(tool_service.clone());
         jobs.push(Box::pin(start_fleet(f.clone(), db.clone())));
     }
-    let local_node = node_host.as_ref().map(|h| h.node.clone());
-    let local_runtime = node_host.as_ref().map(|h| h.runtime.clone());
-    if let Some(NodeHost { tools, .. }) = node_host {
-        tools
+    let local_node = model_node.as_ref().map(|h| h.node.clone());
+    // Health's Node rollout switch describes agent-session routing, including its rollback.
+    // The model-job host still participates in domain shutdown regardless of that switch.
+    let local_runtime = node_host.map(|h| h.runtime.clone());
+    if let Some(h) = &model_node {
+        h.tools
             .install(tool_service.clone())
             .map_err(|e| BackendError::msg(e.to_string()))?;
     }
@@ -792,22 +833,21 @@ mod tests {
         );
     }
 
-    /// With the local Node on, Steve's think calls go to it when STEVE_NODE_JOBS is unset (the
-    /// default) or names `think`; with `research` alone they run in process and no job is written.
+    /// Conversation model calls use ACP on the Node even on a config that predates the Node
+    /// switch. Existing agent-session routing follows its own switch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn think_runs_on_the_node_only_with_steve_node_jobs() {
+    async fn think_streams_on_the_node_without_an_opt_in_switch() {
         steve_modules::net::forbid_in_this_process();
-        for jobs in [Some("research"), Some("think"), None] {
+        for (jobs, mode) in [
+            (Some("research"), None),
+            (Some("think"), None),
+            (None, None),
+            (None, Some("off")),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let h = dir.path().canonicalize().unwrap();
-            let claude = h.join("claude");
-            std::fs::write(
-                &claude,
-                "#!/bin/sh\necho \"$$\" >> \"$0.spawns\"\necho '{\"type\":\"result\",\"is_error\":false,\"result\":\"答案\"}'\n",
-            )
-            .unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let adapter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/streaming-acp.js");
             let mut vars: std::collections::HashMap<&str, String> = [
                 ("HOME", h.display().to_string()),
                 ("STEVE_HOME", h.join("steve").display().to_string()),
@@ -817,9 +857,8 @@ mod tests {
                 ("STEVE_REPO", "/nonexistent".into()),
                 ("STEVE_VAULT_KEYSTORE", "file".into()),
                 ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-                ("CLAUDE_CODE_EXECUTABLE", claude.display().to_string()),
-                ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
-                ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
+                ("STEVE_ADAPTER_CLAUDE", adapter.display().to_string()),
+                ("STEVE_ADAPTER_CODEX", adapter.display().to_string()),
                 ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
             ]
             .into_iter()
@@ -828,12 +867,16 @@ mod tests {
             if let Some(j) = jobs {
                 vars.insert("STEVE_NODE_JOBS", j.into());
             }
+            if let Some(mode) = mode {
+                vars.insert("STEVE_NODE_MODE", mode.into());
+            }
             let get = move |k: &str| vars.get(k).cloned();
             let cfg = Arc::new(crate::config::Config::from_vars(&get).unwrap());
             for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
                 std::fs::create_dir_all(d).unwrap();
             }
             let w = wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
+            assert_eq!(w.node.is_some(), mode != Some("off"));
             for job in w.jobs {
                 tokio::spawn(job);
             }
@@ -841,7 +884,7 @@ mod tests {
                 .core
                 .gateway()
                 .call(
-                    "想一想",
+                    "@wire-check",
                     steve_core::Tier::Smart,
                     std::time::Duration::from_secs(20),
                     &steve_core::gateway::ThinkTools::None,
@@ -849,8 +892,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(p.text, "答案");
-            let spawns = std::fs::read_to_string(h.join("claude.spawns")).unwrap();
-            assert_eq!(spawns.lines().count(), 1);
             let store =
                 steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
             let n: i64 = store
@@ -862,8 +903,8 @@ mod tests {
                     )?)
                 })
                 .unwrap();
-            let on_node = jobs != Some("research");
-            assert_eq!(n, if on_node { 1 } else { 0 }, "{jobs:?}");
+            assert_eq!(n, 1, "{jobs:?}");
+            w.domain.shutdown().await;
         }
     }
 

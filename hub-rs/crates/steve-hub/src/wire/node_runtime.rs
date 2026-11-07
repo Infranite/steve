@@ -55,6 +55,7 @@ pub use heads::{
 pub use ledger::LedgerEntry;
 #[cfg(test)]
 pub(crate) use ledger::PUSH_DEADLINE;
+pub(crate) use node_jobs::normalized_usage;
 pub use node_jobs::{
     News, NodePrint, RESEARCH_GRANT, ResearchAttempt, ResearchFile, ResearchJobRun,
 };

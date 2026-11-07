@@ -56,6 +56,90 @@ test("stream paint preserves unrelated sessions, bots, items and thread referenc
   assert.equal(s.st.S.b, before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.st.items, before.items); assert.equal(s.st.thread, before.thread)
 })
 
+const chatMessage = (id, author, origin) => ({ id, author, text: id, created: 1, item_id: null, meta: origin ? { origin } : {} })
+const draft = (h, mid, text) => h.event({ type: "steve.draft", ws: "ws", mid, thought: "", text })
+
+test("chat drafts paint successive chunks before any stored reply arrives", async () => {
+  const h = harness(), s = h.store, c = counted(h)
+  h.state.thread = [chatMessage("question", "me")]
+  s.start(); await flush()
+  h.event({ type: "steve.thinking", on: true, phase: "answer" })
+  const version = s.st.ver
+  draft(h, "question", "第一段"); await h.tick(0)
+  assert.equal(s.st.draft.text, "第一段"); assert.ok(s.st.ver > version)
+  draft(h, "question", "第一段，第二段"); await h.tick(0)
+  assert.equal(s.st.draft.text, "第一段，第二段")
+  assert.equal(s.st.thread.filter((m) => m.k === "thinking").length, 1)
+  assert.equal(s.st.thread.filter((m) => m.k === "steve").length, 0)
+  assert.equal(c.states, 1)
+})
+
+test("unrelated Steve messages keep the live draft; only its own reply replaces it", async () => {
+  const h = harness(), s = h.store
+  h.state.thread = [chatMessage("question", "me")]
+  s.start(); await flush()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "question", "仍在生成")
+  h.state.thread.push(chatMessage("item-progress", "steve", "other-question"))
+  await s.refresh()
+  assert.equal(s.st.draft.text, "仍在生成"); assert.equal(s.st.drafted, "")
+  // The original question may have moved outside /api/state's message window.
+  h.state.thread = [chatMessage("item-progress", "steve", "other-question"), chatMessage("answer", "steve", "question")]
+  await s.refresh()
+  assert.equal(s.st.draft, null); assert.equal(s.st.drafted, "answer")
+  assert.equal(s.st.thread.filter((m) => m.id === "answer").length, 1)
+})
+
+test("rerunning a question does not replace its new draft with the previous reply", async () => {
+  const h = harness(), s = h.store
+  h.state.thread = [chatMessage("question", "me"), chatMessage("previous-answer", "steve", "question")]
+  s.start(); await flush()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "question", "重新生成")
+  await s.refresh()
+  assert.equal(s.st.draft.text, "重新生成"); assert.equal(s.st.drafted, "")
+  h.state.thread.push(chatMessage("new-answer", "steve", "question"))
+  h.event({ type: "steve.thinking", on: false }); await s.refresh()
+  assert.equal(s.st.draft, null); assert.equal(s.st.drafted, "new-answer")
+})
+
+test("a state request begun while idle cannot clear a turn that started during the request", async () => {
+  const h = harness(), s = h.store, response = defer()
+  s.start(); await flush()
+  const old = await h.api.state()
+  h.api.state = () => response.promise
+  const loading = s.refresh()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "new-question", "新回复")
+  response.resolve(old); await loading
+  assert.equal(s.st.draft.text, "新回复"); assert.equal(s.st.thinking, true)
+})
+
+test("a stopped turn's refresh cannot clear the next turn's draft", async () => {
+  const h = harness(), s = h.store, response = defer()
+  s.start(); await flush()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "first-question", "第一条")
+  h.event({ type: "steve.thinking", on: false })
+  const old = await h.api.state()
+  h.api.state = () => response.promise
+  const loading = s.refresh()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "next-question", "第二条")
+  response.resolve(old); await loading
+  assert.equal(s.st.draft.text, "第二条"); assert.equal(s.st.thinking, true)
+})
+
+test("a settled turn without a stored reply clears its draft after a fresh idle snapshot", async () => {
+  const h = harness(), s = h.store
+  s.start(); await flush()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "question", "尚未保存")
+  h.event({ type: "steve.thinking", on: false }); await s.refresh()
+  assert.equal(s.st.draft, null)
+  assert.equal(s.st.thread.some((m) => m.k === "thinking"), false)
+})
+
 test("pages paint before EOF; SSE during a load is caught up without duplicates", async () => {
   const h = harness(), s = h.store, eof = defer()
   s.start(); await flush()
