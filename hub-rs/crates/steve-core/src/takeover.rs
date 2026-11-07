@@ -153,6 +153,9 @@ impl Tx<'_> {
         {
             return Ok(Some(stop.why().into()));
         }
+        if self.waiting_on_lane(item_id)? {
+            return Ok(None);
+        }
         if i.revision > 0
             && let Some(rule) = self.done_rule(&i)?
         {
@@ -187,7 +190,11 @@ impl Tx<'_> {
             .decisions_of_item(item_id)?
             .iter()
             .any(|d| d.status == "open" && matches!(d.kind.as_str(), "approve" | "ask"));
-        if waiting || self.busy(&s.id) || !self.db().queued(&s.id)?.is_empty() {
+        if waiting
+            || self.waiting_on_lane(item_id)?
+            || self.busy(&s.id)
+            || !self.db().queued(&s.id)?.is_empty()
+        {
             self.c.steve_note(&s.id, &text);
             return Ok(());
         }
@@ -195,6 +202,22 @@ impl Tx<'_> {
             self.fail(item_id, &why)?;
         }
         Ok(())
+    }
+
+    /// A persisted lane request explains an idle agent, including after a restart.
+    /// The lane owns approval/release failure cards and wakes members when it finishes or
+    /// sends them back. This only suppresses automatic nudges, never explicit user messages.
+    fn waiting_on_lane(&self, item_id: &str) -> Result<bool> {
+        Ok(self
+            .db()
+            .store()
+            .reader(|c| steve_store::lanes::request_of_item(c, item_id))?
+            .is_some_and(|r| {
+                matches!(
+                    r.state.as_str(),
+                    "queued" | "collecting" | "merging" | "merged"
+                )
+            }))
     }
 
     /// Steve's continues since you last did something on the item.
