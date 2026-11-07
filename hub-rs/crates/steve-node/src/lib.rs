@@ -16,6 +16,7 @@ mod actor;
 mod attachments;
 mod confine;
 
+pub mod disk_usage;
 mod exec;
 pub mod git;
 pub mod history;
