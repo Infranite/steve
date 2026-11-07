@@ -205,6 +205,7 @@ fn open_body(session: &str) -> OpenSession {
         resume: None,
         env: Default::default(),
         state: Default::default(),
+        artifact_view: None,
     }
 }
 
@@ -266,6 +267,164 @@ async fn ready(n: &LocalNode, session: &str) {
         .unwrap();
     let s = finished(n, &op).await;
     assert!(ok(&s), "{s:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn artifact_reads_bind_the_execution_view_and_survive_compaction_and_restart() {
+    let t = T::new(&[]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let digest = Digest::sha256(b"principal u1, workspace item:x");
+    let mut open = open_body("s_art");
+    open.artifact_view = Some(digest.clone());
+    n.open_session(now_cmd("op_open_art", open.clone()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_open_art").await));
+    std::fs::write(t.root.join("work/proj/result.txt"), b"the result").unwrap();
+    let command = now_cmd("op_art", turn("s_art", "t_art", "a_art", "@say done"));
+    n.start_turn(command.clone()).await.unwrap();
+    assert!(ok(&finished(&n, "op_art").await));
+    // A resend does not capture another grant or change the view.
+    n.start_turn(command).await.unwrap();
+    let query = ArtifactRead {
+        execution: ExecutionRef::Turn {
+            session: SessionId::new("s_art").unwrap(),
+            turn: TurnId::new("t_art").unwrap(),
+            attempt: AttemptId::new("a_art").unwrap(),
+        },
+        view_digest: digest,
+        location: RelPath::new("result.txt").unwrap(),
+        expected: None,
+        offset: 4,
+        max: 6,
+    };
+    assert_eq!(
+        n.read_artifact(query.clone()).await.unwrap().bytes,
+        b"result"
+    );
+    let mut wrong = query.clone();
+    wrong.view_digest = Digest::sha256(b"another principal");
+    assert_eq!(
+        n.read_artifact(wrong).await.unwrap_err().code,
+        ErrorCode::Denied
+    );
+    let mut wrong = query.clone();
+    let ExecutionRef::Turn { ref mut turn, .. } = wrong.execution else {
+        unreachable!()
+    };
+    *turn = TurnId::new("another-turn").unwrap();
+    assert_eq!(
+        n.read_artifact(wrong).await.unwrap_err().code,
+        ErrorCode::Denied
+    );
+    let mut legacy = query.clone();
+    legacy.execution = ExecutionRef::Job {
+        job: JobId::new("unknown").unwrap(),
+        attempt: AttemptId::new("unknown").unwrap(),
+    };
+    assert_eq!(
+        n.read_artifact(legacy).await.unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    // Reopening the session with a new view must not relabel an old execution's artifacts.
+    n.release_session(now_cmd("op_rel_art", open.session.clone()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_rel_art").await));
+    open.artifact_view = Some(Digest::sha256(b"new view"));
+    n.open_session(now_cmd("op_reopen_art", open))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_reopen_art").await));
+    assert_eq!(
+        n.read_artifact(query.clone()).await.unwrap().bytes,
+        b"result"
+    );
+    let heads = n.streams().await.unwrap();
+    n.acknowledge(EventAck {
+        durable: heads
+            .into_iter()
+            .map(|h| Watermark {
+                stream: h.stream,
+                epoch: h.epoch,
+                seq: h.produced,
+            })
+            .collect(),
+    })
+    .await
+    .unwrap();
+    n.shutdown().await;
+    drop(n);
+    let n = t.node();
+    assert_eq!(
+        n.read_artifact(query.clone()).await.unwrap().bytes,
+        b"result"
+    );
+    // Removing a configured root revokes even a durable grant.
+    n.set_roots(vec![]);
+    assert!(n.read_artifact(query.clone()).await.is_err());
+    n.set_roots(t.config().roots);
+    let current = n.workspace(ws()).await.unwrap();
+    n.tidy_workspace(now_cmd(
+        "op_tidy_art",
+        Tidy {
+            workspace: ws(),
+            expected: current.revision,
+            keep_branch: true,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_tidy_art").await));
+    assert_eq!(
+        n.read_artifact(query.clone()).await.unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    // Reusing the resource/id cannot resurrect a predecessor's grant.
+    n.prepare_workspace(now_cmd("op_reprep_art", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_reprep_art").await));
+    assert_eq!(
+        n.read_artifact(query).await.unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_legacy_execution_never_falls_back_to_a_general_file_read() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_legacy").await;
+    n.start_turn(now_cmd(
+        "op_legacy",
+        turn("s_legacy", "t_l", "a_l", "@say done"),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_legacy").await));
+    let query = ArtifactRead {
+        execution: ExecutionRef::Turn {
+            session: SessionId::new("s_legacy").unwrap(),
+            turn: TurnId::new("t_l").unwrap(),
+            attempt: AttemptId::new("a_l").unwrap(),
+        },
+        view_digest: Digest::sha256(b"guessed"),
+        location: RelPath::new("result.txt").unwrap(),
+        expected: None,
+        offset: 0,
+        max: 100,
+    };
+    assert_eq!(
+        n.read_artifact(query).await.unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

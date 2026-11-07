@@ -445,6 +445,23 @@ pub struct FileRead {
     pub max: u32,
 }
 
+/// A file produced by one accepted execution. Unlike a general [`FileRead`], this cannot name
+/// an arbitrary root: the Node takes the directory from the execution's durable artifact grant.
+/// The Hub authorizes the reader before calling this face. A digest is a scope binding, not a
+/// bearer token. Initially only session turns with an explicit artifact view are supported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRead {
+    pub execution: crate::common::ExecutionRef,
+    pub view_digest: Digest,
+    /// Plain relative names below the execution's workspace; no symlink is followed.
+    pub location: RelPath,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<Revision>,
+    pub offset: u64,
+    /// Bounded by the Node and transport even when the caller asks for more.
+    pub max: u32,
+}
+
 /// A directory tree to list for a knowledge source (or a project's description).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanSpec {

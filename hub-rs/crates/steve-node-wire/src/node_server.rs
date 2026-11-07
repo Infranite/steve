@@ -61,6 +61,7 @@ impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
                 en(&n.list_root(a.at, a.page).await?)
             }
             FS_READ => en(&n.read_file(de(p)?).await?),
+            ARTIFACT_READ => en(&n.read_artifact(de(p)?).await?),
             TREE_SCAN => en(&n.scan(de(p)?).await?),
             SCAN_PAGE => {
                 let a: PagesArgs = de(p)?;

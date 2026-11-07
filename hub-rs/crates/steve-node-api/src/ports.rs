@@ -85,6 +85,14 @@ pub trait WorkspaceExecutor: Send + Sync {
     /// Browse an allowed root (choosing a project directory).
     async fn list_root(&self, at: RootPath, page: PageRequest) -> ApiResult<Page<FileInfo>>;
     async fn read_file(&self, q: FileRead) -> ApiResult<ReadChunk>;
+    /// Strict, execution-scoped artifact read. Unsupported peers must never fall back to a
+    /// general filesystem read (which can follow links and does not bind an execution view).
+    async fn read_artifact(&self, _q: ArtifactRead) -> ApiResult<ReadChunk> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "execution-scoped artifact reads unsupported",
+        ))
+    }
     /// Scan a tree; read its pages under the scan's operation id.
     async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt>;
     async fn scan_page(&self, scan: OperationId, page: PageRequest) -> ApiResult<ScanPage>;

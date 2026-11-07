@@ -137,6 +137,21 @@ async fn faces(n: Arc<dyn Node>) -> Vec<String> {
         })
         .await,
     ));
+    // A peer without this face returns unsupported; never reinterpret it as fs.read.
+    out.push(show(
+        &n.read_artifact(ArtifactRead {
+            execution: ExecutionRef::Job {
+                job: JobId::new("job-art").unwrap(),
+                attempt: AttemptId::new("attempt-art").unwrap(),
+            },
+            view_digest: Digest::sha256(b"artifact view"),
+            location: rel("d/b.md"),
+            expected: None,
+            offset: 0,
+            max: u32::MAX,
+        })
+        .await,
+    ));
     let spec = ScanSpec {
         root: at("notes", ""),
         include: vec![],
@@ -224,8 +239,9 @@ async fn the_faces_answer_over_the_wire_exactly_like_the_node() {
         assert_eq!(x, y, "step {i}");
     }
     assert!(a[0].starts_with("ok"), "{}", a[0]);
-    assert!(a[7].starts_with("ok"), "the push went through: {}", a[7]);
-    assert!(a[11].contains("invalid"), "a forged key: {}", a[11]);
+    assert!(a[3].contains("unsupported"), "old face refused: {}", a[3]);
+    assert!(a[8].starts_with("ok"), "the push went through: {}", a[8]);
+    assert!(a[12].contains("invalid"), "a forged key: {}", a[12]);
     assert_eq!(direct_secrets.taken(), hub_secrets.taken());
     assert_eq!(hub_secrets.taken().len(), 1);
     assert_eq!(direct.log(), fake.log());
@@ -333,6 +349,49 @@ impl Handler for Echo {
     async fn handle(&self, _method: &str, p: Value) -> ApiResult<Value> {
         Ok(p)
     }
+}
+
+struct ArtifactPeer(std::sync::Mutex<Option<ArtifactRead>>);
+
+#[async_trait]
+impl Handler for ArtifactPeer {
+    async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
+        if method != ARTIFACT_READ {
+            return Err(unsupported(method));
+        }
+        let q: ArtifactRead = from_value(p)?;
+        let result = ReadChunk {
+            offset: q.offset,
+            bytes: b"artifact bytes".to_vec(),
+            eof: true,
+        };
+        *self.0.lock().unwrap() = Some(q);
+        Ok(serde_json::to_value(result).unwrap())
+    }
+}
+
+#[tokio::test]
+async fn artifact_reads_preserve_scope_and_bound_the_wire_chunk() {
+    let (h, n) = pair();
+    let hub = Conn::spawn(h.sink, h.stream, 1, Arc::new(Echo), opts("h"));
+    let peer = Arc::new(ArtifactPeer(Default::default()));
+    let _node = Conn::spawn(n.sink, n.stream, 1, peer.clone(), opts("n"));
+    let remote = steve_node_wire::RemoteNode::new(NodeId::new("n1").unwrap());
+    remote.attach(hub, false);
+    let mut q = ArtifactRead {
+        execution: exec_turn("s-art", "t-art", "a-art"),
+        view_digest: Digest::sha256(b"principal view"),
+        location: rel("report.txt"),
+        expected: Some(Revision::new("v-art").unwrap()),
+        offset: 123,
+        max: u32::MAX,
+    };
+    let result = remote.read_artifact(q.clone()).await.unwrap();
+    assert_eq!(result.bytes, b"artifact bytes");
+    assert_eq!(result.offset, 123);
+    q.max = steve_node_wire::envelope::CHUNK_BYTES;
+    assert_eq!(*peer.0.lock().unwrap(), Some(q));
+    assert_eq!(spec(ARTIFACT_READ).unwrap().lane, Lane::Bulk);
 }
 
 /// Both ends of a link that echoes (keep the second alive).
@@ -564,7 +623,7 @@ impl Handler for OldPeer {
     async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
         self.seen.lock().unwrap().push(method.to_string());
         match method {
-            HISTORY_LOCATE => Err(unsupported(method)),
+            HISTORY_LOCATE | ARTIFACT_READ => Err(unsupported(method)),
             GIT_INSPECT => {
                 // what it understands, and nothing else
                 let q: OldQuery = from_value(p)?;
@@ -701,6 +760,27 @@ async fn an_older_peer_is_never_sent_what_it_would_ignore() {
     };
     remote.scan(cmd("op_s2", default_scan)).await.unwrap();
     assert!(remote.probe(false).await.is_ok());
+    // A new method cannot be mistaken for an older method with ignored fields. A real old
+    // endpoint rejects it explicitly, and the remote never retries it through fs.read.
+    refused(
+        remote
+            .read_artifact(ArtifactRead {
+                execution: exec_turn("s-art", "t-art", "a-art"),
+                view_digest: Digest::sha256(b"view"),
+                location: rel("report.txt"),
+                expected: None,
+                offset: 0,
+                max: 100,
+            })
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(
+        peer.seen.lock().unwrap().last().map(String::as_str),
+        Some(ARTIFACT_READ)
+    );
+    assert!(!peer.seen.lock().unwrap().iter().any(|m| m == FS_READ));
+    assert!(remote.probe(false).await.is_ok(), "same link still usable");
     // a malformed payload is still invalid, not unsupported
     let e = hub
         .call(GIT_INSPECT, json!({"workspace": 1}), None)
