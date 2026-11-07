@@ -102,6 +102,17 @@ impl Home {
             .filter(|m| m.get("spawn").is_some())
             .count()
     }
+    /// Count adapters by workspace, without unrelated background model jobs. Canonicalize
+    /// both sides because the temporary home may use a symlink (e.g. /var on macOS).
+    fn spawns_under(&self, dir: &std::path::Path) -> usize {
+        let root = dir.canonicalize().expect("adapter workspace");
+        self.lines()
+            .iter()
+            .filter_map(|m| m["spawn"]["cwd"].as_str())
+            .filter_map(|cwd| std::path::Path::new(cwd).canonicalize().ok())
+            .filter(|cwd| cwd.starts_with(&root))
+            .count()
+    }
     /// The test's own database (in the temp home), read-only.
     fn db(&self) -> rusqlite::Connection {
         rusqlite::Connection::open_with_flags(
@@ -1346,6 +1357,7 @@ async fn legacy_sessions_move_to_the_node_at_boot() {
     hub.kill();
     drop(hub);
     legacy_fixture(&h, &bot);
+    let scratch = h.steve().join("scratch");
 
     // the upgrade: the first boot of this build on that home, still behind the drain (the
     // release lifts it once the new Hub answers)
@@ -1382,6 +1394,14 @@ async fn legacy_sessions_move_to_the_node_at_boot() {
     );
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
+    assert!(
+        wait(30, || h
+            .count("SELECT COUNT(*) FROM runtime_jobs WHERE ?<>''", "-")
+            > jobs)
+        .await,
+        "the background model call resumes after maintenance; log:\n{}",
+        hub_log(&h)
+    );
     for (s, conv, token) in [
         ("ses_legacy_a", "acp-legacy-a", "moved-a-B7"),
         ("ses_legacy_r", "acp-legacy-r", "moved-r-B7"),
@@ -1441,11 +1461,17 @@ async fn legacy_sessions_move_to_the_node_at_boot() {
         0,
         "nothing left in the old runner's hands"
     );
+    // Category backfill resumes too, in a Node job directory of its own. It must not count
+    // as an extra migrated session, and the idle session must still have no adapter.
     assert_eq!(
-        h.spawns(),
-        spawns + 2,
-        "one Node harness each, none for the idle one"
+        h.spawns_under(&scratch),
+        2,
+        "one session harness each, none for the idle one; ACP:\n{:?}",
+        h.lines()
     );
+    for (item, expected) in [("ST-91", 1), ("ST-93", 1), ("ST-95", 0)] {
+        assert_eq!(h.spawns_under(&scratch.join(item)), expected, "{item}");
+    }
     // the idle one is bound as one the Node let go: its harness opens at its next message
     assert_eq!(
         h.one(
@@ -1467,7 +1493,10 @@ async fn legacy_sessions_move_to_the_node_at_boot() {
             .any(|m| m["method"] == "session/load" && m["params"]["sessionId"] == "acp-legacy-i"),
         "on its own conversation"
     );
-    assert_eq!(h.spawns(), spawns + 3);
+    assert_eq!(h.spawns_under(&scratch), 3);
+    for item in ["ST-91", "ST-93", "ST-95"] {
+        assert_eq!(h.spawns_under(&scratch.join(item)), 1, "{item}");
+    }
     // b can never run there: ended, why said once, its queue said and gone
     assert_eq!(
         h.one("SELECT status FROM sessions WHERE id=?", "ses_legacy_b")
@@ -1540,7 +1569,7 @@ async fn legacy_sessions_move_to_the_node_at_boot() {
     drop(hub);
 
     // the Node off: a Node session parks, a new session is refused, nothing runs on the Hub
-    let spawns = h.spawns();
+    let spawns = h.spawns_under(&scratch);
     let _hub = spawn(&h, false, &env);
     serving(&h).await;
     let c = Client::login(&h).await;
@@ -1571,7 +1600,11 @@ async fn legacy_sessions_move_to_the_node_at_boot() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(h.got("parked-a-B7"), 0);
     assert_eq!(h.got("off-new-B7"), 0);
-    assert_eq!(h.spawns(), spawns, "no harness on the Hub");
+    assert_eq!(
+        h.spawns_under(&scratch),
+        spawns,
+        "no session harness on the Hub"
+    );
 }
 
 /// B7: a session the boot pass could not move yet (here: a resume handle no Node takes, mended
