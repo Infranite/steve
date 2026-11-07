@@ -407,9 +407,18 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         "the command ran and the turn went on: {}",
         texts(&e, &unasked).await
     );
+    // `busy` describes the current turn: takeover may already have started another one
+    // by the time we poll. Check the durable completion of the turn exercised here.
     assert!(
-        until(10, || async { e.session(&unasked).await["busy"] == false }).await,
-        "the turn is over"
+        until(30, || async {
+            texts(&e, &unasked)
+                .await
+                .contains("\"stopReason\":\"end_turn\"")
+        })
+        .await,
+        "the turn completed normally; session: {}; events: {}",
+        e.session(&unasked).await,
+        texts(&e, &unasked).await
     );
     let t = texts(&e, &unasked).await;
     assert!(!t.contains("\"stopReason\":\"cancelled\""), "{t}");
