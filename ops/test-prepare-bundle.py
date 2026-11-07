@@ -18,7 +18,7 @@ m = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(m)
 
 
-class PrepareBundle(unittest.TestCase):
+class BundleFixture:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -51,6 +51,7 @@ class PrepareBundle(unittest.TestCase):
         self.sign = patch.object(m, "sign").start()
         self.args = SimpleNamespace(from_source=False, release=str(self.candidate), version="0.2.0", commit="a" * 40, keychain_pass_stdin=True)
 
+class PrepareBundle(BundleFixture, unittest.TestCase):
     def test_signs_only_hub_without_compilation_or_helper_replacement(self):
         with patch.object(m.subprocess, "run", side_effect=AssertionError("no build or network")):
             self.assertEqual(m.prepare_bundle(self.args), 0)
@@ -100,7 +101,7 @@ class PrepareBundle(unittest.TestCase):
         self.sign.assert_not_called()
 
 
-class LegacyBundleBridge(PrepareBundle):
+class LegacyBundleBridge(BundleFixture, unittest.TestCase):
     def archive(self):
         output = io.BytesIO()
         with tarfile.open(fileobj=output, mode="w:gz") as archive:
@@ -141,7 +142,7 @@ class LegacyBundleBridge(PrepareBundle):
         self.assertFalse((self.home / "releases/0.2.0-local-aaaaaaa").exists())
 
 
-class FirstMacInstall(PrepareBundle):
+class FirstMacInstall(BundleFixture, unittest.TestCase):
     def fresh(self):
         self.helper.unlink()
         for name in ("sign-setup.sh", "release-lib.sh"):
