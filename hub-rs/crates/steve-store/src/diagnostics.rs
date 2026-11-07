@@ -401,14 +401,14 @@ impl Diagnostics<'_> {
 
     pub fn explain(&self, ws: &str, item: &str) -> Result<Value> {
         self.snapshot(|tx, counters| {
-            own(&tx, ws, item)?;
+            own(tx, ws, item)?;
             let at = now();
             let item_view = tx.query_row("SELECT id,status,phase,cycle,revision FROM items WHERE id=?",[item],|r| {
                 Ok(json!({"id":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"phase":r.get::<_,String>(2)?,"cycle":r.get::<_,i64>(3)?,"revision":r.get::<_,i64>(4)?}))
             })?;
             let mut st = tx.prepare("SELECT id,status,harness,created,updated FROM sessions WHERE item_id=? AND workspace_id=? ORDER BY no DESC,created DESC LIMIT 100")?;
             let sessions = st.query_map(params![item,ws],|r| Ok(json!({"id":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"harness":r.get::<_,String>(2)?,"created":r.get::<_,i64>(3)?,"updated":r.get::<_,i64>(4)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
-            Ok(json!({"observed_at":at,"item":item_view,"capture":capture_view(&tx,item,at)?,"sessions":sessions,"coverage":self.coverage(&tx,item,at,counters)?}))
+            Ok(json!({"observed_at":at,"item":item_view,"capture":capture_view(tx,item,at)?,"sessions":sessions,"coverage":self.coverage(tx,item,at,counters)?}))
         })
     }
 
@@ -434,7 +434,7 @@ impl Diagnostics<'_> {
             return Err(StoreError::Conflict("invalid diagnostic filter".into()));
         }
         self.snapshot(|tx, counters| {
-            own(&tx,ws,item)?;
+            own(tx,ws,item)?;
             let at=now();
             let head: i64=tx.query_row("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='diagnostic_events'),0)",[],|r|r.get(0))?;
             let through=filter.through.unwrap_or(head).min(head);
@@ -468,7 +468,7 @@ impl Diagnostics<'_> {
             })?.collect::<std::result::Result<Vec<_>,_>>()?;
             let has_more=events.len()>limit;events.truncate(limit);
             let next=events.last().and_then(|e|e["cursor"].as_i64());
-            let coverage=self.coverage(&tx,item,at,counters)?;
+            let coverage=self.coverage(tx,item,at,counters)?;
             let removed=coverage["removed_through"].as_i64().unwrap_or(0);
             let mut gaps=vec![];
             if removed.min(through)>after {gaps.push(json!({"reason":"retention_or_capacity","after":after,"through":removed.min(through)}));}
@@ -510,7 +510,8 @@ impl Diagnostics<'_> {
             .diagnostics
             .get()
             .map_or(0, |r| r.loss_epoch.load(Ordering::Relaxed));
-        let loss_count_stable = counters.loss_epoch % 2 == 0 && counters.loss_epoch == ending_epoch;
+        let loss_count_stable =
+            counters.loss_epoch.is_multiple_of(2) && counters.loss_epoch == ending_epoch;
         let queued = counters.queued;
         // A process crash can discard queued observations or interrupt remote-event
         // projection before the recorder sees them. Zero known losses or pending

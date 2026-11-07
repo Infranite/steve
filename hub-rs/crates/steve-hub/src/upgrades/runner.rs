@@ -999,13 +999,13 @@ fn deploy(
     let log = spec.log.clone().unwrap_or_default();
 
     say(format!("deploy {}", candidate.display()));
-    let journaled = fs::read_to_string(&script).is_ok_and(|s| s.contains("--operation"));
+    let journaled = fs::read_to_string(script).is_ok_and(|s| s.contains("--operation"));
     let mut deploy = Command::new(&spec.python);
     deploy
         .arg("-I")
-        .arg(&script)
+        .arg(script)
         .arg("deploy")
-        .arg(&candidate)
+        .arg(candidate)
         .env("STEVE_HOME", &u.home)
         .stdin(Stdio::null());
     if journaled {
