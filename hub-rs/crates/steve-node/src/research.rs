@@ -1,9 +1,9 @@
-//! Research jobs: one read-only research attempt per job, run by `steve_research` on this machine.
+//! Research jobs: one read-only research attempt per job, hosted on this machine.
 //!
 //! The Hub chose the model and built the prompt; this Node resolves the directories through its
-//! roots, fetches the prompt's files from the Hub, runs exactly that one attempt with all three
-//! read-only layers (harness allowlist and settings, the guard that kills on the first bad call, and
-//! `sandbox-exec` when the policy asks for `fs-readonly`) and reports its draft, tool rows, usage
+//! roots, fetches the prompt's files from the Hub, runs exactly that one attempt through its ACP
+//! adapter (read-only mode, the guard that kills on the first bad call, and the policy's sandbox).
+//! Hosts without a registered adapter retain the legacy print runner. Both report draft, tool rows, usage
 //! and end. Steve's read-only tools reach the Hub through the Node's loopback endpoint with a token
 //! of this job only, gone when it ends. Off until the host enables it ([`LocalNode::enable_research`]).
 
@@ -18,6 +18,9 @@ use tokio::sync::{mpsc, watch};
 
 use crate::journal::Tx;
 use crate::{Decided, LocalNode, emit_all, job, now, procs, workspace};
+
+#[path = "research_acp.rs"]
+pub(crate) mod acp;
 
 /// The guarantee a research job may ask the sandbox for.
 pub(crate) const FS_READONLY: &str = "fs-readonly";
@@ -51,6 +54,7 @@ struct Plan {
     req: r::ResearchRequest,
     plan: r::AttemptPlan,
     codex: bool,
+    acp: bool,
 }
 
 impl LocalNode {
@@ -73,6 +77,7 @@ impl LocalNode {
                 .accept("start_job", &c, |_| Ok(Decided::accepted()))
                 .map(|(r, _)| r);
         }
+        self.0.cfg.ceiling.check(&spec.run.policy)?;
         let plan = self.research_plan(spec)?;
         let jobs = self.0.cfg.capacity.jobs;
         let (r, fresh) = self.accept("start_job", &c, |t| {
@@ -130,7 +135,9 @@ impl LocalNode {
             return Err(ApiError::new(ErrorCode::Internal, "not a research job"));
         };
         let run = &spec.run;
+        let acp = self.0.cfg.acp.adapters.contains_key(&run.choice.harness);
         let codex = match run.choice.harness.as_str() {
+            _ if acp => false,
             "claude-code" => false,
             "codex" if base.codex_executable.is_some() => true,
             h => {
@@ -141,7 +148,7 @@ impl LocalNode {
             }
         };
         let model = run.choice.model.clone().unwrap_or_default();
-        if model.is_empty() && !codex {
+        if model.is_empty() && !codex && !acp {
             return Err(ApiError::new(
                 ErrorCode::Invalid,
                 "a research job on claude-code names its model",
@@ -166,7 +173,14 @@ impl LocalNode {
                 "this node cannot restrict a harness's network",
             ));
         }
-        let sandbox = sandbox_mode(&p.sandbox, codex)?;
+        let sandbox = if acp {
+            acp::sandbox_mode(
+                &p.sandbox,
+                self.0.cfg.acp.adapter_properties(&run.choice.harness),
+            )?
+        } else {
+            sandbox_mode(&p.sandbox, codex)?
+        };
         Self::check_limits(&run.limits)?;
         let roots = self.0.roots();
         let cwd = job
@@ -197,6 +211,7 @@ impl LocalNode {
             max_turns: job.budget.max_turns,
             max_tools: job.budget.max_tools,
             idle: Duration::from_millis(job.budget.idle_ms),
+            exit_wait: r::EXIT_WAIT,
         };
         let prompt = run
             .prompt
@@ -223,6 +238,7 @@ impl LocalNode {
             cfg,
             req,
             codex,
+            acp,
         })
     }
 
@@ -232,6 +248,7 @@ impl LocalNode {
             mut req,
             plan,
             codex,
+            acp,
         } = p;
         let inner = self.0.clone();
         let dir = workspace::dir_name(exec.attempt().as_str());
@@ -242,14 +259,15 @@ impl LocalNode {
         let mut tick = tokio::time::interval(POLL);
         // the prompt's files and images, from the Hub for this execution, while the job is wanted
         for part in &spec.run.prompt {
-            let (artifact, name) = match part {
+            let (artifact, name, earlier) = match part {
                 Part::File { artifact, name } => (
                     artifact,
                     name.strip_prefix(ATTACHMENTS_DIR)
                         .unwrap_or(name)
                         .to_string(),
+                    job.earlier.contains(name),
                 ),
-                Part::Image { artifact } => (artifact, image_name(artifact)),
+                Part::Image { artifact } => (artifact, image_name(artifact), false),
                 _ => continue,
             };
             let fetch = crate::fetch(&inner, &exec, artifact);
@@ -271,7 +289,7 @@ impl LocalNode {
                     name,
                     mime: artifact.mime.clone(),
                     size: artifact.size,
-                    earlier: false,
+                    earlier,
                 }),
                 Err(e) => {
                     let failed = r::RunStatus::Failed(format!("research attachments: {e}"));
@@ -323,49 +341,51 @@ impl LocalNode {
                 ok
             })
         };
-        let (events_tx, mut events) = mpsc::unbounded_channel();
-        let (stop_tx, stop) = watch::channel(false);
-        let one = r::OneAttempt {
-            run_id: dir.clone(),
-            plan,
-            on_spawn: Some(on_spawn),
-        };
-        let run = r::run_attempt(&cfg, req, one, events_tx, stop);
-        tokio::pin!(run);
-        let mut draft = Draft::new(&exec);
-        let mut output = 0u64;
-        // the first reason the Node stopped it for
-        let mut why: Option<Stop> = None;
-        let outcome = loop {
-            tokio::select! {
-                out = &mut run => break out,
-                Some(ev) = events.recv() => {
-                    let evs = draft.on(ev);
-                    output += output_bytes(&evs);
-                    if !evs.is_empty() && self.emit(evs).is_err() {
-                        // the journal is at its limit (or failed): running work stops
-                        stop_tx.send_replace(true);
+        let (outcome, why, tail) = if acp {
+            self.research_acp_attempt(&op, &exec, &spec, &cfg, &req, &plan, &*on_spawn)
+                .await
+        } else {
+            let (events_tx, mut events) = mpsc::unbounded_channel();
+            let (stop_tx, stop) = watch::channel(false);
+            let one = r::OneAttempt {
+                run_id: dir.clone(),
+                plan,
+                on_spawn: Some(on_spawn),
+            };
+            let run = r::run_attempt(&cfg, req, one, events_tx, stop);
+            tokio::pin!(run);
+            let mut draft = Draft::new(&exec);
+            let mut output = 0u64;
+            let mut why: Option<Stop> = None;
+            let outcome = loop {
+                tokio::select! {
+                    out = &mut run => break out,
+                    Some(ev) = events.recv() => {
+                        let evs = draft.on(ev);
+                        output += output_bytes(&evs);
+                        if !evs.is_empty() && self.emit(evs).is_err() {
+                            stop_tx.send_replace(true);
+                        }
+                        if why.is_none() && output > limits.max_output_bytes {
+                            why = Some(Stop::Output);
+                            stop_tx.send_replace(true);
+                        }
                     }
-                    if why.is_none() && output > limits.max_output_bytes {
-                        why = Some(Stop::Output);
-                        stop_tx.send_replace(true);
+                    _ = tick.tick() => {
+                        if why.is_none() && let Some(w) = self.stop_now(&op, limits, output) {
+                            why = Some(w);
+                            stop_tx.send_replace(true);
+                        }
                     }
                 }
-                _ = tick.tick() => {
-                    if why.is_none() && let Some(w) = self.stop_now(&op, limits, output) {
-                        why = Some(w);
-                        stop_tx.send_replace(true);
-                    }
-                }
+            };
+            while let Ok(ev) = events.try_recv() {
+                let evs = draft.on(ev);
+                let _ = self.emit(evs);
             }
+            (outcome, why, draft.close())
         };
-        // whatever the harness still said before it ended
-        while let Ok(ev) = events.try_recv() {
-            let evs = draft.on(ev);
-            let _ = self.emit(evs);
-        }
         inner.tools.revoke_job(&exec);
-        let _ = tokio::fs::remove_dir_all(cfg.scratch.join(&dir)).await;
         let recorded = *group.lock().unwrap();
         if let Some((pgid, started)) = recorded {
             if !confirm_gone(pgid, started).await {
@@ -377,6 +397,10 @@ impl LocalNode {
             }
             let _ = inner.j.tx(|t| t.drop_proc(&holder, pgid));
         }
+        // A cancelled ACP future sends TERM before the process is reaped. Keep its directories
+        // until the whole group is confirmed gone, so a dying child cannot recreate them.
+        let _ = tokio::fs::remove_dir_all(cfg.scratch.join(&dir)).await;
+        let _ = tokio::fs::remove_dir_all(cfg.files_root.join(&dir)).await;
         let usage = usage(&exec, &outcome, codex);
         let session = outcome
             .claude_session
@@ -392,7 +416,7 @@ impl LocalNode {
             outcome.sandboxed,
         );
         let mut evs = usage;
-        evs.extend(draft.close());
+        evs.extend(tail);
         self.end_research(&op, &exec, c, evs).await
     }
 
@@ -481,12 +505,20 @@ async fn confirm_gone(pgid: i64, started: Option<u64>) -> bool {
     loop {
         match procs::state(pgid, started) {
             procs::Stopped::Gone => return true,
-            procs::Stopped::Alive => return procs::stop(pgid, started).await.gone(),
-            procs::Stopped::Uncertain if tokio::time::Instant::now() < until => {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+            procs::Stopped::Alive => {
+                if procs::stop(pgid, started).await.gone() {
+                    return true;
+                }
             }
-            procs::Stopped::Uncertain => return false,
+            procs::Stopped::Uncertain => {}
         }
+        // The leader can exit between state() and stop()'s ownership check. That is not
+        // evidence of a surviving process: wait for the kernel's group-gone proof, just as
+        // when the first probe was already uncertain. Never signal an uncertain group.
+        if tokio::time::Instant::now() >= until {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -627,18 +659,12 @@ fn ended(
         Some(Stop::Offline) => {
             c.outcome = Outcome::TimedOut;
             c.stop_reason = "offline".into();
-            c.error = Some(ApiError::new(
-                ErrorCode::Offline,
-                "the Hub was unreachable past the lease",
-            ));
+            c.error = Some(NodeStop::HubUnreachable.error());
         }
         Some(Stop::Output) => {
             c.outcome = Outcome::Cancelled;
             c.stop_reason = "max_output".into();
-            c.error = Some(ApiError::new(
-                ErrorCode::Exhausted,
-                "the output limit was reached",
-            ));
+            c.error = Some(NodeStop::OutputLimit.error());
         }
         Some(Stop::Cancel | Stop::Deadline) | None => {}
     }
@@ -659,23 +685,17 @@ fn completion(
         r::RunStatus::Budget(r::BudgetHit::Time) => (
             Outcome::TimedOut,
             "deadline",
-            Some(ApiError::new(ErrorCode::Expired, "past the job's deadline")),
+            Some(NodeStop::JobDeadline.error()),
         ),
         r::RunStatus::Budget(r::BudgetHit::Idle) => (
             Outcome::TimedOut,
             "idle",
-            Some(ApiError::new(
-                ErrorCode::Expired,
-                "the harness said nothing for too long",
-            )),
+            Some(NodeStop::HarnessIdle.error()),
         ),
         r::RunStatus::Budget(_) => (
             Outcome::Failed,
             "max_turns",
-            Some(ApiError::new(
-                ErrorCode::Exhausted,
-                "research budget reached",
-            )),
+            Some(NodeStop::ResearchBudget.error()),
         ),
         r::RunStatus::Violated(v) => (
             Outcome::Failed,

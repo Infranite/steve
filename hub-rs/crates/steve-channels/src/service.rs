@@ -15,7 +15,9 @@ use steve_store::Store;
 use crate::ChannelResult;
 use crate::channel::{ChannelAdapter, InboundMessage, ProfileAdapter, SpaceEvent};
 use crate::conversations::Thread;
+use crate::ext::ChannelDecl;
 use crate::inbound::Inbound;
+use crate::media::MediaFetch;
 use crate::membership::SpaceChange;
 use crate::names::Names;
 use crate::reactions::{AdapterReactor, Locks, Reactor};
@@ -51,7 +53,11 @@ struct Inner {
     locks: Locks,
     gens: crate::conversations::Generations,
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
+    media: BTreeMap<String, Arc<dyn MediaFetch>>,
+    history: BTreeMap<String, Arc<dyn crate::history::HistoryRead>>,
+    decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
+    yolo: Option<Arc<dyn YoloSwitch>>,
     names: Names,
     /// Where replies' knowledge is searched (the Hub sets the workspace's store; SQLite until then).
     knowledge: std::sync::OnceLock<Arc<dyn steve_knowledge::port::KnowledgeStore>>,
@@ -62,6 +68,11 @@ struct Inner {
 pub trait OtherEvents: Send + Sync {
     /// `true` when it handled the envelope.
     fn on_event(&self, ws: &str, connection_id: &str, envelope: &serde_json::Value) -> bool;
+}
+
+/// Whether YOLO decides a workspace's cards now (steve-core's switch; a channel card has no item).
+pub trait YoloSwitch: Send + Sync {
+    fn on(&self, ws: &str) -> bool;
 }
 
 /// Builds [`Channels`]: `Channels::builder(modules, conns, sink).adapter(feishu).build()`.
@@ -77,7 +88,11 @@ pub struct ChannelsBuilder {
     reactor: Arc<dyn Reactor>,
     thread: Option<Arc<dyn Thread>>,
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
+    media: BTreeMap<String, Arc<dyn MediaFetch>>,
+    history: BTreeMap<String, Arc<dyn crate::history::HistoryRead>>,
+    decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
+    yolo: Option<Arc<dyn YoloSwitch>>,
 }
 
 impl ChannelsBuilder {
@@ -88,10 +103,38 @@ impl ChannelsBuilder {
         self
     }
 
+    /// Registers the history view of a channel side under the `connections.adapter` it serves:
+    /// how an agent's `steve_im_read` reads its conversations ([`crate::history`]).
+    pub fn history(mut self, h: Arc<dyn crate::history::HistoryRead>) -> Self {
+        self.history.insert(h.adapter_id().to_string(), h);
+        self
+    }
+
+    /// Registers the media view of a channel side under the `connections.adapter` it serves: how
+    /// the resources of messages its connections received are fetched.
+    pub fn media(mut self, m: Arc<dyn MediaFetch>) -> Self {
+        self.media.insert(m.adapter_id().to_string(), m);
+        self
+    }
+
+    /// Registers how a channel side behaves ([`ChannelDecl`]), under its adapter id: whether its
+    /// messages carry provider ids, how precise their times are, the system of its senders.
+    pub fn decl(mut self, d: ChannelDecl) -> Self {
+        self.decls.insert(d.adapter.clone(), d);
+        self
+    }
+
     /// The contacts ports' party hooks, for the merges that names settle (accounts move along).
     /// Default: the accounts module's alone.
     pub fn party_hooks(mut self, hooks: Vec<Arc<dyn PartyHooks>>) -> Self {
         self.party_hooks = hooks;
+        self
+    }
+
+    /// YOLO's switch: while it decides a workspace's cards, a flagged reply that waits for approval is
+    /// still rewritten once first (YOLO never approves a flagged text). Default: off.
+    pub fn yolo(mut self, y: Arc<dyn YoloSwitch>) -> Self {
+        self.yolo = Some(y);
         self
     }
 
@@ -148,6 +191,15 @@ impl ChannelsBuilder {
     }
 
     pub fn build(self) -> Channels {
+        for m in self.media.values() {
+            crate::media::publish(m);
+        }
+        // who can look people up, for the contact pages' “can be looked up” (by declared system)
+        for id in self.profiles.keys() {
+            if let Some(d) = self.decls.get(id) {
+                steve_modules::contacts::profile::register_lookup(id, &d.handle_system);
+            }
+        }
         Channels(Arc::new(Inner {
             modules: self.modules,
             conns: self.conns,
@@ -162,7 +214,11 @@ impl ChannelsBuilder {
             locks: Locks::default(),
             gens: Default::default(),
             profiles: self.profiles,
+            media: self.media,
+            history: self.history,
+            decls: self.decls,
             party_hooks: self.party_hooks,
+            yolo: self.yolo,
             names: Names::default(),
             knowledge: std::sync::OnceLock::new(),
         }))
@@ -188,7 +244,11 @@ impl Channels {
             reactor: Arc::new(AdapterReactor),
             thread: None,
             profiles: BTreeMap::new(),
+            media: BTreeMap::new(),
+            history: BTreeMap::new(),
+            decls: BTreeMap::new(),
             party_hooks: vec![Arc::new(steve_modules::accounts::AccountHooks)],
+            yolo: None,
         }
     }
 
@@ -237,6 +297,11 @@ impl Channels {
         self.0.flow.as_ref()
     }
 
+    /// YOLO decides `ws`'s cards now ([`ChannelsBuilder::yolo`]).
+    pub(crate) fn yolo_on(&self, ws: &str) -> bool {
+        self.0.yolo.as_ref().is_some_and(|y| y.on(ws))
+    }
+
     pub fn guard(&self) -> &dyn Guard {
         self.0.guard.as_ref()
     }
@@ -283,6 +348,46 @@ impl Channels {
     /// The adapters that can look people up.
     pub fn profile_adapter_ids(&self) -> Vec<String> {
         self.0.profiles.keys().cloned().collect()
+    }
+
+    /// The systems whose people a registered profile view looks up (its side's declared
+    /// `handle_system`).
+    pub fn profile_systems(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for id in self.0.profiles.keys() {
+            if let Some(d) = self.0.decls.get(id)
+                && !out.contains(&d.handle_system)
+            {
+                out.push(d.handle_system.clone());
+            }
+        }
+        out
+    }
+
+    /// The history views, by `connections.adapter`.
+    pub(crate) fn history_views(&self) -> &BTreeMap<String, Arc<dyn crate::history::HistoryRead>> {
+        &self.0.history
+    }
+
+    /// The media view for `connections.adapter = id`.
+    pub fn media(&self, id: &str) -> Option<Arc<dyn MediaFetch>> {
+        self.0.media.get(id).cloned()
+    }
+
+    /// The adapters whose messages' resources can be fetched.
+    pub fn media_adapter_ids(&self) -> Vec<String> {
+        self.0.media.keys().cloned().collect()
+    }
+
+    /// The declaration of the channel side serving `connections.adapter = id`, when one was
+    /// registered.
+    pub fn decl(&self, id: &str) -> Option<&ChannelDecl> {
+        self.0.decls.get(id)
+    }
+
+    /// The declared channel sides, by adapter id.
+    pub fn decls(&self) -> impl Iterator<Item = &ChannelDecl> {
+        self.0.decls.values()
     }
 
     pub(crate) fn party_hooks(&self) -> &[Arc<dyn PartyHooks>] {

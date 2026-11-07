@@ -1,4 +1,4 @@
-//! Steve's tools, independent of any tool protocol (docs/hub-node-client.md §4): the five Steve tools
+//! Steve's tools, independent of any tool protocol: the Steve tools
 //! (steve-mcp) and the modules' tools (`mcp_extra`), listed and run for one session. The Hub's MCP
 //! endpoint is one way to reach them (for harnesses the in-process runner starts); a Node's
 //! `tool.call` is the other. Both get the same definitions, checks and texts.
@@ -18,11 +18,15 @@ pub struct ToolService {
 
 /// Tools the agent only reads with (they change nothing).
 const READ_ONLY: &[&str] = &[
+    "steve_items_search",
+    "steve_item_read",
+    steve_mcp::tools::LANE_STATUS,
     "steve_event_get",
     "steve_knowledge_search",
     "steve_knowledge_get",
     "steve_contacts_search",
     "steve_contact_get",
+    "steve_im_read",
 ];
 
 impl ToolService {
@@ -74,7 +78,7 @@ impl ToolService {
 mod tests {
     use super::*;
 
-    /// The names `tools/list` of the Hub's MCP endpoint gives: the five, then the modules'.
+    /// The names `tools/list` of the Hub's MCP endpoint gives: Steve's own, then the modules'.
     fn mcp_names() -> Vec<String> {
         let mut v: Vec<String> = steve_mcp::tools::list()
             .into_iter()
@@ -93,6 +97,17 @@ mod tests {
         let names = mcp_names();
         assert!(names.contains(&"steve_update".to_string()));
         assert!(names.contains(&mcp_extra::REPLY_SOURCE.to_string()));
+        for name in [
+            "steve_items_search",
+            "steve_item_read",
+            "steve_item_dependencies",
+        ] {
+            assert!(names.contains(&name.to_string()), "{name}");
+        }
+        assert!(READ_ONLY.contains(&"steve_items_search"));
+        assert!(READ_ONLY.contains(&"steve_item_read"));
+        assert!(READ_ONLY.contains(&steve_mcp::tools::LANE_STATUS));
+        assert!(!READ_ONLY.contains(&"steve_item_dependencies"));
         let mut unique = names.clone();
         unique.sort();
         unique.dedup();

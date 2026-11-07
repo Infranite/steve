@@ -204,6 +204,7 @@ impl CmdNode for FlowCmd {
             ) => {
                 return CmdRan::NoProject;
             }
+            Err(e @ PlacementError::NotOwners { .. }) => return CmdRan::NotRun(e.to_string()),
             Err(PlacementError::Store(e)) => return CmdRan::NotRun(e.to_string()),
         };
         let At::Root(dir) = placed.at.clone() else {
@@ -343,6 +344,7 @@ mod tests {
         store.ensure_workspace().unwrap();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
                 node: NodeId::new("local").unwrap(),
                 home: dir.join("node"),
                 acp: steve_acp::AcpConfig {

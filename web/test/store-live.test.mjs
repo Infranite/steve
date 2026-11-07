@@ -9,6 +9,7 @@ import * as notes from "../src/decision-notes.ts"
 import * as feed from "../src/feed-order.ts"
 import * as format from "../src/i18n/format.ts"
 import * as i18n from "../src/i18n/index.ts"
+import * as composerDraft from "../src/composer-draft.ts"
 
 const code = ts.transpileModule(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
@@ -30,6 +31,7 @@ function harness() {
       if (id === "./feed-order") return feed
       if (id === "./i18n/format") return format
       if (id === "./i18n") return { __esModule: true, ...i18n }
+      if (id === "./composer-draft") return composerDraft
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "sonner") return { toast: (x) => notices.push(x) }
       if (id === "react") return {}
@@ -52,6 +54,90 @@ test("stream paint preserves unrelated sessions, bots, items and thread referenc
   await h.tick(80)
   assert.equal(s.st.S.a.ev[0][1], "hello")
   assert.equal(s.st.S.b, before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.st.items, before.items); assert.equal(s.st.thread, before.thread)
+})
+
+const chatMessage = (id, author, origin) => ({ id, author, text: id, created: 1, item_id: null, meta: origin ? { origin } : {} })
+const draft = (h, mid, text) => h.event({ type: "steve.draft", ws: "ws", mid, thought: "", text })
+
+test("chat drafts paint successive chunks before any stored reply arrives", async () => {
+  const h = harness(), s = h.store, c = counted(h)
+  h.state.thread = [chatMessage("question", "me")]
+  s.start(); await flush()
+  h.event({ type: "steve.thinking", on: true, phase: "answer" })
+  const version = s.st.ver
+  draft(h, "question", "第一段"); await h.tick(0)
+  assert.equal(s.st.draft.text, "第一段"); assert.ok(s.st.ver > version)
+  draft(h, "question", "第一段，第二段"); await h.tick(0)
+  assert.equal(s.st.draft.text, "第一段，第二段")
+  assert.equal(s.st.thread.filter((m) => m.k === "thinking").length, 1)
+  assert.equal(s.st.thread.filter((m) => m.k === "steve").length, 0)
+  assert.equal(c.states, 1)
+})
+
+test("unrelated Steve messages keep the live draft; only its own reply replaces it", async () => {
+  const h = harness(), s = h.store
+  h.state.thread = [chatMessage("question", "me")]
+  s.start(); await flush()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "question", "仍在生成")
+  h.state.thread.push(chatMessage("item-progress", "steve", "other-question"))
+  await s.refresh()
+  assert.equal(s.st.draft.text, "仍在生成"); assert.equal(s.st.drafted, "")
+  // The original question may have moved outside /api/state's message window.
+  h.state.thread = [chatMessage("item-progress", "steve", "other-question"), chatMessage("answer", "steve", "question")]
+  await s.refresh()
+  assert.equal(s.st.draft, null); assert.equal(s.st.drafted, "answer")
+  assert.equal(s.st.thread.filter((m) => m.id === "answer").length, 1)
+})
+
+test("rerunning a question does not replace its new draft with the previous reply", async () => {
+  const h = harness(), s = h.store
+  h.state.thread = [chatMessage("question", "me"), chatMessage("previous-answer", "steve", "question")]
+  s.start(); await flush()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "question", "重新生成")
+  await s.refresh()
+  assert.equal(s.st.draft.text, "重新生成"); assert.equal(s.st.drafted, "")
+  h.state.thread.push(chatMessage("new-answer", "steve", "question"))
+  h.event({ type: "steve.thinking", on: false }); await s.refresh()
+  assert.equal(s.st.draft, null); assert.equal(s.st.drafted, "new-answer")
+})
+
+test("a state request begun while idle cannot clear a turn that started during the request", async () => {
+  const h = harness(), s = h.store, response = defer()
+  s.start(); await flush()
+  const old = await h.api.state()
+  h.api.state = () => response.promise
+  const loading = s.refresh()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "new-question", "新回复")
+  response.resolve(old); await loading
+  assert.equal(s.st.draft.text, "新回复"); assert.equal(s.st.thinking, true)
+})
+
+test("a stopped turn's refresh cannot clear the next turn's draft", async () => {
+  const h = harness(), s = h.store, response = defer()
+  s.start(); await flush()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "first-question", "第一条")
+  h.event({ type: "steve.thinking", on: false })
+  const old = await h.api.state()
+  h.api.state = () => response.promise
+  const loading = s.refresh()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "next-question", "第二条")
+  response.resolve(old); await loading
+  assert.equal(s.st.draft.text, "第二条"); assert.equal(s.st.thinking, true)
+})
+
+test("a settled turn without a stored reply clears its draft after a fresh idle snapshot", async () => {
+  const h = harness(), s = h.store
+  s.start(); await flush()
+  h.event({ type: "steve.thinking", on: true })
+  draft(h, "question", "尚未保存")
+  h.event({ type: "steve.thinking", on: false }); await s.refresh()
+  assert.equal(s.st.draft, null)
+  assert.equal(s.st.thread.some((m) => m.k === "thinking"), false)
 })
 
 test("pages paint before EOF; SSE during a load is caught up without duplicates", async () => {
@@ -266,4 +352,20 @@ test("an approved release that was not released says so by its outcome in en, no
     assert.equal(s.relOf(d({ outcome: "not_released", reason: "no changes" })).outcome, "not_released")
     assert.equal(s.relOf(d({ outcome: "failed" })).outcome, "failed")
   } finally { await i18n.default.changeLanguage("zh-CN") }
+})
+
+test("sends carry their idempotency key: the composer's on every retry, a fresh one otherwise", async () => {
+  const h = harness(), s = h.store
+  s.start(); await flush()
+  const said = [], made = []
+  h.api.say = async (_t, _f, _m, to) => { said.push(to.client_id); throw new Error("lost answer") }
+  h.api.newItem = async (p) => { made.push(p.client_id); return { id: "ST-1" } }
+  assert.equal(await s.chatSend("你好", [], [], [], "draft-1"), false)
+  assert.equal(await s.chatSend("你好", [], [], [], "draft-1"), false)
+  await s.chatSend("重来")
+  assert.equal(said[0], "draft-1"); assert.equal(said[1], "draft-1")
+  assert.ok(said[2] && said[2] !== "draft-1")
+  await s.newItem("目标", undefined, undefined, "start", "form-1")
+  await s.newItem("目标")
+  assert.equal(made[0], "form-1"); assert.ok(made[1] && made[1] !== "form-1")
 })

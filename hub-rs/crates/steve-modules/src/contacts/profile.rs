@@ -263,17 +263,40 @@ fn lookup_of(c: &Connection, ws: &str, party: &str) -> ApiResult<Option<Lookup>>
     .optional()?)
 }
 
-/// Can any Feishu identity of the workspace look this person up (they have a Feishu account and the
-/// workspace a live Feishu connection)?
+/// The identities that can look people up: `(connections.adapter, systems.id)`, the adapter's
+/// profile view and the system of the people it looks up. Registered when the channels are built
+/// (each channel side with a profile view, by its declared handle system); shared by every
+/// [`contact_profile`] of the process.
+static LOOKUPS: std::sync::RwLock<Vec<(String, String)>> = std::sync::RwLock::new(Vec::new());
+
+/// Makes the profile view of `adapter`, which looks up people of `system`, known to
+/// [`contact_profile`] (“can this person be looked up?”).
+pub fn register_lookup(adapter: &str, system: &str) {
+    let mut l = LOOKUPS.write().unwrap_or_else(|e| e.into_inner());
+    let x = (adapter.to_string(), system.to_string());
+    if !l.contains(&x) {
+        l.push(x);
+    }
+}
+
+/// Can any identity of the workspace look this person up: they have an account in a system a
+/// registered profile view looks up, and the workspace a live connection of that adapter?
 fn reachable(c: &Connection, ws: &str, party: &str) -> ApiResult<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM accounts WHERE workspace_id = ?1 AND party_id = ?2 AND status = 'active'
-                          AND family = 'feishu_user')
-            AND EXISTS (SELECT 1 FROM connections WHERE workspace_id = ?1 AND status IN ('ok', 'error')
-                          AND adapter IN ('feishu_app', 'feishu_user'))",
-        params![ws, party],
-        |r| r.get(0),
-    )?)
+    let lookups = LOOKUPS.read().unwrap_or_else(|e| e.into_inner()).clone();
+    for (adapter, system) in lookups {
+        let found: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM accounts WHERE workspace_id = ?1 AND party_id = ?2 AND status = 'active'
+                              AND system_id = ?3)
+                AND EXISTS (SELECT 1 FROM connections WHERE workspace_id = ?1 AND status IN ('ok', 'error')
+                              AND adapter = ?4)",
+            params![ws, party, system, adapter],
+            |r| r.get(0),
+        )?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// What is known about `p` and why the rest is not. `visible_orgs`: the organizations of the jobs

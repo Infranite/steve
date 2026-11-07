@@ -24,7 +24,7 @@ use crate::{ApiError, ApiResult, Caller, Modules};
 pub const FIND: &str = "steve_contacts_find";
 pub const REMEMBER: &str = "steve_contacts_remember";
 /// Ownership: the account → party → 负责人 chain, a person's holdings, and a
-/// 负责人 heard in chat as a proposal the user confirms.
+/// 负责人 heard in chat, recorded at once (undoable for 24 hours).
 pub const WHOIS: &str = "steve_whois";
 pub const HOLDINGS: &str = "steve_person_holdings";
 pub const STEWARD_PROPOSE: &str = "steve_steward_propose";
@@ -92,7 +92,7 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         }),
         json!({
             "name": STEWARD_PROPOSE,
-            "description": "Record who is responsible for a bot, account, device, connection, persona or group when the conversation says so (\"这是张三的机器人\"). It becomes a proposal the user confirms.",
+            "description": "Record who is responsible for a bot, account, device, connection, persona or group when the conversation says so (\"这是张三的机器人\"). It is recorded at once; the user can undo it.",
             "inputSchema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",

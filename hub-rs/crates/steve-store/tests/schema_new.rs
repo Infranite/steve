@@ -67,8 +67,8 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn schema_version_is_23() {
-    assert_eq!(db::SCHEMA_VERSION, 40);
+fn schema_version_is_52() {
+    assert_eq!(db::SCHEMA_VERSION, 52);
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn empty_database_migrates_to_v20() {
 #[test]
 fn v2_v3_v4_databases_migrate_to_the_fresh_schema() {
     let want = schema_of(fresh().store.path());
-    for v in [2, 3, 4, 12, 16, 17, 18, 19] {
+    for v in [2, 3, 4, 12, 16, 17, 18, 19, 49] {
         let (_dir, path) = at_version(v);
         let s = Store::open(&path, NoPublisher).unwrap();
         s.with_conn(|c| {
@@ -371,4 +371,180 @@ fn migration_20_reactions_after_19() {
     c.execute_batch(db::MIGRATIONS[19]).unwrap();
     assert!(has_table(&c, "chan_reactions"));
     assert!(has_table(&c, "space_prefs"));
+}
+
+#[test]
+fn migration_42_records_how_a_message_was_sent() {
+    let (_dir, path) = at_version(41);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    assert!(!columns(&c, "chan_messages").contains(&"sent_via".to_string()));
+    assert!(!has_table(&c, "chan_message_seen"));
+    db::migrate(&c).unwrap();
+    let cols = columns(&c, "chan_messages");
+    assert!(cols.contains(&"sent_via".to_string()), "{cols:?}");
+    assert!(cols.contains(&"ext_created".to_string()), "{cols:?}");
+    assert_eq!(
+        columns(&c, "chan_message_seen"),
+        ["connection_id", "source_id", "message_id"]
+    );
+    // a delivery id goes with its message
+    c.execute_batch(
+        "INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
+           VALUES ('sp1', 'default', 'feishu', 'group', 'oc_1', '群', 1, 1);
+         INSERT INTO chan_messages (id, workspace_id, space_id, direction, status, text, created)
+           VALUES ('cm1', 'default', 'sp1', 'out', 'sent', 'hi', 1);
+         INSERT INTO chan_message_seen (connection_id, source_id, message_id) VALUES ('con1', 'ev1', 'cm1');
+         DELETE FROM chan_messages WHERE id = 'cm1';",
+    )
+    .unwrap();
+    assert_eq!(count(&c, "SELECT count(*) FROM chan_message_seen"), 0);
+    // opening again runs nothing twice
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn migration_43_keeps_content_keys_of_messages() {
+    let (_dir, path) = at_version(42);
+    let c = Connection::open(&path).unwrap();
+    assert!(!columns(&c, "chan_messages").contains(&"content_key".to_string()));
+    db::migrate(&c).unwrap();
+    let cols = columns(&c, "chan_messages");
+    assert!(cols.contains(&"content_key".to_string()), "{cols:?}");
+    assert!(cols.contains(&"fallback_from".to_string()), "{cols:?}");
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'chan_messages_content_key'"
+        ),
+        1
+    );
+    // a lookup by space and key uses the index
+    let plan: String = c
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT id FROM chan_messages
+              WHERE space_id = 'sp1' AND content_key = 'v1:k' AND created BETWEEN 1 AND 2",
+            [],
+            |r| r.get(3),
+        )
+        .unwrap();
+    assert!(plan.contains("chan_messages_content_key"), "{plan}");
+    // opening again runs nothing twice
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn migration_44_finds_the_start_of_a_message_by_index() {
+    let (_dir, path) = at_version(43);
+    let c = Connection::open(&path).unwrap();
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'events_message_start'"
+        ),
+        1
+    );
+    // the role lookup of a text delta goes by the index, not back through the session's rows
+    let plan: String = c
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT json_extract(data,'$.role') FROM events
+              WHERE session_id = 's1' AND kind = 'message' AND format = 'steve.v1'
+                AND json_extract(data,'$.message') = 'm1' ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| r.get(3),
+        )
+        .unwrap();
+    assert!(plan.contains("events_message_start"), "{plan}");
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn migration_45_adds_the_failure_clock_and_the_compaction_table() {
+    let (_dir, path) = at_version(44);
+    let c = Connection::open(&path).unwrap();
+    /* keepSess chosen while it did nothing must not start compacting after the upgrade */
+    c.execute_batch(
+        "INSERT INTO workspaces (id, name, created) VALUES ('w2', 'w2', 1), ('w3', 'w3', 1);
+         INSERT INTO settings (workspace_id, key, value, updated) VALUES
+           ('default', 'keepSess', '\"90 天\"', 1), ('w2', 'keepSess', '\"1 年\"', 1),
+           ('w3', 'keepSess', '\"永久\"', 1), ('default', 'keepRaw', '\"30\"', 1);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM settings WHERE key = 'keepSess' AND value = '\"永久\"'"
+        ),
+        3
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM settings WHERE key = 'keepSess' AND updated = 1"
+        ),
+        1,
+        "an untouched 永久 keeps its timestamp"
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM settings WHERE key = 'keepRaw' AND value = '\"30\"'"
+        ),
+        1
+    );
+    let col = |t: &str, n: &str| {
+        count(
+            &c,
+            &format!("SELECT count(*) FROM pragma_table_info('{t}') WHERE name = '{n}'"),
+        )
+    };
+    assert_eq!(col("outbox_leases", "failing_since"), 1);
+    assert!(has_table(&c, "session_compactions"));
+    assert_eq!(col("session_compactions", "upto"), 1);
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn migration_48_adds_the_model_of_a_turn() {
+    let (_dir, path) = at_version(47);
+    let c = Connection::open(&path).unwrap();
+    assert!(!columns(&c, "agent_turns").contains(&"model".to_string()));
+    c.execute_batch(
+        "INSERT INTO agent_turns (id, workspace_id, session_id, harness, user_seq, attempt, started, ended)
+         VALUES ('tn_old', 'default', 'ses_1', 'claude-code', 1, 0, 1, 2);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    assert!(columns(&c, "agent_turns").contains(&"model".to_string()));
+    // a turn ended before keeps no model: it is attributed as before
+    let m: Option<String> = c
+        .query_row(
+            "SELECT model FROM agent_turns WHERE id = 'tn_old'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(m, None);
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
 }

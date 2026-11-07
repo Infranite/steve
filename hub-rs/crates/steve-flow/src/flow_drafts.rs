@@ -374,9 +374,12 @@ async fn edit_draft(
     if note.is_empty() {
         note = NOTE_DEFAULT.into();
     }
-    Ok(Json(
-        json!({ "graph": graph.to_value(), "note": note, "draft_notes": notes }),
-    ))
+    Ok(Json(json!({
+        "graph": graph.to_value(),
+        "note": note,
+        "draft_notes": notes,
+        "warnings": graph::branch_warnings(&graph),
+    })))
 }
 
 #[cfg(test)]

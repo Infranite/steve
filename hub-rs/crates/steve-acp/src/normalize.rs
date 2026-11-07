@@ -188,6 +188,56 @@ impl Normalizer {
         self.close()
     }
 
+    /// Final token accounting from `session/prompt`, distinct from usage_update's context meter.
+    pub fn prompt_response(&mut self, response: &Value) -> Vec<Fact> {
+        let tokens = |u: &Value| Tokens {
+            input: u.get("inputTokens").and_then(Value::as_u64),
+            output: u.get("outputTokens").and_then(Value::as_u64),
+            cache_read: u
+                .get("cachedReadTokens")
+                .or_else(|| u.get("cachedInputTokens"))
+                .and_then(Value::as_u64),
+            cache_write: u.get("cachedWriteTokens").and_then(Value::as_u64),
+            reasoning: u.get("reasoningTokens").and_then(Value::as_u64),
+        };
+        let mut rows = vec![];
+        if let Some(u) = response.get("usage").filter(|u| u.is_object()) {
+            rows.push((None, UsageScope::Main, tokens(u)));
+        }
+        if let Some(models) = response
+            .pointer("/_meta/quota/model_usage")
+            .and_then(Value::as_array)
+        {
+            for model in models {
+                if let Some(count) = model.get("token_count") {
+                    rows.push((
+                        model.get("model").and_then(Value::as_str).map(String::from),
+                        UsageScope::All,
+                        tokens(count),
+                    ));
+                }
+            }
+        }
+        rows.into_iter()
+            .map(|(model, scope, tokens)| {
+                self.reports += 1;
+                Fact::Event(EventBody::Usage {
+                    report: UsageReport {
+                        report_id: format!("{}.u{}", self.prefix, self.reports),
+                        model,
+                        meter_epoch: self.meter.clone(),
+                        scope,
+                        measurement: Measurement::Final,
+                        tokens,
+                        context_used: None,
+                        context_limit: None,
+                        cost: None,
+                    },
+                })
+            })
+            .collect()
+    }
+
     fn close(&mut self) -> Vec<Fact> {
         match self.open.take() {
             Some(o) => vec![Fact::Event(EventBody::MessageCompleted {
@@ -394,6 +444,27 @@ pub fn shown(path: &str, root: &Path) -> String {
     }
 }
 
+/// A command as one shell line: a shell string as it is, an argv with each word quoted.
+fn command_line(c: &CommandFact) -> String {
+    match c {
+        CommandFact::Shell(s) => s.clone(),
+        CommandFact::Argv(a) => a
+            .iter()
+            .map(|w| {
+                let plain = !w.is_empty()
+                    && w.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%^".contains(c));
+                if plain {
+                    w.clone()
+                } else {
+                    format!("'{}'", w.replace('\'', "'\\''"))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
 fn command_of(input: &Value) -> Option<CommandFact> {
     match input.get("command")? {
         Value::String(s) => Some(CommandFact::Shell(s.clone())),
@@ -543,7 +614,12 @@ impl ToolFact {
                     cwd: None,
                     network: NetworkScope::Unrestricted,
                 }),
-                _ => Some(Action::Unknown {
+                // its command line as written (argv words quoted), for the timeline and the
+                // tool facts; the directory it runs in is the harness's own
+                (Some(c), _) => Some(Action::Unknown {
+                    summary: command_line(c),
+                }),
+                (None, _) => Some(Action::Unknown {
                     summary: "command needs Node binding".into(),
                 }),
             }
@@ -843,6 +919,26 @@ mod tests {
             &events(n.finish())[0],
             EventBody::MessageCompleted { .. }
         ));
+    }
+
+    /// A harness that runs an argv (`["/bin/zsh", "-lc", script]`) in a directory of its own: the
+    /// view carries the whole command line, as the timeline shows it.
+    #[test]
+    fn an_argv_command_keeps_its_command_line_in_the_view() {
+        let mut n = n();
+        let e = events(n.update(
+            &json!({"sessionUpdate": "tool_call", "toolCallId": "c9", "kind": "execute",
+            "status": "in_progress", "title": "git push",
+            "rawInput": {"command": ["/bin/zsh", "-lc", "git push origin main"], "cwd": "/w/sub"}}),
+        ));
+        let EventBody::ToolChanged { tool } = &e[0] else {
+            panic!("{e:?}")
+        };
+        assert!(
+            matches!(&tool.action, Some(Action::Unknown { summary }) if summary == "/bin/zsh -lc 'git push origin main'"),
+            "{:?}",
+            tool.action
+        );
     }
 
     #[test]

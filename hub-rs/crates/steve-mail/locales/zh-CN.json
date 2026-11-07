@@ -12,6 +12,7 @@
   "mail.draft.already_sent": "邮件已经发出，不能撤回",
   "mail.draft.already_handled": "这封邮件已经处理过了",
   "mail.draft.locked": "这封邮件已经不能改了",
+  "mail.draft.changed": "检查期间草稿改过了，请再检查一次",
   "mail.draft.discarded": "这封邮件已经丢弃了",
   "mail.draft.no_recipients": "还没有收件人",
   "mail.draft.not_waiting": "这封邮件没有在等待发出",

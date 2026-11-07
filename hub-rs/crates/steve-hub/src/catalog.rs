@@ -461,6 +461,7 @@ mod tests {
     /// A LocalNode with a Codex adapter whose probe asks `codex` (absent unless the test writes it).
     fn node_with_codex(dir: &Path, codex: PathBuf) -> std::sync::Arc<steve_node::LocalNode> {
         let node = steve_node::LocalNode::open(steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: steve_node_api::NodeId::new("local").unwrap(),
             home: dir.join("node"),
             acp: steve_acp::AcpConfig {

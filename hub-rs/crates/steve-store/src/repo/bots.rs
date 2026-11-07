@@ -312,6 +312,12 @@ fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) ->
         "INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, ?)",
         params![id, ws, now()],
     )?;
+    // who edits it (migration 050): its workspace's owner; the main bot's is the instance admin
+    c.run(
+        "UPDATE bots SET owner = (SELECT m.user_id FROM workspace_members m WHERE m.workspace_id = bots.workspace_id AND m.role = 'owner' ORDER BY m.created LIMIT 1)
+          WHERE id = ? AND main = 0 AND owner IS NULL",
+        [id],
+    )?;
     Ok(())
 }
 

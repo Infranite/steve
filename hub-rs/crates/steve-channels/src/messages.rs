@@ -38,6 +38,12 @@ pub struct NewInbound<'a> {
     pub attachments: &'a Value,
     pub mentions: &'a Value,
     pub created: i64,
+    /// [`crate::fallback::key_of`].
+    pub content_key: Option<&'a str>,
+    /// The connection that supplied it without a provider id.
+    pub fallback_from: Option<&'a str>,
+    /// Only history ([`crate::inbound::History::code`]); `None`: a live message.
+    pub history: Option<&'a str>,
 }
 
 /// Stores an inbound message; `None` when `(space, external_id)` is already there (the unique index
@@ -46,8 +52,8 @@ pub fn insert_inbound(tx: &Tx, n: &NewInbound) -> ChannelResult<Option<String>> 
     let id = uid("cm");
     let added = tx.execute(
         "INSERT OR IGNORE INTO chan_messages (id, workspace_id, space_id, external_id, thread_key, reply_to, direction,
-            sender_account_id, sender_party_id, text, attachments, mentions, status, created)
-         VALUES (?, ?, ?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, 'received', ?)",
+            sender_account_id, sender_party_id, text, attachments, mentions, status, created, content_key, fallback_from, history)
+         VALUES (?, ?, ?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?)",
         params![
             id,
             n.ws,
@@ -60,7 +66,10 @@ pub fn insert_inbound(tx: &Tx, n: &NewInbound) -> ChannelResult<Option<String>> 
             n.text,
             n.attachments.to_string(),
             n.mentions.to_string(),
-            n.created
+            n.created,
+            n.content_key,
+            n.fallback_from,
+            n.history
         ],
     )?;
     if added == 0 {
@@ -313,11 +322,14 @@ pub struct ChanMessage {
     pub sent: Option<i64>,
     pub purged: Option<i64>,
     pub basis: Value,
+    /// An inbound message only recorded as history: `before` (written before the connection was on)
+    /// or `late` (arrived too late); `null` for everything else.
+    pub history: Option<String>,
 }
 
 const MSG_COLS: &str = "m.id, m.space_id, m.direction, coalesce(a.display_name, a.handle_display, p.name, ''), m.sender_party_id,
     m.sender_account_id, m.persona_id, m.on_behalf, m.text, m.attachments, m.mentions, m.status, m.thread_key, m.reply_to,
-    m.event_id, m.work_item_id, m.decision_id, m.created, m.sent, m.purged";
+    m.event_id, m.work_item_id, m.decision_id, m.created, m.sent, m.purged, m.history";
 const MSG_FROM: &str = "FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id
     LEFT JOIN parties p ON p.id = m.sender_party_id";
 
@@ -344,7 +356,7 @@ fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<ChanMessage> {
         mentions: jv(r.get(10)?),
         status: r.get(11)?,
         thread_key: r.get(12)?,
-        reply_to: r.get(13)?,
+        reply_to: crate::fallback::platform(r.get(13)?),
         event_id: r.get(14)?,
         work_item_id: r.get(15)?,
         decision_id: r.get(16)?,
@@ -352,6 +364,7 @@ fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<ChanMessage> {
         sent: r.get(18)?,
         purged: r.get(19)?,
         basis: Value::Null,
+        history: r.get(20)?,
     })
 }
 
@@ -370,6 +383,42 @@ pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<ChanMessage>> {
         }
         None => Ok(None),
     }
+}
+
+/// Stored message `id` as an adapter needs it to act on it again (recall, reactions), for
+/// connection `conn`: the delivery id is the one that connection knows it by.
+pub(crate) fn message_ref(
+    c: &Connection,
+    id: &str,
+    conn: &str,
+) -> ChannelResult<Option<crate::channel::MessageRef>> {
+    Ok(c.query_row(
+        "SELECT s.external_id, m.external_id, coalesce(m.ext_created, m.created),
+                m.direction = 'in' OR m.ext_created IS NOT NULL, a.system_id, a.handle, m.text,
+                m.thread_key,
+                (SELECT x.source_id FROM chan_message_seen x WHERE x.message_id = m.id AND x.connection_id = ?2)
+           FROM chan_messages m JOIN spaces s ON s.id = m.space_id
+           LEFT JOIN accounts a ON a.id = m.sender_account_id
+          WHERE m.id = ?1",
+        params![id, conn],
+        |r| {
+            let system: Option<String> = r.get(4)?;
+            let handle: Option<String> = r.get(5)?;
+            Ok(crate::channel::MessageRef {
+                space_ext_id: r.get(0)?,
+                ext_id: crate::fallback::platform(r.get(1)?),
+                created: r.get(2)?,
+                created_exact: r.get(3)?,
+                sender: system
+                    .zip(handle)
+                    .map(|(s, h)| crate::channel::HandleRef::new(s, h)),
+                text: r.get(6)?,
+                thread_key: r.get(7)?,
+                source_id: r.get(8)?,
+            })
+        },
+    )
+    .optional()?)
 }
 
 /// The outbound message's basis (C5), for the interfaces only you see; attachments in their public

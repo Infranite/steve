@@ -98,7 +98,8 @@ async fn start() -> Env {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NO_RESUME", "1".into()),
+        // the local Node runs the sessions (the Hub runs none itself)
+        ("STEVE_NODE_MODE", "local".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", fake.display().to_string()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
@@ -198,6 +199,14 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         "做 @tool execute Bash @usage 10 100 0.5 claude-opus-5-5 @tally 1 2 3 4 @quota claude-opus-5-5:10:20:30:40,claude-haiku-5-5:1:2:3:4 @sleep 1500",
     )
     .await;
+    // the first turn is under way on the Node (a message queued before it starts goes with it)
+    assert!(
+        until(10, || async {
+            e.count("SELECT count(*) FROM agent_turns") == 1
+        })
+        .await,
+        "the first turn starts"
+    );
     let (s, v) = e
         .call(
             "POST",
@@ -211,7 +220,21 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
             e.count("SELECT count(*) FROM agent_turns WHERE ended IS NOT NULL") == 2
         })
         .await,
-        "two turns end"
+        "two turns end: {:?} {:?}",
+        e.db()
+            .prepare("SELECT id, started, ended, stop_reason, node_attempt_id FROM agent_turns")
+            .unwrap()
+            .query_map([], |r| Ok(format!("{:?}/{:?}/{:?}/{:?}/{:?}", r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>(),
+        e.db()
+            .prepare("SELECT kind, substr(data,1,200) FROM events WHERE kind<>'agent_message_chunk' ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| Ok(format!("{}:{}", r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
     );
     assert!(until(10, || async { e.session(&sid).await["busy"] == false }).await);
     let c = e.db();
@@ -233,7 +256,8 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         "each turn points at its own user event"
     );
     assert_eq!(turns[0].4, 1);
-    assert_eq!(turns[0].5, r#"{"execute":1,"tool:Bash":1}"#);
+    // the Node names the tool kind by its category
+    assert_eq!(turns[0].5, r#"{"exec":1,"tool:Bash":1}"#);
     let rows: Vec<(String, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<f64>, String)> = c
         .prepare("SELECT model, input, output, cache_read, cache_write, cost_reported, detail FROM usage_records WHERE session_id = ? ORDER BY id")
         .unwrap()

@@ -227,6 +227,7 @@ impl Core {
                 .unwrap_or_default(),
             files,
             from_question: super::decide::pure_question(&om.text),
+            by: None,
             answer: Some(&m),
             start: true, // your action in the web
         })?;

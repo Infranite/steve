@@ -19,6 +19,7 @@ use steve_store::base::ObjRef;
 use steve_store::base::links::{self, NewLink};
 
 use crate::compose::{self, ComposeOpts, Composer};
+use crate::conversations::sender_is_owner;
 use crate::deliver::{Auth, Delivered, DraftOnly, OutRequest, OutTarget, Outbound, Purpose};
 use crate::respond::{self, Acted, Plan, Responder};
 use crate::rules::{Act, ItemMode};
@@ -31,6 +32,32 @@ pub const ITEM_CONTEXT: usize = 10;
 const TITLE_MAX: usize = 80;
 /// `links.source` of the links C4 writes.
 pub const LINK_SOURCE: &str = "chan";
+
+/// The goal of an item made from a group message: the message, then the conversation before it.
+/// What somebody other than the owner wrote goes between the untrusted-data markers (the agent reads
+/// it as data, not as the user's instruction): the message itself unless the owner sent it, and the
+/// conversation always.
+pub fn item_goal(text: &str, context: &[(String, String)], from_owner: bool) -> String {
+    use steve_modules::outbound::quote_untrusted;
+    let mut talk = String::new();
+    for (who, t) in context {
+        talk.push_str(&format!(
+            "\n- {}：{}",
+            if who.is_empty() { "某人" } else { who },
+            t
+        ));
+    }
+    let text = text.trim();
+    match (from_owner, talk.is_empty()) {
+        (true, true) => text.to_string(),
+        (true, false) => format!(
+            "{text}\n\n最近的对话：\n{}",
+            quote_untrusted(talk.trim_start())
+        ),
+        (false, true) => quote_untrusted(text),
+        (false, false) => quote_untrusted(&format!("{text}\n\n最近的对话：{talk}")),
+    }
+}
 
 /// “收到，已记为 <编号>。”
 pub fn item_ack(item_id: &str) -> String {
@@ -148,17 +175,8 @@ impl Replies {
             };
             let bot = compose::pick_bot(c, &ws, &[d["bot_id"].as_str(), persona_bot.as_deref()])?;
             let context = messages::context_before(c, &space.id, &plan.message_id, ITEM_CONTEXT)?;
-            let mut goal = plan.text.trim().to_string();
-            if !context.is_empty() {
-                goal.push_str("\n\n最近的对话：");
-                for (who, t) in &context {
-                    goal.push_str(&format!(
-                        "\n- {}：{}",
-                        if who.is_empty() { "某人" } else { who },
-                        t
-                    ));
-                }
-            }
+            let from_owner = sender_is_owner(c, &ws, plan.sender_party_id.as_deref())?;
+            let goal = item_goal(&plan.text, &context, from_owner);
             let title = {
                 let flat = plan.text.split_whitespace().collect::<Vec<_>>().join(" ");
                 if flat.is_empty() {

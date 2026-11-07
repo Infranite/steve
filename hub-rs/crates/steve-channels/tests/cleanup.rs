@@ -68,7 +68,7 @@ async fn setup() -> (H, String, String) {
         .adapter(app)
         .build();
     let api = connections::routes(conns)
-        .merge(channels_api::routes(ch, None))
+        .merge(channels_api::routes(ch))
         .with_state(env.modules.clone());
     let h = H {
         env,
@@ -273,6 +273,14 @@ async fn preview_then_text_purge() {
     let backup = v["backup"].as_str().expect("backup").to_string();
     assert!(backup.starts_with("pre-purge-"), "{backup}");
     assert!(h.env.dir.path().join("backups").join(&backup).is_file());
+    {
+        // the copy is as private as the database: 0600 in a 0700 directory
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = h.env.dir.path().join("backups");
+        assert_eq!(mode(&dir.join(&backup)), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+    }
     assert_eq!(
         h.n("SELECT count(*) FROM chan_messages WHERE text IS NULL AND attachments = '[]' AND purged IS NOT NULL"),
         3

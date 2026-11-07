@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use steve_modules::vault::inject::{How, RunOutput};
 use steve_modules::vault::{NodePlace, NodeUse, UseNodes, UseValues, VaultResult, pasted_secret};
 use steve_node_api::*;
-use steve_store::Store;
+use steve_store::{Store, StoreError};
 
 use super::flow_cmd::{dir_digest, prepare_dir};
 use super::workspaces::{At, PlacementError, Subject, Workspaces};
@@ -59,6 +59,8 @@ struct Held {
 pub struct NodeSecrets {
     held: Mutex<HashMap<String, Held>>,
     ended: Mutex<VecDeque<String>>,
+    /// Push grants being observed; one observer per operation.
+    watching: Mutex<HashSet<String>>,
 }
 
 impl NodeSecrets {
@@ -93,17 +95,148 @@ impl NodeSecrets {
         );
     }
 
-    /// `op` ended (or was never sent): nothing of it may be taken any more.
-    pub(super) fn end(&self, op: &str) {
-        if self
-            .held
+    /// A push asked about again keeps its original grant, including what it already took.
+    /// An ended operation cannot acquire a new grant in this Hub process.
+    pub(super) fn give_once(
+        &self,
+        op: &str,
+        node: NodeId,
+        ids: Vec<String>,
+        values: Arc<dyn UseValues>,
+        may_grant: impl FnOnce() -> Result<bool, StoreError>,
+    ) -> Result<(), StoreError> {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        self.give_once_in(&mut held, op, node, ids, values, may_grant)?;
+        Ok(())
+    }
+
+    /// Publish the grant and the durable command together. A failed submission can withdraw
+    /// only the grant it just created: take/retirement and other submissions cannot pass this
+    /// lock before the synchronous submission returns.
+    pub(super) fn submit_push<T>(
+        &self,
+        op: &str,
+        node: NodeId,
+        ids: Vec<String>,
+        values: Arc<dyn UseValues>,
+        may_grant: impl FnOnce() -> Result<bool, StoreError>,
+        submit: impl FnOnce() -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        let supplied = self.give_once_in(&mut held, op, node, ids, values, may_grant)?;
+        let result = submit();
+        if result.is_err() && supplied {
+            held.remove(op);
+        }
+        result
+    }
+
+    fn give_once_in(
+        &self,
+        held: &mut HashMap<String, Held>,
+        op: &str,
+        node: NodeId,
+        ids: Vec<String>,
+        values: Arc<dyn UseValues>,
+        may_grant: impl FnOnce() -> Result<bool, StoreError>,
+    ) -> Result<bool, StoreError> {
+        if held.contains_key(op)
+            || self
+                .ended
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|ended| ended == op)
+        {
+            return Ok(false);
+        }
+        // The bounded tombstone cache is diagnostic, not authority. Re-read the ledger while
+        // holding the grant lock so an old caller cannot revive a settled operation after
+        // its tombstone has been evicted. The callback only reads; it must not call secrets.
+        if !may_grant()? {
+            return Ok(false);
+        }
+        held.insert(
+            op.into(),
+            Held {
+                node,
+                ids,
+                taken: HashSet::new(),
+                values,
+            },
+        );
+        Ok(true)
+    }
+
+    /// A caller's wait ending or being cancelled does not end a push. Observe its ledger only;
+    /// no credential or runtime is kept alive while the observer sleeps.
+    pub(super) fn watch_push(
+        self: &Arc<Self>,
+        runtime: &Arc<super::node_runtime::NodeRuntime>,
+        op: &str,
+    ) {
+        if !self
+            .watching
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(op)
-            .is_some()
+            .insert(op.into())
         {
+            return;
+        }
+        let secrets = Arc::downgrade(self);
+        let runtime = Arc::downgrade(runtime);
+        let op = op.to_string();
+        tokio::spawn(async move {
+            loop {
+                let Some(secrets) = secrets.upgrade() else {
+                    return;
+                };
+                let done = match runtime.upgrade() {
+                    Some(runtime) => match runtime.ledger(&op) {
+                        Ok(Some(entry)) => entry.is_settled(),
+                        Ok(None) => true,
+                        Err(e) => {
+                            tracing::warn!("push {op}: {e}");
+                            false
+                        }
+                    },
+                    None => true,
+                };
+                if done {
+                    secrets.retire_push(&op);
+                    secrets
+                        .watching
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&op);
+                    return;
+                }
+                drop(secrets);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
+
+    /// `op` ended (or was never sent): nothing of it may be taken any more.
+    pub(super) fn end(&self, op: &str) {
+        self.end_with_tombstone(op, false);
+    }
+
+    /// A push is over even if this Hub has not supplied its grant. A concurrent caller that
+    /// read an earlier ledger state must not grant it after retirement.
+    pub(super) fn retire_push(&self, op: &str) {
+        self.end_with_tombstone(op, true);
+    }
+
+    fn end_with_tombstone(&self, op: &str, remember_missing: bool) {
+        // Keep the held -> ended lock order shared with take/give_once. Removal and the
+        // tombstone must be atomic to a concurrent retry, which must not resurrect the grant.
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        if held.remove(op).is_some() || remember_missing {
             let mut ended = self.ended.lock().unwrap_or_else(|e| e.into_inner());
-            ended.push_back(op.into());
+            if !ended.iter().any(|ended| ended == op) {
+                ended.push_back(op.into());
+            }
             while ended.len() > ENDED_KEPT {
                 ended.pop_front();
             }
@@ -462,6 +595,7 @@ mod tests {
         store.ensure_workspace().unwrap();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
                 node: NodeId::new("local").unwrap(),
                 home: root.join("node"),
                 acp: steve_acp::AcpConfig {
@@ -596,6 +730,82 @@ mod tests {
             ErrorCode::Stale
         );
         assert_eq!(values.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_push_grant_is_not_reset_or_resurrected_by_another_wait() {
+        let all = NodeSecrets::new();
+        let node = NodeId::new("local").unwrap();
+        let values = Arc::new(Values::default());
+        let give = || {
+            all.give_once(
+                "op_push",
+                node.clone(),
+                vec!["token".into()],
+                values.clone(),
+                || Ok(true),
+            )
+            .unwrap();
+        };
+        let mine = all.for_node(node.clone());
+        let take = || mine.take(OperationId::new("op_push").unwrap(), "token".into());
+        give();
+        take().await.unwrap();
+        give();
+        let refused: Result<(), _> = all.submit_push(
+            "op_push",
+            node.clone(),
+            vec!["token".into()],
+            values.clone(),
+            || Ok(true),
+            || Err(StoreError::Conflict("test submit failure".into())),
+        );
+        assert!(refused.is_err());
+        let error = take().await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.safe_detail, "already taken");
+        all.end("op_push");
+        give();
+        let error = take().await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.safe_detail, "the operation ended");
+        assert_eq!(values.0.load(Ordering::SeqCst), 1);
+
+        all.retire_push("op_retired");
+        all.give_once(
+            "op_retired",
+            node.clone(),
+            vec!["token".into()],
+            values.clone(),
+            || Ok(true),
+        )
+        .unwrap();
+        let error = mine
+            .take(OperationId::new("op_retired").unwrap(), "token".into())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.safe_detail, "the operation ended");
+        assert_eq!(values.0.load(Ordering::SeqCst), 1);
+
+        // A restarted Hub has no in-memory grant or tombstone, and may supply the same
+        // still-pending operation after checking its ledger again.
+        let restarted = NodeSecrets::new();
+        restarted
+            .give_once(
+                "op_push",
+                node.clone(),
+                vec!["token".into()],
+                values.clone(),
+                || Ok(true),
+            )
+            .unwrap();
+        restarted
+            .for_node(node)
+            .take(OperationId::new("op_push").unwrap(), "token".into())
+            .await
+            .unwrap();
+        assert_eq!(values.0.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

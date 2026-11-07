@@ -1,4 +1,4 @@
-//! The modules' MCP tools served next to steve-mcp's five Steve tools without changing steve-mcp: contacts
+//! The modules' MCP tools served next to steve-mcp's Steve tools without changing steve-mcp: contacts
 //! (P3), knowledge (K3/K4), the vault's secret tools (V4), GitHub (G4), mail (E5) and the flow's
 //! `steve_event_get` (S10). A tool that opened an approval marks the session as waiting, like
 //! `steve_request_approval`: `tools/list` answers get the module's
@@ -27,6 +27,8 @@ pub struct Extra {
 /// Which module answers a tool name.
 #[derive(Clone, Copy)]
 enum Owner {
+    Items,
+    Workflow,
     Upgrade,
     Contacts,
     Knowledge,
@@ -36,6 +38,7 @@ enum Owner {
     Mail,
     Flow,
     ReplySource,
+    Im,
 }
 
 /// `steve_reply_source` (channels-personas.md §6): an update back to the chat an item came from.
@@ -56,7 +59,11 @@ fn reply_source_tool() -> Value {
 }
 
 fn owner_of(name: &str) -> Option<Owner> {
-    if name == "steve_upgrade" {
+    if super::item_mcp::handles(name) {
+        Some(Owner::Items)
+    } else if name == "steve_workflow" {
+        Some(Owner::Workflow)
+    } else if name == "steve_upgrade" {
         Some(Owner::Upgrade)
     } else if mcp::handles(name) {
         Some(Owner::Contacts)
@@ -74,6 +81,8 @@ fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::Flow)
     } else if name == REPLY_SOURCE {
         Some(Owner::ReplySource)
+    } else if steve_channels::im_mcp::handles(name) {
+        Some(Owner::Im)
     } else {
         None
     }
@@ -82,6 +91,8 @@ fn owner_of(name: &str) -> Option<Owner> {
 /// The module tool definitions appended to `tools/list`, in this order.
 fn extra_tools() -> Vec<Value> {
     let mut v: Vec<Value> = mcp::tools().to_vec();
+    v.extend(super::item_mcp::tools());
+    v.push(workflow_tool());
     v.extend(steve_knowledge::tools::tools().iter().cloned());
     v.push(steve_knowledge::candidates::remember_tool());
     v.extend(steve_modules::vault::mcp::tools().iter().cloned());
@@ -89,8 +100,47 @@ fn extra_tools() -> Vec<Value> {
     v.extend(steve_mail::mcp::tools().iter().cloned());
     v.extend(steve_flow::mcp::tools().iter().cloned());
     v.push(reply_source_tool());
+    v.extend(steve_channels::im_mcp::tools());
     v.push(json!({"name":"steve_upgrade","description":"Check Steve GitHub releases, inspect an upgrade, or request an instance upgrade. A request requires instance owner approval in Settings / Versions before execution. Never grants approval through an agent token.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["check","status","request"]},"version":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["action"]}}));
     v
+}
+
+fn workflow_tool() -> Value {
+    json!({
+        "name": "steve_workflow",
+        "description": "Read or replan this item's shared work graph. Only the parent item's responsible Bot may change the graph; child Bots can read their own work and upstream deliveries, deliver success through steve_deliver, or report a failure / rejected review with action fail and reason, then end their turn. Plan work, independent review and integration units; dependencies must pass before successors run. Graph changes require the latest expected_revision and a reason. A new graph starts at revision 0. A plan replaces the active specification; preserve existing unit IDs for unchanged work. Do not transfer credentials or permissions between Bots.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["get", "plan", "pause", "resume", "retry", "cancel", "fail"]},
+                "expected_revision": {"type": "integer", "minimum": 0},
+                "reason": {"type": "string", "minLength": 1},
+                "unit_id": {"type": "string"},
+                "max_parallel": {"type": "integer", "minimum": 1},
+                "max_attempts": {"type": "integer", "minimum": 1},
+                "units": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "minLength": 1},
+                            "title": {"type": "string", "minLength": 1},
+                            "goal": {"type": "string", "minLength": 1},
+                            "bot_id": {"type": "string", "minLength": 1},
+                            "kind": {"type": "string", "enum": ["work", "review", "integrate"]},
+                            "depends_on": {"type": "array", "items": {"type": "string"}},
+                            "resources": {"type": "array", "items": {"type": "string"}},
+                            "required": {"type": "boolean"}
+                        },
+                        "required": ["id", "title", "goal", "bot_id", "kind", "depends_on", "resources", "required"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }
+    })
 }
 
 /// A tool result that opened an approval: the session waits for the user.
@@ -123,7 +173,7 @@ fn json_rpc(id: &Value, result: Value) -> Response {
 
 /// The user an agent works for. The Hub is single-user for now, so that is the workspace's owner (the
 /// first owner membership); with several users this becomes the item's requester.
-fn owner(store: &Store, ws: &str) -> Option<String> {
+pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
     store
         .with_conn(|c| {
             use rusqlite::OptionalExtension;
@@ -264,6 +314,33 @@ async fn call_owned(
     name: &str,
     args: Value,
 ) -> Result<String, String> {
+    if matches!(tool_owner, Owner::Items) {
+        let (store, core, name) = (x.store.clone(), x.tools.core.clone(), name.to_owned());
+        return tokio::task::spawn_blocking(steve_i18n::carry(move || {
+            super::item_mcp::call(&store, &core, &s, &name, args)
+        }))
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    if matches!(tool_owner, Owner::Workflow) {
+        // Preserve the authenticated session itself. No caller-supplied item, workspace or
+        // principal can replace the scope established by its bearer token / Node run.
+        let core = x.tools.core.clone();
+        let ends_turn = args["action"] == "fail";
+        return tokio::task::spawn_blocking(steve_i18n::carry(move || {
+            core.tool_workflow(&s, args)
+                .map(|v| {
+                    if ends_turn {
+                        format!("{v}\n\n{}", steve_mcp::END)
+                    } else {
+                        v.to_string()
+                    }
+                })
+                .map_err(|e| e.to_string())
+        }))
+        .await
+        .map_err(|e| e.to_string())?;
+    }
     let store = x.store.clone();
     let ws = s.workspace_id.clone();
     let user = tokio::task::spawn_blocking(move || owner(&store, &ws))
@@ -279,6 +356,8 @@ async fn call_owned(
         session_id: Some(s.id),
     };
     let out: Result<String, String> = match tool_owner {
+        Owner::Items => unreachable!("item management preserves the session above"),
+        Owner::Workflow => unreachable!("workflow preserves the session above"),
         Owner::Upgrade => {
             let ws = cx.ws.clone();
             let store = x.store.clone();
@@ -313,6 +392,7 @@ async fn call_owned(
         // `steve_mail_draft` marks the session itself (`DraftHooks::awaiting_approval`)
         Owner::Mail => steve_mail::mcp::call(&x.tools.mail, &cx, name, &args).await,
         Owner::Flow => steve_flow::mcp::call(&x.tools.flow, &cx, name, &args).await,
+        Owner::Im => steve_channels::im_mcp::call(&x.tools.channels, &cx, name, &args).await,
         Owner::ReplySource => match (
             args.get("text").and_then(Value::as_str),
             cx.item_id.as_deref(),

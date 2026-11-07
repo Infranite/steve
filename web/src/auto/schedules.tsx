@@ -109,11 +109,15 @@ const TEMPLATES = (): { n: string; when: string; what: string; mode: ScheduleMod
   { n: t("auto:schedule.tplBills"), when: "每月 1 日 10:00", what: t("auto:schedule.tplBillsWhat"), mode: "report", bot: Object.keys(st.bots).find((k) => /邮件|mail/i.test(st.bots[k].n + k)) ?? "", show: Object.keys(st.bots).some((k) => /邮件|mail/i.test(st.bots[k].n + k)) },
 ]
 
+/* a new schedule's budget follows its mode until you type one: an agent run costs dollars, a report cents */
+export const defaultBudget = (m: ScheduleMode) => (m === "item" || m === "item_auto" ? 20 : 1)
+
 export function NewScheduleDialog({ edit, bot, onClose, onSaved }: { edit?: Schedule; bot?: string; onClose: () => void; onSaved: (s: Schedule) => void }) {
   const [name, setName] = useState(edit?.name ?? ""), [w, setW] = useState(edit?.when ?? "每周一 09:00"), [what, setWhat] = useState(edit?.what ?? "")
   const [b, setB] = useState(edit?.bot ?? bot ?? mainBot()), [mode, setMode] = useState<ScheduleMode>(edit?.mode ?? "item_auto")
   const [missed, setMissed] = useState<Schedule["missed"]>(edit?.missed ?? "catch_up_once"), [overlap, setOverlap] = useState<Schedule["overlap"]>(edit?.overlap ?? "skip")
-  const [budget, setBudget] = useState(String(edit?.budget_usd ?? 1)), [adv, setAdv] = useState(false)
+  const [budget, setBudget] = useState(String(edit?.budget_usd ?? defaultBudget(edit?.mode ?? "item_auto"))), [budTouched, setBudTouched] = useState(false), [adv, setAdv] = useState(false)
+  const pickMode = (m: ScheduleMode) => { setMode(m); if (!edit && !budTouched) setBudget(String(defaultBudget(m))) }
   const [cron, setCron] = useState(""), [tz, setTz] = useState(edit?.tz ?? st.settings.tz ?? "")
   const [parsed, setParsed] = useState<Parsed | null>(null), [perr, setPerr] = useState(""), [busy, setBusy] = useState(false)
   const t = useT()
@@ -137,7 +141,7 @@ export function NewScheduleDialog({ edit, bot, onClose, onSaved }: { edit?: Sche
   return (
     <Modal title={edit ? t("auto:schedule.editTitle") : t("auto:newSchedule")} desc={t("auto:schedule.desc")} onClose={onClose}
       footer={<><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!ok || busy} onClick={() => void submit()} data-testid="schedule-go">{edit ? t("common:action.save") : t("auto:schedule.create")}</Button></>}>
-      {!edit && <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("auto:schedule.templates")}>{tpl.map((x) => <Button key={x.n} size="xs" variant="outline" onClick={() => { setName(x.n); setW(x.when); setWhat(x.what); setMode(x.mode); if (x.bot) setB(x.bot); setCron("") }} data-tpl={x.n}>{x.n}</Button>)}</div>}
+      {!edit && <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("auto:schedule.templates")}>{tpl.map((x) => <Button key={x.n} size="xs" variant="outline" onClick={() => { setName(x.n); setW(x.when); setWhat(x.what); pickMode(x.mode); if (x.bot) setB(x.bot); setCron("") }} data-tpl={x.n}>{x.n}</Button>)}</div>}
       <FieldGroup className="gap-4">
         <Field><FieldLabel htmlFor="sch-name">{t("auto:schedule.name")}</FieldLabel><Input id="sch-name" className="rounded-lg" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} placeholder={t("auto:schedule.namePlaceholder")} data-schedule-name /></Field>
         <Field><FieldLabel htmlFor="sch-when">{t("auto:schedule.when")}</FieldLabel><Input id="sch-when" className="rounded-lg" maxLength={60} value={w} onChange={(e) => setW(e.target.value)} placeholder={t("auto:schedule.whenPlaceholder")} aria-describedby="sch-when-desc" data-schedule-when disabled={!!cron.trim()} />
@@ -152,10 +156,10 @@ export function NewScheduleDialog({ edit, bot, onClose, onSaved }: { edit?: Sche
         </div>}
         <Field><FieldLabel htmlFor="sch-what">{t("auto:schedule.what")}</FieldLabel><Textarea id="sch-what" maxLength={2000} className="min-h-16 rounded-lg" value={what} onChange={(e) => setWhat(e.target.value)} placeholder={t("auto:schedule.whatPlaceholder")} data-schedule-what /></Field>
         <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.handTo")}</FieldLabel><Pick label={t("auto:schedule.handToAria")} value={b} options={botOptions()} onChange={setB} testId="sch-bot" /></Field>
-        <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.modeLabel")}</FieldLabel><Pick label={t("auto:schedule.modeLabel")} value={mode} options={MODES.map((v) => ({ v, l: modeLabel(v) }))} onChange={setMode} testId="sch-mode" /></Field>
+        <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.modeLabel")}</FieldLabel><Pick label={t("auto:schedule.modeLabel")} value={mode} options={MODES.map((v) => ({ v, l: modeLabel(v) }))} onChange={pickMode} testId="sch-mode" /></Field>
         <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.missedLabel")}</FieldLabel><Pick label={t("auto:schedule.missedLabel")} value={missed} options={[{ v: "catch_up_once", l: t("auto:schedule.missedCatchUp") }, { v: "skip", l: t("auto:schedule.missed.skip") }]} onChange={setMissed} /></Field>
         <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.overlapLabel")}</FieldLabel><Pick label={t("auto:schedule.overlapLabel")} value={overlap} options={[{ v: "skip", l: t("auto:schedule.overlap.skip") }, { v: "run", l: t("auto:schedule.overlap.run") }]} onChange={setOverlap} /></Field>
-        <Field orientation="horizontal" className="justify-between"><FieldLabel htmlFor="sch-budget">{t("auto:schedule.budget")}</FieldLabel><Input id="sch-budget" type="number" min={0} max={50} step={0.5} className="w-24 rounded-lg" value={budget} onChange={(e) => setBudget(e.target.value)} aria-invalid={!budOk} /></Field>
+        <Field orientation="horizontal" className="justify-between"><FieldLabel htmlFor="sch-budget">{t("auto:schedule.budget")}</FieldLabel><Input id="sch-budget" type="number" min={0} max={50} step={0.5} className="w-24 rounded-lg" value={budget} onChange={(e) => { setBudget(e.target.value); setBudTouched(true) }} aria-invalid={!budOk} /></Field>
       </FieldGroup>
     </Modal>
   )

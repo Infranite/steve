@@ -4,7 +4,10 @@
 //! the Node may not signal (EPERM) or a leader whose start time is not the one recorded (its pid was
 //! reused) is uncertain: nothing is freed on it and nothing of it is killed.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long the remnants of a finished or killed group may take to disappear.
+pub(crate) const GONE_WAIT: Duration = Duration::from_secs(3);
 
 /// What became of a process group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +106,35 @@ pub(crate) fn state(pgid: i64, started: Option<u64>) -> Stopped {
         Probe::Uncertain => Stopped::Uncertain,
         Probe::Alive if !ours(pgid, started) => Stopped::Uncertain,
         Probe::Alive => Stopped::Alive,
+    }
+}
+
+/// Observes a group after its leader was reaped, without signalling it. A dying member can
+/// briefly make the group unsignalable on macOS; only ESRCH, never elapsed time or an unreadable
+/// leader, proves that its durable process record may be removed.
+pub(crate) fn wait_gone(pgid: i64, started: Option<u64>) -> Stopped {
+    let until = Instant::now() + GONE_WAIT;
+    wait_gone_checked(
+        || state(pgid, started),
+        || {
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            true
+        },
+    )
+}
+
+fn wait_gone_checked(
+    mut observe: impl FnMut() -> Stopped,
+    mut wait: impl FnMut() -> bool,
+) -> Stopped {
+    loop {
+        let state = observe();
+        if state.gone() || !wait() {
+            return state;
+        }
     }
 }
 
@@ -287,6 +319,45 @@ async fn stop_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reaped_groups_transient_uncertainty_waits_for_proof() {
+        // The leader is reaped before its last dying member disappears. No signal is involved.
+        let mut observations = [Stopped::Uncertain, Stopped::Alive, Stopped::Gone].into_iter();
+        let mut waits = 0;
+        assert_eq!(
+            wait_gone_checked(
+                || observations.next().expect("stops once absence is proved"),
+                || {
+                    waits += 1;
+                    true
+                },
+            ),
+            Stopped::Gone
+        );
+        assert_eq!(waits, 2);
+    }
+
+    #[test]
+    fn a_settling_deadline_never_counts_as_proof_a_group_is_gone() {
+        for state in [Stopped::Uncertain, Stopped::Alive] {
+            let mut waits = 0;
+            let result = wait_gone_checked(
+                || state,
+                || {
+                    waits += 1;
+                    waits < 3
+                },
+            );
+            assert_eq!(result, state);
+            assert!(!result.gone(), "the durable process record must stay");
+            assert_eq!(waits, 3);
+        }
+        assert_eq!(
+            wait_gone_checked(|| Stopped::Gone, || panic!("no wait for an absent group")),
+            Stopped::Gone
+        );
+    }
 
     #[test]
     fn started_in_is_descendants_and_the_group() {

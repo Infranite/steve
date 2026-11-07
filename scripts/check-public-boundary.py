@@ -26,6 +26,23 @@ TOKENS = {
 }
 
 
+# Design notes, plans, specs and runbooks are our own thinking and stay out of the public tree. Documents
+# a user reads are listed here; tests keep their fixtures. Anything else in Markdown is a process document.
+USER_DOCS = {"README.md", "README.zh-CN.md", "CONTRIBUTING.md", "AGENTS.md", "CLAUDE.md", "docs/deployment.md"}
+USER_DOC_DIRS = ("docs/releases/", "docs/assets/")
+
+
+def process_document(rel):
+    if rel in USER_DOCS or rel.startswith(USER_DOC_DIRS) or "/tests/" in "/" + rel:
+        return False
+    return rel.startswith("docs/") or rel.endswith((".md", ".markdown"))
+
+
+# Rules no baseline can excuse.
+def unexcusable(rule):
+    return rule.startswith("dependency-") or rule == "process-document"
+
+
 def finding(path, rule, line, text):
     # Stable under line movement; never write the matching content or credentials into reports.
     return {"path": path, "rule": rule, "line": line,
@@ -53,6 +70,8 @@ def scan(root, paths):
         p = root / rel
         if rel.startswith(".steve/"):
             found.append(finding(rel, "private-runtime-artifact", 0, rel))
+        if process_document(rel):
+            found.append(finding(rel, "process-document", 0, rel))
         if not p.is_file():
             continue
         if p.suffix == ".toml" and p.name == "Cargo.toml":
@@ -103,14 +122,14 @@ def main():
     found = scan(root, [p for p in paths if p])
     baseline_path = root / "scripts/public-boundary-baseline.json"
     if args.write_baseline:
-        debt = [x for x in found if not x["rule"].startswith("dependency-")]
+        debt = [x for x in found if not unexcusable(x["rule"])]
         baseline_path.write_text(json.dumps({"version": 1, "status": "known-debt-not-release-approval", "findings": debt}, indent=2) + "\n")
     baseline = Counter()
     if baseline_path.exists() and not args.strict:
         baseline = Counter(x["fingerprint"] for x in json.loads(baseline_path.read_text())["findings"])
     violations = []
     for x in found:
-        if not x["rule"].startswith("dependency-") and baseline[x["fingerprint"]] > 0:
+        if not unexcusable(x["rule"]) and baseline[x["fingerprint"]] > 0:
             baseline[x["fingerprint"]] -= 1
         else:
             violations.append(x)

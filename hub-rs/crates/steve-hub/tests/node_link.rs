@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use node_harness::*;
 use steve_acp::AcpConfig;
+use steve_hub::wire::node_runtime::Binding;
 use steve_node::{LocalNode, NodeConfig, Root};
 use steve_node_api::testkit::{FakeNode, build::*};
 use steve_node_api::*;
@@ -98,6 +99,7 @@ fn local_config(root: &Path, node: &NodeId) -> (NodeConfig, PathBuf) {
     std::fs::create_dir_all(root.join("work")).unwrap();
     (
         NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: node.clone(),
             home: root.join("node"),
             acp: AcpConfig {
@@ -386,6 +388,102 @@ async fn a_remote_local_node_refuses_history() {
             .all(|h| h.version.is_empty() && h.models.is_empty()),
         "{caps:?}"
     );
+    n.task.abort();
+    n.node.shutdown().await;
+}
+
+/// H1: a remote Node takes only its owner's own work until runs are sandboxed. Once someone else
+/// is a member of the workspace a run there may be theirs: no session binds to the Node and no
+/// turn is planned on it (the message is refused, saying why), and it takes work again once the
+/// workspace is the owner's alone. The local Node is not affected (see the local tests).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_node_takes_only_its_owners_work() {
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    h.session("s1");
+    h.session("s2");
+    let rt = h.bind(&node, "s1");
+    assert!(rt.is_remote());
+    let n = local_node(&h, id, &node).await;
+    for _ in 0..500 {
+        if phase(&h, "s1") == "ready" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert_eq!(phase(&h, "s1"), "ready", "{}", h.dump());
+    // recorded at bind (path model S1): nobody asked for it, so the workspace's service principal
+    let (p, a): (String, String) = h
+        .store
+        .reader(|c| {
+            Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT principal, audience FROM runtime_sessions WHERE session_id='s1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        (p.as_str(), a.as_str()),
+        ("svc:default", r#"["workspace:default"]"#)
+    );
+    let member = |on: bool| {
+        h.store
+            .transaction::<_, steve_store::StoreError>(|tx| {
+                if on {
+                    tx.execute_batch(
+                        "INSERT OR IGNORE INTO users(id,workspace_id,subject,name,role,created) VALUES ('m','default','m','m','member',1);
+                         INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
+                    )?;
+                } else {
+                    tx.execute_batch("DELETE FROM workspace_members WHERE user_id='m'")?;
+                }
+                Ok(())
+            })
+            .unwrap()
+    };
+    member(true);
+    let e = rt.prompt("s1", "@say hi", "user", &[]).unwrap_err();
+    assert!(
+        e.to_string().contains(node.as_str()) && e.to_string().contains("其他成员"),
+        "{e}"
+    );
+    let queued: i64 = h.q("SELECT COUNT(*) FROM queued WHERE session_id='s1'");
+    assert_eq!(queued, 0, "nothing queued for it either");
+    let binding = Binding {
+        session: "s2".into(),
+        resource: "item:s2".into(),
+        prepare: PrepareKind::Scratch,
+        choice: choice(),
+        policy: policy(),
+    };
+    let e = rt.bind(&binding).unwrap_err();
+    assert!(e.to_string().contains("其他成员"), "{e}");
+    let bound: i64 = h.q("SELECT COUNT(*) FROM runtime_sessions WHERE session_id='s2'");
+    assert_eq!(bound, 0);
+    // a session of a workspace the Node's owner does not own: refused too
+    h.store
+        .transaction::<_, steve_store::StoreError>(|tx| {
+            tx.execute_batch(
+                "INSERT INTO workspaces(id,name,created) VALUES ('w2','w2',1);
+                 INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s3','w2','claude-code','.','active',1,1);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let e = rt
+        .bind(&Binding {
+            session: "s3".into(),
+            resource: "item:s3".into(),
+            ..binding.clone()
+        })
+        .unwrap_err();
+    assert!(e.to_string().contains("所有者配对"), "{e}");
+    // the owner's alone again: it runs
+    member(false);
+    rt.prompt("s1", "@say hello", "user", &[]).unwrap();
+    until("turn end", 20, || !h.ends.turns.lock().unwrap().is_empty()).await;
+    rt.bind(&binding).unwrap();
     n.task.abort();
     n.node.shutdown().await;
 }

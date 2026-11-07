@@ -19,6 +19,7 @@ const BEFORE: &str = "How to work with Steve — use the steve MCP tools:
 - steve_request_approval: before anything with outside effects (deploy, release, push, send, pay, delete). After calling it, end your turn.
 - steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open. A delivery with other open steps is refused. Then end your turn.
 - steve_publish: only when the item changed code (commits on your branch), after the user has accepted the item and asked for it to go live. Commit everything on your branch first. Then end your turn. If you changed nothing (an explanation, a review, an answer), don't call it: accepting the item finishes it.
+- steve_lane_status: after steve_publish, to see where the release is: the merge-lane batch it is in (MQ-<n>), an approval it waits for and who answers it, a failure and why, the merged commit and released version, and what you should do next. Read-only. Call it instead of asking the user which batch you are in or how the release is going.
 Do the work yourself; do not stop to ask for confirmation you don't need. Reply to the user in Chinese.";
 
 fn yolo(k: &Kit) -> Yolo {
@@ -315,7 +316,7 @@ fn full_access_bypasses_prompts_and_says_what_still_holds() {
         assert!(p.contains(&l), "{l}\n{p}");
     }
     assert!(p.contains("never use pkill or killall"));
-    assert!(p.contains("do not push to any remote unless the item explicitly asks"));
+    assert!(p.contains("do not push to any remote and do not change GitHub with gh"));
     assert!(p.contains(&format!("do not touch {}", y.env().steve_home.display())));
     // plain YOLO: no full-access lines, no bypass
     let k = Kit::new();
@@ -376,4 +377,49 @@ fn switching_full_access_mid_run_changes_the_mode_in_place_and_off_restores_the_
     k.core.yolo_sync(WS);
     assert_eq!(k.rt.st().modes.last().unwrap().1, "auto", "the bot's mode");
     assert_eq!(say(&k, &sid, "停"), format!("{}\n\n停", agent::NOTE_OFF));
+}
+
+/// #38: an item with its own worktree edits without a card per file whether or not YOLO is on; an
+/// item in a real directory keeps the bot's `default`.
+#[test]
+fn an_own_directory_widens_default_without_yolo_too() {
+    let k = Kit::new();
+    let y = yolo(&k);
+    switch(&y, false);
+    let (_, sid) = started(&k, &k.home().join("ops/release.sh"));
+    let s = k.db().session(&sid).unwrap().unwrap();
+    assert_eq!(
+        k.core
+            .session_perm_mode(&s, Some("default".into()))
+            .as_deref(),
+        Some("acceptEdits")
+    );
+    assert_eq!(
+        k.core.session_perm_mode(&s, Some("plan".into())).as_deref(),
+        Some("plan")
+    );
+    let dir = k.home().join("real");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = k
+        .db()
+        .project_create(
+            WS,
+            "真实目录",
+            "",
+            &dir.to_string_lossy(),
+            "dir",
+            false,
+            Some("dev"),
+            None,
+        )
+        .unwrap()
+        .id;
+    let i = k.item("run", "执行", Some(&p));
+    let s = k.core.start_session(&i, None, None, &[]).unwrap();
+    assert_eq!(
+        k.core
+            .session_perm_mode(&s, Some("default".into()))
+            .as_deref(),
+        Some("default")
+    );
 }

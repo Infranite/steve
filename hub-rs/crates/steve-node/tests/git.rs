@@ -95,6 +95,7 @@ impl T {
     fn node(&self) -> LocalNode {
         let root = self.root.clone();
         let n = LocalNode::open(NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new("hub").unwrap(),
             home: root.join("node"),
             acp: AcpConfig {
@@ -617,10 +618,9 @@ fn all_argv() -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_hanging_push_is_killed_at_the_deadline_and_its_credential_is_nowhere() {
+async fn a_running_push_keeps_its_credential_private_and_stops_with_the_node() {
     let t = T::new();
     let n = t.node();
-    n.set_push_timeout(Duration::from_secs(2));
     let hub = Arc::new(FakeSecrets::default());
     n.connect_secrets(hub.clone());
     let w = workspace(&n).await;
@@ -628,12 +628,21 @@ async fn a_hanging_push_is_killed_at_the_deadline_and_its_credential_is_nowhere(
     let url = format!("http://127.0.0.1:{}/o/r.git", server.port);
     let a = push(&n, &w, &url, true).await;
     hub.give("op_hang", "github", HEADER_VALUE.as_bytes());
-    let t0 = Instant::now();
     n.git_apply(now_cmd("op_hang", a)).await.unwrap();
     // while git waits on the server: the header went to it, and no command line has the token
-    let until = Instant::now() + Duration::from_secs(10);
+    // Use the ordinary push budget here: the short deadline test below may legitimately spend
+    // its budget checking the workspace and preparing the throwaway repository.
+    let until = Instant::now() + Duration::from_secs(30);
     while server.requests.lock().unwrap().is_empty() {
-        assert!(Instant::now() < until, "git never reached the server");
+        let state = n
+            .operation(OperationId::new("op_hang").unwrap())
+            .await
+            .unwrap()
+            .state;
+        assert!(
+            !state.is_finished() && Instant::now() < until,
+            "git never reached the server: {state:?}"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let req = server.requests.lock().unwrap()[0].clone();
@@ -647,20 +656,69 @@ async fn a_hanging_push_is_killed_at_the_deadline_and_its_credential_is_nowhere(
     for leak in [TOKEN, HEADER_VALUE, "eC1hY2Nlc3MtdG9rZW46"] {
         assert!(!argv.contains(leak), "on a command line: {leak}");
     }
+    n.shutdown().await;
     let s = finished(&n, "op_hang").await;
     assert!(
         matches!(
             s,
             Observed::Finished {
+                outcome: Outcome::Interrupted,
+                ..
+            }
+        ),
+        "{s:?}"
+    );
+    assert!(!all_argv().contains(&url), "the push must be gone");
+    assert_eq!(
+        std::fs::read_dir(t.root.join("node/push")).unwrap().count(),
+        0
+    );
+    // not in the workspace's config, the journal or anything else the Node keeps
+    let mut kept = all_bytes(&t.root.join("node"));
+    kept.extend(all_bytes(&t.proj().join(".git")));
+    for leak in [TOKEN, HEADER_VALUE, "eC1hY2Nlc3MtdG9rZW46"] {
+        assert!(!contains(&kept, leak.as_bytes()), "kept: {leak}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hanging_push_exhausts_its_budget_and_leaves_no_process_or_credential() {
+    let t = T::new();
+    let n = t.node();
+    n.set_push_timeout(Duration::from_secs(2));
+    let hub = Arc::new(FakeSecrets::default());
+    n.connect_secrets(hub.clone());
+    let w = workspace(&n).await;
+    let server = hanging();
+    let url = format!("http://127.0.0.1:{}/o/r.git", server.port);
+    let a = push(&n, &w, &url, true).await;
+    hub.give("op_deadline", "github", HEADER_VALUE.as_bytes());
+    let t0 = Instant::now();
+    n.git_apply(now_cmd("op_deadline", a)).await.unwrap();
+    // The deadline includes preparation. Whether git reaches the server before it expires
+    // depends on machine load; either way it must time out and leave nothing running.
+    let s = finished(&n, "op_deadline").await;
+    assert!(
+        matches!(
+            s,
+            Observed::Finished {
                 outcome: Outcome::TimedOut,
+                error: Some(ApiError {
+                    code: ErrorCode::OutcomeUnknown,
+                    ..
+                }),
                 ..
             }
         ),
         "{s:?}"
     );
     assert!(t0.elapsed() < Duration::from_secs(15), "{:?}", t0.elapsed());
+    assert!(!all_argv().contains(&url), "the push must be gone");
+    assert_eq!(
+        std::fs::read_dir(t.root.join("node/push")).unwrap().count(),
+        0
+    );
     n.shutdown().await;
-    // not in the workspace's config, the journal or anything else the Node keeps
     let mut kept = all_bytes(&t.root.join("node"));
     kept.extend(all_bytes(&t.proj().join(".git")));
     for leak in [TOKEN, HEADER_VALUE, "eC1hY2Nlc3MtdG9rZW46"] {

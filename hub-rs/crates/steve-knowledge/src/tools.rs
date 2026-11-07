@@ -16,7 +16,7 @@ use steve_modules::{ApiError, ApiResult, Modules};
 use steve_store::base::{Level, Viewer};
 
 use crate::context::{item_viewer, scrub_query};
-use crate::retrieve::{Hit, Purpose, Query, record_use, retrieve};
+use crate::retrieve::{Hit, Purpose, Query, SEMANTIC_DOWN_NOTE, record_use, retrieve_all};
 use crate::service::own_doc;
 use crate::state::Knowledge;
 use crate::uses::last_n;
@@ -216,11 +216,13 @@ pub fn search(
     let viewer = session_viewer(m, cx)?;
     let text = scrub_query(kb.guard.as_ref(), q);
     let now = m.clock.now();
-    let hits = m.store.reader(|c| {
+    let (hits, semantic_down) = m.store.reader(|c| {
         let mut query = Query::new(kb.store(), &viewer, &text, Purpose::Agent);
         query.k = k;
         query.now = now;
-        let mut hits = retrieve(c, &query)?;
+        let found = retrieve_all(c, &query)?;
+        let semantic_down = found.semantic_down;
+        let mut hits = found.hits;
         let base = match cx.session_id.as_deref() {
             Some(sid) => last_n(c, &cx.ws, sid)?,
             None => 0,
@@ -228,10 +230,15 @@ pub fn search(
         for h in &mut hits {
             h.n += base;
         }
-        Ok::<_, ApiError>(hits)
+        Ok::<_, ApiError>((hits, semantic_down))
     })?;
+    let note = if semantic_down {
+        format!("\n\n{SEMANTIC_DOWN_NOTE}")
+    } else {
+        String::new()
+    };
     if hits.is_empty() {
-        return Ok(format!("No knowledge matches \"{q}\"."));
+        return Ok(format!("No knowledge matches \"{q}\".{note}"));
     }
     if let Some(sid) = cx.session_id.as_deref() {
         m.store
@@ -239,7 +246,7 @@ pub fn search(
     }
     let mut blocks: Vec<String> = hits.iter().map(entry).collect();
     blocks.push(LEVELS.into());
-    Ok(blocks.join("\n\n"))
+    Ok(format!("{}{note}", blocks.join("\n\n")))
 }
 
 type Piece = (i64, String, Option<i64>, Option<i64>);

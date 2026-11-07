@@ -9,7 +9,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
-use steve_mcp::{END, router, testing::Recorder};
+use steve_mcp::{END, PUBLISHED, router, testing::Recorder};
 use tower::ServiceExt;
 
 fn app(rec: Arc<Recorder>, peer: &str) -> Router {
@@ -166,8 +166,30 @@ async fn initialize_list_and_call() {
     .await;
     assert_eq!(
         v["result"]["content"][0]["text"],
-        format!("Release requested. {END}")
+        format!("Release requested. {PUBLISHED} {END}")
     );
+    let t = v["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(t.contains("steve_lane_status"), "{t}");
+    // read-only, no arguments: the text is the backend's, the turn goes on
+    let (_, v) = post(
+        &app,
+        "/mcp",
+        Some("tok"),
+        call(8, "steve_lane_status", json!({})),
+    )
+    .await;
+    assert_eq!(
+        v["result"],
+        json!({"content":[{"type":"text","text":"在合并通道（github.com/x/y main）的 MQ-3 里"}],"isError":false})
+    );
+    let (_, v) = post(
+        &app,
+        "/mcp",
+        Some("tok"),
+        json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"steve_lane_status"}}),
+    )
+    .await;
+    assert_eq!(v["result"]["isError"], false, "{v}");
 
     let calls = rec.calls.lock().unwrap().clone();
     assert_eq!(
@@ -178,6 +200,8 @@ async fn initialize_list_and_call() {
             r#"s1 request_approval {"action":"推送","detail":"git push"}"#,
             r#"s1 deliver {"summary":"好了","outputs":[{"kind":"PR","title":"t"}],"checks":[{"name":"test","passed":true}],"unfinished":["b"]}"#,
             r#"s1 publish {"branch":"steve/st-12","summary":"新版本"}"#,
+            "s1 lane_status",
+            "s1 lane_status",
         ]
     );
 }

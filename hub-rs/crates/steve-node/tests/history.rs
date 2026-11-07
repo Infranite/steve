@@ -46,6 +46,7 @@ fn setup(codex: &str) -> T {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let cfg = NodeConfig {
+        ceiling: steve_node::PolicyCeiling::unlimited(),
         node: NodeId::new("local").unwrap(),
         home: root.join("node"),
         acp: AcpConfig {

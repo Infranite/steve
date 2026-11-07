@@ -1,5 +1,4 @@
-//! ACP permission requests in Steve's terms, and Steve's answers back in ACP's. Only a Node's driver
-//! uses this; the runner keeps its own decision-card fields ([`crate::permission_request`]).
+//! ACP permission requests in Steve's terms, and Steve's answers back in ACP's, for a Node's driver.
 //!
 //! An answer maps to an option of the very request: `allow_once` for [`PermissionDecision::AllowOnce`]
 //! (never `allow_always`: nothing is persisted into a harness's settings), `reject_once` for

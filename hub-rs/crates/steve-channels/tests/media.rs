@@ -14,9 +14,9 @@ use axum::http::{HeaderMap, Request, header};
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_channels::Channels;
-use steve_channels::adapters::feishu::FeishuApp;
 use steve_channels::adapters::feishu::inbound::LongConnection;
 use steve_channels::adapters::feishu::ws::WsState;
+use steve_channels::adapters::feishu::{FeishuApp, FeishuMedia};
 use steve_channels::fake::feishu::model::Resource;
 use steve_channels::fake::feishu::{Endpoint, FakeFeishu, WsClientConfig, fixture, ids};
 use steve_flow::testkit::FakeCore;
@@ -72,12 +72,14 @@ async fn setup() -> H {
         ConnectionsConfig::new(vec!["http://hub.test:8440".into()], true, |_| None),
     )
     .provider(app.clone())
+    .usage(Arc::new(steve_channels::usage::ChannelUsage))
     .build();
     let flow = flow_setup
         .connections(conns.clone())
         .build(env.modules.clone(), Arc::new(LinearExecutor));
     let ch = Channels::builder(env.modules.clone(), conns.clone(), Arc::new(flow))
         .adapter(app)
+        .media(Arc::new(FeishuMedia::new("feishu_app")))
         .build();
     let capi: Router = connections::routes(conns).with_state(env.modules.clone());
     let body = json!({
@@ -722,4 +724,62 @@ async fn an_old_card_is_read_again_from_its_own_raw_event_only() {
         (json!("[interactive消息]"), json!([]))
     );
     let _ = &h.con;
+}
+
+/// An old card is read again from its own raw event even once the connection that received it is
+/// removed (its row gone, the space's connection cleared): the stored fallback text does not come
+/// back.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_old_card_is_read_again_after_its_connection_is_removed() {
+    let h = setup().await;
+    let content = json!({"title": "旧卡片", "elements": [[{"tag": "text", "text": "正文"}]]});
+    let msg = push(
+        &h,
+        envelope(
+            "om_old00000000000000000000000000002",
+            "interactive",
+            &content,
+            "ev_old_2",
+        ),
+    )
+    .await;
+    sql(
+        &h,
+        &format!(
+            "UPDATE chan_messages SET text = '[interactive消息]', attachments = '[]' WHERE id = '{msg}'"
+        ),
+    );
+    let read = |h: &H| {
+        h.env
+            .store()
+            .reader(|c| Ok::<_, steve_store::StoreError>(steve_channels::media::present(c, &msg)))
+            .expect("present")
+            .expect("stored")
+    };
+    assert_eq!(read(&h).0.as_deref(), Some("旧卡片\n正文"));
+    // the connection is removed: its row goes, the space keeps no connection
+    h.ch.connections()
+        .disconnect(&caller(WS, ME), &h.con)
+        .await
+        .expect("disconnected");
+    assert_eq!(
+        one(
+            &h,
+            &format!("SELECT count(*) FROM connections WHERE id = '{}'", h.con)
+        ),
+        json!(0)
+    );
+    assert_eq!(
+        one(
+            &h,
+            &format!(
+                "SELECT count(*) FROM spaces WHERE connection_id IS NOT NULL AND id = '{}'",
+                space_of(&h, &msg)
+            )
+        ),
+        json!(0)
+    );
+    let (text, atts) = read(&h);
+    assert_eq!(text.as_deref(), Some("旧卡片\n正文"));
+    assert_eq!(atts[0]["format"], "flattened");
 }

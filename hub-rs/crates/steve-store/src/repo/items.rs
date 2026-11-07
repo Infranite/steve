@@ -42,6 +42,10 @@ pub struct NewItem {
     /// ([`super::kinds::checked`]). The domain layer always gives them; empty writes none.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The member who asked for it (`items.requested_by`): whose access its runs use. `None`: Steve,
+    /// a flow, a schedule (the workspace's service principal).
+    #[serde(default)]
+    pub requested_by: Option<String>,
 }
 
 /// Patchable item fields. Deserializable so a stored decision `undo` (`{status, now, stage}`) can be applied.
@@ -158,7 +162,7 @@ impl Items<'_> {
             };
             let parent = p.parent.as_ref().map(to_json).transpose()?;
             w.c.run(
-                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, bot_id, project_id, source, parent, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, bot_id, project_id, source, parent, created, updated, requested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     id,
                     ws,
@@ -172,7 +176,8 @@ impl Items<'_> {
                     source,
                     parent,
                     t,
-                    t
+                    t,
+                    p.requested_by
                 ],
             )?;
             super::put_item_tags(w.c, &id, &tags)?;
@@ -376,12 +381,15 @@ impl Deps<'_> {
     }
 
     pub fn add(&self, item: &str, dep: &str) -> Result<()> {
-        self.0.write(|w| {
-            w.c.run(
+        self.0.transaction(|tx| {
+            let added = tx.execute(
                 "INSERT OR IGNORE INTO item_deps (item_id, dep_id, created) VALUES (?, ?, ?)",
                 params![item, dep, now()],
             )?;
-            w.publish(ChangeEvent::Item { id: item.into() });
+            if added > 0 {
+                super::dependency_waits::rearm_in(tx, item)?;
+            }
+            tx.publish(ChangeEvent::Item { id: item.into() });
             Ok(())
         })
     }
@@ -458,23 +466,8 @@ impl Artifacts<'_> {
         location: Option<&str>,
         role: Option<&str>,
     ) -> Result<()> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
-            let id = uid("art");
-            tx.run(
-                "INSERT INTO artifacts (id, item_id, kind, title, location, created) VALUES (?, ?, ?, ?, ?, ?)",
-                params![id, item_id, kind, title, location, now()],
-            )?;
-            if let Some(role) = role.filter(|r| ["record", "result"].contains(r)) {
-                tx.run(
-                    "INSERT INTO artifact_roles (artifact_id, role) VALUES (?, ?)",
-                    [&id, role],
-                )?;
-            }
-            tx.commit()?;
-            w.publish(ChangeEvent::Item { id: item_id.into() });
-            Ok(())
-        })
+        self.0
+            .transaction(|tx| artifact_add_in(tx, item_id, kind, title, location, role))
     }
 
     /// `(artifact id, role)` of the item's outputs the agent said a role for.
@@ -510,8 +503,33 @@ impl Artifacts<'_> {
     }
 }
 
+/// Adds an artifact and its role inside the caller's transaction. Collaboration uses this with its
+/// durable unit result and the child's closing intent, so all delivery evidence commits together.
+pub fn artifact_add_in(
+    tx: &crate::Tx<'_>,
+    item_id: &str,
+    kind: &str,
+    title: &str,
+    location: Option<&str>,
+    role: Option<&str>,
+) -> Result<()> {
+    let id = uid("art");
+    tx.run(
+        "INSERT INTO artifacts (id, item_id, kind, title, location, created) VALUES (?, ?, ?, ?, ?, ?)",
+        params![id, item_id, kind, title, location, now()],
+    )?;
+    if let Some(role) = role.filter(|r| ["record", "result"].contains(r)) {
+        tx.run(
+            "INSERT INTO artifact_roles (artifact_id, role) VALUES (?, ?)",
+            [&id, role],
+        )?;
+    }
+    tx.publish(ChangeEvent::Item { id: item_id.into() });
+    Ok(())
+}
+
 /// The `item_marks` row for a status change; the actor is unknown at this layer (`""`).
-fn status_mark(
+pub(super) fn status_mark(
     c: &rusqlite::Connection,
     ws: &str,
     item: &str,
@@ -623,7 +641,7 @@ pub fn timeline_add_in(
     Ok(())
 }
 
-fn timeline_on(
+pub(super) fn timeline_on(
     c: &rusqlite::Connection,
     item_id: &str,
     actor: &str,

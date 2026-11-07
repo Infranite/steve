@@ -14,10 +14,11 @@ use axum::Router;
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use steve_channels::Outbound;
-use steve_channels::adapters::feishu::{FeishuError, SendAsUser, SentAsUser, UserMessage};
+use steve_channels::channel::{ActAsUser, ActTarget, MessageRef, OutContent, SendKey, Sent};
 use steve_channels::compose::H_SAFETY;
 use steve_channels::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Purpose};
 use steve_channels::disclosure::{CHECK_HEAD, Disclosure, REWRITE_HEAD};
+use steve_channels::ext::{ChannelDecl, MessageIds};
 use steve_channels::fake::channel::FakeChannel;
 use steve_channels::flow_actions::{LateChannels, ReplyAs, SendToSpace, plan_of};
 use steve_channels::inbound::{LABEL_ECHO, LABEL_QUIET};
@@ -30,6 +31,7 @@ use steve_channels::{
     By, Channels, Inbound, InboundMessage, Mention, Next, Replies, SendTarget, SpaceKind, api,
     bindings, spaces,
 };
+use steve_flow::AdapterError;
 use steve_flow::graph::{Graph, Node};
 use steve_flow::nodes::action::Action;
 use steve_flow::runs::{self, NewRun};
@@ -223,7 +225,29 @@ async fn setup() -> H {
     setup_with(None).await
 }
 
-async fn setup_with(as_user: Option<Arc<dyn SendAsUser>>) -> H {
+async fn setup_with(as_user: Option<Arc<dyn ActAsUser>>) -> H {
+    setup_full(as_user, None).await
+}
+
+/// [`setup_with`], with a declaration of the fake channel side.
+async fn setup_full(as_user: Option<Arc<dyn ActAsUser>>, decl: Option<ChannelDecl>) -> H {
+    setup_yolo(as_user, decl, false).await
+}
+
+/// YOLO's switch, as steve-core sets it.
+struct Yolo(bool);
+impl steve_channels::YoloSwitch for Yolo {
+    fn on(&self, _: &str) -> bool {
+        self.0
+    }
+}
+
+/// [`setup_full`], with YOLO deciding the workspace's cards or not.
+async fn setup_yolo(
+    as_user: Option<Arc<dyn ActAsUser>>,
+    decl: Option<ChannelDecl>,
+    yolo: bool,
+) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
     let disclosure = Disclosure::with_models(Vec::new());
@@ -265,7 +289,7 @@ async fn setup_with(as_user: Option<Arc<dyn SendAsUser>>) -> H {
     .build();
     let mut outbox = Outbox::new(link);
     if let Some(u) = as_user {
-        outbox = outbox.as_user(FakeChannel::ID, u);
+        outbox = outbox.act_as_user(u);
     }
     let outbox = Arc::new(outbox);
     let replies = Arc::new(Replies::new().outbound(outbox.clone()));
@@ -275,11 +299,15 @@ async fn setup_with(as_user: Option<Arc<dyn SendAsUser>>) -> H {
         .action(Arc::new(ReplyAs::new(replies.clone(), late.clone())))
         .action(Arc::new(SendToSpace::new(replies.clone(), late.clone())))
         .build(env.modules.clone(), Arc::new(LinearExecutor));
-    let ch = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
+    let mut ch = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
         .adapter(fake.clone())
         .responder(replies.clone())
         .flow(flow.clone())
-        .build();
+        .yolo(Arc::new(Yolo(yolo)));
+    if let Some(d) = decl {
+        ch = ch.decl(d);
+    }
+    let ch = ch.build();
     late.set(&ch);
     let api = api::routes(ch.clone()).with_state(env.modules.clone());
 
@@ -754,7 +782,7 @@ async fn inside_the_sources_scope_it_counts_as_public() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn two_failed_rewrites_become_a_draft_even_with_a_grant() {
+async fn a_failed_rewrite_becomes_a_draft_even_with_a_grant() {
     let h = setup().await;
     checks_pass(&h);
     // the rewrite keeps the number
@@ -765,12 +793,13 @@ async fn two_failed_rewrites_become_a_draft_even_with_a_grant() {
     let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", "预算").await;
     exec(
         &h,
-        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created)
-         VALUES ('gr_1', 'default', 'flow', 'flw_x', 'msg.send', 'space', '*', 99999999999999, 'usr_dev', 1);",
+        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created)
+         VALUES ('gr_1', 'default', 'flow', 'flw_x', 'msg.send', 'space', '*', json_object('flow_version', 1), 99999999999999, 'usr_dev', 1);",
     );
     let auth = Auth::Grant {
         flow_id: "flw_x".into(),
         run_id: "run_x".into(),
+        flow_version: 1,
     };
     let d = h
         .outbox
@@ -797,7 +826,7 @@ async fn two_failed_rewrites_become_a_draft_even_with_a_grant() {
         .iter()
         .filter(|p| p.starts_with(REWRITE_HEAD))
         .count();
-    assert_eq!(rewrites, 2, "at most two rounds");
+    assert_eq!(rewrites, 1, "one round");
     let q = row(
         &h,
         "SELECT question, draft FROM decisions WHERE id = ?",
@@ -813,7 +842,7 @@ async fn two_failed_rewrites_become_a_draft_even_with_a_grant() {
         .unwrap();
     assert_eq!(b.verdict, "drafted");
     assert_eq!(b.spans[0]["text"], "30 万");
-    assert_eq!(b.rewrites.as_array().unwrap().len(), 2);
+    assert_eq!(b.rewrites.as_array().unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1432,8 +1461,8 @@ async fn an_approved_flow_step_is_the_only_approval() {
     exec(
         &h,
         &format!(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created)
-             VALUES ('gr_1', 'default', 'flow', 'flw_test', 'msg.send', 'space', '{}', 99999999999999, 'usr_dev', 1);",
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created)
+             VALUES ('gr_1', 'default', 'flow', 'flw_test', 'msg.send', 'space', '{}', json_object('flow_version', 1), 99999999999999, 'usr_dev', 1);",
             plan.space_id
         ),
     );
@@ -1457,8 +1486,8 @@ async fn an_approved_flow_step_is_the_only_approval() {
     exec(
         &h,
         &format!(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created)
-             VALUES ('gr_2', 'default', 'flow', 'flw_test', 'msg.send', 'space', '{}', 99999999999999, 'usr_dev', 1);",
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created)
+             VALUES ('gr_2', 'default', 'flow', 'flw_test', 'msg.send', 'space', '{}', json_object('flow_version', 1), 99999999999999, 'usr_dev', 1);",
             mine.space_id
         ),
     );
@@ -1517,14 +1546,15 @@ async fn nothing_reaches_the_adapter_without_a_valid_authorization() {
     // an expired / revoked grant, or none
     exec(
         &h,
-        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created, revoked)
-         VALUES ('gr_old', 'default', 'flow', 'flw_old', 'msg.send', 'space', '*', 2, 'usr_dev', 1, NULL),
-                ('gr_rev', 'default', 'flow', 'flw_rev', 'msg.send', 'space', '*', 99999999999999, 'usr_dev', 1, 5);",
+        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created, revoked)
+         VALUES ('gr_old', 'default', 'flow', 'flw_old', 'msg.send', 'space', '*', json_object('flow_version', 1), 2, 'usr_dev', 1, NULL),
+                ('gr_rev', 'default', 'flow', 'flw_rev', 'msg.send', 'space', '*', json_object('flow_version', 1), 99999999999999, 'usr_dev', 1, 5);",
     );
     for f in ["flw_old", "flw_rev", "flw_none"] {
         let a = Auth::Grant {
             flow_id: f.into(),
             run_id: "r".into(),
+            flow_version: 1,
         };
         let d = h
             .outbox
@@ -1559,8 +1589,8 @@ async fn nothing_reaches_the_adapter_without_a_valid_authorization() {
     let li = recorded(&h, &h.me.clone(), "D_LI", "m1", "ulilei", "/bot 发给大家").await;
     exec(
         &h,
-        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, until, created_by, created)
-         VALUES ('gr_me', 'default', 'flow', 'flw_me', 'msg.send', 'space', '*', 99999999999999, 'usr_dev', 1);",
+        "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created)
+         VALUES ('gr_me', 'default', 'flow', 'flw_me', 'msg.send', 'space', '*', json_object('flow_version', 1), 99999999999999, 'usr_dev', 1);",
     );
     for a in [
         Auth::Trigger {
@@ -1569,6 +1599,7 @@ async fn nothing_reaches_the_adapter_without_a_valid_authorization() {
         Auth::Grant {
             flow_id: "flw_me".into(),
             run_id: "r".into(),
+            flow_version: 1,
         },
         rule(&li),
         Auth::None,
@@ -1654,58 +1685,47 @@ async fn a_handoff_can_become_a_draft_reply() {
     assert_eq!(sent(&h)[1].1, "我晚点回你");
 }
 
-/// Records what would have been sent as you (F6's seam), without a network.
+/// Records what would have been sent and recalled as you, without a network.
 #[derive(Default)]
-struct AsUser(Mutex<Vec<UserCall>>);
+struct AsUser(Mutex<Vec<UserCall>>, Mutex<Vec<MessageRef>>);
 
 /// `(chat or message, text, uuid, in_thread)`.
 type UserCall = (String, String, Option<String>, bool);
 
 #[async_trait::async_trait]
-impl SendAsUser for AsUser {
-    async fn send_as_user(
-        &self,
-        _: &ConnCx,
-        chat: &str,
-        m: &UserMessage,
-    ) -> Result<SentAsUser, FeishuError> {
-        self.0.lock().unwrap().push((
-            chat.into(),
-            m.content["text"].as_str().unwrap_or("").into(),
-            m.uuid.clone(),
-            false,
-        ));
-        Ok(SentAsUser {
-            message_id: "om_u1".into(),
-            chat_id: chat.into(),
-            create_time: None,
-            thread_id: None,
-            uuid: m.uuid.clone().unwrap_or_default(),
-            retried: false,
-        })
+impl ActAsUser for AsUser {
+    fn adapter_id(&self) -> &str {
+        FakeChannel::ID
     }
 
-    async fn reply_as_user(
+    async fn send(
         &self,
         _: &ConnCx,
-        message_id: &str,
-        m: &UserMessage,
-        in_thread: bool,
-    ) -> Result<SentAsUser, FeishuError> {
-        self.0.lock().unwrap().push((
-            message_id.into(),
-            m.content["text"].as_str().unwrap_or("").into(),
-            m.uuid.clone(),
-            in_thread,
-        ));
-        Ok(SentAsUser {
-            message_id: "om_u2".into(),
-            chat_id: String::new(),
-            create_time: None,
-            thread_id: None,
-            uuid: m.uuid.clone().unwrap_or_default(),
-            retried: false,
-        })
+        to: &ActTarget,
+        content: &OutContent,
+        key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        let (at, in_thread, id) = match to {
+            ActTarget::Space { ext_id } => (ext_id.clone(), false, "om_u1"),
+            ActTarget::Reply { to, in_thread } => {
+                (to.id().unwrap_or_default().to_string(), *in_thread, "om_u2")
+            }
+        };
+        assert_eq!(content.uuid.as_deref(), Some(key.0.as_str()));
+        self.0
+            .lock()
+            .unwrap()
+            .push((at, content.text.clone(), Some(key.0.clone()), in_thread));
+        Ok(Sent::id(id).created(1_700_000_000_000))
+    }
+
+    fn supports_recall(&self) -> bool {
+        true
+    }
+
+    async fn recall(&self, _: &ConnCx, msg: &MessageRef) -> Result<(), AdapterError> {
+        self.1.lock().unwrap().push(msg.clone());
+        Ok(())
     }
 }
 
@@ -1739,6 +1759,279 @@ async fn your_own_messages_go_out_with_your_user_token_once_approved() {
         )[0],
         "om_u2"
     );
+}
+
+/// Your own account, approved and sent as you: the message is out as `om_u2`.
+async fn sent_as_you(h: &H) -> String {
+    checks_pass(h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let me = h.me.clone();
+    let r = push(h, &me, msg("C_DEV", "d1", "ulilei", "@你 在吗", true))
+        .await
+        .response
+        .unwrap();
+    let m = r.out_message_id.unwrap();
+    decide(h, &r.decision_id.unwrap(), "yes", "在的").unwrap();
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    assert_eq!(status(h, &m), "sent");
+    m
+}
+
+/// A message sent as you is recalled as you through the connection it went out on, even once the
+/// space's voice is a bot; a message sent before that was recorded goes through the voice.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_went_out_as_you_is_recalled_as_you_whatever_the_voice_is_now() {
+    let u = Arc::new(AsUser::default());
+    let h = setup_with(Some(u.clone())).await;
+    let m = sent_as_you(&h).await;
+    assert_eq!(
+        row(
+            &h,
+            "SELECT sent_via, ext_created FROM chan_messages WHERE id = ?",
+            &[&m]
+        ),
+        vec![json!(h.me), json!(1_700_000_000_000i64)]
+    );
+    // a bot identity joins the space and becomes its voice
+    let space = row(&h, "SELECT space_id FROM chan_messages WHERE id = ?", &[&m])[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let now = h.ch.now();
+    h.env
+        .store()
+        .transaction(|tx| -> ApiResult<()> {
+            spaces::see(tx, WS, &space, &h.oncall, now)?;
+            spaces::set_voice(tx, WS, &space, Some(&h.oncall), now)?;
+            Ok(())
+        })
+        .expect("voice");
+    assert_eq!(
+        h.env
+            .store()
+            .reader(|c| spaces::voice(c, &space))
+            .unwrap()
+            .as_deref(),
+        Some(h.oncall.as_str())
+    );
+
+    h.outbox.recall(&h.ch, WS, ME, &m).await.expect("recalled");
+    let calls = u.1.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].id(), Some("om_u2"));
+    assert_eq!(calls[0].space_ext_id, "C_DEV");
+    assert_eq!(calls[0].created, 1_700_000_000_000);
+    assert!(calls[0].created_exact);
+    assert!(h.fake.recalled.lock().unwrap().is_empty(), "not as the bot");
+    assert_eq!(status(&h, &m), "recalled");
+
+    // sent before the connection was recorded: through the space's voice, the bot
+    exec(
+        &h,
+        &format!("UPDATE chan_messages SET status = 'sent', sent_via = NULL WHERE id = '{m}'"),
+    );
+    h.outbox.recall(&h.ch, WS, ME, &m).await.expect("recalled");
+    assert_eq!(*h.fake.recalled.lock().unwrap(), vec!["om_u2".to_string()]);
+    assert_eq!(u.1.lock().unwrap().len(), 1);
+}
+
+/// Acting as you without recalling: `这个渠道不支持撤回`, nothing called.
+#[tokio::test(flavor = "multi_thread")]
+async fn recalling_as_you_needs_a_side_that_can() {
+    struct SendOnly(AsUser);
+
+    #[async_trait::async_trait]
+    impl ActAsUser for SendOnly {
+        fn adapter_id(&self) -> &str {
+            self.0.adapter_id()
+        }
+
+        async fn send(
+            &self,
+            cx: &ConnCx,
+            to: &ActTarget,
+            content: &OutContent,
+            key: &SendKey,
+        ) -> Result<Sent, AdapterError> {
+            self.0.send(cx, to, content, key).await
+        }
+    }
+
+    let h = setup_with(Some(Arc::new(SendOnly(AsUser::default())))).await;
+    let m = sent_as_you(&h).await;
+    let e = h
+        .outbox
+        .recall(&h.ch, WS, ME, &m)
+        .await
+        .expect_err("no recall");
+    assert!(
+        matches!(&e, ApiError::Rule(t) if t == steve_channels::outbound::ERR_NO_RECALL),
+        "{e:?}"
+    );
+    assert!(h.fake.recalled.lock().unwrap().is_empty());
+    assert_eq!(status(&h, &m), "sent");
+}
+
+/// Acts as you on a remote without message ids: every send gets a delivery id, a create time and
+/// the thread it landed in; recalls are recorded.
+#[derive(Default)]
+struct NoIds(Mutex<Vec<MessageRef>>);
+
+#[async_trait::async_trait]
+impl ActAsUser for NoIds {
+    fn adapter_id(&self) -> &str {
+        FakeChannel::ID
+    }
+
+    async fn send(
+        &self,
+        _: &ConnCx,
+        _: &ActTarget,
+        _: &OutContent,
+        _: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        Ok(Sent::without_id()
+            .source_id("dlv_1")
+            .created(1_700_000_000_500)
+            .thread_key("t_1"))
+    }
+
+    fn supports_recall(&self) -> bool {
+        true
+    }
+
+    async fn recall(&self, _: &ConnCx, msg: &MessageRef) -> Result<(), AdapterError> {
+        self.0.lock().unwrap().push(msg.clone());
+        Ok(())
+    }
+}
+
+/// A send without a provider message id is kept by its delivery id, under the connection it went
+/// out on: no `external_id`, the delivery id in `chan_message_seen`, found again by it, and
+/// recalled with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_without_a_message_id_is_found_and_recalled_by_its_delivery_id() {
+    let u = Arc::new(NoIds::default());
+    let h = setup_with(Some(u.clone())).await;
+    let m = sent_as_you(&h).await;
+    assert_eq!(
+        row(
+            &h,
+            "SELECT external_id, sent_via, ext_created, thread_key FROM chan_messages WHERE id = ?",
+            &[&m]
+        ),
+        vec![
+            Value::Null,
+            json!(h.me),
+            json!(1_700_000_000_500i64),
+            json!("t_1")
+        ]
+    );
+    assert_eq!(
+        row(
+            &h,
+            "SELECT connection_id, source_id FROM chan_message_seen WHERE message_id = ?",
+            &[&m]
+        ),
+        vec![json!(h.me), json!("dlv_1")]
+    );
+
+    let cx = h.ch.connections().cx(WS, &h.me).expect("cx");
+    let mine = steve_channels::queries::Queries::new(h.ch.clone()).for_cx(&cx);
+    let r = mine
+        .message_ref_by_source("C_DEV", "dlv_1")
+        .expect("ref")
+        .expect("found");
+    assert_eq!((r.ext_id.as_deref(), r.id()), (None, None));
+    assert_eq!(r.source_id.as_deref(), Some("dlv_1"));
+    assert_eq!((r.created, r.created_exact), (1_700_000_000_500, true));
+    assert_eq!(r.thread_key.as_deref(), Some("t_1"));
+    assert_eq!(
+        mine.message_ref("C_DEV", "dlv_1").expect("ref"),
+        Some(r.clone())
+    );
+    // another connection does not know it by that id
+    let bot = h.ch.connections().cx(WS, &h.oncall).expect("cx");
+    let theirs = steve_channels::queries::Queries::new(h.ch.clone()).for_cx(&bot);
+    assert_eq!(
+        theirs.message_ref_by_source("C_DEV", "dlv_1").expect("ref"),
+        None
+    );
+
+    h.outbox.recall(&h.ch, WS, ME, &m).await.expect("recalled");
+    assert_eq!(*u.0.lock().unwrap(), vec![r]);
+    assert!(h.fake.recalled.lock().unwrap().is_empty());
+    assert_eq!(status(&h, &m), "recalled");
+}
+
+/// A send without a message id read back: through the connection it went out on, by its delivery
+/// id; through the bot, by its content (the bot's copy gives it the provider id); neither is a
+/// new message.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_without_a_message_id_read_back_is_an_echo_and_takes_the_provider_id() {
+    let decl = ChannelDecl::new(FakeChannel::ID)
+        .handle_system(FakeChannel::SYSTEM)
+        .message_ids(MessageIds::None);
+    let h = setup_full(Some(Arc::new(NoIds::default())), Some(decl)).await;
+    let m = sent_as_you(&h).await;
+    let messages = || count(&h, "SELECT count(*) FROM chan_messages", &[]);
+    let before = messages();
+    let you = || steve_channels::channel::Sender::new(FakeChannel::handle("upx"));
+
+    // your side reads it back under the delivery id the send returned
+    let back =
+        InboundMessage::without_id("C_DEV", you(), "在的", 1_700_000_000_500).source_id("dlv_1");
+    let r = push(&h, &h.me.clone(), back).await;
+    assert!(r.duplicate, "{r:?}");
+    assert_eq!(r.message_id, m);
+    assert_eq!(r.next, Next::Record(LABEL_ECHO));
+    assert_eq!(messages(), before);
+
+    // the bot sees it with a provider id: the same send, which now has the id
+    let mut seen = FakeChannel::message("C_DEV", "om_9", "upx", "在的");
+    seen.created = 1_700_000_000_700;
+    let oncall = h.oncall.clone();
+    let r = h.ch.on_inbound(WS, &oncall, seen).await.expect("inbound");
+    assert!(r.duplicate, "{r:?}");
+    assert_eq!(r.message_id, m);
+    assert_eq!(messages(), before);
+    assert_eq!(
+        row(
+            &h,
+            "SELECT external_id, status FROM chan_messages WHERE id = ?",
+            &[&m]
+        ),
+        vec![json!("om_9"), json!("sent")]
+    );
+}
+
+/// The thread a send reports fills an empty `thread_key` only (the test above): a reply in a
+/// thread keeps the thread it was written for.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_thread_a_send_reports_never_replaces_one() {
+    let h = setup_with(Some(Arc::new(NoIds::default()))).await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let me = h.me.clone();
+    let mut q = msg("C_DEV", "d2", "ulilei", "@你 在吗", true);
+    q.thread_key = Some("t_own".into());
+    let r = push(&h, &me, q).await.response.unwrap();
+    let m = r.out_message_id.unwrap();
+    let thread = |h: &H| {
+        row(
+            h,
+            "SELECT thread_key FROM chan_messages WHERE id = ?",
+            &[&m],
+        )[0]
+        .clone()
+    };
+    assert_eq!(thread(&h), json!("t_own"));
+    decide(&h, &r.decision_id.unwrap(), "yes", "在的").unwrap();
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    assert_eq!(status(&h, &m), "sent");
+    assert_eq!(thread(&h), json!("t_own"));
 }
 
 /// YOLO: a message in your own name that YOLO approved goes out with
@@ -2620,6 +2913,8 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
         actor: "steve".into(),
         draft_model: None,
         audience_said: Some("你不是在我的设备上吗".into()),
+        skip_model: false,
+        internal_skip: false,
     };
     let you = Audience {
         scopes: vec!["space:spc_me".into(), "workspace".into(), "private".into()],
@@ -2660,13 +2955,14 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
         level: steve_store::base::Level::Never,
         visibility: "private".into(),
         text: "张三月薪五万".into(),
+        seq: None,
     };
     let r = d.check(&cx, &you, "张三月薪五万。", &[never]).await;
     assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
     assert_eq!(asked(), 0);
-    // a colleague reads along: checked as before
+    // a colleague reads along in a chat that is not entirely the workspace's people: checked as before
     let team = Audience {
-        scopes: vec!["space:spc_dev".into(), "workspace".into()],
+        scopes: vec!["space:spc_dev".into()],
         description: "李雷".into(),
         ..Audience::default()
     };
@@ -2675,6 +2971,299 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
         .await;
     assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
     assert_eq!(asked(), 1);
+}
+
+/// #13: a bot's message to an audience made only of the workspace's own people, with every piece of its
+/// tracked knowledge public for them, is not asked about by the check model; knowledge they may only hear
+/// as a conclusion still is, and so is anyone outside, a text with no knowledge at all (nothing was
+/// tracked: an agent's or a flow's text) and one the caller does not vouch for (sent as you).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_workspaces_own_people_with_public_knowledge_skip_the_model() {
+    use steve_modules::outbound::{Audience, CheckCx, KnowledgeUse, OutboundCheck, Verdict};
+    let h = setup().await;
+    h.env.gateway.script(
+        CHECK_HEAD,
+        r#"{"verdict": "leak", "spans": [{"text": "周四", "reason": "内部细节", "basis": "internal_detail"}]}"#,
+    );
+    let d = Disclosure::with_models(Vec::new());
+    d.bind(h.env.store().clone(), h.env.gateway.clone());
+    let cx = CheckCx {
+        ws: WS.into(),
+        actor: "steve".into(),
+        internal_skip: true,
+        ..CheckCx::default()
+    };
+    let asked = || {
+        h.env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with(CHECK_HEAD))
+            .count()
+    };
+    let team = Audience {
+        scopes: vec!["space:spc_dev".into(), "workspace".into()],
+        description: "李雷、韩梅梅".into(),
+        ..Audience::default()
+    };
+    let k = |level: Level, visibility: &str| KnowledgeUse {
+        source_type: "memory".into(),
+        source_id: "m1".into(),
+        source_label: "发布安排".into(),
+        level,
+        visibility: visibility.into(),
+        text: "我们周四发布".into(),
+        seq: None,
+    };
+    for knowledge in [
+        vec![k(Level::Public, "private")],
+        vec![k(Level::Reasoning, "workspace")],
+    ] {
+        let r = d.check(&cx, &team, "我们周四发布。", &knowledge).await;
+        assert_eq!(r.verdict, Verdict::Pass, "{knowledge:?} {r:?}");
+        assert!(r.check_model.is_none(), "{r:?}");
+    }
+    assert_eq!(asked(), 0, "the check model is not asked");
+    // no knowledge at all is not public knowledge: the model looks
+    let r = d.check(&cx, &team, "我们周四发布。", &[]).await;
+    assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
+    assert_eq!(asked(), 1);
+    // said as you (or on your behalf): the caller does not vouch, the model looks
+    let as_you = CheckCx {
+        actor: "me".into(),
+        internal_skip: false,
+        ..cx.clone()
+    };
+    let r = d
+        .check(
+            &as_you,
+            &team,
+            "我们周四发布。",
+            &[k(Level::Public, "workspace")],
+        )
+        .await;
+    assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
+    assert_eq!(asked(), 2);
+    // reasoning-only knowledge from a narrower scope: the model looks
+    let r = d
+        .check(
+            &cx,
+            &team,
+            "我们周四发布。",
+            &[k(Level::Reasoning, "space:spc_acme")],
+        )
+        .await;
+    assert_eq!(r.verdict, Verdict::Leak, "{r:?}");
+    assert_eq!(asked(), 3);
+    // someone outside reads it: the model looks
+    let outside = Audience {
+        external: true,
+        ..team.clone()
+    };
+    d.check(
+        &cx,
+        &outside,
+        "我们周四发布。",
+        &[k(Level::Public, "workspace")],
+    )
+    .await;
+    assert_eq!(asked(), 4);
+    // the caller says it is a fixed receipt: rules only, whoever reads it
+    let receipt = CheckCx {
+        skip_model: true,
+        ..cx.clone()
+    };
+    let r = d
+        .check(&receipt, &outside, "收到，已记为 ST-3。", &[])
+        .await;
+    assert_eq!(r.verdict, Verdict::Pass, "{r:?}");
+    assert_eq!(asked(), 4);
+}
+
+/// #13: an item's receipt (“收到，已记为 …”) is a fixed template: it goes out on a bot's rule without the
+/// check model (which here would fail and hold it as a draft).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_template_receipt_goes_out_without_the_check_model() {
+    let h = setup().await;
+    let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", "帮我记一下").await;
+    let mut r = out(&plan, "收到，已记为 ST-3。", rule(&plan), None);
+    r.purpose = Purpose::Item;
+    let d = h.outbox.deliver(&h.ch, &r).await.unwrap();
+    assert!(matches!(d, Delivered::Sent { .. }), "{d:?}");
+    assert!(
+        h.env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|p| !p.starts_with(CHECK_HEAD)),
+        "no check model"
+    );
+    // a reply a model wrote, in the same place: checked (and held, the model gave nothing)
+    let d = h
+        .outbox
+        .deliver(&h.ch, &out(&plan, "我们一般周四发布。", rule(&plan), None))
+        .await
+        .unwrap();
+    assert!(matches!(d, Delivered::Drafted { .. }), "{d:?}");
+}
+
+/// #14: a flagged text that waits for you anyway is not rewritten first (you see the original with the
+/// parts marked); the card offers “改写后再看”, which rewrites once, checks again and shows a new card.
+/// Nothing is sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_is_not_rewritten_until_you_ask() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(
+        REWRITE_HEAD,
+        r#"{"text": "预算的事我这边还不清楚，确认后告诉你。"}"#,
+    );
+    let mem = acme(&h);
+    let me = h.me.clone();
+    let plan = recorded(&h, &me, "C_DEV", "d1", "ulilei", "预算多少").await;
+    let rewrites = || {
+        h.env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with(REWRITE_HEAD))
+            .count()
+    };
+    let d = h
+        .outbox
+        .deliver(
+            &h.ch,
+            &out(&plan, "Acme 的预算有 30 万。", Auth::None, generation(&mem)),
+        )
+        .await
+        .unwrap();
+    let Delivered::Drafted {
+        message_id,
+        decision_id,
+    } = d
+    else {
+        panic!("{d:?}")
+    };
+    assert_eq!(rewrites(), 0, "a draft is not rewritten on its own");
+    let q = row(
+        &h,
+        "SELECT draft, options FROM decisions WHERE id = ?",
+        &[&decision_id],
+    );
+    assert_eq!(q[0], "Acme 的预算有 30 万。");
+    assert_eq!(q[1], json!(r#"["yes","no","rewrite"]"#));
+
+    // undone before the queue came by: the card is back, nothing is rewritten
+    decide(&h, &decision_id, "rewrite", "").expect("rewrite");
+    undo(&h, &decision_id).expect("undo");
+    h.outbox.send_due(&h.ch).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(rewrites(), 0);
+    assert_eq!(decision_of(&h, &message_id), decision_id);
+    decide(&h, &decision_id, "rewrite", "").expect("rewrite");
+    // the queue finds the choice in the store (a restart does not lose it) and rewrites on a task of its own
+    h.outbox.send_due(&h.ch).await;
+    let mut again = decision_of(&h, &message_id);
+    for _ in 0..200 {
+        if again != decision_id {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        again = decision_of(&h, &message_id);
+    }
+    assert_ne!(again, decision_id, "a new card");
+    assert_eq!(rewrites(), 1);
+    nothing_sent(&h);
+    assert_eq!(status(&h, &message_id), "draft");
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(rewrites(), 1, "once");
+    let q = row(
+        &h,
+        "SELECT question, draft, options, status FROM decisions WHERE id = ?",
+        &[&again],
+    );
+    assert_eq!(q[0], "以你本人发到「Steve 开发群」（已改写）");
+    assert_eq!(q[1], "预算的事我这边还不清楚，确认后告诉你。");
+    assert_eq!(
+        q[2],
+        json!(r#"["yes","no"]"#),
+        "it passed: no rewrite offered"
+    );
+    assert_eq!(q[3], "open");
+    let b = h
+        .env
+        .store()
+        .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.verdict, "rewritten");
+    assert_eq!(b.rewrites[0]["from"], "Acme 的预算有 30 万。");
+    // approving the new card sends the rewritten text
+    decide(&h, &again, "yes", "").expect("yes");
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    assert_eq!(sent(&h)[0].1, "预算的事我这边还不清楚，确认后告诉你。");
+}
+
+/// #14 under YOLO: it never approves a flagged text, so a draft it decides is rewritten once first, as a
+/// direct reply is; the card then carries `rewritten`, which YOLO may approve after its cooling-off.
+#[tokio::test(flavor = "multi_thread")]
+async fn under_yolo_a_flagged_draft_is_rewritten_first() {
+    let h = setup_yolo(None, None, true).await;
+    checks_pass(&h);
+    h.env.gateway.script(
+        REWRITE_HEAD,
+        r#"{"text": "预算的事我这边还不清楚，确认后告诉你。"}"#,
+    );
+    let mem = acme(&h);
+    let me = h.me.clone();
+    let plan = recorded(&h, &me, "C_DEV", "d1", "ulilei", "预算多少").await;
+    let d = h
+        .outbox
+        .deliver(
+            &h.ch,
+            &out(&plan, "Acme 的预算有 30 万。", Auth::None, generation(&mem)),
+        )
+        .await
+        .unwrap();
+    let Delivered::Drafted {
+        message_id,
+        decision_id,
+    } = d
+    else {
+        panic!("{d:?}")
+    };
+    let rewrites = h
+        .env
+        .gateway
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.starts_with(REWRITE_HEAD))
+        .count();
+    assert_eq!(rewrites, 1, "rewritten once before the card");
+    let q = row(
+        &h,
+        "SELECT draft, options FROM decisions WHERE id = ?",
+        &[&decision_id],
+    );
+    assert_eq!(q[0], "预算的事我这边还不清楚，确认后告诉你。");
+    assert_eq!(q[1], json!(r#"["yes","no"]"#));
+    let b = h
+        .env
+        .store()
+        .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.verdict, "rewritten", "YOLO may approve it");
+    nothing_sent(&h);
 }
 
 /// Y4: the connection is checked when the message goes out, not when it was approved: approved
@@ -2891,4 +3480,279 @@ async fn a_tried_message_is_not_sent_again_past_its_window_by_any_path() {
         &[&decision_of(&h, &m)],
     );
     assert_eq!(q[0], json!(r#"["sent","retry","discard"]"#));
+}
+
+/// SEND_DELAY: a bot's draft you approve waits 3 s (it speaks as itself and can be recalled), your own
+/// account 10 s, and each account can set its own window (0–60 s, `null` back to the default). YOLO's
+/// approval came after its own cooling-off: out at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_undo_window_follows_the_account() {
+    use steve_channels::channel_accounts::{self, ChannelPatch};
+    let h = setup().await;
+    checks_pass(&h);
+    let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", "部署好了吗").await;
+    async fn drafted(h: &H, r: OutRequest) -> String {
+        match h.outbox.deliver(&h.ch, &r).await.unwrap() {
+            Delivered::Drafted { decision_id, .. } => decision_id,
+            d => panic!("{d:?}"),
+        }
+    }
+    let draft = |text: &str| drafted(&h, out(&plan, text, Auth::None, None));
+    let d = draft("好了。").await;
+    decide(&h, &d, "yes", "").expect("approve");
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0, "inside the window");
+    h.env.clock.advance(3_100);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1, "a bot waits 3 s");
+
+    // YOLO's approval: no second wait
+    let d = draft("好了，已经上线。").await;
+    let dec =
+        steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, "yolo"), &d, "yes", "")
+            .expect("ours")
+            .expect("approved");
+    assert_eq!(dec.result["send_at"], json!(h.ch.now()));
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+
+    // the account's own window
+    let set = |v: Value| {
+        let p: ChannelPatch = serde_json::from_value(json!({ "send_delay_s": v })).unwrap();
+        let now = h.ch.now();
+        h.env
+            .store()
+            .transaction(|tx| channel_accounts::patch(&h.ch, tx, &viewer(), &h.oncall, &p, now))
+    };
+    assert!(set(json!(61)).is_err(), "0–60 s");
+    set(json!(20)).expect("20 s");
+    let a = h
+        .env
+        .store()
+        .reader(|c| channel_accounts::out(&h.ch, c, &viewer(), &h.oncall))
+        .unwrap();
+    assert_eq!((a.send_delay_s, a.send_delay_default_s), (Some(20), 3));
+    let d = draft("好了，稍后发公告。").await;
+    decide(&h, &d, "yes", "").expect("approve");
+    h.env.clock.advance(3_100);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0, "the account waits 20 s");
+    h.env.clock.advance(17_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    set(Value::Null).expect("back to the default");
+    let a = h
+        .env
+        .store()
+        .reader(|c| channel_accounts::out(&h.ch, c, &viewer(), &h.oncall))
+        .unwrap();
+    assert_eq!(a.send_delay_s, None);
+
+    // your own account: 10 s
+    let me = h.me.clone();
+    let mine = recorded(&h, &me, "C_DEV", "d1", "ulilei", "在吗").await;
+    let d = drafted(&h, out(&mine, "在的。", Auth::None, None)).await;
+    decide(&h, &d, "yes", "").expect("approve");
+    h.env.clock.advance(3_100);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
+    h.env.clock.advance(7_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+}
+
+/// Choose “改写后再看” on `decision` and wait for the new card.
+async fn rewrite_and_wait(h: &H, message_id: &str, decision: &str) -> String {
+    decide(h, decision, "rewrite", "").expect("rewrite");
+    h.outbox.send_due(&h.ch).await;
+    for _ in 0..300 {
+        let again = decision_of(h, message_id);
+        if again != decision {
+            return again;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("no new card")
+}
+
+/// #14: “改写后再看” checks the rewrite against the same knowledge the first check had, a retrieved
+/// piece that is not a memory included (it used to reload memories only, so a rewrite that kept the
+/// flagged part passed as rewritten); knowledge that cannot be read again any more does not let it pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rewrite_is_checked_against_the_retrieved_knowledge_too() {
+    let h = setup().await;
+    checks_pass(&h);
+    // the rewrite keeps what was flagged
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text": "Acme 那边的预算大概 30 万。"}"#);
+    acme(&h);
+    exec(
+        &h,
+        "INSERT INTO kb_chunks (workspace_id, obj_type, obj_id, seq, heading, text, visibility, level, created_by, source_kind, label, updated)
+         VALUES ('default', 'chunk', 'kd_acme', 2, '', 'Acme 的预算是 30万，下周签', 'space:spc_acme', 'reasoning', 'usr_dev', 'note', '笔记 · Acme', 1);",
+    );
+    let hit = steve_knowledge::Hit {
+        n: 1,
+        obj_type: "chunk".into(),
+        obj_id: "kd_acme".into(),
+        seq: 2,
+        title: "Acme".into(),
+        heading: String::new(),
+        text: "Acme 的预算是 30万，下周签".into(),
+        label: "笔记 · Acme".into(),
+        source_kind: "note".into(),
+        level: Level::Reasoning,
+        visibility: Visibility::Space("spc_acme".into()),
+        score: 1.0,
+        href: String::new(),
+        about: Vec::new(),
+    };
+    let g = Generation {
+        model: "smart-1".into(),
+        hits: vec![hit],
+        ..Generation::default()
+    };
+    let me = h.me.clone();
+    let plan = recorded(&h, &me, "C_DEV", "d1", "ulilei", "预算多少").await;
+    let d = h
+        .outbox
+        .deliver(
+            &h.ch,
+            &out(&plan, "Acme 的预算有 30 万。", Auth::None, Some(g)),
+        )
+        .await
+        .unwrap();
+    let Delivered::Drafted {
+        message_id,
+        decision_id,
+    } = d
+    else {
+        panic!("{d:?}")
+    };
+    let basis = |h: &H| {
+        h.env
+            .store()
+            .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(basis(&h).verdict, "drafted");
+
+    let again = rewrite_and_wait(&h, &message_id, &decision_id).await;
+    let b = basis(&h);
+    assert_eq!(b.verdict, "drafted", "the flagged part is still there");
+    assert!(
+        b.entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["source_id"] == "kd_acme" && e["seq"] == 2),
+        "{:?}",
+        b.entries
+    );
+    let q = row(
+        &h,
+        "SELECT question, options FROM decisions WHERE id = ?",
+        &[&again],
+    );
+    assert!(q[0].as_str().unwrap().contains("仍可能泄露"), "{q:?}");
+    nothing_sent(&h);
+
+    // the piece is gone from the index: the next rewrite cannot be checked against it and does not pass
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text": "预算的事我确认后告诉你。"}"#);
+    exec(&h, "DELETE FROM kb_chunks WHERE obj_id = 'kd_acme'");
+    rewrite_and_wait(&h, &message_id, &again).await;
+    let b = basis(&h);
+    assert_eq!(b.verdict, "drafted");
+    assert!(
+        b.spans
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["reason"] == steve_modules::outbound::R_BASIS_GONE),
+        "{:?}",
+        b.spans
+    );
+    nothing_sent(&h);
+}
+
+/// #13: an agent's own text (no generation: nothing tracked) to the workspace's own people is still
+/// checked by the model, on a bot and above all as you; so is a bot's reply on your behalf.
+#[tokio::test(flavor = "multi_thread")]
+async fn untracked_or_as_you_text_to_your_own_people_is_checked_by_the_model() {
+    let h = setup().await;
+    checks_pass(&h);
+    let asked = |h: &H| {
+        h.env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with(CHECK_HEAD))
+            .count()
+    };
+    let me = h.me.clone();
+    let plan = recorded(&h, &me, "C_DEV", "d1", "ulilei", "进度怎样").await;
+    let bot = recorded(&h, &h.oncall.clone(), "C_DEV", "o1", "ulilei", "进度怎样").await;
+    // everyone in it is a recorded user of the workspace
+    exec(
+        &h,
+        "INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
+           SELECT 'pt_' || a.id, 'default', 'contact', a.id, 'usr_dev', 1, 1 FROM accounts a
+            WHERE a.party_id IS NULL AND a.id IN (SELECT sm.account_id FROM space_members sm JOIN spaces s ON s.id = sm.space_id WHERE s.external_id = 'C_DEV');
+         UPDATE accounts SET party_id = 'pt_' || id
+            WHERE party_id IS NULL AND id IN (SELECT sm.account_id FROM space_members sm JOIN spaces s ON s.id = sm.space_id WHERE s.external_id = 'C_DEV');
+         INSERT INTO users (id, workspace_id, subject, name, role, created)
+           SELECT 'usr_' || p.id, 'default', 'sub_' || p.id, p.name, 'member', 1 FROM parties p
+            WHERE p.user_id IS NULL AND p.id IN (SELECT a.party_id FROM accounts a JOIN space_members sm ON sm.account_id = a.id JOIN spaces s ON s.id = sm.space_id WHERE s.external_id = 'C_DEV');
+         UPDATE parties SET user_id = coalesce(user_id, 'usr_' || id)
+            WHERE id IN (SELECT a.party_id FROM accounts a JOIN space_members sm ON sm.account_id = a.id JOIN spaces s ON s.id = sm.space_id WHERE s.external_id = 'C_DEV');
+         UPDATE spaces SET member_count = (SELECT count(*) FROM space_members sm JOIN accounts a ON a.id = sm.account_id
+            WHERE sm.space_id = spaces.id AND a.kind NOT IN ('app_bot', 'bot')), has_external = 0 WHERE external_id = 'C_DEV';",
+    );
+    let mut r = out(&plan, "我们周四发布。", Auth::None, None);
+    r.purpose = Purpose::Source;
+    h.outbox.deliver(&h.ch, &r).await.unwrap();
+    assert_eq!(asked(&h), 1, "as you, nothing tracked: the model looks");
+    // as you with tracked public knowledge: still the model
+    let mem = h
+        .env
+        .store()
+        .transaction(|tx| {
+            mems::create(
+                tx,
+                WS,
+                &NewMem {
+                    kind: "fact".into(),
+                    text: "我们周四发布".into(),
+                    source_label: "发布安排".into(),
+                    visibility: Visibility::Workspace,
+                    level: Level::Public,
+                    status: "confirmed".into(),
+                    created_by: ME.into(),
+                    ..NewMem::default()
+                },
+            )
+        })
+        .expect("mem")
+        .id;
+    h.outbox
+        .deliver(
+            &h.ch,
+            &out(&plan, "我们周四发布。", Auth::None, generation(&mem)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(asked(&h), 2, "as you: the model looks");
+    // the same place on a bot: its own tracked public knowledge skips the model (so the place is the
+    // workspace's own people), an agent's text with nothing tracked does not
+    h.outbox
+        .deliver(
+            &h.ch,
+            &out(&bot, "我们周四发布。", rule(&bot), generation(&mem)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(asked(&h), 2, "a bot's tracked public knowledge: no model");
+    let mut r = out(&bot, "我们周四发布。", rule(&bot), None);
+    r.purpose = Purpose::Source;
+    h.outbox.deliver(&h.ch, &r).await.unwrap();
+    assert_eq!(asked(&h), 3, "nothing tracked: the model looks");
 }

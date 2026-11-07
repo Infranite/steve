@@ -503,11 +503,35 @@ pub fn inbox_insert_in(
     payload: &Value,
     now: i64,
 ) -> Result<Inboxed> {
+    let r = inbox_put_in(tx, k, seq, event_id, payload, now)?;
+    if r == Inboxed::New {
+        extend_durable_in(tx, k)?;
+    }
+    Ok(r)
+}
+
+/// [`inbox_insert_in`] without moving the stream's durable prefix: a batch puts all its events
+/// first, then calls [`extend_durable_in`] once per stream (in the same transaction).
+pub fn inbox_put_in(
+    tx: &Tx<'_>,
+    k: StreamKey<'_>,
+    seq: i64,
+    event_id: &str,
+    payload: &Value,
+    now: i64,
+) -> Result<Inboxed> {
     if seq <= 0 {
         return Err(conflict("sequence must be positive"));
     }
     let payload = to_json(payload)?;
-    let existing:Option<(String,String)>=tx.query_row("SELECT event_id,payload FROM node_event_inbox WHERE node_id=? AND stream=? AND epoch=? AND seq=?",params![k.node,k.stream,k.epoch,seq],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let existing: Option<(String, String)> = tx
+        .prepare_cached(
+            "SELECT event_id,payload FROM node_event_inbox WHERE node_id=? AND stream=? AND epoch=? AND seq=?",
+        )?
+        .query_row(params![k.node, k.stream, k.epoch, seq], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()?;
     if let Some(old) = existing {
         if old != (event_id.into(), payload) {
             return Ok(Inboxed::Conflict(Conflict::Position));
@@ -516,43 +540,70 @@ pub fn inbox_insert_in(
     }
     // no row at or below the durable prefix: it was applied and pruned since, and this is a
     // redelivery. It is never stored again (it would be applied twice); its payload can no longer be
-    // compared, and a fresh journal never reuses a position (it gets a new epoch).
+    // compared, and a fresh journal never reuses a position (it gets a new epoch). (Positions put
+    // earlier in the same batch, above a durable not extended yet, are found as rows above.)
     let durable: Option<i64> = tx
-        .query_row(
+        .prepare_cached(
             "SELECT durable FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
-            params![k.node, k.stream, k.epoch],
-            |r| r.get(0),
-        )
+        )?
+        .query_row(params![k.node, k.stream, k.epoch], |r| r.get(0))
         .optional()?;
     if durable.is_some_and(|d| seq <= d) {
         return Ok(Inboxed::Seen);
     }
-    let reused: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=? AND event_id=?)",
-        params![k.node, event_id],
-        |r| r.get(0),
-    )?;
+    let reused: bool = tx
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=? AND event_id=?)",
+        )?
+        .query_row(params![k.node, event_id], |r| r.get(0))?;
     if reused {
         return Ok(Inboxed::Conflict(Conflict::EventId));
     }
-    tx.execute(
-        "INSERT OR IGNORE INTO node_streams(node_id,stream,epoch) VALUES (?,?,?)",
-        params![k.node, k.stream, k.epoch],
-    )?;
-    tx.execute("INSERT INTO node_event_inbox(node_id,stream,epoch,seq,event_id,payload,received) VALUES (?,?,?,?,?,?,?)",params![k.node,k.stream,k.epoch,seq,event_id,payload,now])?;
-    let mut durable = watermarks_in(tx, k)?.durable;
-    while let Some(next) = durable.checked_add(1) {
-        let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM node_event_inbox WHERE node_id=? AND stream=? AND epoch=? AND seq=?)",params![k.node,k.stream,k.epoch,next],|r|r.get(0))?;
-        if !exists {
-            break;
-        }
-        durable = next;
+    if durable.is_none() {
+        tx.execute(
+            "INSERT OR IGNORE INTO node_streams(node_id,stream,epoch) VALUES (?,?,?)",
+            params![k.node, k.stream, k.epoch],
+        )?;
     }
-    tx.execute(
-        "UPDATE node_streams SET durable=? WHERE node_id=? AND stream=? AND epoch=?",
-        params![durable, k.node, k.stream, k.epoch],
-    )?;
+    tx.prepare_cached("INSERT INTO node_event_inbox(node_id,stream,epoch,seq,event_id,payload,received) VALUES (?,?,?,?,?,?,?)")?
+        .execute(params![k.node, k.stream, k.epoch, seq, event_id, payload, now])?;
     Ok(Inboxed::New)
+}
+
+/// Moves the stream's durable watermark over the contiguous run of held events after it, in one
+/// query (however many were put).
+pub fn extend_durable_in(tx: &Tx<'_>, k: StreamKey<'_>) -> Result<i64> {
+    let durable: Option<i64> = tx
+        .prepare_cached(
+            "SELECT durable FROM node_streams WHERE node_id=? AND stream=? AND epoch=?",
+        )?
+        .query_row(params![k.node, k.stream, k.epoch], |r| r.get(0))
+        .optional()?;
+    let Some(durable) = durable else {
+        return Ok(0);
+    };
+    // the end of the run starting right after `durable`, if that position is held: the first
+    // held position above it whose successor is not
+    let end: Option<i64> = tx
+        .prepare_cached(
+            "SELECT e.seq FROM node_event_inbox e
+              WHERE e.node_id=?1 AND e.stream=?2 AND e.epoch=?3 AND e.seq>?4
+                AND EXISTS(SELECT 1 FROM node_event_inbox f WHERE f.node_id=?1 AND f.stream=?2 AND f.epoch=?3 AND f.seq=?4+1)
+                AND NOT EXISTS(SELECT 1 FROM node_event_inbox x WHERE x.node_id=?1 AND x.stream=?2 AND x.epoch=?3 AND x.seq=e.seq+1)
+              ORDER BY e.seq LIMIT 1",
+        )?
+        .query_row(params![k.node, k.stream, k.epoch, durable], |r| r.get(0))
+        .optional()?;
+    match end {
+        Some(end) if end > durable => {
+            tx.prepare_cached(
+                "UPDATE node_streams SET durable=? WHERE node_id=? AND stream=? AND epoch=?",
+            )?
+            .execute(params![end, k.node, k.stream, k.epoch])?;
+            Ok(end)
+        }
+        _ => Ok(durable),
+    }
 }
 
 /// Why a stream's apply stopped until reconciliation.
@@ -709,6 +760,59 @@ pub fn next_event_in(tx: &Tx<'_>, k: StreamKey<'_>) -> Result<Option<PendingEven
         })
     })
     .transpose()
+}
+
+/// Up to `limit` events eligible for ordered apply, in order (the contiguous run after `applied`
+/// within `durable`): what [`next_event_in`] would return, called that many times. Apply them in
+/// one transaction and mark them with [`mark_applied_through_in`] in it.
+pub fn next_events_in(tx: &Tx<'_>, k: StreamKey<'_>, limit: usize) -> Result<Vec<PendingEvent>> {
+    let mut st = tx.prepare_cached(
+        "SELECT e.seq,e.event_id,e.payload FROM node_event_inbox e JOIN node_streams s USING(node_id,stream,epoch)
+          WHERE e.node_id=?1 AND e.stream=?2 AND e.epoch=?3 AND e.seq>s.applied AND e.seq<=s.durable AND s.fault IS NULL
+          ORDER BY e.seq LIMIT ?4",
+    )?;
+    let rows = st
+        .query_map(params![k.node, k.stream, k.epoch, limit as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(seq, event_id, payload)| {
+            Ok(PendingEvent {
+                seq,
+                event_id,
+                payload: serde_json::from_str(&payload)?,
+            })
+        })
+        .collect()
+}
+
+/// [`mark_applied_in`] for every event after `applied` up to `seq`, at once (they were applied in
+/// this transaction, in order). False: nothing was left to mark.
+pub fn mark_applied_through_in(tx: &Tx<'_>, k: StreamKey<'_>, seq: i64) -> Result<bool> {
+    let w = watermarks_in(tx, k)?;
+    if seq <= 0 {
+        return Err(conflict("sequence must be positive"));
+    }
+    if seq <= w.applied {
+        return Ok(false);
+    }
+    if seq > w.durable {
+        return Err(conflict("apply must follow the contiguous durable prefix"));
+    }
+    tx.execute(
+        "UPDATE node_event_inbox SET applied=1 WHERE node_id=? AND stream=? AND epoch=? AND seq>? AND seq<=?",
+        params![k.node, k.stream, k.epoch, w.applied, seq],
+    )?;
+    tx.execute(
+        "UPDATE node_streams SET applied=? WHERE node_id=? AND stream=? AND epoch=?",
+        params![seq, k.node, k.stream, k.epoch],
+    )?;
+    Ok(true)
 }
 
 /// For reconciliation after a crash or a response lost in transit. A receipt's JSON wrapper has

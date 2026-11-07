@@ -132,6 +132,12 @@ impl Store {
 // operations may finish while maintenance is on; unrelated tasks never inherit the scope.
 tokio::task_local! { static ADMITTED_STORE: usize; }
 impl Store {
+    /// Synchronous counterpart of [`Self::admitted`], for workers which already own a permit
+    /// and may block on nested async work. Unrelated spawned tasks do not inherit this scope.
+    pub fn admitted_sync<T>(&self, work: impl FnOnce() -> T) -> T {
+        ADMITTED_STORE.sync_scope(Arc::as_ptr(&self.inner) as usize, work)
+    }
+
     pub async fn admitted<F: std::future::Future>(&self, future: F) -> F::Output {
         ADMITTED_STORE
             .scope(Arc::as_ptr(&self.inner) as usize, future)

@@ -1483,9 +1483,31 @@ impl ChangeOp for PartyPatchOp {
     fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
         let a: IdArg = args(op)?;
         if let (Some(p), Some(b)) = (party_in(tx, cx, &a.id)?, before.as_object()) {
-            write_party(tx, cx, &p, b, "party.update")?;
+            let back = crate::changes::still_ours(
+                cx,
+                b,
+                &fields_of(op, &CONTACT_FIELDS),
+                &snap(&p),
+                field_label,
+            );
+            write_party(tx, cx, &p, &back, "party.update")?;
         }
         Ok(())
+    }
+}
+
+/// A party field as the change lines name it (what an undo kept, in the request's language).
+fn field_label(key: &str) -> String {
+    match key {
+        "name" => steve_i18n::t!("modules.contacts_draft.label.name"),
+        "aliases" => steve_i18n::t!("modules.contacts_draft.label.aliases"),
+        "rels" => steve_i18n::t!("modules.contacts_draft.label.rels"),
+        "important" => steve_i18n::t!("modules.contacts_draft.label.important"),
+        "note" => steve_i18n::t!("modules.contacts_draft.label.note"),
+        "kind" => steve_i18n::t!("modules.contacts_draft.label.org_kind"),
+        "domains" => steve_i18n::t!("modules.contacts_draft.label.domains"),
+        "purpose" => steve_i18n::t!("modules.contacts_draft.label.purpose"),
+        k => k.to_string(),
     }
 }
 
@@ -1610,7 +1632,8 @@ impl ChangeOp for OrgPatchOp {
         let (Some(o), Some(b)) = (party_in(tx, cx, &a.id)?, before.as_object()) else {
             return Ok(());
         };
-        let mut b = b.clone();
+        let mut b =
+            crate::changes::still_ours(cx, b, &fields_of(op, &ORG_FIELDS), &snap(&o), field_label);
         if let Some(d) = b.remove("domains") {
             let old: Vec<String> = serde_json::from_value(d).unwrap_or_default();
             repo::set_domains(tx, cx.ws, &o.id, &old)?;
@@ -2217,6 +2240,24 @@ impl ChangeOp for TeamPatchOp {
             return Ok(());
         };
         let d = trepo::details(tx, &p.id)?;
+        let mut written = Map::new();
+        for k in ["name", "purpose"] {
+            if let Some(v) = op.get(k).and_then(Value::as_str) {
+                let v = if k == "name" { v.trim() } else { v };
+                written.insert(k.into(), json!(v));
+            }
+        }
+        let now: Map<String, Value> = [("name", json!(p.name)), ("purpose", json!(d.purpose))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let before = Value::Object(crate::changes::still_ours(
+            cx,
+            before.as_object().unwrap_or(&Map::new()),
+            &written,
+            &now,
+            field_label,
+        ));
         let s = |k: &str| before.get(k).and_then(Value::as_str).map(String::from);
         let back = TeamPatch {
             id: p.id.clone(),

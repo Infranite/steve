@@ -519,12 +519,32 @@ pub fn action_undone(tx: &Tx, id: &str, now: i64) -> Result<bool> {
     Ok(n == 1)
 }
 
-/// YOLO's decisions the user undid since `since` (breaker B3).
-pub fn undone_since(c: &Connection, ws: &str, since: i64) -> Result<i64> {
+/// What the user undid of YOLO's decisions since `since` (breaker B3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Undone {
+    /// Different items (an action without one counts on its own).
+    pub items: i64,
+    /// The most different items one rule was undone on.
+    pub same_rule_items: i64,
+    /// Channel messages recalled.
+    pub recalls: i64,
+}
+
+pub fn undone_since(c: &Connection, ws: &str, since: i64) -> Result<Undone> {
     Ok(c.prepare_cached(
-        "SELECT count(*) FROM yolo_actions WHERE workspace_id = ? AND undone IS NOT NULL AND undone >= ?",
+        "SELECT count(DISTINCT coalesce(item_id, id)),
+                coalesce((SELECT max(n) FROM (SELECT count(DISTINCT coalesce(item_id, id)) AS n FROM yolo_actions
+                           WHERE workspace_id = ?1 AND undone IS NOT NULL AND undone >= ?2 GROUP BY rule)), 0),
+                count(*) FILTER (WHERE json_extract(undo, '$.kind') = 'recall')
+           FROM yolo_actions WHERE workspace_id = ?1 AND undone IS NOT NULL AND undone >= ?2",
     )?
-    .query_row(params![ws, since], |r| r.get(0))?)
+    .query_row(params![ws, since], |r| {
+        Ok(Undone {
+            items: r.get(0)?,
+            same_rule_items: r.get(1)?,
+            recalls: r.get(2)?,
+        })
+    })?)
 }
 
 /// Moves a scheduled action to a later time (its judgement says wait, not no); false when it is no

@@ -9,6 +9,7 @@ import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { blockSlots, type FeedRow } from "./feed-order"
 import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
+import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
 import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
@@ -35,6 +36,7 @@ export type Item = {
   due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
   rel?: Rel
+  workflow?: RItemDetail["workflow"]
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
 export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
@@ -191,11 +193,11 @@ export function briefHead(text: string): string {
   const line = text.split("\n").find((l) => l.trim())?.trim() ?? ""
   return !line ? t("core:brief.plain") : line.length > 120 ? line.slice(0, 120) + "…" : line
 }
-const STEVE_TOOL: Record<string, string> = live(["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish"] as const, (k) => t(`core:steveTool.${k}`))
+const STEVE_TOOL: Record<string, string> = live(["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish", "steve_lane_status"] as const, (k) => t(`core:steveTool.${k}`))
 const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
 const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
 const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
-/** a tool's whole current view (transcript `tool`, ToolView in docs/node-protocol.md) → its transcript tuple, in place */
+/** a tool's whole current view (transcript `tool`, the Node protocol's ToolView) → its transcript tuple, in place */
 function toolEv(t: Ev, v: any) {
   const name = String(v.name ?? ""), short = name.replace(/^mcp__steve__/, ""), title = String(v.title ?? "")
   const steve = v.origin === "steve" || v.category === "steve", live = v.phase === "succeeded" || v.phase === "failed" ? 0 : 1
@@ -354,7 +356,7 @@ function choiceLabel(d: RDecision) {
   return r.approved ? t("core:choice.approve") : t("core:choice.deny")
 }
 /** the choices on a card about something that went wrong, by the Hub's choice id */
-export const FAIL_CHOICE: Record<string, string> = live(["continue", "delivered", "look", "tosteve", "drop", "release_waive", "release_retry", "release_live"] as const, (k) => t(`core:fail.${k}`))
+export const FAIL_CHOICE: Record<string, string> = live(["continue", "delivered", "look", "tosteve", "drop", "release_waive", "release_retry", "retry", "release_live"] as const, (k) => t(`core:fail.${k}`))
 /* ── which agent turn answered a comment in the work log ──
  * a comment (timeline kind "me") becomes a user prompt in one of the item's sessions: "补充信息：…", "用户的回答：…", a merged queue…
  * the first unclaimed prompt sent at or after the comment that contains its text is the one; the reply is that turn */
@@ -417,6 +419,7 @@ function itemOf(i: RItem): Item {
     id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit,
     goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
+    workflow: det?.workflow,
     wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5]]) : [], anns: det?.annotations ?? [],
     q: act?.queued ?? [], qs: act?.id ?? null,
     parent: i.parent?.item ? { item: i.parent.item, s: i.parent.session ?? undefined, at: undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, snoozeUntil: snoozed ? i.snooze!.until : undefined, tags: i.tags,
@@ -428,6 +431,8 @@ function itemOf(i: RItem): Item {
 }
 /** every message of the conversation this page has seen, older ones included (thread/history.ts loads those) */
 export const knownMsgs = new Map<string, Msg>()
+/* A rerun keeps the question's origin: replies already on screen cannot finish its new draft. */
+let priorDraftReplies = new Set<string>(), nextDraft = true
 export function msgOf(m: State["thread"][number]): Msg {
   const x = m.meta ?? {}
   /* one drafted change (`proposal`) or several (`proposals`); `cfg_state` is what became of each */
@@ -448,7 +453,11 @@ export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" =
   if (cur) { if (!cur.touched || state === cur.state) { cur.state = state; cur.touched = false } return cur }
   const x: any = { title: p.title, target: p.title, href: p.href, changes: p.changes, state, id: p.id, touched: false }
   const set = (s: typeof state) => { x.state = s; x.touched = true; emit() }
-  x.undo = async () => { if (await call(api.undoConfig(p.id), t("core:toast.undone"))) set("draft") }
+  /* a field changed again since this change keeps its value: the Hub names it (`kept`) */
+  x.undo = async () => {
+    const r = await call(api.undoConfig(p.id) as Promise<{ kept?: string[] }>); if (!r) return
+    toast(r.kept?.length ? t("core:toast.undoneKept", { fields: r.kept.join(t("core:toast.fieldSep")) }) : t("core:toast.undone")); set("draft")
+  }
   x.apply = async () => { const r = await call(api.apply(p.id)); if (r) { set("applied"); toast(t("core:toast.applied"), { action: { label: t("core:toast.undo"), onClick: () => void x.undo() } }) } }
   x.drop = async () => { if (await call(api.dropConfig(p.id))) set("dropped") }
   proposals.set(p.id, x); return x
@@ -475,7 +484,7 @@ function build() {
   /* after a reload, whether Steve is still on a turn (afterwards the steve.thinking events say so) */
   if (!st.ready && s.thinking) st.thinking = true
   if (st.draft) {
-    const at = s.thread.findIndex((m) => m.id === st.draft!.mid), reply = at < 0 ? undefined : s.thread.slice(at + 1).find((m) => m.author === "steve")
+    const reply = s.thread.findLast((m) => m.author === "steve" && m.meta?.origin === st.draft!.mid && !priorDraftReplies.has(m.id))
     if (reply) { st.drafted = reply.id; st.draft = null }
   }
   /* a research run's answer is stored: its live line goes, and the thinking line with it */
@@ -503,9 +512,10 @@ let inflight: Promise<void> | null = null, again = false
 export function refresh(): Promise<void> {
   if (inflight) { again = true; return inflight.then(() => inflight ?? undefined) } // resolve after the follow-up, so callers see state newer than their action
   inflight = (async () => {
-    /* asked after Steve stopped, the state has the reply (stored before steve.thinking went off): the draft has served */
-    const settled = !st.thinking, epoch = scopeEpoch
-    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build(); if (settled && st.draft) { st.draft = null; build() } emit() }
+    /* A stopped turn can leave no reply after a restart. Only retire the same untouched draft;
+     * another turn or a chunk received during this request is newer than this state snapshot. */
+    const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch
+    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build(); if (settled && st.draft === settled && !st.thinking && !state.thinking) { st.draft = null; build() } emit() }
     catch (e) { if (epoch !== scopeEpoch) return; if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
     finally { inflight = null; if (again) { again = false; void refresh() } }
   })()
@@ -639,7 +649,13 @@ function onHub(e: HubEvent | ModuleEvent) {
   e = e as HubEvent
   if (e.type === "workspace") { void resync(); return }
   if (e.type === "release.hold") { st.hold = e.hold; emit(); return }
-  if (e.type === "steve.draft") { st.draft = { mid: e.mid, thought: e.thought, text: e.text }; if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" }); drawDraft(); return }
+  if (e.type === "steve.draft") {
+    if (nextDraft || st.draft?.mid !== e.mid) priorDraftReplies = new Set([...st.thread, ...knownMsgs.values()].filter((m) => m.k === "steve" && m.origin === e.mid && m.id).map((m) => m.id!))
+    nextDraft = false
+    st.draft = { mid: e.mid, thought: e.thought, text: e.text }
+    if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
+    drawDraft(); return
+  }
   if (e.type === "steve.tool") {
     if (st.live?.run !== e.run) st.live = { mid: e.mid, run: e.run, t0: Date.now(), tools: [] }
     st.live.tools.push({ name: e.name, brief: e.brief, ok: e.ok })
@@ -647,7 +663,7 @@ function onHub(e: HubEvent | ModuleEvent) {
     drawDraft(); return
   }
   if (e.type === "thread.run") { soon(); return }
-  if (e.type === "steve.thinking") { st.thinking = e.on; st.phase = e.on ? e.phase ?? "" : ""; cue(e.on ? "think" : "reply"); build(); emit(); if (!e.on) soon(); return }
+  if (e.type === "steve.thinking") { if (e.on && !st.thinking) nextDraft = true; st.thinking = e.on; st.phase = e.on ? e.phase ?? "" : ""; cue(e.on ? "think" : "reply"); build(); emit(); if (!e.on) soon(); return }
   if (e.type === "event") {
     const xs = raw.events.get(e.session_id)
     if (["turn_end", "user", "permission", "system"].includes(e.kind)) soon()
@@ -706,8 +722,13 @@ export function start() {
 /* ───────── selectors ───────── */
 export const it = (id: string) => st.items.find((x) => x.id === id)!
 export const pending = () => st.items.filter((i) => (i.st === "wait" || i.st === "prop" || !!i.wait) && !!i.wait && !i.snooze && !i.arch)
-/** every open card, several per item when it has more than one */
-export const pendingCards = (): Orphan[] => [...pending().flatMap((i) => i.waits.map((w) => ({ i, w }))), ...st.orphans]
+const allCards = (): Orphan[] => [...pending().flatMap((i) => i.waits.map((w) => ({ i, w }))), ...st.orphans]
+/** a memory to confirm: it blocks nothing, so it is counted on one line of 待处理, not shown as a card */
+export const isMemCard = (w: Wait) => w.type === "confirm" && w.subject === "mem"
+/** every open card that holds work, several per item when it has more than one */
+export const pendingCards = (): Orphan[] => allCards().filter((c) => !isMemCard(c.w))
+/** the memories waiting to be confirmed (their batch page is 知识 › 待确认) */
+export const memCards = (): Orphan[] => allCards().filter((c) => isMemCard(c.w))
 /** the open cards a session is waiting on, with or without an item */
 export const sessionCards = (sid: string): Orphan[] => [...st.items.flatMap((i) => i.waits.filter((w) => w.session === sid).map((w) => ({ i, w }))), ...st.orphans.filter((o) => o.w.session === sid)]
 /** "" is the stand-in id of a card without an item */
@@ -732,13 +753,14 @@ export function stageOf(i: Item): string {
 /** how long the conversation keeps talking to an item after the last message sent to it (§5.3) */
 const FOCUS_MS = 10 * 60_000
 const ITEM_REF = /^#([A-Z]{1,6}-\d+)\b/
-export async function chatSend(v: string, files: string[] = [], refs: RFile[] = [], mentions: { kind: "party" | "bot"; id: string }[] = []) {
+/** `clientId`: the send idempotency key (the composer's draft keeps one across retries; a button sends a new one) */
+export async function chatSend(v: string, files: string[] = [], refs: RFile[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], clientId = newClientId()) {
   /* a quote of an item's message, or the focus bar, sends straight to that item; `#ST-n` does too and starts the focus */
   const quoted = st.quote ? st.thread.find((m) => m.id === st.quote) ?? knownMsgs.get(st.quote) : undefined
   const focus = st.focus && st.focus.until > Date.now() ? st.focus.item : undefined
   const item = quoted?.item ?? (quoted ? undefined : focus)
   const toItem = item ?? ITEM_REF.exec(v)?.[1]
-  const to = { item, reply_to: quoted?.id }
+  const to = { item, reply_to: quoted?.id, client_id: clientId }
   st.quote = null; st.focus = toItem ? { item: toItem, until: Date.now() + FOCUS_MS } : st.focus
   /* Steve is on a turn: the message waits in the queue above the composer and goes when the turn ends (the Hub decides) */
   if (chatBusy()) {
@@ -848,7 +870,7 @@ const DECIDED_BY_SUBJECT: Record<string, readonly string[] | ((c: string) => str
   mem: ["yes", "no"],
   party_merge: ["merge", "not_same"],
   release: ["no"],
-  chan_message: ["yes", "no"],
+  chan_message: ["yes", "no", "rewrite"],
 }
 const DECIDED_ANY = ["pass", "rework", "yes", "no", "continue", "delivered", "look", "tosteve", "drop", "deny"]
 function decidedText(w: Wait, c: string, bot: string | null) {
@@ -861,6 +883,12 @@ function decidedText(w: Wait, c: string, bot: string | null) {
 }
 /** accepted, but the project still has a release to go: the item is not finished yet */
 const releaseAhead = (i?: Item) => !!i?.branch && !!st.projects.find((p) => p.id === i.project)?.release
+/** the acceptance chooses whether to release (验收并发布 / 验收，先不发布): a release script runs on accept. A project
+ * done by its rule (release.done_when merge/tag) is finished by that rule, so its acceptance has nothing to choose */
+export const acceptChoosesRelease = (i?: Item) => {
+  const r = releaseAhead(i) ? st.projects.find((p) => p.id === i!.project)?.release : null
+  return !!r?.cmd && !r.done_when
+}
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
   const key = "decision:" + w.decision
@@ -873,12 +901,14 @@ export async function decide(id: string, c: string, text?: string, decision?: st
       if (d) { const rel = relOf(d); toast(rel?.text ?? t("core:decided.releaseApproved")); if (rel?.tone === "fail") cue("failure") }
       return
     }
-    if (c === "pass" && w.type === "accept" && text !== "no-release" && releaseAhead(i) && i) {
-      /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release */
-      if (!(await call(api.decide(w.decision, c, text)))) return
+    if (c === "pass" && w.type === "accept" && releaseAhead(i) && i) {
+      /* the Hub finishes an item with nothing on its branch right away: say so instead of waiting for a release;
+       * 验收并发布 starts it on the Hub unless the branch moved or a release runs (then the agent asks for it) */
+      const d = await call(api.decide(w.decision, c, text)); if (!d) return
       cue("success")
       const after = await api.item(i.id).catch(() => null)
-      toast(after?.status === "done" ? t("core:decided.acceptedNothingToRelease") : t("core:decided.acceptedAwaitRelease"))
+      toast(after?.status === "done" ? (text === "no-release" ? t("core:decided.acceptedNoRelease") : t("core:decided.acceptedNothingToRelease"))
+        : d.result?.release === "started" ? t("core:decided.acceptedReleasing") : t("core:decided.acceptedAwaitRelease"))
       return
     }
     const result = await call(api.decide(w.decision, c, text), decidedText(w, c, i?.b ?? null))
@@ -904,8 +934,9 @@ export async function dismiss(id: string, decision?: string) {
 export function undoDecision(n: number) { const d = st.done[n]; if (!d?.canUndo) return; void call(api.undo(d.decision), t("core:toast.undoneToPending", { id: d.id })) }
 
 /* ───────── actions: items ───────── */
-export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start") {
-  const r = await call(api.newItem({ goal, bot, project, mode })); return r?.id
+/** `clientId`: the same for every retry of one unchanged form, so a retry does not make a second item */
+export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start", clientId = newClientId()) {
+  const r = await call(api.newItem({ goal, bot, project, mode, client_id: clientId })); return r?.id
 }
 export async function supp(id: string, v: string, target: "auto" | "steer" | "new", files: string[] = []) {
   const msg = t(target === "steer" ? "core:toast.steered" : target === "new" ? "core:toast.newSession" : active(it(id))?.st === "run" ? "core:toast.queuedForTurn" : "core:toast.delivered")

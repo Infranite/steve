@@ -342,7 +342,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
             const lit = m.id && m.id === flash ? "rounded-2xl bg-blue/10 ring-8 ring-blue/10" : ""
             if (m.k === "me" && conv) return <Fragment key={key}>{dayLabel}<div className="flex flex-col gap-1.5" data-msg={m.id} data-im-turn><SenderLine m={rawOf(m)} />{rawOf(m)?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={rawOf(m)!.channel_message!} /></div> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /></div></Fragment>
             if (m.k === "me") return <Fragment key={key}>{dayLabel}<div className={cn("group/me relative flex flex-col gap-1.5 transition-colors duration-500", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}><QuoteHead id={m.replyTo} className="self-end" />{m.a2uiAction ? <A2uiActionNote a={m.a2uiAction} /> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /><MeActions m={m} /></div></Fragment>
-            if (m.k === "thinking") return <div key={key} className="flex flex-col gap-2"><LiveSteps />{st.draft?.text && <SteveSays><Markdown text={st.draft.text} streaming /></SteveSays>}</div>
+            if (m.k === "thinking") return <div key={key} className="flex flex-col gap-2" data-chat-draft={st.draft?.mid} aria-busy="true"><LiveSteps />{st.draft?.text && <SteveSays><Markdown text={st.draft.text} streaming /></SteveSays>}</div>
             if (m.notice) return <Fragment key={key}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>
             return <Fragment key={key}>{dayLabel}<div className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 transition-colors duration-500", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}>
               <div className="flex min-w-0 items-center gap-2 px-1 type-footnote text-muted-foreground" data-chat-author><span className="truncate font-medium text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>
@@ -369,7 +369,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
         )}
         <ChatQueue composer={composer} />
         <ComposerBars />
-        <Composer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} placeholder={focusItem() ? t("pages:chat.placeholderFocus", { item: focusItem() }) : chatBusy() ? t("pages:chat.placeholderBusy", { name: S?.n ?? "Steve" }) : t("pages:chat.placeholder", { name: S?.n ?? "Steve" })} testId="chat" onSend={(t, files, refs, mentions) => { bottom(); return chatSend(t, files, refs, mentions) }} busy={working} onStop={stopReply}
+        <Composer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} placeholder={focusItem() ? t("pages:chat.placeholderFocus", { item: focusItem() }) : chatBusy() ? t("pages:chat.placeholderBusy", { name: S?.n ?? "Steve" }) : t("pages:chat.placeholder", { name: S?.n ?? "Steve" })} testId="chat" onSend={(t, files, refs, mentions, clientId) => { bottom(); return chatSend(t, files, refs, mentions, clientId) }} busy={working} onStop={stopReply}
           onCommand={(c) => { if (c === "digest") { void chatSend("/汇报"); return } openSheet(c) }} />
         </>}
       </div>

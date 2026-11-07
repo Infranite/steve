@@ -38,17 +38,17 @@ pub fn codex_args(
     instructions: Option<&Path>,
     images: &[PathBuf],
 ) -> Vec<String> {
-    let mut a: Vec<String> = [
-        "exec",
-        "--json",
-        "--ephemeral",
-        "--skip-git-repo-check",
-        "-s",
-        "read-only",
-        "-C",
-    ]
-    .map(String::from)
-    .into();
+    let mut a: Vec<String> = ["exec", "--json", "--ephemeral", "--skip-git-repo-check"]
+        .map(String::from)
+        .into();
+    if tools {
+        a.extend(read_only_profile(
+            &steve_vault::harness::steve_home_from_env(),
+        ));
+    } else {
+        a.extend(["-s".into(), "read-only".into()]);
+    }
+    a.push("-C".into());
     a.push(cwd.to_string_lossy().into_owned());
     if !model.is_empty() {
         a.extend(["-m".into(), model.into()]);
@@ -82,6 +82,20 @@ pub fn codex_args(
     }
     a.push("-".into());
     a
+}
+
+/// The read-only sandbox of a run with the shell, as a permission profile that also denies reading the
+/// Hub's secret files under `steve_home` (Codex's plain read-only sandbox reads the whole disk).
+pub fn read_only_profile(steve_home: &Path) -> [String; 4] {
+    [
+        "-c".into(),
+        "default_permissions=\"steve_read\"".into(),
+        "-c".into(),
+        format!(
+            "permissions.steve_read={{extends=\":read-only\",filesystem={}}}",
+            steve_vault::harness::codex_deny_filesystem(steve_home)
+        ),
+    ]
 }
 
 /// How a Codex run said it failed.
@@ -353,8 +367,12 @@ mod tests {
             ),
             want
         );
-        // with tools: the shell and Codex's own instructions stay
-        let mut want: Vec<&str> = head.to_vec();
+        // with tools: the shell and Codex's own instructions stay, in a read-only profile that
+        // denies the Hub's secret files instead of the plain read-only sandbox
+        let profile = read_only_profile(&steve_vault::harness::steve_home_from_env());
+        let mut want: Vec<&str> = head[..4].to_vec();
+        want.extend(profile.iter().map(String::as_str));
+        want.extend(&head[6..]);
         want.push("-");
         assert_eq!(codex_args(cwd, "gpt-x", None, true, None, &[]), want);
         // no model named: Codex's configured default

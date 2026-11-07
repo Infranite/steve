@@ -140,7 +140,8 @@ async fn start() -> Env {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NO_RESUME", "1".into()),
+        // the local Node runs the sessions (the Hub runs none itself)
+        ("STEVE_NODE_MODE", "local".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", fake.display().to_string()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),

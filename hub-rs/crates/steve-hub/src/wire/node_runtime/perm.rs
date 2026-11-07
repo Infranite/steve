@@ -367,6 +367,11 @@ impl NodeRuntime {
             if status != "open" || row.state != "waiting" {
                 return Ok((false, false));
             }
+            if let Some(why) = steve_store::workflow_gate::session_blocker(tx, &row.session)? {
+                // A pause/cancel/replan can precede a late human or YOLO answer. Commit the
+                // expired card and a rejection together; never grant the old attempt new access.
+                return Ok((false, self.expire_card_in(tx, &row, &why)?));
+            }
             if row.expires_at <= now() {
                 // too late: closed now (committed), not answered
                 return Ok((false, self.expire_card_in(tx, &row, EXPIRED)?));

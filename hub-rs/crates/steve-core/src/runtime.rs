@@ -1,4 +1,4 @@
-//! What the domain layer needs from the agent runner (steve-acp) and gives to it and to the MCP server.
+//! What the domain layer needs from the agent runtime (the Hub routes it to the Nodes) and gives to it and to the MCP server.
 //!
 //! Every method is called while the core lock is held, so implementations must return promptly and must
 //! never call back into [`crate::Core`] synchronously: turns run on their own tasks and report through
@@ -111,14 +111,33 @@ pub struct TurnEnd {
     pub error: Option<String>,
 }
 
-/// The ACP runner (acp.ts): per-session adapter processes, the prompt queue, permissions, and the release hold.
+/// Where sessions run (the Hub routes them to their Nodes): per-session harnesses, the prompt
+/// queue, permissions, and the release hold.
 pub trait AgentRuntime: Send + Sync {
+    /// Check a work unit before the scheduler creates a session or touches its workspace. Only a
+    /// Node runtime that enforces OS sandboxing and supplies credentials/environment from the
+    /// execution's own principal may opt in. ACP adapter permissions and the Node's machine owner
+    /// do not establish that isolation. Default-deny also protects legacy and newly added runtimes.
+    fn check_workflow_execution(&self, item_id: &str) -> Result<()> {
+        let _ = item_id;
+        Err(crate::CoreError::Msg(
+            "协作工作尚不能执行：需要支持 OS 沙箱、运行主体身份及按主体注入凭据和环境变量的 Node。请先完成 Node 隔离能力迁移，再恢复工作流；现有 ACP 权限模式不能替代沙箱，工作不会回退到 Hub 执行。".into(),
+        ))
+    }
     /// A session was just created (before its first prompt): the runtime may fix its backend now.
     /// Only new sessions are ever bound here; existing ones keep the backend they have. `after`: it
     /// takes over from a session whose release is still on its way ([`Released::Pending`]); its
     /// harness does not start before that release is done (two harnesses never share a worktree).
     fn created(&self, session_id: &str, after: Option<&str>) {
         let _ = (session_id, after);
+    }
+    /// Why nothing can run `session_id` (stored text, zh-CN), asked once [`Self::created`] had its
+    /// say: no backend takes it, and there is no in-process runner to fall back on (B7). The core
+    /// then ends it at once, said in it and on its item, instead of leaving it waiting for good.
+    /// `None`: a backend runs it.
+    fn refusal(&self, session_id: &str) -> Option<String> {
+        let _ = session_id;
+        None
     }
     /// Send now or queue behind the running turn (or behind the release hold). Writes the `queued`
     /// row/event itself (with the files). Attachments are copied into the session cwd and named in the

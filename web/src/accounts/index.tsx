@@ -14,7 +14,7 @@ import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot } from "@/ui
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { tm, toast } from "@/store"
-import { accountsApi, capLabel, kindLabel, KIND_LABEL, CONN_STATUS, type RAccount, type RAdapter, type RConnection, type RMatchRule, type RUsage } from "@/api/accounts"
+import { accountsApi, capLabel, kindLabel, KIND_LABEL, CONN_STATUS, connStatusOf, type RAccount, type RAdapter, type RConnection, type RMatchRule, type RUsage } from "@/api/accounts"
 import { useLoad, useBusy, report, Dots } from "@/accounts/load"
 import { NewAccountDialog, ConnectDialog, CredentialDialog } from "@/accounts/dialogs"
 import { NewVaultDialog } from "@/vault/new-item"
@@ -185,7 +185,7 @@ function EditAccount({ a, onClose, onDone }: { a: RAccount; onClose: () => void;
 function Connection({ c, adapter, label, onChange }: { c: RConnection; adapter: RAdapter | null; label: string; onChange: () => void }) {
   const t = useT()
   const [busy, act] = useBusy(), [cred, setCred] = useState<string[] | null>(null), [usage, setUsage] = useState<RUsage | null>(null), [asking, setAsking] = useState(false)
-  const [s, dot] = CONN_STATUS[c.status] ?? [c.status, "idle"]
+  const [s, dot] = connStatusOf(c)
   const reauth = async () => {
     const r = await act(() => accountsApi.reauth(c.id))
     if (!r) return
@@ -205,12 +205,13 @@ function Connection({ c, adapter, label, onChange }: { c: RConnection; adapter: 
         {used.length > 0 && <div className="type-callout" data-usage><div className="mb-1.5 text-muted-foreground">{t("accounts:conn.willStop")}</div><ul className="list-disc pl-5">{used.map((u) => <li key={u}>{u}</li>)}</ul></div>}
         <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={async () => { if (await act(() => accountsApi.disconnect(c.id), t("accounts:conn.disconnected"))) onChange() }} data-disconnect-confirm>{t("accounts:conn.disconnect")}</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent></AlertDialog>
+      {c.installed === false && <div className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground" data-conn-not-installed>{t("api:notInstalledNote")}</div>}
       <Group>
         <Row title={<span className="inline-flex items-center gap-2"><StatusDot s={dot} />{s}</span>} data-conn-state
           sub={<Dots><span>{adapter?.name ?? c.adapter}</span>{c.last_sync ? <span>{t("accounts:conn.lastSync", { time: tm(c.last_sync) })}</span> : null}{c.health.last_ok ? <span>{t("accounts:conn.lastOk", { time: tm(c.health.last_ok) })}</span> : null}</Dots>}>
-          <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(r.status === "ok" ? t("accounts:conn.testOk") : t("accounts:conn.testFailed")); onChange() } })} data-conn-test><RefreshCwIcon />{t("accounts:conn.test")}</Button></Row>
+          <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy || c.installed === false} onClick={() => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(r.status === "ok" ? t("accounts:conn.testOk") : t("accounts:conn.testFailed")); onChange() } })} data-conn-test><RefreshCwIcon />{t("accounts:conn.test")}</Button></Row>
         {c.health.last_error && c.status !== "ok" && <Row title={t("accounts:conn.lastError")} sub={<span className="font-mono">{c.health.last_error}</span>}>{c.health.error_at ? <span className="type-footnote text-muted-foreground">{tm(c.health.error_at)}</span> : null}</Row>}
-        {(c.status === "reauth" || c.status === "error") && <Row title={t("accounts:conn.reauth")} sub={c.auth === "oauth" ? t("accounts:conn.reauthOAuth") : t("accounts:conn.reauthCred")}><Button size="sm" disabled={busy} onClick={() => void reauth()} data-reauth>{t("accounts:conn.reauth")}</Button></Row>}
+        {c.installed !== false && (c.status === "reauth" || c.status === "error") && <Row title={t("accounts:conn.reauth")} sub={c.auth === "oauth" ? t("accounts:conn.reauthOAuth") : t("accounts:conn.reauthCred")}><Button size="sm" disabled={busy} onClick={() => void reauth()} data-reauth>{t("accounts:conn.reauth")}</Button></Row>}
         <Row title={t("accounts:conn.receiving")} sub={c.status === "paused" ? t("accounts:conn.pausedSub") : t("accounts:conn.receivingSub")}>
           <Switch aria-label={t("accounts:conn.receiving")} checked={c.status !== "paused"} disabled={busy || c.status === "revoked"} onCheckedChange={(v) => void act(() => accountsApi.patchConnection(c.id, { paused: !v }), v ? t("accounts:conn.resumed") : t("accounts:conn.paused")).then((r) => r && onChange())} data-conn-pause /></Row>
       </Group>

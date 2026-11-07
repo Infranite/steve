@@ -46,9 +46,7 @@ pub mod webauthn;
 
 pub use api::routes;
 pub use error::{VaultError, VaultResult};
-pub use service::{
-    KeyStoreInfo, Keychain, NewItemKey, RewrapReport, Rotation, Status, Vault, ensure_active,
-};
+pub use service::{KeyStoreInfo, Keychain, NewItemKey, Rotation, Status, Vault, ensure_active};
 pub use steve_vault::{guard, redact};
 pub use r#use::{
     NodePlace, NodeUse, SecretUses, SessionSink, UseCx, UseNodes, UseOutcome, UseRequest,

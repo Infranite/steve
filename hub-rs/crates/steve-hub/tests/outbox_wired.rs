@@ -248,7 +248,7 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
     );
 }
 
-/// healthz's `node` block without a Node (STEVE_NODE_MODE unset): off, nothing reconciled, and the
+/// healthz's `node` block without a Node (a STEVE_NO_RESUME copy, STEVE_NODE_MODE unset): off, nothing reconciled, and the
 /// store's counts as they are: Node-bound sessions with queued messages are parked, and legacy
 /// sessions that could still run (and those with work in hand) are counted for the runner's removal.
 #[tokio::test(flavor = "multi_thread")]
@@ -427,4 +427,51 @@ async fn dismissing_a_draft_reply_discards_it() {
     let (s, v) = e.call("POST", "/api/decisions/dc_d1/undo", None).await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(status(), "draft");
+}
+
+/// Audit #5: the dead deliveries are listed for the instance owner, grouped by consumer, and revived.
+#[tokio::test(flavor = "multi_thread")]
+async fn dead_deliveries_are_listed_by_consumer_and_revived() {
+    let e = start().await;
+    let c = rusqlite::Connection::open(&e.db).expect("db");
+    c.busy_timeout(Duration::from_secs(5)).expect("timeout");
+    // a consumer this Hub does not run, so nothing delivers the revived rows meanwhile
+    c.execute_batch(
+        "INSERT INTO outbox_events (id, workspace_id, topic, version, payload, created) VALUES
+           ('evt_d1', 'default', 'test.topic', 1, '{}', 1), ('evt_d2', 'default', 'test.topic', 1, '{}', 2);
+         INSERT INTO outbox_leases (event_seq, consumer_id, attempts, last_error, next_at, dead, updated)
+           SELECT seq, 'test.gone', 3, 'GitHub 503', 0, 1, created FROM outbox_events WHERE id IN ('evt_d1', 'evt_d2');",
+    )
+    .expect("rows");
+    drop(c);
+    let (s, v) = e.call("GET", "/api/system/outbox", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["dead"], 2, "{v}");
+    assert_eq!(v["groups"].as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(v["groups"][0]["consumer"], "test.gone");
+    assert_eq!(v["groups"][0]["count"], 2);
+    assert_eq!(v["groups"][0]["last_error"], "GitHub 503");
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/system/outbox/revive",
+            Some(json!({ "consumer": 7 })),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/system/outbox/revive",
+            Some(json!({ "consumer": "test.gone" })),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["revived"], 2);
+    assert_eq!(
+        e.one("SELECT count(*) FROM outbox_leases WHERE dead = 0 AND attempts = 0"),
+        2
+    );
+    let (_, v) = e.call("GET", "/api/system/outbox", None).await;
+    assert_eq!(v["groups"], json!([]), "{v}");
 }

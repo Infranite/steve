@@ -14,8 +14,6 @@ pub struct LaneRow {
     pub branch: String,
     pub window_ms: Option<i64>,
     pub max_members: Option<i64>,
-    /// Commands a batch must pass before it merges (JSON list of strings), as you set them.
-    pub checks: String,
     /// The state machine's snapshot (JSON).
     pub state: String,
     pub created: i64,
@@ -60,7 +58,6 @@ fn lane(r: &rusqlite::Row<'_>) -> rusqlite::Result<LaneRow> {
         branch: r.get("branch")?,
         window_ms: r.get("window_ms")?,
         max_members: r.get("max_members")?,
-        checks: r.get("checks")?,
         state: r.get("state")?,
         created: r.get("created")?,
         updated: r.get("updated")?,
@@ -186,6 +183,16 @@ pub fn request_of_item(c: &Connection, item: &str) -> Result<Option<LaneRequest>
     .optional()?)
 }
 
+/// The item's newest request, whatever became of it (released, left): what `steve_lane_status` reports.
+pub fn request_last_of_item(c: &Connection, item: &str) -> Result<Option<LaneRequest>> {
+    Ok(c.query_row(
+        "SELECT * FROM lane_requests WHERE item_id = ? ORDER BY arrived DESC, rowid DESC LIMIT 1",
+        [item],
+        request,
+    )
+    .optional()?)
+}
+
 /// A lane's requests, oldest first (`open`: only those still in it).
 pub fn requests_of(c: &Connection, lane: &str, open: bool) -> Result<Vec<LaneRequest>> {
     let sql = if open {
@@ -213,15 +220,6 @@ pub fn request_set(
         "UPDATE lane_requests SET state = ?, unit = coalesce(?, unit), released_in = coalesce(?, released_in),
             reason = coalesce(?, reason), updated = ? WHERE id = ?",
         params![state, unit, released_in, reason, now(), id],
-    )?;
-    Ok(())
-}
-
-/// The commands a lane's batches must pass (empty: none).
-pub fn lane_checks_set(c: &Connection, id: &str, checks: &[String]) -> Result<()> {
-    c.execute(
-        "UPDATE lanes SET checks = ?, updated = ? WHERE id = ?",
-        params![serde_json::to_string(checks)?, now(), id],
     )?;
     Ok(())
 }
@@ -263,6 +261,7 @@ pub fn unit_set(
 }
 
 /// The newest card of `kind` about a batch (`subject`: `lane:<lane>:<unit>`): its status and result.
+/// A card replaced by a newer one ([`batch_card_renew`]) does not count.
 pub fn batch_card(
     c: &Connection,
     subject: &str,
@@ -271,7 +270,9 @@ pub fn batch_card(
     Ok(c
         .query_row(
             "SELECT status, coalesce(result, 'null') FROM decisions
-              WHERE subject_type = 'delivery_batch' AND subject_id = ? AND kind = ? ORDER BY created DESC LIMIT 1",
+              WHERE subject_type = 'delivery_batch' AND subject_id = ? AND kind = ?
+                AND NOT (status = 'expired' AND json_extract(coalesce(result, '{}'), '$.renewed') IS NOT NULL)
+              ORDER BY created DESC, rowid DESC LIMIT 1",
             params![subject, kind],
             |r| {
                 let raw: String = r.get(1)?;
@@ -279,6 +280,47 @@ pub fn batch_card(
             },
         )
         .optional()?)
+}
+
+/// A request joined a batch whose approval card is still open (`subject`: `lane:<lane>:<unit>`): that
+/// card is expired (`renewed`) and a new one asks with `question` and `draft`, in the caller's
+/// transaction. A new card, not the old one rewritten: an answer is only ever to a card that listed
+/// exactly what merges, and an answer to the card you loaded before the request joined is refused
+/// (it is no longer open). The new card's id; `None` when no card of it is open.
+pub fn batch_card_renew(
+    tx: &crate::Tx<'_>,
+    subject: &str,
+    question: &str,
+    draft: &str,
+) -> Result<Option<String>> {
+    let old: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT id, workspace_id, requested_by FROM decisions
+              WHERE subject_type = 'delivery_batch' AND subject_id = ? AND kind = 'approve' AND status = 'open'
+              ORDER BY created DESC, rowid DESC LIMIT 1",
+            [subject],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((id, ws, by)) = old else {
+        return Ok(None);
+    };
+    crate::decision_resolve_in(tx, &id, &serde_json::json!({"renewed": true}), "expired")?;
+    let d = crate::decision_create_in(
+        tx,
+        &crate::NewDecision {
+            workspace_id: ws,
+            kind: "approve".into(),
+            subject_type: "delivery_batch".into(),
+            subject_id: subject.into(),
+            question: question.into(),
+            draft: Some(draft.into()),
+            options: Some(vec!["yes".into(), "no".into()]),
+            requested_by: by,
+            ..Default::default()
+        },
+    )?;
+    Ok(Some(d.id))
 }
 
 /// Marks the newest resolved card of a batch (`subject`, `kind`) as acted on: recovery after a
@@ -299,4 +341,31 @@ pub fn units_of(c: &Connection, lane: &str) -> Result<Vec<LaneUnit>> {
         .query_map([lane], unit)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(v)
+}
+
+pub fn unit_get(c: &Connection, lane: &str, no: i64) -> Result<Option<LaneUnit>> {
+    Ok(c.query_row(
+        "SELECT * FROM lane_units WHERE lane_id = ? AND no = ?",
+        params![lane, no],
+        unit,
+    )
+    .optional()?)
+}
+
+/// The newest card of `kind` about a batch, whole ([`batch_card`] gives only its status and result).
+pub fn batch_card_decision(
+    c: &Connection,
+    subject: &str,
+    kind: &str,
+) -> Result<Option<crate::Decision>> {
+    Ok(c
+        .query_row(
+            "SELECT * FROM decisions
+              WHERE subject_type = 'delivery_batch' AND subject_id = ? AND kind = ?
+                AND NOT (status = 'expired' AND json_extract(coalesce(result, '{}'), '$.renewed') IS NOT NULL)
+              ORDER BY created DESC, rowid DESC LIMIT 1",
+            params![subject, kind],
+            crate::Decision::from_row,
+        )
+        .optional()?)
 }

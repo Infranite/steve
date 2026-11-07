@@ -624,11 +624,18 @@ impl Real {
         )
     }
 
-    /// Switches YOLO on for the workspace. With the Bot's `default` mode and the item in its own
-    /// worktree, the session's harness mode becomes `acceptEdits`: today the only Hub path to
-    /// `set_mode`, hence to the Node's `configure_session`.
+    /// Switches YOLO on for the workspace. An item in its own worktree already runs in
+    /// `acceptEdits` without YOLO (#38), so this changes no harness mode.
     async fn yolo_on(&self) {
         self.c.ok("PUT", "/api/yolo", json!({"on": true})).await;
+    }
+
+    /// Switches full access on for the workspace: the session's harness mode becomes
+    /// `bypassPermissions`, a Hub path to `set_mode`, hence to the Node's `configure_session`.
+    async fn full_on(&self) {
+        self.c
+            .ok("PUT", "/api/yolo", json!({"mode": "full", "confirm": true}))
+            .await;
     }
 
     /// Waits for the session's permission mode to be configured on the Node, failing with the log.
@@ -837,16 +844,16 @@ async fn the_test_project_is_a_node_root_from_the_first_turn() {
     );
 }
 
-/// Case 5's plumbing, on the scripted agent: YOLO switched on at idle reaches the Node session as
-/// a `configure_session` to `accept_edits`, and the next turn runs.
+/// Case 5's plumbing, on the scripted agent: full access switched on at idle reaches the Node
+/// session as a `configure_session` to `full_access`, and the next turn runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mode_change_at_idle_configures_the_node_session() {
     let r = Real::start_on(Home::fake()).await;
     let sid = r.item("A7 配置 @say first-A7").await;
     r.turn_over(&sid, 1, "first turn").await;
-    assert_eq!(r.configured(&sid, "accept_edits"), 0);
-    r.yolo_on().await;
-    r.configure_over(&sid, "accept_edits").await;
+    assert_eq!(r.configured(&sid, "full_access"), 0);
+    r.full_on().await;
+    r.configure_over(&sid, "full_access").await;
     let seq = r.seq(&sid);
     r.c.say(&sid, "A7 配置之后 @say second-A7").await;
     r.turn_over(&sid, 2, "after the configure").await;
@@ -1052,9 +1059,10 @@ async fn a_cancel_mid_turn_ends_it() {
     assert!(r.said(&sid, seq, &pong) > 0);
 }
 
-/// 5. A change at idle applies: the permission mode switched at idle (YOLO on: `default` becomes
-/// `acceptEdits`) is configured on the Node, and the next turn writes a file with no card. The
-/// Bot's model and effort reach the harness with the open (claude answers with that model).
+/// 5. A change at idle applies: the session opens in `acceptEdits` (its own worktree, #38); the
+/// permission mode switched at idle (full access) is configured on the Node, and the next turn
+/// writes a file with no card. The Bot's model and effort reach the harness with the open (claude
+/// answers with that model).
 ///
 /// TODO(model/effort at idle): no Hub trigger sends a model or effort change to an open Node session
 /// yet (`RoutedRuntime` configures only from `set_mode`); assert it here once the step that adds
@@ -1081,8 +1089,8 @@ async fn a_change_at_idle_applies_and_the_bots_model_reaches_the_harness() {
     assert!(open.contains(&model()), "the open carries the model");
     assert!(open.contains(&effort()), "the open carries the effort");
     assert!(
-        open.contains("\"ask\""),
-        "opened asking for every permission"
+        open.contains("\"accept_edits\""),
+        "opened accepting edits in its own worktree"
     );
     let models = transcript_models(&cwd(&r, &sid).display().to_string());
     eprintln!("case 5: transcript models {models:?}");
@@ -1093,8 +1101,8 @@ async fn a_change_at_idle_applies_and_the_bots_model_reaches_the_harness() {
     );
 
     // at idle: the mode change goes to the Node now, not with a later open
-    r.yolo_on().await;
-    r.configure_over(&sid, "accept_edits").await;
+    r.full_on().await;
+    r.configure_over(&sid, "full_access").await;
     let opens = r.h.count(
         "SELECT COUNT(*) FROM node_commands WHERE method='open_session'",
         &[],
@@ -1109,8 +1117,8 @@ async fn a_change_at_idle_applies_and_the_bots_model_reaches_the_harness() {
         ),
     )
     .await;
-    r.turn_over(&sid, 2, "edit under acceptEdits").await;
-    assert_eq!(r.cards(&sid), 0, "acceptEdits: the edit asked nothing");
+    r.turn_over(&sid, 2, "edit under full access").await;
+    assert_eq!(r.cards(&sid), 0, "full access: the edit asked nothing");
     assert_eq!(
         std::fs::read_to_string(cwd(&r, &sid).join("a7-edit-5.txt"))
             .unwrap_or_default()

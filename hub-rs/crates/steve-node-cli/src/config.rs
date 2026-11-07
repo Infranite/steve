@@ -4,6 +4,11 @@
 //! - `node/node.json`: the pairing (hub url, node id, hub id, the pin or `loopback`)
 //! - `roots.json`: the directories this Node lets the Hub work in (`[{id, path, display}]`)
 //! - `harness.json`: optional, the ACP adapters (`{"adapters": {"claude-code": "/path"}, "node": "node"}`)
+//! - `policy.json`: optional, the most any Hub may ask of this Node
+//!   (`{"max_permissions": "auto", "full_network": true, "exec": false, "jobs": false}`, the
+//!   defaults). Sessions here run with this machine's own home and logins until runs are
+//!   sandboxed: only `"max_permissions": "full_access"` lets the Hub turn permission prompts off
+//!   (`bypassPermissions`). Read at start; a file that does not parse stops the Node.
 //! - `node/local/`: the LocalNode's journal, worktrees and caches
 //!
 //! No secret ever goes through argv: the pairing code comes from stdin or `STEVE_PAIR_CODE`.
@@ -113,6 +118,16 @@ impl Home {
             .collect()
     }
 
+    /// The owner's ceiling (`policy.json`; none: [`steve_node::PolicyCeiling::default`]).
+    pub fn ceiling(&self) -> Result<steve_node::PolicyCeiling> {
+        let p = self.0.join("policy.json");
+        if !p.exists() {
+            return Ok(steve_node::PolicyCeiling::default());
+        }
+        serde_json::from_str(&std::fs::read_to_string(&p)?)
+            .with_context(|| format!("{} does not parse", p.display()))
+    }
+
     pub fn harness(&self) -> Result<Harness> {
         let p = self.0.join("harness.json");
         if !p.exists() {
@@ -155,6 +170,7 @@ impl Home {
             },
             storage: steve_node::Storage::default(),
             jobs: Default::default(),
+            ceiling: self.ceiling()?,
         })
     }
 }
@@ -173,4 +189,47 @@ pub fn ws_url(hub_url: &str) -> Result<String> {
 
 pub fn loopback_plaintext_allowed() -> bool {
     std::env::var("STEVE_NODE_LOOPBACK_PLAINTEXT").as_deref() == Ok("1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use steve_node_api::PermissionMode;
+
+    /// H1: without a policy file the Node takes no FullAccess, commands or jobs; the owner widens
+    /// it, and a file that does not parse (a typo included) stops the Node rather than default.
+    #[test]
+    fn the_ceiling_is_narrow_unless_the_owner_widens_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home(dir.path().to_path_buf());
+        let c = home.ceiling().unwrap();
+        assert_eq!(c, steve_node::PolicyCeiling::default());
+        assert_eq!(c.max_permissions, PermissionMode::Auto);
+        assert!(c.full_network && !c.exec && !c.jobs);
+        std::fs::write(
+            dir.path().join("policy.json"),
+            r#"{"max_permissions": "full_access"}"#,
+        )
+        .unwrap();
+        let c = home.ceiling().unwrap();
+        assert_eq!(c.max_permissions, PermissionMode::FullAccess);
+        assert!(c.full_network && !c.exec && !c.jobs);
+        std::fs::write(
+            dir.path().join("policy.json"),
+            r#"{"max_permissions": "ask", "full_network": false}"#,
+        )
+        .unwrap();
+        let c = home.ceiling().unwrap();
+        assert_eq!(c.max_permissions, PermissionMode::Ask);
+        assert!(!c.full_network);
+        for bad in [
+            r#"{"max_permission": "full_access"}"#,
+            r#"{"max_permissions": "bypassPermissions"}"#,
+            "not json",
+        ] {
+            std::fs::write(dir.path().join("policy.json"), bad).unwrap();
+            assert!(home.ceiling().is_err(), "{bad}");
+        }
+        assert!(home.node_config(NodeId::new("n1").unwrap()).is_err());
+    }
 }

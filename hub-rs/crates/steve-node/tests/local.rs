@@ -61,6 +61,7 @@ impl T {
     fn config(&self) -> NodeConfig {
         let root = self.root.clone();
         NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new("hub").unwrap(),
             home: self.home.clone(),
             acp: AcpConfig {
@@ -2350,10 +2351,8 @@ impl EventSink for Counting {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_full_mid_turn_keeps_numbered_events_and_skips_no_seq() {
-    // gated: a flood that outruns the actor (one synchronous journal write per chunk, slow on a
-    // loaded machine) by a full ingress queue is stopped as an ingress overflow before the journal
-    // is ever full, which is not what this test is about. A pause alone does not bound that on a
-    // slow enough disk; the adapter sends a chunk only once fewer than `AHEAD` are not yet journaled.
+    // gated: the adapter sends a chunk only once fewer than `AHEAD` are not yet journaled, so how
+    // far the flood got when the disk fills does not depend on how fast the machine journals.
     const AHEAD: i64 = 24;
     let gate_dir = tempfile::tempdir().unwrap();
     let gate = gate_dir.path().join("flood-gate");
@@ -3610,4 +3609,453 @@ async fn a_rebase_applies_only_on_the_facts_it_was_decided_on() {
     };
     assert_eq!(e.code, ErrorCode::Busy);
     assert_eq!(std::fs::read(repo.join("b.txt")).unwrap(), b"dirty\n");
+}
+
+/// H1: the owner's ceiling holds whatever the Hub asks. The default one takes no FullAccess
+/// (`bypassPermissions`), no commands and no jobs, and is refused before anything is accepted;
+/// what is under it runs as before. Without the open network allowed nothing opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_owners_ceiling_refuses_what_is_over_it() {
+    let t = T::new(&[]);
+    let mut cfg = t.config();
+    cfg.ceiling = steve_node::PolicyCeiling::default();
+    cfg.capacity.execs = 2;
+    cfg.capacity.jobs = 2;
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    // under the ceiling: as before
+    ready(&n, "s_1").await;
+    let mut o = open_body("s_2");
+    o.policy.permissions = PermissionMode::FullAccess;
+    let e = n.open_session(now_cmd("op_o2", o)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    assert!(e.safe_detail.contains("full_access"), "{e:?}");
+    let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
+    let mut wide = policy();
+    wide.permissions = PermissionMode::FullAccess;
+    let e = n
+        .configure_session(now_cmd(
+            "op_t1",
+            ConfigureSession {
+                session: SessionId::new("s_1").unwrap(),
+                expected: v.revision,
+                choice: choice(),
+                policy: wide,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    // nothing of either was taken
+    assert!(
+        n.operation(OperationId::new("op_o2").unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        n.operation(OperationId::new("op_t1").unwrap())
+            .await
+            .is_err()
+    );
+    let e = n
+        .exec(now_cmd(
+            "op_x",
+            ExecSpec {
+                workspace: ws(),
+                command: "true".into(),
+                cwd: None,
+                policy: policy(),
+                limits: limits(),
+                env: vec![],
+                secrets: vec![],
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    let e = n
+        .start_job(now_cmd(
+            "op_j",
+            steve_node_api::testkit::build::job("j1", "ja1", "hi"),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    // a turn under it still runs
+    n.start_turn(now_cmd("op_t2", turn("s_1", "t_2", "a_2", "@say ok")))
+        .await
+        .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    n.shutdown().await;
+
+    // the owner widens it: FullAccess is taken
+    let t = T::new(&[]);
+    let mut cfg = t.config();
+    cfg.ceiling = steve_node::PolicyCeiling {
+        max_permissions: PermissionMode::FullAccess,
+        ..Default::default()
+    };
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let mut o = open_body("s_3");
+    o.policy.permissions = PermissionMode::FullAccess;
+    n.open_session(now_cmd("op_o3", o)).await.unwrap();
+    let s = finished(&n, "op_o3").await;
+    assert!(ok(&s), "{s:?}");
+    n.shutdown().await;
+
+    // no open network: nothing opens (a harness's network cannot be narrowed yet)
+    let t = T::new(&[]);
+    let mut cfg = t.config();
+    cfg.ceiling = steve_node::PolicyCeiling {
+        full_network: false,
+        ..Default::default()
+    };
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    let e = n
+        .open_session(now_cmd("op_o4", open_body("s_4")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+}
+
+/// What the harness says in small chunks goes out as fewer, bigger deltas of the very same text,
+/// soon (within the hold, not at the end of the turn), and in order with what follows it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chunks_said_together_go_out_as_one_delta_soon() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let words: Vec<String> = (1..=20).map(|i| format!("w{i}.")).collect();
+    let said: String = words.concat();
+    let prompt = format!(
+        "{} @sleep 1500 @say delta @tool read Read",
+        words
+            .iter()
+            .map(|w| format!("@say {w}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", &prompt)))
+        .await
+        .unwrap();
+    // seen while the harness still sleeps: held text is not kept until the turn ends
+    t.until("the first text", |t| t.text() == said).await;
+    assert!(t.ended().is_empty(), "before the end of the turn");
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    let deltas: Vec<(u64, String)> = t
+        .sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e.body {
+            EventBody::TextDelta {
+                utf8_offset, text, ..
+            } => Some((utf8_offset, text)),
+            _ => None,
+        })
+        .collect();
+    // the same bytes, contiguous, in far fewer deltas than the 21 chunks
+    let mut at = 0;
+    for (off, text) in &deltas {
+        assert_eq!(*off, at, "{deltas:?}");
+        at += text.len() as u64;
+    }
+    assert_eq!(t.text(), format!("{said}delta"));
+    assert!(deltas.len() <= 4, "{deltas:?}");
+    assert_eq!(
+        deltas.last().unwrap().1,
+        "delta",
+        "said after the pause: its own delta"
+    );
+    // the text came before the tool the harness reported after it
+    let kinds = t.kinds();
+    let last_text = kinds.iter().rposition(|k| k == "text_delta").unwrap();
+    let tool = kinds.iter().position(|k| k == "tool_changed").unwrap();
+    assert!(last_text < tool, "{kinds:?}");
+    n.shutdown().await;
+}
+
+/// A Hub that takes a while per batch, counting how many it is given at once.
+#[derive(Default)]
+struct Slow {
+    hub: RecordingSink,
+    now: std::sync::atomic::AtomicUsize,
+    most: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl EventSink for Slow {
+    async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
+        let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(n, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let ack = self.hub.commit(batch).await;
+        self.now.fetch_sub(1, Ordering::SeqCst);
+        ack
+    }
+}
+
+/// Several batches are in flight at once, and every event still arrives once in its stream's
+/// order, all of them acknowledged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batches_go_several_at_a_time_and_all_are_acknowledged() {
+    let t = T::new(&[]);
+    let n = LocalNode::open(t.config()).unwrap();
+    let slow = Arc::new(Slow::default());
+    n.connect(slow.clone(), None);
+    ready(&n, "s_1").await;
+    // bursts of 10 calls every 30 ms: on a slow runner the actor falls behind them, and the
+    // harness waits for it (they once overflowed its 64-slot queue and cancelled the attempt)
+    let group = ["@tool read Read"; 10].join(" ");
+    let prompt = vec![format!("{group} @sleep 30"); 60].join(" ");
+    let mut spec = turn("s_1", "t_1", "a_1", &prompt);
+    spec.run.limits.max_output_bytes = 64 << 20;
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    let t0 = Instant::now();
+    while !slow
+        .hub
+        .events()
+        .iter()
+        .any(|e| matches!(e.body, EventBody::AttemptEnded { .. }))
+    {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the end");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    all_acknowledged(&n).await;
+    let tools = slow
+        .hub
+        .events()
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::ToolChanged { .. }))
+        .count();
+    let end: Vec<_> = slow
+        .hub
+        .events()
+        .into_iter()
+        .filter_map(|e| match e.body {
+            EventBody::AttemptEnded { completion } => Some(completion),
+            _ => None,
+        })
+        .collect();
+    assert!(tools >= 1200, "{tools}: {end:?}");
+    assert!(
+        slow.most.load(Ordering::SeqCst) > 1,
+        "more than one batch at a time"
+    );
+    // each stream's positions are contiguous from 1 (the sink holds each once)
+    let mut last: HashMap<String, u64> = HashMap::new();
+    for e in slow.hub.events() {
+        let l = last.entry(e.cursor.stream.to_string()).or_insert(0);
+        assert_eq!(e.cursor.seq, *l + 1, "{:?}", e.cursor);
+        *l = e.cursor.seq;
+    }
+    n.shutdown().await;
+}
+
+/// A Node whose journal takes `ms` more for every write of data (as a slow disk's fsync does: each
+/// one asks for the free space first), blocking the session's actor meanwhile.
+fn slow_journal(t: &T, ms: u64) -> NodeConfig {
+    let mut cfg = t.config();
+    cfg.storage.free_space = Some(Arc::new(move || {
+        std::thread::sleep(Duration::from_millis(ms));
+        1 << 40
+    }));
+    cfg
+}
+
+/// A slow disk and a busy Hub put the Node behind a harness that writes a burst at once (100
+/// chunks, then 150 tool calls: several times what the actor's queue holds): the harness waits for it,
+/// and the attempt ends as it would have, every update delivered in order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_journal_and_hub_hold_the_harness_back_and_cancel_nothing() {
+    let t = T::new(&[]);
+    let n = LocalNode::open(slow_journal(&t, 2)).unwrap();
+    let slow = Arc::new(Slow::default());
+    n.connect(slow.clone(), None);
+    ready(&n, "s_1").await;
+    let prompt = format!("@drip 100 0 {}", ["@tool read Read"; 150].join(" "));
+    let mut spec = turn("s_1", "t_1", "a_1", &prompt);
+    spec.run.limits.max_output_bytes = 64 << 20;
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    let t0 = Instant::now();
+    let end = loop {
+        if let Some(c) = slow.hub.events().into_iter().find_map(|e| match e.body {
+            EventBody::AttemptEnded { completion } => Some(completion),
+            _ => None,
+        }) {
+            break c;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(120), "the end");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(end.outcome, Outcome::Succeeded, "{end:?}");
+    all_acknowledged(&n).await;
+    let events = slow.hub.events();
+    let text: String = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::TextDelta { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let want: String = (0..100).map(|i| format!("t{i} ")).collect();
+    assert_eq!(text, want, "every chunk, in order");
+    let tools = events
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::ToolChanged { .. }))
+        .count();
+    assert_eq!(tools, 300, "tool_call and its update, 150 times");
+    n.shutdown().await;
+}
+
+/// Control is never behind the harness's data: a cancel goes out at once and a shutdown ends
+/// while the harness waits on a full queue (the actor slowed by its journal); nothing waits forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_and_a_shutdown_get_past_a_full_ingress_queue() {
+    let t = T::new(&[]);
+    let n = LocalNode::open(slow_journal(&t, 3)).unwrap();
+    n.connect(t.sink.clone(), None);
+    ready(&n, "s_1").await;
+    let mut spec = turn("s_1", "t_1", "a_1", "@flood 20");
+    spec.run.limits.max_output_bytes = 64 << 20;
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    t.until("the flood", |t| t.text().len() >= 16 * 4096).await;
+    let asked = Instant::now();
+    n.cancel(now_cmd(
+        "op_c",
+        Cancel {
+            target: OperationId::new("op_t1").unwrap(),
+            reason: "paused".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    t.until("the cancel", |t| t.sent("session/cancel") == 1)
+        .await;
+    assert!(
+        asked.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        asked.elapsed()
+    );
+    tokio::time::timeout(Duration::from_secs(15), n.shutdown())
+        .await
+        .expect("shutdown with the harness waiting on a full queue");
+    assert!(t.text().len() < 2000 * 4096, "cut short");
+}
+
+/// A harness the Node takes nothing from at all (its journal stuck, not slow) is still stopped,
+/// with why, once the queue was full for the stall limit; the actor is never wedged by it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_harness_stuck_behind_a_stuck_journal_is_stopped_with_why() {
+    let t = T::new(&[]);
+    let stuck: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let mut cfg = t.config();
+    let s = stuck.clone();
+    cfg.storage.free_space = Some(Arc::new(move || {
+        // slow, and stuck for a while (past the stall limit); it comes back to end the attempt
+        std::thread::sleep(Duration::from_millis(1));
+        let until = *s.lock().unwrap();
+        while until.is_some_and(|u| Instant::now() < u) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        1 << 40
+    }));
+    cfg.storage.ingress_stall = Duration::from_secs(1);
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    ready(&n, "s_1").await;
+    let mut spec = turn("s_1", "t_1", "a_1", "@flood");
+    spec.run.limits.max_output_bytes = 64 << 20;
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    t.until("the flood", |t| t.text().len() > 64 * 4096).await;
+    *stuck.lock().unwrap() = Some(Instant::now() + Duration::from_secs(3));
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    let end = &t.ended()[0];
+    assert_eq!(end.outcome, Outcome::Interrupted, "{end:?}");
+    let e = end.error.as_ref().unwrap();
+    assert_eq!(e.code, ErrorCode::Busy);
+    assert!(
+        e.safe_detail
+            .contains("took none of the harness's output for 1 s"),
+        "{e:?}"
+    );
+    assert!(t.text().len() < 2000 * 4096);
+    n.shutdown().await;
+}
+
+/// How many text events a streaming harness costs: chunks at a model's pace (1000 chunks, one
+/// every `PERF_DRIP_MS` ms, 10 by default). Run by hand:
+/// `cargo test --release -p steve-node --test local drip_cost -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn drip_cost() {
+    let ms: u64 = std::env::var("PERF_DRIP_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let mut spec = turn("s_1", "t_1", "a_1", &format!("@drip 1000 {ms}"));
+    spec.run.limits.max_output_bytes = 64 << 20;
+    let t0 = Instant::now();
+    n.start_turn(now_cmd("op_t1", spec)).await.unwrap();
+    while t.ended().is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(120));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let deltas = t
+        .sink
+        .events()
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::TextDelta { .. }))
+        .count();
+    let want: String = (0..1000).map(|i| format!("t{i} ")).collect();
+    assert_eq!(t.text(), want);
+    println!(
+        "1000 chunks, one every {ms} ms: {deltas} text events journaled and sent ({:.1} chunks per event), {} events in all",
+        1000.0 / deltas as f64,
+        t.sink.events().len()
+    );
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_code_is_told_to_deny_the_hubs_secret_files() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", "@say hello")))
+        .await
+        .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    let log = std::fs::read_to_string(&t.log).unwrap();
+    let new = log
+        .lines()
+        .find(|l| l.contains("\"method\":\"session/new\""))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(new).unwrap();
+    let deny: Vec<&str> = v["params"]["_meta"]["claudeCode"]["options"]["settings"]["permissions"]
+        ["deny"]
+        .as_array()
+        .expect("deny rules")
+        .iter()
+        .filter_map(|r| r.as_str())
+        .collect();
+    let home = t.root.join("steve");
+    for want in [
+        format!("Read(/{}/signing/**)", home.display()),
+        format!("Read(/{}/secrets/**)", home.display()),
+        format!("Read(/{}/steve.env*)", home.display()),
+        format!("Read(/{}/backups/**)", home.display()),
+    ] {
+        assert!(deny.contains(&want.as_str()), "{want} not in {deny:?}");
+    }
+    // the workspace stays the agent's
+    assert!(!deny.iter().any(|r| r.contains("/work")), "{deny:?}");
 }

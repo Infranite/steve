@@ -16,6 +16,7 @@ steve_i18n::init!();
 
 pub mod base;
 mod bus;
+pub mod compact;
 pub mod db;
 mod event_payload;
 pub mod maintenance;
@@ -23,6 +24,7 @@ pub mod outbox;
 mod repo;
 mod tx;
 mod types;
+pub mod workflow_gate;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};

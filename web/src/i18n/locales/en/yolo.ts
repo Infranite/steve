@@ -56,7 +56,7 @@ export default {
   },
   digest: {
     title: "YOLO record",
-    sub: "Every decision Steve made while you were away, grouped by each time YOLO was on. Undo what you can; 2 undos within an hour pause YOLO.",
+    sub: "Every decision Steve made while you were away, grouped by each time YOLO was on. Undo what you can; an undo takes that item out of YOLO, and undos on 3 items within an hour (or one rule undone on 2 items, or 2 recalled messages) pause YOLO.",
     noYolo: "This Hub has no YOLO",
     never: "YOLO hasn't been on yet",
     neverSub: "Once it's on, every decision Steve makes for you is recorded here.",
@@ -121,7 +121,7 @@ export default {
   switch: {
     never: "YOLO never spends money, sends messages or email as you (unless marked [AI] and cleared by the disclosure check), pushes to GitHub or other remotes, deletes data outside the workspace, or handles content that could leak.",
     fullGives: "Agents will run any command and change any file as you, without asking first.",
-    fullKeeps: "Still protected: messages sent as you (only those marked [AI] that pass the disclosure check go out), payments and bank cards, high-sensitivity vault entries, and Steve's own releases. Agents are also told to leave ~/.steve and port 8440 alone, not to push unless the item asks for it, and to stop only processes they started, by PID.",
+    fullKeeps: "Still waiting for you: payments and bank cards, high-sensitivity vault entries, messages and email Steve sends as you (only those marked [AI] that pass the disclosure check go out), and releases of other projects. Under full access the agent's own commands and edits no longer ask for permission, so Steve has nothing to answer and does not intercept them. What still protects you: Steve keeps its secrets out of the agent's environment and files where it can, and agent processes get no GH_TOKEN and no SSH agent. An agent's own sandbox, if it has one, may be off under full access; an OS-level sandbox is on the way. This is the same whichever agent you use.",
     offSub: "Every decision waits for you.",
     onSub: "Steve makes the decisions that can be undone: commands in the workspace, deliveries whose checks all pass, questions from agents. Each one is logged and can be undone in one click.",
     fullSub: "On top of YOLO, agents stop asking for permission and just act. Only turn this on if you trust every item running during this time.",

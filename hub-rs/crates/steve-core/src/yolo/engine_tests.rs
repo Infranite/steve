@@ -142,6 +142,63 @@ impl T {
     }
 }
 
+/// Maintenance may begin after a background YOLO worker was admitted but before its
+/// synchronous decision reaches the async model gateway. That nested call must still finish.
+#[test]
+fn an_admitted_yolo_worker_can_finish_its_model_call_during_maintenance() {
+    for from_tick in [false, true] {
+        let t = t();
+        let (item, sid, _) = t.item();
+        let d = t.card(
+            &item,
+            &sid,
+            "ask",
+            "question",
+            "用 A 还是 B？",
+            "推荐：A\n理由：更简单",
+            &["A", "B"],
+        );
+        let store = t.kit.db().store().clone();
+        let probe = store.clone();
+        t.kit.gw.set(move |_, _| {
+            let worker = if from_tick { "yolo_tick" } else { "yolo" };
+            assert_eq!(probe.activities().get(worker), Some(&1));
+            // Flip the durable gate at the model boundary, after the worker owns its permit.
+            probe.maintenance_set(true).unwrap();
+            let _model = probe
+                .try_activity("model")
+                .expect("the admitted worker's nested model must not wait for itself");
+            assert!(!probe.maintenance_seal(), "the worker is still finishing");
+            Ok(json!({
+                "act": "answer",
+                "answer": "用 A",
+                "option": "A",
+                "confidence": 0.95,
+                "reason": "推荐更简单",
+                "assumptions": []
+            })
+            .to_string())
+        });
+        if from_tick {
+            let actions = t.engine.tick();
+            assert!(
+                actions.iter().any(|a| a.decision_id.as_deref() == Some(d.as_str())
+                    && a.outcome == "decided"),
+                "{actions:?}"
+            );
+        } else {
+            assert_eq!(t.engine.kick(&d).unwrap().outcome, "decided");
+        }
+        assert_eq!(t.decision(&d).status, "resolved");
+        assert_eq!(t.kit.gw.calls.lock().unwrap().len(), 1);
+        assert!(store.activities().is_empty());
+        assert!(
+            store.maintenance_seal(),
+            "the completed worker releases admission"
+        );
+    }
+}
+
 #[test]
 fn a_tool_call_inside_the_worktree_is_allowed_once_and_recorded() {
     let t = t();
@@ -501,13 +558,84 @@ fn you_being_around_makes_yolo_wait() {
 }
 
 #[test]
+fn a_permission_inside_the_worktree_does_not_wait_for_you() {
+    let t = t();
+    let (item, sid, cwd) = t.item();
+    t.kit
+        .db()
+        .timeline_add(&item, "me", "me", "改一下 notes", Some(&sid))
+        .unwrap();
+    // a message of yours queued behind the call: it waits for the turn, the turn for this answer
+    t.kit.db().queue_add(&sid, "还有一点", "me", &[]).unwrap();
+    let file = cwd.join("notes.txt").to_string_lossy().to_string();
+    let d = t.permission(
+        &item,
+        &sid,
+        ToolInput {
+            raw: json!({"file_path": file, "content": "x"}),
+            kind: Some("edit".into()),
+            locations: vec![file.clone()],
+            own_dir: None,
+            own_pids: None,
+        },
+    );
+    let a = t.engine.consider(&d).unwrap().expect("answered now");
+    assert_eq!(
+        (a.outcome.as_str(), a.rule.as_str()),
+        ("decided", "tool.worktree")
+    );
+}
+
+#[test]
+fn a_queued_message_counts_as_presence_only_within_the_window() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    t.kit.db().queue_add(&sid, "等一下", "me", &[]).unwrap();
+    let card = |t: &T| {
+        t.card(
+            &item,
+            &sid,
+            "accept",
+            "item",
+            "做完了",
+            "x\n\n检查：✓ t",
+            &["pass", "rework"],
+        )
+    };
+    let d = card(&t);
+    assert!(
+        t.engine.consider(&d).unwrap().is_none(),
+        "a fresh message: waits"
+    );
+    // the message is still queued, but it is old now: it no longer holds the card
+    t.clock.advance(181_000);
+    assert_eq!(t.kit.db().queued(&sid).unwrap().len(), 1);
+    let a = t.engine.consider(&d).unwrap().expect("decided");
+    assert_eq!(a.outcome, "decided");
+}
+
+#[test]
 fn many_failure_cards_at_once_trip_the_breaker() {
     let t = t();
     let opts = ["continue", "delivered", "look"];
-    let mut last = String::new();
-    for n in 0..5 {
+    // stopped agents and other failures, however many, are not a systemic failure
+    for _ in 0..4 {
         let (item, sid, _) = t.item();
-        last = t.card(
+        let d = t.card(
+            &item,
+            &sid,
+            "fail",
+            "item",
+            "Agent 停下来了，没有交付也没有提问",
+            "",
+            &opts,
+        );
+        t.engine.consider(&d).unwrap();
+    }
+    // two cards on one item count once
+    let (item, sid, _) = t.item();
+    for _ in 0..2 {
+        let d = t.card(
             &item,
             &sid,
             "fail",
@@ -516,7 +644,25 @@ fn many_failure_cards_at_once_trip_the_breaker() {
             "",
             &opts,
         );
-        if n < 4 {
+        t.engine.consider(&d).unwrap();
+    }
+    let mut last = String::new();
+    for n in 0..2 {
+        let (item, sid, _) = t.item();
+        last = t.card(
+            &item,
+            &sid,
+            "fail",
+            "item",
+            if n == 0 {
+                "会话出错：模型通路断了"
+            } else {
+                "Hub 重启时这个会话正在运行，已经中断"
+            },
+            "",
+            &opts,
+        );
+        if n == 0 {
             t.engine.consider(&last).unwrap();
         }
     }
@@ -555,7 +701,7 @@ fn many_failure_cards_at_once_trip_the_breaker() {
 }
 
 #[test]
-fn undoing_yolo_twice_in_an_hour_trips_the_breaker() {
+fn undoing_one_rule_on_two_items_in_an_hour_trips_the_breaker() {
     let t = t();
     for n in 0..2 {
         let (item, sid, _) = t.item();
@@ -580,6 +726,224 @@ fn undoing_yolo_twice_in_an_hour_trips_the_breaker() {
         }
     }
     assert_eq!(t.paused().expect("paused")["code"], "B3");
+}
+
+#[test]
+fn an_undo_takes_its_item_out_and_only_spreading_undos_pause_everything() {
+    let t = t();
+    // an acceptance you undid: that item leaves YOLO, nothing else changes
+    let (a, sid, _) = t.item();
+    let d = t.card(
+        &a,
+        &sid,
+        "accept",
+        "item",
+        "做完了",
+        "x\n\n检查：✓ t",
+        &["pass", "rework"],
+    );
+    t.engine.consider(&d).unwrap().unwrap();
+    t.kit.core.undo_decision(&d, "me").unwrap();
+    assert!(t.engine.consider(&d).unwrap().is_none());
+    assert!(t.paused().is_none());
+    assert!(
+        !t.yolo.effective(WS, Some(&a)).unwrap().on,
+        "the item left YOLO"
+    );
+    let undo_on_new_item = |rule: &str| {
+        let (item, _, _) = t.item();
+        let x = t
+            .yolo
+            .record(&repo::NewAction {
+                workspace_id: WS.into(),
+                item_id: Some(item.clone()),
+                kind: "ask".into(),
+                subject_type: "question".into(),
+                rule: rule.into(),
+                outcome: "decided".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        (item, t.yolo.undone(WS, &x.id).unwrap())
+    };
+    // another rule on a second item: two items, two rules
+    let (b, tripped) = undo_on_new_item("ask.answer");
+    assert!(!tripped && t.paused().is_none());
+    assert!(!t.yolo.effective(WS, Some(&b)).unwrap().on);
+    // a third item: undos spread, the workspace pauses
+    let (_, tripped) = undo_on_new_item("propose.deps");
+    assert!(tripped);
+    assert_eq!(t.paused().expect("paused")["code"], "B3");
+}
+
+#[test]
+fn two_recalls_pause_everything() {
+    let t = t();
+    let recall = |t: &T| {
+        let x = t
+            .yolo
+            .record(&repo::NewAction {
+                workspace_id: WS.into(),
+                kind: "approve".into(),
+                subject_type: "chan_message".into(),
+                rule: "chan.bot".into(),
+                outcome: "decided".into(),
+                undo: Some(json!({"kind": "recall"})),
+                ..Default::default()
+            })
+            .unwrap();
+        t.yolo.undone(WS, &x.id).unwrap()
+    };
+    assert!(!recall(&t));
+    assert!(t.paused().is_none());
+    assert!(recall(&t));
+    assert_eq!(t.paused().expect("paused")["code"], "B3");
+}
+
+fn auto(choice: &str, rule: &str) -> Verdict {
+    Verdict::Auto {
+        choice: choice.into(),
+        text: None,
+        delay_s: 0,
+        rule: rule.into(),
+        reason: String::new(),
+        undo: None,
+        checks: Value::Null,
+    }
+}
+
+#[test]
+fn a_recheck_that_says_not_now_or_no_does_not_trip_b5() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    let d = t.card(
+        &item,
+        &sid,
+        "accept",
+        "item",
+        "做完了",
+        "x\n\n检查：✓ t",
+        &["pass", "rework"],
+    );
+    // you typed while it was being judged: the answer waits for the next look
+    t.kit
+        .db()
+        .timeline_add(&item, "me", "me", "等等", Some(&sid))
+        .unwrap();
+    let dd = t.decision(&d);
+    assert!(
+        t.engine
+            .execute(&dd, &auto("pass", "accept.checks"), None, None)
+            .unwrap()
+            .is_none()
+    );
+    assert!(t.paused().is_none());
+    assert!(t.actions(&d).is_empty());
+    assert_eq!(t.decision(&d).status, "open");
+    // a card the recheck leaves to you is recorded as declined
+    let (item, sid, _) = t.item();
+    let d = t.card(
+        &item,
+        &sid,
+        "approve",
+        "action",
+        "删除 ~/Documents/x",
+        "rm -rf ~/Documents/x",
+        &["yes", "no"],
+    );
+    let dd = t.decision(&d);
+    let a = t
+        .engine
+        .execute(&dd, &auto("yes", "action.local"), None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.outcome, "declined");
+    assert!(t.paused().is_none());
+    assert_eq!(t.decision(&d).status, "open");
+}
+
+#[test]
+fn a_recheck_with_another_answer_trips_b5() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    let d = t.card(
+        &item,
+        &sid,
+        "accept",
+        "item",
+        "做完了",
+        "x\n\n检查：✓ t",
+        &["pass", "rework"],
+    );
+    let dd = t.decision(&d);
+    assert!(
+        t.engine
+            .execute(&dd, &auto("rework", "accept.rework"), None, None)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(t.paused().expect("paused")["code"], "B5");
+    assert_eq!(t.decision(&d).status, "open");
+}
+
+#[test]
+fn errors_before_answering_trip_b5_only_when_they_repeat() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    let d = t.card(
+        &item,
+        &sid,
+        "accept",
+        "item",
+        "做完了",
+        "",
+        &["pass", "rework"],
+    );
+    let e = steve_modules::ApiError::Internal("database is locked".into());
+    t.engine.fail_hard(&d, &e);
+    t.engine.fail_hard(&d, &e);
+    assert!(t.paused().is_none());
+    // ten minutes later those two no longer count
+    t.clock.advance(11 * 60_000);
+    t.engine.fail_hard(&d, &e);
+    t.engine.fail_hard(&d, &e);
+    assert!(t.paused().is_none());
+    t.engine.fail_hard(&d, &e);
+    assert_eq!(t.paused().expect("paused")["code"], "B5");
+}
+
+#[test]
+fn an_error_recording_an_answer_already_given_trips_b5_at_once() {
+    let t = t();
+    let (item, sid, cwd) = t.item();
+    let file = cwd.join("notes.txt").to_string_lossy().to_string();
+    let d = t.permission(
+        &item,
+        &sid,
+        ToolInput {
+            raw: json!({"file_path": file, "content": "x"}),
+            kind: Some("edit".into()),
+            locations: vec![file.clone()],
+            own_dir: None,
+            own_pids: None,
+        },
+    );
+    // the ledger cannot settle the action once the card is answered
+    rusqlite::Connection::open(t.kit.home().join("data/steve.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER yolo_no_decided BEFORE UPDATE OF outcome ON yolo_actions
+               WHEN NEW.outcome = 'decided' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+        )
+        .unwrap();
+    let a = t.engine.consider(&d).unwrap().expect("an action");
+    assert_ne!(a.outcome, "decided", "not settled");
+    assert_eq!(
+        t.kit.rt.st().answered,
+        vec![(d.clone(), Some("once".to_string()))]
+    );
+    // one error, after the answer: tripped, not counted towards a repeat
+    assert_eq!(t.paused().expect("paused")["code"], "B5");
 }
 
 #[test]

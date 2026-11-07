@@ -21,13 +21,13 @@ use steve_store::NewRouteLog;
 type Reply<'a> = &'a (dyn Fn(&str, Option<&str>, Option<Value>) -> Option<String> + Sync);
 
 /// “别建事项，直接在这告诉我”: a spoken correction back into the conversation.
-static TO_INLINE: LazyLock<Regex> = LazyLock::new(|| {
+pub(super) static TO_INLINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"别建|不用建|不要建|不建事项|别做成|不用做成|直接(在这里?|在对话里)?(告诉|说|讲|回答)|在这里?(告诉|说|讲|回答)")
         .expect("valid regex")
 });
 
 /// Asking how an item is going, not telling it something.
-static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
+pub(super) static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"进展|进度|做完没|做完了吗|完成了吗|怎么样了|到哪了|到哪一步").expect("valid regex")
 });
 
@@ -61,11 +61,16 @@ impl Core {
             j.user.as_deref(),
         );
         let space = j.conv.space.as_str();
-        let lane = super::lane_key(ws, space);
+        let lane = if j.direct {
+            super::direct_lane(ws, space)
+        } else {
+            super::lane_key(ws, space)
+        };
         let flag = super::Stop::default();
         lock(&self.0.thread.inflight).insert(lane.clone(), flag.clone());
-        /* the web's “thinking” line is about your conversation only */
-        let quiet = j.conv.guest();
+        /* the web's “thinking” line is about your conversation only, and stays with the turn in progress
+        while a message with a fixed way passes it */
+        let quiet = j.conv.guest() || (j.direct && self.main_busy_besides(ws));
         if !quiet {
             self.store().publish(HubEvent::SteveThinking {
                 on: true,
@@ -120,6 +125,7 @@ impl Core {
                 &flag,
                 &reply,
                 &steps,
+                quiet,
             )
             .await
         {
@@ -175,6 +181,7 @@ impl Core {
         flag: &super::Stop,
         reply: Reply<'_>,
         steps: &Mutex<Steps>,
+        quiet: bool,
     ) -> Result<()> {
         let db = self.store();
         let guest = conv.guest();
@@ -208,7 +215,9 @@ impl Core {
                 return Ok(());
             }
             self.log_fixed(ws, mid, "supplement", Some(&id))?;
-            self.phase(ws, "supplement");
+            if !quiet {
+                self.phase(ws, "supplement");
+            }
             let i = Steps::begin(
                 steps,
                 "supplement",
@@ -236,7 +245,9 @@ impl Core {
                     return Ok(());
                 }
                 self.log_fixed(ws, mid, "supplement", Some(&id))?;
-                self.phase(ws, "supplement");
+                if !quiet {
+                    self.phase(ws, "supplement");
+                }
                 let i = Steps::begin(
                     steps,
                     "supplement",
@@ -267,14 +278,39 @@ impl Core {
                 .join("、");
             format!("{text}\n（附带 {} 个附件：{list}）", files.len())
         };
-        if !guest {
+        /* a plain question needs no router: its kind is known (#52) */
+        let plain = match decide::without_router(text, !files.is_empty(), guest, &[]) {
+            Some(_) => {
+                let c = self.route_ctx_in(ws, guest)?;
+                decide::without_router(text, !files.is_empty(), guest, &c.focus).map(|kind| {
+                    let project = c.steve_project.clone().or_else(|| {
+                        c.projects
+                            .iter()
+                            .find(|p| !p.archived)
+                            .map(|p| p.id.clone())
+                    });
+                    Route {
+                        kind: kind.into(),
+                        confidence: 1.0,
+                        why: "纯问题，没有问路由".into(),
+                        ..Route::fallback(text, project)
+                    }
+                    .plain()
+                })
+            }
+            None => None,
+        };
+        if !guest && plain.is_none() {
             self.phase(ws, "route");
         }
         let r0 = now();
         /* stopping does not wait for the router: nothing has happened yet */
-        let r = tokio::select! {
-            r = self.route_in(ws, &routed, &history, false, guest) => r?,
-            _ = flag.stopped() => return Ok(()),
+        let r = match plain.clone() {
+            Some(r) => r,
+            None => tokio::select! {
+                r = self.route_in(ws, &routed, &history, false, guest) => r?,
+                _ = flag.stopped() => return Ok(()),
+            },
         };
         let ms = now() - r0;
         if flag.is_stopped() {
@@ -302,6 +338,9 @@ impl Core {
             d = decide::for_main(d, &r);
         }
         d = decide::for_owner(d, conv.owner_only && conv.research);
+        if plain.is_some() {
+            d.guard = Some("q");
+        }
         lock(steps).route = Some(route_step(&r, Some(&d), ms));
         self.store().store().thread().route_add(&NewRouteLog {
             workspace_id: ws.into(),
@@ -434,7 +473,13 @@ impl Core {
                     .sum::<usize>(),
             })
         })?;
-        let (text, meta) = config_reply(ask, &ds);
+        /* the L0 ones apply right away: their cards say 已应用 and offer the undo */
+        let applied = if ask {
+            vec![]
+        } else {
+            self.config_auto_apply(ws, user, &ds).await
+        };
+        let (text, meta) = config_reply(ask, &ds, &applied);
         reply(&text, None, meta);
         Ok(Logged { item: None })
     }
@@ -601,6 +646,7 @@ impl Core {
             from_question: r.signals.iter().any(|s| s == "question"),
             answer: None,
             start,
+            by: user.map(String::from),
         });
         let item = Steps::end(
             steps,
@@ -678,8 +724,12 @@ fn listed(d: &crate::changes::Drafted) -> String {
 }
 
 /// The reply to a configuration request: the drafted cards (`meta.proposal`, or `meta.proposals` when
-/// there are several), and how the rest is set now.
-fn config_reply(ask: bool, ds: &[crate::changes::Drafted]) -> (String, Option<Value>) {
+/// there are several; those `applied` already marked so in `meta.cfg_state`), and how the rest is set now.
+fn config_reply(
+    ask: bool,
+    ds: &[crate::changes::Drafted],
+    applied: &[String],
+) -> (String, Option<Value>) {
     if ask {
         let parts: Vec<String> = ds
             .iter()
@@ -709,30 +759,61 @@ fn config_reply(ask: bool, ds: &[crate::changes::Drafted]) -> (String, Option<Va
             }
         })
         .collect();
-    let head = match drafted.as_slice() {
+    let is_applied = |p: &Value| {
+        p["id"]
+            .as_str()
+            .is_some_and(|id| applied.iter().any(|a| a == id))
+    };
+    let titled = |pred: &dyn Fn(&Value) -> bool| -> Vec<&str> {
+        ds.iter()
+            .filter(|d| d.proposal.as_ref().is_some_and(pred))
+            .map(|d| d.title.as_str())
+            .collect()
+    };
+    let (done, todo) = (titled(&is_applied), titled(&|p| !is_applied(p)));
+    let done_text = match done.as_slice() {
         [] => String::new(),
-        [_] => {
-            let t = ds
-                .iter()
-                .find(|d| d.proposal.is_some())
-                .map(|d| d.title.as_str())
-                .unwrap_or_default();
-            format!("这是配置改动，我起草好了，确认后应用到「{t}」：")
-        }
+        [t] => format!("已经改好了「{t}」，不对的话在卡片上撤销："),
+        many => format!(
+            "已经改好了 {} 处（{}），不对的话在卡片上撤销：",
+            many.len(),
+            many.iter()
+                .map(|t| format!("「{t}」"))
+                .collect::<Vec<_>>()
+                .join("")
+        ),
+    };
+    let todo_text = match todo.as_slice() {
+        [] => String::new(),
+        [t] if done.is_empty() => format!("这是配置改动，我起草好了，确认后应用到「{t}」："),
+        [t] => format!("「{t}」的改动起草好了，确认后应用："),
         many => format!(
             "这是配置改动，我起草好了 {} 处，确认后分别应用：",
             many.len()
         ),
     };
+    let head = [done_text, todo_text]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     let text = std::iter::once(head)
         .chain(unchanged)
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
-    let meta = match drafted.as_slice() {
+    let mut meta = match drafted.as_slice() {
         [] => None,
         [p] => Some(json!({"proposal": p})),
         many => Some(json!({"proposals": many})),
     };
+    if let Some(m) = meta.as_mut().filter(|_| !applied.is_empty()) {
+        m["cfg_state"] = Value::Object(
+            applied
+                .iter()
+                .map(|id| (id.clone(), json!("applied")))
+                .collect(),
+        );
+    }
     (text, meta)
 }

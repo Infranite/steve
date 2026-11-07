@@ -138,7 +138,8 @@ async fn start() -> Env {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NO_RESUME", "1".into()),
+        // the local Node runs the sessions (the Hub runs none itself)
+        ("STEVE_NODE_MODE", "local".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", fake.display().to_string()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
@@ -224,7 +225,12 @@ async fn item(e: &Env, goal: &str) -> String {
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
     assert!(
-        until(10, || async { e.session(&sid).await["busy"] == true }).await,
+        // on the Node: its turn is under way (not only the session opening)
+        until(10, || async {
+            let s = e.session(&sid).await;
+            s["busy"] == true && s["status"] == "running"
+        })
+        .await,
         "the first turn runs"
     );
     sid

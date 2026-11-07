@@ -1,4 +1,4 @@
-//! A Steve Node: the host of harnesses on one machine (docs/hub-node-client.md).
+//! A Steve Node: the host of harnesses on one machine.
 //!
 //! It runs exactly what the Hub asks, one attempt at a time per session, and reports facts. It never
 //! retries, never picks the next message, never decides about permissions: the Hub does. Agent
@@ -11,7 +11,9 @@
 //! happens to it ([`ExecutionControl::abandon`]), and nothing is freed before its processes are
 //! confirmed gone ([`procs`]).
 
+mod acp_job;
 mod actor;
+mod attachments;
 mod exec;
 pub mod git;
 pub mod history;
@@ -32,8 +34,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use steve_acp::AcpConfig;
 use steve_acp::permission::Asked;
-use steve_acp::{AcpConfig, FileRef, StoredFile};
 use steve_node_api::*;
 use tokio::sync::mpsc;
 
@@ -54,6 +56,120 @@ pub struct NodeConfig {
     pub storage: Storage,
     /// The CLIs think jobs run with (none: no harness runs jobs, whatever `capacity.jobs` says).
     pub jobs: JobHarnesses,
+    /// The most any Hub may ask of this Node, whatever it sends ([`PolicyCeiling`]).
+    pub ceiling: PolicyCeiling,
+}
+
+/// What this Node's owner lets a Hub ask of it at most: the widest permission mode, whether a run
+/// may have the open network, whether commands and jobs run at all. A command over it is refused
+/// (`denied`) before it is accepted, so a Hub (or whoever speaks for one) can only ask for less.
+/// Remote sessions run with the owner's own home and logins until runs are sandboxed, so the
+/// default is narrow: no [`PermissionMode::FullAccess`] (`bypassPermissions`), no commands, no
+/// jobs; the network as before (a harness's network cannot be restricted yet, so turning it off
+/// refuses every run). The Hub's own local Node is [`PolicyCeiling::unlimited`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyCeiling {
+    #[serde(default = "PolicyCeiling::default_permissions")]
+    pub max_permissions: PermissionMode,
+    #[serde(default = "PolicyCeiling::yes")]
+    pub full_network: bool,
+    #[serde(default)]
+    pub exec: bool,
+    #[serde(default)]
+    pub jobs: bool,
+}
+
+impl Default for PolicyCeiling {
+    fn default() -> PolicyCeiling {
+        PolicyCeiling {
+            max_permissions: Self::default_permissions(),
+            full_network: true,
+            exec: false,
+            jobs: false,
+        }
+    }
+}
+
+impl PolicyCeiling {
+    /// Everything the Hub may ask: the Hub's own local Node, which runs as the Hub does.
+    pub fn unlimited() -> PolicyCeiling {
+        PolicyCeiling {
+            max_permissions: PermissionMode::FullAccess,
+            full_network: true,
+            exec: true,
+            jobs: true,
+        }
+    }
+    fn default_permissions() -> PermissionMode {
+        PermissionMode::Auto
+    }
+    fn yes() -> bool {
+        true
+    }
+
+    /// How wide a mode is: each one allows what the ones before it do.
+    fn rank(p: PermissionMode) -> u8 {
+        match p {
+            PermissionMode::Plan => 0,
+            PermissionMode::Ask => 1,
+            PermissionMode::AcceptEdits => 2,
+            PermissionMode::Auto => 3,
+            PermissionMode::FullAccess => 4,
+        }
+    }
+
+    /// Refused (`denied`) when `p` asks more than this ceiling allows.
+    pub fn check(&self, p: &ExecutionPolicy) -> ApiResult<()> {
+        if Self::rank(p.permissions) > Self::rank(self.max_permissions) {
+            return Err(ApiError::new(
+                ErrorCode::Denied,
+                format!(
+                    "this node's owner allows at most permission mode {} here (asked: {})",
+                    mode_name(self.max_permissions),
+                    mode_name(p.permissions)
+                ),
+            ));
+        }
+        if p.network == NetworkScope::Unrestricted && !self.full_network {
+            return Err(ApiError::new(
+                ErrorCode::Denied,
+                "this node's owner does not allow runs with the open network",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refused (`denied`) unless the owner lets commands run here.
+    pub fn check_exec(&self) -> ApiResult<()> {
+        if self.exec {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                ErrorCode::Denied,
+                "this node's owner does not allow commands here",
+            ))
+        }
+    }
+
+    /// Refused (`denied`) unless the owner lets jobs run here.
+    pub fn check_jobs(&self) -> ApiResult<()> {
+        if self.jobs {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                ErrorCode::Denied,
+                "this node's owner does not allow jobs here",
+            ))
+        }
+    }
+}
+
+fn mode_name(p: PermissionMode) -> String {
+    serde_json::to_value(p)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
 }
 
 /// How much disk the journal may take. The limit is the quota, or less when the filesystem of the
@@ -78,6 +194,11 @@ pub struct Storage {
     /// Tests: the free bytes where worktrees go, instead of asking the filesystem.
     #[doc(hidden)]
     pub worktree_free: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+    /// How long a running attempt's harness may wait for the Node to take any of its output (the
+    /// data queue full, not one slot freed) before the attempt is stopped: a journal or disk that is
+    /// stuck, not one that is slow. Being behind for less only slows the harness down (it blocks on
+    /// its stdout). 5 minutes.
+    pub ingress_stall: Duration,
 }
 
 impl Default for Storage {
@@ -89,6 +210,7 @@ impl Default for Storage {
             free_space: None,
             worktree_floor: 0,
             worktree_free: None,
+            ingress_stall: Duration::from_secs(300),
         }
     }
 }
@@ -281,9 +403,99 @@ pub(crate) fn stream_of(subject: &Subject) -> String {
     }
 }
 
+/// The largest event the Node journals, encoded: well inside a frame
+/// (`steve_node_wire::envelope::BULK_CAP`), so one event can never be too big to deliver and stop
+/// its stream. A text delta over it is cut into several; anything else has its long strings cut
+/// (marked), and failing that is replaced by a diagnostic saying so.
+pub const EVENT_CAP: usize = 192 * 1024;
+/// The most text of one delta piece when a delta over [`EVENT_CAP`] is cut (JSON escaping may
+/// grow text up to six times).
+const PIECE: usize = 24 * 1024;
+/// How long a string stays in an event cut down to fit, in characters.
+const CUT_TEXT: usize = 4000;
+const CUT_MARK: &str = "…[cut by the node: too long for one event]";
+
+/// `body` as events that each fit [`EVENT_CAP`].
+fn fit(subject: &Subject, body: EventBody) -> Vec<EventBody> {
+    let size = |b: &EventBody| serde_json::to_vec(b).map(|v| v.len()).unwrap_or(usize::MAX);
+    // the subject and the envelope's other fields are small, but they count too
+    let budget =
+        EVENT_CAP.saturating_sub(serde_json::to_vec(subject).map(|v| v.len()).unwrap_or(0) + 512);
+    if size(&body) <= budget {
+        return vec![body];
+    }
+    if let EventBody::TextDelta {
+        message,
+        block,
+        utf8_offset,
+        text,
+    } = body
+    {
+        let mut out = vec![];
+        let mut at = 0usize;
+        while at < text.len() {
+            let mut end = (at + PIECE).min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.push(EventBody::TextDelta {
+                message: message.clone(),
+                block: block.clone(),
+                utf8_offset: utf8_offset + at as u64,
+                text: text[at..end].to_string(),
+            });
+            at = end;
+        }
+        return out;
+    }
+    let kind = serde_json::to_value(&body)
+        .ok()
+        .and_then(|v| v.get("type").and_then(Value::as_str).map(String::from))
+        .unwrap_or_default();
+    let was = size(&body);
+    for keep in [CUT_TEXT, CUT_TEXT / 8] {
+        let Ok(mut v) = serde_json::to_value(&body) else {
+            break;
+        };
+        cut_strings(&mut v, keep);
+        if let Ok(b) = serde_json::from_value::<EventBody>(v)
+            && size(&b) <= budget
+        {
+            tracing::warn!("{kind} event of {was} bytes cut to fit one event");
+            return vec![b];
+        }
+    }
+    tracing::warn!("{kind} event of {was} bytes dropped: too big for one event");
+    vec![EventBody::Diagnostic {
+        severity: Severity::Warning,
+        code: "event_too_large".into(),
+        safe_text: format!("a {kind} event of {was} bytes was too big to report"),
+    }]
+}
+
+fn cut_strings(v: &mut Value, keep: usize) {
+    match v {
+        Value::String(s) if s.chars().count() > keep => {
+            let cut: String = s.chars().take(keep).collect();
+            *s = format!("{cut}{CUT_MARK}");
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| cut_strings(x, keep)),
+        Value::Object(o) => o.values_mut().for_each(|x| cut_strings(x, keep)),
+        _ => {}
+    }
+}
+
 /// Journal events in `t` (numbered in their streams as part of the transaction).
 pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) -> ApiResult<()> {
     let mut limit = None;
+    let evs = evs
+        .into_iter()
+        .flat_map(|(subject, body)| {
+            fit(&subject, body)
+                .into_iter()
+                .map(move |b| (subject.clone(), b))
+        })
+        .collect::<Vec<_>>();
     for (subject, body) in evs {
         let data = match &body {
             EventBody::OperationChanged { .. }
@@ -305,10 +517,7 @@ pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) ->
                 > limit
             {
                 inner.full.store(true, Ordering::SeqCst);
-                return Err(ApiError::new(
-                    ErrorCode::Exhausted,
-                    "journal data budget reached",
-                ));
+                return Err(NodeStop::JournalBudget.error());
             }
         }
         let stream: StreamId = id(stream_of(&subject))?;
@@ -359,6 +568,20 @@ pub(crate) fn mode(harness: &str, p: PermissionMode) -> Option<String> {
     }
 }
 
+/// The `_meta` of `session/new|load` for `harness`: Claude Code is told to deny its file tools the
+/// Hub's secret files under `steve_home` in every permission mode (a program its Bash runs is not
+/// bound by that). Codex gets none yet: codex-acp's `session/set_mode` replaces the permission
+/// profile with the mode's built-in one, so deny entries do not survive it; and once a profile has
+/// deny-read entries, codex-core keeps a command the user approved to run outside the sandbox inside
+/// it (`sandbox_permissions_preserving_denied_reads`), so Ask mode could no longer write anything.
+pub(crate) fn harness_meta(harness: &str, steve_home: &Path) -> Option<Value> {
+    (harness == "claude-code").then(|| {
+        json!({ "claudeCode": { "options": {
+            "settings": steve_vault::harness::claude_settings(steve_home),
+        } } })
+    })
+}
+
 /// Steve's tool server for a new adapter process of `session` (a fresh token; the old ones go).
 pub(crate) fn mcp_servers(inner: &Inner, session: &SessionId) -> Value {
     let url = inner.tools_url.lock().unwrap().clone();
@@ -377,8 +600,11 @@ pub(crate) fn revoke_tools(inner: &Inner, session: &SessionId) {
     inner.tools.revoke_session(session);
 }
 
-/// Prompt blocks: the text, attachments put into the workspace (from the Hub, for this execution),
-/// images inline.
+/// Prompt blocks: the text, attachments put into the workspace (fetched from the Hub for this
+/// execution and placed here, [`attachments::place`]), images inline. An attachment the Hub no
+/// longer has is left out and named in a note; one that cannot be
+/// placed in the workspace turns into a note too (the legacy runner's behaviour). Anything else
+/// (offline, past the deadline) fails the preparation.
 pub(crate) async fn prompt(
     inner: &Arc<Inner>,
     exec: &ExecutionRef,
@@ -387,8 +613,8 @@ pub(crate) async fn prompt(
     image: bool,
 ) -> ApiResult<Value> {
     let mut text = vec![];
-    let mut refs = vec![];
-    let mut stored: HashMap<String, StoredFile> = HashMap::new();
+    let mut fetched = vec![];
+    let mut missing = vec![];
     for p in parts {
         match p {
             Part::Text { text: t } => text.push(t.clone()),
@@ -397,37 +623,75 @@ pub(crate) async fn prompt(
                     Part::File { name, .. } => name.clone(),
                     _ => format!("image-{}", &artifact.sha256.as_str()[7..15]),
                 };
-                let path = fetch(inner, exec, artifact).await?;
-                refs.push(FileRef {
-                    id: artifact.id.to_string(),
-                    name: name.clone(),
-                    mime: artifact.mime.clone(),
-                    size: artifact.size,
-                });
-                stored.insert(
-                    artifact.id.to_string(),
-                    StoredFile {
+                match fetch(inner, exec, artifact).await {
+                    Ok(blob) => fetched.push(attachments::Fetched {
                         id: artifact.id.to_string(),
                         name,
                         mime: artifact.mime.clone(),
                         size: artifact.size,
-                        path,
-                    },
-                );
+                        sha256: artifact.sha256.as_str().to_string(),
+                        blob,
+                    }),
+                    Err(e) if gone(&e) => {
+                        tracing::warn!(
+                            "attachment {} left out: {}",
+                            artifact.id.as_str(),
+                            e.safe_detail
+                        );
+                        missing.push(attachments::file_name(&name));
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             Part::Diff { .. } => {}
         }
     }
-    let a = steve_acp::for_agent(&cwd.to_string_lossy(), &refs, image, |i| {
-        stored.get(i).cloned()
-    })
-    .map_err(|e| ApiError::new(ErrorCode::Internal, e))?;
-    let body = text.join("\n\n") + &a.note;
+    let count = fetched.len();
+    let dir = cwd.to_path_buf();
+    let placed = tokio::task::spawn_blocking(move || attachments::place(&dir, &fetched, image))
+        .await
+        .map_err(internal)?;
+    let (note, images) = match placed {
+        Ok(a) => (a.note, a.images),
+        Err(e) => {
+            tracing::warn!("attachments not placed: {e}");
+            (attachments::failed_note(count, &e), vec![])
+        }
+    };
+    let body = text.join("\n\n") + &note + &attachments::missing_note(&missing);
     Ok(Value::Array(
         std::iter::once(json!({"type": "text", "text": body}))
-            .chain(a.images)
+            .chain(images)
             .collect(),
     ))
+}
+
+/// A fetch error that will not go away by trying again: the Hub no longer has the artifact
+/// (`conflict`), or what it sent is not the bytes it granted (`invalid`). A denial (the execution
+/// is no longer live, say) is not one: it fails the preparation.
+fn gone(e: &ApiError) -> bool {
+    matches!(e.code, ErrorCode::Conflict | ErrorCode::Invalid)
+}
+
+/// Attachment chunks asked of the Hub ahead of the one being taken ([`fetch`]).
+const FETCH_WINDOW: usize = 4;
+
+/// Chunks asked ahead, by offset; what is still out when they are not needed any more is stopped.
+#[derive(Default)]
+struct Ahead(std::collections::VecDeque<(u64, tokio::task::JoinHandle<ApiResult<ReadChunk>>)>);
+
+impl Ahead {
+    fn clear(&mut self) {
+        for (_, h) in self.0.drain(..) {
+            h.abort();
+        }
+    }
+}
+
+impl Drop for Ahead {
+    fn drop(&mut self) {
+        self.clear();
+    }
 }
 
 /// An attachment's bytes, from the cache (checked) or the Hub (for this execution; size, progress
@@ -456,15 +720,50 @@ pub(crate) async fn fetch(
     };
     let mut bytes: Vec<u8> = Vec::with_capacity(a.size.min(1 << 26) as usize);
     let mut hasher = sha2::Sha256::new();
+    // once the first chunk tells how much the link gives at a time, the next ones are asked
+    // ahead, in order (a round trip each, one at a time, is slow on a remote link)
+    let mut ahead = Ahead::default();
+    let mut step: Option<u64> = None;
+    let get = |offset: u64, max: u32| {
+        let (files, access, id) = (
+            files.clone(),
+            FileAccess::Execution(exec.clone()),
+            a.id.clone(),
+        );
+        tokio::spawn(async move { files.fetch(access, id, offset, max).await })
+    };
     loop {
-        let c = files
-            .fetch(
-                FileAccess::Execution(exec.clone()),
-                a.id.clone(),
-                bytes.len() as u64,
-                1 << 20,
-            )
-            .await?;
+        let at = bytes.len() as u64;
+        if let Some(step) = step {
+            let mut next = ahead.0.back().map_or(at, |(o, _)| o + step);
+            while ahead.0.len() < FETCH_WINDOW && next < a.size {
+                ahead.0.push_back((next, get(next, step as u32)));
+                next += step;
+            }
+        }
+        let c = match ahead.0.pop_front() {
+            Some((o, h)) if o == at => h
+                .await
+                .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))??,
+            other => {
+                // nothing asked ahead, or a short chunk put the rest off: ask from here
+                if let Some((_, h)) = other {
+                    h.abort();
+                }
+                ahead.clear();
+                files
+                    .fetch(
+                        FileAccess::Execution(exec.clone()),
+                        a.id.clone(),
+                        at,
+                        1 << 20,
+                    )
+                    .await?
+            }
+        };
+        if step.is_none() && !c.bytes.is_empty() {
+            step = Some(c.bytes.len() as u64);
+        }
         if c.offset != bytes.len() as u64 {
             return Err(ApiError::new(
                 ErrorCode::Invalid,
@@ -1292,8 +1591,10 @@ impl LocalNode {
         Ok(r)
     }
 
-    /// What this Node can enforce; anything else is refused before it is accepted.
-    fn check_policy(p: &ExecutionPolicy) -> ApiResult<()> {
+    /// What this Node can enforce and its owner allows ([`PolicyCeiling`]); anything else is
+    /// refused before it is accepted.
+    fn check_policy(&self, p: &ExecutionPolicy) -> ApiResult<()> {
+        self.0.cfg.ceiling.check(p)?;
         if let SandboxRequirement::Required { guarantees } = &p.sandbox
             && !guarantees.is_empty()
         {
@@ -1622,62 +1923,147 @@ impl LocalNode {
 /// Delivers journaled events to the Hub. Every call is bounded; while there is nothing to send the
 /// Node still checks the Hub is there (an empty batch), so a Hub that went silent is noticed for the
 /// offline lease.
+/// Batches of the journal's unacknowledged events in flight to the Hub at once. Each is answered
+/// with the Hub's durable prefix per stream, as one at a time was: a later batch the Hub happens
+/// to take first is covered once the earlier one is in (the prefix then runs through both).
+const IN_FLIGHT: usize = 4;
+/// Events per batch (a batch over the frame budget is cut again by the sink).
+const BATCH: usize = 200;
+
+/// What a batch in flight answered.
+type Delivered = (
+    Vec<Watermark>,
+    Result<ApiResult<EventAck>, tokio::time::error::Elapsed>,
+);
+
 async fn deliver_loop(inner: std::sync::Weak<Inner>) {
     let mut backoff = Duration::from_millis(100);
     let mut last_ok = std::time::Instant::now();
+    let mut flight: tokio::task::JoinSet<Delivered> = tokio::task::JoinSet::new();
+    // per stream, the last position in a batch out: the next batch starts past it
+    let mut sent: HashMap<String, u64> = HashMap::new();
+    // an answer fell short (an error, a timeout, an ack that does not cover its batch): nothing
+    // more goes out until every batch in flight is answered, then what is left is sent again
+    let mut short = false;
+    let mut progress = false;
     loop {
         let Some(me) = inner.upgrade() else { return };
         if me.closed.load(Ordering::SeqCst) {
             return;
         }
-        let batch = me.j.read(|t| t.unacked(200)).unwrap_or_else(|e| {
-            tracing::error!("node delivery: {e}");
-            vec![]
-        });
-        if batch.is_empty() && last_ok.elapsed() < HEARTBEAT {
+        let sink = me.sink.lock().unwrap().clone();
+        if !short && let Some(sink) = &sink {
+            while flight.len() < IN_FLIGHT {
+                let batch =
+                    me.j.read(|t| t.unacked_past(&sent, BATCH))
+                        .unwrap_or_else(|e| {
+                            tracing::error!("node delivery: {e}");
+                            vec![]
+                        });
+                // an empty commit now and then, when idle, tells the Node the Hub is there
+                if batch.is_empty() && (!flight.is_empty() || last_ok.elapsed() < HEARTBEAT) {
+                    break;
+                }
+                let mut marks: Vec<Watermark> = vec![];
+                for e in &batch {
+                    sent.insert(e.cursor.stream.to_string(), e.cursor.seq);
+                    match marks.iter_mut().find(|m| m.stream == e.cursor.stream) {
+                        Some(m) => m.seq = m.seq.max(e.cursor.seq),
+                        None => marks.push(e.cursor.clone()),
+                    }
+                }
+                let sink = sink.clone();
+                let empty = batch.is_empty();
+                flight.spawn(async move {
+                    let r = tokio::time::timeout(
+                        HUB_TIMEOUT,
+                        sink.commit(EventBatch { events: batch }),
+                    )
+                    .await;
+                    (marks, r)
+                });
+                if empty {
+                    break;
+                }
+            }
+        }
+        if flight.is_empty() {
+            if sink.is_none() {
+                me.hub_down_since.lock().unwrap().get_or_insert_with(now);
+            }
+            let (was_short, moved) = (short, progress);
+            short = false;
+            progress = false;
+            sent.clear();
+            if was_short || sink.is_none() {
+                drop(me);
+                tokio::time::sleep(if sink.is_none() {
+                    Duration::from_millis(200)
+                } else {
+                    backoff
+                })
+                .await;
+                if sink.is_some() {
+                    backoff = if moved {
+                        Duration::from_millis(100)
+                    } else {
+                        (backoff * 2).min(Duration::from_secs(10))
+                    };
+                }
+                continue;
+            }
             let _ = tokio::time::timeout(Duration::from_secs(2), me.wake.notified()).await;
             continue;
         }
-        let sink = me.sink.lock().unwrap().clone();
-        let Some(sink) = sink else {
-            me.hub_down_since.lock().unwrap().get_or_insert_with(now);
-            drop(me);
-            tokio::time::sleep(Duration::from_millis(200)).await;
+        let room = flight.len() < IN_FLIGHT && !short;
+        let done = tokio::select! {
+            d = flight.join_next() => d,
+            _ = me.wake.notified(), if room => continue,
+        };
+        let Some(Ok((marks, answered))) = done else {
+            short = true;
             continue;
         };
-        let sent =
-            tokio::time::timeout(HUB_TIMEOUT, sink.commit(EventBatch { events: batch })).await;
-        match sent {
+        match answered {
             Ok(Ok(ack)) => {
                 last_ok = std::time::Instant::now();
                 *me.hub_down_since.lock().unwrap() = None;
-                let progress = me.j.tx(|t| {
+                let moved = me.j.tx(|t| {
                     let before: u64 = t.heads()?.iter().map(|h| h.acknowledged).sum();
                     t.ack(&ack)?;
                     let after: u64 = t.heads()?.iter().map(|h| h.acknowledged).sum();
                     Ok(after > before)
                 });
-                if matches!(progress, Ok(true)) {
-                    backoff = Duration::from_millis(100);
-                } else {
-                    if let Err(e) = progress {
+                match moved {
+                    Ok(m) => progress |= m,
+                    Err(e) => {
                         tracing::error!("node ack: {e}");
+                        short = true;
                     }
-                    drop(me);
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(10));
+                }
+                // what this batch carried must be covered now (by its own ack or an earlier one)
+                let heads = me.j.read(|t| t.heads()).unwrap_or_default();
+                let covered = marks.iter().all(|m| {
+                    heads
+                        .iter()
+                        .find(|h| h.stream == m.stream)
+                        .is_none_or(|h| h.epoch != m.epoch || h.acknowledged >= m.seq)
+                });
+                if !covered {
+                    short = true;
+                } else if progress && flight.is_empty() {
+                    backoff = Duration::from_millis(100);
                 }
             }
             Ok(Err(e)) => {
                 tracing::warn!("hub did not take events: {e}");
                 me.hub_down_since.lock().unwrap().get_or_insert_with(now);
-                drop(me);
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(10));
+                short = true;
             }
             Err(_) => {
                 tracing::warn!("hub did not answer");
                 me.hub_down_since.lock().unwrap().get_or_insert_with(now);
+                short = true;
             }
         }
     }
@@ -1712,7 +2098,7 @@ impl SessionExecutor for LocalNode {
         let (r, fresh) = self.accept("open_session", &c, |t| {
             let o = &c.body;
             self.check_harness(&o.choice.harness)?;
-            Self::check_policy(&o.policy)?;
+            self.check_policy(&o.policy)?;
             let w = t
                 .workspace(&o.workspace.id)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
@@ -1796,7 +2182,7 @@ impl SessionExecutor for LocalNode {
                     "another harness needs another session",
                 ));
             }
-            Self::check_policy(&b.policy)?;
+            self.check_policy(&b.policy)?;
             row.open.choice = b.choice.clone();
             row.open.policy = b.policy.clone();
             row.view.phase = SessionPhase::Opening;
@@ -1845,7 +2231,7 @@ impl SessionExecutor for LocalNode {
                 ));
             }
             Self::workspace_free(t, &w.resource)?;
-            Self::check_policy(&tu.run.policy)?;
+            self.check_policy(&tu.run.policy)?;
             Self::check_limits(&tu.run.limits)?;
             Self::idle(t, &tu.session)?;
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
@@ -1929,10 +2315,13 @@ impl JobExecutor for LocalNode {
     /// Accepted running; a think job runs its one model in a scratch directory of its own and
     /// ends with its answer; a research job is [`Self::start_research`]'s.
     async fn start_job(&self, c: Command<JobSpec>) -> ApiResult<Receipt> {
+        self.0.cfg.ceiling.check_jobs()?;
         if let JobWork::Research(_) = &c.body.work {
             return self.start_research(c).await;
         }
-        if self.0.cfg.capacity.jobs == 0 || self.0.cfg.jobs.names().is_empty() {
+        if self.0.cfg.capacity.jobs == 0
+            || (self.0.cfg.jobs.names().is_empty() && self.0.cfg.acp.adapters.is_empty())
+        {
             return Err(ApiError::new(
                 ErrorCode::Unsupported,
                 "this node runs no jobs",
@@ -1945,13 +2334,15 @@ impl JobExecutor for LocalNode {
         let (r, fresh) = self.accept("start_job", &c, |t| {
             let j = &c.body;
             j.check()?;
-            if self.0.cfg.jobs.executable(&j.run.choice.harness).is_none() {
+            if !self.0.cfg.acp.adapters.contains_key(&j.run.choice.harness)
+                && self.0.cfg.jobs.executable(&j.run.choice.harness).is_none()
+            {
                 return Err(ApiError::new(
                     ErrorCode::Unsupported,
                     format!("no harness {} runs jobs on this node", j.run.choice.harness),
                 ));
             }
-            Self::check_policy(&j.run.policy)?;
+            self.check_policy(&j.run.policy)?;
             Self::check_limits(&j.run.limits)?;
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
                 return Err(ApiError::new(
@@ -2888,11 +3279,12 @@ impl WorkspaceExecutor for LocalNode {
     /// restart while it ran: it is never run again (recover stops what is left).
     async fn exec(&self, c: Command<ExecSpec>) -> ApiResult<Receipt> {
         self.mine(&c.body.workspace)?;
+        self.0.cfg.ceiling.check_exec().map_err(|e| e.on(&c.id))?;
         if self.0.cfg.capacity.execs == 0 {
             return unsupported("commands");
         }
         secrets::check(&c.body.secrets, &c.body.env).map_err(|e| e.on(&c.id))?;
-        Self::check_policy(&c.body.policy)?;
+        self.check_policy(&c.body.policy)?;
         Self::check_limits(&c.body.limits)?;
         if c.body.command.trim().is_empty() || c.body.command.contains('\0') {
             return Err(ApiError::new(ErrorCode::Invalid, "no command").on(&c.id));
@@ -3214,7 +3606,7 @@ impl Discovery for LocalNode {
                     name: h.clone(),
                     version: p.version,
                     sessions: true,
-                    jobs: false,
+                    jobs: self.0.cfg.capacity.jobs > 0,
                     models: p.models,
                     resume: true,
                     cancel: true,
@@ -3224,7 +3616,7 @@ impl Discovery for LocalNode {
                 }
             })
             .collect();
-        // think jobs, for the harnesses with a print-mode CLI here
+        // Legacy CLI-only hosts may also run think jobs.
         if self.0.cfg.capacity.jobs > 0 {
             for name in self.0.cfg.jobs.names() {
                 match harnesses.iter_mut().find(|h| h.name == name) {
@@ -3424,5 +3816,92 @@ mod storage_tests {
         assert_eq!(admit(true, 79, 1, 100, 80), (true, false));
         // no room at all (the disk is past its reserve)
         assert_eq!(admit(false, 0, 1, 0, 80), (false, true));
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    fn subject() -> Subject {
+        Subject::Session {
+            session: SessionId::new("s_1").unwrap(),
+        }
+    }
+
+    fn size(b: &EventBody) -> usize {
+        serde_json::to_vec(b).unwrap().len()
+    }
+
+    #[test]
+    fn a_small_event_is_kept_as_it_is() {
+        let b = EventBody::Plan {
+            entries: vec![PlanEntry {
+                content: "x".into(),
+                status: "pending".into(),
+            }],
+        };
+        assert_eq!(fit(&subject(), b.clone()), vec![b]);
+    }
+
+    #[test]
+    fn a_text_delta_too_big_for_one_event_goes_as_several_with_the_same_text() {
+        // multi-byte text and characters JSON escapes, so pieces are cut on char boundaries
+        let text = "中文\"\\\n".repeat(60_000);
+        let out = fit(
+            &subject(),
+            EventBody::TextDelta {
+                message: "m".into(),
+                block: "b".into(),
+                utf8_offset: 7,
+                text: text.clone(),
+            },
+        );
+        assert!(out.len() > 1);
+        let mut at = 7u64;
+        let mut joined = String::new();
+        for b in &out {
+            assert!(size(b) <= EVENT_CAP, "{}", size(b));
+            let EventBody::TextDelta {
+                utf8_offset, text, ..
+            } = b
+            else {
+                panic!("{b:?}")
+            };
+            assert_eq!(*utf8_offset, at);
+            at += text.len() as u64;
+            joined.push_str(text);
+        }
+        assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn another_event_too_big_has_its_long_strings_cut_or_becomes_a_diagnostic() {
+        let out = fit(
+            &subject(),
+            EventBody::Plan {
+                entries: vec![PlanEntry {
+                    content: "y".repeat(1 << 20),
+                    status: "pending".into(),
+                }],
+            },
+        );
+        let [EventBody::Plan { entries }] = out.as_slice() else {
+            panic!("{out:?}")
+        };
+        assert!(entries[0].content.ends_with(CUT_MARK));
+        assert!(entries[0].content.len() < 5000);
+        // nothing long to cut: too many entries
+        let many = (0..40_000)
+            .map(|i| PlanEntry {
+                content: format!("step {i}"),
+                status: "pending".into(),
+            })
+            .collect();
+        let out = fit(&subject(), EventBody::Plan { entries: many });
+        assert!(
+            matches!(out.as_slice(), [EventBody::Diagnostic { code, .. }] if code == "event_too_large"),
+            "{out:?}"
+        );
     }
 }

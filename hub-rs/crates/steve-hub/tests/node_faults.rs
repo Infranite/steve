@@ -429,6 +429,7 @@ impl Rig {
     fn config(&self) -> NodeConfig {
         let root = self.root.clone();
         NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new(NODE).unwrap(),
             home: self.home(),
             acp: steve_acp::AcpConfig {

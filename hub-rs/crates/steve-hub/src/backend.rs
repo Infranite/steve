@@ -697,6 +697,14 @@ pub trait Domain: Send + Sync + 'static {
     async fn item_action(&self, id: &str, action: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("item_action")
     }
+    /// The durable work graph beneath one item; `null` when no graph has been planned.
+    async fn workflow_get(&self, id: &str) -> BResult<Value> {
+        Ok(Value::Null)
+    }
+    /// Plan, pause, resume or change a work unit under an optimistic revision check.
+    async fn workflow_change(&self, id: &str, args: Value, actor: &str) -> BResult<Value> {
+        todo_backend!("workflow_change")
+    }
     /// The lifecycle commands (`accept` | `cancel` | `fail` | `new_cycle`), checked against the cycle
     /// and revision the caller saw; returns the item.
     #[allow(clippy::too_many_arguments)]
@@ -723,6 +731,25 @@ pub trait Domain: Send + Sync + 'static {
     /// Commits the closings whose gate holds now (the periodic tick).
     async fn lifecycle_tick(&self) -> BResult<usize> {
         Ok(0)
+    }
+    /// The merge lane of (`upstream`, `branch`) as the project page shows it (`None`: nothing went
+    /// into it yet).
+    async fn lane_view(&self, upstream: &str, branch: &str) -> BResult<Option<Value>> {
+        Ok(None)
+    }
+    /// Your limits for that lane (`None`: the default); the lane as shown after.
+    async fn lane_policy(
+        &self,
+        upstream: &str,
+        branch: &str,
+        window_ms: Option<i64>,
+        max_members: Option<i64>,
+    ) -> BResult<Option<Value>> {
+        todo_backend!("lane_policy")
+    }
+    /// "Merge and release now": the lane's collecting batch closes. `false`: none was collecting.
+    async fn lane_now(&self, upstream: &str, branch: &str) -> BResult<bool> {
+        todo_backend!("lane_now")
     }
     async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
         todo_backend!("revise_goal")
@@ -865,9 +892,10 @@ pub trait Domain: Send + Sync + 'static {
         }
         self.say(ws, user, text, files, mentions).await
     }
-    /// A message the paste guard caught: stored replaced, answered with `guard::REPLY`, not routed.
-    async fn say_guarded(&self, ws: &str, stored: &str) -> BResult<()> {
-        todo_backend!("say_guarded")
+    /// The paste guard's note under a message whose secret was replaced before it was routed
+    /// (`guard::ROUTED`, linking to the vault).
+    async fn say_guard_note(&self, ws: &str) -> BResult<()> {
+        todo_backend!("say_guard_note")
     }
     async fn stop(&self, ws: &str) -> BResult<bool> {
         todo_backend!("stop")

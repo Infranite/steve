@@ -27,6 +27,34 @@ pub fn trust(p: &Pairing) -> Result<Trust> {
     .map_err(|e| anyhow!(e))
 }
 
+/// The pairing request goes out through reqwest (the `url` crate) and the link through tungstenite
+/// (`http::Uri`): both must read the same host out of `hub_url`, the one [`tls::policy`] judged.
+fn same_host(hub_url: &str) -> Result<()> {
+    let wire = tls::host_of(&ws_url(hub_url)?).map_err(|e| anyhow!(e))?;
+    let parsed = reqwest::Url::parse(hub_url).context("the hub url does not parse")?;
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
+        bail!("the hub url must not contain userinfo or a fragment");
+    }
+    let http = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("the hub url has no host"))?;
+    let http = http
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(http);
+    let same = match (
+        wire.parse::<std::net::IpAddr>(),
+        http.parse::<std::net::IpAddr>(),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => wire.eq_ignore_ascii_case(http),
+    };
+    if !same {
+        bail!("the hub url names two different hosts ({wire} and {http})");
+    }
+    Ok(())
+}
+
 fn http(trust: &Trust) -> Result<reqwest::Client> {
     let b = reqwest::Client::builder().timeout(Duration::from_secs(20));
     let b = match tls::client_config(trust).map_err(|e| anyhow!(e))? {
@@ -53,6 +81,7 @@ pub async fn pair(
         plain && loopback_plaintext_allowed(),
     )
     .map_err(|e| anyhow!(e))?;
+    same_host(&hub_url)?;
     let id = match Identity::load(&home.identity()) {
         Ok(id) => id,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -135,7 +164,8 @@ pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -
             Err(Stop::Retry(e)) => tracing::info!("hub link: {e}"),
         }
         link.set(None);
-        tokio::time::sleep(backoff).await;
+        // spread out: every Node of a restarted Hub dials again at once otherwise
+        tokio::time::sleep(steve_node_wire::jitter(backoff)).await;
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
@@ -228,6 +258,28 @@ mod tests {
         assert!(matches!(stop_for(&r("unsupported")), Stop::Refused(_)));
         for code in [handshake::INTERNAL, "offline", "invalid"] {
             assert!(matches!(stop_for(&r(code)), Stop::Retry(_)), "{code}");
+        }
+    }
+
+    /// M2: the pairing request and the link go to the same host, or pairing stops before either.
+    #[test]
+    fn pairing_reads_one_host() {
+        for ok in [
+            "http://127.0.0.1:7777",
+            "http://[::1]:7777",
+            "https://hub.example",
+            "https://Hub.Example:8443/steve",
+        ] {
+            assert!(same_host(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://evil.example#@127.0.0.1:7777",
+            "http://user@127.0.0.1:7777",
+            "http://evil.example%40127.0.0.1",
+            "https://hub.example/#frag",
+            "http://127.0.0.1\\@evil.example",
+        ] {
+            assert!(same_host(bad).is_err(), "{bad}");
         }
     }
 }

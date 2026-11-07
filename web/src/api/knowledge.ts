@@ -20,6 +20,7 @@ export type Hit = { n: number; type: string; id: string; seq: number; title: str
 export type Mem = { id: string; kind: string; text: string; source_label: string; level: Level; status: "candidate" | "confirmed" | "stale"; visibility: string; about: ObjRef[]; created: number }
 /** `record`, `why`, `scope`: what it would become and why it is worth keeping (ST-41; absent on older Hubs) */
 export type Candidate = { mem: Mem; origin: string; origin_label: string; evidence: string; supersedes: Mem | null; decision_id: string | null; record?: string; why?: string; scope?: string }
+export type ExpiredCandidate = { mem: Mem; origin_label: string; evidence: string; expired: number }
 /** one entry of `messages.meta.cites` */
 export type Cite = { n: number; label: string; href: string; level: Level }
 export type Use = { n: number; type: string; id: string; seq: number; level: Level; title: string; label: string; href: string; deleted: boolean; use_id: string; query: string; created: number }
@@ -28,7 +29,7 @@ const get = <T>(p: string) => req<T>("GET", p)
 const enc = encodeURIComponent
 
 export const kb = {
-  search: (q: string, limit = 20) => get<{ hits: Hit[]; took_ms: number }>("/kb/search" + qs({ q, limit })),
+  search: (q: string, limit = 20) => get<{ hits: Hit[]; took_ms: number; semantic_down?: boolean }>("/kb/search" + qs({ q, limit })),
   sources: () => get<KbSource[]>("/kb/sources"),
   addFolder: (p: { name: string; path: string; include?: string[]; exclude?: string[]; visibility?: string; level?: Level }) => req<KbSource>("POST", "/kb/sources", { kind: "folder", ...p }),
   patchSource: (id: string, p: Partial<{ name: string; paused: boolean; visibility: string; level: Level; include: string[]; exclude: string[] }>) => req<KbSource>("PATCH", "/kb/sources/" + enc(id), p),
@@ -48,6 +49,9 @@ export const kb = {
   deleteMem: (id: string) => req<{ ok: true }>("DELETE", "/mems/" + enc(id)),
   candidates: () => get<Candidate[]>("/kb/candidates"),
   resolve: (ids: string[], choice: "yes" | "no") => req<{ ok: true; done: number }>("POST", "/kb/candidates/resolve", { ids, choice }),
+  /** candidates that expired unanswered; `restore` puts one back for another 30 days */
+  expired: () => get<ExpiredCandidate[]>("/kb/candidates/expired"),
+  restore: (id: string) => req<{ ok: true }>("POST", `/kb/candidates/${enc(id)}/restore`),
   uses: (consumer_type: "session" | "chat", consumer_id: string) => get<{ hits: Use[] }>("/kb/uses" + qs({ consumer_type, consumer_id })),
 }
 

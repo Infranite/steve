@@ -149,6 +149,14 @@ struct PatchBody {
     paused: Option<bool>,
     #[serde(default)]
     caps: Option<Vec<String>>,
+    /// Absent: unchanged; `null`: unpaired; an id: paired with that connection.
+    #[serde(default, deserialize_with = "present")]
+    app_connection: Option<Option<String>>,
+}
+
+/// A field that is there, `null` included.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
 }
 
 async fn patch_one(
@@ -157,7 +165,14 @@ async fn patch_one(
     Path(id): Path<String>,
     Body(b): Body<PatchBody>,
 ) -> VaultResult<Json<Value>> {
-    to(c.patch(&who, &id, b.paused, b.caps)?)
+    let mut out = None;
+    if let Some(to) = &b.app_connection {
+        out = Some(c.set_pairing(&who, &id, to.as_deref())?);
+    }
+    if b.paused.is_some() || b.caps.is_some() || out.is_none() {
+        out = Some(c.patch(&who, &id, b.paused, b.caps)?);
+    }
+    to(out)
 }
 
 async fn delete_one(

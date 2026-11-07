@@ -1,4 +1,4 @@
-//! The local Node (`STEVE_NODE_MODE=local`), end to end on the real `steve-hub` binary: a temp
+//! The local Node (`STEVE_NODE_MODE=local`, the default), end to end on the real `steve-hub` binary: a temp
 //! STEVE_HOME, its own port, the fake ACP agent (`steve-acp/tests/fake-acp.js`, which logs every
 //! message it gets), real HTTP. Covers D5's acceptance on one Hub home:
 //! - a session created with the Node on is bound to it and its transcript is stored as `steve.v1`;
@@ -7,7 +7,12 @@
 //! - while held (upgrade drain), a message is queued and not drained, and goes once released;
 //! - the Hub killed mid-turn comes back with the attempt `unknown` (awaiting reconciliation),
 //!   which is never re-run;
-//! - with `STEVE_NODE_MODE` off, a Node-bound session is parked, never handed to the legacy runner.
+//! - with `STEVE_NODE_MODE` off, a Node-bound session is parked, and nothing runs on the Hub;
+//! - with `STEVE_NODE_MODE` unset the Node is on (the default); a `STEVE_NO_RESUME` copy boots
+//!   with it off instead, and its Node-bound sessions are parked.
+//!
+//! - B7: what an older Hub's legacy runner left moves to the Node at boot (or ends, with why), and
+//!   a new session no Node takes is refused visibly, never run on the Hub.
 //!
 //! And on a second home, with a short attempt deadline, a card nobody answers expires; on a
 //! third, an idle Node session goes through two Hub restarts without a resume or a restart notice.
@@ -97,6 +102,17 @@ impl Home {
             .filter(|m| m.get("spawn").is_some())
             .count()
     }
+    /// Count adapters by workspace, without unrelated background model jobs. Canonicalize
+    /// both sides because the temporary home may use a symlink (e.g. /var on macOS).
+    fn spawns_under(&self, dir: &std::path::Path) -> usize {
+        let root = dir.canonicalize().expect("adapter workspace");
+        self.lines()
+            .iter()
+            .filter_map(|m| m["spawn"]["cwd"].as_str())
+            .filter_map(|cwd| std::path::Path::new(cwd).canonicalize().ok())
+            .filter(|cwd| cwd.starts_with(&root))
+            .count()
+    }
     /// The test's own database (in the temp home), read-only.
     fn db(&self) -> rusqlite::Connection {
         rusqlite::Connection::open_with_flags(
@@ -149,7 +165,13 @@ impl Drop for Hub {
     }
 }
 
+/// The Hub with the local Node explicitly on (`local`) or off (`off`, the rollback).
 fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
+    spawn_mode(h, Some(if node { "local" } else { "off" }), extra)
+}
+
+/// The Hub with `STEVE_NODE_MODE` set to `mode`, or unset (the default since B6) for `None`.
+fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
     let fake = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../steve-acp/tests/fake-acp.js"
@@ -171,8 +193,11 @@ fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
         .env("STEVE_ADAPTER_CLAUDE", fake)
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .env_remove("STEVE_NODE_MODE")
+        .env_remove("STEVE_NODE")
+        .env_remove("STEVE_NODE_JOBS")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_IDLE_RELEASE_MS")
+        .env_remove("STEVE_LEGACY_MOVE_EVERY_MS")
         .env_remove("STEVE_NO_RESUME")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
@@ -191,8 +216,8 @@ fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
                 .expect("hub log"),
         )
         .process_group(0);
-    if node {
-        c.env("STEVE_NODE_MODE", "local");
+    if let Some(mode) = mode {
+        c.env("STEVE_NODE_MODE", mode);
     }
     for (k, v) in extra {
         c.env(k, v);
@@ -941,11 +966,83 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
     );
 }
 
-/// A new session the Node path cannot express (its bot's permission mode is one the Node has no
-/// mode for, `dontAsk`) stays on the legacy runner with the Node on, and healthz counts it: a fallback since boot and a legacy
-/// session that could still run.
+/// B6: with `STEVE_NODE_MODE` unset the local Node is on and a new session binds to it. A
+/// `STEVE_NO_RESUME` copy of that home boots with the Node off instead of failing, and parks the
+/// Node-bound session; an explicit `local` on such a copy refuses to boot.
 #[tokio::test(flavor = "multi_thread")]
-async fn healthz_counts_a_new_session_left_on_the_legacy_runner() {
+async fn the_node_is_the_default() {
+    let h = Home::new();
+    let mut hub = spawn_mode(&h, None, &[]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let n = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    assert_eq!(
+        (&n["enabled"], &n["reconciled"]),
+        (&json!(true), &json!(true)),
+        "healthz with STEVE_NODE_MODE unset: {n}"
+    );
+    let sid = c.item(&h, "默认验收 @say default-node-B6").await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "default-node-B6") > 0).await,
+        "the reply stored as steve.v1; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
+            &sid
+        ),
+        1,
+        "bound to the local Node"
+    );
+    hub.kill();
+    drop(hub);
+
+    // a STEVE_NO_RESUME copy: an explicit local is a boot error
+    let mut refused = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
+    assert!(
+        wait(30, || matches!(refused.0.try_wait(), Ok(Some(_)))).await,
+        "an explicit local on a STEVE_NO_RESUME copy exits"
+    );
+    assert!(
+        hub_log(&h).contains("STEVE_NO_RESUME"),
+        "says why; log:\n{}",
+        hub_log(&h)
+    );
+    drop(refused);
+
+    // unset: it boots with the Node off, and the bound session is parked
+    let spawns = h.spawns();
+    let _hub = spawn_mode(&h, None, &[("STEVE_NO_RESUME", "1")]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let n = node_health(&h).await;
+    assert_eq!(
+        n["enabled"], false,
+        "healthz on a STEVE_NO_RESUME copy: {n}"
+    );
+    let r = c.say(&sid, "副本验收-C6 @say copy").await;
+    assert_eq!(r["result"], "queued", "{r}");
+    assert!(
+        wait(10, || {
+            h.count(
+                "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND json_extract(data,'$.parked')=1",
+                &sid,
+            ) > 0
+        })
+        .await,
+        "told it is parked"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(h.got("副本验收-C6"), 0, "no runner got it");
+    assert_eq!(h.spawns(), spawns, "no adapter started for it");
+}
+
+/// B7: a new session the Node path cannot express (its bot's permission mode is one the Node has
+/// no mode for, `dontAsk`) is refused visibly, never run on the Hub: it ends at once, says why in
+/// it and on its item, and healthz counts it as a fallback since boot, never as a legacy session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_session_no_node_takes_is_refused_visibly() {
     let h = Home::new();
     let _hub = spawn(&h, true, &[]);
     serving(&h).await;
@@ -959,9 +1056,11 @@ async fn healthz_counts_a_new_session_left_on_the_legacy_runner() {
         [],
     )
     .expect("dontAsk");
+    let spawns = h.spawns();
     let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
     let n = node_health_until(&h, 30, |n| n["fallbacks"] == 1).await;
     assert_eq!(n["fallbacks"], 1, "{n}");
+    assert_eq!(n["legacy"]["sessions"], 0, "never a legacy session: {n}");
     assert_eq!(
         h.count(
             "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
@@ -971,10 +1070,29 @@ async fn healthz_counts_a_new_session_left_on_the_legacy_runner() {
         "not bound"
     );
     assert_eq!(
-        n["legacy"]["sessions"].as_i64(),
-        before["legacy"]["sessions"].as_i64().map(|x| x + 1),
-        "{before} -> {n}"
+        h.one("SELECT status FROM sessions WHERE id=?", &sid)
+            .as_deref(),
+        Some("ended")
     );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND json_extract(data,'$.refused')=1 AND instr(data,'dontAsk')>0",
+            &sid
+        ),
+        1,
+        "it says why"
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM decisions d JOIN sessions s ON s.item_id=d.item_id WHERE s.id=? AND d.kind='fail' AND d.status='open' AND instr(d.question,'dontAsk')>0",
+            &sid
+        ),
+        1,
+        "and on its item"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(h.got("fallback-legacy-3F"), 0, "nothing ran it");
+    assert_eq!(h.spawns(), spawns, "no adapter started for it");
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
@@ -1129,4 +1247,700 @@ async fn a_git_items_worktree_is_made_and_given_back_by_the_node() {
         ),
         1
     );
+}
+
+/// B5: sessions the legacy runner ran before the Node was switched on move to it at an idle
+/// boundary, on the same conversation. An idle one moves at its next message (`session/load` of
+/// the harness session id the legacy runner kept); one cut mid-turn by the restart is first
+/// resumed on the legacy runner and moves at its next message after that; one that can never
+/// run on the Node (its directory is gone) is ended at boot with why, once. With the Node off
+/// again a moved session is parked, never handed back to the legacy runner.
+/// What the store says of a session, for a failure message.
+fn debug_session(h: &Home, sid: &str) -> String {
+    let db = h.db();
+    let rows = |sql: &str| -> Vec<String> {
+        let mut st = db.prepare(sql).expect("prepare");
+        let n = st.column_count();
+        st.query_map([sid], |r| {
+            Ok((0..n)
+                .map(|i| match r.get_ref(i) {
+                    Ok(rusqlite::types::ValueRef::Text(t)) => String::from_utf8_lossy(t).into(),
+                    Ok(v) => format!("{v:?}"),
+                    Err(e) => e.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("|"))
+        })
+        .expect("query")
+        .map(Result::unwrap)
+        .collect()
+    };
+    format!(
+        "session {:?}\nruntime {:?}\ncommands {:?}\nqueued {:?}\nevents {:?}",
+        rows("SELECT status, acp_session_id FROM sessions WHERE id=?"),
+        rows("SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?"),
+        rows(
+            "SELECT method, state, substr(receipt,1,300) FROM node_commands WHERE instr(request, ?)>0"
+        ),
+        rows("SELECT text, via FROM queued WHERE session_id=?"),
+        rows("SELECT kind, substr(data,1,300) FROM events WHERE session_id=?"),
+    )
+}
+
+/// What an older Hub's legacy runner left, written into a home whose Hub is stopped: items with
+/// their sessions as that runner kept them (bound to no Node, its harness's conversation id),
+/// its dispatches in hand and an open permission card. The claude-code bot's id is `bot`.
+fn legacy_fixture(h: &Home, bot: &str) {
+    let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
+    db.busy_timeout(Duration::from_secs(5)).expect("timeout");
+    let gone = "/nonexistent-steve-b7/gone";
+    // where the old runner worked: each item's scratch directory, as the core made them
+    let scratch = |item: &str| {
+        let d = h.steve().join("scratch").join(item);
+        std::fs::create_dir_all(&d).expect("scratch");
+        d.display().to_string()
+    };
+    let (a, r, i) = (scratch("ST-91"), scratch("ST-93"), scratch("ST-95"));
+    db.execute_batch(&format!(
+        "INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES
+           ('ST-91','default',91,'旧事项甲','run','执行','{bot}',1,1),
+           ('ST-92','default',92,'旧事项乙','run','执行','{bot}',1,1),
+           ('ST-93','default',93,'旧事项丙','run','执行','{bot}',1,1),
+           ('ST-94','default',94,'旧事项丁','run','执行','{bot}',1,1),
+           ('ST-95','default',95,'旧事项戊','run','执行','{bot}',1,1);
+         INSERT INTO sessions(id,workspace_id,item_id,no,bot_id,harness,cwd,status,acp_session_id,title,created,updated) VALUES
+           ('ses_legacy_a','default','ST-91',1,'{bot}','claude-code','{a}','idle','acp-legacy-a','甲',1,1),
+           ('ses_legacy_b','default','ST-92',1,'{bot}','claude-code','{gone}','idle','acp-legacy-b','乙',1,1),
+           ('ses_legacy_r','default','ST-93',1,'{bot}','claude-code','{r}','running','acp-legacy-r','丙',1,1),
+           ('ses_legacy_ro','default','ST-94',1,'{bot}','claude-code','','idle',NULL,'丁',1,1),
+           ('ses_legacy_i','default','ST-95',1,'{bot}','claude-code','{i}','idle','acp-legacy-i','戊',1,1);
+         UPDATE sessions SET readonly=1 WHERE id='ses_legacy_ro';
+         -- claimed, never delivered: goes as it was
+         INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated) VALUES
+           ('q-a1','ses_legacy_a','旧会话甲-已领取 @say moved-a-B7','me',2,NULL,'claimed',2),
+         -- delivered when the old Hub stopped: comes back to be checked, behind the resume
+           ('q-r1','ses_legacy_r','旧会话丙-已送出 @say moved-r-B7','me',2,NULL,'submitted',2);
+         -- a message nothing could ever send where it would run
+         INSERT INTO queued(id,session_id,text,via,created) VALUES ('q-b1','ses_legacy_b','旧会话乙-排队','me',3);
+         -- the old harness's permission request, open when it stopped
+         INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,item_id,session_id,question,status,requested_by,created)
+           VALUES ('dec-legacy-r','default','approve','tool_call','tc-1','ST-93','ses_legacy_r','允许执行：Bash','open','{bot}',2);"
+    ))
+    .expect("fixture");
+}
+
+/// B7: boot moves what the legacy runner left. Idle sessions open on the Node with their own
+/// conversation (`session/load` of the id the runner kept) and send what it had claimed; a turn
+/// the old Hub's stop cut continues once (the resume first, then the message it had delivered,
+/// to be checked), its old permission card expired; a session that can never run on the Node
+/// ends, with why and its queue; an imported read-only one is left alone. healthz counts them
+/// and has no legacy session left. Messages to them afterwards go to the Node or are refused;
+/// with the Node off, new sessions are refused and Node sessions park, nothing runs on the Hub.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_sessions_move_to_the_node_at_boot() {
+    let h = Home::new();
+    let token = control_token(&h);
+    let env = [("STEVE_TAKEOVER_CONTINUES", "0")];
+    let mut hub = spawn_mode(&h, None, &env);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let (_, state) = c.call("GET", "/api/state", None).await;
+    let bot = state["bots"]
+        .as_array()
+        .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
+        .and_then(|b| b["id"].as_str())
+        .expect("a claude-code bot")
+        .to_string();
+    // the old Hub drains for the upgrade (durable) and stops
+    let d = drain(&h, "POST", &token).await;
+    assert_eq!(d["maintenance"], true, "{d}");
+    hub.kill();
+    drop(hub);
+    legacy_fixture(&h, &bot);
+    let scratch = h.steve().join("scratch");
+
+    // the upgrade: the first boot of this build on that home, still behind the drain (the
+    // release lifts it once the new Hub answers)
+    let spawns = h.spawns();
+    let jobs = h.count("SELECT COUNT(*) FROM runtime_jobs WHERE ?<>''", "-");
+    let hub = spawn_mode(&h, None, &env);
+    serving(&h).await;
+    let n = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    assert_eq!(
+        (&n["adopted"], &n["retired"], &n["legacy"]["sessions"]),
+        (&json!(3), &json!(1), &json!(0)),
+        "every legacy session moved or ended at boot: {n}"
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE phase='released' AND ?<>''",
+            "-"
+        ),
+        3,
+        "bound, nothing opened"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM runtime_jobs WHERE ?<>''", "-"),
+        jobs,
+        "no background model job behind the drain; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(
+        h.spawns(),
+        spawns,
+        "no harness behind the drain; ACP:\n{:?}",
+        h.lines()
+    );
+    let d = drain(&h, "DELETE", &token).await;
+    assert_eq!(d["maintenance"], false, "{d}");
+    assert!(
+        wait(30, || h
+            .count("SELECT COUNT(*) FROM runtime_jobs WHERE ?<>''", "-")
+            > jobs)
+        .await,
+        "the background model call resumes after maintenance; log:\n{}",
+        hub_log(&h)
+    );
+    for (s, conv, token) in [
+        ("ses_legacy_a", "acp-legacy-a", "moved-a-B7"),
+        ("ses_legacy_r", "acp-legacy-r", "moved-r-B7"),
+    ] {
+        assert!(
+            wait(30, || attempts(&h, s, "finished") >= 1).await,
+            "{s} ran on the Node: {}; log:\n{}",
+            debug_session(&h, s),
+            hub_log(&h)
+        );
+        assert_eq!(
+            h.count(
+                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
+                s
+            ),
+            1
+        );
+        assert!(
+            h.lines()
+                .iter()
+                .any(|m| m["method"] == "session/load" && m["params"]["sessionId"] == conv),
+            "{s} continues its own conversation"
+        );
+        assert_eq!(h.got(token), 1, "{s}: what it had in hand goes once");
+        assert_eq!(
+            h.count(
+                "SELECT COUNT(*) FROM events WHERE session_id=? AND json_extract(data,'$.adopted')=1",
+                s
+            ),
+            1,
+            "{s} hears it once"
+        );
+    }
+    // the cut turn: the resume first, the delivered message to be checked, never as new
+    let r: Vec<String> = h
+        .prompts()
+        .into_iter()
+        .filter(|p| p.contains("moved-r-B7"))
+        .collect();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(
+        r[0].starts_with("Hub 刚重启") && r[0].contains("以下是 Hub 重启前已经发给你的消息"),
+        "{}",
+        r[0]
+    );
+    assert_eq!(
+        h.one("SELECT status FROM decisions WHERE id=?", "dec-legacy-r")
+            .as_deref(),
+        Some("expired"),
+        "the old harness's permission died with it"
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM session_dispatch WHERE state IN ('claimed','submitted') AND ?<>''",
+            "-"
+        ),
+        0,
+        "nothing left in the old runner's hands"
+    );
+    // Category backfill resumes too, in a Node job directory of its own. It must not count
+    // as an extra migrated session, and the idle session must still have no adapter.
+    assert_eq!(
+        h.spawns_under(&scratch),
+        2,
+        "one session harness each, none for the idle one; ACP:\n{:?}",
+        h.lines()
+    );
+    for (item, expected) in [("ST-91", 1), ("ST-93", 1), ("ST-95", 0)] {
+        assert_eq!(h.spawns_under(&scratch.join(item)), expected, "{item}");
+    }
+    // the idle one is bound as one the Node let go: its harness opens at its next message
+    assert_eq!(
+        h.one(
+            "SELECT phase FROM runtime_sessions WHERE session_id=?",
+            "ses_legacy_i"
+        )
+        .as_deref(),
+        Some("released")
+    );
+    c.say("ses_legacy_i", "旧会话戊-续 @say moved-i-B7").await;
+    assert!(
+        wait(30, || h.got("moved-i-B7") == 1).await,
+        "it opens on the Node at its message: {}",
+        debug_session(&h, "ses_legacy_i")
+    );
+    assert!(
+        h.lines()
+            .iter()
+            .any(|m| m["method"] == "session/load" && m["params"]["sessionId"] == "acp-legacy-i"),
+        "on its own conversation"
+    );
+    assert_eq!(h.spawns_under(&scratch), 3);
+    for item in ["ST-91", "ST-93", "ST-95"] {
+        assert_eq!(h.spawns_under(&scratch.join(item)), 1, "{item}");
+    }
+    // b can never run there: ended, why said once, its queue said and gone
+    assert_eq!(
+        h.one("SELECT status FROM sessions WHERE id=?", "ses_legacy_b")
+            .as_deref(),
+        Some("ended")
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND json_extract(data,'$.retired')=1 AND instr(data,'工作目录已不存在')>0",
+            "ses_legacy_b"
+        ),
+        1,
+        "b says why, once"
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='queued_removed'",
+            "ses_legacy_b"
+        ),
+        1,
+        "the dropped message is said"
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM queued WHERE session_id=?",
+            "ses_legacy_b"
+        ),
+        0
+    );
+    // the imported read-only one is no legacy session: as it was
+    assert_eq!(
+        h.one("SELECT status FROM sessions WHERE id=?", "ses_legacy_ro")
+            .as_deref(),
+        Some("idle")
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
+            "ses_legacy_ro"
+        ),
+        0
+    );
+    // afterwards: a moved one takes messages on the Node, an ended one refuses them
+    c.say("ses_legacy_a", "旧会话甲-续 @say again-a-B7").await;
+    assert!(
+        wait(30, || h.got("again-a-B7") == 1).await,
+        "on the Node; log:\n{}",
+        hub_log(&h)
+    );
+    let (st, v) = c
+        .call(
+            "POST",
+            "/api/sessions/ses_legacy_b/messages",
+            Some(json!({"text": "旧会话乙-续 @say revived-b-B7"})),
+        )
+        .await;
+    assert_ne!(st, 200, "refused: {v}");
+    drop(hub);
+
+    // a second boot moves nothing again
+    let hub = spawn_mode(&h, None, &env);
+    serving(&h).await;
+    let n = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    assert_eq!(
+        (&n["adopted"], &n["retired"], &n["legacy"]["sessions"]),
+        (&json!(0), &json!(0), &json!(0)),
+        "{n}"
+    );
+    assert_eq!(h.got("moved-r-B7"), 1, "the cut turn continued once");
+    drop(hub);
+
+    // the Node off: a Node session parks, a new session is refused, nothing runs on the Hub
+    let spawns = h.spawns_under(&scratch);
+    let _hub = spawn(&h, false, &env);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    c.say("ses_legacy_a", "旧会话甲-停 @say parked-a-B7").await;
+    assert!(
+        wait(30, || h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND json_extract(data,'$.parked')=1",
+            "ses_legacy_a"
+        ) == 1)
+        .await,
+        "parked; log:\n{}",
+        hub_log(&h)
+    );
+    let sid = c.item(&h, "关闭验收 @say off-new-B7").await;
+    assert_eq!(
+        h.one("SELECT status FROM sessions WHERE id=?", &sid)
+            .as_deref(),
+        Some("ended")
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND json_extract(data,'$.refused')=1 AND instr(data,'STEVE_NODE_MODE=off')>0",
+            &sid
+        ),
+        1,
+        "a clear refusal"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(h.got("parked-a-B7"), 0);
+    assert_eq!(h.got("off-new-B7"), 0);
+    assert_eq!(
+        h.spawns_under(&scratch),
+        spawns,
+        "no session harness on the Hub"
+    );
+}
+
+/// B7: a session the boot pass could not move yet (here: a resume handle no Node takes, mended
+/// afterwards) moves at a later pass and sends what it has queued then, not only at the next
+/// message; a turn the restart cut in a session that can never move ends with a failure card on
+/// its item, never left looking like work in progress.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_legacy_session_left_at_boot_moves_later_and_sends_its_queue() {
+    let h = Home::new();
+    let env = [
+        ("STEVE_TAKEOVER_CONTINUES", "0"),
+        ("STEVE_LEGACY_MOVE_EVERY_MS", "300"),
+    ];
+    let mut hub = spawn_mode(&h, None, &env);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let (_, state) = c.call("GET", "/api/state", None).await;
+    let bot = state["bots"]
+        .as_array()
+        .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
+        .and_then(|b| b["id"].as_str())
+        .expect("a claude-code bot")
+        .to_string();
+    hub.kill();
+    drop(hub);
+    {
+        let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
+        db.busy_timeout(Duration::from_secs(5)).expect("timeout");
+        let d = h.steve().join("scratch").join("ST-96");
+        std::fs::create_dir_all(&d).expect("scratch");
+        let (l, gone) = (d.display().to_string(), "/nonexistent-steve-b7/cut");
+        db.execute_batch(&format!(
+            "INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES
+               ('ST-96','default',96,'旧事项己','run','执行','{bot}',1,1),
+               ('ST-97','default',97,'旧事项庚','run','执行','{bot}',1,1);
+             INSERT INTO sessions(id,workspace_id,item_id,no,bot_id,harness,cwd,status,acp_session_id,title,created,updated) VALUES
+               ('ses_legacy_l','default','ST-96',1,'{bot}','claude-code','{l}','idle','bad handle','己',1,1),
+               ('ses_legacy_x','default','ST-97',1,'{bot}','claude-code','{gone}','running','acp-legacy-x','庚',1,1);
+             INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated) VALUES
+               ('q-l1','ses_legacy_l','旧会话己-已领取 @say later-l-B7','me',2,NULL,'claimed',2);"
+        ))
+        .expect("fixture");
+    }
+    let _hub = spawn_mode(&h, None, &env);
+    serving(&h).await;
+    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    // the cut turn that can never move: ended, its item carries a card
+    assert_eq!(
+        h.one("SELECT status FROM sessions WHERE id=?", "ses_legacy_x")
+            .as_deref(),
+        Some("ended")
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM decisions WHERE item_id=? AND kind='fail' AND status='open' AND instr(question,'工作目录已不存在')>0",
+            "ST-97"
+        ),
+        1,
+        "{}",
+        debug_session(&h, "ses_legacy_x")
+    );
+    // left at boot: bound to no Node, its message waits
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
+            "ses_legacy_l"
+        ),
+        0,
+        "{}",
+        debug_session(&h, "ses_legacy_l")
+    );
+    assert_eq!(h.got("later-l-B7"), 0);
+    // mended: the next pass moves it and sends what waited, with no message of yours
+    {
+        let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
+        db.busy_timeout(Duration::from_secs(5)).expect("timeout");
+        db.execute(
+            "UPDATE sessions SET acp_session_id='acp-legacy-l' WHERE id='ses_legacy_l'",
+            [],
+        )
+        .expect("mend");
+    }
+    assert!(
+        wait(30, || h.got("later-l-B7") == 1).await,
+        "moved later and sent: {}; log:\n{}",
+        debug_session(&h, "ses_legacy_l"),
+        hub_log(&h)
+    );
+    assert!(
+        h.lines()
+            .iter()
+            .any(|m| m["method"] == "session/load" && m["params"]["sessionId"] == "acp-legacy-l"),
+        "on its own conversation"
+    );
+}
+
+/// A 1×1 PNG (RGB, no filter), for the attachment case.
+fn png(rgb: [u8; 3]) -> Vec<u8> {
+    use std::io::Write as _;
+    fn crc(bytes: &[u8]) -> u32 {
+        let mut c = 0xFFFF_FFFFu32;
+        for b in bytes {
+            c ^= u32::from(*b);
+            for _ in 0..8 {
+                c = if c & 1 == 1 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+        }
+        !c
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend((data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend(data);
+        out.extend(&body);
+        out.extend(crc(&body).to_be_bytes());
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&[0, rgb[0], rgb[1], rgb[2]]).expect("zlib");
+    let idat = z.finish().expect("zlib");
+    let mut ihdr = Vec::new();
+    ihdr.extend(1u32.to_be_bytes());
+    ihdr.extend(1u32.to_be_bytes());
+    ihdr.extend([8, 2, 0, 0, 0]);
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"IDAT", &idat);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(b))
+}
+
+impl Client {
+    async fn upload(&self, name: &str, bytes: Vec<u8>) -> String {
+        let r = self
+            .http
+            .post(format!("{}/api/files?name={name}", self.base))
+            .header("cookie", &self.cookie)
+            .header("content-type", "application/octet-stream")
+            .body(bytes)
+            .send()
+            .await
+            .expect("upload");
+        let st = r.status().as_u16();
+        let v: Value = r.json().await.expect("upload json");
+        assert_eq!(st, 200, "upload: {v}");
+        v["id"].as_str().expect("file id").to_string()
+    }
+    async fn say_with(&self, sid: &str, text: &str, files: &[&str]) -> Value {
+        let (st, v) = self
+            .call(
+                "POST",
+                &format!("/api/sessions/{sid}/messages"),
+                Some(json!({"text": text, "files": files})),
+            )
+            .await;
+        assert_eq!(st, 200, "message: {v}");
+        v
+    }
+}
+
+/// The prompt blocks the agent got for the message carrying `token`.
+fn prompt_blocks(h: &Home, token: &str) -> Option<Vec<Value>> {
+    h.lines()
+        .into_iter()
+        .filter(|m| m["method"] == "session/prompt")
+        .filter_map(|m| m["params"]["prompt"].as_array().cloned())
+        .find(|ps| {
+            ps.iter()
+                .any(|p| p["text"].as_str().is_some_and(|t| t.contains(token)))
+        })
+}
+
+/// N0e-E9: a Node session's attachments come to the agent through the Node. It fetches them from
+/// the Hub (HubFiles, by hash) and places them in the session's workspace under
+/// `.steve/attachments` with the ignore file; the image also goes inline. An attachment the Hub no
+/// longer has does not hold the turn up: it goes without it, and the agent is told.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_sessions_attachments_are_placed_by_the_node() {
+    let h = Home::new();
+    let _hub = spawn(&h, true, &[("FAKE_ACP_IMAGE", "1")]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    let sid = c.item(&h, "附件验收 @say ready-A1").await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "ready-A1") > 0).await,
+        "the first turn; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
+            &sid
+        ),
+        1,
+        "bound to the local Node"
+    );
+
+    let notes = "第一行\nline two\n".repeat(50).into_bytes();
+    let image = png([200, 30, 30]);
+    let txt = c.upload("notes.txt", notes.clone()).await;
+    let pic = c.upload("截图.png", image.clone()).await;
+    c.say_with(&sid, "附件验收-F3 @say got-files", &[&txt, &pic])
+        .await;
+    let mut blocks = None;
+    assert!(
+        wait(30, || {
+            blocks = prompt_blocks(&h, "附件验收-F3");
+            blocks.is_some()
+        })
+        .await,
+        "the prompt reached the agent; log:\n{}",
+        hub_log(&h)
+    );
+    let blocks = blocks.expect("blocks");
+    let text = blocks[0]["text"].as_str().expect("text").to_string();
+    let cwd = h
+        .one("SELECT cwd FROM sessions WHERE id=?", &sid)
+        .expect("cwd");
+    let cwd = PathBuf::from(cwd).canonicalize().expect("cwd exists");
+    assert!(
+        text.contains("用户附带了 2 个附件，已保存在工作目录里"),
+        "{text}"
+    );
+    for (id, name, bytes) in [(&txt, "notes.txt", &notes), (&pic, "截图.png", &image)] {
+        let rel = format!(".steve/attachments/{}-{name}", &id[4..]);
+        assert!(text.contains(&format!("- {rel}（")), "{rel} named: {text}");
+        let placed = std::fs::read(cwd.join(&rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        assert_eq!(
+            sha256_hex(&placed),
+            sha256_hex(bytes),
+            "{rel}: the same bytes"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(cwd.join(".steve/attachments/.gitignore")).expect("ignore file"),
+        "*\n"
+    );
+    assert!(
+        text.contains("图片也直接附在这条消息里"),
+        "the image is inline: {text}"
+    );
+    assert!(
+        blocks
+            .iter()
+            .any(|b| b["type"] == "image" && b["mimeType"] == "image/png"),
+        "an image block: {blocks:?}"
+    );
+    // fetched by the Node: the bytes are in its cache, by hash
+    for bytes in [&notes, &image] {
+        let cached = h.steve().join("node/blobs").join(sha256_hex(bytes));
+        let cached = if cached.exists() {
+            cached
+        } else {
+            walk(&h.steve())
+                .into_iter()
+                .find(|p| {
+                    p.parent().and_then(|d| d.file_name()) == Some("blobs".as_ref())
+                        && p.file_name() == Some(sha256_hex(bytes).as_ref())
+                })
+                .unwrap_or_else(|| panic!("no cached blob under {}", h.steve().display()))
+        };
+        assert_eq!(
+            sha256_hex(&std::fs::read(cached).expect("cache")),
+            sha256_hex(bytes)
+        );
+    }
+    assert!(wait(30, || steve_v1(&h, &sid, "got-files") > 0).await);
+
+    // the blob is gone from the Hub: the turn goes on without it, and says so
+    let lost = c.upload("lost.txt", b"never placed".to_vec()).await;
+    let (ws, sha): (String, String) = h
+        .db()
+        .query_row(
+            "SELECT workspace_id, sha256 FROM files WHERE id=?",
+            [&lost],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("file row");
+    std::fs::remove_file(
+        h.steve()
+            .join("data/files")
+            .join(&ws)
+            .join(&sha[..2])
+            .join(&lost),
+    )
+    .expect("remove blob");
+    c.say_with(&sid, "附件验收-G4 @say went-on", &[&lost]).await;
+    // wait for the prompt itself: the user's own message (which names `went-on`) is a steve.v1
+    // event the moment it is sent, before the agent has seen anything
+    let mut blocks = None;
+    assert!(
+        wait(30, || {
+            blocks = prompt_blocks(&h, "附件验收-G4");
+            blocks.is_some()
+        })
+        .await,
+        "the turn ran; log:\n{}",
+        hub_log(&h)
+    );
+    let text = blocks.expect("prompt")[0]["text"]
+        .as_str()
+        .expect("text")
+        .to_string();
+    assert!(
+        text.contains("（用户还附带了 1 个附件，但没能取到：lost.txt）"),
+        "{text}"
+    );
+    assert!(
+        !cwd.join(format!(".steve/attachments/{}-lost.txt", &lost[4..]))
+            .exists()
+    );
+}
+
+/// Every file under `dir`.
+fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }

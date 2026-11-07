@@ -16,6 +16,8 @@
 //! | `GET /flows/:id/runs?limit=&dry=0\|1` | `Run[]` without steps (`dry` absent = all) |
 //! | `GET /runs/:id` | `Run` |
 //! | `POST /runs/:id/cancel` | `Run` |
+//! | `GET /flow-settings/allow-private` | `{hosts}`: the hosts `http` nodes may reach on internal addresses |
+//! | `PUT /flow-settings/allow-private` | `{hosts}` → `{hosts}` (the workspace's owner; Steve's drafts never write it) |
 
 use std::sync::Arc;
 
@@ -31,6 +33,7 @@ use crate::FlowCx;
 use crate::engine;
 use crate::flows::{self, DESCRIPTION_MAX, FlowRow, NAME_MAX, NewFlow};
 use crate::graph::{self, Graph};
+use crate::nodes::http;
 use crate::runs;
 use crate::signals;
 
@@ -51,6 +54,88 @@ pub fn routes() -> Router<Modules> {
         .route("/flows/{id}/runs", get(history))
         .route("/runs/{id}", get(run_detail))
         .route("/runs/{id}/cancel", post(cancel))
+        .route(
+            "/flow-settings/allow-private",
+            get(allow_private_get).put(allow_private_put),
+        )
+}
+
+/// Hosts in [`http::ALLOW_PRIVATE`] at most.
+pub const ALLOW_PRIVATE_MAX: usize = 50;
+
+async fn allow_private_get(Extension(cx): Cx, who: Caller) -> ApiResult<Json<Value>> {
+    let mut hosts: Vec<String> = cx
+        .store()
+        .reader(|c| Ok::<_, ApiError>(http::allow_private(c, &who.ws)))?
+        .into_iter()
+        .collect();
+    hosts.sort();
+    Ok(Json(json!({ "hosts": hosts })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AllowPrivateBody {
+    hosts: Vec<String>,
+}
+
+/// A host name or an IP literal (`nas.local`, `192.168.1.10`, `[::1]`, `localhost`).
+fn valid_host(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 253
+        && h.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']' | '_'))
+}
+
+/// Your explicit setting: only a person, in this form, adds a host. Steve's drafts and conversational
+/// edits write graphs, never this.
+async fn allow_private_put(
+    Extension(cx): Cx,
+    who: Caller,
+    Body(b): Body<AllowPrivateBody>,
+) -> ApiResult<Json<Value>> {
+    let mut hosts: Vec<String> = Vec::new();
+    for h in &b.hosts {
+        let h = h.trim().trim_end_matches('.').to_ascii_lowercase();
+        if h.is_empty() {
+            continue;
+        }
+        if !valid_host(&h) {
+            return Err(ApiError::invalid("hosts"));
+        }
+        if !hosts.contains(&h) {
+            hosts.push(h);
+        }
+    }
+    if hosts.len() > ALLOW_PRIVATE_MAX {
+        return Err(ApiError::invalid("hosts"));
+    }
+    hosts.sort();
+    let now = cx.now();
+    cx.store().transaction(|tx| -> ApiResult<()> {
+        let role: Option<String> = rusqlite::OptionalExtension::optional(tx.query_row(
+            "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+            params![who.ws, who.me],
+            |r| r.get(0),
+        ))?;
+        if role.as_deref() != Some("owner") {
+            return Err(ApiError::forbidden(steve_i18n::t!("flow.settings.owner_only")));
+        }
+        tx.execute(
+            "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?)
+             ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
+            params![who.ws, http::ALLOW_PRIVATE, json!(hosts).to_string(), now],
+        )?;
+        steve_store::base::audit(
+            tx,
+            &who.ws,
+            &who.me,
+            "flow.allow_private",
+            http::ALLOW_PRIVATE,
+            &json!({ "hosts": hosts }),
+        )?;
+        Ok(())
+    })?;
+    Ok(Json(json!({ "hosts": hosts })))
 }
 
 /// Schedules are edited on their own page (their graph is generated from the form).

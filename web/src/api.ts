@@ -1,6 +1,7 @@
 /* Hub API: raw shapes (mirroring hub/src/repo.ts) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
+import type { Workflow } from "./workflow"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type RItem = {
@@ -10,6 +11,7 @@ export type RItem = {
   goal: string; goals: number; tags: string[]; deps: string[]; sessionIds: string[]; open: string[]; queued: number; live: boolean
 }
 export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number }[]; decisions: RDecision[]; dependents: string[]
+  workflow?: Workflow | null
   /** outputs delivered as records of the work (self-check screenshots, logs): `{artifact id: "record"}` */
   artifactRoles?: Record<string, string>
   /** the user's notes on the outputs, drafts and sent (ST-38) */
@@ -37,6 +39,16 @@ export type RLane = {
   ship: RLaneFact<"tag" | "script" | "merge">
   numbered: { kind: "version" | "notes" | "migrations" | "lockfile"; path: string; evidence: string; handling: string }[]
   pace: { days: number; landed: number; releases: number; authors: number }
+  /** the lane itself; `null` until a request first went into it or you set its limits */
+  lane: RLaneState | null
+}
+export type RLaneMember = { id: string; item_id: string | null; branch: string; label: string }
+/** a batch: `approved` false while its card waits for you (what arrives then joins it) */
+export type RLaneUnit = { no: number; members: RLaneMember[]; deferred: RLaneMember[]; opened_at: number; closed: boolean; merged: boolean; approved: boolean }
+export type RLaneLimits = { window_ms: number; max_members: number }
+export type RLaneState = {
+  id: string; policy: RLaneLimits; set: { window_ms: number | null; max_members: number | null }; defaults: RLaneLimits
+  running: RLaneUnit | null; collecting: (RLaneUnit & { closes_at: number }) | null; queued: RLaneMember[]
 }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string; done_when?: "merge" | "tag" } | null; archived: boolean; created: number; updated: number }
 export type RWorkspace = { id: string; name: string; description: string; item_prefix: string; sort: number; created: number; role?: string }
@@ -46,6 +58,8 @@ export type RKindReview = { id: string; kind: string; why: string }
 export type RKindBackfill = { checked: number; kept: number; dry: boolean; filled: { id: string; title: string; kind: string; by: "model" | "rule"; confidence: number; uncertain: boolean; why: string; had?: string[] }[] }
 export type RMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
 export type RDevice = { id: string; name: string; roles: string[]; os: string; version: string; status: string; max_sessions: number; seen: number; created: number }
+export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean }
+export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
 export type RRuntime = { id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string }
 export type REvent = { seq: number; ts: number; kind: string; data: any }
 export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[] }
@@ -155,7 +169,7 @@ export const api = {
   state: () => { let c: string | null = null; return req<State>("GET", "/state", undefined, (r) => { c = r.headers.get("x-steve-cursor") }).then((s) => { if (c) stateCursors.set(s, c); return s }) },
   me: () => get<{ user: { id: string; name: string; email: string | null; role: string }; version: string; web_version: string }>("/me"),
   switchWs: (id: string) => post(`/workspaces/${id}/switch`), newWs: (p: { name: string; description?: string; item_prefix?: string }) => post<RWorkspace>("/workspaces", p), patchWs: (id: string, p: Partial<RWorkspace>) => patch(`/workspaces/${id}`, p),
-  say: (text: string, files: string[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], to: { item?: string; reply_to?: string } = {}) => post("/thread", { text, files, ...(mentions.length ? { mentions } : {}), ...(to.item ? { item: to.item } : {}), ...(to.reply_to ? { reply_to: to.reply_to } : {}) }),
+  say: (text: string, files: string[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], to: { item?: string; reply_to?: string; client_id?: string } = {}) => post("/thread", { text, files, ...(mentions.length ? { mentions } : {}), ...(to.item ? { item: to.item } : {}), ...(to.reply_to ? { reply_to: to.reply_to } : {}), ...(to.client_id ? { client_id: to.client_id } : {}) }),
   stop: () => post("/thread/stop"),
   /* a message said while Steve was on a turn waits for it; until then it can be changed or withdrawn (409 once it went) */
   threadQueuedEdit: (msg: string, text: string) => patch<{ ok: boolean }>(`/thread/queued/${msg}`, { text }),
@@ -172,13 +186,15 @@ export const api = {
   readNotifications: (at?: number) => post<{ seen: number }>("/notifications/read", { at }),
   dismissNotice: (id: string) => post<{ ok: true }>(`/notifications/${encodeURIComponent(id)}/dismiss`, {}),
   item: (id: string) => get<RItemDetail>("/items/" + id),
+  workflow: (id: string) => get<Workflow | null>(`/items/${encodeURIComponent(id)}/workflow`),
+  workflowChange: (id: string, p: { action: "pause" | "resume" | "retry" | "cancel"; expected_revision: number; reason: string; unit_id?: string }) => post<Workflow>(`/items/${encodeURIComponent(id)}/workflow`, p),
   outPreview: (id: string, art: string, path?: string) => get<ROutPreview>(`/items/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(art)}/preview${qs({ path })}`),
   annAdd: (id: string, p: { art: string; path?: string; anchor: RAnchor; note: string }) => post<RAnnotation>(`/items/${encodeURIComponent(id)}/annotations`, p),
   annEdit: (id: string, ann: string, note: string) => patch<RAnnotation>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`, { note }),
   annRemove: (id: string, ann: string) => del<{ ok: boolean }>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`),
   /* one send per key: the same key again (a second click, a retry) is answered `again` and sends nothing */
   annSend: (id: string, ids: string[], key: string) => post<{ ok: boolean; again: boolean; pending?: boolean; sent: number; timeline_id?: number | null; warning?: string }>(`/items/${encodeURIComponent(id)}/annotations/send`, { ids, key }),
-  newItem: (p: { goal: string; bot?: string; project?: string | null; mode?: "start" | "propose" }) => post<RItem>("/items", p),
+  newItem: (p: { goal: string; bot?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string }) => post<RItem>("/items", p),
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),
@@ -203,6 +219,8 @@ export const api = {
   addMemory: (id: string, text: string) => post(`/bots/${id}/memories`, { text }), editMemory: (id: string, text: string) => patch(`/memories/${id}`, { text }), deleteMemory: (id: string) => del(`/memories/${id}`), clearMemories: () => del("/memories"),
   newProject: (p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) => post<RProject>("/projects", p), patchProject: (id: string, p: Partial<RProject>) => patch<RProject>("/projects/" + id, p),
   lane: (id: string) => get<RLane>(`/projects/${encodeURIComponent(id)}/lane`),
+  lanePolicy: (id: string, p: { window_min: number | null; max_members: number | null }) => patch<{ lane: RLaneState | null }>(`/projects/${encodeURIComponent(id)}/lane`, p),
+  laneNow: (id: string) => post<{ closed: boolean; lane: RLaneState | null }>(`/projects/${encodeURIComponent(id)}/lane/now`),
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }), dirs: (path: string) => get<string[]>(`/fs/dirs?path=${encodeURIComponent(path)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),
   kindsReview: () => get<RKindReview[]>("/tags/kinds/review"), kindsReviewed: (ids: string[]) => post<RKindReview[]>("/tags/kinds/review", { ids }),
@@ -210,6 +228,9 @@ export const api = {
   settings: (p: Record<string, string>) => patch("/settings", p),
   draft: (target: { kind: string; id?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
   devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),
+  nodes: () => get<{ nodes: RNode[] }>("/nodes"),
+  createPairing: () => post<RPairing>("/nodes/pairings"),
+  confirmNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/confirm`),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
     const r = await fetch("/api/files?name=" + encodeURIComponent(name), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "same-origin" })

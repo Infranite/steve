@@ -159,7 +159,8 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
         .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .env_remove("FAKE_ACP_LOG")
-        .env_remove("STEVE_NODE_MODE")
+        // remote Nodes only: the local Node (the default since B6) stays off
+        .env("STEVE_NODE_MODE", "off")
         .env_remove("STEVE_NODE_BIND")
         .env_remove("STEVE_NODE_TLS_PIN")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
@@ -605,8 +606,8 @@ async fn a_second_node_runs_a_whole_item() {
         n.log()
     );
 
-    // nothing ran on the Hub's machine: no local Node, no legacy transcript; the journal and the
-    // workspace are the Node's
+    // The default local model-job host may exist, but this item's turns and transcript belong
+    // only to the remote Node.
     assert_eq!(
         h.count(
             "SELECT COUNT(*) FROM events WHERE session_id=? AND format<>'steve.v1'",
@@ -614,7 +615,14 @@ async fn a_second_node_runs_a_whole_item() {
         ),
         0
     );
-    assert!(!h.steve().join("data/node").exists(), "no local Node");
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id WHERE t.session_id=? AND a.node_id='local'",
+            &sid
+        ),
+        0,
+        "the item's turns never ran on the local model-job host"
+    );
     assert!(n.path().join("node/local").exists(), "the Node's own home");
     assert!(p.alive());
 }
@@ -710,6 +718,12 @@ async fn another_nodes_session_is_refused() {
     let sid = c.item(&h, "隔离验收 @say iso-3M @sleep 600000").await;
     assert!(
         wait(60, || n.got("iso-3M") == 1).await,
+        "node:\n{}",
+        n.log()
+    );
+    // what the harness said is in before the count below is taken
+    assert!(
+        wait(60, || said(&h, &sid, "iso-3M") >= 1).await,
         "node:\n{}",
         n.log()
     );

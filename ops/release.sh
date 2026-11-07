@@ -42,6 +42,8 @@ LABEL=${STEVE_LABEL:-io.github.infranite.steve} PORT=${STEVE_PORT:-8440} DRAIN_S
 REL=$HOME_DIR/releases WEB=$HOME_DIR/web LOGS=$HOME_DIR/logs/release HIST=$HOME_DIR/releases/history.jsonl
 CARGO_TARGET=${STEVE_CARGO_TARGET_DIR:-$HOME_DIR/build/cargo-target} HEALTH_TRIES=${STEVE_HEALTH_TRIES:-40} DB=$HOME_DIR/data/steve.sqlite3
 mkdir -p $REL $WEB $LOGS $HOME_DIR/backups
+# backups are copies of the database (0600): the owner's alone, the ones from before this too
+chmod 700 $HOME_DIR/backups && chmod -R go-rwx $HOME_DIR/backups
 WEB_PREV_TARGET=$(readlink $WEB/current 2>/dev/null)
 PREV=$(basename "$(readlink $HOME_DIR/current 2>/dev/null)" 2>/dev/null) WEB_PREV=$(basename "$WEB_PREV_TARGET" 2>/dev/null)
 [[ $PREV == . ]] && PREV=""; [[ $WEB_PREV == . ]] && WEB_PREV=""
@@ -165,6 +167,10 @@ export STEVE_KEYHELPER_HUB_IDENTIFIER=$SIGN_IDENT
 export STEVE_KEYHELPER_IDENTIFIER=${STEVE_KEYHELPER_IDENTIFIER:-io.github.infranite.steve.keyhelper}
 export STEVE_KEYHELPER_SERVICE=${STEVE_KEYHELPER_SERVICE:-io.github.infranite.steve.vault}
 SIGN_KC=${STEVE_SIGN_KEYCHAIN:-$HOME_DIR/signing/steve-signing.keychain-db}
+# The signing keychain's password (sign_pass, release-lib.sh): read once per run, kept in this shell only (not
+# exported), so a manual run in a terminal meets the macOS prompt at most once.
+SIGN_PASS=""
+signing_pass() { [[ -n $SIGN_PASS ]] || SIGN_PASS=$(sign_pass $SIGN_KC) }
 sign_hub() {
   local bin=$1 req
   # code signing and the keychain ACL are macOS only; other systems keep the vault key elsewhere
@@ -172,13 +178,13 @@ sign_hub() {
     print -r -- "   not macOS ($(uname -s)): skipping code signing"
     return 0
   fi
-  if [[ ! -f $SIGN_KC || ! -f ${SIGN_KC:h}/keychain-pass ]]; then
+  if [[ ! -f $SIGN_KC ]]; then
     [[ ${STEVE_UNSIGNED:-} == 1 ]] && { print -r -- "   STEVE_UNSIGNED=1: no signing keychain, steve-hub stays ad-hoc signed"; return 0 }
     print -r -- "   no signing keychain at $SIGN_KC: an ad-hoc signed Hub can't read the vault (run ops/sign-setup.sh)"
     return 1
   fi
-  security unlock-keychain -p "$(<${SIGN_KC:h}/keychain-pass)" $SIGN_KC || { print -r -- "   cannot unlock $SIGN_KC"; return 1 }
-  run codesign -f -s "$SIGN_ID" --keychain $SIGN_KC -i $SIGN_IDENT $bin || { print -r -- "   codesign failed"; return 1 }
+  signing_pass || return 1
+  kc_sign $SIGN_KC "$SIGN_PASS" run codesign -f -s "$SIGN_ID" --keychain $SIGN_KC -i $SIGN_IDENT $bin || { print -r -- "   codesign failed"; return 1 }
   req=$(codesign -d -r- $bin 2>&1 | grep '^designated')
   [[ $req == *"identifier \"$SIGN_IDENT\""*"certificate leaf"* ]] || { print -r -- "   unexpected signature: $req"; return 1 }
   print -r -- "   signed: $req"
@@ -200,7 +206,7 @@ keyhelper_install() { # release dir
   fi
   src=$dir/hub-rs/crates/steve-keyhelper
   [[ -d $src ]] || return 0
-  if [[ ! -f $SIGN_KC || ! -f ${SIGN_KC:h}/keychain-pass ]]; then
+  if [[ ! -f $SIGN_KC ]]; then
     [[ ${STEVE_UNSIGNED:-} == 1 ]] && { print "   STEVE_UNSIGNED=1: no signing keychain, steve-keyhelper not installed"; return 0 }
     print "   no signing keychain: steve-keyhelper can't be installed (run ops/sign-setup.sh)"; return 1
   fi
@@ -210,8 +216,8 @@ keyhelper_install() { # release dir
   if [[ -x $bin && $want == $have ]]; then print -r -- "   steve-keyhelper unchanged ($want)"; return 0; fi
   ( cd $dir/hub-rs && export CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never && run $CARGO build --release --locked -p steve-keyhelper --target-dir $CARGO_TARGET ) || return 1
   mkdir -p $HOME_DIR/bin && cp -p $CARGO_TARGET/release/steve-keyhelper $bin.new || return 1
-  security unlock-keychain -p "$(<${SIGN_KC:h}/keychain-pass)" $SIGN_KC || return 1
-  run codesign -f -s "$SIGN_ID" --keychain $SIGN_KC -i $STEVE_KEYHELPER_IDENTIFIER $bin.new || return 1
+  signing_pass || return 1
+  kc_sign $SIGN_KC "$SIGN_PASS" run codesign -f -s "$SIGN_ID" --keychain $SIGN_KC -i $STEVE_KEYHELPER_IDENTIFIER $bin.new || return 1
   if [[ -x $bin ]]; then
     print -r -- "   migrating the vault keys from the installed steve-keyhelper"
     $bin.new migrate-from $bin || { print -r -- "   migration failed: keeping the installed helper"; rm -f $bin.new; return 1 }
@@ -268,7 +274,7 @@ hub_release() {
     # the first switch to the Rust Hub migrates the schema forward (3 → 11+): its backup is kept apart from the rotation
     if [[ $HUB_IMPL == rust && $PREV_IMPL != rust ]]; then BACKUP=$HOME_DIR/backups/pre-rust-$VER.sqlite3; else BACKUP=$HOME_DIR/backups/pre-$VER.sqlite3; fi
     print -r -- "   schema v${SCHEMA_BEFORE:-?}, backup to $BACKUP"
-    if run sqlite3 $DB ".backup '$BACKUP'" && [[ $(sqlite3 $BACKUP "PRAGMA quick_check" 2>&1) == ok ]]; then
+    if (umask 077; run sqlite3 $DB ".backup '$BACKUP'") && chmod 600 $BACKUP && [[ $(sqlite3 $BACKUP "PRAGMA quick_check" 2>&1) == ok ]]; then
       print -r -- "   backup ok ($(du -h $BACKUP | cut -f1))"
     else
       hub_fail "发布前数据库备份失败，没有切换"
@@ -345,7 +351,7 @@ rollback_main() { # [version]
   SCHEMA_BEFORE=$(schema)
   if [[ -f $DB ]]; then
     BACKUP=$HOME_DIR/backups/rollback-$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS).sqlite3
-    if ! run sqlite3 $DB ".backup '$BACKUP'"; then
+    if ! (umask 077; run sqlite3 $DB ".backup '$BACKUP'"); then
       err="回滚前数据库备份失败，没有切换"; print -r -- "✗ $err"
       SCHEMA_AFTER=$SCHEMA_BEFORE; history rollback false "$err" false $T_HUB "$cur"; rollback_result false "$err"; finish 1
     fi

@@ -50,6 +50,7 @@ impl steve_flow::Core for FlowCore {
                     opening: None,
                     files: vec![],
                     actor: Some("steve".into()),
+                    requester: None,
                 })
                 .map_err(|e| e.to_string())?;
             if req.accept_auto {
@@ -157,6 +158,8 @@ pub struct Built {
     pub jobs: Vec<Job>,
     /// Recalls a channel message (YOLO's `recall` undo).
     pub recall: Arc<dyn steve_core::yolo::undo::Recall>,
+    /// What runs for each connection of an adapter with a hook (started by one of `jobs`).
+    pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
 }
 
 /// The objects the event producers call, exactly as wired: G2's sink, E1's events, C1's inbound.
@@ -317,6 +320,15 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let keys = steve_modules::vault::keystore::from_env(steve_home, |k| vars(k))
         .map_err(|e| BackendError::msg(format!("vault keystore: {e}")))?;
     let vault = steve_modules::vault::Vault::new(store.clone(), keys);
+    // what an interrupted rotation of an earlier Hub left `retiring` is finished once, off the start
+    {
+        let v = vault.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = v.tidy_keys() {
+                tracing::warn!("vault: tidy keys: {e}");
+            }
+        });
+    }
     let uses = steve_modules::vault::SecretUses::new(
         vault.clone(),
         steve_home,
@@ -361,8 +373,8 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     registry.decision(steve_channels::respond::SUBJECT_MESSAGE, out_link.handler());
     let late = steve_channels::flow_actions::LateChannels::new();
     let mut outbox = steve_channels::Outbox::new(out_link.clone());
-    for (adapter, s) in &declared.as_user {
-        outbox = outbox.as_user(adapter, s.clone());
+    for a in &declared.act_as_user {
+        outbox = outbox.act_as_user(a.clone());
     }
     let outbox = Arc::new(outbox.secrets(Arc::new(hp::RedactorScan)));
     registry.item_hooks(Box::new(steve_channels::outbound::ReturnToSource::new(
@@ -371,6 +383,17 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     )));
 
     let modules = Modules::new(store.clone(), core.module_gateway(), registry);
+    // the handle systems the extensions declared, there before anything names a sender in one
+    if !declared.systems.is_empty() {
+        store
+            .transaction(|tx| -> steve_store::Result<()> {
+                for (id, label, ext) in &declared.systems {
+                    steve_modules::accounts::repo::upsert_declared(tx, id, label, ext)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| BackendError::msg(format!("declared handle systems: {e}")))?;
+    }
     kb_hooks.bind(modules.clone());
     // an item's knowledge document goes in the transaction that deletes the item
     store.on_item_deleted(|tx, ws, id| {
@@ -409,11 +432,25 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         mail_cfg.clone(),
     )))
     // spaces outlive their connection (kept as left; their settings and cursors go)
-    .usage(Arc::new(steve_channels::usage::ChannelUsage));
+    .usage(Arc::new(steve_channels::usage::ChannelUsage))
+    // a claim into 我 moves the merged contact's accounts and channel members along
+    .party_hooks(ports.hooks.clone());
     for p in &declared.providers {
         conns = conns.provider(p.clone());
     }
+    // what each channel side declares, for the 接入 page
+    for d in declared.decls() {
+        conns = conns.channel(
+            &d.adapter,
+            steve_channels::channel_accounts::decl_summary(d),
+        );
+    }
     let conns = conns.build();
+    // a connection stored under another shape than its provider's now waits for a new
+    // authorization instead of running on it
+    if conns.check_versions().is_err() {
+        tracing::error!("could not check the stored connection versions");
+    }
     let gh = steve_github::GitHub::new(conns.clone(), gh_env);
     gh_slot.bind(&gh);
     if let Some(n) = git_nodes {
@@ -526,6 +563,18 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     for p in &declared.profiles {
         channels = channels.profiles(p.clone());
     }
+    // how the images and files of each adapter's messages are fetched
+    for m in &declared.media {
+        channels = channels.media(m.clone());
+    }
+    // how an agent reads each adapter's conversations on demand (`steve_im_read`)
+    for h in &declared.history {
+        channels = channels.history(h.clone());
+    }
+    // how each channel side's messages are told apart (provider ids, time precision, senders)
+    for d in declared.decls() {
+        channels = channels.decl(d.clone());
+    }
     let channels = channels
         .party_hooks(ports.hooks.clone())
         .flow(flow.clone())
@@ -536,6 +585,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .reactor(outbox.clone())
         // IM spaces converse through steve-core's thread (channels §2.12)
         .thread(Arc::new(super::chan::CoreThread(core.clone())))
+        .yolo(Arc::new(super::chan::ChanYolo(core.clone())))
         .build();
     channels.set_knowledge_store(kstore.clone());
     late.set(&channels);
@@ -553,8 +603,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .push(Arc::new(steve_mail::timeline::MailTimeline));
 
     // the extensions' step two: their routes (merged with the modules' below) and jobs
-    let started =
-        crate::extension::Started::new(&channels, bus, vars, declared.feishu_user.clone());
+    let started = crate::extension::Started::new(&channels, bus, vars);
     let routes = Router::new()
         .merge(steve_knowledge::routes(kb.clone()))
         .merge(steve_modules::contacts::routes(ports))
@@ -568,14 +617,24 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .merge(steve_github::issues::routes(gh.clone()))
         .merge(steve_mail::api::routes(mail.clone()))
         .merge(steve_channels::api::routes(channels.clone()))
-        .merge(steve_channels::channels_api::routes(
-            channels.clone(),
-            declared.feishu_user.clone(),
-        ))
+        .merge(steve_channels::channels_api::routes(channels.clone()))
         .merge(super::chan::routes(channels.clone(), outbox.clone()));
-    let (routes, ext_jobs) = assembly
-        .start(&started, routes)
+    let crate::extension::StartedAll {
+        routes,
+        jobs: ext_jobs,
+        hooks,
+    } = assembly
+        .start(&started, &declared, routes)
         .map_err(|e| BackendError::msg(e.to_string()))?;
+    // what runs for each connection of an adapter with a hook: the events are tapped now, before
+    // the runtime lists the connections
+    let lifecycle = (!hooks.is_empty()).then(|| {
+        let mut rt = steve_channels::lifecycle::ConnectionRuntime::builder(channels.clone());
+        for h in hooks {
+            rt = rt.hook(&h.adapter, h.decl, h.hook);
+        }
+        (rt.build(), bus.tap(&["connection"]))
+    });
     let routes = routes
         .with_state(modules.clone())
         .merge(steve_modules::vault::routes(vault.clone()))
@@ -629,9 +688,16 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         Box::pin(steve_flow::retention::run(flow.clone())),
         Box::pin(steve_channels::messages::retention(modules.clone())),
     ];
-    // the extensions' (built in: Feishu app registrations resumed, the Feishu long connections
-    // and self pollers)
+    // the extensions' (built in: Feishu app registrations resumed) and the connection runtime
+    // (built in: the Feishu long connections and self pollers)
     jobs.extend(ext_jobs);
+    let lifecycle = lifecycle.map(|(rt, events)| {
+        let run = rt.clone();
+        jobs.push(Box::pin(async move {
+            let _ = run.start(events).await;
+        }));
+        rt
+    });
     let seams = Seams {
         flow: flow.clone(),
         github: gh_sink,
@@ -706,5 +772,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
             ch: channels.clone(),
             outbox: outbox.clone(),
         }),
+        lifecycle,
     })
 }

@@ -51,7 +51,11 @@ pub struct Policy {
     pub presence_s: u64,
     pub release_delay_s: u64,
     pub propose_chat_delay_s: u64,
+    /// The cooling-off before a message or mail goes out as the user (`chan.self_ai`, `mail.self_ai`).
     pub chan_delay_s: u64,
+    /// The cooling-off before a bot account's first send to an internal audience (`chan.bot_internal`):
+    /// nobody reads it as the user, and it can still be recalled.
+    pub chan_bot_delay_s: u64,
     pub chan_retry_delay_s: u64,
 }
 
@@ -73,6 +77,7 @@ impl Default for Policy {
             release_delay_s: 180,
             propose_chat_delay_s: 120,
             chan_delay_s: 600,
+            chan_bot_delay_s: 60,
             chan_retry_delay_s: 300,
         }
     }
@@ -97,6 +102,7 @@ impl Policy {
             release_delay_s: 0,
             propose_chat_delay_s: 0,
             chan_delay_s: 0,
+            chan_bot_delay_s: 0,
             chan_retry_delay_s: 0,
         }
     }
@@ -293,8 +299,8 @@ pub struct Release {
     pub accepted: bool,
     /// Another release is running or the Hub holds for one.
     pub releasing: bool,
-    /// Releases are not coming too often (the executor's spacing rule).
-    pub spacing_ok: bool,
+    /// Seconds until the last YOLO release is 15 minutes ago (the executor's spacing rule; 0: none).
+    pub spacing_wait_s: u64,
     /// Times a rebase conflict was handed back to the bot for this item.
     pub rebase_returns: u32,
 }
@@ -358,6 +364,9 @@ pub struct Ask {
     pub count: u32,
     /// The normalised question (kept in the ledger to spot a repeat).
     pub key: String,
+    /// The item runs with full access: the agent acts on an answer without the tool guard, so every
+    /// outward word counts, not only going live and mail.
+    pub full: bool,
 }
 
 /// Rebase conflicts handed back before YOLO leaves the next release card to you.
@@ -649,8 +658,7 @@ pub fn reason_shown(reason: &str) -> String {
             steve_i18n::t!("core.yolo.reason.release_rebase")
         }
         "分支不对或事项还没验收" => steve_i18n::t!("core.yolo.reason.release_state"),
-        "发布太频繁（每小时最多 3 次、每次至少隔 15 分钟），这次留给你" =>
-        {
+        "两次发布至少隔 15 分钟，到时间再发" => {
             steve_i18n::t!("core.yolo.reason.release_rate")
         }
         "发布你自己的 Steve，健康检查失败会自动回滚" => {
@@ -751,7 +759,9 @@ pub fn judge(f: &Facts, p: &Policy, env: &Env) -> Verdict {
     if let Some(l) = limits::check(f, env) {
         return decline(&l.rule(), l.reason());
     }
-    if f.present && !matches!(f.subject, Subject::Muted) {
+    // a tool call inside the worktree is the guard's to judge: waiting for the user there only holds
+    // the agent the user just told what to do (and a message queued behind the call waits for it)
+    if f.present && !matches!(f.subject, Subject::Muted | Subject::Tool(_)) {
         return Verdict::Wait {
             rule: "presence".into(),
             reason: "你刚在这件事项上操作过，先等你".into(),
@@ -827,11 +837,12 @@ fn table(f: &Facts, p: &Policy, env: &Env) -> Verdict {
             if !r.branch_ok || !r.accepted && !r.batch {
                 return decline("release.state", "分支不对或事项还没验收");
             }
-            if !r.spacing_ok {
-                return decline(
-                    "release.spacing",
-                    "发布太频繁（每小时最多 3 次、每次至少隔 15 分钟），这次留给你",
-                );
+            if r.spacing_wait_s > 0 {
+                return Verdict::Wait {
+                    rule: "release.spacing".into(),
+                    reason: "两次发布至少隔 15 分钟，到时间再发".into(),
+                    delay_s: r.spacing_wait_s,
+                };
             }
             auto(
                 "yes",
@@ -841,8 +852,8 @@ fn table(f: &Facts, p: &Policy, env: &Env) -> Verdict {
             .delay(p.release_delay_s)
             .undo(Undo::Rollback)
         }
-        Subject::Stall(s) => stall(s, p, env),
-        Subject::Ask(a) => ask(a, p, env),
+        Subject::Stall(s) => stall(s, p),
+        Subject::Ask(a) => ask(a, p),
         Subject::ProposeDeps => {
             if !p.propose {
                 return decline("propose.off", "设置里没有让 YOLO 开始事项");
@@ -912,7 +923,7 @@ fn accept(a: &Accept, p: &Policy) -> Verdict {
         .checks(checks)
 }
 
-fn stall(s: &Stall, p: &Policy, env: &Env) -> Verdict {
+fn stall(s: &Stall, p: &Policy) -> Verdict {
     if !p.continue_stalls {
         return decline("continue.off", "设置里没有让 YOLO 让它继续");
     }
@@ -929,7 +940,7 @@ fn stall(s: &Stall, p: &Policy, env: &Env) -> Verdict {
         StallCause::Stopped => {
             if let Some(q) = &s.asked {
                 // it stopped on a question: answer it the way `steve_ask` is answered
-                return match ask(q, p, env) {
+                return match ask(q, p) {
                     Verdict::Auto { text, reason, .. } => {
                         auto("continue", "continue.stall", reason).text(text.unwrap_or_default())
                     }
@@ -986,7 +997,7 @@ fn stall(s: &Stall, p: &Policy, env: &Env) -> Verdict {
     }
 }
 
-fn ask(a: &Ask, p: &Policy, env: &Env) -> Verdict {
+fn ask(a: &Ask, p: &Policy) -> Verdict {
     if !p.answer_asks {
         return decline("ask.off", "设置里没有让 YOLO 代答");
     }
@@ -1007,11 +1018,11 @@ fn ask(a: &Ask, p: &Policy, env: &Env) -> Verdict {
         return decline("ask.unsure", "YOLO 没替你答：拿不准");
     };
     let checks = json!({ "question": a.key, "answer": ans, "recommended": a.recommended });
-    if limits::money_or_outside_words(&ans.answer, env).is_some()
+    if limits::money_or_outside_words(&ans.answer, a.full).is_some()
         || ans
             .option
             .as_deref()
-            .is_some_and(|o| limits::money_or_outside_words(o, env).is_some())
+            .is_some_and(|o| limits::money_or_outside_words(o, a.full).is_some())
     {
         return decline("ask.limit", "答案涉及硬限制");
     }
@@ -1036,7 +1047,7 @@ fn ask(a: &Ask, p: &Policy, env: &Env) -> Verdict {
         Some(rec)
             if !objected
                 && !rec.trim().is_empty()
-                && limits::money_or_outside_words(rec, env).is_none() =>
+                && limits::money_or_outside_words(rec, a.full).is_none() =>
         {
             let why = a.why.clone().unwrap_or_else(|| "Agent 的推荐".into());
             auto(rec, "ask.recommended", format!("选了 Agent 推荐的：{why}"))
@@ -1086,7 +1097,7 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
                     if retry {
                         ("chan.retry", p.chan_retry_delay_s)
                     } else {
-                        ("chan.bot_internal", p.chan_delay_s)
+                        ("chan.bot_internal", p.chan_bot_delay_s)
                     }
                 }
                 Identity::SelfAccount | Identity::Proxy => {

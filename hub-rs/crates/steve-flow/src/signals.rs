@@ -42,6 +42,12 @@ pub fn source_label(source: &str) -> &str {
     }
 }
 
+/// Whether an event of `source` carries somebody else's text (a mail, a message, an issue, a webhook…)
+/// rather than the user's own: everything but the clock, a manual run and an item of theirs.
+pub fn external_source(source: &str) -> bool {
+    !matches!(source, "time" | "manual" | "item")
+}
+
 /// Coalesces `signal` events: the first of a workspace starts a 500 ms window, later ones only
 /// replace the id; at the end the last id is published. Without a tokio runtime it publishes at once.
 #[derive(Default)]

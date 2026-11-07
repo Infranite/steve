@@ -459,6 +459,9 @@ fn status_names_the_backup_a_failed_upgrade_recovers_from() {
     );
 }
 
+/// The signing keychain's password in these homes (ops/sign-setup.sh's form).
+const SIGNING_PASS: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 /// A local_release install as `ops/local-release.py` leaves it: the signing identity and keychain files and
 /// a checkout. The runner job is recorded, never started.
 /// A Hub ready for a one-click local build. Only on macOS: elsewhere `runner::local_missing` names
@@ -471,7 +474,7 @@ fn local(home: &Path, repo: &Path, api_base: String) -> (Updates, Arc<Mutex<Vec<
     )
     .unwrap();
     fs::write(home.join("signing/steve-signing.keychain-db"), "").unwrap();
-    fs::write(home.join("signing/keychain-pass"), "").unwrap();
+    fs::write(home.join("signing/keychain-pass"), SIGNING_PASS).unwrap();
     fs::create_dir_all(repo.join(".git")).unwrap();
     let started = Arc::new(Mutex::new(vec![]));
     let u = Updates {
@@ -552,7 +555,7 @@ async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside
     let reason = u.execution_reason().unwrap();
     assert!(reason.contains("signing/keychain-pass"), "{reason}");
     assert!(u.request("0.3.0", "k0", "owner", true).is_err());
-    fs::write(home.path().join("signing/keychain-pass"), "").unwrap();
+    fs::write(home.path().join("signing/keychain-pass"), SIGNING_PASS).unwrap();
 
     // tags only: stable, strictly newer than what runs
     for refused in ["0.2.0", "0.1.9", "0.3.0-rc.1", "main", "v0.3.0+local"] {
@@ -676,9 +679,12 @@ fn a_release_script_or_local_release_running_refuses_a_local_upgrade() {
 
 /// A python that has what local-release.py needs (the runner checks the same).
 fn python() -> Option<String> {
+    let path = std::env::var_os("PATH")?;
     ["python3.13", "python3.12", "python3"]
         .into_iter()
-        .map(String::from)
+        .flat_map(|n| std::env::split_paths(&path).map(move |d| d.join(n)))
+        .filter(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
         .find(|p| {
             std::process::Command::new(p)
                 .args(["-I", "-c", "import tarfile; tarfile.data_filter"])
@@ -723,6 +729,8 @@ HOME = pathlib.Path(__HOME__)
 cmd = sys.argv[1]
 if cmd == "build":
     commit, version = sys.argv[2], sys.argv[4]
+    if "--keychain-pass-stdin" in sys.argv:
+        (HOME / "got-pass").write_text(sys.stdin.readline())
     d = HOME / "releases" / f"{version}-local-{commit[:7]}"
     if (HOME / "fake-build-raced").exists():
         # another local-release.py took the lock first and is building this directory: refused untouched
@@ -798,8 +806,21 @@ fn the_runner_builds_the_tagged_commit_with_its_own_scripts_and_reports_each_res
     let candidate = home
         .path()
         .join(format!("releases/0.3.0-local-{}", &commit[..7]));
+    // what the Hub would build itself: this home, this python's directory, the tag's commit
+    let trusted = |commit: String| runner::Trust {
+        home: Some(home.path().into()),
+        python_dirs: vec![Path::new(&python).parent().unwrap().into()],
+        release: Box::new({
+            let source = repo.path().to_string_lossy().into_owned();
+            move |v: &str| {
+                assert_eq!(v, "0.3.0");
+                Ok((source.clone(), commit.clone()))
+            }
+        }),
+    };
+    let trust = trusted(commit.clone());
     let finish = |op: &Operation| {
-        let code = runner::main(home.path(), &op.id);
+        let code = runner::main_with(home.path(), &op.id, &trust);
         (code, u.operation(&op.id).unwrap())
     };
 
@@ -821,11 +842,63 @@ fn the_runner_builds_the_tagged_commit_with_its_own_scripts_and_reports_each_res
         !u.dir().join(format!("runner/{}-ops", op.id)).exists(),
         "the tag's scripts are cleaned up"
     );
+    // the signing password went to the build over its stdin, never as an argument
+    assert_eq!(
+        fs::read_to_string(home.path().join("got-pass")).unwrap(),
+        format!("{SIGNING_PASS}\n")
+    );
     assert_eq!(
         sh(repo.path(), &["status", "--porcelain"]),
         "",
         "the checkout is not touched"
     );
+
+    // the password goes only to a build the Hub would make itself: a journal or a caller naming
+    // another home, another python or another release gets nothing, and nothing is built
+    fs::remove_dir_all(&candidate).unwrap();
+    fs::remove_file(home.path().join("got-pass")).unwrap();
+    let refused = |trust: runner::Trust, python: &str, key: &str| {
+        let op = runner_op(&u, key, &commit, python);
+        let code = runner::main_with(home.path(), &op.id, &trust);
+        let done = u.operation(&op.id).unwrap();
+        assert_eq!((code, done.phase.as_str()), (1, "failed"), "{key}");
+        assert!(
+            !home.path().join("got-pass").exists(),
+            "{key}: no password handed out"
+        );
+        assert!(!candidate.exists(), "{key}: nothing built");
+        done.error.unwrap()
+    };
+    let other_home = tempfile::tempdir().unwrap();
+    let mut t = trusted(commit.clone());
+    t.home = Some(other_home.path().into());
+    assert!(refused(t, &python, "other-home").contains("密码"));
+    let mut t = trusted(commit.clone());
+    t.home = None;
+    assert!(refused(t, &python, "no-home").contains("密码"));
+    // a python of the caller's: a script of the same name elsewhere is not one of the trusted dirs
+    let elsewhere = tempfile::tempdir().unwrap();
+    let fake = elsewhere.path().join("python3.13");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&python, &fake).unwrap();
+    let e = refused(
+        trusted(commit.clone()),
+        &fake.to_string_lossy(),
+        "other-python",
+    );
+    assert!(e.contains(&*fake.to_string_lossy()), "{e}");
+    // the release manifest names another source or commit than the journal, or can't be read
+    let mut t = trusted(commit.clone());
+    t.release = Box::new(|_| Ok(("https://github.com/someone/else.git".into(), "d".repeat(40))));
+    assert!(refused(t, &python, "other-release").contains("someone/else"));
+    let mut t = trusted(commit.clone());
+    t.release = Box::new(|_| anyhow::bail!("offline"));
+    assert!(refused(t, &python, "unconfirmed").contains("offline"));
+    // and the trusted build goes through again
+    fs::write(home.path().join("fake-deploy"), "ok").unwrap();
+    let op = runner_op(&u, "ok-again", &commit, &python);
+    let (code, done) = finish(&op);
+    assert_eq!((code, done.phase.as_str()), (0, "succeeded"));
 
     // failed and rolled back: the existing build is reused, the deploy's exit says what happened
     fs::write(home.path().join("fake-deploy"), "rollback").unwrap();
@@ -1012,4 +1085,73 @@ fn a_python3_without_data_filter_is_not_offered_for_a_local_upgrade() {
         runner::find_python(None, path, &[]),
         Some(old.path().join("python3.12"))
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_runner_trusts_the_accounts_own_steve_home_not_the_environment() {
+    let t = runner::Trust::installed();
+    let home = t.home.expect("the account has a home directory");
+    assert!(home.is_absolute() && home.ends_with(".steve"), "{home:?}");
+    assert!(
+        runner::PYTHON_DIRS
+            .iter()
+            .all(|d| t.python_dirs.contains(&PathBuf::from(d)))
+    );
+}
+
+/// The supervisor asks the candidate's own `--check-config` before it drains, in the environment the
+/// child would get; a candidate from before the check is not asked (it would start a Hub).
+#[cfg(unix)]
+#[tokio::test]
+async fn the_supervisor_asks_the_candidate_about_this_environment_before_draining() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let cfg = crate::config::Config::from_vars(|k: &str| match k {
+        "HOME" | "STEVE_HOME" => Some(home.path().to_string_lossy().into_owned()),
+        "STEVE_HOST" => Some("127.0.0.1,::1".into()),
+        "STEVE_PORT" => Some("9123".into()),
+        "STEVE_ADAPTER_CLAUDE" | "STEVE_ADAPTER_CODEX" => Some("unused".into()),
+        _ => None,
+    })
+    .unwrap();
+    let bundle = |name: &str, check: bool| {
+        let d = home.path().join(name);
+        fs::create_dir_all(d.join("bin")).unwrap();
+        let asked = d.join("asked");
+        let info = if check { r#","check_config":true"# } else { "" };
+        let hub = d.join("bin/steve-hub");
+        fs::write(
+            &hub,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --build-info) echo '{{\"version\":\"0.2.0\"{info}}}' ;;\n  \
+                 --check-config) echo \"$STEVE_HOST|$STEVE_PORT|$STEVE_HOME\" > '{}'\n    \
+                 echo '{{\"ok\":false,\"errors\":[\"STEVE_X: refused\"],\"listen\":[]}}'; exit 2 ;;\n  \
+                 *) exit 9 ;;\nesac\n",
+                asked.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hub, fs::Permissions::from_mode(0o755)).unwrap();
+        (d, asked)
+    };
+    let (d, asked) = bundle("new", true);
+    let e = supervisor::check_candidate(&cfg, &d, &fixture())
+        .await
+        .expect_err("refused");
+    let e = format!("{e:#}");
+    assert!(
+        e.contains("STEVE_X: refused") && e.contains("没有排空"),
+        "{e}"
+    );
+    assert_eq!(
+        fs::read_to_string(&asked).unwrap().trim(),
+        format!("127.0.0.1,::1|9123|{}", home.path().display())
+    );
+
+    let (d, asked) = bundle("old", false);
+    supervisor::check_candidate(&cfg, &d, &fixture())
+        .await
+        .expect("an older candidate is not asked");
+    assert!(!asked.exists());
 }

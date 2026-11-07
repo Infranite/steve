@@ -470,3 +470,147 @@ async fn with_the_local_node_a_link_out_of_a_root_is_not_read() {
         .await;
     assert_eq!((s, v), (200, json!([])));
 }
+
+#[tokio::test]
+async fn the_lane_limits_are_yours_to_set_and_now_has_nothing_to_close_on_an_idle_lane() {
+    let e = start().await;
+    let repo = e.home.join("solo");
+    std::fs::create_dir_all(&repo).unwrap();
+    g(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-q", "-m", "base"]);
+    let (s, p) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "Solo", "path": repo.to_string_lossy()})),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    let id = p["id"].as_str().unwrap().to_string();
+    let path = format!("/api/projects/{id}/lane");
+    let (s, v) = e.call("GET", &path, None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["lane"], Value::Null, "nothing went into it yet");
+
+    let (s, v) = e
+        .call(
+            "PATCH",
+            &path,
+            Some(json!({"window_min": 15, "max_members": 4})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["lane"]["policy"]["window_ms"], 15 * 60_000);
+    assert_eq!(v["lane"]["set"]["max_members"], 4);
+    let (_, v) = e.call("GET", &path, None).await;
+    assert_eq!(v["lane"]["policy"]["max_members"], 4, "kept");
+    // back to the defaults
+    let (s, v) = e
+        .call(
+            "PATCH",
+            &path,
+            Some(json!({"window_min": null, "max_members": null})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["lane"]["set"]["window_ms"], Value::Null);
+    assert_eq!(
+        v["lane"]["policy"]["window_ms"],
+        v["lane"]["defaults"]["window_ms"]
+    );
+    for bad in [
+        json!({"window_min": 0, "max_members": null}),
+        json!({"window_min": 2000, "max_members": null}),
+        json!({"window_min": null, "max_members": 0}),
+        json!({"window_min": 1.5, "max_members": null}),
+    ] {
+        let (s, v) = e.call("PATCH", &path, Some(bad.clone())).await;
+        assert_eq!(s, 400, "{bad} {v}");
+    }
+
+    let (s, v) = e.call("POST", &format!("{path}/now"), None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["closed"], false);
+}
+
+/// Lanes are one per target, shared by every workspace merging into it: another workspace's
+/// requests are counted, never named, and its lane's limits and "merge now" are not yours to change
+/// while they are in it.
+#[tokio::test]
+async fn another_workspaces_requests_in_the_lane_are_counted_not_shown_or_steered() {
+    let e = start().await;
+    let repo = e.home.join("shared");
+    std::fs::create_dir_all(&repo).unwrap();
+    g(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-q", "-m", "base"]);
+    let (s, p) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "Shared", "path": repo.to_string_lossy()})),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    let path = format!("/api/projects/{}/lane", p["id"].as_str().unwrap());
+    let (s, v) = e.call("GET", &path, None).await;
+    assert_eq!(s, 200, "{v}");
+    let (up, br) = (
+        v["target"]["upstream"].as_str().unwrap().to_string(),
+        v["target"]["branch"].as_str().unwrap().to_string(),
+    );
+    /* a request from another workspace whose project merges into the same target */
+    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let req = |ws: &'static str, item: &'static str| steve_store::lanes::NewRequest {
+        lane_id: "",
+        workspace_id: Some(ws),
+        item_id: Some(item),
+        source: "item",
+        dir: "/nonexistent",
+        branch: item,
+        head: "abc",
+        repo: None,
+    };
+    steve_core::lane::store::request(&store, &up, &br, &req("ws_other", "ST-90")).unwrap();
+    let (s, v) = e.call("GET", &path, None).await;
+    assert_eq!(s, 200, "{v}");
+    let running = &v["lane"]["running"];
+    assert_eq!(running["members"], json!([]), "{v}");
+    assert_eq!(running["others"], 1, "{v}");
+    assert!(!v.to_string().contains("ST-90"), "{v}");
+    assert!(!v.to_string().contains("ws_other"), "{v}");
+
+    /* its limits and "merge now" are refused while the other workspace's request is in it */
+    let (s, v) = e
+        .call(
+            "PATCH",
+            &path,
+            Some(json!({"window_min": 1, "max_members": 1})),
+        )
+        .await;
+    assert_eq!(s, 409, "{v}");
+    assert_eq!(
+        v["error"],
+        "这个合并通道里还有其他工作区的合并，不能在这里改它的设置或立即合并"
+    );
+    let (s, _) = e.call("POST", &format!("{path}/now"), None).await;
+    assert_eq!(s, 409);
+    let row = store
+        .reader(steve_store::lanes::lanes_all)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.upstream == up)
+        .unwrap();
+    assert_eq!((row.window_ms, row.max_members), (None, None), "unchanged");
+
+    /* your own request in the same lane is shown */
+    steve_core::lane::store::request(&store, &up, &br, &req("default", "ST-91")).unwrap();
+    let (_, v) = e.call("GET", &path, None).await;
+    let running = &v["lane"]["running"];
+    assert_eq!(running["members"][0]["item_id"], "ST-91", "{v}");
+    assert_eq!(running["members"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(running["others"], 1, "{v}");
+}

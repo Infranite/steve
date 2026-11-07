@@ -5,7 +5,7 @@
 //! nothing waits in memory and a Hub restart loses nothing. The server is stateless (no
 //! `Mcp-Session-Id`), like the TS server with `sessionIdGenerator: undefined`.
 //!
-//! The Hub supplies a [`Backend`] (token lookup + the five actions) and mounts [`router`] for
+//! The Hub supplies a [`Backend`] (token lookup + the Steve tools) and mounts [`router`] for
 //! every path that starts with `/mcp`. Serve the app with
 //! `into_make_service_with_connect_info::<SocketAddr>()`: requests from a non-loopback peer
 //! (or without `ConnectInfo`) are refused with `403`.
@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub mod testing;
 pub mod tools;
 
-pub use tools::END;
+pub use tools::{END, PUBLISHED};
 
 /// Error from a tool action; its `Display` text is returned to the agent as an `isError` result,
 /// as the TS SDK does with a thrown `Error.message`.
@@ -127,6 +127,13 @@ pub trait Backend: Send + Sync + 'static {
         branch: String,
         summary: String,
     ) -> impl Future<Output = Result<(), ToolError>> + Send;
+
+    /// Read-only: where the session's item's release request is (`steve_lane_status`); the text the
+    /// agent reads.
+    fn lane_status(
+        &self,
+        s: &Self::Session,
+    ) -> impl Future<Output = Result<String, ToolError>> + Send;
 }
 
 /// The authenticated session, carried from the auth middleware to the tool handler through
@@ -247,12 +254,12 @@ impl<B: Backend> Handler<B> {
     }
 }
 
-/// Whether `name` is one of the five Steve tools served here.
+/// Whether `name` is one of the Steve tools served here.
 pub fn handles(name: &str) -> bool {
     tools::list().iter().any(|t| t.name == name)
 }
 
-/// Runs one of the five Steve tools, independent of any tool protocol: `Ok` is the success text,
+/// Runs one of the Steve tools, independent of any tool protocol: `Ok` is the success text,
 /// `Err` the error text (MCP returns them as a result and an `isError` result).
 pub async fn run<B: Backend>(
     b: &B,
@@ -294,8 +301,9 @@ pub async fn run<B: Backend>(
             let a: PublishArgs = parse(args)?;
             b.publish(s, a.branch, a.summary)
                 .await
-                .map(|_| format!("Release requested. {END}"))
+                .map(|_| format!("Release requested. {PUBLISHED} {END}"))
         }
+        tools::LANE_STATUS => b.lane_status(s).await,
         _ => return Err(format!("MCP error -32602: Tool {name} not found")),
     };
     done.map_err(|e| {

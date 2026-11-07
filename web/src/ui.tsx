@@ -38,7 +38,7 @@ import { Markdown } from "@/components/markdown"
 import { PermissionDetails, PermissionRecord } from "@/components/permission"
 import { LOADED_WEB_VERSION, permissionDecision, useStore } from "@/store"
 import { shortVersion } from "@/updates"
-import { st, emit, briefHead, pendingCards, ST, SS, WT, FAIL_CHOICE, SNOOZE_KEYS, snoozeLabel, tagCatLabel, botName, decide, dismiss, setSt, snooze, tag, isKind, kindColor, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
+import { st, emit, briefHead, pendingCards, acceptChoosesRelease, ST, SS, WT, FAIL_CHOICE, SNOOZE_KEYS, snoozeLabel, tagCatLabel, botName, decide, dismiss, setSt, snooze, tag, isKind, kindColor, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import { YoloPill } from "@/yolo/switch"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
@@ -50,7 +50,7 @@ import { MODULE_CARDS } from "@/vault/decisions"
 import { OutContext } from "@/channels/out-context"
 import { MailDraftCard } from "@/mail/draft"
 import { useMentions } from "@/people/mention"
-import { clearSentDraft, readDraft, saveDraft } from "@/composer-draft"
+import { clearSentDraft, draftToSend, readDraft, saveDraft } from "@/composer-draft"
 import { isPeopleDecision, PeopleDecisionBody } from "@/people/pending"
 import { usePeopleOn } from "@/api/people"
 
@@ -403,7 +403,8 @@ export type ComposerHandle = { empty: () => boolean; fill: (text: string, files:
 type ComposerProps = {
   handle?: { current: ComposerHandle | null }
   draftKey?: string
-  placeholder: string; onSend: (t: string, files: string[], refs: RFile[], mentions: { kind: "party" | "bot"; id: string }[]) => void | boolean | Promise<void | boolean>; model?: string; onModel?: (m: string) => void; left?: ReactNode; autoFocus?: boolean; className?: string; testId?: string; disabled?: boolean
+  /** `clientId`: the same for every retry of one unchanged draft (send idempotency) */
+  placeholder: string; onSend: (t: string, files: string[], refs: RFile[], mentions: { kind: "party" | "bot"; id: string }[], clientId: string) => void | boolean | Promise<void | boolean>; model?: string; onModel?: (m: string) => void; left?: ReactNode; autoFocus?: boolean; className?: string; testId?: string; disabled?: boolean
   /** `busy`: the other side is working. With `onStop` there is a stop button beside send (and Esc), and sending still
    * works: the page queues what is sent meanwhile */
   busy?: boolean; onStop?: () => void | Promise<void>; onCommand?: (c: string) => void
@@ -444,11 +445,10 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
   const send = async () => {
     const t = v.trim()
     if (disabled || (busy && !onStop) || inFlight.current || up.uploading || (!t && !up.ready.length)) return
-    const sentDraft = { text: v, files: up.ready, mentions: men.snapshot() }
-    saveDraft(draftKey, sentDraft)
+    const sentDraft = draftToSend(draftKey, { text: v, files: up.ready, mentions: men.snapshot() })
     inFlight.current = true; setSending(true)
     try {
-      const sent = await onSend(t || "（附件）", up.ready.map((f) => f.id), up.ready, men.take(t))
+      const sent = await onSend(t || "（附件）", up.ready.map((f) => f.id), up.ready, men.take(t), sentDraft.clientId)
       if (sent === false) return
       if (clearSentDraft(draftKey, sentDraft)) { setV(""); up.clear(); men.clear(); setMenu(null) }
     } catch { /* the action reports its error; keep the draft for retry */ }
@@ -950,7 +950,7 @@ export function ReplyBlock({ r }: { r: Reply }) {
 
 /* ───────── decisions ───────── */
 /** the buttons of a failure card in their order, with their look; the words are FAIL_CHOICE */
-const FAIL: Record<string, "ghost" | "outline" | "default"> = { look: "ghost", drop: "outline", tosteve: "outline", delivered: "outline", release_waive: "outline", release_retry: "outline", release_live: "default", continue: "default" }
+const FAIL: Record<string, "ghost" | "outline" | "default"> = { look: "ghost", drop: "outline", tosteve: "outline", delivered: "outline", release_waive: "outline", release_retry: "outline", retry: "default", release_live: "default", continue: "default" }
 export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?: Item["wait"] & {}; showItem?: boolean }) {
   const t = useT()
   const [rework, setRework] = useState(false), [txt, setTxt] = useState(""), [localBusy, setBusy] = useState(false), [free, setFree] = useState(false)
@@ -1001,7 +1001,9 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
     <CardContent className="pb-4">{draft}
       {rework && <Textarea autoFocus className="mt-3 min-h-20 rounded-lg" placeholder={t("core:card.reworkPlaceholder", { bot: botName(i.b) })} value={txt} onChange={(e) => setTxt(e.target.value)} data-rework />}</CardContent>
     {foot(rework ? <><Button variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button disabled={busy} onClick={() => act("rework", txt.trim())}>{t("core:card.sendRework")}</Button></>
-      : <><Button variant="outline" onClick={() => setRework(true)}>{t("core:card.rework")}</Button><Button disabled={busy} onClick={() => act("pass")} data-pass><CheckIcon />{t("core:card.pass")}</Button></>)}
+      : <><Button variant="outline" onClick={() => setRework(true)}>{t("core:card.rework")}</Button>{acceptChoosesRelease(i)
+        ? <><Button variant="outline" disabled={busy} onClick={() => act("pass", "no-release")} data-pass-no-release>{t("core:card.passNoRelease")}</Button><Button disabled={busy} onClick={() => act("pass", "release")} data-pass data-pass-release><CheckIcon />{t("core:card.passRelease")}</Button></>
+        : <Button disabled={busy} onClick={() => act("pass")} data-pass><CheckIcon />{t("core:card.pass")}</Button>}</>)}
   </>
   else if (w.type === "approve" && w.subject === "tool_call") {
     const opts = w.options.map((o) => { const [id, name, kind] = o.split("|"); return { id, name, kind } })
@@ -1018,7 +1020,7 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
     {head(w.q)}
     <CardContent className="pb-4">{draft}{rework && <Textarea autoFocus className="mt-3 min-h-16 rounded-lg" placeholder={t("core:card.rejectPlaceholder")} value={txt} onChange={(e) => setTxt(e.target.value)} />}</CardContent>
     {foot(rework ? <><Button variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button variant="outline" disabled={busy} onClick={() => act("no", txt.trim())}>{t("core:card.reject")}</Button></>
-      : <><Button variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setRework(true)}>{t("core:card.rejectMore")}</Button><Button disabled={busy} onClick={() => act("yes")} data-approve>{t(w.subject === "release" ? "core:card.approveRelease" : "core:card.approve")}</Button></>)}
+      : <><Button variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setRework(true)}>{t("core:card.rejectMore")}</Button>{w.subject === "chan_message" && w.options.includes("rewrite") && <Button variant="outline" disabled={busy} onClick={() => act("rewrite")} data-rewrite>{t("core:card.rewriteFirst")}</Button>}<Button disabled={busy} onClick={() => act("yes")} data-approve>{t(w.subject === "release" ? "core:card.approveRelease" : "core:card.approve")}</Button></>)}
   </>
   else if (w.type === "propose") body = <>
     {head(w.q)}

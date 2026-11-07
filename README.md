@@ -155,15 +155,15 @@ No setting can widen these limits, and they are property-tested: money, high-sen
 
 ### 🚚 Merging and releases
 
-Each target branch has a merge lane. Requests that arrive while a merge is in flight are batched, and you approve one card per batch. Conflicting members are backed out one at a time. Pushes are fast-forward only, and after a restart nothing merges or releases twice. The project page shows the lane profile Steve found (merge queue, required checks, release method) and the evidence for each.
+Each target branch has a merge lane. Requests that arrive while a merge is in flight are batched, and you approve one card per batch; a request that arrives before you answer joins that batch and its card. The project page sets the batch window and size and has a *merge and release now* button. Conflicting members are backed out one at a time. Pushes are fast-forward only, a branch whose host requires a pull request or a merge queue is never pushed to directly, and after a restart nothing merges or releases twice. The project page also shows the lane profile Steve found (merge queue, required checks, release method) and the evidence for each.
 
-On GitHub, Steve asks before opening a PR after you accept, and again before merging. Effects go through a durable queue that reconciles with GitHub before retrying. Projects on the Hub's own machine, Steve included, can be released by script: build, drain running work, restart, and report the outcome once it's back. Rollback is refused when the old version can't read the current database.
+On GitHub, Steve asks before opening a PR after you accept, and again before merging. For a private repository you can let accepting the item open a draft PR from its own branch without asking, once its commits pass a leak check. Effects go through a durable queue that reconciles with GitHub before retrying. Projects on the Hub's own machine, Steve included, can be released by script: build, drain running work, restart, and report the outcome once it's back. Rollback is refused when the old version can't read the current database.
 
 ### 🔌 Connections
 
 Every outgoing message takes the same path: disclosure check, authorization, the send itself, a record of which knowledge was used at what level, and an audit entry. Your own account never sends without approval, and messages sent on your behalf say so.
 
-- **Feishu / Lark.** Create a bot by scanning one QR code. Steve works as the bot or, through OAuth, as you, and receives messages over the long connection. Each chat becomes a space with an attention level (live, muted, blocked) and response rules (mention, DM, keyword, intent…) that can turn into flows. Personas set how much a reply reveals: name, role, that it's an AI, that it's Steve, who the owner is. A loop guard mutes runaway spaces.
+- **Feishu / Lark.** Create a bot by scanning one QR code. Steve works as the bot or, through OAuth, as you, and receives messages over the long connection. Each chat becomes a space with an attention level (live, muted, blocked) and response rules (mention, DM, keyword, intent…) that can turn into flows. Personas set how much a reply reveals: name, role, that it's an AI, that it's Steve, who the owner is.
 - **Email** over IMAP/SMTP, with presets. IDLE push sync, and views for *needs action*, *waiting on them* and drafts. HTML renders in a sandbox with remote images blocked. Sending always goes through an approval card bound to the content, and the server computes the recipients, so agents can't add any. Your first mailbox comes with a triage flow that drops notification mail before any model call.
 - **GitHub** through a GitHub App (manifest flow) or a fine-grained token. Webhooks are HMAC-verified and deduplicated, with polling as a fallback. PRs link to items automatically, issues can become items, and a *PR checks failed* flow feeds failures back into the item. Agents get status, CI logs, comments (behind time-boxed grants) and `open_pr`.
 - **Disconnecting** shows a dry run first, backs up the database and removes everything in one transaction.
@@ -220,7 +220,8 @@ There is no runtime plugin store yet; the Plugins page is a placeholder. Today y
 
 ## Experimental and planned
 
-- **Multiple devices** (experimental, off by default). A `steve-node` on another machine can pair with the Hub and run harnesses there. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. Turn it on with `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` / `STEVE_NODE_MODE=local`. Pairing is CLI-only for now, and the design is still moving ([docs/hub-node-client.md](docs/hub-node-client.md)).
+- **Sessions run on a Node.** The Hub does not start agent processes itself: every session, Steve's own judgment calls and inline research run on the local Node, which is on by default (`STEVE_NODE_MODE=off` parks it).
+- **Multiple devices** (experimental, off by default). A `steve-node` on another machine can pair with the Hub and run harnesses there. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. Turn remote Nodes on with `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND`. The owner generates a code and confirms the device in Devices; the Node claims the code through its CLI ([docs/deployment.md](docs/deployment.md#remote-nodes)).
 - **Not built yet:** the Plugins page (use the extension points above), quiet hours and a daily digest (marked *Works once push is connected* in Settings), Gmail and Outlook API mail adapters, Feishu docs, calendar and approvals, and external vault backends (1Password, Bitwarden).
 
 ## How it works
@@ -259,8 +260,6 @@ flowchart LR
 - **Runtime drivers.** Agent protocols (ACP, MCP, stream-json) stop at the driver. The rest of Steve only deals in sessions, turns, events, tool calls and approvals, so a new harness should need one more driver and nothing else.
 - **Modules.** Channels, mail, GitHub, knowledge, flows and the vault register through the [extension points above](#extending-steve). Events between modules go through a durable outbox.
 - **Clients.** Everyone in a workspace, on every device, sees the same state live.
-
-The design is in [docs/hub-node-client.md](docs/hub-node-client.md) and the wire contract in [docs/node-protocol.md](docs/node-protocol.md).
 
 ## Quick start
 
@@ -314,7 +313,7 @@ Steve reads its settings from the environment. For a service, put them in `$STEV
 | Variable | Purpose |
 |---|---|
 | `STEVE_HOME` | Data directory (default `~/.steve`) |
-| `STEVE_HOST`, `STEVE_PORT` | Listen address (default `127.0.0.1:8440`) |
+| `STEVE_HOST`, `STEVE_PORT` | Listen addresses, comma-separated, on one port (default `127.0.0.1:8440`); for a proxy on another machine add the address it reaches, e.g. `127.0.0.1,100.64.0.2`. `0.0.0.0`/`::` is refused unless `STEVE_ALLOW_ANY_HOST=1` |
 | `STEVE_WEB_DIR` | The built web UI the Hub serves |
 | `STEVE_PUBLIC_URL` | A URL your integrations can reach, only needed for callbacks. No shared hosted endpoint is provided. |
 | `STEVE_OIDC_ISSUER`, `STEVE_OIDC_CLIENT_ID`, `STEVE_OIDC_CLIENT_SECRET_FILE` | Sign-in through your OIDC provider |
@@ -323,7 +322,9 @@ Steve reads its settings from the environment. For a service, put them in `$STEV
 | `STEVE_YOLO` | `off` disables YOLO for the whole instance |
 | `STEVE_KB_STORE` | `openviking` to use the optional vector backend (default: SQLite FTS) |
 | `STEVE_VAULT_KEYSTORE` | `auto` (Keychain / Secret Service), `dir` with `STEVE_VAULT_KEY_DIR`, or `file` for tests |
-| `STEVE_NODE_LISTEN`, `STEVE_NODE_BIND`, `STEVE_NODE_MODE` | Experimental multi-device Nodes, off by default |
+| `STEVE_NODE_MODE` | `local` (default) runs sessions on the local Node; `off` parks them |
+| `STEVE_NODE_LISTEN`, `STEVE_NODE_BIND` | Experimental multi-device Nodes, off by default |
+| `STEVE_NODE_PROXY_PEERS` | Optional exact IPs of TLS-terminating proxies for remote Node ingress; default is loopback only |
 
 > [!IMPORTANT]
 > Review authentication before you expose the listener beyond localhost. Agents running under Steve act with your local user's permissions.
@@ -356,7 +357,7 @@ hub-rs/          Rust workspace: the Hub binary and its crates
   crates/steve-flow       signals, flows, schedules
   crates/steve-vault      redaction and paste guard; steve-keyhelper holds the macOS key
   crates/steve-stats      usage, cost and delivery metrics
-  crates/steve-node*      the Hub–Node protocol and the Node runtime (experimental)
+  crates/steve-node*      the Hub–Node protocol and the Node runtime that runs every session
   crates/steve-store      SQLite schema and migrations
 web/             React + Vite + Tailwind interface
 ops/             install, release, backup, service and OpenViking scripts

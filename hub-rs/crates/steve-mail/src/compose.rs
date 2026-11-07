@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
-use steve_knowledge::{Hit, Purpose, Query, anchor_mems, record_use, retrieve};
+use steve_knowledge::{
+    Hit, Purpose, Query, SEMANTIC_DOWN_NOTE, anchor_mems, record_use, retrieve_all,
+};
 use steve_modules::contacts::{cards, people_repo};
 use steve_modules::outbound::{self, Audience, CheckCx, KnowledgeUse};
 use steve_modules::{ApiError, Caller, Tier};
@@ -175,6 +177,18 @@ fn level_label(h: &Hit) -> &'static str {
     steve_knowledge::context::level_label(h.level)
 }
 
+/// The knowledge layer, with [`SEMANTIC_DOWN_NOTE`] when it was found by keywords only.
+fn with_down_note(knowledge: String, semantic_down: bool) -> String {
+    if !semantic_down {
+        return knowledge;
+    }
+    if knowledge.is_empty() {
+        SEMANTIC_DOWN_NOTE.to_string()
+    } else {
+        format!("{knowledge}\n{SEMANTIC_DOWN_NOTE}")
+    }
+}
+
 fn render_hits(hits: &[Hit]) -> String {
     if hits.is_empty() {
         return String::new();
@@ -318,7 +332,9 @@ impl Mail {
             rq.anchors = &anchors;
             rq.k = DRAFT_K;
             rq.now = now;
-            for h in retrieve(c, &rq)? {
+            let found = retrieve_all(c, &rq)?;
+            let semantic_down = found.semantic_down;
+            for h in found.hits {
                 if !hits
                     .iter()
                     .any(|x| x.obj_type == h.obj_type && x.obj_id == h.obj_id && x.seq == h.seq)
@@ -360,7 +376,7 @@ impl Mail {
                     signature: st.signature,
                     cards: cards_text,
                     items,
-                    knowledge: render_hits(&hits),
+                    knowledge: with_down_note(render_hits(&hits), semantic_down),
                     context: blocks.join("\n\n---\n\n"),
                     replying_to: line_of(&orig).replace('\n', "；"),
                     instruction: q.instruction.clone().unwrap_or_default(),
@@ -462,21 +478,28 @@ impl Mail {
                 level: h.level,
                 visibility: h.visibility.code(),
                 text: h.text.clone(),
+                seq: Some(h.seq),
             })
             .collect();
-        let check = outbound::check(
-            &self.0.m,
-            &CheckCx {
-                ws: who.ws.clone(),
-                actor: g.author.clone(),
-                draft_model: Some(out.model.clone()),
-                audience_said: None,
-            },
-            &audience,
-            &format!("{subject}\n\n{body}"),
-            &knowledge,
-        )
-        .await;
+        let skip_model = !self.model_check_now(&who.ws, q.item_id.as_deref());
+        let check = drafts::local_only(
+            outbound::check(
+                &self.0.m,
+                &CheckCx {
+                    ws: who.ws.clone(),
+                    actor: g.author.clone(),
+                    draft_model: Some(out.model.clone()),
+                    audience_said: None,
+                    skip_model,
+                    internal_skip: false,
+                },
+                &audience,
+                &format!("{subject}\n\n{body}"),
+                &knowledge,
+            )
+            .await,
+            skip_model,
+        );
 
         let now = self.now();
         let d = DraftRow {
@@ -508,9 +531,11 @@ impl Mail {
             sent: None,
         };
         let mut d = self.insert_pending(d, &check)?;
-        // why / needs_attention / cites ride along on the basis (the card shows them with it)
+        // why / needs_attention / cites ride along on the basis (the card shows them with it), and the
+        // model that wrote it (a later check uses another one)
         if let Some(Value::Object(b)) = d.basis.as_mut() {
             b.insert("why".into(), Value::String(md.why.clone()));
+            b.insert("answer_model".into(), Value::String(out.model.clone()));
             b.insert("needs_attention".into(), Value::Bool(md.needs_attention));
             b.insert(
                 "cites".into(),

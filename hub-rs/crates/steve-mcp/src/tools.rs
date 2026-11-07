@@ -18,6 +18,10 @@ pub const ASK: &str = "steve_ask";
 pub const REQUEST_APPROVAL: &str = "steve_request_approval";
 pub const DELIVER: &str = "steve_deliver";
 pub const PUBLISH: &str = "steve_publish";
+pub const LANE_STATUS: &str = "steve_lane_status";
+
+/// Added to the `steve_publish` result: where to look for its progress instead of asking the user.
+pub const PUBLISHED: &str = "To see its progress (the merge-lane batch, an approval it waits for, a failure and why, the released version), call steve_lane_status; don't ask the user.";
 
 struct Def {
     name: String,
@@ -165,9 +169,13 @@ mod tests {
     }
 
     #[test]
-    fn lists_five_tools_in_ts_order() {
+    fn lists_the_tools_in_ts_order_then_lane_status() {
         let names: Vec<_> = list().into_iter().map(|t| t.name.to_string()).collect();
-        assert_eq!(names, [UPDATE, ASK, REQUEST_APPROVAL, DELIVER, PUBLISH]);
+        assert_eq!(
+            names,
+            [UPDATE, ASK, REQUEST_APPROVAL, DELIVER, PUBLISH, LANE_STATUS]
+        );
+        assert_eq!(validate(LANE_STATUS, &JsonObject::new()), Ok(()));
     }
 
     #[test]

@@ -3,20 +3,20 @@
 //!
 //! Off by default: nothing here is mounted unless `STEVE_NODE_LISTEN=1`. The Hub decides, the
 //! Node executes; ACP and MCP never cross the link. The listener rides the Hub's own port and
-//! takes connections only from a loopback peer: a remote Node comes in through the TLS-terminating
-//! proxy on the Hub's machine (or is on the same machine, over loopback).
+//! accepts loopback peers or explicitly configured TLS-terminating proxy peers.
 
 pub mod fleet;
 pub mod guard;
+mod ingress;
 pub mod listener;
 pub mod pairing;
 pub mod registry;
+pub use ingress::Ingress;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use rusqlite::OptionalExtension;
 use steve_store::{Store, StoreError};
@@ -54,16 +54,12 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Peer {
     }
 }
 
-/// Only loopback peers: the proxy in front of the Hub, or a Node on this machine.
-pub(crate) fn peer_allowed(peer: Option<SocketAddr>, _headers: &HeaderMap) -> bool {
-    peer.as_ref().is_some_and(crate::app::is_loopback)
-}
-
 pub struct NodeService {
     pub store: Store,
     pub hub_id: String,
     /// `sha256:…` of the Hub's certificate when it terminates TLS itself (`STEVE_NODE_TLS_PIN`).
     pub pin: Option<String>,
+    pub ingress: Ingress,
     pub registry: Arc<NodeRegistry>,
     pub fleet: Arc<NodeFleet>,
     pub limiter: pairing::Limiter,
@@ -107,10 +103,20 @@ impl NodeService {
         fleet: Arc<NodeFleet>,
         pin: Option<String>,
     ) -> Result<Arc<Self>, StoreError> {
+        Self::with_ingress(store, fleet, pin, Ingress::default())
+    }
+
+    fn with_ingress(
+        store: Store,
+        fleet: Arc<NodeFleet>,
+        pin: Option<String>,
+        ingress: Ingress,
+    ) -> Result<Arc<Self>, StoreError> {
         Ok(Arc::new(NodeService {
             hub_id: hub_id(&store)?,
             store,
             pin,
+            ingress,
             registry: Arc::new(NodeRegistry::default()),
             fleet,
             limiter: pairing::Limiter::default(),
@@ -131,7 +137,14 @@ pub fn from_vars(
         return None;
     }
     let pin = var("STEVE_NODE_TLS_PIN").filter(|p| !p.is_empty());
-    match NodeService::new(store.clone(), fleet, pin) {
+    let ingress = match Ingress::from_vars(&var) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("remote nodes disabled: {e}");
+            return None;
+        }
+    };
+    match NodeService::with_ingress(store.clone(), fleet, pin, ingress) {
         Ok(s) => Some(s),
         Err(e) => {
             tracing::error!("remote nodes disabled: {e}");

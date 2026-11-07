@@ -22,7 +22,7 @@ use steve_modules::Caller;
 use steve_node_wire::identity;
 use steve_store::StoreError;
 
-use super::{NodeService, Peer, now, peer_allowed};
+use super::{NodeService, Peer, now};
 use crate::error::json_response;
 
 pub const CODE_TTL_MS: i64 = 10 * 60 * 1000;
@@ -159,7 +159,7 @@ pub async fn claim(
     headers: HeaderMap,
     Json(b): Json<PairBody>,
 ) -> Response {
-    if !peer_allowed(peer, &headers) {
+    if !svc.ingress.allows(peer, &headers) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     if !svc.limiter.take(&code_hash(&b.code)) {

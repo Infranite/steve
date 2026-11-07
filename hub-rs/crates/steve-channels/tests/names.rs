@@ -114,10 +114,7 @@ async fn setup() -> H {
     );
     vault.init(WS, ME).expect("vault init");
     let app = Arc::new(FeishuApp::new());
-    let user = Arc::new(
-        FeishuUser::with_base(fake.base_url())
-            .with_party_hooks(steve_modules::accounts::ports().hooks),
-    );
+    let user = Arc::new(FeishuUser::with_base(fake.base_url()));
     let conns = Connections::builder(
         env.modules.clone(),
         vault,
@@ -133,11 +130,13 @@ async fn setup() -> H {
     let ch = Channels::builder(env.modules.clone(), conns.clone(), sink.clone())
         .adapter(app.clone())
         .profiles(user.clone())
+        .decl(steve_channels::adapters::feishu::user_decl())
+        .decl(steve_channels::adapters::feishu::app_decl(&app))
         .profiles(app)
         .build();
 
     let api: Router = connections::routes(conns.clone())
-        .merge(user_routes(conns.clone(), user.claims().clone()))
+        .merge(user_routes(conns.clone()))
         .with_state(env.modules.clone());
     let cb: Router = connections::callback_routes(conns.clone()).with_state(env.modules.clone());
     let me = caller(WS, ME);

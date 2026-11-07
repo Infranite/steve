@@ -284,6 +284,10 @@ pub struct ResearchJob {
     /// Steve's read-only tools (the grant `run.policy.tools`) are offered to the harness.
     #[serde(default)]
     pub steve_tools: bool,
+    /// The file parts (by name) attached to the message the question follows up on, not to the
+    /// question itself: the prompt's note says so.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<String>,
 }
 
 /// Limits of one research attempt besides the deadline. `None`: no limit.

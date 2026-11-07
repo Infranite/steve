@@ -172,7 +172,7 @@ export function ReactionChip({ r }: { r?: Reaction }) {
 }
 
 /* a chan_out status from the Hub to its label; an unknown status shows as it is */
-const CHAN_OUT = { sent: "thread:chanOut.sent", pending: "thread:chanOut.pending", draft: "thread:chanOut.draft", blocked: "thread:chanOut.blocked", failed: "thread:chanOut.failed", unknown: "thread:chanOut.unknown", discarded: "thread:chanOut.discarded" } as const
+const CHAN_OUT = { sent: "thread:chanOut.sent", pending: "thread:chanOut.pending", draft: "thread:chanOut.draft", blocked: "thread:chanOut.blocked", failed: "thread:chanOut.failed", unknown: "thread:chanOut.unknown", discarded: "thread:chanOut.discarded", disconnected: "thread:chanOut.disconnected" } as const
 
 /** what became of Steve's message in the space. A draft is closed right here, in its own conversation; sending it is
  *  approved on its card in 待处理, which shows the text that would actually go out and any disclosure warning */
@@ -185,7 +185,7 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   if (!s || s === "skipped") return null
   /* only a draft can be assumed closed: whatever the Hub says past it wins over a late click */
   const shown = closed && s === "draft" ? "discarded" : s
-  const note = <div className={cn("type-footnote", shown === "failed" || shown === "blocked" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{shown in CHAN_OUT ? t(CHAN_OUT[shown as keyof typeof CHAN_OUT]) : shown}</div>
+  const note = <div className={cn("type-footnote", shown === "failed" || shown === "blocked" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{shown in CHAN_OUT ? t(CHAN_OUT[shown as keyof typeof CHAN_OUT]) : shown}</div>
   if (shown !== "draft" || !decision) return note
   const busy = st.pendingActions.has("decision:" + decision)
   const discard = async () => { if (await discardOut(decision)) setClosed(true) }

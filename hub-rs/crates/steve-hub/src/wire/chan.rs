@@ -95,6 +95,15 @@ impl steve_channels::conversations::Thread for CoreThread {
     }
 }
 
+/// steve-core's YOLO switch for the channel module: a channel card has no item, the workspace's decides.
+pub struct ChanYolo(pub steve_core::Core);
+
+impl steve_channels::YoloSwitch for ChanYolo {
+    fn on(&self, ws: &str) -> bool {
+        self.0.yolo_applies(ws, None)
+    }
+}
+
 /// The channel module as the owner of steve-core's guest conversations.
 pub struct ChanConvHost(pub steve_channels::WeakChannels);
 

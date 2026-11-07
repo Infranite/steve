@@ -21,9 +21,24 @@ try {
       // couldn't look: said so, with why, never "nothing there"
       assert.match(await lane.locator("[data-lane-merge]").innerText(), /查不到[\s\S]*Bad credentials/)
       assert.match(await lane.locator("[data-lane-target]").innerText(), /没取到最新状态/)
+      // a lane nothing went into yet: nothing in flight, the limits still there to set
+      assert.match(await lane.locator("[data-lane-idle]").innerText(), /没有在合并的批次/)
+      assert.equal(await lane.locator("[data-lane-limits]").count(), 1)
     } else {
       assert.match(await lane.locator("[data-lane-merge]").innerText(), /直接推送到分支[\s\S]*没有要求 PR/)
-      assert.match(await lane.locator("[data-lane-checks]").innerText(), /合并前要过 · 没有[\s\S]*没找到，按默认/)
+      assert.match(await lane.locator("[data-lane-checks]").innerText(), /托管方要求的检查 · 没有[\s\S]*没找到，按默认[\s\S]*不另跑检查/)
+      // the lane itself: what is in flight, what collects, and the way out of the window
+      assert.match(await lane.locator("[data-lane-running]").innerText(), /MQ-3 · 正在合并[\s\S]*ST-60/)
+      assert.match(await lane.locator("[data-lane-collecting]").innerText(), /MQ-4 · 合批中[\s\S]*ST-61[\s\S]*ST-62/)
+      if (width === 1440 && theme === "light") {
+        await lane.locator("[data-lane-window]").fill("15")
+        await lane.locator("[data-lane-save]").click()
+        await page.waitForFunction(() => window.sent.length === 1)
+        assert.deepEqual(await page.evaluate(() => window.sent[0]), { window_min: 15, max_members: null })
+        await lane.locator("[data-lane-now]").click()
+        await lane.locator("[data-lane-now]").waitFor({ state: "detached" })
+        assert.match(await lane.locator("[data-lane-collecting]").innerText(), /MQ-4 · 已截止/)
+      }
     }
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "the section never widens the page")
     await lane.scrollIntoViewIfNeeded()

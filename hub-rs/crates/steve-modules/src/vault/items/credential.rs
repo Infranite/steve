@@ -42,11 +42,14 @@ impl fmt::Debug for Credential {
 }
 
 const DAY_MS: i64 = 86_400_000;
+/// Failures of the same item and user this close after the last one extend its row.
+const FAILURE_MERGE_MS: i64 = 3_600_000;
 
 impl Vault {
     /// Lends the secret fields of `item_id` to `f`. `actor` is who uses them (`con_…` for a
     /// connection), `purpose` goes into the use log. Logged once per item, actor and (UTC) day when it
-    /// works; every failure gets its own `failed` row.
+    /// works; a failure gets a `failed` row, and failures that follow it within an hour (nothing
+    /// worked in between) only move that row's `finished` on.
     pub fn with_credential<R>(
         &self,
         ws: &str,
@@ -156,6 +159,19 @@ impl Vault {
         self.store().transaction(|tx| {
             if ok && repo::has_internal_use(tx, ws, item_id, actor, at - at.rem_euclid(DAY_MS))? {
                 return Ok::<_, VaultError>(());
+            }
+            if !ok
+                && let Some((id, status, finished)) =
+                    repo::last_internal_use(tx, ws, item_id, actor)?
+                && status == "failed"
+                && at - finished <= FAILURE_MERGE_MS
+            {
+                repo::touch_use(tx, &id, at)?;
+                tx.publish(ChangeEvent::Vault {
+                    id: item_id.into(),
+                    ws: ws.into(),
+                });
+                return Ok(());
             }
             let su = uid("su");
             repo::insert_use(

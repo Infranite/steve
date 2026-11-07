@@ -94,6 +94,8 @@ export default {
     sendRework: "Send back",
     rework: "Rework…",
     pass: "Accept",
+    passRelease: "Accept and release",
+    passNoRelease: "Accept, don't release yet",
   },
   composer: {
     reply: "Replying: “{{text}}”",
@@ -187,6 +189,7 @@ export default {
     failed: "Not sent",
     unknown: "May have been sent, checking",
     discarded: "You didn't send it",
+    disconnected: "Not sent: the connected account was removed",
     discard: "Don't send",
     review: "Approve…",
   },

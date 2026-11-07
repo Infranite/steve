@@ -2458,6 +2458,7 @@ pub mod build {
                     idle_ms: 600_000,
                 },
                 steve_tools: true,
+                earlier: vec![],
             }),
             ..job(job_id, attempt, text)
         }
