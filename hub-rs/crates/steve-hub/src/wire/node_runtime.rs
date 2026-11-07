@@ -1246,6 +1246,11 @@ impl NodeRuntime {
 
     /// What [`Self::plan_in`] would answer, without planning (and without writing anything).
     fn plan_state_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
+        // Node facts and reconciliation can schedule the next queued turn without going through
+        // RoutedRuntime::flush. Recheck the durable graph in the same transaction as the claim.
+        if steve_store::workflow_gate::session_blocker(tx, session)?.is_some() {
+            return Ok(Planned::Held);
+        }
         // the persisted upgrade maintenance holds too: after a restart mid-drain nobody calls hold
         if self.is_holding() {
             return Ok(Planned::Held);
@@ -2283,6 +2288,23 @@ impl NodeRuntime {
             .optional()?;
         if ok {
             if let Some(turn) = waiting {
+                if let Some(why) = steve_store::workflow_gate::session_blocker(tx, s)? {
+                    return self.after_attempt_in(
+                        tx,
+                        s,
+                        &turn,
+                        &Completion {
+                            outcome: Outcome::Interrupted,
+                            stop_reason: "cancelled".into(),
+                            error: Some(ApiError::new(ErrorCode::Invalid, why)),
+                            result: vec![],
+                            continuation: None,
+                            transient: false,
+                            acted: false,
+                            job: None,
+                        },
+                    );
+                }
                 let (spec, ordinal): (String, i64) = tx.query_row(
                     "SELECT spec, ordinal FROM runtime_attempts WHERE turn_id=? ORDER BY ordinal DESC LIMIT 1",
                     [&turn],
@@ -2456,7 +2478,10 @@ impl NodeRuntime {
             [&attempt],
             |r| r.get(0),
         )?;
-        let reopen = gone && !reopened_before && !cancelled;
+        let reopen = gone
+            && !reopened_before
+            && !cancelled
+            && steve_store::workflow_gate::session_blocker(tx, &session)?.is_none();
         let completion = Completion {
             outcome: Outcome::Failed,
             stop_reason: if reopen { "released" } else { "error" }.into(),
@@ -3502,6 +3527,7 @@ impl NodeRuntime {
             && c.transient
             && !c.acted
             && !cancelled
+            && steve_store::workflow_gate::session_blocker(tx, session)?.is_none()
             && (ordinal as usize) < RETRY_DELAYS_MS.len();
         // a retry carries the config of its first attempt: never once a change is waiting
         let waits = retry && config::desired_in(tx, session)?.is_some();
@@ -4301,6 +4327,84 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("timed out waiting for {what}");
+    }
+
+    /// A Node fact starts follow-ups inside the coordinator, without the public runtime router.
+    /// The durable pause must hold that path too, while preserving its queued input for resume.
+    #[tokio::test]
+    async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
+        let h = super::super::node_tools::tests::fixture(vec![]).await;
+        until("first turn reached Node", || {
+            h._node
+                .log()
+                .iter()
+                .any(|(method, _)| *method == "start_turn")
+        })
+        .await;
+        h.store.transaction::<_, StoreError>(|tx| {
+            tx.execute_batch(
+                "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
+                 VALUES ('parent','default',2,'主事项','run','执行',1,1);
+                 INSERT INTO item_goals(item_id,version,text,created)
+                 VALUES ('parent',1,'验证暂停和恢复',1);
+                 INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
+                 VALUES ('parent',1,2,3,1,1);
+                 INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
+                 VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作\",\"goal\":\"测试\",\"bot_id\":\"dev\"}','running','i1','s1');",
+            )?;
+            Ok(())
+        }).unwrap();
+        h._rt.prompt("s1", "排队补充", "user", &[]).unwrap();
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("UPDATE workflows SET paused=1 WHERE item_id='parent'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        h._node
+            .finish(
+                &h.exec,
+                Completion {
+                    // A transient failure can beat the pause's cancellation command. Neither its
+                    // automatic retry nor the queued follow-up may start while the graph is paused.
+                    outcome: Outcome::Failed,
+                    stop_reason: "error".into(),
+                    error: None,
+                    result: vec![],
+                    continuation: None,
+                    transient: true,
+                    acted: false,
+                    job: None,
+                },
+            )
+            .await
+            .unwrap();
+        until("paused attempt ended", || {
+            h._rt.active_attempt("s1").unwrap().is_none()
+        })
+        .await;
+        let counts = || {
+            h.store
+                .reader(|c| {
+                    Ok::<_, StoreError>(c.query_row(
+                        "SELECT (SELECT COUNT(*) FROM runtime_attempts),
+                            (SELECT COUNT(*) FROM queued WHERE session_id='s1')",
+                        [],
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                    )?)
+                })
+                .unwrap()
+        };
+        assert_eq!(counts(), (1, 1));
+        assert_eq!(h._rt.flush("s1", None).unwrap(), Planned::Held);
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("UPDATE workflows SET paused=0 WHERE item_id='parent'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(h._rt.flush("s1", None).unwrap(), Planned::Created);
+        assert_eq!(counts(), (2, 0));
     }
 
     /// Review L4: an attempt the Hub settles on its own word reaches the apply worker only once

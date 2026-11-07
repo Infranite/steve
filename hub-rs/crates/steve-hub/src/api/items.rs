@@ -116,12 +116,14 @@ pub async fn get_one(
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
     let lifecycle = st.domain.lifecycle_view(&id).await?;
+    let workflow = st.domain.workflow_get(&id).await?;
     st.read(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
         if let Some(l) = lifecycle {
             out.insert("lifecycle".into(), l);
         }
+        out.insert("workflow".into(), workflow);
         out.insert("cycles".into(), objs(r.item_cycles(&id)?));
         out.insert("goalsList".into(), objs(r.item_goals(&id)?));
         out.insert("planRounds".into(), objs(r.item_plan_rounds(&id)?));
@@ -138,6 +140,27 @@ pub async fn get_one(
         ok(Value::Object(out))
     })
     .await
+}
+
+pub async fn workflow_get(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    own_item(&st, &c.ws, &id).await?;
+    ok(st.domain.workflow_get(&id).await?)
+}
+
+pub async fn workflow_change(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    own_item(&st, &c.ws, &id).await?;
+    let args = body(&b)?;
+    // The core validates the same commands for HTTP, MCP and Node tools.
+    ok(st.domain.workflow_change(&id, args, &c.me).await?)
 }
 
 pub async fn actions(

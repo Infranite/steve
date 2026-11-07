@@ -434,6 +434,10 @@ pub fn router(st: AppState, modules: Router) -> Router {
                 .delete(items::delete_one),
         )
         .route("/items/{id}/actions", post(items::actions))
+        .route(
+            "/items/{id}/workflow",
+            get(items::workflow_get).post(items::workflow_change),
+        )
         .route("/items/{id}/lifecycle", post(items::lifecycle))
         .route("/items/{id}/goal", post(items::goal))
         .route("/items/{id}/supplement", post(items::supplement))

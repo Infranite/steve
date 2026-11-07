@@ -73,6 +73,17 @@ pub(crate) fn authorize(
     if s.status == "ended" || s.readonly != 0 || s.device_id != "hub" || s.source != "Steve" {
         return Err(denied());
     }
+    // Steve tools enter through the Node without a harness permission card. Recheck the same
+    // persisted gate used for turns before every fresh call, including the check after its fence.
+    // A known ToolKey must still be readable when a wait/replan stops further work.
+    if active
+        && store
+            .reader(|c| steve_store::workflow_gate::session_blocker(c, &s.id))
+            .map_err(internal)?
+            .is_some()
+    {
+        return Err(denied());
+    }
     if let Some(item) = &s.item_id {
         let item = store
             .items()
@@ -89,7 +100,12 @@ pub(crate) fn authorize(
             .get(bot)
             .map_err(internal)?
             .ok_or_else(denied)?;
-        if bot.workspace_id != s.workspace_id || !bot.enabled {
+        if !bot.enabled
+            || !store
+                .bots()
+                .in_workspace(&bot.id, &s.workspace_id)
+                .map_err(internal)?
+        {
             return Err(denied());
         }
     }
@@ -725,6 +741,134 @@ pub(crate) mod tests {
         );
     }
     #[tokio::test]
+    async fn workflow_gate_stops_new_tools_but_keeps_known_results_readable() {
+        let h = fixture(vec![]).await;
+        let tools =
+            NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
+        let service = Arc::new(Mock {
+            calls: AtomicUsize::new(0),
+            gate: None,
+        });
+        tools.install(service.clone()).unwrap();
+        let q = request(&tools, h.exec.clone()).await;
+        assert!(matches!(
+            tools.call(q.clone()).await.unwrap(),
+            ToolResult::Completed { .. }
+        ));
+        // The running attempt has not ended or received cancellation yet. Both an ordinary
+        // prerequisite wait and a detached old work unit must nevertheless revoke fresh calls.
+        for (index, change) in [
+            "UPDATE items SET status='block' WHERE id='i1'",
+            "UPDATE items SET status='run',source='[\"item\",\"workflow\"]' WHERE id='i1'",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            h.store
+                .transaction::<_, StoreError>(|tx| {
+                    tx.execute(change, [])?;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                tools.catalog(h.exec.clone()).await.unwrap_err().code,
+                ErrorCode::Denied
+            );
+            let mut fresh = q.clone();
+            fresh.id = CallId::new(format!("revoked{index}")).unwrap();
+            assert_eq!(tools.call(fresh).await.unwrap_err().code, ErrorCode::Denied);
+            assert!(matches!(
+                tools.call(q.clone()).await.unwrap(),
+                ToolResult::Completed { .. }
+            ));
+            assert!(matches!(
+                tools.call_status(q.key()).await.unwrap(),
+                ToolResult::Completed { .. }
+            ));
+        }
+        assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn bot_membership_authorizes_cross_home_tools_and_revokes_them() {
+        let h = fixture(vec![]).await;
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO workspaces(id,name,created,item_prefix) VALUES('other','Other',1,'OT')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        h.store
+            .bots()
+            .seed(
+                "shared_bot",
+                false,
+                &steve_store::NewBot {
+                    name: "Shared worker".into(),
+                    ..Default::default()
+                },
+                "other",
+            )
+            .unwrap();
+        h.store
+            .bots()
+            .set_workspaces("shared_bot", &["other".into(), "default".into()])
+            .unwrap();
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("UPDATE items SET bot_id='shared_bot' WHERE id='i1'", [])?;
+                tx.execute("UPDATE sessions SET bot_id='shared_bot' WHERE id='s1'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let tools =
+            NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
+        let service = Arc::new(Mock {
+            calls: AtomicUsize::new(0),
+            gate: None,
+        });
+        tools.install(service.clone()).unwrap();
+        let q = request(&tools, h.exec.clone()).await;
+        assert!(matches!(
+            tools.call(q.clone()).await.unwrap(),
+            ToolResult::Completed { .. }
+        ));
+        h.store
+            .bots()
+            .set_workspaces("shared_bot", &["other".into()])
+            .unwrap();
+        assert_eq!(
+            tools.catalog(h.exec.clone()).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+        let mut revoked = q.clone();
+        revoked.id = CallId::new("membership_revoked").unwrap();
+        assert_eq!(
+            tools.call(revoked).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+        h.store
+            .bots()
+            .set_workspaces("shared_bot", &["other".into(), "default".into()])
+            .unwrap();
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("UPDATE bots SET enabled=0 WHERE id='shared_bot'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let mut disabled = q;
+        disabled.id = CallId::new("bot_disabled").unwrap();
+        assert_eq!(
+            tools.call(disabled).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
     async fn timeout_and_cancel_are_uncertain_never_reinvoked() {
         let h = fixture(vec![]).await;
         let tools =
@@ -906,6 +1050,28 @@ pub(crate) mod tests {
         let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
         let home = cfg.data_dir.join("test-tool-bridge");
         let host = fixture_on(dir, store.clone(), vec![]).await;
+        store
+            .bots()
+            .seed(
+                "management_bot",
+                false,
+                &steve_store::NewBot {
+                    name: "Management worker".into(),
+                    ..Default::default()
+                },
+                "default",
+            )
+            .unwrap();
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("UPDATE items SET bot_id='management_bot' WHERE id='i1'", [])?;
+                tx.execute(
+                    "UPDATE sessions SET bot_id='management_bot' WHERE id='s1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         let tools = NodeTools::open(store.clone(), NodeId::new("local").unwrap(), &home).unwrap();
         tools.install(w.tool_service.clone()).unwrap();
 
@@ -919,6 +1085,29 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(names, mcp, "the same tools as the MCP endpoint");
         assert!(names.contains(&steve_mcp::tools::UPDATE));
+        for (name, args) in [
+            ("steve_items_search", json!({"query": "test"})),
+            ("steve_item_read", json!({"id": "i1"})),
+            ("steve_item_dependencies", json!({"action": "get"})),
+            ("steve_workflow", json!({"action": "get"})),
+        ] {
+            assert!(names.contains(&name), "{name}");
+            let result = tools
+                .call(ToolCall {
+                    id: CallId::new(format!("management_{name}")).unwrap(),
+                    catalog: catalog.revision.clone(),
+                    execution: host.exec.clone(),
+                    name: name.into(),
+                    args,
+                    deadline: Timestamp(steve_store::now() + 60_000),
+                })
+                .await
+                .unwrap();
+            assert!(
+                matches!(result, ToolResult::Completed { .. }),
+                "{name}: {result:?}"
+            );
+        }
 
         let call = |id: &str| ToolCall {
             id: CallId::new(id).unwrap(),

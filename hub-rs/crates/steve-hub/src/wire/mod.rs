@@ -12,6 +12,7 @@ pub mod core;
 pub mod flow_cmd;
 pub mod git_push;
 pub mod item_git;
+pub mod item_mcp;
 pub mod mcp;
 pub mod mcp_extra;
 pub mod modules;

@@ -115,6 +115,10 @@ pub const MIGRATIONS: &[&str] = &[
     // 50: path model S1: who a run works for (`items.requested_by`, `runtime_sessions.principal`,
     // `audience`), `bots.owner`, and `node_grants`, `node_roots`, `node_env`, with their backfill.
     include_str!("../migrations/050.sql"),
+    // 51: durable multi-Bot work graphs, their unit attempts and replanning history.
+    include_str!("../migrations/051.sql"),
+    // 52: per-item prerequisite waiting and durable automatic continuation.
+    include_str!("../migrations/052.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

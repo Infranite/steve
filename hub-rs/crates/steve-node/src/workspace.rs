@@ -358,7 +358,7 @@ impl Commands {
         };
         truncated |= drain(&mut out, &mut stdout, cap);
         drain(&mut err, &mut stderr, ERR_CAP);
-        if !crate::procs::state(pid, started).gone() {
+        if !crate::procs::wait_gone(pid, started).gone() {
             return Err(Failed::Pipe("git group stop uncertain".into()));
         }
         self.inner
