@@ -384,16 +384,27 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         "{last_free_mode}"
     );
 
-    // U2 baseline: a harness that runs a command without asking, with nothing of any harness in
-    // what it reports (plain ACP `tool_call` updates, no `_meta`, no adapter extra), meets the
-    // floor all the same. With YOLO on, the turn stops once the call starts.
-    let unasked = item(&e, "推送 @run git push origin main @say after").await;
+    // The harness's own permission mode decides what it runs without asking; Steve does not
+    // second-guess it. A command it reports as run (plain ACP `tool_call` updates, no permission
+    // request) runs on and the turn ends normally, even one naming launchctl: a read-only
+    // `launchctl print` over ssh on another host used to stop turns.
+    let cancels = || {
+        std::fs::read_to_string(&e.log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"session/cancel\""))
+            .count()
+    };
+    let cancels_before = cancels();
+    let ssh = "ssh -o BatchMode=yes macbook '/bin/launchctl print gui/501'";
+    let unasked = item(&e, &format!("看看 @run {ssh} @say after")).await;
     assert!(
-        until(20, || async {
-            texts(&e, &unasked).await.contains("Steve 停下了这一轮")
+        until(30, || async {
+            let t = texts(&e, &unasked).await;
+            t.contains("ran:ssh -o BatchMode=yes macbook") && t.contains("after")
         })
         .await,
-        "the turn was stopped: {}",
+        "the command ran and the turn went on: {}",
         texts(&e, &unasked).await
     );
     assert!(
@@ -401,28 +412,35 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         "the turn is over"
     );
     let t = texts(&e, &unasked).await;
-    assert!(!t.contains("ran:git push"), "{t}");
-    assert!(t.contains("\"stopReason\":\"cancelled\""), "{t}");
-    let cancels = std::fs::read_to_string(&e.log)
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| l.contains("\"session/cancel\""))
-        .count();
-    assert!(cancels > 0, "the adapter got session/cancel");
-    let n = rows(
-        &e.db,
-        "SELECT text FROM messages WHERE author = 'steve' AND text LIKE '%停下了这一轮%git push%'",
-        &[],
-    );
-    assert!(!n.is_empty(), "the user was told");
-    // a harmless command it runs without asking goes on
-    let fine = item(&e, "测试 @run cargo test @say after").await;
+    assert!(!t.contains("\"stopReason\":\"cancelled\""), "{t}");
+    assert!(!t.contains("停下了这一轮"), "{t}");
+    assert_eq!(cancels(), cancels_before, "no session/cancel");
+
+    // what the harness does ask about is still answered by YOLO, and a push is not approved:
+    // it stays with the user as a card
+    let push = item(&e, "推送 @permexec git push origin main").await;
     assert!(
         until(20, || async {
-            texts(&e, &fine).await.contains("ran:cargo test")
+            !rows(
+                &e.db,
+                "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
+                  WHERE d.subject_type = 'tool_call' AND d.session_id = ?",
+                &[&push],
+            )
+            .is_empty()
         })
         .await,
-        "{}",
-        texts(&e, &fine).await
+        "YOLO looked at it"
     );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let r = rows(
+        &e.db,
+        "SELECT d.status, a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
+          WHERE d.subject_type = 'tool_call' AND d.session_id = ?",
+        &[&push],
+    );
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0][0], json!("open"), "the card waits for the user: {r:?}");
+    assert_ne!(r[0][1], json!("decided"), "{r:?}");
+    assert!(!texts(&e, &push).await.contains("perm:selected"));
 }

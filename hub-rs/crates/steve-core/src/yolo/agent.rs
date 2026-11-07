@@ -24,8 +24,8 @@ pub const DELIVER: &str = "- steve_deliver: when the goal is met and your checks
 /// Appended to the `steve_publish` line for the user's own Steve deployment.
 pub const PUBLISH: &str = " In YOLO mode Steve approves releases of this project by itself and rolls back if the health check fails.";
 
-/// Under 完全放开 (full access): the harness asks nothing. Steve still stops the turn when it sees a
-/// tool call cross [`super::limits::floor`]; the agent is told so, and what else to mind.
+/// Under 完全放开 (full access): the harness asks nothing, so Steve has nothing to answer and does
+/// not intercept the agent's tool calls. The agent is told what to mind.
 pub fn full_lines(steve_home: &str) -> Vec<String> {
     vec![
         "- Full access is on: your tools run without permission prompts. You act as the user on this machine, so stay careful:".into(),
@@ -33,7 +33,6 @@ pub fn full_lines(steve_home: &str) -> Vec<String> {
         "  - do not push to any remote and do not change GitHub with gh: Steve pushes your branch when the item is delivered;".into(),
         "  - do not send messages or mail as the user (lark-cli, sendmail, mail, osascript…); use Steve's tools for that;".into(),
         "  - stop only processes you started yourself, by PID; never use pkill or killall.".into(),
-        "  - Steve watches your tool calls: one that does any of the above stops your turn.".into(),
     ]
 }
 
@@ -42,7 +41,7 @@ pub const NOTE_ON: &str = "（YOLO 已开启：用户不在，希望尽量少被
 /// …and when it goes off.
 pub const NOTE_OFF: &str = "（YOLO 已结束：回到平常的工作方式，需要决定时用 steve_ask）";
 /// …when full access comes on (on top of the YOLO note when it came from off).
-pub const NOTE_FULL: &str = "（完全放开已开启：你的工具调用不再请求权限。仍然：不要碰 STEVE_HOME（你自己的工作目录除外）、8440 端口和 launchd；不要推送到远端，也不要用 gh 改 GitHub，交付时 Steve 会推送你的分支；不要以用户的名义发消息或邮件（lark-cli、sendmail、mail、osascript 等）；只按 PID 停你自己启动的进程，不用 pkill/killall。Steve 看着你的工具调用，做了这些会停下你这一轮。）";
+pub const NOTE_FULL: &str = "（完全放开已开启：你的工具调用不再请求权限。仍然：不要碰 STEVE_HOME（你自己的工作目录除外）、8440 端口和 launchd；不要推送到远端，也不要用 gh 改 GitHub，交付时 Steve 会推送你的分支；不要以用户的名义发消息或邮件（lark-cli、sendmail、mail、osascript 等）；只按 PID 停你自己启动的进程，不用 pkill/killall。）";
 /// …when full access ends but YOLO stays on.
 pub const NOTE_FULL_OFF: &str = "（完全放开已结束：工具调用重新会请求权限，YOLO 仍开着）";
 
@@ -101,14 +100,6 @@ fn note(from: Level, to: Level) -> Option<&'static str> {
     }
 }
 
-/// What the floor read of a tool call update at once, when it came in: the session's turn then,
-/// and whether the harness had asked about the call ([`Core::yolo_saw`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SeenTurn {
-    turn: u64,
-    asked: bool,
-}
-
 /// What each running session was last told about YOLO, the note waiting for its next message, and
 /// the sessions whose harness mode switch did not go through yet.
 #[derive(Default)]
@@ -119,16 +110,6 @@ pub(crate) struct Sessions {
     /// The mode switch failed (a store error, say): the next sync tries it again, whatever the
     /// note did meanwhile. Apart from `told`, so a retry never makes a note again.
     mode_pending: Mutex<HashSet<String>>,
-    /// Tool calls (`session`, call id) that stopped their turn already, with the turn.
-    stopped: Mutex<HashMap<(String, String), u64>>,
-    /// Tool calls (`session`, call id) the harness asked permission for: the guard judged them.
-    asked: Mutex<HashMap<(String, String), u64>>,
-    /// Tool calls (`session`, call id) the floor saw, with the turn it first saw them in.
-    seen: Mutex<HashMap<(String, String), u64>>,
-    /// Each session's turn, counted up when one is over.
-    turns: Mutex<HashMap<String, u64>>,
-    /// Why Steve stopped the session's last turn, for the agent's next message.
-    stop_notes: Mutex<HashMap<String, String>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -144,57 +125,6 @@ impl Sessions {
     /// The note for the next message to `sid`, taken.
     pub(crate) fn take_note(&self, sid: &str) -> Option<&'static str> {
         lock(&self.notes).remove(sid).map(|(_, n)| n)
-    }
-    /// Records that call `call` of `sid` stopped its turn; false when it did already.
-    fn stop_once(&self, sid: &str, call: &str, note: String) -> bool {
-        let turn = self.turn(sid);
-        if lock(&self.stopped)
-            .insert((sid.into(), call.into()), turn)
-            .is_some()
-        {
-            return false;
-        }
-        lock(&self.stop_notes).insert(sid.into(), note);
-        true
-    }
-    fn take_stop_note(&self, sid: &str) -> Option<String> {
-        lock(&self.stop_notes).remove(sid)
-    }
-    fn turn(&self, sid: &str) -> u64 {
-        lock(&self.turns).get(sid).copied().unwrap_or(0)
-    }
-    fn asked(&self, sid: &str, call: &str) {
-        let turn = self.turn(sid);
-        lock(&self.asked).insert((sid.into(), call.into()), turn);
-    }
-    fn was_asked(&self, sid: &str, call: &str) -> bool {
-        lock(&self.asked).contains_key(&(sid.to_string(), call.to_string()))
-    }
-    /// A tool call update of `sid` came in: the turn it belongs to and whether the harness asked
-    /// about it, read at once (before any slower look). `None`: the call was first seen in a turn
-    /// that is over (a late update), and nothing is done about it now.
-    fn saw(&self, sid: &str, call: &str) -> Option<SeenTurn> {
-        let turn = self.turn(sid);
-        let first = *lock(&self.seen)
-            .entry((sid.into(), call.into()))
-            .or_insert(turn);
-        (first == turn).then(|| SeenTurn {
-            turn,
-            asked: self.was_asked(sid, call),
-        })
-    }
-    /// The turn of `sid` is over: a call of it is not looked at again. What the turn just over
-    /// kept stays one turn more, so its late updates are still known as its own.
-    fn turn_over(&self, sid: &str) {
-        let turn = {
-            let mut turns = lock(&self.turns);
-            let t = turns.entry(sid.into()).or_insert(0);
-            *t += 1;
-            *t
-        };
-        for m in [&self.asked, &self.stopped, &self.seen] {
-            lock(m).retain(|(s, _), t| s != sid || *t + 1 >= turn);
-        }
     }
     /// Records the level; the level the session was told before when it differs (unknown = off,
     /// the protocol of a session started before YOLO).
@@ -281,134 +211,14 @@ impl Core {
         harness_mode(bot.as_deref(), self.yolo_level(&item), own)
     }
 
-    /// The text for session `sid`, with what changed about YOLO in front of it (once), and why Steve
-    /// stopped its last turn under full access.
+    /// The text for session `sid`, with what changed about YOLO in front of it (once).
     pub(crate) fn with_yolo_note(&self, sid: &str, text: &str) -> String {
         let sessions = &self.0.yolo_sessions;
         let mut out = text.to_string();
-        if let Some(n) = sessions.take_stop_note(sid) {
-            out = format!("{n}\n\n{out}");
-        }
         if let Some(n) = sessions.take_note(sid) {
             out = format!("{n}\n\n{out}");
         }
         out
-    }
-
-    /// YOLO applies to the item session `session` works on (a cheap look before its tool calls
-    /// are read): false with YOLO off, for a read-only session or without YOLO wired.
-    pub fn yolo_watches(&self, session: &str) -> bool {
-        self.yolo().is_some() && self.watched_item(session).is_some()
-    }
-
-    fn watched_item(&self, session: &str) -> Option<(Item, Level)> {
-        let s = self.store().session(session).ok().flatten()?;
-        let item = self.store().item(s.item_id.as_deref()?).ok().flatten()?;
-        let level = self.yolo_level(&item);
-        (s.readonly == 0 && level != Level::Off).then_some((item, level))
-    }
-
-    /// The harness asked permission for call `call` of `session` (a `session/request_permission`
-    /// the Node forwarded): the guard judges it, so [`Self::yolo_seen`] leaves it alone.
-    pub fn yolo_asked(&self, session: &str, call: &str) {
-        self.0.yolo_sessions.asked(session, call);
-    }
-
-    /// The turn of `session` is over: calls of it are no longer looked at.
-    pub fn yolo_turn_over(&self, session: &str) {
-        self.0.yolo_sessions.turn_over(session);
-    }
-
-    /// A tool call update of `session` came in: read its turn and whether it was asked about now,
-    /// before [`Self::yolo_seen`] looks at it on another thread (the turn may end meanwhile).
-    /// `None`: it belongs to a turn that is over.
-    pub fn yolo_saw(&self, session: &str, call: &str) -> Option<SeenTurn> {
-        self.0.yolo_sessions.saw(session, call)
-    }
-
-    /// A harness tool call of `session` as its ACP `tool_call` updates report it (`call`: its id,
-    /// `title`: what it shows, `pending`: it has not started yet; `input`: its kind, raw input and
-    /// locations), whichever harness sent it. The floor ([`super::limits::floor`]) holds for every
-    /// call the harness did not ask permission for: under full access because the harness asks
-    /// nothing, with YOLO on because a harness may run a call without asking (one that ignores the
-    /// permission mode). With YOLO on a pending call is left until it starts, since the harness may
-    /// still ask, and then the guard has it. One that crosses the floor stops the turn: the user is
-    /// told, and the agent hears why with its next message. True when it stopped the turn. Nothing
-    /// happens with YOLO off, nor for a call of a turn that is over by now (`seen`: what
-    /// [`Self::yolo_saw`] read when the update came).
-    pub fn yolo_seen(
-        &self,
-        session: &str,
-        call: &str,
-        title: &str,
-        pending: bool,
-        input: super::ToolInput,
-        seen: SeenTurn,
-    ) -> bool {
-        let (Some(y), Some((item, level))) = (self.yolo(), self.watched_item(session)) else {
-            return false;
-        };
-        let sessions = &self.0.yolo_sessions;
-        let over = || sessions.turn(session) != seen.turn;
-        if over() || seen.asked || sessions.was_asked(session, call) {
-            return false;
-        }
-        if pending && level != Level::Full {
-            return false;
-        }
-        let own = y.own_dir(item.cwd.as_deref());
-        let tool = super::judge::Tool {
-            kind: input.kind,
-            title: title.to_string(),
-            raw: input.raw,
-            truncated: false,
-            locations: input.locations,
-            options: Vec::new(),
-            cwd: input
-                .own_dir
-                .as_deref()
-                .map(super::limits::canonical)
-                .or(own),
-            project_dir: None,
-            branch: item.branch.clone(),
-            own_pids: input.own_pids.unwrap_or_default(),
-        };
-        let Some(limit) = super::limits::floor(&tool, y.env()) else {
-            return false;
-        };
-        let note = format!(
-            "（Steve 停下了你上一轮：没有经过用户确认就做了这件事——{}（{}）。不要再试；需要的话用 steve_request_approval 交给用户。）",
-            limit.what, title
-        );
-        // the turn may have ended while the floor looked: then there is nothing to stop
-        if over() || !sessions.stop_once(session, call, note) {
-            return false;
-        }
-        tracing::warn!(session, call, rule = %limit.rule(), "yolo floor: stopping the turn");
-        if let Err(e) = self.0.runtime.cancel(session) {
-            tracing::error!(session, "yolo floor: stop the turn: {e}");
-        }
-        let text = format!(
-            "Agent 没有先请求权限就要做碰到底线的事，Steve 停下了这一轮：{}（{}）。这条命令可能已经开始执行。",
-            limit.what, title
-        );
-        if let Err(e) =
-            self.store()
-                .event_add(session, "system", serde_json::json!({ "text": text }))
-        {
-            tracing::error!(session, "yolo floor: system entry: {e}");
-        }
-        if let Err(e) = crate::notify::notify(
-            self.store(),
-            &item.workspace_id,
-            "system",
-            "fail",
-            &text,
-            Some(&item.id),
-        ) {
-            tracing::error!(session, "yolo floor: notice: {e}");
-        }
-        true
     }
 
     /// Brings every running session of `ws` in line with YOLO as it is now: a note for its next

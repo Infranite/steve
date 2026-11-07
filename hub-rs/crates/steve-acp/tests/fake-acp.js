@@ -16,6 +16,7 @@
 //   @permexec <command>    request_permission for an `execute` tool call running <command>
 //   @run <command>         an `execute` tool call running <command> without asking, whatever the mode
 //                          (no `_meta` of any harness): in_progress, 2 s, completed, says "ran:<command>"
+//                          (steve-hub's yolo_e2e: such a call does not stop the turn)
 //   @codexperm <tool>      Codex-style MCP approval form for the steve server
 //   @permtool <kind> <path> request_permission for a `kind` tool call on `path` (rawInput.file_path, locations);
 //                          like a real harness, in mode bypassPermissions / full-access it asks nothing
