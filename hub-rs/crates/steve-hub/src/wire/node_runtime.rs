@@ -198,6 +198,8 @@ pub struct Binding {
 }
 
 pub struct NodeRuntime {
+    /// [`Self::set_principal_state`].
+    principal_state: AtomicBool,
     /// [`Self::set_configured_roots`].
     configured_roots: OnceLock<Vec<String>>,
     store: Store,
@@ -372,6 +374,7 @@ impl NodeRuntime {
     pub fn new(store: Store, node: Arc<dyn Node>, domain: Arc<dyn NodeDomain>) -> Arc<NodeRuntime> {
         let node_id = node.id().clone();
         Arc::new(NodeRuntime {
+            principal_state: AtomicBool::new(false),
             configured_roots: OnceLock::new(),
             store,
             node,
@@ -747,6 +750,9 @@ impl NodeRuntime {
             choice: b.choice.clone(),
             policy: b.policy.clone(),
             resume: adopted.clone().flatten(),
+            // set in the bind's transaction, once its principal is recorded
+            env: vec![],
+            state: None,
         };
         let fresh = self.tx(|tx| {
             self.session_owners_work_in(tx, &b.session)?;
@@ -798,6 +804,18 @@ impl NodeRuntime {
                 now(),
             )?;
             let open_op = format!("op_open_{}", b.session);
+            // the principal's own variables on this Node, as recorded just now (node_env)
+            let mut open = open.clone();
+            open.env = super::node_env::for_session(tx, self.node_id.as_str(), &b.session)?;
+            // a session moved from the legacy runner resumes its conversation where it was kept
+            if self.principal_state.load(Ordering::Relaxed) && adopted.is_none() {
+                open.state = super::principal::harness_state_in(
+                    tx,
+                    &b.session,
+                    self.node_id.as_str(),
+                    &open.choice.harness,
+                )?;
+            }
             let (open_v, open_d) = command(&open_op, open.clone())?;
             rt::insert_command_in(
                 tx,
@@ -882,6 +900,12 @@ impl NodeRuntime {
         }
     }
 
+    /// New sessions get a harness directory of their principal's own on this Node
+    /// ([`super::principal::harness_state_in`]).
+    pub fn set_principal_state(&self, on: bool) {
+        self.principal_state.store(on, Ordering::Relaxed);
+    }
+
     /// The directories the Hub gives the local Node besides its projects, sessions and folders
     /// (the scratch and worktree directories), for [`Self::record_view`]. Once.
     pub fn set_configured_roots(&self, dirs: Vec<std::path::PathBuf>) {
@@ -907,6 +931,24 @@ impl NodeRuntime {
         )?;
         if n == 0 {
             return Ok(false);
+        }
+        // never sent yet: it goes with the principal's variables as they are now
+        let op = format!("op_open_{session}");
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT request FROM node_commands WHERE operation_id=? AND state='pending'",
+                [&op],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(req) = stored {
+            let mut open = serde_json::from_str::<Command<OpenSession>>(&req)?.body;
+            open.env = super::node_env::for_session(tx, self.node_id.as_str(), session)?;
+            let (req, digest) = command(&op, open)?;
+            tx.execute(
+                "UPDATE node_commands SET request=?, digest=? WHERE operation_id=? AND state='pending'",
+                rusqlite::params![req.to_string(), digest, op],
+            )?;
         }
         let rev = session_revision(tx, session)?;
         rt::session_cas_in(
@@ -955,6 +997,8 @@ impl NodeRuntime {
         let mut open = self.open_of(tx, session)?;
         self.fold_desired_in(tx, session, &mut open)?;
         open.resume = resume_of_in(tx, &self.node_id, session)?;
+        // the variables as they are now: a removed or changed one does not come back
+        open.env = super::node_env::for_session(tx, self.node_id.as_str(), session)?;
         let op = uid(&format!("op_open_{session}"));
         let (req, digest) = command(&op, open)?;
         rt::insert_command_in(

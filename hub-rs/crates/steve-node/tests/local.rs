@@ -203,6 +203,8 @@ fn open_body(session: &str) -> OpenSession {
         choice: choice(),
         policy: policy(),
         resume: None,
+        env: Default::default(),
+        state: Default::default(),
     }
 }
 
@@ -4093,4 +4095,127 @@ async fn a_harness_cannot_read_the_control_plane() {
         .unwrap();
     t.until("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.text(), "cat:EPERM cat:EPERM cat:ok ", "{:?}", t.ended());
+}
+
+/// The principal's own variables on this Node (`node_env`) reach its harness, `PATH_PREPEND` in
+/// front of `PATH`; a key Steve sets itself is not theirs to set, whatever the Hub sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_users_own_variables_reach_the_harness_and_steves_stay_steves() {
+    let t = T::new(&[]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let mut body = open_body("s_1");
+    body.env = vec![
+        ("NPM_TOKEN".into(), "tok-1".into()),
+        ("PATH_PREPEND".into(), "/opt/mine/bin".into()),
+        ("HOME".into(), "/elsewhere".into()),
+    ];
+    n.open_session(now_cmd("op_open_s_1", body)).await.unwrap();
+    let s = finished(&n, "op_open_s_1").await;
+    assert!(ok(&s), "{s:?}");
+    let spawn = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .find_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).ok()?["spawn"]["env"]
+                .as_object()
+                .cloned()
+        })
+        .unwrap();
+    assert_eq!(spawn["NPM_TOKEN"], "tok-1");
+    assert_eq!(spawn["PATH0"], "/opt/mine/bin");
+    assert_ne!(spawn["HOME"], "/elsewhere");
+}
+
+/// A principal's own harness directory (path model §4.5.1): the harness gets it through the
+/// variable its adapter declares; the Node's owner starts with their own settings, anyone else
+/// with nothing of theirs; a path that is not plain is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_principal_gets_a_harness_directory_of_their_own() {
+    let t = T::new(&[]);
+    std::fs::create_dir_all(t.root.join(".claude")).unwrap();
+    std::fs::write(t.root.join(".claude/settings.json"), r#"{"owner":true}"#).unwrap();
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let open = |s: &str, dir: &str, owner: bool| {
+        let mut b = open_body(s);
+        b.state = Some(HarnessState {
+            dir: dir.into(),
+            import_owner: owner,
+        });
+        b
+    };
+    n.open_session(now_cmd(
+        "op_open_s_1",
+        open("s_1", "default/owner/dev/claude-code", true),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_1").await));
+    n.open_session(now_cmd(
+        "op_open_s_2",
+        open("s_2", "default/other/dev/claude-code", false),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_2").await));
+    let dirs: Vec<String> = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .filter_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).ok()?["spawn"]["env"]["CLAUDE_CONFIG_DIR"]
+                .as_str()
+                .map(String::from)
+        })
+        .collect();
+    let owner = t.home.join("state/default/owner/dev/claude-code/harness");
+    let other = t.home.join("state/default/other/dev/claude-code/harness");
+    assert_eq!(
+        dirs,
+        [owner.display().to_string(), other.display().to_string()]
+    );
+    assert_eq!(
+        std::fs::read_to_string(owner.join("settings.json")).unwrap(),
+        r#"{"owner":true}"#
+    );
+    assert!(
+        !other.join("settings.json").exists(),
+        "nothing of the owner's"
+    );
+    // in the sandbox, a session reads its own directory and nobody else's
+    if steve_vault::harness::seatbelt_works() && n.confinement().is_ok() {
+        std::fs::write(other.join("mine.txt"), "m").unwrap();
+        let text = format!(
+            "@cat {}/mine.txt @cat {}/settings.json",
+            other.display(),
+            owner.display()
+        );
+        n.start_turn(now_cmd("op_t2", turn("s_2", "t_1", "a_1", &text)))
+            .await
+            .unwrap();
+        t.until("the end", |t| !t.ended().is_empty()).await;
+        assert_eq!(t.text(), "cat:ok cat:EPERM ");
+    }
+    n.open_session(now_cmd("op_open_s_3", open("s_3", "../escape", true)))
+        .await
+        .unwrap();
+    assert!(!ok(&finished(&n, "op_open_s_3").await));
+    // a link someone left on the way is not followed
+    let elsewhere = t.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, t.home.join("state/planted")).unwrap();
+    n.open_session(now_cmd(
+        "op_open_s_4",
+        open("s_4", "planted/x/dev/claude-code", true),
+    ))
+    .await
+    .unwrap();
+    assert!(!ok(&finished(&n, "op_open_s_4").await));
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }

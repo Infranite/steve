@@ -945,20 +945,14 @@ fn numbered(dir: &Path, files: &[String]) -> Vec<Numbered> {
         });
     }
 
-    const LOCKS: &[&str] = &[
-        "Cargo.lock",
-        "package-lock.json",
-        "yarn.lock",
-        "pnpm-lock.yaml",
-        "poetry.lock",
-        "uv.lock",
-        "go.sum",
-    ];
+    // the toolchains' lockfiles (steve-toolchains: data, not a list kept here)
+    let defs = steve_toolchains::Toolchains::builtin();
+    let locks = defs.lockfile_names();
     /* the ones the repository is built from: at the top or one directory down, like its manifests
     (deeper ones are fixtures and experiments) */
     for f in files.iter().filter(|f| f.matches('/').count() <= 1) {
         let name = f.rsplit('/').next().unwrap_or(f);
-        if LOCKS.contains(&name) {
+        if locks.contains(&name) {
             out.push(Numbered {
                 kind: "lockfile",
                 path: f.clone(),

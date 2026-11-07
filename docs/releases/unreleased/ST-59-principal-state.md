@@ -1,0 +1,5 @@
+- 新增可选的“每个人自己的 harness 目录”：在 `steve.env` 里设 `STEVE_PRINCIPAL_STATE=on` 后，新开的会话按“工作区 × 发起人 × Bot × harness”各用一个独立目录，存放 harness 的配置、登录和历史（Claude Code 通过 `CLAUDE_CONFIG_DIR`，Codex 通过 `CODEX_HOME`），不再和 Node 主人自己的目录混用。
+  - 发起人就是这台 Node 的主人时，第一次会从主人自己的目录复制 Claude Code 的 `settings.json` 和 Codex 的 `config.toml`，之后就是独立的一份，原目录不会被改动。写在设置里的登录方式（例如 Claude Code 的 `apiKeyHelper`）会一起带过来；用 `/login` 的订阅登录和 Codex 的登录不复制，需要在新目录里重新登录。不复制 Codex 登录，是为了避免多份副本各自刷新令牌、把主人自己的登录挤掉。
+  - 其他人的目录开始是空的，暂时没有登录，所以这个开关默认关闭；等每个人自己的 harness 凭据做好之后再默认打开。
+  - 已有的会话，以及从旧运行器迁过来的会话，照旧使用原来的目录，续接不受影响。关掉开关后，已经用了独立目录的会话继续用它。
+  - 启用 Steve 系统沙箱的运行只放行自己的主体目录；仍使用自身沙箱的 harness（当前 Codex）没有这层目录隔离。该阶段不隔离同一系统用户下的进程，也不改变真实 HOME。

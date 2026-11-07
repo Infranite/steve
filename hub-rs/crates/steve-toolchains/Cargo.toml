@@ -1,0 +1,13 @@
+[package]
+name = "steve-toolchains"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Toolchains as data (path model §6.5): how a project's build tools are detected, where their caches and outputs go per item and per person, and what Steve sets for them. The code knows no tool by name."
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+toml = "=0.8.23"
+
+[dev-dependencies]
+tempfile = "=3.27.0"

@@ -8,6 +8,7 @@ mod diagnostics;
 mod files;
 mod items;
 mod misc;
+mod node_env;
 mod outputs;
 mod projects;
 mod sessions;
@@ -391,6 +392,11 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/updates/{id}/approve", post(updates::approve))
         .route("/updates/{id}/reject", post(updates::reject))
         .route("/me", get(misc::me))
+        .route("/node-env/{node}", get(node_env::list))
+        .route(
+            "/node-env/{node}/{key}",
+            put(node_env::put).delete(node_env::delete),
+        )
         .route("/state", get(misc::state))
         // workspaces
         .route("/workspaces", post(misc::workspace_create))

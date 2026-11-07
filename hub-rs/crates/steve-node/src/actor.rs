@@ -1948,6 +1948,79 @@ impl Actor {
     }
 }
 
+/// The principal's own directory for a harness (path model §4.5.1), made when missing under the
+/// Node's `state/` (0700). A principal who owns this Node starts with what the adapter declares of
+/// their own directory here (their settings, their login); a file already there is theirs to keep.
+fn harness_state(
+    inner: &Inner,
+    s: &HarnessState,
+    sd: steve_acp::StateDir,
+) -> ApiResult<std::path::PathBuf> {
+    if !s.valid() {
+        return Err(ApiError::new(
+            ErrorCode::Invalid,
+            "a harness state directory that is not a plain path",
+        ));
+    }
+    // every step a real directory made here, never one a run planted as a link
+    let mut dir = inner.cfg.home.clone();
+    let parts = std::iter::once("state")
+        .chain(s.dir.split('/'))
+        .chain(std::iter::once("harness"));
+    for part in parts {
+        dir.push(part);
+        crate::attachments::private_dir(&dir)
+            .map_err(|e| internal(format!("harness state: {e}")))?;
+    }
+    if s.import_owner {
+        let own = std::env::var_os(sd.env)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| inner.cfg.acp.user_home.join(sd.default));
+        for f in sd.import {
+            let (from, to) = (own.join(f), dir.join(f));
+            if !from.is_file() || std::fs::symlink_metadata(&to).is_ok() {
+                continue;
+            }
+            let bytes =
+                std::fs::read(&from).map_err(|e| internal(format!("harness state: {f}: {e}")))?;
+            crate::attachments::publish_private_if_absent(&to, &bytes)
+                .map_err(|e| internal(format!("harness state: {f}: {e}")))?;
+        }
+    }
+    Ok(dir)
+}
+
+/// The environment a session's harness gets over the Node's: the principal's own variables
+/// (`node_env`; a key the Node refuses is dropped, `PATH_PREPEND` goes in front of `PATH`), then
+/// what Steve sets itself.
+fn harness_env(
+    user: &[(String, String)],
+    claude_executable: std::ffi::OsString,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    use steve_node_api::env::{PATH_PREPEND, user_env_refusal};
+    let mut env: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+    for (k, v) in user {
+        if let Some(why) = user_env_refusal(k) {
+            tracing::warn!("node: {k} is not set for the harness: {why}");
+            continue;
+        }
+        if k == PATH_PREPEND {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let mut joined = std::ffi::OsString::from(v);
+            if !path.is_empty() {
+                joined.push(":");
+                joined.push(path);
+            }
+            env.push(("PATH".into(), joined));
+        } else {
+            env.push((k.into(), v.into()));
+        }
+    }
+    env.push(("CLAUDE_CODE_EXECUTABLE".into(), claude_executable));
+    env
+}
+
 /// Starts and opens a harness for `session` (in a task). Its group is recorded before the handshake
 /// (never over one not confirmed gone) and stopped again if anything after fails.
 async fn open_harness(
@@ -1973,11 +2046,33 @@ async fn open_harness(
         .acp
         .adapter_command(&harness)
         .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))?;
+    // the principal's own harness directory, when the Hub asks for one and the adapter can move it
+    let state = match (
+        &row.open.state,
+        inner.cfg.acp.adapter_properties(&harness).state,
+    ) {
+        (Some(s), Some(sd)) => Some((sd.env, harness_state(inner, s, sd)?)),
+        _ => None,
+    };
+    // its toolchains' outputs and caches in the item's and the person's own places
+    let tools = crate::toolchain::for_run(
+        &inner.cfg.home,
+        std::path::Path::new(&cwd),
+        row.open.state.as_ref(),
+    );
     // in the OS sandbox, unless the harness sandboxes its own shell (macOS nests none)
     let (program, args) = if inner.cfg.acp.adapter_properties(&harness).nested_sandbox {
-        inner
-            .confine
-            .wrap_in(program, args, &[], Some(std::path::Path::new(&cwd)))
+        inner.confine.wrap_in(
+            program,
+            args,
+            &[],
+            &state
+                .iter()
+                .map(|(_, d)| d.clone())
+                .chain(tools.person.clone())
+                .collect::<Vec<_>>(),
+            Some(std::path::Path::new(&cwd)),
+        )
     } else {
         (program, args)
     };
@@ -2004,10 +2099,19 @@ async fn open_harness(
             program,
             args,
             cwd: cwd.clone().into(),
-            env: vec![(
-                "CLAUDE_CODE_EXECUTABLE".into(),
-                inner.cfg.acp.claude_executable.clone().into_os_string(),
-            )],
+            env: {
+                let mut env = harness_env(
+                    &row.open.env,
+                    inner.cfg.acp.claude_executable.clone().into_os_string(),
+                );
+                // the toolchains', then Steve's own last: nothing before overrides them
+                let at = env.len().saturating_sub(1);
+                env.splice(at..at, tools.env);
+                if let Some((var, dir)) = &state {
+                    env.push(((*var).into(), dir.clone().into_os_string()));
+                }
+                env
+            },
             log_tag: format!("[node {session}]"),
         },
         1 << 20,

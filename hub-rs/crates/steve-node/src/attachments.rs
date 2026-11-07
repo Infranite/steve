@@ -80,8 +80,19 @@ pub(crate) fn rel_path(f: &Fetched) -> String {
 
 /// A directory of the workspace, made if missing; refused when it is anything but a real
 /// directory (a link could point out of the workspace).
-fn real_dir(p: &Path) -> Result<(), String> {
-    match fs::create_dir(p) {
+pub(crate) fn real_dir(p: &Path) -> Result<(), String> {
+    make_dir(p, &fs::DirBuilder::new())
+}
+
+/// As `real_dir`, with owner-only permissions when creating shared principal state or caches.
+/// Concurrent first runs may create the same directory; verify the winner instead of failing.
+pub(crate) fn private_dir(p: &Path) -> Result<(), String> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    make_dir(p, fs::DirBuilder::new().mode(0o700))
+}
+
+fn make_dir(p: &Path, builder: &fs::DirBuilder) -> Result<(), String> {
+    match builder.create(p) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(format!("{}: {e}", p.display())),
@@ -91,6 +102,31 @@ fn real_dir(p: &Path) -> Result<(), String> {
         return Err(format!("{} is not a directory", p.display()));
     }
     Ok(())
+}
+
+/// Imports private state once. Publish only complete bytes, without replacing any existing
+/// destination (including a link), so concurrent first runs all see the same complete file.
+pub(crate) fn publish_private_if_absent(dst: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let dir = dst.parent().ok_or("no directory")?;
+    let tmp = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+    let write = || -> std::io::Result<()> {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        match fs::hard_link(&tmp, dst) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e),
+        }
+    };
+    let result = write();
+    let _ = fs::remove_file(&tmp);
+    result.map_err(|e| format!("{}: {e}", dst.display()))
 }
 
 /// Whether `p` is a regular file (not a link) holding exactly the bytes hashed `sha256`.
@@ -106,7 +142,7 @@ fn holds(p: &Path, size: u64, sha256: &str) -> bool {
 
 /// Writes `bytes` to `dst` whole: a temporary file next to it, then one rename (which replaces a
 /// link at `dst` rather than writing through it).
-fn publish(dst: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn publish(dst: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = dst.parent().ok_or("no directory")?;
     let tmp = dir.join(format!(
         ".{}.{}.tmp",
@@ -206,6 +242,64 @@ pub(crate) fn failed_note(count: usize, e: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_private_initialization_publishes_one_complete_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("state");
+        let barrier = std::sync::Barrier::new(12);
+        std::thread::scope(|scope| {
+            for id in 0..12_u8 {
+                let (dir, barrier) = (&dir, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    private_dir(dir).unwrap();
+                    let dst = dir.join("config.json");
+                    publish_private_if_absent(&dst, &vec![id; 1_048_576]).unwrap();
+                    let bytes = fs::read(dst).unwrap();
+                    assert_eq!(bytes.len(), 1_048_576);
+                    assert!(bytes[0] < 12 && bytes.iter().all(|b| *b == bytes[0]));
+                });
+            }
+        });
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let dst = dir.join("config.json");
+        assert_eq!(
+            fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let original = fs::read(&dst).unwrap();
+        publish_private_if_absent(&dst, b"replacement").unwrap();
+        assert_eq!(fs::read(dst).unwrap(), original);
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn private_initialization_never_follows_existing_links() {
+        let t = tempfile::tempdir().unwrap();
+        let outside = t.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let linked_dir = t.path().join("state");
+        std::os::unix::fs::symlink(&outside, &linked_dir).unwrap();
+        assert!(private_dir(&linked_dir).is_err());
+        let original = outside.join("config.json");
+        fs::write(&original, b"keep").unwrap();
+        let linked_file = t.path().join("config.json");
+        std::os::unix::fs::symlink(&original, &linked_file).unwrap();
+        publish_private_if_absent(&linked_file, b"replacement").unwrap();
+        assert!(
+            fs::symlink_metadata(&linked_file)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(original).unwrap(), b"keep");
+        assert_eq!(fs::read_dir(t.path()).unwrap().count(), 3);
+    }
 
     fn sha(b: &[u8]) -> String {
         format!("sha256:{}", hex::encode(sha2::Sha256::digest(b)))

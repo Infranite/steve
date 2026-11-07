@@ -21,6 +21,7 @@ steve-node-api = { path = "../steve-node-api" }
 steve-print = { path = "../steve-print" }
 steve-research = { path = "../steve-research" }
 steve-vault = { path = "../steve-vault" }
+steve-toolchains = { path = "../steve-toolchains" }
 tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros", "process", "fs", "net"] }
 tracing = "=0.1.44"
 uuid = { version = "=1.29.0", features = ["v4"] }

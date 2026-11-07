@@ -5040,3 +5040,69 @@ async fn a_stopped_node_adopts_nothing() {
     assert_eq!(bound, 0);
     assert_eq!(h.rt.adopted(), 0);
 }
+
+/// The principal's own variables on this Node (`node_env`) go with the open, and only theirs:
+/// the Node's owner, alone in the workspace, on an item they asked for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_open_carries_the_principals_variables_on_this_node() {
+    let h = hub();
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute_batch(
+                "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','u','u','owner',1);
+                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
+                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n1','u','n1',zeroblob(32),'f1','active',1);
+                 INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated,requested_by) VALUES ('i1','default',1,'t','run','执行',1,1,'u');
+                 UPDATE sessions SET item_id='i1' WHERE id='s1';
+                 INSERT INTO node_env(node_id,principal,key,value,updated_by,updated) VALUES
+                   ('n1','u','NPM_TOKEN','tok','u',1),
+                   ('n2','u','ELSEWHERE','x','u',1),
+                   ('n1','someone','THEIRS','y','u',1);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.bind();
+    let request: String = h.q("SELECT request FROM node_commands WHERE method='open_session'");
+    let v: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(
+        v["body"]["env"],
+        serde_json::json!([["NPM_TOKEN", "tok"]]),
+        "{v}"
+    );
+}
+
+/// With `STEVE_PRINCIPAL_STATE=on` a new session gets its principal's own harness directory on
+/// the Node, recorded on the session; only the Node's owner starts from their own settings there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_session_gets_its_principals_own_harness_directory() {
+    for (node_owner, imports) in [("u", true), ("someone-else", false)] {
+        let h = hub();
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute_batch(&format!(
+                    "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','u','u','owner',1);
+                     INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
+                     INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n1','{node_owner}','n1',zeroblob(32),'f1','active',1);
+                     INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated,requested_by) VALUES ('i1','default',1,'t','run','执行',1,1,'u');
+                     UPDATE sessions SET item_id='i1', bot_id='dev' WHERE id='s1';"
+                ))?;
+                Ok(())
+            })
+            .unwrap();
+        h.rt.set_principal_state(true);
+        h.bind();
+        let request: String = h.q("SELECT request FROM node_commands WHERE method='open_session'");
+        let v: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let state = &v["body"]["state"];
+        let dir = state["dir"].as_str().unwrap().to_string();
+        assert_eq!(dir.split('/').count(), 4, "{dir}");
+        assert!(
+            dir.starts_with("default-") && dir.contains("/u-") && dir.contains("/dev-"),
+            "{dir}"
+        );
+        assert_eq!(state["import_owner"], imports, "{v}");
+        let recorded: String = h.q("SELECT state_dir FROM runtime_sessions WHERE session_id='s1'");
+        assert_eq!(recorded, dir);
+    }
+}

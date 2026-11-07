@@ -1,0 +1,222 @@
+# Steve's built-in toolchain definitions (path model §6.5.2). Data only: the code that reads this knows
+# no tool by name. A Node's or a workspace's definitions may add to or override them by id.
+#
+# detect    marker files (a `*` matches any run of characters), at the repository root or one level down
+# key       files whose contents make a seed key (lockfiles, tool version files)
+# lockfiles what the tool writes itself and a merge may regenerate instead of resolving by hand
+# dirs      caches and outputs. scope: item (each item its own), seed (an item's own, started from a
+#           seed later), person (shared by one person's items: only caches the tool locks itself).
+#           env + value: the variable that moves it and what it is set to ({item} = the item's
+#           .steve/build/<id>, {person} = that person's cache for <id>); in_tree: where it stays
+#           when it is not moved. disposable: a whole directory that is only a cache, safe to give
+#           back when the disk is low (what ST-45 frees)
+# env       what Steve sets besides
+# options   what a project may switch, each with its variables and default
+#
+# Only what is a cache and nothing else is moved: never a tool's whole home (its config, its
+# credentials, what it installed), never a variable the project or its user may set themselves.
+
+[[toolchain]]
+id = "cargo"
+detect = ["Cargo.toml"]
+key = ["Cargo.lock", "rust-toolchain", "rust-toolchain.toml"]
+lockfiles = ["Cargo.lock"]
+dirs = [
+  { name = "target", scope = "seed", env = "CARGO_TARGET_DIR", value = "{item}/target" },
+]
+# lighter debug builds for agents, on by default (path model v2, decision 4)
+options = { light = { default = true, env = { CARGO_INCREMENTAL = "0", CARGO_PROFILE_DEV_DEBUG = "line-tables-only" } } }
+
+[[toolchain]]
+id = "npm"
+detect = ["package-lock.json"]
+key = ["package-lock.json"]
+lockfiles = ["package-lock.json"]
+dirs = [
+  { name = "node_modules", scope = "seed", in_tree = "node_modules", disposable = true },
+  { name = "cache", scope = "person", env = "npm_config_cache", value = "{person}/npm", concurrent_safe = true },
+]
+
+[[toolchain]]
+id = "pnpm"
+detect = ["pnpm-lock.yaml"]
+key = ["pnpm-lock.yaml"]
+lockfiles = ["pnpm-lock.yaml"]
+dirs = [
+  { name = "node_modules", scope = "seed", in_tree = "node_modules", disposable = true },
+]
+
+[[toolchain]]
+id = "yarn"
+detect = ["yarn.lock"]
+key = ["yarn.lock"]
+lockfiles = ["yarn.lock"]
+dirs = [
+  { name = "node_modules", scope = "seed", in_tree = "node_modules", disposable = true },
+]
+
+[[toolchain]]
+id = "bun"
+detect = ["bun.lock*"]
+key = ["bun.lock", "bun.lockb"]
+dirs = [
+  { name = "node_modules", scope = "seed", in_tree = "node_modules", disposable = true },
+  { name = "cache", scope = "person", env = "BUN_INSTALL_CACHE_DIR", value = "{person}", concurrent_safe = true },
+]
+
+[[toolchain]]
+id = "pip"
+detect = ["requirements*.txt", "pyproject.toml"]
+key = ["requirements.txt", "pyproject.toml"]
+dirs = [
+  { name = "venv", scope = "seed", in_tree = ".venv" },
+  { name = "cache", scope = "person", env = "PIP_CACHE_DIR", value = "{person}", concurrent_safe = true },
+]
+
+[[toolchain]]
+id = "uv"
+detect = ["uv.lock"]
+key = ["uv.lock", ".python-version"]
+lockfiles = ["uv.lock"]
+dirs = [
+  { name = "venv", scope = "seed", in_tree = ".venv" },
+  { name = "cache", scope = "person", env = "UV_CACHE_DIR", value = "{person}", concurrent_safe = true },
+]
+
+[[toolchain]]
+id = "poetry"
+detect = ["poetry.lock"]
+key = ["poetry.lock"]
+lockfiles = ["poetry.lock"]
+dirs = [
+  { name = "venv", scope = "seed", in_tree = ".venv" },
+  { name = "cache", scope = "person", env = "POETRY_CACHE_DIR", value = "{person}", concurrent_safe = true },
+]
+
+[[toolchain]]
+id = "conda"
+detect = ["environment.yml", "environment.yaml"]
+key = ["environment.yml", "environment.yaml"]
+dirs = [
+  { name = "pkgs", scope = "person", env = "CONDA_PKGS_DIRS", value = "{person}/pkgs", concurrent_safe = true },
+]
+
+[[toolchain]]
+id = "go"
+detect = ["go.mod"]
+key = ["go.sum"]
+lockfiles = ["go.sum"]
+dirs = [
+  { name = "build", scope = "person", env = "GOCACHE", value = "{person}/build", concurrent_safe = true },
+  { name = "mod", scope = "person", env = "GOMODCACHE", value = "{person}/mod", concurrent_safe = true },
+]
+
+[[toolchain]]
+id = "gradle"
+detect = ["build.gradle*", "settings.gradle*"]
+key = ["gradle/libs.versions.toml", "gradle/wrapper/gradle-wrapper.properties"]
+dirs = [
+  { name = "build", scope = "item", in_tree = "build" },
+  { name = "gradle", scope = "item", in_tree = ".gradle", disposable = true },
+]
+
+[[toolchain]]
+id = "maven"
+detect = ["pom.xml"]
+key = ["pom.xml"]
+dirs = [
+  { name = "target", scope = "item", in_tree = "target" },
+]
+
+[[toolchain]]
+id = "swiftpm"
+detect = ["Package.swift"]
+key = ["Package.resolved"]
+dirs = [
+  { name = "build", scope = "seed", in_tree = ".build" },
+]
+
+[[toolchain]]
+id = "xcode"
+detect = ["*.xcodeproj", "*.xcworkspace"]
+key = ["Package.resolved", "Podfile.lock"]
+dirs = []
+
+[[toolchain]]
+id = "cocoapods"
+detect = ["Podfile"]
+key = ["Podfile.lock"]
+dirs = [
+  { name = "pods", scope = "seed", in_tree = "Pods" },
+]
+
+[[toolchain]]
+id = "bazel"
+detect = ["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"]
+key = ["MODULE.bazel.lock"]
+dirs = []
+
+[[toolchain]]
+id = "cmake-make"
+detect = ["CMakeLists.txt", "Makefile"]
+key = []
+dirs = [
+  { name = "build", scope = "seed", in_tree = "build" },
+]
+
+[[toolchain]]
+id = "dotnet"
+detect = ["*.csproj", "*.sln", "*.fsproj"]
+key = ["packages.lock.json"]
+dirs = [
+  { name = "bin", scope = "item", in_tree = "bin" },
+  { name = "obj", scope = "item", in_tree = "obj" },
+  { name = "http", scope = "person", env = "NUGET_HTTP_CACHE_PATH", value = "{person}/http", concurrent_safe = true },
+]
+
+[[toolchain]]
+id = "bundler"
+detect = ["Gemfile"]
+key = ["Gemfile.lock"]
+dirs = [
+  { name = "cache", scope = "person", env = "BUNDLE_USER_CACHE", value = "{person}", concurrent_safe = true },
+]
+
+[[toolchain]]
+id = "dart"
+detect = ["pubspec.yaml"]
+key = ["pubspec.lock"]
+dirs = [
+  { name = "dart_tool", scope = "seed", in_tree = ".dart_tool" },
+]
+
+[[toolchain]]
+id = "mix"
+detect = ["mix.exs"]
+key = ["mix.lock"]
+dirs = [
+  { name = "build", scope = "seed", in_tree = "_build" },
+  { name = "deps", scope = "seed", in_tree = "deps" },
+]
+
+[[toolchain]]
+id = "js-frameworks"
+detect = ["next.config.*", "nuxt.config.*", "turbo.json", "svelte.config.*", ".parcelrc"]
+key = []
+dirs = [
+  { name = "next", scope = "item", in_tree = ".next", disposable = true },
+  { name = "nuxt", scope = "item", in_tree = ".nuxt", disposable = true },
+  { name = "turbo", scope = "item", in_tree = ".turbo", disposable = true },
+  { name = "svelte-kit", scope = "item", in_tree = ".svelte-kit", disposable = true },
+  { name = "parcel", scope = "item", in_tree = ".parcel-cache", disposable = true },
+]
+
+[[toolchain]]
+id = "python-tools"
+detect = ["pyproject.toml", "setup.cfg", "pytest.ini"]
+key = []
+dirs = [
+  { name = "pytest", scope = "item", in_tree = ".pytest_cache", disposable = true },
+  { name = "mypy", scope = "item", in_tree = ".mypy_cache", disposable = true },
+  { name = "ruff", scope = "item", in_tree = ".ruff_cache", disposable = true },
+]
