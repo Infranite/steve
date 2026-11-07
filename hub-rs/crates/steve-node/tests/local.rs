@@ -269,6 +269,216 @@ async fn ready(n: &LocalNode, session: &str) {
     assert!(ok(&s), "{s:?}");
 }
 
+async fn disk_observations_done(
+    n: &LocalNode,
+    expected: usize,
+) -> steve_node::disk_observation::Page {
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        let page = n.disk_observations(0, 100).unwrap();
+        if page.records.len() == expected && page.records.iter().all(|r| r.state.terminal()) {
+            return page;
+        }
+        assert!(
+            Instant::now() < until,
+            "disk observations did not finish: {page:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_statistics_abort_does_not_abort_turn_acceptance_or_completion() {
+    use steve_node::disk_observation::Policy;
+    for phase in ["started", "finished"] {
+        let t = T::new(&[]);
+        let n = t.node();
+        ready(&n, "disk").await;
+        n.configure_disk_observations(Some(Policy::default()))
+            .unwrap();
+        let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TRIGGER fail_statistics BEFORE INSERT ON disk_observations
+             WHEN NEW.phase='{phase}' BEGIN SELECT RAISE(ABORT,'statistics only'); END;"
+        ))
+        .unwrap();
+        n.start_turn(now_cmd(
+            "disk_turn",
+            turn("disk", "t_disk", "a_disk", "@say business committed"),
+        ))
+        .await
+        .unwrap();
+        assert!(ok(&finished(&n, "disk_turn").await), "{phase}");
+        t.until("the business end despite statistics failure", |t| {
+            t.ended().len() == 1
+        })
+        .await;
+        assert_eq!(t.text(), "business committed", "{phase}");
+        let rejected_rows: i64 = db
+            .query_row(
+                "SELECT count(*) FROM disk_observations WHERE phase=?",
+                [phase],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rejected_rows, 0, "{phase}");
+        // A completed actor releases its gate even when the optional end record failed.
+        n.start_turn(now_cmd(
+            "disk_next",
+            turn("disk", "t_next", "a_next", "@say continued"),
+        ))
+        .await
+        .unwrap();
+        assert!(ok(&finished(&n, "disk_next").await), "{phase}");
+        n.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_statistics_rollback_does_not_hide_a_lost_business_transaction() {
+    use steve_node::disk_observation::Policy;
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "disk").await;
+    n.configure_disk_observations(Some(Policy::default()))
+        .unwrap();
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    let view_before: String = db
+        .query_row("SELECT view FROM sessions WHERE id='disk'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER rollback_statistics BEFORE INSERT ON disk_observations
+         BEGIN SELECT RAISE(ROLLBACK,'the whole journal transaction was lost'); END;",
+    )
+    .unwrap();
+    let command = now_cmd(
+        "disk_turn",
+        turn("disk", "t_disk", "a_disk", "@say only after repair"),
+    );
+    let error = n.start_turn(command.clone()).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Internal);
+    let accepted: i64 = db
+        .query_row("SELECT count(*) FROM ops WHERE id='disk_turn'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(accepted, 0);
+    let view_after: String = db
+        .query_row("SELECT view FROM sessions WHERE id='disk'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(view_after, view_before);
+    assert_eq!(t.sent("session/prompt"), 0);
+    db.execute_batch("DROP TRIGGER rollback_statistics")
+        .unwrap();
+    n.start_turn(command).await.unwrap();
+    assert!(ok(&finished(&n, "disk_turn").await));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_records_follow_real_turns_and_survive_resend_compaction_and_restart() {
+    use steve_node::disk_observation::{Interpretation, Phase, Policy, State};
+    use steve_node::disk_usage::{Budget, Outcome};
+    let t = T::new(&[]);
+    let n = t.node();
+    n.configure_disk_observations(Some(Policy {
+        budget: Budget {
+            elapsed: Duration::from_secs(2),
+            ..Policy::default().budget
+        },
+        ..Policy::default()
+    }))
+    .unwrap();
+    ready(&n, "disk").await;
+    std::fs::write(t.root.join("work/proj/data"), vec![b'x'; 8192]).unwrap();
+    let command = now_cmd(
+        "disk_turn",
+        turn("disk", "t_disk", "a_disk", "@say finished"),
+    );
+    n.start_turn(command.clone()).await.unwrap();
+    assert!(ok(&finished(&n, "disk_turn").await));
+    n.start_turn(command).await.unwrap();
+    let page = disk_observations_done(&n, 2).await;
+    assert_eq!(
+        page.records.iter().map(|r| r.phase).collect::<Vec<_>>(),
+        vec![Phase::Started, Phase::Finished]
+    );
+    assert!(
+        page.records
+            .iter()
+            .all(|r| r.interpretation == Interpretation::AsynchronousUnattributedPathStock)
+    );
+    let record = &page.records[1];
+    assert_eq!(record.resource, "item:x");
+    assert_eq!(record.execution.attempt().as_str(), "a_disk");
+    let State::Observed(sample) = &record.state else {
+        panic!("{record:?}")
+    };
+    let Outcome::Complete(usage) = sample.outcome else {
+        panic!("{sample:?}")
+    };
+    assert!(usage.apparent_bytes >= 8192);
+    assert_eq!(sample.missing_roots, 0);
+    // Acknowledging and compacting command bodies cannot erase statistics.
+    all_acknowledged(&n).await;
+    assert_eq!(n.disk_observations(0, 100).unwrap(), page);
+    n.shutdown().await;
+    drop(n);
+    let n = LocalNode::open(t.config()).unwrap();
+    assert_eq!(n.disk_observations(0, 100).unwrap(), page);
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_record_limits_preserve_partial_results_and_disabling_does_not_change_turns() {
+    use steve_node::disk_observation::{Phase, Policy, State};
+    use steve_node::disk_usage::{Incomplete, Outcome};
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "disk").await;
+    std::fs::write(t.root.join("work/proj/data"), b"some data").unwrap();
+    n.configure_disk_observations(Some(Policy {
+        budget: steve_node::disk_usage::Budget {
+            entries: 1,
+            elapsed: Duration::from_secs(2),
+            ..Policy::default().budget
+        },
+        ..Policy::default()
+    }))
+    .unwrap();
+    n.start_turn(now_cmd(
+        "disk_partial",
+        turn("disk", "t1", "a1", "@say done"),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "disk_partial").await));
+    let page = disk_observations_done(&n, 2).await;
+    let sample = &page
+        .records
+        .iter()
+        .find(|r| r.phase == Phase::Finished)
+        .unwrap()
+        .state;
+    assert!(
+        matches!(sample, State::Observed(sample) if matches!(sample.outcome, Outcome::Incomplete { reason: Incomplete::EntryBudget, .. }))
+    );
+    n.configure_disk_observations(None).unwrap();
+    n.start_turn(now_cmd(
+        "disk_off",
+        turn("disk", "t2", "a2", "@say still runs"),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "disk_off").await));
+    assert_eq!(n.disk_observations(0, 100).unwrap(), page);
+    n.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn artifact_reads_bind_the_execution_view_and_survive_compaction_and_restart() {
     let t = T::new(&[]);
