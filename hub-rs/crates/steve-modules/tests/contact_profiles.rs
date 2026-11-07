@@ -539,6 +539,8 @@ async fn the_profile_says_what_is_missing_and_lookups_are_retried() {
         p["fields"]["email"],
         json!({"state": "missing", "reason": "no_source"})
     );
+    // a Feishu identity that looks Feishu people up (registered as the channels would)
+    profile::register_lookup("feishu_app", "feishu");
     fx.exec(&format!(
         "UPDATE connections SET adapter = 'feishu_app', status = 'ok' WHERE id = '{CONN}'"
     ));

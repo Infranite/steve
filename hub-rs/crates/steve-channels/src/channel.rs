@@ -189,6 +189,187 @@ impl OutContent {
     }
 }
 
+/// One stored message, as an adapter needs it to act on it again (recall, react, fetch media).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MessageRef {
+    /// The space at the provider.
+    pub space_ext_id: String,
+    /// The provider's message id; `None` for a message without one (never a Hub-made id).
+    pub ext_id: Option<String>,
+    /// Unix ms: the provider's time when known, otherwise the Hub's send time.
+    pub created: i64,
+    /// `created` is the provider's time; `false`: the Hub's send time, match with a window.
+    pub created_exact: bool,
+    /// Who sent it, when known.
+    pub sender: Option<HandleRef>,
+    /// Its text; `None` once purged.
+    pub text: Option<String>,
+    pub thread_key: Option<String>,
+    /// The remote's delivery id of the message ([`InboundMessage`]'s `source_id`, or the one a send
+    /// returned), when known. Opaque, per connection.
+    pub source_id: Option<String>,
+}
+
+impl MessageRef {
+    /// A message with a provider id; the rest unknown.
+    pub fn platform(space_ext_id: impl Into<String>, ext_id: impl Into<String>) -> Self {
+        Self {
+            space_ext_id: space_ext_id.into(),
+            ext_id: Some(ext_id.into()),
+            created: 0,
+            created_exact: false,
+            sender: None,
+            text: None,
+            thread_key: None,
+            source_id: None,
+        }
+    }
+
+    /// The provider's message id, if it has one.
+    pub fn id(&self) -> Option<&str> {
+        self.ext_id.as_deref()
+    }
+}
+
+/// The emoji shown for a reaction kind when an adapter names none of its own.
+pub fn default_emoji(kind: ReactionKind) -> &'static str {
+    match kind {
+        ReactionKind::Ack => "👀",
+        ReactionKind::Done => "✅",
+        ReactionKind::Failed => "❌",
+    }
+}
+
+/// The idempotency key of one outbound message: derived from the Hub's outbound row id, the same
+/// for every retry of that message and never reused for another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SendKey(pub String);
+
+/// Where a message sent as you goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActTarget {
+    /// A new message in the space.
+    Space { ext_id: String },
+    /// A reply to a stored message, in its thread when `in_thread`.
+    Reply { to: MessageRef, in_thread: bool },
+}
+
+/// What a send as you returned. Build it with [`Sent::id`] or [`Sent::without_id`] and the
+/// setters, so fields added later don't break adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct Sent {
+    /// The provider's message id, when it gives one.
+    pub ext_id: Option<String>,
+    /// The provider's create time (Unix ms), when it gives one.
+    pub created: Option<i64>,
+    /// The thread the message landed in, when the provider says.
+    pub thread_key: Option<String>,
+    /// The remote's delivery id of the send, when it has one: kept on the message so it can be
+    /// acted on again (recall, reactions, media) without a provider message id.
+    pub source_id: Option<String>,
+}
+
+impl Sent {
+    /// Sent, with the provider's message id.
+    pub fn id(ext_id: impl Into<String>) -> Self {
+        Self {
+            ext_id: Some(ext_id.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Sent; the provider gave no message id.
+    pub fn without_id() -> Self {
+        Self::default()
+    }
+
+    pub fn created(mut self, ms: i64) -> Self {
+        self.created = Some(ms);
+        self
+    }
+
+    pub fn thread_key(mut self, k: impl Into<String>) -> Self {
+        self.thread_key = Some(k.into());
+        self
+    }
+
+    pub fn source_id(mut self, id: impl Into<String>) -> Self {
+        self.source_id = Some(id.into());
+        self
+    }
+}
+
+/// Acting as you on a connection of your own account (`Mode::Own`): sending and replying, and,
+/// when supported, reactions and recalling what was sent as you. Only the outbox calls it, after
+/// your approval or your own trigger words; nothing here decides to send.
+#[async_trait]
+pub trait ActAsUser: Send + Sync {
+    /// The `connections.adapter` it serves.
+    fn adapter_id(&self) -> &str;
+
+    /// Sends `content` as you. `key` is stable for one outbound message across every retry; the
+    /// remote side may dedupe on it. Returns the provider's message id and create time (ms) when
+    /// it knows them.
+    async fn send(
+        &self,
+        cx: &ConnCx,
+        to: &ActTarget,
+        content: &OutContent,
+        key: &SendKey,
+    ) -> Result<Sent, AdapterError>;
+
+    /// How long the provider drops a repeat of a send with the same `key`: within it, a send whose
+    /// answer was lost may be sent again as is. `None`: no such guarantee.
+    fn send_dedup(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// Whether [`ActAsUser::add_reaction`] and [`ActAsUser::remove_reaction`] work.
+    fn supports_reactions(&self) -> bool {
+        false
+    }
+
+    /// The provider's emoji for a reaction kind (shown in the UI next to the message).
+    fn reaction_emoji(&self, kind: ReactionKind) -> &'static str {
+        default_emoji(kind)
+    }
+
+    /// Puts a reaction on a message as you; returns the provider's reaction id.
+    async fn add_reaction(
+        &self,
+        cx: &ConnCx,
+        msg: &MessageRef,
+        kind: ReactionKind,
+    ) -> Result<String, AdapterError> {
+        let _ = (cx, msg, kind);
+        Err(ProviderError::Unsupported.into())
+    }
+
+    /// Takes your reaction off again.
+    async fn remove_reaction(
+        &self,
+        cx: &ConnCx,
+        msg: &MessageRef,
+        reaction_id: &str,
+    ) -> Result<(), AdapterError> {
+        let _ = (cx, msg, reaction_id);
+        Err(ProviderError::Unsupported.into())
+    }
+
+    /// Whether [`ActAsUser::recall`] works.
+    fn supports_recall(&self) -> bool {
+        false
+    }
+
+    /// Recalls a message sent as you.
+    async fn recall(&self, cx: &ConnCx, msg: &MessageRef) -> Result<(), AdapterError> {
+        let _ = (cx, msg);
+        Err(ProviderError::Unsupported.into())
+    }
+}
+
 /// A change of a space or its members, as an adapter saw it (Feishu `im.chat.member.*`,
 /// `im.chat.updated_v1`, `im.chat.disbanded_v1`). [`crate::Channels::on_space_event`]
 /// applies it.
@@ -252,7 +433,10 @@ pub enum PushOutcome {
 
 /// Who sent an inbound message.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Sender {
+    /// The primary handle, in any system: the declared `handle_system`, or one of the adapter's own
+    /// (its internal user id) when it has none there.
     pub handle: HandleRef,
     /// Chat nickname, when the payload carries one (Feishu's does not: [`crate::Channels`] looks it
     /// up in the members list).
@@ -261,6 +445,47 @@ pub struct Sender {
     pub is_bot: bool,
     /// Of another organization (Feishu: another `tenant_key`).
     pub external: bool,
+    /// More handles of the same person, in other systems (an email). The Hub matches an existing
+    /// contact through the primary handle and every alias before it makes a new unconfirmed one,
+    /// and attaches the handles it did not know to that contact.
+    pub aliases: Vec<HandleRef>,
+}
+
+impl Sender {
+    /// A person known by `handle` (in any system); no name, not a bot, not external, no aliases.
+    pub fn new(handle: HandleRef) -> Self {
+        Self {
+            handle,
+            display_name: None,
+            is_bot: false,
+            external: false,
+            aliases: Vec::new(),
+        }
+    }
+
+    /// One more handle of the same person, in another system (or another one in the same).
+    pub fn alias(mut self, h: HandleRef) -> Self {
+        if !h.handle.trim().is_empty() && h != self.handle && !self.aliases.contains(&h) {
+            self.aliases.push(h);
+        }
+        self
+    }
+
+    pub fn display_name(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        self.display_name = (!name.trim().is_empty()).then_some(name);
+        self
+    }
+
+    pub fn bot(mut self, is_bot: bool) -> Self {
+        self.is_bot = is_bot;
+        self
+    }
+
+    pub fn external(mut self, external: bool) -> Self {
+        self.external = external;
+        self
+    }
 }
 
 /// Someone @-mentioned in a message.
@@ -273,15 +498,19 @@ pub struct Mention {
     pub is_connection: bool,
 }
 
-/// One message as an adapter saw it, before it is stored.
+/// One message as an adapter saw it, before it is stored. Build it with [`InboundMessage::text`]
+/// or [`InboundMessage::without_id`] and set the fields, so fields added later don't break
+/// adapters.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct InboundMessage {
     /// The space at the provider (Feishu `chat_id`).
     pub space_ext_id: String,
     /// What the payload says about the space, used when `space_info` is not available.
     pub space_kind: Option<SpaceKind>,
     pub space_name: Option<String>,
-    /// The message id at the provider (`om_…`); unique per space.
+    /// The message id at the provider (`om_…`); unique per space. `""` only for an adapter
+    /// without platform message ids ([`crate::ext::MessageIds::None`]).
     pub external_id: String,
     /// The provider's delivery id (Feishu `header.event_id`), for logs.
     pub event_id: Option<String>,
@@ -303,6 +532,15 @@ pub struct InboundMessage {
     pub via: Option<String>,
     /// The provider's payload, kept as the event's original until the retention period ends.
     pub raw: Value,
+    /// The remote's stable id of this delivery (an event id or a sequence number): redeliveries
+    /// carry the same one. Opaque, per connection, never shown. The Hub drops a delivery it already
+    /// stored with this id, and acts on the message again through it
+    /// ([`MessageRef::source_id`]).
+    pub source_id: Option<String>,
+    /// Unix ms at the provider of the message's last edit, when it was edited and the remote says
+    /// so: how late it arrived is counted from there ([`crate::inbound::history_of`]), not from
+    /// [`Self::created`].
+    pub edited: Option<i64>,
 }
 
 impl InboundMessage {
@@ -323,19 +561,43 @@ impl InboundMessage {
             thread_key: None,
             reply_to: None,
             root_id: None,
-            sender: Sender {
-                handle: sender,
-                display_name: None,
-                is_bot: false,
-                external: false,
-            },
+            sender: Sender::new(sender),
             text: text.into(),
             attachments: Vec::new(),
             mentions: Vec::new(),
             created,
             via: None,
             raw: Value::Null,
+            source_id: None,
+            edited: None,
         }
+    }
+
+    /// A text message of an adapter without platform message ids
+    /// ([`crate::ext::MessageIds::None`]): the Hub tells it apart by its [`Self::source_id`] and,
+    /// failing that, by space, sender, content and time.
+    pub fn without_id(
+        space_ext_id: impl Into<String>,
+        sender: Sender,
+        text: impl Into<String>,
+        created: i64,
+    ) -> Self {
+        let mut m = Self::text(space_ext_id, "", sender.handle.clone(), text, created);
+        m.sender = sender;
+        m
+    }
+
+    /// The remote's delivery id ([`Self::source_id`]); an empty one is none.
+    pub fn source_id(mut self, id: impl Into<String>) -> Self {
+        let id = id.into();
+        self.source_id = (!id.trim().is_empty()).then_some(id);
+        self
+    }
+
+    /// When the message was last edited at the provider (unix ms; [`Self::edited`]).
+    pub fn edited(mut self, at: i64) -> Self {
+        self.edited = Some(at);
+        self
     }
 
     /// The connection's account is @-mentioned.
@@ -359,6 +621,14 @@ pub trait ChannelAdapter: ConnectionProvider {
     ) -> Result<PushOutcome, AdapterError> {
         let _ = (cx, req);
         Err(ProviderError::Unsupported.into())
+    }
+
+    /// Whether a connection with this `config` receives every message of the spaces it is in (a
+    /// bot that only gets the messages that @ it does not). Messages of spaces covered this way need
+    /// not be read another way. Default: yes.
+    fn receives_all(&self, config: &Value) -> bool {
+        let _ = config;
+        true
     }
 
     /// Name, kind, member count, external members.
@@ -385,11 +655,7 @@ pub trait ChannelAdapter: ConnectionProvider {
 
     /// The provider's emoji for a reaction kind (shown in the UI next to the message).
     fn reaction_emoji(&self, kind: ReactionKind) -> &'static str {
-        match kind {
-            ReactionKind::Ack => "👀",
-            ReactionKind::Done => "✅",
-            ReactionKind::Failed => "❌",
-        }
+        default_emoji(kind)
     }
 
     /// Puts a reaction on a message as the connection's account; returns the provider's reaction

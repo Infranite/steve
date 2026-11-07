@@ -522,6 +522,10 @@ impl Db {
     pub fn queue_remove(&self, session: &str, id: &str) -> Result<Option<Queued>> {
         Ok(self.s.queued().remove(session, id)?)
     }
+    /// [`Self::queue_remove`], a message a runner had delivered (`resumed:`) included.
+    pub fn queue_remove_any(&self, session: &str, id: &str) -> Result<Option<Queued>> {
+        Ok(self.s.queued().remove_any(session, id)?)
+    }
     /// Moves a row to the head of the queue; `None` once a turn took it.
     pub fn queue_front(&self, session: &str, id: &str) -> Result<Option<Queued>> {
         Ok(self.s.queued().to_front(session, id)?)

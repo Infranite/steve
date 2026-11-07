@@ -11,6 +11,7 @@ pub mod app;
 pub mod backend;
 pub mod bus;
 pub mod catalog;
+pub mod check;
 pub mod config;
 pub mod error;
 pub mod extension;

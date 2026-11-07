@@ -187,8 +187,8 @@ fn connections(flow: &FlowCx) -> Vec<(String, String, String, String, String)> {
 }
 
 /// Mail follows its connections at once (E6 `Mail::on_event`), and a new mailbox gets the
-/// “邮件分诊” template (E4; idempotent). Feishu's connections are
-/// followed by capi's `FeishuRuntime`.
+/// “邮件分诊” template (E4; idempotent). Channel connections are followed by the connection
+/// runtime (`steve_channels::lifecycle`).
 pub async fn watch_mailboxes(
     mut changes: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
     flow: Arc<FlowCx>,

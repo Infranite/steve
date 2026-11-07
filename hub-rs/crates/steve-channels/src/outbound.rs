@@ -4,9 +4,11 @@
 //! `send(` is called. In order:
 //!
 //! 1. **disclosure** (C5): B1's outbound check for the space's audience with the knowledge the text
-//!    was written with; a generated text that may leak is rewritten by the drafting model, at most
-//!    twice; still leaking → a draft with the suspicious parts named, even when a grant or a rule
-//!    would have let it out; a secret value → `blocked`, never sent and never drafted;
+//!    was written with (a fixed receipt gets the local checks only); a generated text that may leak and
+//!    could go out without a draft is rewritten once by the drafting model; still leaking → a draft with
+//!    the suspicious parts named, even when a grant or a rule would have let it out. A text that becomes
+//!    a draft anyway is not rewritten: its card offers “改写后再看” ([`REWRITE`]). A secret value →
+//!    `blocked`, never sent and never drafted;
 //! 2. **authorization**: a bot account's `reply` rule, a flow's `msg.send` grant or the engine's
 //!    approval of the step, your own trigger words, or your approval of this very message. Your own
 //!    account never sends without your approval, except the trigger words you typed yourself.
@@ -17,8 +19,10 @@
 //!    `uuid = cm_…` (a retry cannot double-send), then `sent` / `failed` + a `fail` decision
 //!    (retry / discard), the basis record and the audit.
 //!
-//! Approvals wait out a short delay ([`SEND_DELAY_MS`]) in the queue ([`Outbox::send_due`], every
-//! [`QUEUE_EVERY`]); undoing the approval within it puts the draft back.
+//! Approvals wait out a short delay in the queue ([`Outbox::send_due`], every [`QUEUE_EVERY`]): the
+//! account's `send_delay_s`, else [`SEND_DELAY_MS`] in your name and [`BOT_SEND_DELAY_MS`] for a bot;
+//! undoing the approval within it puts the draft back. YOLO's approval comes after its own cooling-off
+//! and goes out at once.
 //!
 //! Wiring (integrator):
 //! ```ignore
@@ -26,7 +30,7 @@
 //! registry.decision(steve_channels::respond::SUBJECT_MESSAGE, link.handler());   // before Modules
 //! let late = steve_channels::flow_actions::LateChannels::new();
 //! let outbox = Arc::new(steve_channels::outbound::Outbox::new(link.clone())
-//!     .as_user(steve_channels::adapters::feishu::auth::USER_ADAPTER, feishu_user.clone()));
+//!     .act_as_user(feishu_user.clone()));
 //! registry.item_hooks(Box::new(steve_channels::outbound::ReturnToSource::new(outbox.clone(), late.clone())));
 //! let replies = Arc::new(steve_channels::Replies::new().outbound(outbox.clone()));
 //! // … Channels::builder(…).responder(replies.clone()).build(); late.set(&channels);
@@ -35,7 +39,6 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -52,10 +55,11 @@ use steve_modules::{ApiError, ApiResult, Clock, SystemClock, Tier};
 use steve_store::base::{self, DecisionKind, mems};
 use steve_store::{Decision, Item, NewDecision, Tx, uid};
 
-use crate::adapters::feishu::as_user::{SendAsUser, UserMessage};
 use crate::adapters::feishu::send::{at_handle, reply_in_thread};
 use crate::basis::{self, NewBasis, Rewrite};
-use crate::channel::{OutContent, SendTarget, SpaceKind};
+use crate::channel::{
+    ActAsUser, ActTarget, MessageRef, OutContent, SendKey, SendTarget, Sent, SpaceKind,
+};
 use crate::compose::PinnedModel;
 use crate::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Outbound, Purpose};
 use crate::disclosure::{self, MAX_REWRITES, NoSecrets, SecretScan};
@@ -64,10 +68,13 @@ use crate::personas::{self, PersonaRow};
 use crate::respond::{self, DRAFT_OPTIONS, SUBJECT_MESSAGE};
 use crate::rules::{self, Act, ItemMode, Trigger};
 use crate::spaces::{self, Mode, SpaceRow};
-use crate::{ChannelResult, Channels, bindings, compose, messages, send_state};
+use crate::{ChannelResult, Channels, bindings, compose, fallback, messages, send_state};
 
-/// How long an approved message waits before it goes out (undo window).
+/// How long a message you approved waits before it goes out in your name, or as a bot speaking for you
+/// (undo window).
 pub const SEND_DELAY_MS: i64 = 10_000;
+/// The same for a bot account speaking as itself (it can still be recalled once out).
+pub const BOT_SEND_DELAY_MS: i64 = 3_000;
 /// How often the queue looks for approved messages whose delay is over.
 pub const QUEUE_EVERY: Duration = Duration::from_secs(2);
 /// A claim older than this is considered abandoned (the Hub stopped mid-send) and retried; the
@@ -85,6 +92,11 @@ pub const UNKNOWN_OPTIONS: [&str; 3] = ["sent", "retry", "discard"];
 pub const FAIL_OPTIONS: [&str; 2] = ["retry", "discard"];
 /// Options of the decision after a blocked one.
 pub const BLOCKED_OPTIONS: [&str; 1] = ["discard"];
+/// The choice “改写后再看”: the drafting model rewrites the flagged parts, the result is checked again
+/// and comes back as a new draft card.
+pub const REWRITE: &str = "rewrite";
+/// Options of the approval of a model's draft the check flagged.
+pub const REWRITE_OPTIONS: [&str; 3] = ["yes", "no", REWRITE];
 
 /// A provider refusal for a missing permission (Feishu 99991672 tenant / 99991679 user scope, or
 /// the grant check before the call): retrying can't help.
@@ -136,7 +148,6 @@ enum After {
 struct LinkInner {
     clock: OnceLock<Arc<dyn Clock>>,
     after: Mutex<Vec<After>>,
-    delay_ms: AtomicI64,
 }
 
 /// Shared between the `chan_message` decision handler (registered before `Modules` exists) and the
@@ -155,7 +166,6 @@ impl OutLink {
         Self(Arc::new(LinkInner {
             clock: OnceLock::new(),
             after: Mutex::new(Vec::new()),
-            delay_ms: AtomicI64::new(SEND_DELAY_MS),
         }))
     }
 
@@ -167,17 +177,6 @@ impl OutLink {
     /// The modules' clock (once; the handler uses the system clock until then).
     pub fn bind_clock(&self, c: Arc<dyn Clock>) {
         let _ = self.0.clock.set(c);
-    }
-
-    /// The undo window after an approval, in ms (0–60 s).
-    pub fn set_delay_ms(&self, ms: i64) {
-        self.0
-            .delay_ms
-            .store(ms.clamp(0, 60_000), Ordering::Relaxed);
-    }
-
-    fn delay(&self) -> i64 {
-        self.0.delay_ms.load(Ordering::Relaxed)
     }
 
     fn now(&self) -> i64 {
@@ -349,6 +348,7 @@ fn knowledge_of(c: &Connection, g: Option<&Generation>) -> ChannelResult<Vec<Kno
             level: h.level,
             visibility: h.visibility.code(),
             text: h.text.clone(),
+            seq: Some(h.seq),
         })
         .collect();
     for a in &g.anchors {
@@ -370,6 +370,7 @@ fn knowledge_of(c: &Connection, g: Option<&Generation>) -> ChannelResult<Vec<Kno
                 level: m.level,
                 visibility: m.visibility.code(),
                 text: m.text.clone(),
+                seq: None,
             });
         }
     }
@@ -437,7 +438,13 @@ fn open_approval(
     id: &str,
     question: String,
     text: &str,
+    rewrite: bool,
 ) -> ChannelResult<String> {
+    let options = if rewrite {
+        &REWRITE_OPTIONS[..]
+    } else {
+        &DRAFT_OPTIONS[..]
+    };
     let d = base::decisions::open(
         tx,
         &NewDecision {
@@ -449,7 +456,7 @@ fn open_approval(
             session_id: None,
             question,
             draft: Some(text.to_string()),
-            options: Some(DRAFT_OPTIONS.map(String::from).to_vec()),
+            options: Some(options.iter().map(|s| s.to_string()).collect()),
             requested_by: "steve".into(),
         },
     )?;
@@ -488,6 +495,295 @@ fn space_name(s: &SpaceRow) -> String {
 }
 
 // ---------------------------------------------------------------- authorization
+
+/// The undo window of an account with no `send_delay_s` of its own: a bot speaking as itself waits
+/// [`BOT_SEND_DELAY_MS`], your own account [`SEND_DELAY_MS`].
+pub fn default_send_delay_ms(mode: Mode) -> i64 {
+    match mode {
+        Mode::Bot => BOT_SEND_DELAY_MS,
+        Mode::Own => SEND_DELAY_MS,
+    }
+}
+
+/// How long `row` waits after you approve it: its account's `send_delay_s`, else the default of its
+/// identity; a bot speaking for you (`on_behalf = proxy`) always waits like your own account.
+fn send_delay_ms(c: &Connection, row: &OutRow) -> ChannelResult<i64> {
+    if row.on_behalf == "proxy" {
+        return Ok(SEND_DELAY_MS);
+    }
+    let space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+    let (_, mode) = bindings::connection_account(c, &row.ws, &space.connection_id)?;
+    let set =
+        spaces::channel_settings(c, &row.ws, &space.connection_id)?.and_then(|s| s.send_delay_s);
+    Ok(set.map_or(default_send_delay_ms(mode), |s| s.clamp(0, 60) * 1000))
+}
+
+/// One rewrite of `text` by the model that wrote it (`model`; the gateway's smart tier when it was not
+/// a pinned one); `None` when it gave no text.
+async fn rewrite_text(
+    ch: &Channels,
+    pinned: Option<&Arc<dyn PinnedModel>>,
+    audience: &Audience,
+    text: &str,
+    r: &CheckResult,
+    model: &str,
+) -> Option<String> {
+    let prompt = disclosure::rewrite_prompt(audience, text, &r.spans);
+    let out = match pinned {
+        Some(p) if !model.is_empty() => p.run(model, &prompt, compose::TIMEOUT).await,
+        _ => {
+            steve_modules::gateway::purpose(
+                "compose",
+                ch.modules()
+                    .gateway
+                    .run(Tier::Smart, &prompt, compose::TIMEOUT),
+            )
+            .await
+        }
+    };
+    match out {
+        Ok(o) => disclosure::parse_rewrite(&o.text),
+        Err(e) => {
+            tracing::warn!("channel rewrite failed: {e}");
+            None
+        }
+    }
+}
+
+/// “改写后再看”: the flagged draft `message_id` is rewritten once by the model that wrote it, checked
+/// again and put back as a draft with a new card (still flagged: it says so, and offers another
+/// rewrite). Nothing is sent. A failed rewrite keeps the text and says so on the card. Only while the
+/// draft still waits on the card `decision_id` the choice closed (an undo reopened it: nothing). Runs on
+/// a task of its own ([`Outbox::send_due`] finds the choice in the store, so a restart does not lose it).
+async fn rewrite_draft(
+    ch: &Channels,
+    pinned: Option<&Arc<dyn PinnedModel>>,
+    message_id: &str,
+    decision_id: &str,
+) -> ChannelResult<()> {
+    type Loaded = (
+        OutRow,
+        Place,
+        Audience,
+        Vec<KnowledgeUse>,
+        Option<String>,
+        basis::BasisOut,
+        bool,
+    );
+    let loaded = ch.store().reader(|c| -> ChannelResult<Option<Loaded>> {
+        let Some(row) = out_row(c, message_id)? else {
+            return Ok(None);
+        };
+        let d = base::decisions::get(c, decision_id)?;
+        let chosen = d.is_some_and(|d| {
+            d.status == "resolved" && d.result["choice"].as_str() == Some(REWRITE)
+        });
+        if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) || !chosen {
+            return Ok(None);
+        }
+        let Some(b) = basis::of_message(c, &row.ws, &row.id)? else {
+            return Ok(None);
+        };
+        let space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+        let p = place(
+            c,
+            &row.ws,
+            &space.connection_id,
+            &row.space_id,
+            row.persona_id.as_deref(),
+        )?;
+        let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
+        // the same knowledge the first check had (retrieved pieces and memories), read again
+        let entries = b.entries.as_array().cloned().unwrap_or_default();
+        let (k, complete) = steve_knowledge::retrieve::knowledge_again(c, &row.ws, &entries)?;
+        let said = match &row.reply_to {
+            Some(src) => c
+                .query_row(
+                    "SELECT text FROM chan_messages WHERE external_id = ? AND space_id = ? AND direction = 'in'
+                        AND purged IS NULL AND text IS NOT NULL AND trim(text) <> ''",
+                    params![src, row.space_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?,
+            None => None,
+        };
+        Ok(Some((row, p, a, k, said, b, complete)))
+    })?;
+    let Some((row, p, audience, knowledge, said, b, complete)) = loaded else {
+        return Ok(());
+    };
+    let spans: Vec<steve_modules::outbound::Span> =
+        serde_json::from_value(b.spans.clone()).unwrap_or_default();
+    let flagged = CheckResult {
+        verdict: Verdict::Leak,
+        entries: Vec::new(),
+        spans,
+        check_model: b.check_model.clone(),
+    };
+    let model = b.answer_model.clone().unwrap_or_default();
+    let new = rewrite_text(ch, pinned, &audience, &row.text, &flagged, &model).await;
+    let cx = CheckCx {
+        ws: row.ws.clone(),
+        actor: match (&p.persona, p.mode) {
+            (Some(per), _) => per.bot_id.clone(),
+            (None, Mode::Own) => "me".into(),
+            (None, Mode::Bot) => "steve".into(),
+        },
+        draft_model: b.answer_model.clone(),
+        audience_said: said,
+        skip_model: false,
+        // the model may be left out only when the knowledge is all here, as in the first check
+        internal_skip: complete && p.mode == Mode::Bot && row.on_behalf != "proxy",
+    };
+    let checked = match &new {
+        Some(t) => {
+            let mut r = b1::check(ch.modules(), &cx, &audience, t, &knowledge).await;
+            // checked against less than it was written with: it does not pass on that
+            if !complete && r.verdict == Verdict::Pass {
+                r.verdict = Verdict::Leak;
+                r.spans.push(steve_modules::outbound::Span {
+                    text: String::new(),
+                    reason: steve_modules::outbound::R_BASIS_GONE.into(),
+                });
+            }
+            Some(r)
+        }
+        None => None,
+    };
+    let now = ch.now();
+    ch.store().transaction(|tx| -> ChannelResult<()> {
+        // answered or edited meanwhile: the rewrite is not wanted any more
+        let Some(cur) = out_row(tx, &row.id)? else {
+            return Ok(());
+        };
+        if cur.status != "draft"
+            || cur.decision_id.as_deref() != Some(decision_id)
+            || cur.text != row.text
+        {
+            return Ok(());
+        }
+        let mut q = format!("{}发到「{}」", p.speaker, space_name(&p.space));
+        let text = match (&new, &checked) {
+            // a rewrite with a secret in it is not shown: the text stays as it was
+            (Some(t), Some(r)) if r.verdict != Verdict::Blocked => {
+                let leak = r.verdict != Verdict::Pass;
+                let mut rewrites: Vec<Rewrite> =
+                    serde_json::from_value(b.rewrites.clone()).unwrap_or_default();
+                rewrites.push(Rewrite {
+                    from: row.text.clone(),
+                    to: t.clone(),
+                    reason: flagged
+                        .spans
+                        .iter()
+                        .map(|s| s.reason.clone())
+                        .collect::<Vec<_>>()
+                        .join("；"),
+                });
+                basis::insert(
+                    tx,
+                    &NewBasis {
+                        ws: row.ws.clone(),
+                        message_id: row.id.clone(),
+                        entries: r.entries.clone(),
+                        rewrites,
+                        verdict: if leak {
+                            basis::DRAFTED
+                        } else {
+                            basis::REWRITTEN
+                        }
+                        .into(),
+                        answer_model: b.answer_model.clone(),
+                        check_model: r.check_model.clone(),
+                        spans: if leak { r.spans.clone() } else { Vec::new() },
+                    },
+                    now,
+                )?;
+                q.push_str("（已改写");
+                if leak {
+                    q.push_str(&format!("，仍可能泄露：{}", spans_note(r)));
+                }
+                q.push('）');
+                tx.execute(
+                    "UPDATE chan_messages SET text = ? WHERE id = ? AND status = 'draft'",
+                    params![t, row.id],
+                )?;
+                let again = leak && !unchecked(r);
+                open_approval(tx, &row.ws, &row.id, q, t, again)?;
+                t.clone()
+            }
+            _ => {
+                q.push_str("（没能改写，原文未变）");
+                open_approval(tx, &row.ws, &row.id, q, &row.text, true)?;
+                row.text.clone()
+            }
+        };
+        base::audit(
+            tx,
+            &row.ws,
+            "steve",
+            "chan_message.rewritten",
+            &row.id,
+            &json!({"decision": decision_id, "changed": text != row.text}),
+        )?;
+        messages::event(tx, &row.ws, &row.space_id, &row.id);
+        Ok(())
+    })
+}
+
+/// The flagged draft could not be rewritten at all (its space or account is gone, the store failed): its
+/// text comes back on a card as it was, so it is not left without one.
+fn rewrite_failed(ch: &Channels, message_id: &str, decision_id: &str) -> ChannelResult<()> {
+    ch.store().transaction(|tx| -> ChannelResult<()> {
+        let Some(row) = out_row(tx, message_id)? else {
+            return Ok(());
+        };
+        if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) {
+            return Ok(());
+        }
+        let name = spaces::get(tx, &row.space_id)?
+            .map(|s| space_name(&s))
+            .unwrap_or_default();
+        open_approval(
+            tx,
+            &row.ws,
+            &row.id,
+            format!("发到「{name}」（没能改写，原文未变）"),
+            &row.text,
+            false,
+        )?;
+        messages::event(tx, &row.ws, &row.space_id, &row.id);
+        Ok(())
+    })
+}
+
+/// Flagged drafts whose card was answered “改写后再看” and that wait for the rewrite.
+fn rewrites_asked(c: &Connection) -> ChannelResult<Vec<(String, String)>> {
+    let mut st = c.prepare_cached(
+        "SELECT m.id, d.id FROM chan_messages m JOIN decisions d ON d.id = m.decision_id
+          WHERE m.direction = 'out' AND m.status = 'draft' AND d.status = 'resolved' AND d.subject_type = ?
+            AND d.subject_id = m.id AND json_extract(d.result, '$.choice') = ?
+          ORDER BY m.created LIMIT 20",
+    )?;
+    let rows = st
+        .query_map(params![SUBJECT_MESSAGE, REWRITE], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// A receipt from a fixed template (an item's “收到，已记为 …”, a handoff's “我请 … 来看。” or its failure
+/// note): nothing a model wrote, so only the local checks run on it.
+fn template(req: &OutRequest) -> bool {
+    matches!(req.purpose, Purpose::Item | Purpose::HandoffAck) && req.generation.is_none()
+}
+
+/// A check that could not run found nothing to rewrite: the text waits for the owner as it is.
+fn unchecked(r: &CheckResult) -> bool {
+    r.spans
+        .iter()
+        .any(|s| s.reason == disclosure::R_MODEL_FAILED || s.reason == disclosure::R_UNBOUND)
+}
 
 /// Whether `auth` may let a message out without a draft on an account in `mode` (step 2). The
 /// store check comes again in [`verify`].
@@ -602,10 +898,16 @@ pub fn verify(
                 _ => false,
             }
         }
-        Auth::Grant { flow_id, .. } => c.query_row(
+        // only a grant for the flow version the run is running
+        Auth::Grant {
+            flow_id,
+            flow_version,
+            ..
+        } => c.query_row(
             "SELECT EXISTS (SELECT 1 FROM grants WHERE workspace_id = ? AND subject_type = 'flow' AND subject_id = ?
-                AND capability = ? AND resource_type = 'space' AND resource_id IN (?, '*') AND revoked IS NULL AND until > ?)",
-            params![row.ws, flow_id, crate::flow_actions::CAPABILITY, space.id, now],
+                AND capability = ? AND resource_type = 'space' AND resource_id IN (?, '*') AND revoked IS NULL AND until > ?
+                AND json_extract(scope, '$.flow_version') = ?)",
+            params![row.ws, flow_id, crate::flow_actions::CAPABILITY, space.id, now, flow_version],
             |r| r.get(0),
         )?,
         Auth::Step { run_id, node_id, gate } => match steve_flow::runs::get(c, run_id) {
@@ -641,38 +943,33 @@ fn completes(p: Purpose) -> bool {
 /// What [`Outbox::send`] did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SendOutcome {
-    Sent {
-        external_id: String,
-    },
+    /// Out; `external_id` is the provider's message id when it gave one.
+    Sent { external_id: Option<String> },
     /// The authorization did not hold: back to a draft with its approval.
-    Drafted {
-        decision_id: String,
-    },
+    Drafted { decision_id: String },
     /// A secret value: `blocked`, a `fail` decision with “discard”.
-    Blocked {
-        decision_id: String,
-    },
+    Blocked { decision_id: String },
     /// The provider failed: `failed`, a `fail` decision (retry / discard).
-    Failed {
-        error: String,
-        decision_id: String,
-    },
+    Failed { error: String, decision_id: String },
     /// Sent without an answer: `unknown`, it may be out (sent again under the same dedupe key
     /// while the provider drops repeats, else you are asked).
-    Unknown {
-        error: String,
-    },
+    Unknown { error: String },
     /// Not pending, already claimed, gone, or waiting for its connection.
     Skipped,
 }
+
+/// An `unknown` message: its id, the dedupe window of the side it went out on, its first try.
+type Unknown = (String, Option<Duration>, Option<i64>);
 
 /// C6's outbound. Share one `Arc<Outbox>` between [`crate::Replies::outbound`], the queue and the
 /// item hook.
 pub struct Outbox {
     link: OutLink,
-    as_user: BTreeMap<String, Arc<dyn SendAsUser>>,
+    as_user: BTreeMap<String, Arc<dyn ActAsUser>>,
     secrets: Arc<dyn SecretScan>,
     pinned: Option<Arc<dyn PinnedModel>>,
+    /// Drafts being rewritten now (“改写后再看”), each on a task of its own.
+    rewriting: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Outbox {
@@ -682,13 +979,32 @@ impl Outbox {
             as_user: BTreeMap::new(),
             secrets: Arc::new(NoSecrets),
             pinned: None,
+            rewriting: Arc::default(),
         }
     }
 
-    /// Sends as you on connections of `adapter` (`feishu_user`) through F6's [`SendAsUser`].
-    pub fn as_user(mut self, adapter: &str, s: Arc<dyn SendAsUser>) -> Self {
-        self.as_user.insert(adapter.into(), s);
+    /// Acts as you (sends, reacts, recalls) on your own connections (`Mode::Own`) of the adapter
+    /// `a` serves ([`ActAsUser::adapter_id`]).
+    pub fn act_as_user(mut self, a: Arc<dyn ActAsUser>) -> Self {
+        self.as_user.insert(a.adapter_id().to_string(), a);
         self
+    }
+
+    /// How long the provider drops a repeat of a send through connection `conn` (of `adapter`):
+    /// as you on your own account, as the connection's account otherwise.
+    fn send_dedup(
+        &self,
+        ch: &Channels,
+        c: &Connection,
+        ws: &str,
+        conn: &str,
+        adapter: &str,
+    ) -> Option<Duration> {
+        let own = bindings::connection_account(c, ws, conn).is_ok_and(|(_, m)| m == Mode::Own);
+        match (own, self.as_user.get(adapter)) {
+            (true, Some(u)) => u.send_dedup(),
+            _ => ch.adapter(adapter).and_then(|a| a.send_dedup()),
+        }
     }
 
     /// The adapters it sends as you on.
@@ -714,36 +1030,6 @@ impl Outbox {
 
     fn bind(&self, ch: &Channels) {
         self.link.bind_clock(ch.modules().clock.clone());
-    }
-
-    async fn rewrite(
-        &self,
-        ch: &Channels,
-        audience: &Audience,
-        text: &str,
-        r: &CheckResult,
-        model: &str,
-    ) -> Option<String> {
-        let prompt = disclosure::rewrite_prompt(audience, text, &r.spans);
-        let out = match &self.pinned {
-            Some(p) if !model.is_empty() => p.run(model, &prompt, compose::TIMEOUT).await,
-            _ => {
-                steve_modules::gateway::purpose(
-                    "compose",
-                    ch.modules()
-                        .gateway
-                        .run(Tier::Smart, &prompt, compose::TIMEOUT),
-                )
-                .await
-            }
-        };
-        match out {
-            Ok(o) => disclosure::parse_rewrite(&o.text),
-            Err(e) => {
-                tracing::warn!("channel rewrite failed: {e}");
-                None
-            }
-        }
     }
 
     /// [`Outbound::deliver`] with the check result (for `steve_reply_source`'s answer).
@@ -788,28 +1074,38 @@ impl Outbox {
             },
             draft_model: draft_model.clone(),
             audience_said: said,
+            // a fixed receipt (“收到，已记为 …”, “我请 … 来看。”) no model wrote: secrets and the rules only
+            skip_model: template(req),
+            // a bot's own reply whose knowledge was tracked (a generation) may skip the model for the
+            // workspace's own people; text without one (an agent's, a flow's) and anything said as you
+            // or on your behalf may not
+            internal_skip: req.generation.is_some()
+                && p.mode == Mode::Bot
+                && req.purpose != Purpose::Trigger,
         };
 
         // 1. disclosure (and the rewrites)
         let mut res = b1::check(ch.modules(), &cx, &audience, &text, &knowledge).await;
         let mut rewrites: Vec<Rewrite> = Vec::new();
-        // a check that could not run found nothing to rewrite: the text waits for the owner as it is
-        let unchecked = |r: &steve_modules::outbound::CheckResult| {
-            r.spans.iter().any(|s| {
-                s.reason == disclosure::R_MODEL_FAILED || s.reason == disclosure::R_UNBOUND
-            })
-        };
-        if res.verdict == Verdict::Leak && req.generation.is_some() && !unchecked(&res) {
+        // a text that waits for the owner whatever the check says is not rewritten: they see the original
+        // with the parts marked, and the card offers the rewrite. Unless YOLO decides the card: it never
+        // approves a flagged text, so the one rewrite comes first, as for a direct reply
+        let will_draft = req.approve || !direct_ok(p.mode, &req.auth);
+        if res.verdict == Verdict::Leak
+            && req.generation.is_some()
+            && !unchecked(&res)
+            && (!will_draft || ch.yolo_on(&t.ws))
+        {
             for _ in 0..MAX_REWRITES {
-                let Some(new) = self
-                    .rewrite(
-                        ch,
-                        &audience,
-                        &text,
-                        &res,
-                        draft_model.as_deref().unwrap_or(""),
-                    )
-                    .await
+                let Some(new) = rewrite_text(
+                    ch,
+                    self.pinned.as_ref(),
+                    &audience,
+                    &text,
+                    &res,
+                    draft_model.as_deref().unwrap_or(""),
+                )
+                .await
                 else {
                     break;
                 };
@@ -938,7 +1234,9 @@ impl Outbox {
                 if leak {
                     q.push_str(&format!("（可能泄露：{}）", spans_note(&res)));
                 }
-                Some(open_approval(tx, &t.ws, &id, q, &text)?)
+                // a model's text the check flagged: the card can ask for the rewrite it did not get
+                let rewrite = leak && req.generation.is_some() && !unchecked(&res);
+                Some(open_approval(tx, &t.ws, &id, q, &text, rewrite)?)
             };
             messages::event(tx, &t.ws, &t.space_id, &id);
             Ok((id, decision))
@@ -1041,16 +1339,15 @@ impl Outbox {
             // tried before: again only while the provider drops repeats
             let tried = send_state::get(tx, &row.id)?.and_then(|s| s.first_at);
             if let Some(first) = tried {
-                let adapter: Option<String> = tx
+                let adapter: Option<(String, String)> = tx
                     .query_row(
-                        "SELECT c.adapter FROM spaces s JOIN connections c ON c.id = s.connection_id WHERE s.id = ?",
+                        "SELECT c.id, c.adapter FROM spaces s JOIN connections c ON c.id = s.connection_id WHERE s.id = ?",
                         [&row.space_id],
-                        |r| r.get(0),
+                        |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .optional()?;
                 let window = adapter
-                    .and_then(|a| ch.adapter(&a))
-                    .and_then(|a| a.send_dedup())
+                    .and_then(|(conn, a)| self.send_dedup(ch, tx, &row.ws, &conn, &a))
                     .map(|d| d.as_millis() as i64);
                 if !window.is_some_and(|w| now < first + w) {
                     tx.execute(
@@ -1113,7 +1410,7 @@ impl Outbox {
                 let speaker = place(tx, &row.ws, &space.connection_id, &row.space_id, row.persona_id.as_deref())?.speaker;
                 let d = match base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
                     Some(d) if d.kind == "approve" => d.id,
-                    _ => open_approval(tx, &row.ws, &row.id, format!("{speaker}发到「{}」", space_name(&space)), &row.text)?,
+                    _ => open_approval(tx, &row.ws, &row.id, format!("{speaker}发到「{}」", space_name(&space)), &row.text, false)?,
                 };
                 base::audit(
                     tx,
@@ -1252,20 +1549,32 @@ impl Outbox {
             .store()
             .transaction(|tx| send_state::attempt(tx, &row.id, auth, &text, &at, now))?;
         let in_thread = reply_in_thread(kind, row.thread_key.as_deref());
-        let sent: Result<String, ProviderError> = match (mode, self.as_user.get(&adapter)) {
+        let sent: Result<Sent, ProviderError> = match (mode, self.as_user.get(&adapter)) {
             (Mode::Own, Some(u)) => {
-                let mut m = UserMessage::text(text.clone());
-                m.uuid = Some(row.id.clone());
-                match &row.reply_to {
-                    Some(r) => u.reply_as_user(&cx, r, &m, in_thread).await,
-                    None => u.send_as_user(&cx, &space.external_id, &m).await,
-                }
-                .map(|s| s.message_id)
-                .map_err(ProviderError::from)
+                let to = match &row.reply_to {
+                    Some(r) => {
+                        let to = ch
+                            .store()
+                            .reader(|c| replied_ref(c, &row.space_id, &space.connection_id, r))
+                            .unwrap_or_else(|_| MessageRef::platform(&space.external_id, r));
+                        ActTarget::Reply { to, in_thread }
+                    }
+                    None => ActTarget::Space {
+                        ext_id: space.external_id.clone(),
+                    },
+                };
+                let mut content = OutContent::text(text.clone());
+                content.uuid = Some(row.id.clone());
+                content.space_ext_id = Some(space.external_id.clone());
+                u.send(&cx, &to, &content, &SendKey(row.id.clone()))
+                    .await
+                    .map_err(provider_error)
             }
             _ => match ch.adapter(&adapter) {
                 Some(a) => {
-                    let to = match &row.reply_to {
+                    // a message only the Hub has an id for can't be replied to at the provider:
+                    // the answer goes to the space
+                    let to = match row.reply_to.as_ref().filter(|r| !fallback::is_fallback(r)) {
                         Some(r) => SendTarget::Reply {
                             ext_msg_id: r.clone(),
                             in_thread,
@@ -1278,25 +1587,48 @@ impl Outbox {
                     content.uuid = Some(row.id.clone());
                     content.at = at;
                     content.space_ext_id = Some(space.external_id.clone());
-                    a.send(&cx, &to, &content).await.map_err(|e| match e {
-                        AdapterError::Provider(p) => p,
-                        e => ProviderError::Rejected(e.to_string()),
-                    })
+                    a.send(&cx, &to, &content)
+                        .await
+                        .map(Sent::id)
+                        .map_err(provider_error)
                 }
                 None => Err(ProviderError::Rejected("这个渠道还不能发送消息".into())),
             },
         };
         match sent {
-            Ok(ext) => {
+            Ok(out) => {
                 let now = ch.now();
+                let ext = fallback::platform(out.ext_id.clone());
                 let ours = ch.store().transaction(|tx| -> ChannelResult<bool> {
+                    // `sent_via`: recalled through the same connection later, whatever the space's
+                    // voice is by then. The content key: a copy read back without a provider id,
+                    // or of a send without one, is this message.
+                    let key = fallback::out_key(ch, tx, &row.ws, &space.connection_id, &text)?;
                     if tx.execute(
-                        "UPDATE chan_messages SET status = 'sent', external_id = ?, text = ?, sent = ?
+                        "UPDATE chan_messages SET status = 'sent', external_id = ?, text = ?, sent = ?,
+                                sent_via = ?, ext_created = ?, thread_key = coalesce(thread_key, ?),
+                                content_key = ?
                           WHERE id = ? AND status = 'pending' AND sent = ?",
-                        params![ext, text, now, row.id, claim],
+                        params![
+                            ext,
+                            text,
+                            now,
+                            space.connection_id,
+                            out.created,
+                            out.thread_key,
+                            key,
+                            row.id,
+                            claim
+                        ],
                     )? == 0
                     {
                         return Ok(false);
+                    }
+                    if let Some(src) = out.source_id.as_deref().filter(|s| !s.is_empty()) {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO chan_message_seen (connection_id, source_id, message_id) VALUES (?, ?, ?)",
+                            params![space.connection_id, src, row.id],
+                        )?;
                     }
                     send_state::forget(tx, &row.id)?;
                     base::audit(
@@ -1447,6 +1779,28 @@ impl Outbox {
                 After::Discarded { message_id } => ch.react_discarded(&message_id).await,
             }
         }
+        // “改写后再看”: each on a task of its own, so a slow model does not hold up the sends
+        match ch.store().reader(rewrites_asked) {
+            Ok(asked) => {
+                for (m, d) in asked {
+                    if !lock(&self.rewriting).insert(m.clone()) {
+                        continue;
+                    }
+                    let (ch, pinned, busy) =
+                        (ch.clone(), self.pinned.clone(), self.rewriting.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = rewrite_draft(&ch, pinned.as_ref(), &m, &d).await {
+                            tracing::warn!(message = m, "rewriting a draft failed: {e}");
+                            if let Err(e) = rewrite_failed(&ch, &m, &d) {
+                                tracing::warn!(message = m, "putting the draft back: {e}");
+                            }
+                        }
+                        lock(&busy).remove(&m);
+                    });
+                }
+            }
+            Err(e) => tracing::warn!("drafts to rewrite: {e}"),
+        }
         let now = ch.now();
         let due = ch.store().reader(|c| -> ChannelResult<Vec<(String, String)>> {
             let mut st = c.prepare_cached(
@@ -1580,9 +1934,9 @@ impl Outbox {
     /// counted from the first try) sent again as they were, so a repeat is dropped; after it, or
     /// without one, you are asked whether it went out ([`UNKNOWN_OPTIONS`]), once.
     async fn settle_unknown(&self, ch: &Channels, now: i64) -> usize {
-        let rows = ch.store().reader(|c| -> ChannelResult<Vec<(String, String, Option<i64>)>> {
+        let rows = ch.store().reader(|c| -> ChannelResult<Vec<Unknown>> {
             let mut st = c.prepare_cached(
-                "SELECT m.id, c.adapter, s.first_at FROM chan_messages m
+                "SELECT m.id, m.workspace_id, c.id, c.adapter, s.first_at FROM chan_messages m
                    JOIN spaces sp ON sp.id = m.space_id JOIN connections c ON c.id = sp.connection_id
                    LEFT JOIN chan_send_state s ON s.message_id = m.id
                   WHERE m.direction = 'out' AND m.status = 'unknown'
@@ -1591,9 +1945,22 @@ impl Outbox {
                   ORDER BY m.created LIMIT 50",
             )?;
             let v = st
-                .query_map([SUBJECT_MESSAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .query_map([SUBJECT_MESSAGE], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
+                    ))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(v)
+            Ok(v
+                .into_iter()
+                .map(|(m, ws, conn, adapter, first)| {
+                    (m, self.send_dedup(ch, c, &ws, &conn, &adapter), first)
+                })
+                .collect())
         });
         let rows = match rows {
             Ok(r) => r,
@@ -1603,11 +1970,8 @@ impl Outbox {
             }
         };
         let mut n = 0;
-        for (m, adapter, first_at) in rows {
-            let window = ch
-                .adapter(&adapter)
-                .and_then(|a| a.send_dedup())
-                .map(|d| d.as_millis() as i64);
+        for (m, window, first_at) in rows {
+            let window = window.map(|d| d.as_millis() as i64);
             let st = ch.store().reader(|c| send_state::get(c, &m)).ok().flatten();
             let resend = match (window, first_at, &st) {
                 (Some(w), Some(t), Some(_)) => now < t + w,
@@ -1780,8 +2144,10 @@ impl Outbox {
         })
     }
 
-    /// Recalls a sent message (`POST /chan-messages/:id/recall`): `400 这个渠道不支持撤回` when the
-    /// adapter can't.
+    /// Recalls a sent message (`POST /chan-messages/:id/recall`) through the connection it went out
+    /// on (`sent_via`; the space's voice for messages sent before it was recorded): as you when it
+    /// was sent as you, as the connection's account otherwise. `400 这个渠道不支持撤回` when that
+    /// side can't.
     pub async fn recall(
         &self,
         ch: &Channels,
@@ -1789,43 +2155,60 @@ impl Outbox {
         actor: &str,
         id: &str,
     ) -> ChannelResult<()> {
-        let (row, space, adapter) = ch.store().reader(|c| -> ChannelResult<_> {
+        let (row, conn, adapter, mode, msg) = ch.store().reader(|c| -> ChannelResult<_> {
             let row = out_row(c, id)?
                 .filter(|r| r.ws == ws)
                 .ok_or_else(|| ApiError::not_found("消息"))?;
             let space =
                 spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-            let adapter: String = c.query_row(
-                "SELECT adapter FROM connections WHERE id = ?",
-                [&space.connection_id],
-                |r| r.get(0),
-            )?;
-            Ok((row, space, adapter))
-        })?;
-        let a = ch
-            .adapter(&adapter)
-            .filter(|a| a.features().recall)
-            .ok_or_else(|| ApiError::rule(steve_i18n::t!("channels.error.no_recall")))?;
-        if row.status != "sent" {
-            return Err(ApiError::conflict(steve_i18n::t!(
-                "channels.error.not_sent"
-            )));
-        }
-        let ext: Option<String> = ch.store().reader(|c| {
-            c.query_row(
-                "SELECT external_id FROM chan_messages WHERE id = ?",
+            let via: Option<String> = c.query_row(
+                "SELECT sent_via FROM chan_messages WHERE id = ?",
                 [id],
                 |r| r.get(0),
-            )
-            .map_err(steve_store::StoreError::from)
+            )?;
+            let conn = via.filter(|v| !v.is_empty()).unwrap_or(space.connection_id);
+            let adapter: String = c
+                .query_row(
+                    "SELECT adapter FROM connections WHERE id = ? AND workspace_id = ?",
+                    params![conn, ws],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or_default();
+            let mode = bindings::connection_account(c, ws, &conn)
+                .map(|(_, m)| m)
+                .unwrap_or(Mode::Bot);
+            let msg = crate::messages::message_ref(c, id, &conn)?
+                .ok_or_else(|| ApiError::not_found("消息"))?;
+            Ok((row, conn, adapter, mode, msg))
         })?;
-        let ext =
-            ext.ok_or_else(|| ApiError::conflict(steve_i18n::t!("channels.error.not_sent")))?;
+        let no_recall = || ApiError::rule(steve_i18n::t!("channels.error.no_recall"));
+        let not_sent = || ApiError::conflict(steve_i18n::t!("channels.error.not_sent"));
+        let recaller = match (mode, self.as_user.get(&adapter)) {
+            (Mode::Own, Some(u)) if u.supports_recall() => Recaller::AsUser(u.clone()),
+            (Mode::Own, Some(_)) => return Err(no_recall()),
+            _ => Recaller::Adapter(
+                ch.adapter(&adapter)
+                    .filter(|a| a.features().recall)
+                    .ok_or_else(no_recall)?,
+            ),
+        };
+        if row.status != "sent" {
+            return Err(not_sent());
+        }
         let cx = ch
             .connections()
-            .cx_for(ws, &space.connection_id, None)
+            .cx_for(ws, &conn, None)
             .map_err(|e| ApiError::rule(e.to_string()))?;
-        a.recall(&cx, &ext).await.map_err(|e| {
+        let done = match recaller {
+            // without ids the adapter still has the time (`created_exact`) and the text to find it by
+            Recaller::AsUser(u) => u.recall(&cx, &msg).await,
+            Recaller::Adapter(a) => {
+                let ext = msg.ext_id.clone().ok_or_else(not_sent)?;
+                a.recall(&cx, &ext).await
+            }
+        };
+        done.map_err(|e| {
             ApiError::rule(steve_i18n::t!("channels.error.recall_failed", error = e))
         })?;
         ch.store().transaction(|tx| -> ChannelResult<()> {
@@ -1837,6 +2220,49 @@ impl Outbox {
             messages::event(tx, ws, &row.space_id, id);
             Ok(())
         })
+    }
+}
+
+/// Who recalls a message: you, or the connection's account through its channel adapter.
+enum Recaller {
+    AsUser(Arc<dyn ActAsUser>),
+    Adapter(Arc<dyn crate::ChannelAdapter>),
+}
+
+/// An adapter's failure as the provider error the send path records.
+fn provider_error(e: AdapterError) -> ProviderError {
+    match e {
+        AdapterError::Provider(p) => p,
+        e => ProviderError::Rejected(e.to_string()),
+    }
+}
+
+/// The message a reply as you answers (`ext` in space `space`), as the adapter of connection
+/// `conn` acts on it; only its ids when it is not stored.
+fn replied_ref(c: &Connection, space: &str, conn: &str, ext: &str) -> ChannelResult<MessageRef> {
+    let id: Option<String> = c
+        .query_row(
+            "SELECT id FROM chan_messages WHERE space_id = ? AND external_id = ? ORDER BY direction = 'in' DESC, created LIMIT 1",
+            params![space, ext],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let stored = match id {
+        Some(id) => crate::messages::message_ref(c, &id, conn)?,
+        None => None,
+    };
+    match stored {
+        Some(m) => Ok(m),
+        None => {
+            let space_ext: String = c.query_row(
+                "SELECT external_id FROM spaces WHERE id = ?",
+                [space],
+                |r| r.get(0),
+            )?;
+            let mut m = MessageRef::platform(space_ext, ext);
+            m.ext_id = fallback::platform(m.ext_id);
+            Ok(m)
+        }
     }
 }
 
@@ -1977,7 +2403,12 @@ impl MessageDecisions {
                 if text.trim().is_empty() {
                     return Err(ApiError::rule(steve_i18n::t!("channels.error.reply_empty")));
                 }
-                let send_at = now + self.0.delay();
+                // YOLO waited out its own cooling-off before it approved: no second wait
+                let send_at = if cx.actor == b1::YOLO_ACTOR {
+                    now
+                } else {
+                    now + send_delay_ms(tx, &row)?
+                };
                 tx.execute(
                     "UPDATE chan_messages SET text = ?, status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
                     params![text, row.id],
@@ -1995,6 +2426,17 @@ impl MessageDecisions {
                 if cx.actor == b1::YOLO_ACTOR {
                     result["decided_by"] = json!(b1::YOLO_ACTOR);
                 }
+            }
+            REWRITE if d.options.iter().any(|o| o == REWRITE) => {
+                // the card closes; the queue finds the choice and the rewritten text comes back on a new one
+                base::audit(
+                    tx,
+                    cx.ws,
+                    cx.actor,
+                    "chan_message.rewrite",
+                    &row.id,
+                    &json!({"decision": d.id}),
+                )?;
             }
             "no" => {
                 set_status(tx, &row.id, &["draft"], DISCARDED)?;
@@ -2151,6 +2593,9 @@ impl DecisionHandler for MessageDecisions {
             ("approve", "yes") if in_window => {
                 set_status(tx, &row.id, &["pending"], "draft")?;
             }
+            // the rewrite has not replaced this card yet: it stays open as it was
+            ("approve", REWRITE)
+                if row.status == "draft" && row.decision_id.as_deref() == Some(d.id.as_str()) => {}
             ("approve", "no") if row.status == DISCARDED => {
                 set_status(tx, &row.id, &[DISCARDED], "draft")?;
             }
@@ -2191,7 +2636,7 @@ impl crate::reactions::Reactor for Outbox {
         ch: &Channels,
         ws: &str,
         conn: &str,
-        ext_msg_id: &str,
+        msg: &MessageRef,
         kind: crate::channel::ReactionKind,
     ) -> Result<crate::reactions::Added, String> {
         let adapter = crate::reactions::adapter_of(ch, ws, conn)?;
@@ -2201,20 +2646,19 @@ impl crate::reactions::Reactor for Outbox {
                     .connections()
                     .cx_for(ws, conn, None)
                     .map_err(|e| e.to_string())?;
-                let emoji = crate::adapters::feishu::send::emoji_type(kind);
                 let id = u
-                    .react_as_user(&cx, ext_msg_id, emoji)
+                    .add_reaction(&cx, msg, kind)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(crate::reactions::Added {
                     reaction_id: id,
-                    emoji: emoji.into(),
+                    emoji: u.reaction_emoji(kind).into(),
                     as_user: true,
                 })
             }
             None => {
                 crate::reactions::AdapterReactor
-                    .add(ch, ws, conn, ext_msg_id, kind)
+                    .add(ch, ws, conn, msg, kind)
                     .await
             }
         }
@@ -2225,7 +2669,7 @@ impl crate::reactions::Reactor for Outbox {
         ch: &Channels,
         ws: &str,
         conn: &str,
-        ext_msg_id: &str,
+        msg: &MessageRef,
         reaction_id: &str,
         as_user: bool,
     ) -> Result<(), String> {
@@ -2236,13 +2680,13 @@ impl crate::reactions::Reactor for Outbox {
                     .connections()
                     .cx_for(ws, conn, None)
                     .map_err(|e| e.to_string())?;
-                u.unreact_as_user(&cx, ext_msg_id, reaction_id)
+                u.remove_reaction(&cx, msg, reaction_id)
                     .await
                     .map_err(|e| e.to_string())
             }
             _ => {
                 crate::reactions::AdapterReactor
-                    .remove(ch, ws, conn, ext_msg_id, reaction_id, as_user)
+                    .remove(ch, ws, conn, msg, reaction_id, as_user)
                     .await
             }
         }

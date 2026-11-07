@@ -141,7 +141,7 @@ export default {
     deletePasskeyTitle: "删除通行密钥“{{name}}”？",
     deletePasskeyBody: "删除后这台设备上不能再用它查看原值，要重新登记。",
     rotateTitle: "轮换主密钥？",
-    rotateBody: "Steve 生成新的主密钥，在后台把每个条目的数据密钥重新包裹一遍。完成后旧的主密钥和旧的恢复码都作废，你要抄下新的恢复码。",
+    rotateBody: "Steve 生成新的主密钥，把每个条目的数据密钥重新包裹一遍。完成后旧的主密钥和旧的恢复码都作废，你要抄下新的恢复码。",
     rotate: "轮换",
     localVerify: "本机验证",
     passkeySub: "{{rp}} · 登记于 {{created}}",

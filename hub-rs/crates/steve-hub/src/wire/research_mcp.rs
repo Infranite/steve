@@ -377,6 +377,7 @@ pub async fn call(
             let (store, all) = (x.store.clone(), args["all"].as_bool().unwrap_or(false));
             let origin = run.message_id.clone();
             tokio::task::spawn_blocking(move || {
+                // your agents' sessions are yours: not for a run answering someone else
                 if !own_reader(&store, &origin)? {
                     return Err(REFUSED.to_string());
                 }
@@ -387,6 +388,36 @@ pub async fn call(
         }
         _ => Err(REFUSED.into()),
     }
+}
+
+/// The research tools as a Node's catalog (a research job's grant): the very set `/mcp` lists for
+/// an in-process run's token.
+pub fn descriptors() -> Vec<steve_node_api::ToolDescriptor> {
+    tools()
+        .into_iter()
+        .map(|t| steve_node_api::ToolDescriptor {
+            name: t["name"].as_str().unwrap_or_default().to_string(),
+            description: t["description"].as_str().unwrap_or_default().to_string(),
+            input_schema: t["inputSchema"].clone(),
+            read_only: true,
+        })
+        .collect()
+}
+
+/// A research job's tool call through its Node, answered as `/mcp` answers an in-process run.
+pub async fn call_tool(
+    x: &Extra,
+    run: ThreadRun,
+    name: &str,
+    args: Value,
+) -> Result<String, String> {
+    let (store, ws) = (x.store.clone(), run.workspace_id.clone());
+    let owner = tokio::task::spawn_blocking(move || super::mcp_extra::owner(&store, &ws))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    call(x, &run, name, &args, &owner).await
 }
 
 /// One JSON-RPC message from a research run.

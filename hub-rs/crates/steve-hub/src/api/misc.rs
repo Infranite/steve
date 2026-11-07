@@ -344,6 +344,7 @@ pub async fn thread_say(
     let mentions = k.raw("mentions").cloned();
     let item = k.opt_str("item", Str::len(1, 40));
     let reply_to = k.opt_str("reply_to", Str::len(1, 80));
+    let client_id = k.opt_str("client_id", Str::len(1, 80));
     k.finish()?;
     // `@` mentions (contacts P3): checked like the module does before anything happens
     let mut checked = Vec::new();
@@ -358,17 +359,27 @@ pub async fn thread_say(
         }
         checked = ms;
     }
-    // V4 paste guard: a password or token is stored replaced and never reaches the router
-    let guarded = steve_vault::guard::intercept(&text);
-    if guarded.blocked {
-        st.domain.say_guarded(&c.ws, &guarded.text).await?;
-        return ok_true();
-    }
-    let refs = super::files::refs(&st, &c.ws, files).await?;
-    st.domain
-        .say_to(&c.ws, &c.me, &text, refs, checked, item, reply_to)
+    // a retry of the same draft (`client_id`) answers like the first send and sends nothing; the
+    // send runs on even if this request goes away, so it needs its own state
+    let (st2, c2) = (st.clone(), c.clone());
+    let v = st
+        .dedupe
+        .once(&c.ws, &c.me, "thread", client_id, move || async move {
+            let (st, c) = (st2, c2);
+            // V4 paste guard: a password or token is replaced before the message is stored or
+            // routed; the rest of it goes on as usual, with Steve's note on where to keep the secret
+            let guarded = steve_vault::guard::intercept(&text);
+            let refs = super::files::refs(&st, &c.ws, files).await?;
+            st.domain
+                .say_to(&c.ws, &c.me, &guarded.text, refs, checked, item, reply_to)
+                .await?;
+            if guarded.blocked {
+                st.domain.say_guard_note(&c.ws).await?;
+            }
+            Ok::<_, ApiError>(json!({ "ok": true }))
+        })
         .await?;
-    ok_true()
+    ok(v)
 }
 
 pub async fn thread_stop(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
@@ -443,11 +454,13 @@ pub async fn thread_queued_edit(
     if text.is_empty() {
         return Err(ApiError::Invalid(vec!["text".into()]));
     }
-    // V4 paste guard: what is sent is guarded, so is what it is changed to
-    if steve_vault::guard::intercept(&text).blocked {
-        return Err(ApiError::bad_request(steve_i18n::t!("hub.queued.secret")));
-    }
-    if !st.domain.thread_queued_edit(&c.ws, &id, &text).await? {
+    // V4 paste guard: what is sent is guarded, so is what it is changed to (the secret replaced)
+    let guarded = steve_vault::guard::intercept(&text);
+    if !st
+        .domain
+        .thread_queued_edit(&c.ws, &id, &guarded.text)
+        .await?
+    {
         return Err(ApiError::Json(409, steve_i18n::t!("hub.queued.gone")));
     }
     ok_true()
@@ -1091,13 +1104,14 @@ pub async fn system_models(
 
 /// Paths and sizes on this machine are the instance manager's.
 fn instance_owner(c: &Ctx) -> Result<(), ApiError> {
+    owner_or(c, || steve_i18n::t!("hub.workspaces.owner_only"))
+}
+
+fn owner_or(c: &Ctx, why: impl FnOnce() -> String) -> Result<(), ApiError> {
     if c.user.get("role").and_then(Value::as_str) == Some("owner") {
         Ok(())
     } else {
-        Err(ApiError::Json(
-            403,
-            steve_i18n::t!("hub.workspaces.owner_only"),
-        ))
+        Err(ApiError::Json(403, why()))
     }
 }
 
@@ -1118,6 +1132,56 @@ pub async fn system_workspaces_reclaim(
 ) -> ApiResult {
     instance_owner(&c)?;
     ok(st.domain.reclaim_workspaces().await?)
+}
+
+/// The outbox's store: only a Hub with its modules wired has one.
+fn outbox_store(st: &AppState) -> Result<steve_store::Store, ApiError> {
+    st.modules
+        .as_ref()
+        .map(|m| m.store.clone())
+        .ok_or_else(|| ApiError::not_found(steve_i18n::t!("hub.outbox.none")))
+}
+
+/// `GET /api/system/outbox`: what the outbox still owes, and the dead deliveries grouped by consumer.
+pub async fn system_outbox(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
+    owner_or(&c, || steve_i18n::t!("hub.outbox.owner_only"))?;
+    let store = outbox_store(&st)?;
+    let (stats, dead) = tokio::task::spawn_blocking(move || {
+        Ok::<_, steve_store::StoreError>((
+            store.reader(steve_store::outbox::stats)?,
+            store.reader(steve_store::outbox::dead)?,
+        ))
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    ok(
+        json!({ "pending": stats.pending, "dead": stats.dead, "oldest": stats.oldest, "groups": dead }),
+    )
+}
+
+/// `POST /api/system/outbox/revive` `{consumer?}`: the dead deliveries (of one consumer, or all) are
+/// tried again, with a fresh day before they can be given up on again.
+pub async fn system_outbox_revive(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    b: Bytes,
+) -> ApiResult {
+    owner_or(&c, || steve_i18n::t!("hub.outbox.owner_only"))?;
+    let store = outbox_store(&st)?;
+    let v = if b.is_empty() { json!({}) } else { body(&b)? };
+    let consumer = match v.get("consumer") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(_) => return Err(ApiError::Invalid(vec!["consumer".into()])),
+    };
+    let n = tokio::task::spawn_blocking(move || {
+        steve_store::outbox::revive(&store, consumer.as_deref())
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    ok(json!({ "revived": n }))
 }
 
 // ── devices ──

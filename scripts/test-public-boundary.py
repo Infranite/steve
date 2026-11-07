@@ -62,9 +62,20 @@ class PublicBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "docs").mkdir()
-            (root / "docs/example.md").write_text("https://pengxiang.dev/private")
-            found = boundary.scan(root, ["docs/example.md", ".steve/qa/capture.png"])
+            (root / "docs/deployment.md").write_text("https://pengxiang.dev/private")
+            found = boundary.scan(root, ["docs/deployment.md", ".steve/qa/capture.png"])
             self.assertEqual({x["rule"] for x in found}, {"personal-domain", "private-runtime-artifact"})
+
+    def test_process_documents_are_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            paths = ["docs/design.md", "docs/ST-9/prototype.html", "hub-rs/README.md", "web/DESIGN.md",
+                     "README.md", "docs/deployment.md", "docs/releases/unreleased/ST-9.md", "docs/assets/logo.svg",
+                     "hub-rs/crates/a/tests/fixtures/x/README.md"]
+            found = boundary.scan(root, paths)
+            self.assertEqual(sorted(x["path"] for x in found if x["rule"] == "process-document"),
+                             ["docs/ST-9/prototype.html", "docs/design.md", "hub-rs/README.md", "web/DESIGN.md"])
+            self.assertTrue(boundary.unexcusable("process-document"))
 
     def test_regex_literal_is_not_a_personal_home(self):
         self.assertIsNone(boundary.TOKENS["personal-home"].search("/Users/|/etc/"))

@@ -1,10 +1,10 @@
 //! Opening an ACP session on a started adapter: `initialize`, `session/new` or `session/load`, the
-//! permission mode, the model and the reasoning effort. Shared by the runner and the Node driver.
+//! permission mode, the model and the reasoning effort, for the Node's driver.
 //!
-//! What the adapter reports comes back through [`Reports`] at the moment it is known (the runner
-//! stores it right away, as before). How strict to be is the caller's [`Strictness`]: the runner
-//! logs a mode or model it could not set and goes on; a Node fails closed, since the Hub asked for a
-//! configuration and must not get another one silently.
+//! What the adapter reports comes back through [`Reports`] at the moment it is known. How strict
+//! to be is the caller's [`Strictness`]: lenient logs a mode or model it could not set and goes on
+//! (how the Hub's old runner worked); a Node fails closed, since the Hub asked for a configuration
+//! and must not get another one silently.
 
 use std::time::Duration;
 
@@ -85,7 +85,7 @@ pub async fn open(
     reports: &dyn Reports,
     strictness: Strictness,
 ) -> Result<Opened, RpcError> {
-    open_with(l, c, reports, strictness, false).await
+    open_with_meta(l, c, None, reports, strictness).await
 }
 
 /// Open a read-only job using a mode declared by the adapter. Never inherit a user's
@@ -95,12 +95,35 @@ pub async fn open_read_only(
     c: OpenConfig<'_>,
     reports: &dyn Reports,
 ) -> Result<Opened, RpcError> {
-    open_with(l, c, reports, Strictness::Strict, true).await
+    open_read_only_with_meta(l, c, None, reports).await
+}
+
+/// [`open_read_only`], with the same adapter metadata as ordinary sessions.
+pub async fn open_read_only_with_meta(
+    l: &Conn,
+    c: OpenConfig<'_>,
+    meta: Option<Value>,
+    reports: &dyn Reports,
+) -> Result<Opened, RpcError> {
+    open_with(l, c, meta, reports, Strictness::Strict, true).await
+}
+
+/// [`open`], with `meta` as the `_meta` of `session/new|load` (Claude Code's adapter reads its
+/// options there, `claudeCode.options.settings` among them).
+pub async fn open_with_meta(
+    l: &Conn,
+    c: OpenConfig<'_>,
+    meta: Option<Value>,
+    reports: &dyn Reports,
+    strictness: Strictness,
+) -> Result<Opened, RpcError> {
+    open_with(l, c, meta, reports, strictness, false).await
 }
 
 async fn open_with(
     l: &Conn,
     mut c: OpenConfig<'_>,
+    meta: Option<Value>,
     reports: &dyn Reports,
     strictness: Strictness,
     read_only: bool,
@@ -120,22 +143,22 @@ async fn open_with(
         .is_some_and(truthy);
     let (r, acp_id) = match c.resume {
         Some(id) => {
+            let mut p = json!({ "sessionId": id, "cwd": c.cwd, "mcpServers": c.mcp_servers });
+            if let Some(m) = &meta {
+                p["_meta"] = m.clone();
+            }
             let r = l
-                .request(
-                    "session/load",
-                    json!({ "sessionId": id, "cwd": c.cwd, "mcpServers": c.mcp_servers }),
-                    Some(Duration::from_secs(120)),
-                )
+                .request("session/load", p, Some(Duration::from_secs(120)))
                 .await?;
             (r, id.to_string())
         }
         None => {
+            let mut p = json!({ "cwd": c.cwd, "mcpServers": c.mcp_servers });
+            if let Some(m) = meta {
+                p["_meta"] = m;
+            }
             let r = l
-                .request(
-                    "session/new",
-                    json!({ "cwd": c.cwd, "mcpServers": c.mcp_servers }),
-                    Some(Duration::from_secs(120)),
-                )
+                .request("session/new", p, Some(Duration::from_secs(120)))
                 .await?;
             let id = js_str(r.get("sessionId"));
             reports.new_session(&id);
@@ -208,7 +231,7 @@ async fn open_with(
                         }
                     }
                     // the adapter took it without saying what it runs: what was asked and accepted
-                    // is in force (strictly; the runner keeps what it last saw, as before)
+                    // is in force (strictly; leniently, what it last saw is kept)
                     None if strict => reports.model(model),
                     None => {}
                 }

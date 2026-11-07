@@ -25,13 +25,6 @@ pub use steve_node_api::{Epoch, Measurement, Money, Tokens, UsageReport, UsageSc
 /// The system prompt of a call whose prompt has no stable head of its own.
 pub const GATEWAY_SYSTEM: &str = "You are a component of Steve, a personal assistant app. Follow the instructions in the user message exactly and reply with only what they ask for.";
 
-/// Environment a model run must not inherit from the Hub (the upgrade control channel).
-const SCRUBBED_ENV: [&str; 3] = [
-    "STEVE_UPGRADE_CONTROL_TOKEN",
-    "STEVE_SUPERVISOR_PID",
-    "STEVE_UPGRADE_ID",
-];
-
 /// Which CLI runs the call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
@@ -317,7 +310,8 @@ impl Stderr {
 /// `group`: the process leads a process group of its own.
 fn command(exe: &Path, cwd: &Path, group: bool) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(exe);
-    for key in SCRUBBED_ENV {
+    // what a model run must not inherit from the Hub: the upgrade channel, the key store, secret files
+    for key in steve_vault::harness::hub_private_vars() {
         cmd.env_remove(key);
     }
     cmd.current_dir(cwd).kill_on_drop(true);
@@ -368,15 +362,16 @@ mod tests {
         assert!(!PrintError::NoResult.transient());
     }
 
-    /// A leaf: a Node can run it without the Hub's store, core or statistics.
+    /// A leaf: a Node can run it without the Hub's store, core or statistics (steve-vault is the
+    /// vault's store-free part: what a harness must not see).
     #[test]
-    fn the_only_steve_dependency_is_the_node_contract() {
+    fn the_only_steve_dependencies_are_the_node_contract_and_the_store_free_vault() {
         let toml = include_str!("../Cargo.toml");
         let steve: Vec<&str> = toml
             .lines()
             .filter_map(|l| l.split_once(" = ").map(|(k, _)| k.trim()))
             .filter(|k| k.starts_with("steve-") || k.starts_with("steve_"))
             .collect();
-        assert_eq!(steve, ["steve-node-api"]);
+        assert_eq!(steve, ["steve-node-api", "steve-vault"]);
     }
 }

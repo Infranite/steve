@@ -23,7 +23,7 @@ def eventually(fn, label, timeout=90):
 with tempfile.TemporaryDirectory(prefix='steve-upgrade-smoke-') as temp:
     root=pathlib.Path(temp); home=root/'home'; home.mkdir(); keys=root/'keys'; keys.mkdir(mode=0o700)
     sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
-    env={**os.environ,'STEVE_HOME':str(home),'STEVE_HOST':'127.0.0.1','STEVE_PORT':str(port),'STEVE_PUBLIC_URL':f'http://127.0.0.1:{port}', 'STEVE_VAULT_KEYSTORE':'dir','STEVE_VAULT_KEY_DIR':str(keys),'STEVE_NO_RESUME':'1','STEVE_ADAPTER_CLAUDE':'/nonexistent','STEVE_ADAPTER_CODEX':'/nonexistent','CODEX_HOME':str(root/'codex'),'STEVE_REPO':str(root/'repo'),'STEVE_DEV_LOGIN':'1'}
+    env={**os.environ,'STEVE_HOME':str(home),'STEVE_HOST':'127.0.0.1','STEVE_PORT':str(port),'STEVE_PUBLIC_URL':f'http://127.0.0.1:{port}', 'STEVE_VAULT_KEYSTORE':'dir','STEVE_VAULT_KEY_DIR':str(keys),'STEVE_NO_RESUME':'1','STEVE_NODE_MODE':'off','STEVE_ADAPTER_CLAUDE':'/nonexistent','STEVE_ADAPTER_CODEX':'/nonexistent','CODEX_HOME':str(root/'codex'),'STEVE_REPO':str(root/'repo'),'STEVE_DEV_LOGIN':'1'}
     # Avoid inherited production auth/channels/external integrations in this isolated fixture.
     for key in list(env):
         if key.startswith(('STEVE_OIDC_', 'LARK_', 'FEISHU_', 'GITHUB_', 'STEVE_UPGRADE_', 'STEVE_KEYHELPER')): env.pop(key)

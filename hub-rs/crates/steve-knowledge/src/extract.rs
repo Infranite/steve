@@ -486,6 +486,7 @@ pub fn select(
             supersedes: r.conflicts.filter(|id| valid_conflict(id)),
             why: r.why,
             scope: r.scope,
+            owner_said: false,
         });
     }
     out
@@ -622,18 +623,52 @@ pub async fn run(
     }
     let (guard, origin) = (kb.guard.clone(), origin.clone());
     m.blocking(move |m| {
-        m.store.transaction(|tx| {
+        let made = m.store.transaction(|tx| {
             chosen
                 .iter()
                 .map(|c| {
                     let mut c = c.clone();
+                    // only the owner's own conversation tells their words apart (`我（…）：`)
+                    c.owner_said = origin.kind == OriginKind::Chat
+                        && c.kind != "event"
+                        && candidates::owner_said(&text, OWNER_LINE, &c.evidence);
                     c.evidence = redact(guard.as_ref(), &c.evidence);
                     candidates::propose(tx, &origin, &c)
                 })
                 .collect::<ApiResult<Vec<_>>>()
-        })
+        })?;
+        kept_notice(m, &origin.ws, &made);
+        Ok(made)
     })
     .await
+}
+
+/// How a line of the owner starts in a day of chat (`sources::chat::day_text`).
+const OWNER_LINE: &str = "我（";
+
+/// Memories kept at once because the owner said so: one notice says which, and where to take them back.
+fn kept_notice(m: &Modules, ws: &str, made: &[Mem]) {
+    let kept: Vec<String> = made
+        .iter()
+        .filter(|x| x.status == "confirmed")
+        .map(|x| format!("「{}」", x.text.chars().take(80).collect::<String>()))
+        .collect();
+    if kept.is_empty() {
+        return;
+    }
+    let text = format!(
+        "按你在对话里说的，记住了 {} 条：{}。不对的话到 知识 › 长期记忆 里改或删掉。",
+        kept.len(),
+        kept.join("；")
+    );
+    let meta = serde_json::json!({"notice": {"kind": "memory", "level": "info"}});
+    if let Err(e) = m
+        .store
+        .messages()
+        .add(ws, "steve", &text, None, &meta, "notify")
+    {
+        tracing::warn!("kb.extract: kept notice: {e}");
+    }
 }
 
 /// The entry point for other modules: mail threads (`OriginKind::Mail`, default

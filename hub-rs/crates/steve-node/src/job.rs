@@ -540,13 +540,7 @@ fn why_stop(
 ) -> Option<Stop> {
     let now = now();
     let hub_down = inner.hub_down_since().is_some_and(|since| since < now);
-    let exhausted = |why: &str| {
-        Some(Stop::End(
-            Outcome::Cancelled,
-            Some(ApiError::new(ErrorCode::Exhausted, why)),
-            "error",
-        ))
-    };
+    let exhausted = |why: NodeStop| Some(Stop::End(Outcome::Cancelled, Some(why.error()), "error"));
     if inner.closed.load(Ordering::SeqCst) {
         Some(Stop::Shutdown)
     } else if inner
@@ -560,31 +554,25 @@ fn why_stop(
     } else if now >= lim.deadline.0 {
         Some(Stop::End(
             Outcome::TimedOut,
-            Some(ApiError::new(ErrorCode::Expired, "past its deadline")),
+            Some(NodeStop::Deadline.error()),
             "timeout",
         ))
     } else if hub_down && now >= lim.offline_until.0 {
         Some(Stop::End(
             Outcome::TimedOut,
-            Some(ApiError::new(
-                ErrorCode::Offline,
-                "the Hub was unreachable past the lease",
-            )),
+            Some(NodeStop::HubUnreachable.error()),
             "timeout",
         ))
     } else if output.load(Ordering::SeqCst) > lim.max_output_bytes {
-        exhausted("the output limit was reached")
+        exhausted(NodeStop::OutputLimit)
     } else if broken.load(Ordering::SeqCst)
         || inner.j.read(|t| inner.over_limit(t)).unwrap_or(false)
     {
-        exhausted("journal data budget reached")
+        exhausted(NodeStop::JournalBudget)
     } else if inner.faulted() {
         Some(Stop::End(
             Outcome::Failed,
-            Some(ApiError::new(
-                ErrorCode::Internal,
-                "the node's journal fails",
-            )),
+            Some(NodeStop::JournalFails.error()),
             "error",
         ))
     } else {
@@ -628,13 +616,13 @@ async fn end(
                     Outcome::Cancelled,
                     ErrorCode::Exhausted,
                     "error",
-                    "the output limit was reached".to_string(),
+                    NodeStop::OutputLimit.detail(),
                 ),
                 PrintError::Timeout(_) => (
                     Outcome::TimedOut,
                     ErrorCode::Expired,
                     "timeout",
-                    "past its deadline".to_string(),
+                    NodeStop::Deadline.detail(),
                 ),
                 PrintError::Failed(err) => (Outcome::Failed, ErrorCode::Internal, "failed", err),
                 PrintError::Harness { text, .. } => {

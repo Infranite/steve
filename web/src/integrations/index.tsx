@@ -1,4 +1,4 @@
-/* 接入 (integrations): every outside service Steve can connect — 飞书 / Lark, GitHub, mail, and the ones still planned.
+/* 接入 (integrations): every outside service Steve can connect — 飞书 / Lark, GitHub, mail.
  * Installation → identity → capability (domain-model.md §1.3): under each provider its installations (a Feishu app, a
  * GitHub App, a mailbox), each with the identities Steve works through — itself, and on your behalf — and for each what
  * it can do: 已开启 / 缺权限 / 已关闭 / 规划中. Nothing here claims a capability works without a connection that is up.
@@ -13,6 +13,7 @@ import { t as tr, useT } from "@/i18n"
 import { useLoad } from "@/accounts/load"
 import { CONN_STATUS } from "@/api/accounts"
 import { ConnectDialog } from "@/accounts/dialogs"
+import { botAdapterIds } from "@/integrations/sides"
 import { integrationsApi, areaLabel, asAdapter, installationsOf, type IAdapter, type IInstallation, type IProvider, type Integrations } from "@/api/integrations"
 import { channelsApi } from "@/api/channels"
 import { cleanupApi, type Leftover } from "@/api/cleanup"
@@ -44,7 +45,7 @@ export function IntegrationsRoute({ id }: { id?: string }) {
 /* ═════════ overview ═════════ */
 function Overview({ x }: { x: Integrations }) {
   const t = useT()
-  const live = x.providers.filter((p) => p.status === "supported"), soon = x.providers.filter((p) => p.status === "planned")
+  const live = x.providers
   const n = live.reduce((k, p) => k + p.connections.length, 0)
   return (
     <Page title={t("integrations:page.title")} sub={t("integrations:page.overviewSub")} max={760}>
@@ -53,10 +54,6 @@ function Overview({ x }: { x: Integrations }) {
           <div className="mt-0.5 type-callout text-muted-foreground">{t("integrations:page.noneSub")}</div></div>}
         <section><SectionLabel>{t("integrations:page.available", { n: live.length })}</SectionLabel>
           <div className="flex flex-col gap-6">{live.map((p) => <ProviderBlock key={p.id} p={p} x={x} />)}</div></section>
-        {soon.length > 0 && <section><SectionLabel>{t("integrations:page.comingSoonN", { n: soon.length })}</SectionLabel>
-          <Group>{soon.map((p) => <Row key={p.id} icon={<ProviderIcon id={p.id} />} title={p.name} sub={t("integrations:page.plannedList", { list: join(p.areas.map((a) => areaLabel(a.area))) })} onClick={() => go("#/integrations/" + p.id)} data-provider-row={p.id}>
-            <span className="type-footnote text-muted-foreground">{t("integrations:page.comingSoon")}</span><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
-          <Note>{t("integrations:page.soonNote")}</Note></section>}
         <Note>{t("integrations:page.footNote")}</Note>
       </div>
     </Page>
@@ -126,30 +123,27 @@ function ProviderView({ p, x, reload }: { p: IProvider; x: Integrations; reload:
   // the identities' defaults (rules, /bot, persona) and their groups; absent on a Hub without 渠道
   const C = useLoad(() => (p.connections.some((c) => c.capabilities.some((a) => a.area === "channel" && a.state !== "planned")) ? channelsApi.accounts() : Promise.resolve([])), [p.id, p.connections.length], ["connection", "space", "channel"])
   const chans = C.s === "ok" ? C.data : null
-  const bots = p.connections.filter((c) => c.adapter === "feishu_app").map((c) => {
+  const botIds = botAdapterIds(p.adapters), selfIds = p.adapters.filter((a) => a.identity === "self").map((a) => a.id)
+  const bots = p.connections.filter((c) => botIds.includes(c.adapter)).map((c) => {
     const raw = c.detail && "domain" in c.detail ? c.detail.domain : undefined
     const domain: "feishu" | "lark" | undefined = raw === "lark" ? "lark" : raw === "feishu" ? "feishu" : undefined
     return { id: c.id, name: c.name || c.handle, domain }
   })
-  const planned = p.status === "planned"
   return (
     <Page title={p.name} back={["#/integrations", t("integrations:page.title")]} max={720}
-      sub={<Meta><span>{planned ? t("integrations:page.comingSoon") : insts.length ? t(p.id === "feishu" ? "integrations:page.connectedApps" : "integrations:page.connectedN", { count: insts.length }) : t("integrations:page.notConnected")}</span>{p.adapters.length > 0 && p.id !== "feishu" && <span>{p.adapters.map((a) => a.name).join(" / ")}</span>}</Meta>}>
+      sub={<Meta><span>{insts.length ? t(p.id === "feishu" ? "integrations:page.connectedApps" : "integrations:page.connectedN", { count: insts.length }) : t("integrations:page.notConnected")}</span>{p.adapters.length > 0 && p.id !== "feishu" && <span>{p.adapters.map((a) => a.name).join(" / ")}</span>}</Meta>}>
       {dlg && <ConnectDialog adapter={asAdapter(dlg, p.id)} onClose={() => setDlg(null)} done={() => go("#/integrations/" + p.id)} />}
       <div className="flex flex-col gap-8" data-provider-page={p.id}>
-        {planned ? <Hint data-planned>{t("integrations:page.plannedHint", { name: p.name, list: join(p.planned.map((w) => w.name)) })}</Hint>
-          : insts.length ? <section><SectionLabel>{t("integrations:page.connectedSection", { n: insts.length })}</SectionLabel>
+        {insts.length ? <section><SectionLabel>{t("integrations:page.connectedSection", { n: insts.length })}</SectionLabel>
             <div className="flex flex-col gap-6">{insts.map((i) => <InstallationCard key={i.id} inst={i} p={p} chans={chans} onChange={reload} />)}</div></section>
           : <section><SectionLabel>{t("integrations:page.connectedSection", { n: 0 })}</SectionLabel><Hint data-not-connected>{t("integrations:page.notConnectedHint", { name: p.name })}</Hint></section>}
-        {!planned && <Leftovers p={p} />}
-        {p.id === "feishu" ? <FeishuGuide adapters={p.adapters} bots={bots} selfDone={p.connections.some((c) => c.adapter === "feishu_user")} callbackUrls={x.callback_urls} />
-          : !planned && <WaysIn p={p} onConnect={setDlg} />}
+        <Leftovers p={p} />
+        {p.id === "feishu" ? <FeishuGuide adapters={p.adapters} bots={bots} selfDone={p.connections.some((c) => selfIds.includes(c.adapter))} callbackUrls={x.callback_urls} />
+          : <WaysIn p={p} onConnect={setDlg} />}
         {!insts.length && <section><SectionLabel>{t("integrations:page.whatItDoes")}</SectionLabel>
           <Group>{[...p.areas].sort((x, y) => +(x.state === "planned") - +(y.state === "planned")).map((a) => <Row key={a.area} title={areaLabel(a.area)} sub={areaNote(p, a.area)} data-area={a.area} data-area-state={a.state}>
             <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={a.state === "supported" ? (p.connections.length ? "done" : "idle") : "drop"} />{a.state === "planned" ? t("integrations:page.planned") : p.connections.length ? t("integrations:page.supported") : t("integrations:page.supportedNotConnected")}</span></Row>)}</Group>
-          {!planned && !p.connections.length && <Note>{t("integrations:page.supportedNote")}</Note>}</section>}
-        {p.planned.length > 0 && !planned && <section><SectionLabel>{t("integrations:page.comingSoon")}</SectionLabel>
-          <Group>{p.planned.map((w) => <Row key={w.name} title={w.name} sub={[join(w.areas.map(areaLabel)), w.note].filter(Boolean).join(" · ")}><span className="type-footnote text-muted-foreground">{t("integrations:page.planned")}</span></Row>)}</Group></section>}
+          {!p.connections.length && <Note>{t("integrations:page.supportedNote")}</Note>}</section>}
       </div>
     </Page>
   )

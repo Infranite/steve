@@ -70,6 +70,7 @@ pub fn routes(mail: Mail) -> Router<Modules> {
         )
         .route("/mail/drafts/{id}/send", post(send_draft))
         .route("/mail/drafts/{id}/cancel", post(cancel_draft))
+        .route("/mail/drafts/{id}/check", post(check_draft))
         .route("/mail/threads/{id}/to-item", post(to_item))
         .route("/mail/threads/{id}/archive", post(archive_thread))
         .route("/mail/threads/{id}/read", post(read_thread))
@@ -224,6 +225,15 @@ async fn send_draft(
     Path(id): Path<String>,
 ) -> MailResult<Json<Value>> {
     to(blocking(move || m.send_draft(&who, &id)).await?)
+}
+
+/// The model's disclosure check on demand (a draft written without YOLO got only the local checks).
+async fn check_draft(
+    Extension(m): Extension<Mail>,
+    who: Caller,
+    Path(id): Path<String>,
+) -> MailResult<Json<Value>> {
+    to(m.check_draft(&who, &id).await?)
 }
 
 async fn cancel_draft(

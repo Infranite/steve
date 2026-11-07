@@ -22,7 +22,7 @@ const BUNDLED_PROPERTIES: &[(&str, AdapterProperties)] = &[(
     },
 )];
 
-/// Everything the runner needs from the Hub's configuration.
+/// Everything the ACP driver needs from the configuration (the Node's, built from the Hub's).
 #[derive(Debug, Clone)]
 pub struct AcpConfig {
     /// Adapter entry point per harness (`claude-code`, `codex`). A `.js` path runs with [`Self::node`].

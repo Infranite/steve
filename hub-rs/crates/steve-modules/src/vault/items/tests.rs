@@ -971,6 +971,68 @@ async fn connection_credentials_in_the_system_vault() {
         &[&id],
     );
     assert_eq!(n, 1);
+    // the same connection failing again (a retry loop against a locked keychain): one row, its
+    // finished moves on, no new audit line; another user of the item gets a row of its own
+    let audits = |e: &Env| -> i64 {
+        e.sql(
+            "SELECT COUNT(*) FROM audit WHERE action = 'vault.use' AND target = ?",
+            &[&id],
+        )
+    };
+    let before = audits(&e);
+    let first: i64 = e.sql(
+        "SELECT finished FROM secret_uses WHERE item_id = ? AND status = 'failed'",
+        &[&id],
+    );
+    for _ in 0..5 {
+        assert!(
+            e.vault
+                .with_credential(WS, &id, "con_1", "x", |_| ())
+                .is_err()
+        );
+    }
+    let n: i64 = e.sql(
+        "SELECT COUNT(*) FROM secret_uses WHERE item_id = ? AND status = 'failed'",
+        &[&id],
+    );
+    assert_eq!(n, 1, "consecutive failures merge");
+    let last: i64 = e.sql(
+        "SELECT finished FROM secret_uses WHERE item_id = ? AND status = 'failed'",
+        &[&id],
+    );
+    assert!(last >= first);
+    assert_eq!(audits(&e), before);
+    assert!(
+        e.vault
+            .with_credential(WS, &id, "con_2", "x", |_| ())
+            .is_err()
+    );
+    let n: i64 = e.sql(
+        "SELECT COUNT(*) FROM secret_uses WHERE item_id = ? AND status = 'failed'",
+        &[&id],
+    );
+    assert_eq!(n, 2, "per actor");
+    // an hour after the last failure, a new row
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE secret_uses SET created = created - 7200000, finished = finished - 7200000 WHERE item_id = ?",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        e.vault
+            .with_credential(WS, &id, "con_1", "x", |_| ())
+            .is_err()
+    );
+    let n: i64 = e.sql(
+        "SELECT COUNT(*) FROM secret_uses WHERE item_id = ? AND status = 'failed' AND actor_id = 'con_1'",
+        &[&id],
+    );
+    assert_eq!(n, 2, "a new hour, a new row");
 
     let n = e
         .env

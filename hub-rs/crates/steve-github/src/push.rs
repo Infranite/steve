@@ -239,6 +239,93 @@ pub fn ahead(cwd: &Path, base: &str, branch: &str) -> Result<u64, PushError> {
         .map_err(|_| PushError::Git("rev-list".into()))
 }
 
+/// What the commits up to `head` (a full commit id) that `base` lacks would publish and looks like a
+/// secret: every commit's added lines and its message, through the paste guard (tokens, private
+/// keys, card numbers, "密码是…") and the values injected into any live session. Commit by commit,
+/// not the net diff: a secret one commit adds and a later one removes is still in the pushed
+/// history. A merge counts with what it adds beyond the automatic merge (`--remerge-diff`). One
+/// entry per kind found (`token`, `private_key`, `card`, `said`, `vault:<label>`, and `binary` for
+/// a binary change, which the check cannot read); empty when nothing was. The same base as
+/// [`ahead`]; the commit, not the branch, so what is checked is what gets pushed.
+pub fn leaks(cwd: &Path, base: &str, head: &str) -> Result<Vec<String>, PushError> {
+    if head.len() < 40 || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(PushError::Git(format!("不是提交号：{head}")));
+    }
+    if !branch_ok(base) {
+        return Err(PushError::BadBranch(base.into()));
+    }
+    let has = |r: &str| {
+        let mut c = git(cwd);
+        c.args(["rev-parse", "--verify", "--quiet", r]);
+        run(c).is_ok()
+    };
+    let from = if has(&format!("refs/remotes/origin/{base}")) {
+        format!("refs/remotes/origin/{base}")
+    } else {
+        format!("refs/heads/{base}")
+    };
+    let range = format!("{from}..{head}");
+    let mut c = git(cwd);
+    c.args([
+        "-c",
+        "core.quotePath=false",
+        "log",
+        "-p",
+        "--remerge-diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--unified=0",
+        "--format=",
+        &range,
+    ]);
+    let patches = run(c)?;
+    let mut c = git(cwd);
+    c.args(["log", "--no-color", "--format=%B", &range]);
+    let messages = run(c)?;
+    let (added, binary) = added_lines(&patches);
+    let text: String = added
+        .into_iter()
+        .chain(messages.lines())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut found: Vec<String> = Vec::new();
+    if binary {
+        found.push("binary".into());
+    }
+    for s in steve_vault::guard::scan(&text) {
+        if !found.iter().any(|k| k == s.kind) {
+            found.push(s.kind.to_string());
+        }
+    }
+    for l in steve_vault::redact::find_labels(&text) {
+        found.push(format!("vault:{l}"));
+    }
+    Ok(found)
+}
+
+/// The lines a `git log -p --unified=0` adds (inside hunks, without the `+`), and whether it has a
+/// binary change.
+fn added_lines(patches: &str) -> (Vec<&str>, bool) {
+    let (mut added, mut binary, mut hunk) = (Vec::new(), false, false);
+    for l in patches.lines() {
+        if l.starts_with("diff --git ") || l.starts_with("diff --cc ") || l.is_empty() {
+            hunk = false;
+        } else if l.starts_with("@@") {
+            hunk = true;
+        } else if hunk {
+            if let Some(a) = l.strip_prefix('+') {
+                added.push(a);
+            }
+        } else if (l.starts_with("Binary files ") && l.ends_with(" differ"))
+            || l == "GIT binary patch"
+        {
+            binary = true;
+        }
+    }
+    (added, binary)
+}
+
 /// The object directory of the worktree's repository (shared by all its worktrees).
 fn objects_dir(cwd: &Path) -> Result<PathBuf, PushError> {
     let mut c = git(cwd);
@@ -354,6 +441,28 @@ mod tests {
         ] {
             assert!(!branch_ok(b), "{b}");
         }
+    }
+
+    #[test]
+    fn added_lines_are_read_inside_hunks_only() {
+        let log = "\
+diff --git a/x b/x
+index 1..2 100644
+--- a/x
++++ b/x
+@@ -1 +1,2 @@
+-old
++new
+++++ starts with pluses
+
+diff --git a/bin b/bin
+new file mode 100644
+Binary files /dev/null and b/bin differ
+";
+        let (added, binary) = added_lines(log);
+        assert_eq!(added, vec!["new", "+++ starts with pluses"]);
+        assert!(binary);
+        assert!(!added_lines("diff --git a/x b/x\n@@ -0,0 +1 @@\n+a\n").1);
     }
 
     #[test]

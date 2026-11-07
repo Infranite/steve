@@ -96,6 +96,8 @@ export default {
     sendRework: "发回返工",
     rework: "返工…",
     pass: "验收通过",
+    passRelease: "验收并发布",
+    passNoRelease: "验收，先不发布",
   },
   /* the bars above the composer */
   composer: {
@@ -192,6 +194,7 @@ export default {
     failed: "没有发出去",
     unknown: "可能已经发出，正在核对",
     discarded: "你没有发出",
+    disconnected: "没有发出去：接入的账号已经移除",
     discard: "不发出",
     review: "去批准…",
   },

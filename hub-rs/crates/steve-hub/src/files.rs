@@ -1,5 +1,6 @@
 //! Attachments (files.ts): validation by content (not by the name or the claimed type), storage under
-//! `data/files`, and what an agent gets (copied into its working directory, images also inline).
+//! `data/files`. The Hub never copies them into a working directory: the Node fetches what a turn
+//! was granted (`wire/node_files.rs`) and places it there itself.
 
 use std::path::{Path, PathBuf};
 
@@ -14,8 +15,6 @@ pub const MAX_FILE: usize = 20 * 1024 * 1024;
 pub const MAX_FILES: usize = 10;
 /// Image types a model takes inline; everything else only goes by path.
 pub const INLINE_IMAGES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-/// The Messages API takes base64 images up to 5 MB; larger ones are read from disk by the agent.
-const MAX_INLINE: u64 = 3_750_000;
 
 /// A file kind Steve accepts: its MIME type and the extensions that name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,8 +51,15 @@ pub const TEXT: Kind = Kind {
     mime: "text/plain; charset=utf-8",
     ext: &[],
 };
+/// Bytes of no type Steve recognizes (a screen recording, an Office file of another kind, a binary): stored
+/// as they are, always served as a download, never shown inline. The name keeps its own extension.
+pub const OCTET: Kind = Kind {
+    mime: "application/octet-stream",
+    ext: &[],
+};
 
-/// The type of the bytes, or `None` when Steve doesn't accept it (executables, other archives; svg/html are text at most).
+/// The type of the bytes, or `None` when they are none of the types Steve recognizes (svg/html are text at
+/// most); [`validate`] stores those as [`OCTET`].
 pub fn sniff(b: &[u8]) -> Option<Kind> {
     let at = |off: usize, sig: &[u8]| b.len() >= off + sig.len() && &b[off..off + sig.len()] == sig;
     if at(0, &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
@@ -155,7 +161,7 @@ pub fn clean_name(raw: Option<&str>, kind: Kind) -> String {
         n = format!("{}.{}", or_file(&n), kind.ext[0]);
         ext = kind.ext[0].to_string();
     }
-    if kind.ext.is_empty() && ext.is_empty() {
+    if kind == TEXT && ext.is_empty() {
         n = format!("{}.txt", or_file(&n));
         ext = "txt".into();
     }
@@ -176,7 +182,8 @@ pub fn clean_name(raw: Option<&str>, kind: Kind) -> String {
     n
 }
 
-/// Checks an upload: 400 empty, 413 too large, 415 not an accepted type. Returns (mime, clean name).
+/// Checks an upload: 400 empty, 413 too large; bytes of an unknown type are `application/octet-stream`.
+/// Returns (mime, clean name).
 pub fn validate(b: &[u8], name: Option<&str>) -> BResult<(&'static str, String)> {
     if b.is_empty() {
         return Err(BackendError {
@@ -190,12 +197,7 @@ pub fn validate(b: &[u8], name: Option<&str>) -> BResult<(&'static str, String)>
             message: steve_i18n::t!("hub.file.too_large", mb = MAX_FILE / 1024 / 1024),
         });
     }
-    let Some(kind) = sniff(b) else {
-        return Err(BackendError {
-            status: 415,
-            message: steve_i18n::t!("hub.file.unsupported"),
-        });
-    };
+    let kind = sniff(b).unwrap_or(OCTET);
     Ok((kind.mime, clean_name(name, kind)))
 }
 
@@ -223,6 +225,8 @@ pub struct NewFile {
 }
 
 /// Validates and stores (under the write lock); the same bytes under the same name in a workspace are stored once.
+/// A stored copy whose length differs from the row (cut short by a power loss before blobs were written
+/// atomically) is written again from these bytes, which have the same hash.
 pub fn store(
     r: &dyn Repo,
     data_dir: &Path,
@@ -233,9 +237,11 @@ pub fn store(
 ) -> BResult<Obj> {
     let (mime, name) = validate(b, name)?;
     let sha256 = hex::encode(Sha256::digest(b));
-    if let Some(dup) = r.file_same(ws, &sha256, &name)?
-        && blob_path(data_dir, &dup).exists()
-    {
+    if let Some(dup) = r.file_same(ws, &sha256, &name)? {
+        let p = blob_path(data_dir, &dup);
+        if std::fs::metadata(&p).map(|m| m.len()).ok() != Some(b.len() as u64) {
+            write_blob(&p, b).map_err(|e| BackendError::msg(e.to_string()))?;
+        }
         return Ok(dup);
     }
     let row = NewFile {
@@ -260,19 +266,36 @@ pub fn store(
     r.file_create(&row)
 }
 
+/// Atomically: a temporary file next to it, synced, then renamed over `p`, so a crash or power loss
+/// leaves either no blob or the whole one, never a truncated one.
 fn write_blob(p: &Path, b: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    if let Some(d) = p.parent() {
-        std::fs::create_dir_all(d)?;
+    let dir = p
+        .parent()
+        .ok_or_else(|| std::io::Error::other("a blob path has a parent"))?;
+    std::fs::create_dir_all(dir)?;
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let written = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(b)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, p)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(p)?;
-    f.write_all(b)
+    written?;
+    // the rename itself survives a power loss once the directory is synced
+    std::fs::File::open(dir).and_then(|d| d.sync_all())
 }
 
 /// `FileRef` = `{id, name, mime, size}`, the copy every other place stores.
@@ -300,89 +323,6 @@ pub fn refs(r: &dyn Repo, ws: &str, ids: Option<&[String]>) -> BResult<Vec<Value
 
 pub fn is_inline_image(mime: &str) -> bool {
     INLINE_IMAGES.contains(&mime)
-}
-
-/// `kb(n)`: `1.3 MB` (toFixed(1), half up) or `12 KB` (Math.round, at least 1).
-pub fn kb(n: u64) -> String {
-    const MB: u64 = 1024 * 1024;
-    if n >= MB {
-        let tenths = (n * 20 + MB) / (2 * MB);
-        format!("{}.{} MB", tenths / 10, tenths % 10)
-    } else {
-        format!("{} KB", ((n + 512) / 1024).max(1))
-    }
-}
-
-/// What an agent gets: the note appended to the prompt and the inline image blocks.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct ForAgent {
-    pub note: String,
-    pub images: Vec<Value>,
-}
-
-/// Copies attachments into `<cwd>/.steve/attachments` (ignored by git) and says where they are; images that
-/// fit also go inline when the adapter takes images. Blocking.
-pub fn for_agent(
-    r: &dyn Repo,
-    data_dir: &Path,
-    cwd: &str,
-    refs: &[Value],
-    inline_images: bool,
-) -> BResult<ForAgent> {
-    use base64::Engine;
-    if refs.is_empty() {
-        return Ok(ForAgent::default());
-    }
-    let io = |e: std::io::Error| BackendError::msg(e.to_string());
-    let dir = Path::new(cwd).join(".steve/attachments");
-    std::fs::create_dir_all(&dir).map_err(io)?;
-    let ign = dir.join(".gitignore");
-    if !ign.exists() {
-        std::fs::write(&ign, "*\n").map_err(io)?;
-    }
-    let (mut lines, mut images) = (vec![], vec![]);
-    for rf in refs {
-        let Some(f) = r.file_get(rf.get("id").and_then(Value::as_str).unwrap_or_default())? else {
-            continue;
-        };
-        let s = |k: &str| {
-            f.get(k)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
-        let (id, name, mime) = (s("id"), s("name"), s("mime"));
-        let size = f.get("size").and_then(Value::as_u64).unwrap_or(0);
-        let rel = format!(".steve/attachments/{}-{name}", id.get(4..).unwrap_or(""));
-        let dst = Path::new(cwd).join(&rel);
-        let blob = blob_path(data_dir, &f);
-        if !dst.exists() {
-            std::fs::copy(&blob, &dst).map_err(io)?;
-        }
-        let inline = inline_images && is_inline_image(&mime) && size <= MAX_INLINE;
-        if inline {
-            let data = std::fs::read(&blob).map_err(io)?;
-            images.push(json!({ "type": "image", "data": base64::engine::general_purpose::STANDARD.encode(data), "mimeType": mime }));
-        }
-        let main = mime.split(';').next().unwrap_or("");
-        lines.push(format!(
-            "- {rel}（{main}，{}{}）",
-            kb(size),
-            if inline {
-                "，图片也直接附在这条消息里"
-            } else {
-                ""
-            }
-        ));
-    }
-    Ok(ForAgent {
-        note: format!(
-            "\n\n用户附带了 {} 个附件，已保存在工作目录里（绝对路径前缀 {cwd}/），需要时直接读取：\n{}",
-            lines.len(),
-            lines.join("\n")
-        ),
-        images,
-    })
 }
 
 /// `encodeURIComponent`.
@@ -472,13 +412,21 @@ mod tests {
             validate(b"<svg onload=alert(1)>", Some("x.svg")).map(|x| x.0),
             Ok("text/plain; charset=utf-8")
         );
+        // unknown bytes are kept as a download: the name keeps its extension, no `.txt` is added
         assert_eq!(
-            validate(&[0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 7], Some("tool")).map_err(|e| e.status),
-            Err(415)
+            validate(&[0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 7], Some("tool")),
+            Ok(("application/octet-stream", "tool".to_string()))
         );
         assert_eq!(
-            validate(&[0xff, 0xfe, 0x00, 0x41], Some("a.txt")).map_err(|e| e.status),
-            Err(415)
+            validate(
+                &[0, 0, 0, 0x20, b'f', b't', b'y', b'p', b'q', b't'],
+                Some("录屏 2026.mov")
+            ),
+            Ok(("application/octet-stream", "录屏 2026.mov".to_string()))
+        );
+        assert_eq!(
+            validate(&[0xff, 0xfe, 0x00, 0x41], Some("a.txt")).map(|x| x.0),
+            Ok("application/octet-stream")
         );
         assert_eq!(validate(&[], Some("a.txt")).map_err(|e| e.status), Err(400));
         assert_eq!(
@@ -507,9 +455,6 @@ mod tests {
 
     #[test]
     fn sizes_and_headers() {
-        assert_eq!(kb(10), "1 KB");
-        assert_eq!(kb(1536), "2 KB");
-        assert_eq!(kb(1024 * 1024 + 256 * 1024), "1.3 MB");
         assert_eq!(
             encode_uri_component("截图 a.png"),
             "%E6%88%AA%E5%9B%BE%20a.png"

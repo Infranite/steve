@@ -1,7 +1,10 @@
 use super::*;
+use crate::wire::node_runtime::{NodeDomain, Sink};
 use std::sync::atomic::AtomicBool;
 use steve_core::thread::{Researcher, ResumeFrom};
 use steve_node::{LocalNode, NodeConfig, Storage};
+use steve_node_api::*;
+use steve_store::{Store, StoreError};
 
 struct Domain;
 impl NodeDomain for Domain {
@@ -20,7 +23,10 @@ impl ResearchSink for Seen {
 struct Test {
     _dir: tempfile::TempDir,
     root: PathBuf,
-    research: NodeResearch,
+    research: ResearchAdapter,
+    runtime: Arc<NodeRuntime>,
+    node: Arc<LocalNode>,
+    store: Store,
 }
 
 impl Test {
@@ -32,7 +38,8 @@ impl Test {
         let store = Store::open(root.join("hub.sqlite"), steve_store::FnPublisher(|_| {})).unwrap();
         store.ensure_workspace().unwrap();
         let cfg = NodeConfig {
-            node: idv("hub").unwrap(),
+            ceiling: steve_node::PolicyCeiling::unlimited(),
+            node: NodeId::new("hub").unwrap(),
             home: root.join("node"),
             acp: steve_acp::AcpConfig {
                 adapters: [(
@@ -51,7 +58,12 @@ impl Test {
                 idle_release: Duration::from_secs(60),
                 retry_delays: vec![],
             },
-            roots: vec![],
+            roots: vec![steve_node::Root {
+                id: RootId::new("project").unwrap(),
+                display: "project".into(),
+                path: project.clone(),
+                access: RootAccess::ReadOnly,
+            }],
             capacity: Capacity {
                 sessions: 0,
                 jobs: 2,
@@ -65,8 +77,8 @@ impl Test {
         research.home = root.clone();
         research.claude_dir = root.join("adapter-state");
         research.files_root = root.join("files");
-        node.enable_research(research);
-        let runtime = NodeRuntime::new(store, node.clone(), Arc::new(Domain));
+        node.enable_research(research.clone());
+        let runtime = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Domain));
         node.connect(Arc::new(Sink(Arc::downgrade(&runtime))), None);
         runtime.start();
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -78,12 +90,26 @@ impl Test {
         .unwrap();
         Self {
             _dir: dir,
-            root,
-            research: NodeResearch {
-                runtime,
-                node,
-                roots: vec![project],
-            },
+            root: root.clone(),
+            research: ResearchAdapter::new(
+                research,
+                steve_core::repo::Db::new(store.clone()),
+                root.join("data"),
+            )
+            .on_node(NodeResearch {
+                runtime: runtime.clone(),
+                roots: Arc::new(move || {
+                    Ok(vec![steve_node::Root {
+                        id: RootId::new("project").unwrap(),
+                        display: "project".into(),
+                        path: project.clone(),
+                        access: RootAccess::ReadOnly,
+                    }])
+                }),
+            }),
+            runtime,
+            node,
+            store,
         }
     }
 
@@ -157,9 +183,7 @@ impl Test {
     }
 
     fn specs(&self) -> Vec<JobSpec> {
-        self.research
-            .runtime
-            .store
+        self.store
             .reader(|c| {
                 let mut st =
                     c.prepare("SELECT spec FROM runtime_job_attempts ORDER BY created, rowid")?;
@@ -183,8 +207,8 @@ impl Test {
     }
 
     async fn close(&self) {
-        self.research.runtime.stop("test finished");
-        self.research.node.shutdown().await;
+        self.runtime.stop("test finished");
+        self.node.shutdown().await;
     }
 }
 
@@ -254,8 +278,23 @@ async fn remote_readable_projects_do_not_block_local_research() {
     let JobWork::Research(job) = &specs[0].work else {
         panic!("not research")
     };
-    assert_eq!(job.readable.len(), 1);
+    assert!(job.readable.is_empty(), "the cwd is already readable");
     assert!(job.cwd.is_some());
+    t.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remote_project_is_not_read_as_a_local_path() {
+    let t = Test::new().await;
+    let mut q = t.request("run-remote-project", &["ready"]);
+    // Its path deliberately exists locally: device identity must still forbid that substitution.
+    let mut remote = t.project("remote");
+    remote.path = t.project("hub").path;
+    q.project = Some(remote);
+    let out = t.run(q, &Seen::default()).await;
+    assert_eq!(out.end, RunEnd::Failed, "{out:?}");
+    assert!(out.error.unwrap().contains("另一节点"));
+    assert!(t.specs().is_empty());
     t.close().await;
 }
 
@@ -277,7 +316,7 @@ async fn stopped_runtime_returns_partial_research_and_persists_cancellation() {
     })
     .await
     .unwrap();
-    t.research.runtime.stop("test connection lost");
+    t.runtime.stop("test connection lost");
     let out = tokio::time::timeout(Duration::from_secs(3), &mut pending)
         .await
         .unwrap();
@@ -287,8 +326,6 @@ async fn stopped_runtime_returns_partial_research_and_persists_cancellation() {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let cancelled = t
-                .research
-                .runtime
                 .store
                 .reader(|c| {
                     Ok::<_, StoreError>(c.query_row(

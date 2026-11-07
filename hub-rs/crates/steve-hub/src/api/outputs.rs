@@ -25,8 +25,14 @@ mod node;
 const TEXT_MAX: usize = 512 * 1024;
 /// A diff beyond this is cut.
 const DIFF_MAX: usize = 400 * 1024;
-/// Images, PDFs and media served as they are, up to this size.
+/// Images and Office files the page renders itself (it reads them whole): above this size the preview
+/// says the file is large and offers the download. `/raw` serves every size, video and audio by range.
 const RAW_MAX: u64 = 64 * 1024 * 1024;
+
+/// Is a file of `form` and `size` too large for the page to render itself (images, Office)?
+pub(crate) fn large(form: &str, size: u64) -> bool {
+    matches!(form, "image" | "office") && size > RAW_MAX
+}
 const LIST_MAX: usize = 500;
 
 /// One output with what is needed to find it.
@@ -170,12 +176,6 @@ pub async fn raw(
         ),
         Src::Node(a, e) => (e.size(), a.name()),
     };
-    if size > RAW_MAX {
-        return Err(ApiError::Json(
-            413,
-            steve_i18n::t!("hub.output.too_large", size = human(size)),
-        ));
-    }
     let file = match &src {
         Src::Disk(p) => match tokio::fs::File::open(p).await {
             Ok(f) => Some(f),
@@ -397,7 +397,13 @@ pub(crate) fn locate(o: &Out, sub: Option<&str>) -> Result<Found, String> {
 /// The document `loc` as the item's branch, else HEAD, has it in the item's git repository.
 fn git_doc(o: &Out, loc: &str) -> Option<Found> {
     let g = git_dir(o)?;
-    let revs = o.branch.iter().cloned().chain(["HEAD".to_string()]);
+    // a rev that starts with `-` would be read as an option of `git show` (as in `branch`)
+    let revs = o
+        .branch
+        .iter()
+        .filter(|b| !b.is_empty() && !b.starts_with('-'))
+        .cloned()
+        .chain(["HEAD".to_string()]);
     for rev in revs {
         if let Ok(t) = git(&g, &["show", &format!("{rev}:{loc}")]) {
             return Some(Found::Git(rev, loc.to_string(), t));
@@ -559,7 +565,7 @@ fn file(p: &FsPath, shown: &str) -> Value {
     let size = m.as_ref().map(|m| m.len()).unwrap_or(0);
     let mut v = match media(&name) {
         (Some(form), mime) => {
-            json!({ "type": form, "name": name, "mime": mime, "large": size > RAW_MAX })
+            json!({ "type": form, "name": name, "mime": mime, "large": large(form, size) })
         }
         (None, _) => {
             let mut buf = Vec::with_capacity(TEXT_MAX.min(size as usize) + 1);
@@ -750,14 +756,6 @@ fn branch(o: &Out) -> Value {
         "diff": diff,
         "truncated": cut,
     })
-}
-
-fn human(n: u64) -> String {
-    if n >= 1024 * 1024 {
-        format!("{:.1} MB", n as f64 / 1024.0 / 1024.0)
-    } else {
-        format!("{} KB", n.div_ceil(1024))
-    }
 }
 
 #[cfg(test)]
@@ -986,5 +984,24 @@ mod tests {
         assert_eq!(byte_range("bytes=8-100", 10), Some((8, 9)));
         assert_eq!(byte_range("bytes=11-12", 10), None);
         assert_eq!(byte_range("bytes=0-1,3-4", 10), None);
+    }
+
+    /// A branch that reads as an option never reaches `git show`: the document comes from HEAD and
+    /// no file is written by `--output`.
+    #[test]
+    fn git_doc_skips_a_branch_that_starts_with_a_dash() {
+        let root = tempfile::tempdir().unwrap();
+        let r = repo(root.path());
+        let target = root.path().join("written");
+        let mut o = out("file", "a", Some("a.txt"), &r, Some(&r));
+        o.branch = Some(format!("--output={}", target.display()));
+        match git_doc(&o, "a.txt") {
+            Some(Found::Git(rev, _, text)) => {
+                assert_eq!(rev, "HEAD");
+                assert_eq!(text.trim_end(), "a");
+            }
+            _ => panic!("read from HEAD"),
+        }
+        assert!(!target.exists());
     }
 }

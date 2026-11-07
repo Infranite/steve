@@ -136,6 +136,8 @@ fn elapsed_ms(t0: Instant) -> u64 {
 pub struct Tried {
     pub reply: Result<(String, Option<f64>)>,
     pub usage: Vec<ModelUsage>,
+    /// The try ran out of its time: the next model is not tried (it would most likely wait as long).
+    pub timed_out: bool,
 }
 
 impl Tried {
@@ -144,13 +146,16 @@ impl Tried {
         Tried {
             reply: Err(e),
             usage: vec![],
+            timed_out: false,
         }
     }
 
     /// A [`steve_print`] run in the gateway's terms: its error in Steve's words, its usage as rows
     /// (`codex`: the run was Codex's). A run elsewhere (a Node job) is put back into these terms too.
     pub fn of(ran: steve_print::Ran, codex: bool) -> Tried {
+        let timed_out = matches!(ran.reply, Err(steve_print::PrintError::Timeout(_)));
         Tried {
+            timed_out,
             reply: ran
                 .reply
                 .map(|r| (r.text, r.cost.as_ref().and_then(steve_print::cost_f64)))
@@ -292,6 +297,13 @@ pub struct Fallback<M> {
 
 /// Steve's gateway in process: the fallback over [`LocalPrint`].
 pub type ClaudeCli = Fallback<LocalPrint>;
+
+/// The mark on a failure that ran out of time ([`Attempt::failures`]), ahead of the harness's words.
+pub const TIMED_OUT: &str = "[timeout]";
+
+/// The router's time limit: a route that takes longer becomes [`Route::fallback`] (successful routes
+/// take under 20 s).
+pub const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The statistics' harness name of `codex exec` calls (`usage_records.harness`).
 pub const CODEX_HARNESS: &str = "codex-cli";
@@ -452,8 +464,8 @@ impl<M: OneModel> Fallback<M> {
         }
     }
 
-    /// Each model of the tier in turn until one answers; streaming when `on_text` is given. Counts the
-    /// models tried and keeps the tokens of failed tries too (they were spent).
+    /// Each model of the tier in turn until one answers or one runs out of time; streaming when `on_text`
+    /// is given. Counts the models tried and keeps the tokens of failed tries too (they were spent).
     async fn fall_back(
         &self,
         prompt: &str,
@@ -515,8 +527,17 @@ impl<M: OneModel> Fallback<M> {
                 Err(e) => {
                     let e1 = js_head(&e.to_string(), 200).to_string();
                     tracing::error!("model {m} failed: {e1}");
-                    a.failures.push(format!("{m}: {e1}"));
+                    a.failures.push(if r.timed_out {
+                        format!("{m}: {TIMED_OUT} {e1}")
+                    } else {
+                        format!("{m}: {e1}")
+                    });
                     a.result = Err(e);
+                    // a timeout is not the model's own fault (the provider or the harness is slow): the
+                    // next one would wait as long, so the chain ends here; fast errors fall back
+                    if r.timed_out {
+                        break;
+                    }
                 }
             }
         }
@@ -753,6 +774,14 @@ impl Default for Route {
 }
 
 impl Route {
+    /// Not a fallback: a kind the code knew without the router (`route_log.guard = "q"`).
+    pub fn plain(self) -> Route {
+        Route {
+            fallback: false,
+            ..self
+        }
+    }
+
     /// What the router falls back to when the model fails: never an item. Research when
     /// there is a project to read (`project`), else a direct answer.
     pub fn fallback(text: &str, project: Option<String>) -> Route {
@@ -1116,12 +1145,7 @@ pub async fn route(
 ) -> Route {
     let prompt = route_prompt(c, text, history, promote);
     match gw
-        .call(
-            &prompt,
-            Tier::Fast,
-            Duration::from_secs(60),
-            &ThinkTools::None,
-        )
+        .call(&prompt, Tier::Fast, ROUTE_TIMEOUT, &ThinkTools::None)
         .await
     {
         Ok(Printed {

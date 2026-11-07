@@ -5,18 +5,25 @@ import { modReq } from "@/api"
 import { lazy } from "@/api/accounts"
 import { t } from "@/i18n"
 import type { ConnStatus, RAdapter, RFieldDef } from "@/api/accounts"
+import type { ChannelSummary, Pairing } from "@/integrations/sides"
 
 export type AreaId = "channel" | "docs" | "sheets" | "calendar" | "tasks" | "approval" | "minutes" | "mail" | "repo" | "directory" | string
 export type Identity = "bot" | "self" | "app" | "account" | string
 export type ScopeSpec = { scope: string; purpose: string; required: boolean }
 export type CapSpec = { area: AreaId; caps: string[]; scopes: ScopeSpec[]; planned: boolean; note?: string }
 export type CapState = { area: AreaId; state: "on" | "missing" | "off" | "planned"; missing_scopes: string[]; suggested_scopes: string[]; caps: string[]; note?: string }
-export type IAdapter = { id: string; name: string; identity: Identity; auth: RAdapter["auth"]; device: boolean; fields?: RFieldDef[]; capabilities: CapSpec[] }
+export type IAdapter = {
+  id: string; name: string; identity: Identity; auth: RAdapter["auth"]; device: boolean; fields?: RFieldDef[]; capabilities: CapSpec[]
+  /** whom its connections pair with (`null`: nobody); what its channel side declares (`null`: not a channel side); absent on older Hubs */
+  pairing?: Pairing | null; channel?: ChannelSummary | null
+}
 export type IConnection = {
   id: string; account_id: string; adapter: string; adapter_name: string; identity: Identity; name: string; handle: string
   status: ConnStatus; health: { last_ok: number; last_error: string; error_at: number }; last_sync: number | null; capabilities: CapState[]; warning?: string
   /** provider-specific facts (Feishu: the app, the console links, what is 未开通); absent on older Hubs */
   detail?: FeishuAppDetail | FeishuUserDetail | Record<string, unknown>
+  /** the Hub has its adapter (absent on older Hubs: installed) */
+  installed?: boolean
 }
 /** a permission row 未开通, from the check at connect time or a call Feishu refused (`refused_at`) */
 export type MissingRow = { scope: string; purpose: string; level: "required" | "suggested" | "directory" | "optional"; status: "missing"; refused_at?: number }
@@ -29,7 +36,7 @@ export type FeishuUserDetail = { app_connection: string | null; missing: Missing
 export type IIdentity = { kind: "steve" | "you"; connection: IConnection }
 export type IInstallation = { id: string; provider: string; provider_name: string; name: string; status: ConnStatus; missing: number; identities: IIdentity[] }
 export type IProvider = {
-  id: string; name: string; status: "supported" | "planned"; adapters: IAdapter[]; planned: { name: string; areas: AreaId[]; note?: string }[]
+  id: string; name: string; status: "supported"; adapters: IAdapter[]
   areas: { area: AreaId; state: "supported" | "planned" }[]; connections: IConnection[]
 }
 export type Integrations = { areas: { id: AreaId; label: string }[]; providers: IProvider[]; callback_urls: string[]; installations?: IInstallation[] }

@@ -9,7 +9,9 @@ import { fileURLToPath } from "node:url"
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)))
-const records = resolve(root, ".steve/chat-streaming")
+const nodeMode = process.env.STEVE_TEST_NODE_MODE || "local"
+assert.ok(["local", "off"].includes(nodeMode))
+const records = resolve(root, nodeMode === "off" ? ".steve/chat-streaming-off" : ".steve/chat-streaming")
 await mkdir(records, { recursive: true })
 const home = await mkdtemp(resolve(records, "hub-"))
 const socket = createServer()
@@ -32,6 +34,7 @@ const hub = spawn(resolve(root, "hub-rs/target/debug/steve-hub"), [], {
     CLAUDE_CODE_EXECUTABLE: "/usr/bin/false", CODEX_EXECUTABLE: "/usr/bin/false",
     STEVE_MODELS_FAST: "test-model", STEVE_MODELS_SMART: "test-model",
     STEVE_MODELS_RESEARCH: "unavailable,test-model",
+    STEVE_NODE_MODE: nodeMode,
   },
 })
 const exited = new Promise((r) => hub.once("exit", r))
@@ -96,7 +99,7 @@ try {
     await page.screenshot({ path: resolve(records, `complete-${width}-${theme}.png`) })
     measurements.push({ width, theme, harness, kind: "answer", first_ms: first, complete_ms: done })
     // Real stop action while text is streaming; the partial reply is saved once.
-    await input.fill("再解释一次，我会中途停止。")
+    await input.fill("请再给我一段长回答，我会中途停止。")
     await input.press("Enter")
     await until(async () => (await draft.textContent().catch(() => ""))?.includes("首段已经到达"), "stop has partial text")
     const stoppedMid = await page.locator("[data-chat-draft]").getAttribute("data-chat-draft")
@@ -136,7 +139,7 @@ try {
     await context.close()
   }
   assert.deepEqual(errors, [])
-  const result = { passed: true, measurements, scenarios: ["real Hub→Node→ACP→SSE→browser", "first text before persistence", "growing long Markdown", "single final replacement", "stop preserves partial answer", "research model fallback and streaming", "desktop dark / mobile light", "no horizontal overflow"], records }
+  const result = { passed: true, node_mode: nodeMode, measurements, scenarios: ["real Hub→Node→ACP→SSE→browser", "first text before persistence", "growing long Markdown", "single final replacement", "stop preserves partial answer", "research model fallback and streaming", "desktop dark / mobile light", "no horizontal overflow"], records }
   await writeFile(resolve(records, "result.json"), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result))
 } finally {

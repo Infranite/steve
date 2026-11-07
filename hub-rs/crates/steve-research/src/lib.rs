@@ -12,7 +12,9 @@
 //! 3. **System sandbox** ([`sandbox`]): on macOS the process runs under `sandbox-exec` with a profile that
 //!    denies file writes except the run directory and `~/.claude`.
 //!
-//! Budgets (240 s, 24 turns, 40 tools; one run per workspace) end a run with what it wrote so far.
+//! A run has no time, turn or tool limit unless setting `thread.research` names one; it ends when it is
+//! done, when the user stops it, or when the harness says nothing at all for [`DEFAULT_IDLE`] (the same
+//! for every harness), keeping what it wrote so far. One run per workspace.
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), steve_research::ResearchError> {
@@ -45,8 +47,8 @@ pub use guard::{Scope, Violation, research_guard};
 pub use prompt::{DirInfo, PromptInput};
 pub use run::{
     AttemptPlan, AttemptRunner, Attempted, Budget, BudgetHit, DEFAULT_IDLE, DEFAULT_MODELS,
-    McpAccess, OneAttempt, ResearchConfig, ResearchError, ResearchEvent, ResearchOutcome,
-    ResearchRequest, ResearchRun, Researcher, Resume, RunStatus, SpawnHook, StopHandle, ToolSeen,
-    drive, models_from_env, plan, present, run_attempt,
+    EXIT_WAIT, McpAccess, OneAttempt, ResearchConfig, ResearchError, ResearchEvent,
+    ResearchOutcome, ResearchRequest, ResearchRun, Researcher, Resume, RunStatus, SpawnHook,
+    StopHandle, ToolSeen, drive, models_from_env, plan, present, run_attempt,
 };
 pub use sandbox::SandboxMode;

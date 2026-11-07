@@ -171,8 +171,9 @@ type CellKey = (String, String, String, String, String, String, String);
 /// the current `stats.tz` (and correcting `usage_records.day`), then flags every item of the workspace
 /// for the refresh. One write transaction. Returns the number of `stat_daily` rows.
 ///
-/// A turn is booked under the model of its first token record, else its session's, else its bot's
-/// model, else `""` — the same order the live writer uses.
+/// A turn is booked under the model the live writer booked it under (`agent_turns.model`); a turn
+/// ended before that was kept, under the model of its first token record, else its session's, else
+/// its bot's model, else `""`.
 pub fn rebuild_in(c: &Connection, ws: &str) -> Result<usize> {
     let tz = tz_of(c, ws)?;
     let mut cells: HashMap<CellKey, Cell> = HashMap::new();
@@ -224,7 +225,7 @@ pub fn rebuild_in(c: &Connection, ws: &str) -> Result<usize> {
     {
         let mut st = c.prepare(
             "SELECT t.id, t.harness, t.bot_id, t.project_id, t.attempt, t.started, t.ended, t.stop_reason, t.transient, t.tools,
-                    t.tool_errors, t.tool_kinds, COALESCE(NULLIF(s.model, ''), NULLIF(b.model, ''), '')
+                    t.tool_errors, t.tool_kinds, COALESCE(NULLIF(s.model, ''), NULLIF(b.model, ''), ''), t.model
              FROM agent_turns t LEFT JOIN sessions s ON s.id = t.session_id LEFT JOIN bots b ON b.id = t.bot_id
              WHERE t.workspace_id = ? AND t.ended IS NOT NULL",
         )?;
@@ -232,8 +233,10 @@ pub fn rebuild_in(c: &Connection, ws: &str) -> Result<usize> {
         while let Some(r) = rows.next()? {
             let id: String = r.get(0)?;
             let ended: i64 = r.get(6)?;
-            let fallback: String = r.get(12)?;
-            let model = first_model.get(&id).cloned().unwrap_or(fallback);
+            let model = match r.get::<_, Option<String>>(13)? {
+                Some(m) => m,
+                None => first_model.get(&id).cloned().unwrap_or(r.get(12)?),
+            };
             let key = (
                 crate::day::day(ended, tz),
                 "agent".to_string(),

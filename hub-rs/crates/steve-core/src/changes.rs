@@ -36,7 +36,7 @@ pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
         { "key": "reduceMotion", "label": "减弱动态效果", "values": ["开", "关"], "def": "关", "live": true },
       ],
       "data": [
-        { "key": "keepSess", "label": "会话记录保留", "values": ["90 天", "1 年", "永久"], "def": "永久", "live": false },
+        { "key": "keepSess", "label": "会话记录保留", "values": ["90 天", "1 年", "永久"], "def": "永久", "live": true },
         // signals (S1 `steve_flow::retention::keep_raw_setting`) and mail (E1 `keepMail`), as steve-hub's settings.rs serves them
         { "key": "keepRaw", "label": "事件与消息原文保留", "values": ["7", "30", "90"], "def": "7", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天" } },
         { "key": "keepMail", "label": "本地邮件正文保留", "values": ["30", "90", "365"], "def": "90", "live": true, "labels": { "30": "30 天", "90": "90 天", "365": "1 年" } },
@@ -137,7 +137,30 @@ pub struct Proposal {
 pub struct Applied {
     target: Target,
     before: Map<String, Value>,
+    /// What the apply wrote, field by field (bots, projects, settings, models): an undo puts back
+    /// only the fields that still hold it, a field changed since is kept and named.
+    after: Map<String, Value>,
     ws: String,
+}
+
+/// The fields of `before` an undo may put back: those whose value `now` is still what the apply
+/// wrote (`after`). Returns them and the keys changed since (kept as they are).
+fn still_ours(
+    before: &Map<String, Value>,
+    after: &Map<String, Value>,
+    now: impl Fn(&str) -> Value,
+) -> (Map<String, Value>, Vec<String>) {
+    let mut back = Map::new();
+    let mut kept = vec![];
+    for (k, v) in before {
+        match after.get(k) {
+            Some(a) if now(k) != *a => kept.push(k.clone()),
+            _ => {
+                back.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    (back, kept)
 }
 
 /// `show()`: empty → （空）; long values cut at 40 with an ellipsis.
@@ -876,6 +899,42 @@ pub struct Drafted {
     pub current: Vec<Current>,
 }
 
+/// Settings a request in the conversation changes at once, with an undo on its card: local, and put
+/// back in one click. Retention (data is deleted) and the default acceptance still show a preview.
+const AUTO_SETTINGS: [&str; 12] = [
+    "lang",
+    "home",
+    "awayH",
+    "tz",
+    "depsAfter",
+    "handoff",
+    "archDays",
+    "quiet",
+    "digestAt",
+    "fontSize",
+    "reduceMotion",
+    "item_prefix",
+];
+/// The module operations a request in the conversation applies at once: field edits of a contact,
+/// an organization or a team. Creating, closing, adding and anything of YOLO, GitHub, channels or
+/// mail stays a preview.
+const AUTO_MODULE_OPS: [&str; 3] = ["party.patch", "org.patch", "team.patch"];
+
+/// A draft whose lines are all clear: nothing unrecognised, and not only text appended to a free
+/// field (that is better read before it goes in).
+fn clear_lines(p: &Value) -> bool {
+    let lines: Vec<&Value> = p["changes"].as_array().into_iter().flatten().collect();
+    !lines.is_empty()
+        && !lines.iter().any(|l| {
+            ["label", "from", "to"]
+                .iter()
+                .any(|k| l[*k].as_str().is_some_and(|s| s.contains("没认出")))
+        })
+        && !lines
+            .iter()
+            .all(|l| l["label"].as_str().is_some_and(|s| s.ends_with("（追加）")))
+}
+
 /// How many configurations one request drafts at most (“按这个方案补齐 Bot” can touch every bot).
 const MAX_TARGETS: usize = 6;
 
@@ -1612,6 +1671,74 @@ impl Core {
             proposal: None,
         })
     }
+    /// Drafts of a request said in the conversation that touch only L0 configuration — the settings
+    /// in [`AUTO_SETTINGS`], field edits of contacts, organizations and teams — apply at once; their
+    /// card says so and offers the undo. Returns the ids applied; the rest stay cards to apply.
+    pub async fn config_auto_apply(
+        &self,
+        ws: &str,
+        who: Option<&str>,
+        ds: &[Drafted],
+    ) -> Vec<String> {
+        let mut done = vec![];
+        for p in ds.iter().filter_map(|d| d.proposal.as_ref()) {
+            let (Some(id), Some(kind)) = (p["id"].as_str(), p["target"]["kind"].as_str()) else {
+                continue;
+            };
+            if !clear_lines(p) {
+                continue;
+            }
+            let ok = if CORE_KINDS.contains(&kind) {
+                let keys = p["patch"]
+                    .as_object()
+                    .map(|o| o.keys().cloned().collect::<Vec<_>>());
+                kind == "settings"
+                    && keys.is_some_and(|k| {
+                        !k.is_empty() && k.iter().all(|k| AUTO_SETTINGS.contains(&k.as_str()))
+                    })
+                    && self.apply(id, who.unwrap_or("me"), ws).is_ok()
+            } else {
+                let (Some(m), Some(me)) = (self.modules(), who) else {
+                    continue;
+                };
+                let caller = steve_modules::Caller {
+                    ws: ws.into(),
+                    me: me.into(),
+                };
+                let cid = id.to_string();
+                m.blocking(move |m| {
+                    let cs = m
+                        .store
+                        .reader(|c| steve_store::base::changesets::get(c, &cid))?;
+                    let fields_only = cs.is_some_and(|cs| {
+                        !cs.ops.is_empty()
+                            && cs.ops.iter().all(|o| {
+                                o["op"]
+                                    .as_str()
+                                    .is_some_and(|n| AUTO_MODULE_OPS.contains(&n))
+                            })
+                    });
+                    if !fields_only {
+                        return Ok(false);
+                    }
+                    match steve_modules::changes::apply(m, &caller, &cid) {
+                        Some(r) => r.map(|_| true),
+                        None => Ok(false),
+                    }
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("config auto-apply {kind}: {e}");
+                    false
+                })
+            };
+            if ok {
+                done.push(id.to_string());
+            }
+        }
+        done
+    }
+
     /// Apply a draft of this workspace; returns the id to undo it with.
     pub fn apply(&self, id: &str, actor: &str, ws: &str) -> Result<Value> {
         let r = self.apply_draft(id, actor, ws)?;
@@ -1681,6 +1808,7 @@ impl Core {
         t.st.drafts.remove(id);
         let db = t.db();
         let mut before = Map::new();
+        let mut after = Map::new();
         let tid = p.target.id.clone().unwrap_or_default();
         match p.target.kind.as_str() {
             "bot" if new_bot_name(&tid).is_some() => {
@@ -1698,6 +1826,12 @@ impl Core {
                     before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
                 }
                 db.bot_patch(&tid, &p.patch, actor)?;
+                if let Some(b) = db.bot(&tid)? {
+                    let b = serde_json::to_value(b)?;
+                    for k in p.patch.keys() {
+                        after.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
+                    }
+                }
             }
             "project" => {
                 let x = serde_json::to_value(
@@ -1708,6 +1842,12 @@ impl Core {
                     before.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
                 }
                 db.project_patch(&tid, &p.patch, actor)?;
+                if let Some(x) = db.project(Some(&tid))? {
+                    let x = serde_json::to_value(x)?;
+                    for k in p.patch.keys() {
+                        after.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
+                    }
+                }
             }
             "settings" => {
                 let mut cur = setting_defaults();
@@ -1719,6 +1859,11 @@ impl Core {
                 }
                 if !rest.is_empty() {
                     db.settings_set(&p.ws, &rest, actor)?;
+                    let mut now = setting_defaults();
+                    now.extend(db.settings_all(&p.ws)?);
+                    for k in rest.keys() {
+                        after.insert(k.clone(), now.get(k).cloned().unwrap_or(Value::Null));
+                    }
                 }
                 if let Some(pre) = prefix.filter(truthy) {
                     let w = db
@@ -1726,6 +1871,9 @@ impl Core {
                         .ok_or_else(|| msg(steve_i18n::t!("core.space.not_found")))?;
                     before.insert("item_prefix".into(), json!(w.item_prefix));
                     db.workspace_patch(&p.ws, patch![item_prefix: jstr(&pre)])?;
+                    if let Some(w) = db.workspace(&p.ws)? {
+                        after.insert("item_prefix".into(), json!(w.item_prefix));
+                    }
                 }
             }
             "tags" => {
@@ -1799,6 +1947,7 @@ impl Core {
                 before = self.models().stored(&p.ws, &p.patch);
                 self.models()
                     .write(&p.ws, &p.patch, actor, "settings.models")?;
+                after = self.models().stored(&p.ws, &p.patch);
             }
             _ => {}
         }
@@ -1818,6 +1967,7 @@ impl Core {
             Applied {
                 target: p.target.clone(),
                 before,
+                after,
                 ws: p.ws.clone(),
             },
         );
@@ -1846,12 +1996,41 @@ impl Core {
             t.delete_bot(&made, &main, actor)?;
         }
         let db = t.db();
+        /* only what still holds the value this change wrote goes back: an edit made since is kept */
+        let now: Map<String, Value> = match a.target.kind.as_str() {
+            "bot" if new_bot_name(&tid).is_some() => Map::new(),
+            "bot" => db
+                .bot(&tid)?
+                .map(serde_json::to_value)
+                .transpose()?
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default(),
+            "project" => db
+                .project(Some(&tid))?
+                .map(serde_json::to_value)
+                .transpose()?
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default(),
+            "settings" => {
+                let mut now = setting_defaults();
+                now.extend(db.settings_all(&a.ws)?);
+                if let Some(w) = db.workspace(&a.ws)? {
+                    now.insert("item_prefix".into(), json!(w.item_prefix));
+                }
+                now
+            }
+            "models" => self.models().stored(&a.ws, &a.after),
+            _ => Map::new(),
+        };
+        let (back, kept) = still_ours(&a.before, &a.after, |k| {
+            now.get(k).cloned().unwrap_or(Value::Null)
+        });
         match a.target.kind.as_str() {
             "bot" if new_bot_name(&tid).is_some() => {}
-            "bot" => db.bot_patch(&tid, &a.before, actor)?,
-            "project" => db.project_patch(&tid, &a.before, actor)?,
+            "bot" if !back.is_empty() => db.bot_patch(&tid, &back, actor)?,
+            "project" if !back.is_empty() => db.project_patch(&tid, &back, actor)?,
             "settings" => {
-                let mut rest = a.before.clone();
+                let mut rest = back.clone();
                 let prefix = rest.remove("item_prefix");
                 if !rest.is_empty() {
                     db.settings_set(&a.ws, &rest, actor)?;
@@ -1900,13 +2079,23 @@ impl Core {
                     )?;
                 }
             }
-            "models" => self
-                .models()
-                .write(&a.ws, &a.before, actor, "settings.models")?,
+            "models" if !back.is_empty() => {
+                self.models()
+                    .write(&a.ws, &back, actor, "settings.models")?
+            }
             _ => {}
         }
-        db.audit(actor, "config.undo", id, &json!({}), &a.ws)?;
-        Ok(json!({"ok": true}))
+        db.audit(actor, "config.undo", id, &json!({"kept": kept}), &a.ws)?;
+        let mut r = json!({"ok": true});
+        if !kept.is_empty() {
+            /* named as the user sees them, in their language: these were changed again since */
+            r["kept"] = json!(
+                kept.iter()
+                    .map(|k| field_shown(&a.target.kind, k, false, k))
+                    .collect::<Vec<_>>()
+            );
+        }
+        Ok(r)
     }
 }
 

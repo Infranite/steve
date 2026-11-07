@@ -942,10 +942,32 @@ fn injected_values_are_scrubbed_from_events_and_timeline() {
     assert!(!steve_vault::redact::is_registered(&ses.id));
 }
 
+/// A row of `session_dispatch` as the legacy runner of an older Hub left it.
+fn legacy_dispatch(
+    store: &Store,
+    id: &str,
+    session: &str,
+    text: &str,
+    state: &str,
+    files: Option<&str>,
+) {
+    store
+        .with_conn(|c| {
+            c.execute(
+                "INSERT INTO session_dispatch (id,session_id,text,via,created,files,state,updated)
+                 VALUES (?1,?2,?3,'me',1,?4,?5,1)",
+                rusqlite::params![id, session, text, files, state],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
-fn durable_dispatch_survives_claim_and_repeated_recovery_with_attachments() {
+fn what_the_legacy_runner_had_in_hand_comes_back_to_the_queue_once() {
     let t = with_steve();
     let s = new_session(&t.store, None, "token");
+    let s2 = new_session(&t.store, None, "token2");
     let q = t.store.queued();
     let files = vec![FileRef {
         id: "file-1".into(),
@@ -953,115 +975,81 @@ fn durable_dispatch_survives_claim_and_repeated_recovery_with_attachments() {
         mime: "image/png".into(),
         size: 123,
     }];
-    q.add(&s.id, "不能丢的输入", "me", &files).unwrap();
-    let claimed = q.claim(&s.id).unwrap();
-    assert_eq!(claimed.len(), 1);
-    assert!(q.list(&s.id).unwrap().is_empty());
-    q.recover_dispatches().unwrap();
-    q.recover_dispatches().unwrap();
-    let again = q.claim(&s.id).unwrap();
-    assert_eq!(again.len(), 1);
-    assert_eq!(again[0].text, claimed[0].text);
-    assert_eq!(again[0].via, "me");
-    assert_eq!(again[0].files, files);
-    q.plan_resume(&s.id).unwrap();
-    assert_eq!(q.resume_ids().unwrap(), vec![s.id.clone()]);
-    q.submitted(&s.id).unwrap();
-    assert!(q.resume_ids().unwrap().is_empty());
-    q.recover_dispatches().unwrap();
-    assert_eq!(q.resume_ids().unwrap(), vec![s.id.clone()]);
-    let again = q.claim(&s.id).unwrap();
-    assert_eq!(again.len(), 1);
-    q.submitted(&s.id).unwrap();
-    q.receipt(&s.id, "completed").unwrap();
-    q.recover_dispatches().unwrap();
-    assert!(
-        q.list(&s.id).unwrap().is_empty(),
-        "completed dispatch must never replay"
+    let refs = serde_json::to_string(&files).unwrap();
+    // claimed, never delivered: back as it was, attachments and all
+    legacy_dispatch(
+        &t.store,
+        "q_claimed",
+        &s2.id,
+        "还没送出",
+        "claimed",
+        Some(&refs),
     );
-}
-
-#[test]
-fn durable_resume_and_dispatch_are_visible_after_reopening_the_database() {
-    let t = with_steve();
-    let s = new_session(&t.store, None, "token");
-    t.store.queued().add(&s.id, "reopen", "me", &[]).unwrap();
-    t.store.queued().claim(&s.id).unwrap();
-    t.store.queued().plan_resume(&s.id).unwrap();
-    let reopened = Store::open(t.dir.path().join("steve.sqlite3"), FnPublisher(|_| {})).unwrap();
-    reopened.queued().recover_dispatches().unwrap();
-    assert_eq!(reopened.queued().list(&s.id).unwrap()[0].text, "reopen");
-    assert_eq!(reopened.queued().resume_ids().unwrap(), vec![s.id]);
-}
-
-#[test]
-fn an_unsubmitted_claim_can_be_deferred_without_restarting() {
-    let t = with_steve();
-    let s = new_session(&t.store, None, "token");
-    let q = t.store.queued();
-    q.add(&s.id, "storage temporarily unavailable", "me", &[])
-        .unwrap();
-    q.claim(&s.id).unwrap();
-    q.defer_claimed(&s.id).unwrap();
-    q.defer_claimed(&s.id).unwrap();
-    assert_eq!(q.list(&s.id).unwrap().len(), 1);
-    assert_eq!(
-        q.claim(&s.id).unwrap()[0].text,
-        "storage temporarily unavailable"
-    );
-    q.submitted(&s.id).unwrap();
-    q.defer_claimed(&s.id).unwrap();
-    assert!(
-        q.list(&s.id).unwrap().is_empty(),
-        "ambiguous submission must not be treated as unsent"
-    );
-}
-
-#[test]
-fn a_message_submitted_before_the_stop_comes_back_marked_never_as_a_new_request() {
-    let t = with_steve();
-    let s = new_session(&t.store, None, "token");
-    let q = t.store.queued();
-    q.add(&s.id, "发布一下", "me", &[]).unwrap();
-    q.claim(&s.id).unwrap();
-    q.submitted(&s.id).unwrap();
-    // the Hub stops with the turn submitted, twice
-    q.recover_dispatches().unwrap();
-    let back = q.list(&s.id).unwrap();
+    // delivered (maybe acted on): back marked, with a resume intent
+    legacy_dispatch(&t.store, "q_sent", &s.id, "发布一下", "submitted", None);
+    // finished: never replayed
+    legacy_dispatch(&t.store, "q_done", &s.id, "做完了", "completed", None);
+    assert_eq!(q.return_legacy_dispatches().unwrap(), 2);
+    assert_eq!(q.return_legacy_dispatches().unwrap(), 0, "once");
+    let back = q.list(&s2.id).unwrap();
     assert_eq!(back.len(), 1);
     assert_eq!(
-        back[0].via, "resumed:me",
-        "marked: delivered before, to be checked"
+        (back[0].text.as_str(), back[0].via.as_str()),
+        ("还没送出", "me")
     );
-    q.claim(&s.id).unwrap();
-    q.submitted(&s.id).unwrap();
-    q.recover_dispatches().unwrap();
-    assert_eq!(
-        q.list(&s.id).unwrap()[0].via,
-        "resumed:me",
-        "never marked twice"
+    assert_eq!(back[0].files, files);
+    assert_ne!(
+        back[0].id, "q_claimed",
+        "a fresh id: the old one stays the dispatch row's"
     );
-    // a claim that was never submitted comes back unmarked
-    let s2 = new_session(&t.store, None, "token2");
-    q.add(&s2.id, "还没送出", "me", &[]).unwrap();
-    q.claim(&s2.id).unwrap();
-    q.recover_dispatches().unwrap();
-    assert_eq!(q.list(&s2.id).unwrap()[0].via, "me");
+    let back = q.list(&s.id).unwrap();
+    assert_eq!(back.len(), 1, "a completed dispatch never replays");
+    assert_eq!(back[0].via, "resumed:me", "delivered before, to be checked");
+    assert_eq!(q.resume_ids().unwrap(), vec![s.id.clone()]);
+    // survives reopening the database
+    let reopened = Store::open(t.dir.path().join("steve.sqlite3"), FnPublisher(|_| {})).unwrap();
+    assert_eq!(reopened.queued().return_legacy_dispatches().unwrap(), 0);
+    assert_eq!(reopened.queued().list(&s.id).unwrap()[0].text, "发布一下");
 }
 
 #[test]
-fn a_resume_intent_says_whether_it_is_new() {
+fn a_resumed_row_is_unwrapped_into_a_plain_message_with_the_note() {
     let t = with_steve();
     let s = new_session(&t.store, None, "token");
     let q = t.store.queued();
-    assert!(q.plan_resume(&s.id).unwrap());
+    legacy_dispatch(&t.store, "q_sent", &s.id, "发布一下", "submitted", None);
+    q.return_legacy_dispatches().unwrap();
+    q.add(&s.id, "新的", "me", &[]).unwrap();
+    let id = q.list(&s.id).unwrap()[0].id.clone();
     assert!(
-        !q.plan_resume(&s.id).unwrap(),
-        "already recorded by an earlier boot"
+        q.edit(&s.id, &id, "x").unwrap().is_none(),
+        "a resumed row is a receipt"
     );
+    assert_eq!(q.unwrap_resumed(&s.id, "（核对）").unwrap(), 1);
+    assert_eq!(q.unwrap_resumed(&s.id, "（核对）").unwrap(), 0, "once");
+    let rows = q.list(&s.id).unwrap();
+    assert_eq!(
+        (rows[0].text.as_str(), rows[0].via.as_str()),
+        ("（核对）\n\n发布一下", "me")
+    );
+    assert_eq!(rows[1].text, "新的", "the others as they were");
+    assert!(
+        q.edit(&s.id, &id, "x").unwrap().is_some(),
+        "an ordinary message now"
+    );
+}
+
+#[test]
+fn a_resume_intent_is_kept_until_done() {
+    let t = with_steve();
+    let s = new_session(&t.store, None, "token");
+    let q = t.store.queued();
+    legacy_dispatch(&t.store, "q_sent", &s.id, "x", "submitted", None);
+    q.return_legacy_dispatches().unwrap();
     assert!(q.resume_created(&s.id).unwrap().is_some());
     q.resume_done(&s.id).unwrap();
     assert!(q.resume_created(&s.id).unwrap().is_none());
+    assert!(q.resume_ids().unwrap().is_empty());
 }
 
 #[tokio::test]

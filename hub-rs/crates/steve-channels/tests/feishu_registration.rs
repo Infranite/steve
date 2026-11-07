@@ -50,10 +50,7 @@ async fn setup() -> H {
     vault.init(WS, ME).expect("vault init");
     vault.init(WS, OTHER).ok();
     let cfg = ConnectionsConfig::new(vec![ORIGIN.into()], true, |_| None);
-    let user = Arc::new(
-        FeishuUser::with_base(fake.base_url())
-            .with_party_hooks(steve_modules::accounts::ports().hooks),
-    );
+    let user = Arc::new(FeishuUser::with_base(fake.base_url()));
     let conns = Connections::builder(env.modules.clone(), vault.clone(), cfg)
         .provider(Arc::new(FeishuApp::new()))
         .provider(user.clone())

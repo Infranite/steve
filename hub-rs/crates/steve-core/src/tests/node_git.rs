@@ -68,6 +68,7 @@ impl OnNode {
         let home = tempfile::tempdir().unwrap();
         let root = k.home().to_path_buf();
         let cfg = steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new("local").unwrap(),
             home: home.path().join("node"),
             acp: steve_acp::AcpConfig {
@@ -353,6 +354,58 @@ fn a_gathering_slower_than_the_periodic_check_still_decides() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(moved, "the change is seen while the check keeps polling");
+}
+
+/// Answering a card that decides nothing about the item's result (a permission, an approval the
+/// agent asked for, going on after a failure) never waits on the Node's git; an acceptance still
+/// gathers first. Production 2026-11-06: each permission answer took 1.3–2.5 s, the gathering's
+/// two git reads on the Node.
+#[test]
+fn a_card_that_decides_no_result_is_answered_without_waiting_on_the_node() {
+    use std::time::Instant;
+    let k = Kit::new();
+    let port = OnNode::new(&k);
+    let (i, _wt) = delivered_on_node(&k, &port);
+    assert!(k.wait(|| !closing(&k, &i).print_pending));
+    let slow = Duration::from_millis(1500);
+    *port.slow.lock().unwrap() = slow;
+    let s = k.db().sessions_of_item(&i).unwrap()[0].id.clone();
+    let timed = |p: &str, choice: &str| {
+        let t0 = Instant::now();
+        k.core.resolve(p, choice, "", "me").unwrap();
+        t0.elapsed()
+    };
+    let p = k.decision(
+        &i,
+        Some(&s),
+        "approve",
+        "tool_call",
+        &["ok|允许|allow_once"],
+    );
+    k.rt.st().pending_permissions.insert(p.clone());
+    let t = timed(&p, "ok");
+    assert!(t < slow, "a permission answer waited {t:?}");
+    let p = k.decision(&i, Some(&s), "approve", "action", &["yes", "no"]);
+    let t = timed(&p, "yes");
+    assert!(t < slow, "an approval waited {t:?}");
+    let p = k.decision(&i, Some(&s), "fail", "item", &["continue", "look"]);
+    let t = timed(&p, "continue");
+    assert!(t < slow, "going on after a failure waited {t:?}");
+    /* an acceptance decides on the result: on what the Node says now */
+    let p = k.decision(&i, Some(&s), "accept", "item", &["pass", "rework"]);
+    let t = timed(&p, "rework");
+    assert!(t >= slow, "an acceptance gathers first ({t:?})");
+}
+
+#[test]
+fn which_answers_decide_on_the_result() {
+    use crate::orchestrator::decides_on_result as d;
+    assert!(d("accept", "item", "pass") && d("accept", "item", "rework"));
+    assert!(d("approve", "release", "yes"));
+    assert!(!d("approve", "tool_call", "allow_once") && !d("approve", "action", "yes"));
+    assert!(d("fail", "item", "delivered") && d("fail", "item", "release_live"));
+    assert!(!d("fail", "item", "continue") && !d("fail", "item", "look"));
+    assert!(!d("ask", "item", "x") && !d("propose", "item", "yes"));
 }
 
 /// A release project for `r`, its script waiting for `$STEVE_HOME/go`.

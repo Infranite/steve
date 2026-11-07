@@ -752,12 +752,19 @@ async fn budget_pauses_and_continue_once_doubles() {
         .reader(|c| runs::get(c, &run_id))
         .unwrap()
         .unwrap();
-    assert_eq!(r.context["budget_limit"], 1.0);
-    // over the doubled limit: a second decision
+    // spent $0.90 against $0.50: the limit becomes max(0.5 × 2, 0.9 × 2) = $1.80, not $1.00
+    assert!((r.context["budget_limit"].as_f64().unwrap() - 1.8).abs() < 1e-9);
     add_session(&e, "ses_3", "ST-1", 0.2);
+    assert_eq!(
+        on_session_cost(&e.flow, "ses_3").await,
+        None,
+        "$1.10 is under $1.80"
+    );
+    // over the raised limit: a second decision
+    add_session(&e, "ses_3", "ST-1", 1.0);
     let dec2 = on_session_cost(&e.flow, "ses_3")
         .await
-        .expect("over doubled budget");
+        .expect("over the raised budget");
     assert_ne!(dec, dec2);
     let res = steve_modules::decisions::dispatch(
         &e.env.modules,
@@ -785,7 +792,30 @@ async fn budget_pauses_and_continue_once_doubles() {
         None,
     )
     .await;
-    assert!((v["last"]["cost_usd"].as_f64().unwrap() - 1.1).abs() < 1e-9);
+    assert!((v["last"]["cost_usd"].as_f64().unwrap() - 1.9).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn the_default_budget_follows_the_mode() {
+    let e = env();
+    for (mode, usd) in [
+        ("item_auto", 20.0),
+        ("item", 20.0),
+        ("propose", 1.0),
+        ("report", 1.0),
+    ] {
+        let mut b = daily(mode);
+        b["name"] = json!(format!("预算 {mode}"));
+        let s = create(&e, b).await;
+        assert_eq!(s["budget_usd"], usd, "{mode}");
+    }
+    // a budget you give is kept
+    let mut b = daily("item_auto");
+    b["name"] = json!("自己定");
+    b["budget_usd"] = json!(3);
+    assert_eq!(create(&e, b).await["budget_usd"], 3.0);
+    assert_eq!(budget::raised_limit(1.0, 0.0), 2.0);
+    assert_eq!(budget::raised_limit(1.0, 9.0), 18.0);
 }
 
 #[tokio::test]

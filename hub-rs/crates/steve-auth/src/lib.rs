@@ -138,6 +138,46 @@ fn query_param(parts: &Parts, key: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
+/// A `back` target that stays on this site: one leading `/`, not followed by `/` or `\\`
+/// (browsers read both `//host` and `/\\host` as another host), and no control characters.
+fn is_local_path(back: &str) -> bool {
+    let mut c = back.chars();
+    c.next() == Some('/')
+        && !matches!(c.next(), Some('/' | '\\'))
+        && !back.chars().any(char::is_control)
+}
+
+/// `/auth/dev` only answers a browser on this machine talking to the Hub directly: the Host is
+/// a loopback name and no proxy added forwarding headers (a proxy on the same machine would
+/// otherwise make every remote visitor look local).
+fn is_direct_local(headers: &HeaderMap) -> bool {
+    const FORWARDED: [&str; 6] = [
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+        "via",
+    ];
+    if FORWARDED.iter().any(|h| headers.contains_key(*h)) {
+        return false;
+    }
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let Some(name) = url::Url::parse(&format!("http://{host}/"))
+        .ok()
+        .and_then(|u| u.host().map(|h| h.to_owned()))
+    else {
+        return false;
+    };
+    match name {
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
+}
+
 /// Same peer test as the TS regex `^(127\.|::1|::ffff:127\.)`.
 fn is_loopback(addr: &SocketAddr) -> bool {
     match addr {
@@ -376,8 +416,7 @@ async fn finish<St: UserStore>(
         return Ok(None);
     };
     let cookie = a.start_session(&id).map_err(|e| e.to_string())?;
-    // [TS bug kept] `//host` also starts with "/" (open redirect); fix in both Hubs together.
-    let back = if l.back.starts_with('/') {
+    let back = if is_local_path(&l.back) {
         l.back.clone()
     } else {
         "/".into()
@@ -403,7 +442,10 @@ async fn dev<St: UserStore>(State(a): State<Auth<St>>, req: Request) -> Response
         .await
         .ok()
         .map(|c| c.0);
-    if !a.inner.config.dev_login || !peer.is_some_and(|p| is_loopback(&p)) {
+    if !a.inner.config.dev_login
+        || !peer.is_some_and(|p| is_loopback(&p))
+        || !is_direct_local(&parts.headers)
+    {
         return text(StatusCode::NOT_FOUND, "not found");
     }
     let s = &a.inner.store;
@@ -496,6 +538,66 @@ mod tests {
             ("[fe80::1]:1", false),
         ] {
             assert_eq!(is_loopback(&a.parse().unwrap()), ok, "{a}");
+        }
+    }
+
+    #[test]
+    fn back_stays_on_this_site() {
+        for (b, ok) in [
+            ("/", true),
+            ("/items/1?x=2#y", true),
+            ("/a//b", true),
+            ("//evil.test/", false),
+            ("/\\evil.test/", false),
+            ("https://evil.test/", false),
+            ("", false),
+            ("evil", false),
+            ("/\tx", false),
+            ("/\n//evil.test", false),
+            ("/ok\u{7f}", false),
+        ] {
+            assert_eq!(is_local_path(b), ok, "{b:?}");
+        }
+    }
+
+    #[test]
+    fn direct_local_needs_loopback_host_and_no_proxy() {
+        let h = |pairs: &[(&'static str, &str)]| {
+            let mut m = HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(*k, v.parse().unwrap());
+            }
+            m
+        };
+        for host in [
+            "127.0.0.1:8440",
+            "localhost",
+            "LOCALHOST:1",
+            "[::1]:8440",
+            "127.1.2.3",
+        ] {
+            assert!(is_direct_local(&h(&[("host", host)])), "{host}");
+        }
+        for host in [
+            "steve.example.test",
+            "10.0.0.1:8440",
+            "localhost.evil.test",
+            "[fe80::1]",
+        ] {
+            assert!(!is_direct_local(&h(&[("host", host)])), "{host}");
+        }
+        assert!(!is_direct_local(&h(&[])));
+        for fwd in [
+            "forwarded",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-real-ip",
+            "via",
+        ] {
+            assert!(
+                !is_direct_local(&h(&[("host", "127.0.0.1:8440"), (fwd, "1.2.3.4")])),
+                "{fwd}"
+            );
         }
     }
 

@@ -598,7 +598,7 @@ impl ChangeOp for SourcePatchOp {
         if folder::owner_refuses(c, &who, &old, &patch)? {
             return Err(ApiError::forbidden(folder::owner_only()));
         }
-        Ok(())
+        folder::check_patch_include(self.0.folder_policy(), &old, &patch)
     }
 
     fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {

@@ -32,7 +32,7 @@ KEEP=0 REAL=0
 for a in "$@"; do case $a in -k) KEEP=1 ;; --real) REAL=1 ;; *) echo "usage: $0 [-k] [--real]"; exit 2 ;; esac; done
 
 T=$(mktemp -d -t steve-test-release)
-export STEVE_HOME=$T/home STEVE_REPO=$T/repo STEVE_NO_RESUME=1 TEST_ROOT=$ROOT
+export STEVE_HOME=$T/home STEVE_REPO=$T/repo STEVE_NO_RESUME=1 STEVE_NODE_MODE=off TEST_ROOT=$ROOT
 export STEVE_ADAPTER_CLAUDE=/usr/bin/false STEVE_ADAPTER_CODEX=/usr/bin/false CLAUDE_CODE_EXECUTABLE=/usr/bin/false
 export STEVE_VAULT_KEYSTORE=file STEVE_FORBID_REAL_HOSTS=1 STEVE_DEV_LOGIN=1 STEVE_HEALTH_TRIES=12 STEVE_UNSIGNED=1
 unset STEVE_CARGO_TARGET_DIR

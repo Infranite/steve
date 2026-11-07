@@ -22,6 +22,7 @@ export default {
     undo: "撤销",
     doneNote: "显示最近 7 天做过的决定。验收通过、“不需要”、“我来看看”和撤回在 24 小时内可以撤销；已经告诉 Bot 的回答和批准收不回来。",
     doneEmpty: "最近 7 天没有做过决定",
+    mems_other: "{{count}} 条记忆待确认",
   },
   /* the 事项 list, board and graph */
   items: {

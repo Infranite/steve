@@ -34,7 +34,10 @@ pub mod extract;
 
 pub use api::routes;
 pub use guard::TokenGuard;
-pub use retrieve::{Hit, Purpose, Query, anchor_mems, record_use, retrieve};
+pub use retrieve::{
+    Hit, Purpose, Query, Retrieved, SEMANTIC_DOWN_NOTE, anchor_mems, record_use, retrieve,
+    retrieve_all,
+};
 pub use sources::files::FilesLoader;
 pub use sources::folder::{FolderLoader, FolderPolicy, spawn_scans};
 pub use state::{Guard, KbEvent, Knowledge, NoGuard};

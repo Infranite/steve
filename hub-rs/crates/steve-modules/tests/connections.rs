@@ -525,6 +525,19 @@ async fn outlook_refresh_rotates_single_use_tokens_then_reauth() {
     // paused connections are not checked or refreshed, and recording leaves them alone
     h.conns.record(WS, &con, Health::Ok).await;
     assert_eq!(conn_of(&h, &acc)[1], "paused");
+    let enabled_at = |h: &H| {
+        q(h, |c| {
+            c.query_row(
+                "SELECT enabled_at FROM connections WHERE id = ?",
+                [&con],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+        })
+        .expect("enabled_at")
+    };
+    // connected again just now: what it receives from before is history from here on
+    let reconnected = enabled_at(&h).expect("set on reconnect");
+    h.env.clock.advance(60_000);
     let (s, v, _) = send(
         &h.api,
         Some(&me),
@@ -535,6 +548,8 @@ async fn outlook_refresh_rotates_single_use_tokens_then_reauth() {
     )
     .await;
     assert_eq!((s, v["status"].as_str()), (200, Some("ok")));
+    // resumed: turned on again
+    assert_eq!(enabled_at(&h), Some(reconnected + 60_000));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -701,7 +716,8 @@ async fn feishu_app_credential_and_user_oauth_with_single_use_refresh() {
         (400, Some("参数不对：fields.app_secret"))
     );
 
-    // the user's own token, with the app's id and secret as OAuth client
+    // the user's own token, with the app's id and secret as OAuth client; without a pair named, the
+    // only app connection there is gets picked
     let (s, v, _) = send(
         &h.api,
         Some(&me),
@@ -711,10 +727,18 @@ async fn feishu_app_credential_and_user_oauth_with_single_use_refresh() {
         None,
     )
     .await;
-    assert_eq!(
-        (s, v["error"].as_str()),
-        (400, Some("还没有配置 飞书 的 OAuth 应用"))
-    );
+    assert_eq!(s, 200, "{v}");
+    // a pair the provider does not take, and one that is not there
+    let (s, v, _) = send(
+        &h.api,
+        Some(&me),
+        "POST",
+        "/connections/oauth/start",
+        Some(json!({"adapter": "feishu_user", "config": {"app_connection": "con_nope"}})),
+        None,
+    )
+    .await;
+    assert_eq!(s, 404, "{v}");
     let loc = oauth_round_trip(
         &h,
         &me,

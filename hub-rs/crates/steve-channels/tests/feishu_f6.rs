@@ -12,10 +12,11 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, header};
 use serde_json::{Value, json};
-use steve_channels::adapters::feishu::as_user::{SendAsUser, UserMessage};
+use steve_channels::adapters::feishu::as_user::UserMessage;
 use steve_channels::adapters::feishu::auth::{DeviceFlows, FeishuApp, FeishuUser, device_routes};
 use steve_channels::adapters::feishu::client::{FeishuError, is_real_host};
 use steve_channels::adapters::feishu::user_oauth::{FeishuIds, identify_sender, user_routes};
+use steve_channels::channel::{ActAsUser, ActTarget, MessageRef, OutContent, SendKey};
 use steve_channels::fake::feishu::{Endpoint, FakeFeishu, World, ids};
 use steve_modules::accounts::connections::{
     self, ConnCx, Connections, ConnectionsConfig, ProviderError,
@@ -53,17 +54,14 @@ async fn setup_with(world: World) -> H {
     vault.init(WS, OTHER).ok();
     let cfg = ConnectionsConfig::new(vec![ORIGIN.into()], true, |_| None);
     // every endpoint of the user provider on the fake (never the real hosts)
-    let user = Arc::new(
-        FeishuUser::with_base(fake.base_url())
-            .with_party_hooks(steve_modules::accounts::ports().hooks),
-    );
+    let user = Arc::new(FeishuUser::with_base(fake.base_url()));
     let conns = Connections::builder(env.modules.clone(), vault.clone(), cfg)
         .provider(Arc::new(FeishuApp::new()))
         .provider(user.clone())
         .build();
     let api = connections::routes(conns.clone())
         .merge(device_routes(DeviceFlows::new(conns.clone(), user.clone())))
-        .merge(user_routes(conns.clone(), user.claims().clone()))
+        .merge(user_routes(conns.clone()))
         .with_state(env.modules.clone());
     let cb = connections::callback_routes(conns.clone()).with_state(env.modules.clone());
     H {
@@ -240,7 +238,7 @@ async fn oauth_first_then_the_bot_finds_you_on_me() {
         a,
         vec![json!(ids::OWNER.union_id), json!("feishu"), json!(me)]
     );
-    // the spent ticket is not kept in the connection's config
+    // nothing of the start flow but the pair is kept in the connection's config
     let cfg: Value = serde_json::from_str(&s(&row(
         &h,
         "SELECT config FROM connections WHERE id = ?",
@@ -449,8 +447,8 @@ async fn bot_first_then_device_code_merges_too() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn without_a_ticket_or_for_a_confirmed_contact_nothing_is_merged() {
-    // the generic start route carries no ticket: no merge, the connect says who holds the account
+async fn the_generic_start_route_merges_too_but_never_a_confirmed_contact() {
+    // the framework claims on every way in: the generic start route merges like the F6 one
     let h = setup().await;
     let bot = connect_bot(&h).await;
     let first = bot_sees(&h, &bot, &owner_ids());
@@ -458,20 +456,23 @@ async fn without_a_ticket_or_for_a_confirmed_contact_nothing_is_merged() {
         &h,
         &caller(WS, ME),
         "/connections/oauth/start",
-        json!({"adapter": "feishu_user", "config": {"app_connection": bot, "self_claim": "scl_forged"}}),
+        json!({"adapter": "feishu_user", "config": {"app_connection": bot}}),
     )
     .await;
-    assert!(loc.starts_with("/#/accounts?error="), "{loc}");
+    assert_eq!(loc, format!("/#/accounts/{}", first.account_id));
     assert_eq!(
         s(&row(
             &h,
             "SELECT status FROM parties WHERE id = ?",
             &first.party_id
         )[0]),
-        "active"
+        "merged"
     );
 
     // a contact someone confirmed by hand is never merged automatically
+    let h = setup().await;
+    let bot = connect_bot(&h).await;
+    let first = bot_sees(&h, &bot, &owner_ids());
     h.env
         .store()
         .transaction(|tx| {
@@ -614,6 +615,66 @@ async fn reacts_as_you_with_the_user_token() {
         .await
         .expect("removed");
     assert!(h.fake.reactions_on(&m.message_id).is_empty());
+}
+
+/// Acting as you through the extension seam: sending with the outbound key as Feishu's `uuid`,
+/// and recalling what you sent with your user token. The bot is refused that recall (only the
+/// sender can), which is why a message sent as you must not be recalled through the bot.
+#[tokio::test(flavor = "multi_thread")]
+async fn recalls_what_you_sent_with_the_user_token() {
+    let h = setup().await;
+    let bot = connect_bot(&h).await;
+    let (_, ucon) = authorize_me(&h, &bot).await;
+    let cx = user_cx(&h, &ucon);
+    let user: &dyn ActAsUser = h.user.as_ref();
+    assert!(user.supports_recall() && user.supports_reactions());
+
+    let to = ActTarget::Space {
+        ext_id: ids::GROUP_CHAT.into(),
+    };
+    let sent = user
+        .send(
+            &cx,
+            &to,
+            &OutContent::text("发错了"),
+            &SendKey("cm_1".into()),
+        )
+        .await
+        .expect("sent");
+    let id = sent.ext_id.clone().expect("a message id");
+    let last = h.fake.sent().pop().expect("sent");
+    assert_eq!(last.uuid.as_deref(), Some("cm_1"));
+    assert_eq!(last.as_user.as_deref(), Some(ids::OWNER.open_id));
+
+    // as the bot: Feishu refuses, it did not send it
+    let e = steve_channels::adapters::feishu::send::recall(&user_cx(&h, &bot), &id)
+        .await
+        .expect_err("only the sender");
+    assert!(matches!(e, FeishuError::Api { .. }), "{e:?}");
+    assert!(h.fake.deleted().is_empty());
+
+    // as you, with the user token
+    let msg = MessageRef::platform(ids::GROUP_CHAT, &id);
+    user.recall(&cx, &msg).await.expect("recalled");
+    assert_eq!(h.fake.deleted(), vec![id.clone()]);
+    let req = h
+        .fake
+        .requests_to(Endpoint::DeleteMessage)
+        .pop()
+        .expect("request");
+    assert!(
+        req.token.as_deref().is_some_and(|t| t.starts_with("u-")),
+        "{:?}",
+        req.token
+    );
+    // again: already recalled, Feishu's refusal passed on
+    assert!(user.recall(&cx, &msg).await.is_err());
+    // a message without a Feishu id: nothing is called
+    let n = h.fake.requests_to(Endpoint::DeleteMessage).len();
+    let mut none = MessageRef::platform(ids::GROUP_CHAT, "");
+    none.ext_id = None;
+    assert!(user.recall(&cx, &none).await.is_err());
+    assert_eq!(h.fake.requests_to(Endpoint::DeleteMessage).len(), n);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -315,7 +315,7 @@ fn full_access_bypasses_prompts_and_says_what_still_holds() {
         assert!(p.contains(&l), "{l}\n{p}");
     }
     assert!(p.contains("never use pkill or killall"));
-    assert!(p.contains("do not push to any remote unless the item explicitly asks"));
+    assert!(p.contains("do not push to any remote and do not change GitHub with gh"));
     assert!(p.contains(&format!("do not touch {}", y.env().steve_home.display())));
     // plain YOLO: no full-access lines, no bypass
     let k = Kit::new();
@@ -376,4 +376,49 @@ fn switching_full_access_mid_run_changes_the_mode_in_place_and_off_restores_the_
     k.core.yolo_sync(WS);
     assert_eq!(k.rt.st().modes.last().unwrap().1, "auto", "the bot's mode");
     assert_eq!(say(&k, &sid, "停"), format!("{}\n\n停", agent::NOTE_OFF));
+}
+
+/// #38: an item with its own worktree edits without a card per file whether or not YOLO is on; an
+/// item in a real directory keeps the bot's `default`.
+#[test]
+fn an_own_directory_widens_default_without_yolo_too() {
+    let k = Kit::new();
+    let y = yolo(&k);
+    switch(&y, false);
+    let (_, sid) = started(&k, &k.home().join("ops/release.sh"));
+    let s = k.db().session(&sid).unwrap().unwrap();
+    assert_eq!(
+        k.core
+            .session_perm_mode(&s, Some("default".into()))
+            .as_deref(),
+        Some("acceptEdits")
+    );
+    assert_eq!(
+        k.core.session_perm_mode(&s, Some("plan".into())).as_deref(),
+        Some("plan")
+    );
+    let dir = k.home().join("real");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = k
+        .db()
+        .project_create(
+            WS,
+            "真实目录",
+            "",
+            &dir.to_string_lossy(),
+            "dir",
+            false,
+            Some("dev"),
+            None,
+        )
+        .unwrap()
+        .id;
+    let i = k.item("run", "执行", Some(&p));
+    let s = k.core.start_session(&i, None, None, &[]).unwrap();
+    assert_eq!(
+        k.core
+            .session_perm_mode(&s, Some("default".into()))
+            .as_deref(),
+        Some("default")
+    );
 }

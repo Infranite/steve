@@ -47,6 +47,11 @@ pub const INTERRUPTED: &str = crate::scheduler::INTERRUPTED;
 /// The options of the approval the engine asks for before an ungated effect.
 pub const GATE_YES: &str = "执行";
 pub const GATE_NO: &str = "不执行";
+/// The third option, offered when the step has a grant ([`crate::nodes::NodeKind::grant`]): runs
+/// it now and writes the grant, bound to the run's flow version (an edit of the flow ends it).
+pub const GATE_ALWAYS: &str = "此流程当前版本以后都执行";
+/// `grants.until` of a flow grant: it ends with the version, not with time.
+pub const FLOW_GRANT_UNTIL: i64 = 253_402_300_799_000;
 /// `retry` / `drop` of the `fail` decision about an interrupted run.
 pub const RETRY: &str = "retry";
 pub const DROP: &str = "drop";
@@ -264,14 +269,83 @@ fn sender_of(c: &Connection, ev: &Value) -> Value {
     json!({ "name": name.unwrap_or_default(), "party_id": party, "account_id": ev["actor_account_id"] })
 }
 
-/// Is there a live grant for this effect?
+/// Is there a live grant for this effect? Only a grant for the run's flow version counts.
 fn granted(c: &Connection, run: &RunRow, g: &crate::nodes::Grant, now: i64) -> FlowResult<bool> {
     Ok(c.query_row(
         "SELECT EXISTS (SELECT 1 FROM grants WHERE workspace_id = ? AND subject_type = 'flow' AND subject_id = ?
-            AND capability = ? AND resource_type = ? AND resource_id IN (?, '*') AND revoked IS NULL AND until > ?)",
-        params![run.workspace_id, run.flow_id, g.capability, g.resource_type, g.resource_id, now],
+            AND capability = ? AND resource_type = ? AND resource_id IN (?, '*') AND revoked IS NULL AND until > ?
+            AND json_extract(scope, '$.flow_version') = ?)",
+        params![run.workspace_id, run.flow_id, g.capability, g.resource_type, g.resource_id, now, run.flow_version],
         |r| r.get(0),
     )?)
+}
+
+/// The grants an approval may write when you answer [`GATE_ALWAYS`]: `matcher.grants`.
+pub fn gate_matcher(grants: &[crate::nodes::Grant]) -> Value {
+    if grants.is_empty() {
+        return json!({ "kind": "gate" });
+    }
+    let gs: Vec<Value> = grants
+        .iter()
+        .map(|g| json!({ "capability": g.capability, "resource_type": g.resource_type, "resource_id": g.resource_id }))
+        .collect();
+    json!({ "kind": "gate", "grants": gs })
+}
+
+/// The options of an approval the engine asks for: [`GATE_ALWAYS`] only when it can write a grant.
+pub fn gate_options(grantable: bool) -> Vec<String> {
+    let mut o = vec![GATE_YES.to_string()];
+    if grantable {
+        o.push(GATE_ALWAYS.to_string());
+    }
+    o.push(GATE_NO.to_string());
+    o
+}
+
+/// Writes the grants of `matcher.grants` for the run's flow, bound to its version
+/// (`scope = {"flow_version": n}`).
+pub(crate) fn write_gate_grants(
+    tx: &Tx,
+    run: &RunRow,
+    matcher: &Value,
+    actor: &str,
+    decision_id: &str,
+    now: i64,
+) -> FlowResult<usize> {
+    let Some(gs) = matcher["grants"].as_array() else {
+        return Ok(0);
+    };
+    let scope = json!({ "flow_version": run.flow_version }).to_string();
+    let mut n = 0;
+    for g in gs {
+        let (Some(cap), Some(rt), Some(rid)) = (
+            g["capability"].as_str(),
+            g["resource_type"].as_str(),
+            g["resource_id"].as_str(),
+        ) else {
+            continue;
+        };
+        tx.execute(
+            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id,
+               scope, until, created_by, decision_id, revoked, created)
+             VALUES (?, ?, 'flow', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+            params![
+                steve_store::uid("gr"),
+                run.workspace_id,
+                run.flow_id,
+                cap,
+                rt,
+                rid,
+                scope,
+                FLOW_GRANT_UNTIL,
+                actor,
+                decision_id,
+                now
+            ],
+        )?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// Approved by you for this run: an `approve` node on the path, or a per-step approval.
@@ -476,18 +550,32 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                     rcx.effects.outcome = Some("need".into());
                     rcx.effects.label = Some(format!("等你批准：{}", node.name()));
                     let note = kind.gate_note(&rcx, &node.config);
+                    let grants = kind.gate_grants(&rcx, &node.config).unwrap_or_default();
                     Step::Wait(Box::new(gate_wait(
                         &run,
                         &flow_name,
                         node,
                         &rcx.render_value(&node.config, &input),
                         note.as_deref(),
+                        &grants,
                     )))
                 }
             }
             None => step_of(graph, node, kind.run(&mut rcx, &node.config, &input).await),
         };
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        // a named branch with no edge while the node has others: the run ends here, and says so
+        let unrouted: Option<String> = match &step {
+            Step::Advance {
+                branch: Some(b),
+                to: None,
+                ..
+            } if graph.outs(&cursor).next().is_some() => {
+                tracing::info!(run = %run_id, node = %cursor, branch = %b, "flow branch without edge");
+                Some(b.clone())
+            }
+            _ => None,
+        };
         let effects = std::mem::take(&mut rcx.effects);
         let gate_mark = rcx.run.context["approved"][&cursor] == json!(true);
         let now = cx.now();
@@ -562,6 +650,12 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
                 } => {
                     let err = output["error"].as_str().filter(|_| *status == "failed");
                     add(tx, status, output, branch.as_deref(), err)?;
+                    if let Some(b) = &unrouted
+                        && r.outcome_label.is_empty()
+                        && effects.label.is_none()
+                    {
+                        r.outcome_label = label_with_prefix(&r, &format!("分支「{b}」没有连线，到「{node_name}」为止"));
+                    }
                     r.context["steps"][&cursor] = output.clone();
                     r.context["input"] = output.clone();
                     if ours {
@@ -662,6 +756,7 @@ fn gate_wait(
     node: &crate::graph::Node,
     cfg: &Value,
     note: Option<&str>,
+    grants: &[crate::nodes::Grant],
 ) -> WaitSpec {
     let draft: String = serde_json::to_string_pretty(cfg)
         .unwrap_or_default()
@@ -671,7 +766,7 @@ fn gate_wait(
     WaitSpec {
         mode: "decision",
         until: None,
-        matcher: json!({ "kind": "gate" }),
+        matcher: gate_matcher(grants),
         decision: Some(NewDecision {
             workspace_id: run.workspace_id.clone(),
             kind: "approve".into(),
@@ -685,7 +780,7 @@ fn gate_wait(
                 note.unwrap_or("")
             ),
             draft: Some(draft),
-            options: Some(vec![GATE_YES.into(), GATE_NO.into()]),
+            options: Some(gate_options(!grants.is_empty())),
             requested_by: "steve".into(),
         }),
         output: json!({ "waiting": "approval" }),

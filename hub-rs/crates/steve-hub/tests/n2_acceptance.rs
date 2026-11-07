@@ -159,7 +159,8 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
         .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .env_remove("FAKE_ACP_LOG")
-        .env_remove("STEVE_NODE_MODE")
+        // remote Nodes only: the local Node (the default since B6) stays off
+        .env("STEVE_NODE_MODE", "off")
         .env_remove("STEVE_NODE_BIND")
         .env_remove("STEVE_NODE_TLS_PIN")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
@@ -717,6 +718,12 @@ async fn another_nodes_session_is_refused() {
     let sid = c.item(&h, "隔离验收 @say iso-3M @sleep 600000").await;
     assert!(
         wait(60, || n.got("iso-3M") == 1).await,
+        "node:\n{}",
+        n.log()
+    );
+    // what the harness said is in before the count below is taken
+    assert!(
+        wait(60, || said(&h, &sid, "iso-3M") >= 1).await,
         "node:\n{}",
         n.log()
     );

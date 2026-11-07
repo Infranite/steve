@@ -3,7 +3,7 @@
  * “not wired here”, and the page shows the Unwired placeholder instead. */
 import { modReq as req, qs as q } from "@/api"
 
-export type GhSettings = { after_accept: "ask_pr" | "none"; finish_on: "accepted" | "merged"; merge_method: "squash" | "merge" | "rebase"; delete_branch: boolean; ci_fail: "supplement" | "signal"; draft_pr: boolean }
+export type GhSettings = { after_accept: "ask_pr" | "open_pr" | "none"; finish_on: "accepted" | "merged"; merge_method: "squash" | "merge" | "rebase"; delete_branch: boolean; ci_fail: "supplement" | "signal"; draft_pr: boolean }
 export type GhConnection = { id: string; kind: "app" | "pat"; account: string; status: string }
 export type GhRepo = {
   id: string; full_name: string; private: boolean; default_branch: string; connection: { id: string; kind: "app" | "pat"; account: string }

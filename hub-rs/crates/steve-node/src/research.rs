@@ -77,6 +77,7 @@ impl LocalNode {
                 .accept("start_job", &c, |_| Ok(Decided::accepted()))
                 .map(|(r, _)| r);
         }
+        self.0.cfg.ceiling.check(&spec.run.policy)?;
         let plan = self.research_plan(spec)?;
         let jobs = self.0.cfg.capacity.jobs;
         let (r, fresh) = self.accept("start_job", &c, |t| {
@@ -210,6 +211,7 @@ impl LocalNode {
             max_turns: job.budget.max_turns,
             max_tools: job.budget.max_tools,
             idle: Duration::from_millis(job.budget.idle_ms),
+            exit_wait: r::EXIT_WAIT,
         };
         let prompt = run
             .prompt
@@ -257,14 +259,15 @@ impl LocalNode {
         let mut tick = tokio::time::interval(POLL);
         // the prompt's files and images, from the Hub for this execution, while the job is wanted
         for part in &spec.run.prompt {
-            let (artifact, name) = match part {
+            let (artifact, name, earlier) = match part {
                 Part::File { artifact, name } => (
                     artifact,
                     name.strip_prefix(ATTACHMENTS_DIR)
                         .unwrap_or(name)
                         .to_string(),
+                    job.earlier.contains(name),
                 ),
-                Part::Image { artifact } => (artifact, image_name(artifact)),
+                Part::Image { artifact } => (artifact, image_name(artifact), false),
                 _ => continue,
             };
             let fetch = crate::fetch(&inner, &exec, artifact);
@@ -286,7 +289,7 @@ impl LocalNode {
                     name,
                     mime: artifact.mime.clone(),
                     size: artifact.size,
-                    earlier: false,
+                    earlier,
                 }),
                 Err(e) => {
                     let failed = r::RunStatus::Failed(format!("research attachments: {e}"));
@@ -656,18 +659,12 @@ fn ended(
         Some(Stop::Offline) => {
             c.outcome = Outcome::TimedOut;
             c.stop_reason = "offline".into();
-            c.error = Some(ApiError::new(
-                ErrorCode::Offline,
-                "the Hub was unreachable past the lease",
-            ));
+            c.error = Some(NodeStop::HubUnreachable.error());
         }
         Some(Stop::Output) => {
             c.outcome = Outcome::Cancelled;
             c.stop_reason = "max_output".into();
-            c.error = Some(ApiError::new(
-                ErrorCode::Exhausted,
-                "the output limit was reached",
-            ));
+            c.error = Some(NodeStop::OutputLimit.error());
         }
         Some(Stop::Cancel | Stop::Deadline) | None => {}
     }
@@ -688,23 +685,17 @@ fn completion(
         r::RunStatus::Budget(r::BudgetHit::Time) => (
             Outcome::TimedOut,
             "deadline",
-            Some(ApiError::new(ErrorCode::Expired, "past the job's deadline")),
+            Some(NodeStop::JobDeadline.error()),
         ),
         r::RunStatus::Budget(r::BudgetHit::Idle) => (
             Outcome::TimedOut,
             "idle",
-            Some(ApiError::new(
-                ErrorCode::Expired,
-                "the harness said nothing for too long",
-            )),
+            Some(NodeStop::HarnessIdle.error()),
         ),
         r::RunStatus::Budget(_) => (
             Outcome::Failed,
             "max_turns",
-            Some(ApiError::new(
-                ErrorCode::Exhausted,
-                "research budget reached",
-            )),
+            Some(NodeStop::ResearchBudget.error()),
         ),
         r::RunStatus::Violated(v) => (
             Outcome::Failed,

@@ -34,8 +34,29 @@ pub async fn create(
     let mode = k
         .opt_enum("mode", &["start", "propose"])
         .unwrap_or_else(|| "start".into());
+    let client_id = k.opt_str("client_id", Str::len(1, 80));
     k.finish()?;
+    // a retry of the same form (`client_id`) gets the item the first request made; the creation
+    // runs on even if this request goes away, so it needs its own state
+    let (st2, c2) = (st.clone(), c.clone());
+    let item = st
+        .dedupe
+        .once(&c.ws, &c.me, "items", client_id, move || async move {
+            create_now(&st2, &c2, goal, title, bot, project, mode).await
+        })
+        .await?;
+    ok(item)
+}
 
+async fn create_now(
+    st: &AppState,
+    c: &Ctx,
+    goal: String,
+    title: Option<String>,
+    bot: Option<String>,
+    project: Option<Option<String>>,
+    mode: String,
+) -> Result<Value, ApiError> {
     // whatever the user left open (bot, project, title, tags) Steve decides, the same way as in the conversation
     let needs_route = bot.as_deref().is_none_or(str::is_empty)
         || project.is_none()
@@ -85,7 +106,7 @@ pub async fn create(
             opening: None,
         })
         .await?;
-    ok(Value::Object(item))
+    Ok(Value::Object(item))
 }
 
 pub async fn get_one(

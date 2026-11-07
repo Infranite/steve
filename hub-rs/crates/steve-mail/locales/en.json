@@ -12,6 +12,7 @@
   "mail.draft.already_sent": "The email has already been sent and can't be recalled",
   "mail.draft.already_handled": "This email has already been handled",
   "mail.draft.locked": "This email can no longer be edited",
+  "mail.draft.changed": "The draft changed while it was being checked. Check it again",
   "mail.draft.discarded": "This email has already been discarded",
   "mail.draft.no_recipients": "No recipients yet",
   "mail.draft.not_waiting": "This email isn't waiting to be sent",

@@ -664,10 +664,13 @@ fn backup_dir(db: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// A full copy of the database (`VACUUM INTO`, a consistent snapshot under the write lock) before
-/// anything is purged. Returns the file name.
+/// anything is purged. Returns the file name. The copy is the owner's alone (0600 in a 0700
+/// directory), as the database is.
 fn backup(ch: &Channels, now: i64) -> ApiResult<String> {
+    use std::os::unix::fs::PermissionsExt;
     let dir = backup_dir(ch.store().path());
     std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)))
         .map_err(|e| ApiError::Internal(format!("备份目录建不了：{e}")))?;
     let name = format!("pre-purge-{now}-{}.sqlite3", steve_store::uid("backup"));
     let file = dir.join(&name);
@@ -679,6 +682,8 @@ fn backup(ch: &Channels, now: i64) -> ApiResult<String> {
         c.execute("VACUUM INTO ?", [&path])?;
         Ok(())
     })?;
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| ApiError::Internal(format!("备份权限设不了：{e}")))?;
     Ok(name)
 }
 

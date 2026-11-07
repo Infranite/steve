@@ -47,6 +47,9 @@ pub fn conv_space(space_id: &str) -> String {
     format!("{PREFIX}{space_id}")
 }
 
+/// `meta.chan_out.status` of a reply whose space has no connected identity any more: not sent.
+pub const DISCONNECTED: &str = "disconnected";
+
 /// The space of an IM conversation.
 pub fn space_of_conv(conv: &str) -> Option<&str> {
     conv.strip_prefix(PREFIX).filter(|s| !s.is_empty())
@@ -410,6 +413,11 @@ impl Channels {
         let Some(origin) = m.meta.get("origin").and_then(Value::as_str) else {
             return Ok(None);
         };
+        if let Some(space) = space_of_conv(&m.space)
+            && self.store().reader(|c| spaces::voice(c, space))?.is_none()
+        {
+            return self.conv_disconnected(&m, origin).await;
+        }
         let Some((chan, plan)) = self.turn_source(ws, origin)? else {
             return Ok(None);
         };
@@ -512,6 +520,47 @@ impl Channels {
             .await?;
         self.mark_out(&m, &d)?;
         Ok(Some(d))
+    }
+
+    /// The space of conversation message `m` has no connected identity any more (its connections
+    /// were removed): what Steve said cannot go out. It is recorded on the message
+    /// (`chan_out.status = "disconnected"`, shown under it in the conversation) and the reaction of
+    /// the message it answers ends `failed` here, without a provider call. A stopped turn or an
+    /// answer that would not have been said in the space only ends its reaction.
+    async fn conv_disconnected(
+        &self,
+        m: &steve_store::Message,
+        origin: &str,
+    ) -> ChannelResult<Option<Delivered>> {
+        let generation = self.generations().take(origin);
+        let said = !m.meta.get("stopped").is_some_and(|v| v == true)
+            && generation.is_none_or(|g| g.outcome == Outcome::Reply);
+        let source = self
+            .store()
+            .messages()
+            .get(origin)?
+            .and_then(|o| o.meta["chan"]["message"].as_str().map(str::to_string));
+        if let Some(cm) = &source {
+            self.react_finish(cm, if said { Finish::Failed } else { Finish::Clear })
+                .await;
+        }
+        if !said {
+            return Ok(None);
+        }
+        tracing::info!(
+            message = m.id,
+            space = m.space,
+            "conversation reply not sent: the space's connection was removed"
+        );
+        let mut meta: Map<String, Value> = m.meta.as_object().cloned().unwrap_or_default();
+        meta.insert(
+            "chan_out".into(),
+            json!({"message": null, "status": DISCONNECTED, "decision": null}),
+        );
+        self.store()
+            .messages()
+            .patch_meta(&m.id, &Value::Object(meta))?;
+        Ok(None)
     }
 
     /// `meta.chan_out` on the conversation message: what became of it in the space.

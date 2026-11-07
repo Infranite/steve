@@ -17,32 +17,39 @@ import { Unwired } from "@/unwired"
 import { tm, toast } from "@/store"
 import { useLoad, useBusy } from "@/accounts/load"
 import { accountsApi, CONN_STATUS } from "@/api/accounts"
-import { channelsApi, FEISHU_APP, FEISHU_USER, TRIGGER_ALL_DMS, TRIGGER_EVERYWHERE, attentionOf, isDm, spaceTitle, type ChannelAccount, type Rule, type Space, type Trigger } from "@/api/channels"
+import { channelsApi, TRIGGER_ALL_DMS, TRIGGER_EVERYWHERE, attentionOf, isDm, spaceTitle, type ChannelAccount, type Rule, type Space, type Trigger } from "@/api/channels"
 import { AttentionTag, Name, SpaceAvatar, kindLine } from "@/channels/space-bits"
 import { Rules, ruleText, ruleOk } from "@/channels/rules"
 import { PersonaAvatar } from "@/channels/basis"
 import { PermissionList, SelfButtons } from "@/integrations/feishu"
+import { integrationsApi, type IAdapter } from "@/api/integrations"
+import { receiveNote, selfSidesFor } from "@/integrations/sides"
 import { useT } from "@/i18n"
 
 const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-2 px-1 type-footnote text-muted-foreground">{children}</div>
 const TRIGGER_WORD = /^\/[A-Za-z0-9_]{1,20}$/
+/** the undo windows an account can choose (seconds; the Hub takes 0–60) */
+const SEND_DELAYS = [0, 3, 5, 10, 20, 30, 60]
 
 export function AccountView({ id }: { id: string }) {
   const t = useT()
   const L = useLoad(async () => {
     const a = await channelsApi.account(id)
-    const feishuBot = a?.connection.adapter === FEISHU_APP
-    const [personas, all] = await Promise.all([channelsApi.personas(), feishuBot ? accountsApi.connections() : Promise.resolve([])])
-    /* Feishu only: “你本人” through the same app, a user connection on this app */
-    const self = all.filter((c) => c.adapter === FEISHU_USER)
-    return { a, personas, self, feishuBot }
+    const [personas, ig] = await Promise.all([channelsApi.personas(), integrationsApi.all().catch(() => null)])
+    /* “你本人” through this bot: a side acting as you that pairs with this bot's adapter, and its connections */
+    const adapters: IAdapter[] = ig?.providers.flatMap((p) => p.adapters) ?? []
+    const sides = a && a.mode === "bot" ? selfSidesFor(adapters, a.connection.adapter) : []
+    const all = sides.length ? await accountsApi.connections() : []
+    const self = all.filter((c) => sides.some((x) => x.id === c.adapter))
+    const side = (sides[0] as IAdapter | undefined) ?? null
+    return { a, personas, self, side }
   }, [id], ["connection", "account", "space", "persona", "channel"])
   const [busy, act] = useBusy(), [rules, setRules] = useState<Rule[] | null>(null)
   if (L.s === "unwired") return <Unwired id="accounts" />
   const back: [string, string] = ["#/channels", t("channels:list.title")]
   if (L.s === "loading") return <Page title={t("channels:account.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
   if (L.s === "error") return <Page title={t("channels:account.title")} back={back}><Empty title={L.err} /></Page>
-  const { a, personas, self, feishuBot } = L.data
+  const { a, personas, self, side } = L.data
   if (!a) return <Page title={t("channels:account.title")} back={back}><Empty title={t("channels:account.notFound")} sub={t("channels:account.notFoundSub")} /></Page>
   const me = a.mode === "self", c = a.connection
   const [st, dot] = CONN_STATUS[c.status] ?? [c.status, "idle"]
@@ -54,7 +61,7 @@ export function AccountView({ id }: { id: string }) {
       <div className="flex flex-col gap-8" data-channel-account={c.id}>
         <section><SectionLabel>{t("channels:account.status")}</SectionLabel>
           <Group><Row title={<span className="inline-flex items-center gap-2"><StatusDot s={dot} />{st}</span>} data-conn-state
-            sub={[c.health.last_ok ? t("channels:account.lastOk", { time: tm(c.health.last_ok) }) : "", c.status !== "ok" && c.health.last_error ? c.health.last_error : "", feishuBot ? t("channels:account.longConnection") : c.adapter === FEISHU_USER ? t("channels:account.polling") : ""].filter(Boolean).join(" · ")}>
+            sub={[c.health.last_ok ? t("channels:account.lastOk", { time: tm(c.health.last_ok) }) : "", c.status !== "ok" && c.health.last_error ? c.health.last_error : "", (() => { const n = receiveNote(a.receive); return n ? t(`channels:account.${n}`) : "" })()].filter(Boolean).join(" · ")}>
             <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(t(r.status === "ok" ? "channels:account.testOk" : "channels:account.testFailed")); void L.reload() } })} data-conn-test><RefreshCwIcon />{t("channels:account.test")}</Button></Row>
             {(c.status === "reauth" || c.status === "error") && <Row title={t("channels:account.reauth")} sub={t("channels:account.reauthSub")} onClick={() => go(`#/accounts/${a.account.id}/reauth`)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>}
           </Group></section>
@@ -72,12 +79,17 @@ export function AccountView({ id }: { id: string }) {
             {rules && <div className="mt-2 flex gap-2"><Button size="sm" disabled={busy || !rules.every(ruleOk)} onClick={() => void patch({ rules }, t("channels:word.rulesSaved")).then((ok) => ok && setRules(null))} data-acc-rules-save>{t("channels:word.saveRules")}</Button><Button size="sm" variant="ghost" onClick={() => setRules(null)}>{t("channels:word.revert")}</Button></div>}
           </> : a.rules ? <><Group>{a.rules.map((r, n) => <Row key={n} title={ruleText(r, me)} />)}</Group><Note>{a.editable ? "" : t("channels:account.rulesReadonly")}</Note></>
             : <div className="rounded-xl border border-dashed px-4 py-3.5 type-callout text-muted-foreground">{t("channels:account.rulesUnknown")}</div>}</section>
+        {a.editable && a.sendDelay && <section><SectionLabel>{t("channels:account.sendDelay")}</SectionLabel>
+          <Group><Row title={t("channels:account.sendDelayTitle")} sub={t("channels:account.sendDelaySub")}>
+            <Select align="end" testId="acc-send-delay" value={a.sendDelay.set === null ? "default" : String(a.sendDelay.set)}
+              onChange={(v) => void patch({ send_delay_s: v === "default" ? null : Number(v) }, t("channels:account.sendDelaySaved"))}
+              options={[{ v: "default", l: t("channels:account.sendDelayDefault", { n: a.sendDelay.def }) }, ...SEND_DELAYS.map((n) => ({ v: String(n), l: t("channels:account.sendDelaySeconds", { n }) }))]} /></Row></Group></section>}
         {me && <TriggerSection a={a} onSave={(x) => patch({ trigger: x }, t("channels:account.triggerSaved"))} busy={busy} />}
-        {feishuBot && <section><SectionLabel>{t("channels:word.you")}</SectionLabel>
+        {side && <section><SectionLabel>{t("channels:word.you")}</SectionLabel>
           {self.length ? <Group>{self.map((s) => <Row key={s.id} icon={<PersonaAvatar bot={null} size={28} />} title={t("channels:account.selfAuthorized")} sub={t("channels:account.selfAuthorizedSub", { status: CONN_STATUS[s.status]?.[0] ?? s.status })} onClick={() => go("#/channels/acc/" + s.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
             : <div className="flex flex-col gap-3 rounded-xl border px-4 py-3.5" data-self-auth>
               <div className="type-callout text-muted-foreground">{t("channels:account.selfAuthHint")}</div>
-              <div className="flex flex-wrap justify-end gap-2"><SelfButtons app={c.id} /></div></div>}</section>}
+              <div className="flex flex-wrap justify-end gap-2"><SelfButtons app={c.id} side={side} /></div></div>}</section>}
         {!me && <section><SectionLabel>{t("channels:account.permissions")}</SectionLabel>{a.permissions ? <PermissionList checks={a.permissions} /> : <div className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground" data-permissions="none">{t("channels:account.permissionsNone")}</div>}</section>}
         <section><SectionLabel>{t("channels:account.spacesLabel", { n: a.spaces.length })}</SectionLabel>
           {a.spaces.length ? <Group>{a.spaces.map((s) => (

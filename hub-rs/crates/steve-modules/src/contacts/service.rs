@@ -849,9 +849,64 @@ pub fn confirm_contact(m: &Modules, who: &Caller, id: &str) -> ApiResult<Contact
     contact_by_id(m, &viewer, &id)
 }
 
+/// The rows `sql` selects, each as a JSON object of its columns (for an audit record).
+fn rows_json(tx: &Tx, sql: &str, p: impl rusqlite::Params) -> ApiResult<Vec<Value>> {
+    let mut st = tx.prepare(sql)?;
+    let names: Vec<String> = st.column_names().iter().map(|n| n.to_string()).collect();
+    let rows = st
+        .query_map(p, |r| {
+            let mut o = Map::new();
+            for (i, n) in names.iter().enumerate() {
+                let v = match r.get_ref(i)? {
+                    rusqlite::types::ValueRef::Null => Value::Null,
+                    rusqlite::types::ValueRef::Integer(x) => json!(x),
+                    rusqlite::types::ValueRef::Real(x) => json!(x),
+                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+                    rusqlite::types::ValueRef::Blob(_) => Value::Null,
+                };
+                o.insert(n.clone(), v);
+            }
+            Ok(Value::Object(o))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// What deleting a contact removes for good, as it was: its attribute values, the memories only about
+/// it (with their `mem_about` rows) and its team memberships. Kept in the `party.delete` audit, so
+/// a deletion can be put back by hand.
+fn deleted_rows(tx: &Tx, ws: &str, party: &str) -> ApiResult<Value> {
+    let mem_ids = super::people_repo::mems_only_about(tx, ws, PARTY, party)?;
+    let mut mems = Vec::new();
+    let mut about = Vec::new();
+    for id in &mem_ids {
+        mems.extend(rows_json(tx, "SELECT * FROM mems WHERE id = ?", [id])?);
+        about.extend(rows_json(
+            tx,
+            "SELECT * FROM mem_about WHERE mem_id = ? ORDER BY rowid",
+            [id],
+        )?);
+    }
+    Ok(json!({
+        "attr_values": rows_json(
+            tx,
+            "SELECT * FROM attr_values WHERE workspace_id = ? AND party_id = ? ORDER BY rowid",
+            rusqlite::params![ws, party],
+        )?,
+        "mems": mems,
+        "mem_about": about,
+        "team_members": rows_json(
+            tx,
+            "SELECT * FROM team_members WHERE workspace_id = ? AND contact_id = ? ORDER BY rowid",
+            rusqlite::params![ws, party],
+        )?,
+    }))
+}
+
 /// `DELETE /contacts/:id`: the row stays as `deleted`; its attribute values, the memories only
 /// about it and its team memberships are physically deleted, other modules follow through
-/// [`super::PartyHooks::on_delete`]; links stay. The audit records only counts.
+/// [`super::PartyHooks::on_delete`]; links stay. The audit records the counts, and the deleted rows
+/// as they were (`deleted`).
 pub fn delete_contact(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> ApiResult<()> {
     let (viewer, me) = start(m, who)?;
     let id = resolve(id, &me).to_string();
@@ -862,6 +917,7 @@ pub fn delete_contact(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> Api
                 "modules.contacts.not_yourself"
             )));
         }
+        let deleted = deleted_rows(tx, &who.ws, &p.id)?;
         let attrs = repo::values_delete_of(tx, &who.ws, &p.id)?;
         let mems = super::memory::delete_only_about(tx, &who.ws, &p.id)?;
         let teams = repo::memberships_delete_of(tx, &who.ws, &p.id)?;
@@ -887,7 +943,7 @@ pub fn delete_contact(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> Api
             &who.me,
             "party.delete",
             &p.id,
-            &json!({ "type": "contact", "attrs": attrs, "mems": mems, "teams": teams }),
+            &json!({ "type": "contact", "attrs": attrs, "mems": mems, "teams": teams, "deleted": deleted }),
         )?;
         event(tx, &who.ws, &p.id);
         Ok(())

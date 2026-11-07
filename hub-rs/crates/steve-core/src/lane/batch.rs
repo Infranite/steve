@@ -12,6 +12,12 @@
 //! - the unit in flight is not interrupted, but when it finishes merging while a batch is collecting,
 //!   its release is put off and goes out with that batch;
 //! - a closed batch starts once the unit before it has ended; one unit is in flight at a time.
+//!
+//! Changed by the user, 2026-11-06:
+//! - a unit whose approval card is not answered yet is not under way: a request arriving then joins
+//!   that unit (and its one card), up to `max_members`, instead of opening a batch of its own;
+//! - "merge and release now" ([`Event::Now`]) closes the collecting batch at once: it starts as soon as
+//!   nothing is in flight.
 
 use std::collections::VecDeque;
 
@@ -49,6 +55,14 @@ pub struct Unit {
     pub closed: bool,
     /// Its merge is done (it only releases now).
     pub merged: bool,
+    /// You approved its merge. Until then it is not under way: requests that arrive join it. A
+    /// snapshot from before this field counts as approved (what it meant then).
+    #[serde(default = "approved_before")]
+    pub approved: bool,
+}
+
+fn approved_before() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +77,10 @@ pub enum Event {
     Left { unit: u64, id: String, at: i64 },
     /// Time passed (a batch may close, a closed one may start).
     Tick { at: i64 },
+    /// You approved the merge of the unit in flight: from now on it is under way.
+    Approved { unit: u64 },
+    /// You asked to merge and release now: the collecting batch closes (and starts when it may).
+    Now { at: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +101,8 @@ pub enum Action {
     Queue { id: String },
     /// `id` joined the collecting `unit`.
     Join { unit: u64, id: String },
+    /// `id` joined `unit`, in flight but still waiting for your approval (its card now lists it).
+    Add { unit: u64, id: String },
 }
 
 /// One lane's state.
@@ -116,6 +136,7 @@ impl Lane {
             opened_at: at,
             closed: false,
             merged: false,
+            approved: false,
         }
     }
 
@@ -145,6 +166,12 @@ impl Lane {
                         members: u.members.clone(),
                     });
                     self.running = Some(u);
+                } else if let Some(r) = self.running.as_mut().filter(|r| {
+                    !r.merged && !r.approved && r.members.len() < self.policy.max_members
+                }) {
+                    // nothing is under way until you approve: it goes in with that unit
+                    r.members.push(id.clone());
+                    out.push(Action::Add { unit: r.id, id });
                 } else if let Some(c) = self.collecting.as_mut().filter(|c| !c.closed) {
                     c.members.push(id.clone());
                     out.push(Action::Join { unit: c.id, id });
@@ -244,6 +271,18 @@ impl Lane {
                 self.close_if_due(at, &mut out);
             }
             Event::Tick { at } => self.close_if_due(at, &mut out),
+            Event::Approved { unit } => {
+                if let Some(r) = self.running.as_mut().filter(|r| r.id == unit) {
+                    r.approved = true;
+                }
+            }
+            Event::Now { at } => {
+                if let Some(c) = self.collecting.as_mut().filter(|c| !c.closed) {
+                    c.closed = true;
+                    out.push(Action::Close { unit: c.id });
+                }
+                self.close_if_due(at, &mut out);
+            }
         }
         out
     }
@@ -318,6 +357,11 @@ mod tests {
         l.apply(Event::Arrive { id: id.into(), at })
     }
 
+    /// You answered the card of `unit`: it is under way.
+    fn approve(l: &mut Lane, unit: u64) {
+        assert!(l.apply(Event::Approved { unit }).is_empty());
+    }
+
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
@@ -347,6 +391,7 @@ mod tests {
     fn a_request_during_a_merge_opens_a_batch_and_takes_the_release_with_it() {
         let mut l = lane();
         arrive(&mut l, "A", 0);
+        approve(&mut l, 1);
         assert_eq!(
             arrive(&mut l, "B", 5),
             [Action::Join {
@@ -403,6 +448,7 @@ mod tests {
             max_members: 3,
         });
         arrive(&mut l, "A", 0);
+        approve(&mut l, 1);
         arrive(&mut l, "B", 1);
         arrive(&mut l, "C", 2);
         assert_eq!(
@@ -443,6 +489,7 @@ mod tests {
     fn a_closed_batch_waits_for_the_unit_in_flight_to_end() {
         let mut l = lane();
         arrive(&mut l, "A", 0);
+        approve(&mut l, 1);
         arrive(&mut l, "B", 1);
         // closed by time while A still merges: it does not start
         assert_eq!(
@@ -499,6 +546,7 @@ mod tests {
     fn a_member_that_leaves_is_not_merged_and_an_emptied_unit_still_releases_what_it_carried() {
         let mut l = lane();
         arrive(&mut l, "A", 0);
+        approve(&mut l, 1);
         arrive(&mut l, "B", 1);
         l.apply(Event::Merged { unit: 1, at: 2 });
         l.apply(Event::Tick { at: 1 + 2 * H });
@@ -527,6 +575,7 @@ mod tests {
     fn a_request_after_the_window_ran_out_waits_for_the_next_batch() {
         let mut l = lane();
         arrive(&mut l, "A", 0);
+        approve(&mut l, 1);
         arrive(&mut l, "B", 1);
         // no tick came; C arrives after B's window: B's batch closes, C waits
         assert_eq!(
@@ -543,6 +592,7 @@ mod tests {
             max_members: 2,
         });
         arrive(&mut l, "A", 0);
+        approve(&mut l, 1);
         arrive(&mut l, "B", 1);
         arrive(&mut l, "C", 2); // closes B's batch (2 members)
         arrive(&mut l, "D", 3); // queued
@@ -563,6 +613,7 @@ mod tests {
     fn an_emptied_unit_releasing_what_it_carried_keeps_the_lane_until_that_release_ends() {
         let mut l = lane();
         arrive(&mut l, "A", 0);
+        approve(&mut l, 1);
         arrive(&mut l, "B", 1);
         l.apply(Event::Merged { unit: 1, at: 2 });
         l.apply(Event::Tick { at: 1 + 2 * H });
@@ -593,5 +644,121 @@ mod tests {
         assert!(arrive(&mut l, "A", 1).is_empty());
         arrive(&mut l, "B", 2);
         assert!(arrive(&mut l, "B", 3).is_empty());
+    }
+
+    #[test]
+    fn a_request_while_the_card_is_unanswered_joins_that_unit() {
+        let mut l = lane();
+        arrive(&mut l, "A", 0);
+        assert_eq!(
+            arrive(&mut l, "B", 5),
+            [Action::Add {
+                unit: 1,
+                id: "B".into()
+            }],
+            "no batch of its own, no window: it goes in with A"
+        );
+        assert!(l.collecting.is_none());
+        approve(&mut l, 1);
+        // under way now: the next one collects, as before
+        assert_eq!(
+            arrive(&mut l, "C", 6),
+            [Action::Join {
+                unit: 2,
+                id: "C".into()
+            }]
+        );
+        assert_eq!(
+            l.apply(Event::Merged { unit: 1, at: 7 }),
+            [Action::PutOff {
+                from: 1,
+                into: 2,
+                members: ids(&["A", "B"])
+            }]
+        );
+    }
+
+    #[test]
+    fn a_unit_waiting_for_its_card_takes_no_more_than_the_limit() {
+        let mut l = Lane::new(Policy {
+            window_ms: 2 * H,
+            max_members: 2,
+        });
+        arrive(&mut l, "A", 0);
+        arrive(&mut l, "B", 1);
+        assert_eq!(
+            arrive(&mut l, "C", 2),
+            [Action::Join {
+                unit: 2,
+                id: "C".into()
+            }]
+        );
+        assert_eq!(l.running.as_ref().unwrap().members, ids(&["A", "B"]));
+    }
+
+    #[test]
+    fn now_closes_the_collecting_batch_and_starts_it_when_nothing_is_in_flight() {
+        let mut l = lane();
+        assert!(
+            l.apply(Event::Now { at: 0 }).is_empty(),
+            "nothing collecting"
+        );
+        arrive(&mut l, "A", 0);
+        approve(&mut l, 1);
+        arrive(&mut l, "B", 1);
+        // A still merging: the batch closes now and waits for A, not for its window
+        assert_eq!(l.apply(Event::Now { at: 2 }), [Action::Close { unit: 2 }]);
+        assert_eq!(arrive(&mut l, "C", 3), [Action::Queue { id: "C".into() }]);
+        assert_eq!(
+            l.apply(Event::Merged { unit: 1, at: 4 }),
+            [
+                Action::PutOff {
+                    from: 1,
+                    into: 2,
+                    members: ids(&["A"])
+                },
+                Action::Merge {
+                    unit: 2,
+                    members: ids(&["B"])
+                },
+                Action::Join {
+                    unit: 3,
+                    id: "C".into()
+                },
+            ]
+        );
+        // C's batch closes now too: it starts once B merged, carrying A's and B's release
+        approve(&mut l, 2);
+        assert_eq!(l.apply(Event::Now { at: 5 }), [Action::Close { unit: 3 }]);
+        assert_eq!(
+            l.apply(Event::Merged { unit: 2, at: 6 }),
+            [
+                Action::PutOff {
+                    from: 2,
+                    into: 3,
+                    members: ids(&["A", "B"])
+                },
+                Action::Merge {
+                    unit: 3,
+                    members: ids(&["C"])
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_unit_kept_before_approval_was_recorded_counts_as_approved() {
+        let mut l = lane();
+        arrive(&mut l, "A", 0);
+        let mut v = serde_json::to_value(&l).unwrap();
+        v["running"].as_object_mut().unwrap().remove("approved");
+        let mut old: Lane = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            arrive(&mut old, "B", 1),
+            [Action::Join {
+                unit: 2,
+                id: "B".into()
+            }]
+        );
     }
 }

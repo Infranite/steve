@@ -128,49 +128,96 @@ pub(crate) fn conflict(m: impl Into<String>) -> CoreError {
 /// bytes or mode changes it, even when `git status` reads the same. `None` when `cwd` is not a git
 /// worktree or git can't tell.
 pub(crate) fn fingerprint(cwd: Option<&str>) -> Option<String> {
-    let cwd = cwd.filter(|c| !c.is_empty() && Path::new(c).exists())?;
+    fingerprint_now(cwd).ok().flatten()
+}
+
+/// How long the git of one fingerprint may take in all. It runs under the core's lock: a git that
+/// hangs (a huge worktree, a stuck filesystem) must not hold everything, and its answer is then
+/// unknown, never "the result changed".
+pub(crate) const PRINT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The fingerprint could not be taken in time ([`PRINT_DEADLINE`]): the gate holds and asks again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrintUnknown;
+
+/// [`fingerprint`], telling a git that ran out of time (`Err`: unknown) from no worktree or no git
+/// checkout (`Ok(None)`).
+pub(crate) fn fingerprint_now(
+    cwd: Option<&str>,
+) -> std::result::Result<Option<String>, PrintUnknown> {
+    fingerprint_within(cwd, PRINT_DEADLINE)
+}
+
+fn fingerprint_within(
+    cwd: Option<&str>,
+    deadline: std::time::Duration,
+) -> std::result::Result<Option<String>, PrintUnknown> {
+    let Some(cwd) = cwd.filter(|c| !c.is_empty() && Path::new(c).exists()) else {
+        return Ok(None);
+    };
     let index = std::env::temp_dir().join(format!("steve-fingerprint-{}", uuid::Uuid::new_v4()));
-    let out = fingerprint_with(cwd, &index);
+    let out = fingerprint_with(cwd, &index, std::time::Instant::now() + deadline);
     let _ = std::fs::remove_file(&index);
+    /* a git killed at the deadline may leave its lock on the throwaway index */
+    let mut lock = index.into_os_string();
+    lock.push(".lock");
+    let _ = std::fs::remove_file(lock);
     out
 }
 
-fn fingerprint_with(cwd: &str, index: &Path) -> Option<String> {
-    let run = |args: &[&str]| -> Option<String> {
-        let o = crate::git::command()
-            .arg("-C")
-            .arg(cwd)
-            .args(args)
-            .env("GIT_INDEX_FILE", index)
-            .output()
-            .ok()?;
-        o.status
-            .success()
-            .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+fn fingerprint_with(
+    cwd: &str,
+    index: &Path,
+    end: std::time::Instant,
+) -> std::result::Result<Option<String>, PrintUnknown> {
+    /* `Ok(None)`: git said no; `Err`: out of time */
+    let run =
+        |args: &[&str], own_index: bool| -> std::result::Result<Option<String>, PrintUnknown> {
+            let mut cmd = crate::git::command();
+            cmd.arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0");
+            if own_index {
+                cmd.env("GIT_INDEX_FILE", index);
+            }
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            match crate::util::run_deadline(cmd, left) {
+                Ok((true, out, _)) => Ok(Some(out.trim().to_string())),
+                Ok((false, ..)) | Err(crate::util::RunError::Spawn(_)) => Ok(None),
+                Err(e) => {
+                    tracing::warn!(cwd, "fingerprint: git {}: {e}", args.join(" "));
+                    Err(PrintUnknown)
+                }
+            }
+        };
+    let Some(head) = run(&["rev-parse", "HEAD"], true)? else {
+        return Ok(None);
     };
-    let head = run(&["rev-parse", "HEAD"])?;
     /* start from the item's index (its stat cache keeps this fast), then take in the worktree */
-    let real = crate::git::command()
-        .arg("-C")
-        .arg(cwd)
-        .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let real = run(
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        false,
+    )?;
     if let Some(r) = real.filter(|r| Path::new(r).exists()) {
-        std::fs::copy(r, index).ok()?;
-    } else {
-        run(&["read-tree", "HEAD"])?;
+        if std::fs::copy(r, index).is_err() {
+            return Ok(None);
+        }
+    } else if run(&["read-tree", "HEAD"], true)?.is_none() {
+        return Ok(None);
     }
-    run(&["add", "--all"])?;
-    let tree = run(&["write-tree"])?;
-    Some(
+    if run(&["add", "--all"], true)?.is_none() {
+        return Ok(None);
+    }
+    let Some(tree) = run(&["write-tree"], true)? else {
+        return Ok(None);
+    };
+    Ok(Some(
         match crate::upstream::own_change(Path::new(cwd), &head, &tree) {
             Some((base, patch)) => format!("{head}:{tree}:{base}:{patch}"),
             None => format!("{head}:{tree}"),
         },
-    )
+    ))
 }
 
 /// `HEAD` of a fingerprint.
@@ -387,7 +434,9 @@ impl Tx<'_> {
             .into(),
         );
         let i = self.lc_write(&i, w, "closing_requested", reason, |_, _| Ok(()))?;
-        if accepted {
+        /* the acceptance's requirements are recorded by the gate, after it compared the worktree; on a
+         * Node that comparison waits for facts gathered off the lock, so they are recorded now */
+        if accepted && self.git_on_node(&i.id) {
             self.lc_accepted(&i.id)?;
         }
         self.lc_try_close(item_id)?;
@@ -420,7 +469,10 @@ impl Tx<'_> {
         w.closing = Some(serde_json::to_value(&c)?);
         w.now = Some("已验收，正在结束".into());
         self.lc_write(&i, w, "closing_requested", "验收通过", |_, _| Ok(()))?;
-        self.lc_accepted(item_id)?;
+        /* see `lc_request_complete`: here the gate records the requirements after comparing, except on a Node */
+        if self.git_on_node(item_id) {
+            self.lc_accepted(item_id)?;
+        }
         self.lc_try_close(item_id)?;
         Ok(())
     }
@@ -736,7 +788,8 @@ impl Tx<'_> {
             false => None,
             /* on a Node: what it said last, or the worktree left out */
             true if self.git_on_node(&i.id) => self.git_seen(&i.id).map(|s| Some(s.print.clone())),
-            true => Some(fingerprint(i.cwd.as_deref())),
+            /* a fingerprint git could not take in time leaves the worktree out */
+            true => fingerprint_now(i.cwd.as_deref()).ok(),
         };
         self.lc_gate_at(i, c, now.as_ref().map(Option::as_deref))
     }
@@ -856,22 +909,30 @@ impl Tx<'_> {
             self.git_gather(&i);
             return Ok(false);
         }
-        if c.kind == COMPLETE && c.accepted {
-            self.lc_accepted(item_id)?;
-            /* the requirements were decided on the same facts as the gate below, or the closing holds
-             * until facts for what is asked now are here */
-            if node && self.git_take(&self.item(item_id)?).is_none() {
-                return Ok(false);
-            }
-        }
         /* the worktree is fingerprinted once (it runs `git add --all` over all of it), for the gate and
-         * for saying what moved */
+         * for saying what moved. On the periodic tick, not while something else still holds the closing
+         * (a turn, an acceptance, an operation, a question): the check that clears it looks then. */
+        let held = self.lc_gate_at(&i, &c, None)?;
+        let others = held.turn || held.input || held.operation || held.acceptance || held.decision;
         let now = match looks_at_worktree(&i, &c) {
             false => None,
             true if node => print.clone(),
-            true => Some(fingerprint(i.cwd.as_deref())),
+            true if self.st.lc_ticking && others && !held.changed => None,
+            true => match fingerprint_now(i.cwd.as_deref()) {
+                Ok(p) => Some(p),
+                Err(PrintUnknown) => {
+                    /* unknown is not "changed": the closing holds, and is checked again */
+                    tracing::info!(
+                        item = item_id,
+                        "closing check: the worktree's fingerprint took too long"
+                    );
+                    return Ok(false);
+                }
+            },
         };
         let g = self.lc_gate_at(&i, &c, now.as_ref().map(Option::as_deref))?;
+        /* a result that moved is void before anything is started on its acceptance (the acceptance
+         * hooks, a GitHub PR card) */
         if g.changed && !g.turn {
             /* the frozen result moved after it was frozen (and nothing is still at work on it): say what
              * moved, and tell the agent, which may well believe its delivery still stands */
@@ -906,6 +967,18 @@ impl Tx<'_> {
             self.lc_invalidate(item_id, "收到新的消息")?;
             return Ok(false);
         }
+        let g = if c.kind == COMPLETE && c.accepted {
+            self.lc_accepted(item_id)?;
+            /* the requirements were decided on the same facts as the gate below, or the closing holds
+             * until facts for what is asked now are here */
+            if node && self.git_take(&self.item(item_id)?).is_none() {
+                return Ok(false);
+            }
+            /* what the acceptance started holds it too */
+            self.lc_gate_at(&i, &c, now.as_ref().map(Option::as_deref))?
+        } else {
+            g
+        };
         if !g.clear() {
             return Ok(false);
         }
@@ -1121,6 +1194,7 @@ impl Tx<'_> {
         let mut n = 0;
         let ids = self.db().store().items().closing_ids()?;
         self.st.git_polling = true;
+        self.st.lc_ticking = true;
         for id in ids {
             match self.lc_try_close(&id) {
                 Ok(true) => n += 1,
@@ -1128,6 +1202,7 @@ impl Tx<'_> {
                 Err(e) => tracing::warn!(item = %id, "closing check: {e}"),
             }
         }
+        self.st.lc_ticking = false;
         self.st.git_polling = false;
         Ok(n)
     }
@@ -1330,5 +1405,47 @@ mod tests {
         assert!(Gate::default().clear());
         assert_eq!(fingerprint_head("abc:0011"), "abc");
         assert_eq!(fingerprint(Some("/nonexistent/x")), None);
+    }
+
+    #[test]
+    fn a_fingerprint_out_of_time_is_unknown_not_changed() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().to_string_lossy().into_owned();
+        let git = |args: &[&str]| {
+            let o = crate::git::command()
+                .arg("-C")
+                .arg(&cwd)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(d.path().join("a.txt"), "a").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "a"]);
+        let full = fingerprint_within(Some(&cwd), PRINT_DEADLINE).unwrap();
+        assert!(full.is_some());
+        // no time at all: git is killed and the answer is unknown, which the gate holds on
+        assert_eq!(
+            fingerprint_within(Some(&cwd), std::time::Duration::ZERO),
+            Err(PrintUnknown)
+        );
+        // a missing worktree stays a known "no worktree"
+        assert_eq!(
+            fingerprint_within(Some("/nonexistent/x"), std::time::Duration::ZERO),
+            Ok(None)
+        );
+        // not a git checkout: known as well
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(
+            fingerprint_now(Some(&plain.path().to_string_lossy())),
+            Ok(None)
+        );
     }
 }

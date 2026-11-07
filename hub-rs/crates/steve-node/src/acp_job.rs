@@ -249,6 +249,7 @@ pub(crate) async fn run(
             },
             move |_, inc| {
                 let _ = tx.send(inc);
+                None
             },
             || {},
         )
@@ -262,7 +263,7 @@ pub(crate) async fn run(
         let mut out = Output::default();
         let cwd = req.cwd.to_string_lossy();
         let reports = SessionReports(req.on_session);
-        let opening = session::open_read_only(
+        let opening = session::open_read_only_with_meta(
             &conn,
             OpenConfig {
                 client_version: &req.cfg.version,
@@ -273,6 +274,7 @@ pub(crate) async fn run(
                 model: req.model,
                 effort: req.effort,
             },
+            crate::harness_meta(req.harness, &req.cfg.steve_home),
             &reports,
         );
         tokio::pin!(opening);
@@ -370,6 +372,7 @@ for line in sys.stdin:
     if method=="initialize":
         result={{"protocolVersion":1,"agentCapabilities":{{}}}}
     elif method in ("session/new","session/load"):
+        opened_params=msg["params"]
         if method=="session/load":
             for _ in range(4000):
                 chunk("old-history-marker")
@@ -451,6 +454,29 @@ for line in sys.stdin:
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].0, "第一段");
         assert!(seen[1].1.duration_since(seen[0].1) >= Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn jobs_keep_the_nodes_secret_file_denials_on_new_and_resumed_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = adapter(
+            temp.path(),
+            "        chunk(json.dumps(opened_params.get('_meta')))",
+            true,
+        );
+        let peer = cfg.adapters["neutral-test"].clone();
+        cfg.adapters.insert("claude-code".into(), peer);
+        for resume in [None, Some("acp-session")] {
+            let mut req = request(&cfg, temp.path(), &|_| false);
+            req.harness = "claude-code";
+            req.resume = resume;
+            let out = run(req, &|_| true, &|_| {}).await.unwrap();
+            let meta: Value = serde_json::from_str(&out.text).unwrap();
+            assert_eq!(
+                Some(meta),
+                crate::harness_meta("claude-code", &cfg.steve_home)
+            );
+        }
     }
 
     #[tokio::test]

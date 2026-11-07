@@ -42,6 +42,7 @@ pub struct NodeFleet {
     /// How long a session may sit idle before it is let go, for the coordinators started from
     /// now on (ms; -1: their default).
     idle_release: AtomicI64,
+    cost_caps: Mutex<crate::wire::node_runtime::CostCaps>,
 }
 
 /// Events of a Node no coordinator runs for yet: refused `offline`, so they stay in its journal.
@@ -93,6 +94,7 @@ impl NodeFleet {
             holding: AtomicBool::new(false),
             turn_limit: AtomicI64::new(0),
             idle_release: AtomicI64::new(-1),
+            cost_caps: Mutex::new(Default::default()),
         });
         if let Some(s) = service {
             fleet.set_service(s);
@@ -111,6 +113,15 @@ impl NodeFleet {
 
     pub fn set_idle_release(&self, ms: i64) {
         self.idle_release.store(ms.max(0), Ordering::Relaxed);
+    }
+
+    /// What a Node's usage reports may add to a session's cost, for every coordinator started
+    /// from now on ([`NodeRuntime::set_cost_caps`]).
+    pub fn set_cost_caps(&self, caps: crate::wire::node_runtime::CostCaps) {
+        *self.cost_caps.lock().unwrap() = caps;
+        for rt in self.runtimes() {
+            rt.set_cost_caps(caps);
+        }
     }
 
     /// The Hub's release hold on every coordinator.
@@ -194,6 +205,7 @@ impl NodeFleet {
                 if idle >= 0 {
                     rt.set_idle_release(idle);
                 }
+                rt.set_cost_caps(*self.cost_caps.lock().unwrap());
                 rt.hold(self.holding.load(Ordering::SeqCst));
                 e.runtime = Some(rt.clone());
                 (rt, true)

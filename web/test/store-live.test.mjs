@@ -9,6 +9,7 @@ import * as notes from "../src/decision-notes.ts"
 import * as feed from "../src/feed-order.ts"
 import * as format from "../src/i18n/format.ts"
 import * as i18n from "../src/i18n/index.ts"
+import * as composerDraft from "../src/composer-draft.ts"
 
 const code = ts.transpileModule(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
@@ -30,6 +31,7 @@ function harness() {
       if (id === "./feed-order") return feed
       if (id === "./i18n/format") return format
       if (id === "./i18n") return { __esModule: true, ...i18n }
+      if (id === "./composer-draft") return composerDraft
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "sonner") return { toast: (x) => notices.push(x) }
       if (id === "react") return {}
@@ -350,4 +352,20 @@ test("an approved release that was not released says so by its outcome in en, no
     assert.equal(s.relOf(d({ outcome: "not_released", reason: "no changes" })).outcome, "not_released")
     assert.equal(s.relOf(d({ outcome: "failed" })).outcome, "failed")
   } finally { await i18n.default.changeLanguage("zh-CN") }
+})
+
+test("sends carry their idempotency key: the composer's on every retry, a fresh one otherwise", async () => {
+  const h = harness(), s = h.store
+  s.start(); await flush()
+  const said = [], made = []
+  h.api.say = async (_t, _f, _m, to) => { said.push(to.client_id); throw new Error("lost answer") }
+  h.api.newItem = async (p) => { made.push(p.client_id); return { id: "ST-1" } }
+  assert.equal(await s.chatSend("你好", [], [], [], "draft-1"), false)
+  assert.equal(await s.chatSend("你好", [], [], [], "draft-1"), false)
+  await s.chatSend("重来")
+  assert.equal(said[0], "draft-1"); assert.equal(said[1], "draft-1")
+  assert.ok(said[2] && said[2] !== "draft-1")
+  await s.newItem("目标", undefined, undefined, "start", "form-1")
+  await s.newItem("目标")
+  assert.equal(made[0], "form-1"); assert.ok(made[1] && made[1] !== "form-1")
 })

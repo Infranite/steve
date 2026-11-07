@@ -22,6 +22,7 @@ mod helper;
 mod keychain;
 #[cfg(target_os = "linux")]
 mod secret_service;
+pub mod signing;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

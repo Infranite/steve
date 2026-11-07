@@ -297,6 +297,75 @@ async fn every_path_refusal() {
 }
 
 #[tokio::test]
+async fn cloud_drive_folders_are_allowed_inside_their_roots_with_text_files_only() {
+    let e = setup();
+    let h = e.home.clone();
+    let vault = h.join("Library/Mobile Documents/iCloud~md~obsidian/Documents/笔记");
+    write(
+        &vault.join("续签.md"),
+        "# 续签\n\nAcme 的合同每年三月续签。",
+    );
+    write(&vault.join("续签说明.log"), "续签 log");
+    let dropbox = h.join("Library/CloudStorage/Dropbox/notes");
+    fs::create_dir_all(&dropbox).unwrap();
+    // the roots themselves, and the rest of ~/Library, stay refused
+    for (path, reason) in [
+        (
+            h.join("Library/Mobile Documents"),
+            "只能选 ~/Library/Mobile Documents 里面的某个文件夹，不能是它本身",
+        ),
+        (
+            h.join("Library/CloudStorage"),
+            "只能选 ~/Library/CloudStorage 里面的某个文件夹，不能是它本身",
+        ),
+        (h.join("Library"), "不能是 ~/Library 或其中的目录"),
+        (h.join("Library/Mail"), "不能是 ~/Library 或其中的目录"),
+    ] {
+        let (s, v) = e
+            .me(
+                "POST",
+                "/kb/sources",
+                Some(json!({"kind": "folder", "name": "x", "path": path})),
+            )
+            .await;
+        assert_eq!(s, 400, "{path:?}: {v}");
+        assert_eq!(refusal(&v), format!("这个目录不能加入知识库：{reason}"));
+    }
+    // include rules other than Markdown / text are refused there
+    let (s, v) = e
+        .me(
+            "POST",
+            "/kb/sources",
+            Some(json!({"kind": "folder", "name": "x", "path": dropbox, "include": ["**/*.pdf"]})),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    assert!(refusal(&v).contains(".md 和 .txt"), "{v}");
+    assert!(check_path(e.kb.folder_policy(), &dropbox.to_string_lossy()).is_ok());
+
+    // a vault inside iCloud Drive: added, scanned, searchable
+    let src = e
+        .add_folder(
+            &vault,
+            json!({"name": "iCloud 笔记", "include": ["**/*.md", "**/*.txt"]}),
+        )
+        .await;
+    let id = src["id"].as_str().unwrap().to_string();
+    let hits = e.search(ME, "续签").await;
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    // a patch cannot widen it to other files
+    let (st, v) = e
+        .me(
+            "PATCH",
+            &format!("/kb/sources/{id}"),
+            Some(json!({"include": ["**/*.log"]})),
+        )
+        .await;
+    assert_eq!(st, 400, "{v}");
+    assert!(refusal(&v).contains(".md 和 .txt"), "{v}");
+}
+
+#[tokio::test]
 async fn links_out_of_the_folder_are_not_read() {
     let e = setup();
     let outside = e.home.join("outside");

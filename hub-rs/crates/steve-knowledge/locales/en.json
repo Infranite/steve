@@ -63,6 +63,8 @@
   "knowledge.folder.steve_data": "it can't be Steve's own data folder",
   "knowledge.folder.contains_steve_data": "it contains Steve's own data folder",
   "knowledge.folder.private_dir": "it can't be ~/%{dir} or a folder inside it",
+  "knowledge.folder.cloud_root": "pick a folder inside ~/%{dir}, not the folder itself",
+  "knowledge.folder.cloud_text_only": "this folder is in cloud storage, so only .md and .txt files can be included (include rules must name those)",
   "knowledge.folder.outside_home": "You can only add folders in your home folder or on an external disk",
   "knowledge.folder.refused": "This folder can't be added to the knowledge base: %{reason}",
   "knowledge.folder.overlap": "it overlaps the existing folder source “%{name}”",

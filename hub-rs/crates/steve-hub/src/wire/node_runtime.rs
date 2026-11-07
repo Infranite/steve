@@ -1,4 +1,4 @@
-//! The Hub's coordinator for sessions that run on a Node (docs/hub-node-client.md, D3).
+//! The Hub's coordinator for sessions that run on a Node.
 //!
 //! The Hub decides, the Node executes. Here the Hub's decisions become durable commands and the
 //! Node's facts become the Hub's state, each in one store transaction:
@@ -36,26 +36,29 @@ use steve_store::runtime::{self as rt, ReceiptState, StreamKey};
 use steve_store::{FileRef, Store, StoreError, Tx};
 
 mod config;
+mod cost;
 mod heads;
 // the job half of the coordinator lives next to it (wire/node_jobs.rs), with its fields in reach
 mod ledger;
 #[path = "node_jobs.rs"]
 mod node_jobs;
-#[path = "node_research.rs"]
-mod node_research;
 mod perm;
 mod recover;
 mod workspace;
 
 pub use config::{ConfigChange, Configured};
+pub use cost::CostCaps;
+pub(crate) use cost::tokens as usage_tokens;
 pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
 };
 pub use ledger::LedgerEntry;
 #[cfg(test)]
 pub(crate) use ledger::PUSH_DEADLINE;
-pub use node_jobs::NodePrint;
-pub use node_research::NodeResearch;
+pub(crate) use node_jobs::normalized_usage;
+pub use node_jobs::{
+    News, NodePrint, RESEARCH_GRANT, ResearchAttempt, ResearchFile, ResearchJobRun,
+};
 pub use workspace::WorkspaceFact;
 
 /// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
@@ -64,6 +67,37 @@ const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
 const ACCEPT_WINDOW_MS: i64 = 10 * 60_000;
 /// A worker's hold on a command it sends.
 const LEASE_MS: i64 = 60_000;
+
+/// What the user reads for a Node's error: a cause the Node decided on its own ([`NodeStop`]) in
+/// words of ours, anything else as the Node said it. Stored (timeline, fail cards), so zh-CN;
+/// that is also the language a model reads it in where it reaches one (a gateway or research
+/// error), as the prompts are.
+pub(crate) fn said(e: &ApiError) -> String {
+    steve_i18n::stored(|| match NodeStop::of(e) {
+        Some(stop) => stop_text(stop),
+        None => e.safe_detail.clone(),
+    })
+}
+
+fn stop_text(stop: NodeStop) -> String {
+    use steve_i18n::t;
+    match stop {
+        NodeStop::Deadline => t!("hub.node.stop.deadline"),
+        NodeStop::JobDeadline => t!("hub.node.stop.job_deadline"),
+        NodeStop::HubUnreachable => t!("hub.node.stop.hub_unreachable"),
+        NodeStop::OutputLimit => t!("hub.node.stop.output_limit"),
+        NodeStop::FrameTooLarge => t!("hub.node.stop.frame_too_large"),
+        NodeStop::IngressStalled { secs } => t!("hub.node.stop.ingress_stalled", secs = secs),
+        NodeStop::JournalBudget => t!("hub.node.stop.journal_budget"),
+        NodeStop::JournalFails => t!("hub.node.stop.journal_fails"),
+        NodeStop::NotRecorded => t!("hub.node.stop.not_recorded"),
+        NodeStop::HarnessGone => t!("hub.node.stop.harness_gone"),
+        NodeStop::AdapterExited => t!("hub.node.stop.adapter_exited"),
+        NodeStop::StoppedByNode => t!("hub.node.stop.stopped_by_node"),
+        NodeStop::HarnessIdle => t!("hub.node.stop.harness_idle"),
+        NodeStop::ResearchBudget => t!("hub.node.stop.research_budget"),
+    }
+}
 
 /// A turn's end for the business side, told after its commit.
 #[derive(Debug)]
@@ -188,6 +222,8 @@ pub struct NodeRuntime {
     apply_wait_ms: AtomicU64,
     /// What a remote Node's replayed batches pass before the inbox ([`Self::over_link`]).
     replay_check: OnceLock<ReplayCheck>,
+    /// What the Node's usage reports may add to a session's cost ([`Self::set_cost_caps`]).
+    cost_caps: Mutex<CostCaps>,
     /// The largest replay page the Node's transport carries (unbounded in process).
     largest_replay: AtomicU32,
     /// Turn ends settled outside the apply worker (a local cancel), told by it after the commit.
@@ -216,12 +252,28 @@ pub struct NodeRuntime {
     /// How long an open session may sit idle before its harness is let go, in ms
     /// ([`Self::set_idle_release`]; legacy's 10 minutes by default).
     idle_release: std::sync::atomic::AtomicI64,
-    /// New sessions left on the legacy runner since boot although this Node was on (no binding
-    /// could be planned, or the bind failed): `/healthz` shows them, so they don't hide.
+    /// New sessions bound nowhere since boot although this Node was on (no binding could be
+    /// planned, or the bind failed), so refused: `/healthz` shows them, so they don't hide.
     fallbacks: std::sync::atomic::AtomicU64,
+    /// Sessions of the (removed) legacy runner moved onto this Node since boot ([`Self::adopt`]).
+    adopted: std::sync::atomic::AtomicU64,
+    /// Sessions of the (removed) legacy runner ended since boot because they cannot run on this Node.
+    retired: std::sync::atomic::AtomicU64,
+    /// Research runs that went in process since boot although research runs on this Node (a
+    /// directory under none of its roots, or the roots unreadable): `/healthz` shows them too.
+    research_fallbacks: AtomicU64,
     /// The callers waiting on think jobs of this Node ([`NodePrint`]).
     jobs: node_jobs::Waiters,
+    /// The role of each message seen lately, by (session, message): a text delta takes its role
+    /// from the `message` row that began it, and a message's role never changes. What is not
+    /// here (after a restart, or once the map was cleared at [`ROLES_KEPT`]) is looked up by index.
+    roles: Mutex<HashMap<(String, String), Role>>,
 }
+
+/// The most events of one stream applied in one transaction ([`NodeRuntime::apply_some`]).
+const APPLY_RUN: usize = 128;
+/// How many message roles the coordinator keeps in memory before it starts over.
+const ROLES_KEPT: usize = 4096;
 
 /// How long applied Node events stay in the inbox (what is still needed stays longer).
 const INBOX_KEEP_MS: i64 = 7 * 24 * 3600 * 1000;
@@ -231,6 +283,9 @@ const PRUNE_BATCH: i64 = 500;
 /// The `retry_at` of a release queued for when its session's turn is over: never leased until
 /// [`NodeRuntime::release_in`] sends it.
 const AFTER_TURN: i64 = i64::MAX;
+/// The `retry_at` of the first prepare and open of a session adopted idle: never leased until a
+/// message reopens it ([`NodeRuntime::adopt_idle`]).
+const UNTIL_NEEDED: i64 = i64::MAX - 1;
 /// An attempt's deadline by default.
 const TURN_LIMIT_MS: i64 = 6 * 3_600_000;
 /// How long a session stays open with nothing to do, by default (legacy's idle kill).
@@ -329,6 +384,7 @@ impl NodeRuntime {
             lagging: Mutex::new(HashMap::new()),
             apply_wait_ms: AtomicU64::new(heads::APPLY_WAIT.as_millis() as u64),
             replay_check: OnceLock::new(),
+            cost_caps: Mutex::new(CostCaps::default()),
             largest_replay: AtomicU32::new(u32::MAX),
             ended_later: Mutex::new(vec![]),
             settled_later: Mutex::new(vec![]),
@@ -340,7 +396,11 @@ impl NodeRuntime {
             turn_limit: std::sync::atomic::AtomicI64::new(TURN_LIMIT_MS),
             idle_release: std::sync::atomic::AtomicI64::new(IDLE_RELEASE_MS),
             fallbacks: std::sync::atomic::AtomicU64::new(0),
+            adopted: std::sync::atomic::AtomicU64::new(0),
+            retired: std::sync::atomic::AtomicU64::new(0),
+            research_fallbacks: AtomicU64::new(0),
             jobs: node_jobs::Waiters::default(),
+            roles: Mutex::new(HashMap::new()),
         })
     }
 
@@ -350,6 +410,56 @@ impl NodeRuntime {
     pub fn over_link(&self, check: ReplayCheck, largest: u32) {
         let _ = self.replay_check.set(check);
         self.largest_replay.store(largest, Ordering::Relaxed);
+    }
+
+    /// Whether the Node is remote, behind a link ([`Self::over_link`]).
+    pub fn is_remote(&self) -> bool {
+        self.replay_check.get().is_some()
+    }
+
+    /// H1: a remote Node takes only its owner's own work until runs there are sandboxed
+    /// ([`super::node_binding::remote_refusal`]): refused (a conflict saying why, in the current
+    /// language) when `workspace`'s work may be someone else's. A Node paused or revoked is left
+    /// to what pausing does (its work waits). The local Node takes everything.
+    fn owners_work_in(&self, c: &rusqlite::Connection, workspace: &str) -> Result<(), StoreError> {
+        use super::node_binding::{RemoteRefusal, remote_refusal};
+        if !self.is_remote() {
+            return Ok(());
+        }
+        match remote_refusal(c, self.node_id.as_str(), workspace)? {
+            None | Some(RemoteRefusal::Inactive) => Ok(()),
+            Some(r) => {
+                let why = steve_i18n::t!(
+                    "hub.node.remote.refused",
+                    node = self.node_id.as_str(),
+                    why = r.why()
+                );
+                tracing::warn!(node = %self.node_id, workspace, refusal = ?r, "remote node refused: not its owner's work");
+                Err(StoreError::Conflict(why))
+            }
+        }
+    }
+
+    /// [`Self::owners_work_in`] for the workspace of `session`.
+    fn session_owners_work_in(
+        &self,
+        c: &rusqlite::Connection,
+        session: &str,
+    ) -> Result<(), StoreError> {
+        if !self.is_remote() {
+            return Ok(());
+        }
+        let ws: Option<String> = c
+            .query_row(
+                "SELECT workspace_id FROM sessions WHERE id=?",
+                [session],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match ws {
+            Some(w) => self.owners_work_in(c, &w),
+            None => Err(conflict(format!("no session {session}"))),
+        }
     }
 
     /// How long reconcile waits for the Node's heads to be applied before it holds the sessions
@@ -369,6 +479,13 @@ impl NodeRuntime {
             .store(ms.max(1), std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// What one usage report and one attempt may add to a session's cost at most
+    /// (`STEVE_NODE_COST_REPORT_MAX`, `STEVE_NODE_COST_ATTEMPT_MAX`); a report past them adds
+    /// nothing.
+    pub fn set_cost_caps(&self, caps: CostCaps) {
+        *self.cost_caps.lock().unwrap() = caps;
+    }
+
     /// An open session idle for `ms` (nothing running, queued or waiting on a card) is let go;
     /// the next message opens it again, resuming the conversation (`STEVE_IDLE_RELEASE_MS`).
     pub fn set_idle_release(&self, ms: i64) {
@@ -386,7 +503,7 @@ impl NodeRuntime {
         self.stopped.lock().unwrap().is_some()
     }
 
-    /// A new session stayed on the legacy runner although this Node is on.
+    /// A new session was bound nowhere although this Node is on (it is refused).
     pub fn fell_back(&self) {
         self.fallbacks.fetch_add(1, Ordering::Relaxed);
     }
@@ -394,6 +511,31 @@ impl NodeRuntime {
     /// How many new sessions [`Self::fell_back`] since boot.
     pub fn fallbacks(&self) -> u64 {
         self.fallbacks.load(Ordering::Relaxed)
+    }
+
+    /// How many legacy sessions were [`Self::adopt`]ed since boot.
+    pub fn adopted(&self) -> u64 {
+        self.adopted.load(Ordering::Relaxed)
+    }
+
+    /// A legacy session that cannot run on this Node was ended.
+    pub fn retired_one(&self) {
+        self.retired.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many legacy sessions were [`Self::retired_one`] since boot.
+    pub fn retired(&self) -> u64 {
+        self.retired.load(Ordering::Relaxed)
+    }
+
+    /// A research run went in process although research runs on this Node.
+    pub fn research_fell_back(&self) {
+        self.research_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many research runs [`Self::research_fell_back`] since boot.
+    pub fn research_fallbacks(&self) -> u64 {
+        self.research_fallbacks.load(Ordering::Relaxed)
     }
 
     /// An error if [`Self::stop`] was called.
@@ -545,6 +687,52 @@ impl NodeRuntime {
     /// never open at once (they share the item's worktree). A release that fails is asked again
     /// and the session waits for that one instead ([`Self::release_again_in`]).
     pub fn bind_after(&self, b: &Binding, after: Option<&str>) -> Result<(), StoreError> {
+        self.bind_with(b, after, None, false).map(|_| ())
+    }
+
+    /// A session the legacy runner ran moves onto this Node (B5; at boot since B7, as nothing
+    /// runs it any more). It opens continuing the same conversation, `resume` being the harness's
+    /// own session id the legacy runner kept (`sessions.acp_session_id`; `None`: it never got one,
+    /// so it starts a new one). The session hears it once. Idempotent: a session bound already is
+    /// left as it is (false).
+    pub fn adopt(&self, b: &Binding, resume: Option<&str>) -> Result<bool, StoreError> {
+        self.adopt_with(b, resume, false)
+    }
+
+    /// [`Self::adopt`] for a session with nothing to do now: bound as one this Node let go, its
+    /// workspace prepared and its harness opened only once a message comes ([`UNTIL_NEEDED`]).
+    /// So a boot that moves many idle sessions starts no harness for any of them.
+    pub fn adopt_idle(&self, b: &Binding, resume: Option<&str>) -> Result<bool, StoreError> {
+        self.adopt_with(b, resume, true)
+    }
+
+    fn adopt_with(
+        &self,
+        b: &Binding,
+        resume: Option<&str>,
+        idle: bool,
+    ) -> Result<bool, StoreError> {
+        let resume = match resume.filter(|r| !r.is_empty()) {
+            Some(r) => Some(ResumeHandle::try_from(r.to_string()).map_err(conflict)?),
+            None => None,
+        };
+        let fresh = self.bind_with(b, None, Some(resume), idle)?;
+        if fresh {
+            self.adopted.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(fresh)
+    }
+
+    /// [`Self::bind_after`]; `adopted`: a legacy session moving here, with what it resumes.
+    /// `idle`: its prepare and open wait until it is needed ([`Self::adopt_idle`]). Whether the
+    /// binding is new.
+    fn bind_with(
+        &self,
+        b: &Binding,
+        after: Option<&str>,
+        adopted: Option<Option<ResumeHandle>>,
+        idle: bool,
+    ) -> Result<bool, StoreError> {
         self.running()?;
         let workspace = WorkspaceRef {
             node: self.node_id.clone(),
@@ -555,9 +743,10 @@ impl NodeRuntime {
             workspace: workspace.clone(),
             choice: b.choice.clone(),
             policy: b.policy.clone(),
-            resume: None,
+            resume: adopted.clone().flatten(),
         };
-        self.tx(|tx| {
+        let fresh = self.tx(|tx| {
+            self.session_owners_work_in(tx, &b.session)?;
             let fresh = rt::bind_session_in(
                 tx,
                 &rt::SessionBinding {
@@ -570,7 +759,7 @@ impl NodeRuntime {
                 now(),
             )?;
             if !fresh {
-                return Ok(());
+                return Ok(false);
             }
             let (prep, prep_d) = command(
                 &format!("op_prep_{}", b.session),
@@ -608,22 +797,77 @@ impl NodeRuntime {
                 },
                 now(),
             )?;
+            if idle {
+                tx.execute(
+                    "UPDATE node_commands SET retry_at=?1 WHERE operation_id IN (?2, ?3) AND state='pending'",
+                    rusqlite::params![UNTIL_NEEDED, prep_op, open_op],
+                )?;
+            }
             let rev = session_revision(tx, &b.session)?;
             rt::session_cas_in(
                 tx,
                 &b.session,
                 rev,
                 &rt::SessionUpdate {
-                    phase: "opening",
+                    // as a session this Node let go: the next message opens it
+                    phase: if idle { "released" } else { "opening" },
                     active_attempt: None,
                     release_pending: false,
                 },
                 now(),
             )?;
-            Ok(())
+            if let Some(resume) = &adopted {
+                let text = steve_i18n::stored(|| match resume {
+                    Some(_) => steve_i18n::t!("hub.node.adopted"),
+                    None => steve_i18n::t!("hub.node.adopted_fresh"),
+                });
+                rt::add_event_in(
+                    tx,
+                    &b.session,
+                    "system",
+                    json!({ "text": text, "adopted": true }),
+                    V1,
+                    None,
+                    now(),
+                )?;
+            }
+            Ok(true)
         })?;
-        self.wake_send.notify_one();
-        Ok(())
+        if fresh && !idle {
+            self.wake_send.notify_one();
+        }
+        Ok(fresh)
+    }
+
+    /// The prepare and open of a session adopted idle ([`Self::adopt_idle`]) go now, as its
+    /// reopen; false: it has none waiting (it was opened since, or never adopted so).
+    fn open_deferred_in(&self, tx: &Tx, session: &str) -> Result<bool, StoreError> {
+        let n = tx.execute(
+            "UPDATE node_commands SET retry_at=0, updated=?1
+              WHERE operation_id IN (?2, ?3) AND state='pending' AND retry_at=?4",
+            rusqlite::params![
+                now(),
+                format!("op_prep_{session}"),
+                format!("op_open_{session}"),
+                UNTIL_NEEDED
+            ],
+        )?;
+        if n == 0 {
+            return Ok(false);
+        }
+        let rev = session_revision(tx, session)?;
+        rt::session_cas_in(
+            tx,
+            session,
+            rev,
+            &rt::SessionUpdate {
+                phase: "opening",
+                active_attempt: None,
+                release_pending: false,
+            },
+            now(),
+        )?;
+        Ok(true)
     }
 
     /// The session a decision belongs to.
@@ -645,6 +889,10 @@ impl NodeRuntime {
         session: &str,
         dependency: Option<&str>,
     ) -> Result<(), StoreError> {
+        // adopted idle: its first prepare and open, never sent, go now
+        if self.open_deferred_in(tx, session)? {
+            return Ok(());
+        }
         // a worktree it made that was tidied since, or that it could not make: made again first
         let again = match dependency {
             None => self.prepare_again_in(tx, session)?,
@@ -1029,6 +1277,8 @@ impl NodeRuntime {
         if p != Planned::Created {
             return Ok(p);
         }
+        // a member joined the workspace since the session was bound, say: no new turn there
+        self.session_owners_work_in(tx, session)?;
         let turn = uid("t");
         let msgs = rt::claim_in(tx, session, &turn, now())?;
         if msgs.is_empty() {
@@ -1052,7 +1302,14 @@ impl NodeRuntime {
                 now(),
             )?;
             for f in &m.files {
-                prompt.push(file_part(tx, f)?);
+                match file_part(tx, f)? {
+                    Some(p) => prompt.push(p),
+                    // the file is gone from the Hub (its row too): the message goes without it,
+                    // as on the legacy runner, instead of staying queued for good
+                    None => {
+                        tracing::warn!("{session}: attachment {} is gone; sent without it", f.id)
+                    }
+                }
             }
         }
         self.attempt_in(tx, session, &turn, 0, prompt)?;
@@ -1559,7 +1816,7 @@ impl NodeRuntime {
             session: session.to_string(),
             attempt: Some(attempt.to_string()),
             stop: completion.stop_reason.clone(),
-            error: completion.error.as_ref().map(|e| e.safe_detail.clone()),
+            error: completion.error.as_ref().map(said),
         });
         let mut staged = self.staged.lock().unwrap();
         staged.0.push(finished);
@@ -1651,7 +1908,7 @@ impl NodeRuntime {
                     "open_session" => {
                         let s = command_session_in(tx, &lease.operation)?;
                         self.config_opened_in(tx, &s, &lease.operation, false)?;
-                        self.opened_in(tx, &s, false, &e.safe_detail)?
+                        self.opened_in(tx, &s, false, &said(e))?
                     }
                     "abandon" => self.abandon_failed_in(tx, &lease.operation, Some(e))?,
                     "prepare_workspace" => {
@@ -1793,7 +2050,7 @@ impl NodeRuntime {
             return Ok(None);
         }
         let detail = match &receipt.state {
-            Observed::Finished { error: Some(e), .. } => e.safe_detail.clone(),
+            Observed::Finished { error: Some(e), .. } => said(e),
             Observed::Unknown { reason } => reason.clone(),
             _ => String::new(),
         };
@@ -2048,13 +2305,13 @@ impl NodeRuntime {
             return Ok(None);
         }
         // the user hears why even when no turn waited (the queued message stays for the next try)
+        let text =
+            steve_i18n::stored(|| steve_i18n::t!("hub.node.stop.reopen_failed", detail = detail));
         let mut end = Some(End {
             session: s.to_string(),
             attempt: None,
             stop: "error".to_string(),
-            error: Some(format!(
-                "the Node could not open the session again: {detail}"
-            )),
+            error: Some(text.clone()),
         });
         if let Some(turn) = waiting {
             let c = Completion {
@@ -2075,7 +2332,7 @@ impl NodeRuntime {
                 session: s.to_string(),
                 attempt: Some(last_attempt_in(tx, &turn)?),
                 stop: c.stop_reason.clone(),
-                error: c.error.as_ref().map(|e| e.safe_detail.clone()),
+                error: Some(text),
             });
         }
         let rev = session_revision(tx, s)?;
@@ -2554,9 +2811,10 @@ impl NodeRuntime {
                 let seq = e.cursor.seq as i64;
                 let payload = serde_json::to_value(e).map_err(conflict)?;
                 // a conflict is set aside on its own stream (D5: acknowledged once it is durably
-                // quarantined), so the rest of the batch and every other stream go on
+                // quarantined), so the rest of the batch and every other stream go on; the
+                // durable prefix moves once per stream, after the whole batch is in
                 if let rt::Inboxed::Conflict(why) =
-                    rt::inbox_insert_in(tx, k, seq, e.id.as_str(), &payload, now())?
+                    rt::inbox_put_in(tx, k, seq, e.id.as_str(), &payload, now())?
                 {
                     let q = rt::quarantine_in(tx, k, seq, e.id.as_str(), &payload, why, now())?;
                     if q.new {
@@ -2579,14 +2837,13 @@ impl NodeRuntime {
             }
             let mut durable = vec![];
             for (stream, epoch) in &touched {
-                let acked = rt::acked_in(
-                    tx,
-                    StreamKey {
-                        node: &node,
-                        stream,
-                        epoch,
-                    },
-                )?;
+                let k = StreamKey {
+                    node: &node,
+                    stream,
+                    epoch,
+                };
+                rt::extend_durable_in(tx, k)?;
+                let acked = rt::acked_in(tx, k)?;
                 if acked > 0 {
                     durable.push(Watermark {
                         stream: idv(stream.clone())?,
@@ -2626,29 +2883,47 @@ impl NodeRuntime {
 
     // ── T4: applying ──
 
-    /// Applies what is ready on every dirty stream. False: nothing was. Each event is one
-    /// transaction; what the Hub does about it (statistics, YOLO, the turn's end) follows that
-    /// event's commit, not the end of the whole pass.
+    /// Applies what is ready on every dirty stream. False: nothing was.
+    ///
+    /// A stream's events go in runs of up to [`APPLY_RUN`] per transaction, the streams taking
+    /// turns, so one long message neither costs a commit per delta nor keeps the other sessions
+    /// (and their permission cards) waiting. A run is the stream's flow (text, tools, plans) and
+    /// ends with the first other event, or the first the Hub does something about after its
+    /// commit (statistics, YOLO, the turn's end, a settle): what follows an event's commit still
+    /// follows that event's own commit, in order. A run that fails is rolled back and its stream
+    /// goes one event per transaction for the rest of the pass, so the events before a bad one are
+    /// still applied and the bad one stops its stream as before.
     fn apply_some(&self) -> bool {
-        let streams: Vec<(String, String)> = self.dirty.lock().unwrap().iter().cloned().collect();
+        let mut streams: std::collections::VecDeque<(String, String)> =
+            self.dirty.lock().unwrap().iter().cloned().collect();
         let node = self.node_id.to_string();
         let mut any = false;
-        for (stream, epoch) in streams {
-            loop {
-                let k = StreamKey {
-                    node: &node,
-                    stream: &stream,
-                    epoch: &epoch,
+        let mut one_by_one: HashSet<(String, String)> = HashSet::new();
+        while let Some((stream, epoch)) = streams.pop_front() {
+            let k = StreamKey {
+                node: &node,
+                stream: &stream,
+                epoch: &epoch,
+            };
+            let key = (stream.clone(), epoch.clone());
+            let limit = if one_by_one.contains(&key) {
+                1
+            } else {
+                APPLY_RUN
+            };
+            // turn ends settled outside this worker (a local cancel) before this run's commit are
+            // told before its events' ends: taken under the write lock, so every one comes from a
+            // transaction that is over, and the item hears its turns in commit order
+            let mut earlier = (vec![], vec![]);
+            let r = self.tx(|tx| {
+                earlier = self.take_settled();
+                let pending = rt::next_events_in(tx, k, limit)?;
+                let Some(last) = pending.last().map(|p| p.seq) else {
+                    return Ok(None);
                 };
-                // turn ends settled outside this worker (a local cancel) before this event's
-                // commit are told before its end: taken under the write lock, so every one comes
-                // from a transaction that is over, and the item hears its turns in commit order
-                let mut earlier = (vec![], vec![]);
-                let r = self.tx(|tx| {
-                    earlier = self.take_settled();
-                    let Some(p) = rt::next_event_in(tx, k)? else {
-                        return Ok(None);
-                    };
+                let mut told = Vec::with_capacity(pending.len());
+                let mut through = last;
+                for p in pending {
                     let ev: NodeEvent = serde_json::from_value(p.payload)?;
                     let mut ask: Vec<After> =
                         self.permission_event_in(tx, &ev)?.into_iter().collect();
@@ -2662,30 +2937,50 @@ impl NodeRuntime {
                     }
                     ask.extend(self.facts_in(tx, &ev)?);
                     let out = self.apply_in(tx, &ev)?;
-                    rt::mark_applied_in(tx, k, p.seq)?;
-                    Ok(Some((out, ask)))
-                });
-                self.book(earlier);
-                match r {
-                    Ok(Some((end, ask))) => {
-                        any = true;
+                    // only the stream's flow (text, tools, plans) runs on; anything else (an
+                    // attempt's end, a card, a receipt) is the last of its run
+                    let flow = matches!(
+                        ev.body,
+                        EventBody::TextDelta { .. }
+                            | EventBody::MessageStarted { .. }
+                            | EventBody::MessageCompleted { .. }
+                            | EventBody::ToolChanged { .. }
+                            | EventBody::Plan { .. }
+                    );
+                    let tells = out.is_some() || !ask.is_empty() || self.staged_any();
+                    told.push((out, ask));
+                    if tells || !flow {
+                        through = p.seq;
+                        break;
+                    }
+                }
+                rt::mark_applied_through_in(tx, k, through)?;
+                Ok(Some(told))
+            });
+            self.book(earlier);
+            match r {
+                Ok(Some(told)) => {
+                    any = true;
+                    for (end, ask) in told {
                         self.after(ask);
                         if let Some(end) = end {
                             self.tell_end(end);
                         }
                     }
-                    Ok(None) => {
-                        self.dirty
-                            .lock()
-                            .unwrap()
-                            .remove(&(stream.clone(), epoch.clone()));
-                        self.caught_up_on(&stream, &epoch);
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::error!("apply {stream}: {e}");
-                        break;
-                    }
+                    // its turn again once the others had theirs
+                    streams.push_back(key);
+                }
+                Ok(None) => {
+                    self.dirty.lock().unwrap().remove(&key);
+                    self.caught_up_on(&stream, &epoch);
+                }
+                Err(e) if limit > 1 => {
+                    tracing::debug!("apply {stream}: {e}; one event at a time");
+                    one_by_one.insert(key.clone());
+                    streams.push_front(key);
+                }
+                Err(e) => {
+                    tracing::error!("apply {stream}: {e}");
                 }
             }
         }
@@ -2694,6 +2989,14 @@ impl NodeRuntime {
             self.wake_send.notify_one();
         }
         any
+    }
+
+    /// The open transaction settled something the apply worker tells after its commit.
+    fn staged_any(&self) -> bool {
+        let (settled, ended) = &*self.staged.lock().unwrap();
+        !settled.is_empty()
+            || !ended.is_empty()
+            || !self.staged_workspace.lock().unwrap().is_empty()
     }
 
     /// What the Hub settled on its own word (a local cancel, an abandon the Node has no record
@@ -2782,27 +3085,12 @@ impl NodeRuntime {
         let mut out = vec![];
         match &ev.body {
             EventBody::Usage { report } if report.scope != UsageScope::Background => {
-                let cost = report
-                    .cost
-                    .as_ref()
-                    .and_then(|m| m.decimal.parse::<f64>().ok());
-                let delta = match cost {
-                    Some(c) if report.measurement == Measurement::Cumulative => {
-                        let before = earlier_cost_in(tx, &self.node_id, ev, &report.meter_epoch)?;
-                        Some(match before {
-                            Some(b) if b <= c => c - b,
-                            // a lower total: the harness counted from zero again
-                            _ => c,
-                        })
-                    }
-                    Some(c) => Some(c),
-                    None => None,
-                };
+                let delta = self.cost_in(tx, ev, report)?;
                 tx.execute(
                     "UPDATE sessions SET used = COALESCE(?, used), size = COALESCE(?, size), cost = CASE WHEN ? IS NULL THEN cost ELSE COALESCE(cost, 0) + ? END, updated = ? WHERE id = ?",
                     rusqlite::params![
-                        report.context_used.map(|x| x as i64),
-                        report.context_limit.map(|x| x as i64),
+                        report.context_used.and_then(cost::context),
+                        report.context_limit.and_then(cost::context),
                         delta,
                         delta,
                         now(),
@@ -2916,6 +3204,54 @@ impl NodeRuntime {
         Ok(out)
     }
 
+    /// What usage report `report` (of `ev`, being applied) adds to its session's cost: checked as
+    /// [`cost::Meter`] checks it, after the reports of the same attempt applied before it (their
+    /// caps hold across them). `None`: nothing.
+    fn cost_in(
+        &self,
+        tx: &Tx,
+        ev: &NodeEvent,
+        report: &UsageReport,
+    ) -> Result<Option<f64>, StoreError> {
+        let mut meter = cost::Meter::new(*self.cost_caps.lock().unwrap());
+        if let Subject::Execution(x) = &ev.subject
+            && let Some(session) = exec_session(x)
+        {
+            let earlier: Vec<String> = {
+                let mut st = tx.prepare_cached(
+                    "SELECT payload FROM node_event_inbox WHERE node_id=? AND applied=1 AND json_extract(payload,'$.body.type')='usage'
+                      AND json_extract(payload,'$.subject.attempt')=? AND json_extract(payload,'$.subject.session')=?
+                      AND NOT (stream=? AND epoch=? AND seq=?) ORDER BY stream, seq",
+                )?;
+                st.query_map(
+                    rusqlite::params![
+                        self.node_id.as_str(),
+                        x.attempt().as_str(),
+                        session,
+                        ev.cursor.stream.as_str(),
+                        ev.cursor.epoch.as_str(),
+                        ev.cursor.seq as i64
+                    ],
+                    |r| r.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+            };
+            for r in earlier {
+                let Ok(e) = serde_json::from_str::<NodeEvent>(&r) else {
+                    continue;
+                };
+                if let EventBody::Usage { report } = &e.body {
+                    meter.add(report, || {
+                        cost::earlier_cost_in(tx, &self.node_id, &e, &report.meter_epoch)
+                    })?;
+                }
+            }
+        }
+        meter.add(report, || {
+            cost::earlier_cost_in(tx, &self.node_id, ev, &report.meter_epoch)
+        })
+    }
+
     /// What one attempt did, for its statistics row: from the Node's own events of it.
     fn attempt_facts(&self, session: &str, attempt: &str) -> AttemptFacts {
         self.store
@@ -2944,33 +3280,16 @@ impl NodeRuntime {
         };
         let mut f = AttemptFacts::default();
         let mut tools: std::collections::HashMap<String, ToolView> = Default::default();
-        // the cumulative cost per harness process: what it stood at before this attempt, then now
-        let mut last: std::collections::HashMap<String, f64> = Default::default();
+        let mut meter = cost::Meter::new(*self.cost_caps.lock().unwrap());
         for r in rows {
             let Ok(ev) = serde_json::from_str::<NodeEvent>(&r) else {
                 continue;
             };
             if let EventBody::Usage { report } = &ev.body
-                && report.scope != UsageScope::Background
-                && let Some(c) = report
-                    .cost
-                    .as_ref()
-                    .and_then(|m| m.decimal.parse::<f64>().ok())
+                && let Some(delta) = meter.add(report, || {
+                    cost::earlier_cost_in(conn, &self.node_id, &ev, &report.meter_epoch)
+                })?
             {
-                let delta = if report.measurement == Measurement::Cumulative {
-                    let epoch = report.meter_epoch.to_string();
-                    let before = match last.get(&epoch) {
-                        Some(b) => Some(*b),
-                        None => earlier_cost_in(conn, &self.node_id, &ev, &report.meter_epoch)?,
-                    };
-                    last.insert(epoch, c);
-                    match before {
-                        Some(b) if b <= c => c - b,
-                        _ => c,
-                    }
-                } else {
-                    c
-                };
                 f.cost = Some(f.cost.unwrap_or(0.0) + delta);
             }
             match ev.body {
@@ -3103,7 +3422,12 @@ impl NodeRuntime {
     /// The session's Steve event, once (the Node's stream position is its identity).
     fn store_event_in(&self, tx: &Tx, session: &str, ev: &NodeEvent) -> Result<(), StoreError> {
         let role = match &ev.body {
-            EventBody::TextDelta { message, .. } => role_of_in(tx, session, message)?,
+            EventBody::TextDelta { message, .. } => self.role_in(tx, session, message)?,
+            EventBody::MessageStarted { message, role, .. } => {
+                // a rolled-back start comes again with the same role: keeping it early is harmless
+                self.remember_role(session, message, *role);
+                None
+            }
             _ => None,
         };
         let Some(entry) = steve_transcript::of_node(&ev.body, role) else {
@@ -3124,6 +3448,28 @@ impl NodeRuntime {
             ev.at.0,
         )?;
         Ok(())
+    }
+
+    /// The role of a message: from memory, else from its `message` row (by index, however long
+    /// the message is).
+    fn role_in(&self, tx: &Tx, session: &str, message: &str) -> Result<Option<Role>, StoreError> {
+        let key = (session.to_string(), message.to_string());
+        if let Some(r) = self.roles.lock().unwrap().get(&key) {
+            return Ok(Some(*r));
+        }
+        let role = role_of_in(tx, session, message)?;
+        if let Some(r) = role {
+            self.remember_role(session, message, r);
+        }
+        Ok(role)
+    }
+
+    fn remember_role(&self, session: &str, message: &str, role: Role) {
+        let mut roles = self.roles.lock().unwrap();
+        if roles.len() >= ROLES_KEPT {
+            roles.clear();
+        }
+        roles.insert((session.to_string(), message.to_string()), role);
     }
 
     /// An attempt is over: the Hub decides. A passing failure with no tool run is tried again as a
@@ -3214,7 +3560,7 @@ impl NodeRuntime {
             session: session.to_string(),
             attempt: Some(last_attempt_in(tx, turn)?),
             stop: c.stop_reason.clone(),
-            error: c.error.as_ref().map(|e| e.safe_detail.clone()),
+            error: c.error.as_ref().map(said),
         }))
     }
 
@@ -3328,34 +3674,6 @@ enum After {
     },
 }
 
-/// The cumulative cost the same harness process reported last before `ev` in its session.
-fn earlier_cost_in(
-    tx: &rusqlite::Connection,
-    node: &NodeId,
-    ev: &NodeEvent,
-    epoch: &Epoch,
-) -> Result<Option<f64>, StoreError> {
-    let r: Option<String> = match tx.query_row(
-        "SELECT json_extract(payload,'$.body.report.cost.decimal') FROM node_event_inbox
-           WHERE node_id=? AND stream=? AND epoch=? AND seq<? AND json_extract(payload,'$.body.type')='usage'
-             AND json_extract(payload,'$.body.report.meter_epoch')=? AND json_extract(payload,'$.body.report.cost') IS NOT NULL
-           ORDER BY seq DESC LIMIT 1",
-        rusqlite::params![
-            node.as_str(),
-            ev.cursor.stream.as_str(),
-            ev.cursor.epoch.as_str(),
-            ev.cursor.seq as i64,
-            epoch.as_str()
-        ],
-        |r| r.get(0),
-    ) {
-        Ok(x) => x,
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(e.into()),
-    };
-    Ok(r.and_then(|d| d.parse().ok()))
-}
-
 /// A permission card made while applying, for the business side (YOLO) after the commit.
 struct Asked {
     session: String,
@@ -3460,14 +3778,19 @@ fn message_event(text: &str, via: &str, files: &[FileRef]) -> Value {
     v
 }
 
-/// An attachment for the Node to fetch from the Hub by hash.
-fn file_part(tx: &Tx, f: &FileRef) -> Result<Part, StoreError> {
-    let (sha, size, mime): (String, i64, String) = tx.query_row(
-        "SELECT sha256, size, mime FROM files WHERE id=?",
-        [&f.id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-    Ok(Part::File {
+/// An attachment for the Node to fetch from the Hub by hash (none when the Hub has no such file).
+fn file_part(tx: &Tx, f: &FileRef) -> Result<Option<Part>, StoreError> {
+    let Some((sha, size, mime)) = tx
+        .query_row(
+            "SELECT sha256, size, mime FROM files WHERE id=?",
+            [&f.id],
+            |r| Ok::<(String, i64, String), _>((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Part::File {
         artifact: ArtifactRef {
             id: idv(f.id.clone())?,
             sha256: idv(if sha.starts_with("sha256:") {
@@ -3479,7 +3802,7 @@ fn file_part(tx: &Tx, f: &FileRef) -> Result<Part, StoreError> {
             mime,
         },
         name: f.name.clone(),
-    })
+    }))
 }
 
 fn receipt_state(s: &Observed) -> (ReceiptState, bool) {
@@ -3660,12 +3983,17 @@ fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
 ///   not finished, plus harnesses restarting for a configure (what a drain waits for);
 /// - `unknown`: attempts whose outcome nobody can tell (a person gives them up);
 /// - `parked`: sessions with queued messages bound to a Node that is not enabled here;
-/// - `legacy.sessions`: sessions the legacy runner would still run (not ended, not read-only,
-///   bound to no Node); `legacy.busy`: legacy sessions with work in hand (queued messages, a
-///   claimed or submitted dispatch, a pending resume). Removing the runner needs both at 0.
+/// - `legacy.sessions`: sessions bound to no Node that have not ended (not read-only): ones the
+///   removed legacy runner left that boot could not move yet (the local Node off or stopped, a row
+///   unreadable). With the local Node on they are 0 after boot (B7: each is moved or ended);
+///   `legacy.busy`: those with work in hand (queued messages, a claimed or submitted dispatch, a
+///   pending resume).
 ///
-/// `fallbacks` (since boot) counts new sessions left on the legacy runner although the local Node
-/// was on. Public: no reason text, ids or paths, only states and counts.
+/// `fallbacks` (since boot) counts new sessions bound nowhere although the local Node was on (they
+/// are refused); `research_fallbacks` (since boot) research runs that went in process although
+/// research runs on the local Node. `adopted` / `retired` (since boot): legacy sessions moved onto
+/// the local Node / ended because they cannot run there. Public: no reason text, ids or paths,
+/// only states and counts.
 pub fn health(
     store: &Store,
     local: Option<&NodeRuntime>,
@@ -3711,6 +4039,9 @@ pub fn health(
         "stopped": local.is_some_and(|n| n.is_stopped()),
         "holding": local.is_some_and(|n| n.is_holding()),
         "fallbacks": local.map_or(0, |n| n.fallbacks()),
+        "adopted": local.map_or(0, |n| n.adopted()),
+        "retired": local.map_or(0, |n| n.retired()),
+        "research_fallbacks": local.map_or(0, |n| n.research_fallbacks()),
         "sessions": sessions,
         "open": open,
         "running": running,
@@ -3812,18 +4143,29 @@ fn turn_revision(tx: &Tx, turn: &str) -> Result<i64, StoreError> {
     )?)
 }
 
+/// The `message` row that began a message (migration 044's index `events_message_start`).
+const ROLE_SQL: &str = "SELECT json_extract(data,'$.role') FROM events WHERE session_id=?1 AND kind='message' AND format='steve.v1' AND json_extract(data,'$.message')=?2 ORDER BY seq DESC LIMIT 1";
+
 /// The role of a message, from the `message` entry that began it.
 fn role_of_in(tx: &Tx, session: &str, message: &str) -> Result<Option<Role>, StoreError> {
-    let r: Option<String> = match tx.query_row(
-        "SELECT json_extract(data,'$.role') FROM events WHERE session_id=? AND kind='message' AND format='steve.v1' AND json_extract(data,'$.message')=? ORDER BY seq DESC LIMIT 1",
-        [session, message],
-        |r| r.get(0),
-    ) {
-        Ok(x) => x,
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(e.into()),
-    };
-    Ok(r.and_then(|r| serde_json::from_value(Value::String(r)).ok()))
+    Ok(role_lookup_in(tx, session, message)?.0)
+}
+
+/// [`role_of_in`] and the SQLite VM steps it took (tests check they do not grow with the message).
+fn role_lookup_in(
+    tx: &Tx,
+    session: &str,
+    message: &str,
+) -> Result<(Option<Role>, i32), StoreError> {
+    let mut st = tx.prepare_cached(ROLE_SQL)?;
+    st.reset_status(rusqlite::StatementStatus::VmStep);
+    let r: Option<Option<String>> = st.query_row([session, message], |r| r.get(0)).optional()?;
+    let steps = st.get_status(rusqlite::StatementStatus::VmStep);
+    Ok((
+        r.flatten()
+            .and_then(|r| serde_json::from_value(Value::String(r)).ok()),
+        steps,
+    ))
 }
 
 /// Where the session's conversation continues: the resume handle of the Node's last view of it.
@@ -3911,6 +4253,32 @@ mod tests {
         ) {
             self.finished.lock().unwrap().push(attempt.into());
         }
+    }
+
+    /// A cause the Node decided on is told in our words (zh-CN even inside an en request: it is
+    /// stored); a harness's own words pass as they came.
+    #[tokio::test]
+    async fn a_nodes_stop_reason_is_said_in_chinese() {
+        steve_i18n::scope(steve_i18n::EN, async {
+            assert_eq!(
+                said(&NodeStop::Deadline.error()),
+                "运行超过了时限，Node 已停止它"
+            );
+            assert_eq!(
+                said(&NodeStop::OutputLimit.error()),
+                "输出超过了这次运行的上限，Node 已停止它"
+            );
+            assert_eq!(
+                said(&NodeStop::IngressStalled { secs: 90 }.error()),
+                "Node 连续 90 秒没能接收 harness 的输出（它的本地运行记录或磁盘卡住了），已中断这次运行"
+            );
+            // the very words, but another code: not ours to rephrase
+            let other = ApiError::new(ErrorCode::Stale, NodeStop::HarnessGone.detail());
+            assert_eq!(said(&other), "the harness is gone");
+            let harness = ApiError::new(ErrorCode::Internal, "rate limited, try later");
+            assert_eq!(said(&harness), "rate limited, try later");
+        })
+        .await;
     }
 
     async fn until(what: &str, f: impl Fn() -> bool) {
@@ -4004,6 +4372,145 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(seen.finished.lock().unwrap().len(), 1);
         assert_eq!(seen.ended.lock().unwrap().len(), 1);
+    }
+
+    /// The role of a delta is found at the same cost however long its message already is: from
+    /// memory, else through the index on `message` rows (never walking back through the deltas).
+    #[test]
+    fn a_deltas_role_costs_the_same_however_long_its_message() {
+        const S: &str = "s1";
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        let add = |tx: &Tx, kind: &str, data: Value| {
+            rt::add_event_in(tx, S, kind, data, V1, None, 1).map(|_| ())
+        };
+        let steps = |n_before: usize| -> (Option<Role>, i32) {
+            store
+                .transaction::<_, StoreError>(|tx| {
+                    for i in 0..n_before {
+                        add(
+                            tx,
+                            "text",
+                            json!({"role": "thought", "message": "m1", "text": format!("t{i} ")}),
+                        )?;
+                    }
+                    role_lookup_in(tx, S, "m1")
+                })
+                .unwrap()
+        };
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
+                    [S],
+                )?;
+                add(tx, "message", json!({"message": "m0", "role": "user"}))?;
+                add(tx, "message", json!({"message": "m1", "role": "thought"}))
+            })
+            .unwrap();
+        let (role, short) = steps(10);
+        assert_eq!(role, Some(Role::Thought));
+        let (role, long) = steps(5000);
+        assert_eq!(role, Some(Role::Thought));
+        assert_eq!(
+            long, short,
+            "VM steps after 5010 deltas ({long}) and after 10 ({short})"
+        );
+        // another session's or another message's rows do not count either
+        let (role, _) = store
+            .transaction::<_, StoreError>(|tx| role_lookup_in(tx, S, "m0"))
+            .unwrap();
+        assert_eq!(role, Some(Role::User));
+    }
+
+    /// A delta's role comes from memory while the coordinator remembers its message, from the
+    /// store once it does not (a restart): either way the one its message began with.
+    #[tokio::test]
+    async fn a_delta_keeps_its_messages_role_with_or_without_memory() {
+        const S: &str = "s1";
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
+                    [S],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let node = FakeNode::new("n1");
+        let seen = Arc::new(Seen::default());
+        let rt = NodeRuntime::new(store.clone(), node.clone(), seen.clone());
+        node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+        rt.start();
+        rt.bind(&Binding {
+            session: S.into(),
+            resource: format!("item:{S}"),
+            prepare: PrepareKind::Scratch,
+            choice: build::choice(),
+            policy: build::policy(),
+        })
+        .unwrap();
+        rt.prompt(S, "first", "user", &[]).unwrap();
+        until("started", || !seen.started.lock().unwrap().is_empty()).await;
+        let exec: ExecutionRef = store
+            .reader(|c| {
+                Ok::<_, StoreError>(c.query_row(
+                    "SELECT execution FROM runtime_attempts",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
+            .map(|s| serde_json::from_str(&s).unwrap())
+            .unwrap();
+        let subject = Subject::Execution(exec);
+        node.emit(
+            subject.clone(),
+            EventBody::MessageStarted {
+                message: "m1".into(),
+                block: "b1".into(),
+                role: Role::Thought,
+            },
+        )
+        .await
+        .unwrap();
+        let delta = |at: u64| EventBody::TextDelta {
+            message: "m1".into(),
+            block: "b1".into(),
+            utf8_offset: at,
+            text: "x".into(),
+        };
+        node.emit(subject.clone(), delta(0)).await.unwrap();
+        let roles = || -> Vec<String> {
+            store
+                .reader(|c| {
+                    let mut st = c.prepare(
+                        "SELECT json_extract(data,'$.role') FROM events WHERE kind='text' ORDER BY seq",
+                    )?;
+                    let v = st
+                        .query_map([], |r| r.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, StoreError>(v)
+                })
+                .unwrap()
+        };
+        until("first delta", || roles().len() == 1).await;
+        assert!(
+            rt.roles
+                .lock()
+                .unwrap()
+                .contains_key(&(S.to_string(), "m1".to_string()))
+        );
+        // forgotten (as after a restart): found again in the store
+        rt.roles.lock().unwrap().clear();
+        node.emit(subject.clone(), delta(1)).await.unwrap();
+        until("second delta", || roles().len() == 2).await;
+        assert_eq!(roles(), ["thought", "thought"]);
     }
 
     #[test]

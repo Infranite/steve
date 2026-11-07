@@ -47,8 +47,14 @@ pub enum Auth {
     },
     /// Your own trigger words in your own message (only on your own account).
     Trigger { source: String },
-    /// A live `msg.send` grant of the flow.
-    Grant { flow_id: String, run_id: String },
+    /// A live `msg.send` grant of the flow, for the flow version the run is running (a grant is
+    /// bound to one version: an edit of the flow ends it).
+    Grant {
+        flow_id: String,
+        run_id: String,
+        #[serde(default)]
+        flow_version: i64,
+    },
     /// The flow engine's approval for this run: `gate` = you approved exactly this step (its fixed
     /// text was on the card), else an `approve` node earlier on the path.
     Step {

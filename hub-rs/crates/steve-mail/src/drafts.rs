@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_modules::accounts::service::current_party;
-use steve_modules::outbound::CheckResult;
+use steve_modules::outbound::{self, Audience, CheckCx, CheckResult, Verdict};
 use steve_modules::{ApiError, Caller, decisions};
 use steve_store::base::{self, Viewer, Visibility};
 use steve_store::{FileRef, NewDecision, Tx, uid};
@@ -275,6 +275,39 @@ pub fn audience_of(c: &Connection, ws: &str, addr: &str) -> MailResult<(Option<S
     Ok((p.map(|p| p.id), internal))
 }
 
+/// A check whose model part did not run (`skipped`) passed nothing: with no span from the local checks it
+/// is `unchecked` (YOLO declines it, the card offers the model check), spans and secrets stay as found.
+pub fn local_only(mut r: CheckResult, skipped: bool) -> CheckResult {
+    if skipped && r.verdict == Verdict::Pass {
+        r.verdict = Verdict::Unchecked;
+    }
+    r
+}
+
+/// Who reads a draft, for the disclosure check.
+pub fn audience_of_draft(c: &Connection, d: &DraftRow) -> MailResult<Audience> {
+    let mut a = Audience::default();
+    let mut names = Vec::new();
+    for r in d.to.iter().chain(d.cc.iter()).chain(d.bcc.iter()) {
+        let (party, internal) = audience_of(c, &d.workspace_id, &r.addr)?;
+        a.external |= !internal;
+        if let Some(p) = party {
+            a.parties.push(p);
+        }
+        names.push(if r.name.is_empty() {
+            r.addr.clone()
+        } else {
+            r.name.clone()
+        });
+    }
+    a.description = format!(
+        "邮件收件人：{}，{}",
+        names.join("、"),
+        if a.external { "外部" } else { "内部" }
+    );
+    Ok(a)
+}
+
 fn rcpt_out(c: &Connection, ws: &str, l: &[Rcpt]) -> MailResult<Vec<RcptOut>> {
     l.iter()
         .map(|r| {
@@ -510,6 +543,96 @@ pub fn expire_open(tx: &Tx, ws: &str, draft: &str) -> MailResult<()> {
 impl Mail {
     pub(crate) fn viewer_of(&self, who: &Caller) -> MailResult<Viewer> {
         Ok(self.0.m.viewer(who)?)
+    }
+
+    /// Whether a draft written now gets the model check at once: only while YOLO decides for it (it treats
+    /// an unchecked draft as failed). Otherwise the local checks run and the card offers the model check
+    /// ([`Mail::check_draft`]), so writing a draft does not wait for it.
+    pub(crate) fn model_check_now(&self, ws: &str, item_id: Option<&str>) -> bool {
+        self.0.link.hooks().yolo_on(ws, item_id)
+    }
+
+    /// `POST /mail/drafts/:id/check`: the whole disclosure check, the model included, on the draft as it is
+    /// now; its basis is replaced (the drafting notes kept). Only a draft that can still change.
+    pub async fn check_draft(&self, who: &Caller, id: &str) -> MailResult<DraftOut> {
+        let d = self.own_draft(who, id)?;
+        if !["draft", "pending"].contains(&d.status.as_str()) {
+            return Err(ApiError::conflict(steve_i18n::t!("mail.draft.locked")).into());
+        }
+        let (audience, knowledge, complete) = self.0.m.store.reader(|c| -> MailResult<_> {
+            let a = audience_of_draft(c, &d)?;
+            // the same knowledge the drafting check had (retrieved pieces and memories), read again
+            let entries = d
+                .basis
+                .as_ref()
+                .and_then(|b| b["entries"].as_array().cloned())
+                .unwrap_or_default();
+            let (k, complete) =
+                steve_knowledge::retrieve::knowledge_again(c, &d.workspace_id, &entries)?;
+            Ok((a, k, complete))
+        })?;
+        let draft_model = d
+            .basis
+            .as_ref()
+            .and_then(|b| b["answer_model"].as_str())
+            .filter(|m| !m.is_empty())
+            .map(str::to_string);
+        let mut check = outbound::check(
+            &self.0.m,
+            &CheckCx {
+                ws: who.ws.clone(),
+                actor: d.author.clone(),
+                draft_model,
+                audience_said: None,
+                skip_model: false,
+                internal_skip: false,
+            },
+            &audience,
+            &format!("{}\n\n{}", d.subject, d.body),
+            &knowledge,
+        )
+        .await;
+        // checked against less than it was written with: it does not pass on that
+        if !complete && check.verdict == Verdict::Pass {
+            check.verdict = Verdict::Leak;
+            check.spans.push(outbound::Span {
+                text: String::new(),
+                reason: outbound::R_BASIS_GONE.into(),
+            });
+        }
+        let mut basis = serde_json::to_value(&check).unwrap_or(Value::Null);
+        if let (Some(Value::Object(old)), Value::Object(new)) = (&d.basis, &mut basis) {
+            for k in ["why", "needs_attention", "cites", "answer_model"] {
+                if let Some(v) = old.get(k) {
+                    new.insert(k.into(), v.clone());
+                }
+            }
+        }
+        let now = self.now();
+        let done = self.0.m.store.transaction(|tx| -> MailResult<bool> {
+            let n = tx.execute(
+                "UPDATE mail_drafts SET basis = ?, updated = ? WHERE id = ? AND updated = ? AND status IN ('draft', 'pending')",
+                rusqlite::params![basis.to_string(), now.max(d.updated + 1), d.id, d.updated],
+            )?;
+            if n == 1 {
+                base::audit(
+                    tx,
+                    &who.ws,
+                    &who.me,
+                    "mail_draft.check",
+                    &d.id,
+                    &json!({"verdict": check.verdict}),
+                )?;
+            }
+            Ok(n == 1)
+        })?;
+        if !done {
+            // changed while it was checked: checking again is the caller's
+            return Err(ApiError::conflict(steve_i18n::t!("mail.draft.changed")).into());
+        }
+        let d = self.own_draft(who, id)?;
+        self.notify_draft(&d);
+        self.out(&d)
     }
 
     /// A thread the caller may see (`404 没有这个往来`).

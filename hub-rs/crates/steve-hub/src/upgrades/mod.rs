@@ -2,6 +2,7 @@
 mod client;
 pub mod install;
 pub mod runner;
+pub mod signing;
 pub mod supervisor;
 #[cfg(test)]
 mod tests;

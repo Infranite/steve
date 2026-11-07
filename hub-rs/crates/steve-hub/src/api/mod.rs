@@ -3,6 +3,7 @@
 
 mod annotations;
 mod bots;
+pub mod dedupe;
 mod files;
 mod items;
 mod misc;
@@ -45,6 +46,8 @@ pub struct Inner {
     /// The models each harness offers (`/system/models`).
     pub catalog: crate::catalog::Catalog,
     pub state_cache: misc::StateCache,
+    /// `client_id` of recent sends (`POST /thread`, `POST /items`), so a retry does not send twice.
+    pub dedupe: dedupe::Dedupe,
     /// The new modules (steve-modules), for config drafts and decisions they own.
     pub modules: Option<steve_modules::Modules>,
     /// Remote Nodes (`STEVE_NODE_LISTEN=1`): pairing, the `/node/ws` listener, their coordinators.
@@ -79,6 +82,7 @@ impl AppState {
             bus,
             runtimes,
             state_cache: Default::default(),
+            dedupe: Default::default(),
             modules: None,
             nodes: None,
             node: None,
@@ -508,7 +512,11 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/projects", post(projects::create))
         .route("/projects/describe", post(projects::describe))
         .route("/projects/{id}", patch(projects::patch_one))
-        .route("/projects/{id}/lane", get(projects::lane))
+        .route(
+            "/projects/{id}/lane",
+            get(projects::lane).patch(projects::lane_policy),
+        )
+        .route("/projects/{id}/lane/now", post(projects::lane_now))
         .route("/fs/dirs", get(projects::dirs))
         // tags
         .route("/tags", post(misc::tag_create))
@@ -542,6 +550,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
             "/system/workspaces/reclaim",
             post(misc::system_workspaces_reclaim),
         )
+        .route("/system/outbox", get(misc::system_outbox))
+        .route("/system/outbox/revive", post(misc::system_outbox_revive))
         // event stream
         .route("/stream", get(stream::stream))
         .fallback(api_fallback)

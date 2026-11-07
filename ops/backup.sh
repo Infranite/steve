@@ -3,14 +3,16 @@
 # - an online SQLite backup, checked (quick_check) before it is kept;
 # - what the database alone can't bring back, in one tar readable by the owner only: attachments
 #   (data/files), the signing identity a Hub must be signed with to read the vault's master key
-#   (signing), the secret files the configuration points at (secrets) and the configuration (steve.env).
+#   (signing, without the keychain's password: the Hub keeps that in the login keychain, and a copy in
+#   a file would unlock the identity for anyone who reads the backup), the secret files the
+#   configuration points at (secrets) and the configuration (steve.env).
 # Same disk, no restore drill: a copy against mistakes and a corrupt database, not disaster recovery.
 setopt err_return pipe_fail
 HOME_DIR=${STEVE_HOME:-$HOME/.steve}
 OUT=$HOME_DIR/backups
 DAY=$(date +%Y%m%d)
 umask 077
-mkdir -p $OUT
+mkdir -p $OUT && chmod 700 $OUT
 
 db=$OUT/daily-$DAY.sqlite3
 tmp=$db.partial
@@ -28,7 +30,7 @@ for p in data/files signing secrets steve.env; do
   [[ -e $HOME_DIR/$p ]] && parts+=($p)
 done
 if (( ${#parts} )); then
-  tar -C $HOME_DIR -cf $OUT/daily-$DAY-files.tar.partial $parts
+  tar -C $HOME_DIR --exclude signing/keychain-pass -cf $OUT/daily-$DAY-files.tar.partial $parts
   mv -f $OUT/daily-$DAY-files.tar.partial $OUT/daily-$DAY-files.tar
 fi
 

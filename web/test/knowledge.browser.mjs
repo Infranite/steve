@@ -16,7 +16,8 @@ const candidates = [
   { mem: mem('c1', 'rule', 'Agent 出现异常时，先由 Steve 判断能否处理，处理不了再通知用户。', { status: 'candidate', source_label: '11-04 的对话' }), origin: 'chat', origin_label: '11-04 的对话', evidence: '后续这种 agent 的异常，最好是先找 steve 判断能否处理，处理不了再通知用户', supersedes: null, decision_id: 'd1', record: '长期记忆', why: '以后设计异常通知、自动续跑时都按这个顺序', scope: 'Agent 停下、失败等异常' },
   { mem: mem('c2', 'fact', '事项页排队列表把每条都按评论渲染；遇到“评论排版很丑”，先确认那段是不是任务说明。', { status: 'candidate', source_label: 'ST-16 交付时' }), origin: 'item', origin_label: 'ST-16 交付时', evidence: '排队列表把每一条都当用户评论，按 Markdown 整段平铺出来', supersedes: null, decision_id: 'd2', record: '知识条目', why: '再有类似排版反馈时先判断原因，避免误改渲染', scope: '排查事项页评论排版问题' },
 ]
-const added = []
+const expired = [{ mem: mem('x1', 'rule', '周报每周五下午发给团队。', { status: 'stale', source_label: '10-01 的对话' }), origin_label: '10-01 的对话', evidence: '以后周报周五下午发', expired: 1 }]
+const added = [], restored = []
 const run = async ({ width, height, scheme }) => {
   const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height }, colorScheme: scheme, reducedMotion: 'reduce' })
   page.setDefaultTimeout(10000)
@@ -28,6 +29,10 @@ const run = async ({ width, height, scheme }) => {
     if (u.pathname === '/api/kb/mems' && method === 'POST') { const b = route.request().postDataJSON(); added.push(b); data = mem('n' + added.length, b.kind, b.text) }
     else if (u.pathname === '/api/kb/mems') data = mems
     else if (u.pathname === '/api/kb/candidates') data = candidates
+    else if (u.pathname === '/api/kb/candidates/expired') data = restored.length ? [] : expired
+    else if (u.pathname.endsWith('/restore') && method === 'POST') { restored.push(u.pathname); data = { ok: true } }
+    // OpenViking down: the keyword passes answer, and say so
+    else if (u.pathname === '/api/kb/search') data = { hits: u.searchParams.get('q') === '续签' ? [{ n: 1, type: 'chunk', id: 'doc1', seq: 0, title: '合同', heading: null, text: 'Acme 的合同每年三月续签', label: '笔记', level: 'conclusion', href: '#/knowledge/doc/doc1' }] : [], took_ms: 3, semantic_down: true }
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) })
   })
   const fits = async () => assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `overflow at ${width}px`)
@@ -55,6 +60,21 @@ const run = async ({ width, height, scheme }) => {
     assert.match(await page.locator('[data-candidate="c1"] [data-cand-why]').innerText(), /为什么值得保留：以后设计异常通知/)
     assert.equal(await page.locator('[data-cand-yes]').first().innerText(), '保存')
     await fits(); await shot('kb-candidates')
+    // expired ones are folded away below, and one click puts one back
+    await page.locator('[data-cand-expired-toggle]').click()
+    await page.locator('[data-cand-expired-row="x1"] [data-cand-restore]').click()
+    await page.waitForFunction(() => !document.querySelector('[data-cand-expired]'))
+    assert.deepEqual(restored.splice(0), ['/api/kb/candidates/x1/restore'])
+    // search while the meaning search is down: the hits come with the note, and so does "nothing found"
+    await page.locator('[data-kb-search]').fill('续签'); await page.locator('[data-kb-search]').press('Enter')
+    await page.locator('[data-hit="doc1"]').waitFor()
+    assert.match(await page.locator('[data-kb-keywords-only]').innerText(), /只按关键词/)
+    await page.locator('[data-kb-search]').fill('没有的东西'); await page.locator('[data-kb-search]').press('Enter')
+    await page.getByText('没有找到').waitFor()
+    assert.equal(await page.locator('[data-kb-keywords-only]').count(), 1)
+    await fits(); await shot('kb-search-keywords-only')
+    // the link from 待处理 opens 待确认 directly
+    await page.goto(base + '/test/fixtures/knowledge.html?via=link#/knowledge?tab=pending'); await page.locator('[data-kb-tab="待确认"] [data-candidate="c1"]').waitFor()
     // the 待处理 card: the question names the record; an old decision still reads
     await page.goto(base + '/test/fixtures/knowledge.html?inbox'); await page.locator('[data-fixture-cards]').waitFor()
     assert.deepEqual(await page.locator('[data-card-ask]').allInnerTexts(), ['存为长期记忆吗？', '记住这条吗？'])

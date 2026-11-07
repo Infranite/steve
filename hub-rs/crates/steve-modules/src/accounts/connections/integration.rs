@@ -12,7 +12,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::provider::{AuthKind, ConnectionProvider, FieldDef};
+use super::provider::{AuthKind, ConnectionProvider, FieldDef, Pairing};
 use super::repo::ConnRow;
 use super::service::{Connections, HealthOut};
 use crate::Caller;
@@ -149,50 +149,8 @@ impl Integration {
     }
 }
 
-/// A provider Steve knows about but has no adapter for yet, or an adapter of a known provider that
-/// is not built yet (Gmail and Outlook sign-in for mail). Only what the specs plan.
-struct Planned {
-    provider: &'static str,
-    provider_name: &'static str,
-    /// The planned way in, as the dialog would name it.
-    name: &'static str,
-    areas: &'static [&'static str],
-    note: &'static str,
-}
-
-const PLANNED: &[Planned] = &[
-    Planned {
-        provider: "mail",
-        provider_name: "邮箱",
-        name: "Gmail（Google 账号登录）",
-        areas: &["mail"],
-        note: "现在可以用 IMAP 和应用专用密码接入 Gmail",
-    },
-    Planned {
-        provider: "mail",
-        provider_name: "邮箱",
-        name: "Outlook（微软账号登录）",
-        areas: &["mail"],
-        note: "现在可以用 IMAP 接入",
-    },
-    Planned {
-        provider: "slack",
-        provider_name: "Slack",
-        name: "Slack",
-        areas: &["channel"],
-        note: "",
-    },
-    Planned {
-        provider: "gcal",
-        provider_name: "Google 日历",
-        name: "Google 日历",
-        areas: &["calendar"],
-        note: "",
-    },
-];
-
 /// Display order of the known providers; others follow in registration order.
-const ORDER: [&str; 5] = ["feishu", "github", "mail", "slack", "gcal"];
+const ORDER: [&str; 3] = ["feishu", "github", "mail"];
 
 // ---------------------------------------------------------------- shapes
 
@@ -232,31 +190,13 @@ fn area_label(id: &str) -> String {
     }
 }
 
-/// A [`PLANNED`] text in the request's language (the table holds the zh-CN one).
-fn planned_text(zh: &str) -> String {
-    use steve_i18n::t;
-    match zh {
-        "邮箱" => t!("modules.integration.planned.mailbox"),
-        "Gmail（Google 账号登录）" => t!("modules.integration.planned.gmail"),
-        "现在可以用 IMAP 和应用专用密码接入 Gmail" => {
-            t!("modules.integration.planned.gmail_note")
-        }
-        "Outlook（微软账号登录）" => t!("modules.integration.planned.outlook"),
-        "现在可以用 IMAP 接入" => t!("modules.integration.planned.outlook_note"),
-        "Google 日历" => t!("modules.integration.planned.gcal"),
-        x => x.to_string(),
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderOut {
     pub id: String,
     pub name: String,
-    /// `supported` (this Hub has an adapter) or `planned` (即将支持).
+    /// `supported`: this Hub has an adapter (only those are listed).
     pub status: &'static str,
     pub adapters: Vec<AdapterInfo>,
-    /// Ways in that are planned but not built.
-    pub planned: Vec<PlannedOut>,
     /// Every area of the provider: `supported` when an adapter offers it today, else `planned`.
     pub areas: Vec<ProviderArea>,
     pub connections: Vec<ConnectionInfo>,
@@ -266,14 +206,6 @@ pub struct ProviderOut {
 pub struct ProviderArea {
     pub area: String,
     pub state: &'static str,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PlannedOut {
-    pub name: String,
-    pub areas: Vec<&'static str>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -287,6 +219,11 @@ pub struct AdapterInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<FieldDef>>,
     pub capabilities: Vec<CapSpec>,
+    /// The connections it pairs with ([`ConnectionProvider::pairing`]); `null` when it does not.
+    pub pairing: Option<Pairing>,
+    /// What its channel side declares (mode, features, `receive`, `start`…); `null` for an adapter
+    /// that is not a channel side.
+    pub channel: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -309,6 +246,9 @@ pub struct ConnectionInfo {
     /// Provider-specific facts for the page ([`ConnectionProvider::integration_detail`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<Value>,
+    /// The Hub has its adapter. One that is not installed shows 适配器未安装: it can be
+    /// disconnected, not tested or re-authorized; its tokens are not refreshed meanwhile.
+    pub installed: bool,
 }
 
 /// One installation of a provider: a Feishu self-built app, a GitHub App, a mailbox. Steve works
@@ -529,8 +469,8 @@ pub fn cap_state(
 }
 
 impl Connections {
-    /// `GET /connections/integrations`: the providers with their adapters, planned ways in, and
-    /// the caller's connections with the state of every area.
+    /// `GET /connections/integrations`: the providers with their adapters, and the caller's
+    /// connections with the state of every area.
     pub fn integrations(&self, who: &Caller) -> VaultResult<IntegrationsOut> {
         let rows = self.visible(who)?;
         let mut providers: Vec<ProviderOut> = Vec::new();
@@ -541,9 +481,8 @@ impl Connections {
             providers.push(ProviderOut {
                 id: id.into(),
                 name: name.into(),
-                status: "planned",
+                status: "supported",
                 adapters: Vec::new(),
-                planned: Vec::new(),
                 areas: Vec::new(),
                 connections: Vec::new(),
             });
@@ -552,9 +491,7 @@ impl Connections {
         for p in self.providers() {
             let i = p.integration();
             let k = slot(&mut providers, &i.provider, &i.provider_name);
-            let out = &mut providers[k];
-            out.status = "supported";
-            out.adapters.push(AdapterInfo {
+            providers[k].adapters.push(AdapterInfo {
                 id: p.id().into(),
                 name: p.name().into(),
                 identity: i.identity.clone(),
@@ -562,19 +499,24 @@ impl Connections {
                 device: p.oauth().is_some_and(|s| s.device_url.is_some()),
                 fields: matches!(p.auth(), AuthKind::Credential).then(|| p.fields().to_vec()),
                 capabilities: i.capabilities,
-            });
-        }
-        for x in PLANNED {
-            let k = slot(&mut providers, x.provider, &planned_text(x.provider_name));
-            providers[k].planned.push(PlannedOut {
-                name: planned_text(x.name),
-                areas: x.areas.to_vec(),
-                note: planned_text(x.note),
+                pairing: p.pairing(),
+                channel: self.channel_summary(p.id()).cloned(),
             });
         }
         let mut grouped = Vec::new();
         for (r, a) in &rows {
             let Some(p) = self.provider(&r.adapter) else {
+                // its adapter is not installed: listed under the provider of its system when
+                // there is one, so it can be seen and disconnected
+                let info = uninstalled(r, a);
+                let k = slot(&mut providers, &a.system_id, &a.system_id);
+                grouped.push((
+                    r.id.clone(),
+                    providers[k].id.clone(),
+                    providers[k].name.clone(),
+                    info.clone(),
+                ));
+                providers[k].connections.push(info);
                 continue;
             };
             let i = p.integration();
@@ -609,11 +551,6 @@ impl Connections {
             for a in &p.adapters {
                 for c in &a.capabilities {
                     add(&c.area, !c.planned);
-                }
-            }
-            for x in &p.planned {
-                for a in &x.areas {
-                    add(a, false);
                 }
             }
             let rank = |id: &str| {
@@ -687,7 +624,41 @@ impl Connections {
                 .and_then(Value::as_str)
                 .map(String::from),
             detail,
+            installed: true,
         }
+    }
+}
+
+/// A connection whose adapter is not installed, as the page lists it: its name, handle, status
+/// and health; no areas, no provider facts.
+fn uninstalled(r: &ConnRow, a: &Account) -> ConnectionInfo {
+    ConnectionInfo {
+        id: r.id.clone(),
+        account_id: r.account_id.clone(),
+        adapter: r.adapter.clone(),
+        adapter_name: r.adapter.clone(),
+        identity: String::new(),
+        name: if a.display_name.is_empty() {
+            a.handle_display.clone()
+        } else {
+            a.display_name.clone()
+        },
+        handle: if a.handle_display.is_empty() {
+            a.handle.clone()
+        } else {
+            a.handle_display.clone()
+        },
+        status: r.status.clone(),
+        health: HealthOut {
+            last_ok: r.health.last_ok,
+            last_error: r.health.last_error.clone(),
+            error_at: r.health.error_at,
+        },
+        last_sync: r.last_sync,
+        capabilities: Vec::new(),
+        warning: None,
+        detail: None,
+        installed: false,
     }
 }
 

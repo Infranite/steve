@@ -24,8 +24,19 @@ const steve: RLane = {
     { kind: "lockfile", path: "hub-rs/Cargo.lock", evidence: "依赖锁文件", handling: "冲突时用工具重新生成，不手改" },
   ],
   pace: { days: 7, landed: 46, releases: 27, authors: 1 },
+  /* ST-60 merged and releasing; ST-61 and ST-62 collecting, ST-61 carrying ST-60's release along */
+  lane: {
+    id: "ln_1", policy: { window_ms: 7_200_000, max_members: 10 }, set: { window_ms: null, max_members: null }, defaults: { window_ms: 7_200_000, max_members: 10 },
+    running: { no: 3, members: [{ id: "lr_1", item_id: "ST-60", branch: "steve/st-60", label: "ST-60（steve/st-60）" }], deferred: [], opened_at: 0, closed: true, merged: false, approved: true },
+    collecting: { no: 4, members: [{ id: "lr_2", item_id: "ST-61", branch: "steve/st-61", label: "ST-61（steve/st-61）" }, { id: "lr_3", item_id: "ST-62", branch: "steve/st-62", label: "ST-62（steve/st-62）" }], deferred: [], opened_at: 0, closes_at: 7_200_000, closed: false, merged: false, approved: false },
+    queued: [],
+  },
 }
-const down: RLane = { ...steve, fetch_error: "fatal: unable to access 'https://github.com/infranite/steve/'", merge: { value: "push", how: { state: "unknown", why: "读不到 GitHub 上 main 的规则：gh: Bad credentials (HTTP 401)" }, evidence: [] }, checks: { ...steve.checks, how: { state: "unknown", why: "读不到 GitHub 上 main 的规则：gh: Bad credentials (HTTP 401)" }, evidence: steve.checks.evidence.slice(1) } }
+const down: RLane = { ...steve, lane: null, fetch_error: "fatal: unable to access 'https://github.com/infranite/steve/'", merge: { value: "push", how: { state: "unknown", why: "读不到 GitHub 上 main 的规则：gh: Bad credentials (HTTP 401)" }, evidence: [] }, checks: { ...steve.checks, how: { state: "unknown", why: "读不到 GitHub 上 main 的规则：gh: Bad credentials (HTTP 401)" }, evidence: steve.checks.evidence.slice(1) } }
 api.lane = async () => (location.hash === "#down" ? down : steve)
+/* what the page sent, for the test to read */
+const sent: unknown[] = ((window as unknown as { sent: unknown[] }).sent = [])
+api.laneNow = async () => { sent.push("now"); return { closed: true, lane: { ...steve.lane!, collecting: { ...steve.lane!.collecting!, closed: true } } } }
+api.lanePolicy = async (_id, p) => { sent.push(p); return { lane: { ...steve.lane!, set: { window_ms: p.window_min == null ? null : p.window_min * 60_000, max_members: p.max_members } } } }
 function App() { useStore(); return <SidebarProvider><main className="w-full"><ProjectView id="prj_1" /></main><Toaster /></SidebarProvider> }
 createRoot(document.getElementById("root")!).render(<App />)

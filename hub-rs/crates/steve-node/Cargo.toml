@@ -3,7 +3,7 @@ name = "steve-node"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
-description = "A Steve Node: hosts harnesses on this machine and runs what the Hub asks (docs/hub-node-client.md). No Hub store, no business decisions."
+description = "A Steve Node: hosts harnesses on this machine and runs what the Hub asks. No Hub store, no business decisions."
 
 [dependencies]
 async-trait = "=0.1.92"

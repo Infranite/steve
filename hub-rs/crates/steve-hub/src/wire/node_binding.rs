@@ -34,10 +34,10 @@ pub(crate) fn permission_mode(perm: &str) -> Option<PermissionMode> {
 
 /// A binding is only a plan. The coordinator must bind it before routing a new session. Imported,
 /// ended, read-only, cross-workspace or unrecognized permission settings fail closed.
-/// `perm`: the harness mode the legacy runner would start the session in (the bot's `perm_mode`
-/// as YOLO sets it, `Core::session_perm_mode`; `None`: the harness default), so a session gets the
-/// same permissions on either path. `allows`: whether the Node takes a directory (its roots);
-/// a directory it does not take plans nothing, and the session stays where it would go otherwise.
+/// `perm`: the harness mode the session is meant to start in (the bot's `perm_mode` as YOLO sets
+/// it, `Core::session_perm_mode`; `None`: the harness default), the same the legacy runner gave
+/// it. `allows`: whether the Node takes a directory (its roots); a directory it does not take
+/// plans nothing, and the session is refused.
 pub fn binding_for(
     store: &Store,
     session: &str,
@@ -60,32 +60,94 @@ pub fn binding_with(
     allows: &dyn Fn(&RootPath) -> bool,
     worktrees: Option<&Path>,
 ) -> Option<Binding> {
-    let s = store.sessions().get(session).ok()??;
-    if s.status == "ended" || s.readonly != 0 || s.device_id != "hub" || s.source != "Steve" {
-        return None;
+    plan(store, session, perm, allows, worktrees).ok()
+}
+
+/// Why a session has no binding on the local Node ([`plan`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unbound {
+    /// Its rows could not be read, or a name in them is no valid id: maybe only for now.
+    Unreadable,
+    /// No such session.
+    Missing,
+    Ended,
+    /// Imported from a harness's history: read only.
+    ReadOnly,
+    /// Not a session of Steve's on this machine.
+    NotHere,
+    /// It belongs to no item, or its item is in another workspace (or gone).
+    NoItem,
+    /// Its item's project is archived.
+    Archived,
+    /// Its bot is gone, disabled or in another workspace.
+    Bot,
+    /// A permission mode the Node path cannot express.
+    Mode(String),
+    /// Its directory is not one the Node takes (none of its roots).
+    OutsideRoots,
+}
+
+impl Unbound {
+    /// Whether this holds for good: a session that is not bound now never will be, as it is.
+    /// An unreadable row may read fine the next time.
+    pub fn is_permanent(&self) -> bool {
+        !matches!(self, Unbound::Unreadable)
     }
-    let item = store.items().get(s.item_id.as_deref()?).ok()??;
+}
+
+/// [`binding_with`], saying why when there is no binding.
+pub fn plan(
+    store: &Store,
+    session: &str,
+    perm: Option<&str>,
+    allows: &dyn Fn(&RootPath) -> bool,
+    worktrees: Option<&Path>,
+) -> Result<Binding, Unbound> {
+    use Unbound::*;
+    let s = store
+        .sessions()
+        .get(session)
+        .map_err(|_| Unreadable)?
+        .ok_or(Missing)?;
+    if s.status == "ended" {
+        return Err(Ended);
+    }
+    if s.readonly != 0 {
+        return Err(ReadOnly);
+    }
+    if s.device_id != "hub" || s.source != "Steve" {
+        return Err(NotHere);
+    }
+    let item = store
+        .items()
+        .get(s.item_id.as_deref().ok_or(NoItem)?)
+        .map_err(|_| Unreadable)?
+        .ok_or(NoItem)?;
     if item.workspace_id != s.workspace_id {
-        return None;
+        return Err(NoItem);
     }
     // an archived project's directories are no roots any more ([`roots`]), its items' included
     if let Some(pid) = &item.project_id
-        && let Ok(Some(p)) = store.projects().get(pid)
-        && p.archived
+        && store
+            .projects()
+            .get(pid)
+            .map_err(|_| Unreadable)?
+            .is_some_and(|p| p.archived)
     {
-        return None;
+        return Err(Archived);
     }
     let bot = match s.bot_id.as_deref() {
-        Some(id) => Some(store.bots().get(id).ok()??),
+        Some(id) => Some(store.bots().get(id).map_err(|_| Unreadable)?.ok_or(Bot)?),
         None => None,
     };
     if bot
         .as_ref()
         .is_some_and(|b| b.workspace_id != s.workspace_id || !b.enabled)
     {
-        return None;
+        return Err(Bot);
     }
-    let permissions = permission_mode(perm.unwrap_or("default"))?;
+    let mode = perm.unwrap_or("default");
+    let permissions = permission_mode(mode).ok_or_else(|| Mode(mode.to_string()))?;
     let cwd = if !s.cwd.is_empty() {
         Some(s.cwd.as_str())
     } else {
@@ -99,11 +161,11 @@ pub fn binding_with(
             && (item.project_id.is_none() || item.branch.is_some())
         {
             RootPath {
-                root: root_id(path.parent()?)?,
-                rel: RelPath::new(item.id.clone()).ok()?,
+                root: path.parent().and_then(root_id).ok_or(OutsideRoots)?,
+                rel: RelPath::new(item.id.clone()).map_err(|_| Unreadable)?,
             }
         } else {
-            at(cwd)?
+            at(cwd).ok_or(OutsideRoots)?
         };
         let existing = PrepareKind::Existing { dir };
         match worktrees.and_then(|w| item_worktree(store, &item, &s.workspace_id, path, w)) {
@@ -111,25 +173,34 @@ pub fn binding_with(
             _ => existing,
         }
     } else if let Some(pid) = &item.project_id {
-        let p = store.projects().get(pid).ok()??;
-        if p.workspace_id != s.workspace_id || p.device_id != "hub" || p.archived {
-            return None;
+        let p = store
+            .projects()
+            .get(pid)
+            .map_err(|_| Unreadable)?
+            .ok_or(NoItem)?;
+        if p.workspace_id != s.workspace_id || p.device_id != "hub" {
+            return Err(NotHere);
+        }
+        if p.archived {
+            return Err(Archived);
         }
         if p.kind == "git" && p.worktree {
             PrepareKind::Worktree {
-                repository: at(&p.path)?,
+                repository: at(&p.path).ok_or(OutsideRoots)?,
                 branch: format!("steve/{}", item.id.to_lowercase()),
                 base: None,
                 at: match worktrees {
                     Some(w) => Some(RootPath {
-                        root: root_id(w)?,
-                        rel: RelPath::new(item.id.clone()).ok()?,
+                        root: root_id(w).ok_or(OutsideRoots)?,
+                        rel: RelPath::new(item.id.clone()).map_err(|_| Unreadable)?,
                     }),
                     None => None,
                 },
             }
         } else {
-            PrepareKind::Existing { dir: at(&p.path)? }
+            PrepareKind::Existing {
+                dir: at(&p.path).ok_or(OutsideRoots)?,
+            }
         }
     } else {
         PrepareKind::Scratch
@@ -137,12 +208,12 @@ pub fn binding_with(
     match &prepare {
         PrepareKind::Existing { dir: at } | PrepareKind::Worktree { repository: at, .. } => {
             if !allows(at) {
-                return None;
+                return Err(OutsideRoots);
             }
         }
         PrepareKind::Scratch => {}
     }
-    Some(Binding {
+    Ok(Binding {
         session: s.id,
         resource,
         prepare,
@@ -153,12 +224,12 @@ pub fn binding_with(
         },
         policy: ExecutionPolicy {
             revision: Revision::new(format!("host-{}", bot.as_ref().map_or(0, |b| b.revision)))
-                .ok()?,
+                .map_err(|_| Unreadable)?,
             permissions,
             sandbox: SandboxRequirement::None,
             readable: vec![],
             network: NetworkScope::Unrestricted,
-            tools: GrantId::new("hub").ok()?,
+            tools: GrantId::new("hub").map_err(|_| Unreadable)?,
         },
     })
 }
@@ -221,9 +292,9 @@ fn prepared_as(store: &Store, resource: &str) -> Option<PrepareKind> {
 /// when it must stay where it would go otherwise. A remote Node has none of the Hub's directories,
 /// so only an item without a project qualifies, in a fresh scratch workspace on that Node, and only
 /// while every earlier session of the item ran there too (its files are there, not on the Hub).
-/// The Node must be paired and active (a paused or revoked Node takes no new work), and paired by
-/// an owner of the session's workspace: any signed-in user can pair a Node, and the Node sees the
-/// session's prompts, tool output and files, so a member's own machine never gets others' work.
+/// The Node must be paired and active (a paused or revoked Node takes no new work), and take the
+/// workspace's work ([`remote_refusal`]: paired by its owner, who is its only member): the Node
+/// runs the session with its owner's own logins, unsandboxed, so it only ever runs its owner's work.
 /// `speaks_auto`: the Node is known to speak [`AUTO_MODE`]; a session in `auto` goes to it only
 /// then (an older Node would refuse to open it, for good), and otherwise stays where it would go.
 /// `perm`: as for [`binding_for`].
@@ -264,20 +335,68 @@ pub fn remote_binding_for(
     Some(b)
 }
 
-/// Whether the paired remote Node `node` may get `workspace`'s work: it is active (a paused or
-/// revoked Node takes none), and the user who paired it owns the workspace. Any signed-in user can
-/// pair a Node, and a member's own machine never gets others' work.
+/// Why a paired remote Node may not get a workspace's work ([`remote_refusal`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteRefusal {
+    /// Unknown, pending, paused or revoked.
+    Inactive,
+    /// The user who paired it does not own the workspace.
+    NotOwner,
+    /// The workspace has members besides the Node's owner, so a run there may be any of theirs.
+    Shared,
+}
+
+impl RemoteRefusal {
+    /// Why, in the current language (inside [`steve_i18n::stored`] for stored text).
+    pub fn why(&self) -> String {
+        match self {
+            RemoteRefusal::Inactive => steve_i18n::t!("hub.workspaces.offline"),
+            RemoteRefusal::NotOwner => steve_i18n::t!("hub.node.remote.not_owner"),
+            RemoteRefusal::Shared => steve_i18n::t!("hub.node.remote.shared"),
+        }
+    }
+}
+
+/// Whether the paired remote Node `node` may get `workspace`'s work now, and why not (H1). A
+/// remote Node runs its sessions, jobs and commands with its owner's own home and logins, unsandboxed
+/// and under whatever policy the Hub sends, so until runs are sandboxed it takes only its owner's
+/// own work: it is active, the user who paired it (`nodes.owner`) owns the workspace, and nobody
+/// else is a member of it. The Hub records no user per run (an agent works for the workspace's
+/// owner, [`super::mcp_extra::owner`]), and any member of a workspace can start or steer a run in
+/// it, so the only runs that are surely the owner's are those of a workspace that is theirs alone.
+pub(crate) fn remote_refusal(
+    c: &rusqlite::Connection,
+    node: &str,
+    workspace: &str,
+) -> Result<Option<RemoteRefusal>, StoreError> {
+    use rusqlite::OptionalExtension;
+    let row: Option<(String, bool, i64)> = c
+        .query_row(
+            "SELECT n.state,
+                    EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=?2 AND m.user_id=n.owner AND m.role='owner'),
+                    (SELECT COUNT(*) FROM workspace_members m WHERE m.workspace_id=?2 AND m.user_id<>n.owner)
+               FROM nodes n WHERE n.node_id=?1",
+            rusqlite::params![node, workspace],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        None => Some(RemoteRefusal::Inactive),
+        Some((state, _, _)) if state != "active" => Some(RemoteRefusal::Inactive),
+        Some((_, false, _)) => Some(RemoteRefusal::NotOwner),
+        Some((_, true, others)) if others > 0 => Some(RemoteRefusal::Shared),
+        Some(_) => None,
+    })
+}
+
+/// Whether the paired remote Node `node` may get `workspace`'s work: [`remote_refusal`] has nothing
+/// against it.
 pub(crate) fn node_takes(
     c: &rusqlite::Connection,
     node: &str,
     workspace: &str,
 ) -> Result<bool, StoreError> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM nodes n JOIN workspace_members m ON m.user_id=n.owner
-          WHERE n.node_id=?1 AND n.state='active' AND m.workspace_id=?2 AND m.role='owner')",
-        rusqlite::params![node, workspace],
-        |r| r.get(0),
-    )?)
+    Ok(remote_refusal(c, node, workspace)?.is_none())
 }
 
 /// The local Node's allowlist: explicit configured roots (`extra`: the scratch and worktree
@@ -445,7 +564,7 @@ mod remote_tests {
                 "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);
                  INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
-                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1),('default','m','member',1);
+                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
                  INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);
                  INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_p','u','p',zeroblob(32),'fp','paused',1);
                  INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_m','m','m',zeroblob(32),'fm','active',1);",
@@ -483,6 +602,19 @@ mod remote_tests {
             "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s0','n_a','{}','s0','r','released',0);",
         );
         assert!(remote_binding_for(&store, "s1", None, &a, true).is_some());
+        // H1: another member in the workspace, and the run may be theirs: not on the owner's Node
+        exec(
+            &store,
+            "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
+        );
+        assert!(remote_binding_for(&store, "s1", None, &a, true).is_none());
+        let why = |n: &str| store.reader(|c| remote_refusal(c, n, "default")).unwrap();
+        assert_eq!(why("n_a"), Some(RemoteRefusal::Shared));
+        assert_eq!(why("n_m"), Some(RemoteRefusal::NotOwner));
+        assert_eq!(why("n_p"), Some(RemoteRefusal::Inactive));
+        assert_eq!(why("n_none"), Some(RemoteRefusal::Inactive));
+        exec(&store, "DELETE FROM workspace_members WHERE user_id='m';");
+        assert_eq!(why("n_a"), None);
         // a project's directories are on the Hub
         exec(
             &store,
@@ -519,7 +651,7 @@ mod bot_tests {
         assert_eq!(b.policy.revision.as_str(), "host-3");
     }
 
-    /// The Node path starts a session with the permissions the legacy runner would give it: the
+    /// The Node path starts a session with the permissions the legacy runner gave it: the
     /// mode `Core::session_perm_mode` computes (the bot's, as YOLO widens it) for every bot mode ×
     /// YOLO level × directory, and a read-only session never binds.
     #[test]
@@ -570,7 +702,7 @@ mod bot_tests {
         for (n, bot) in bots.iter().enumerate() {
             for (level, own) in levels {
                 for ro in [false, true] {
-                    // what Core::session_perm_mode hands the legacy runner (HubHost::session)
+                    // what Core::session_perm_mode gives (HubHost::perm_mode)
                     let legacy = if ro {
                         perm_mode(*bot, false)
                     } else {
@@ -667,7 +799,7 @@ mod host_tests {
         }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn default_off_and_real_local_host_with_fake_adapter() {
+    async fn explicit_off_and_real_local_host_with_fake_adapter() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = crate::config::Config::from_vars(|k| match k {
             "STEVE_HOME" => Some(dir.path().join("steve").to_string_lossy().into()),
@@ -677,7 +809,9 @@ mod host_tests {
         .unwrap();
         let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        let off: Vars = Arc::new(|_| None);
+        // the rollback: STEVE_NODE_MODE=off builds no Node; neither does an unset mode on a
+        // STEVE_NO_RESUME copy
+        let off: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "off".into()));
         let mut jobs = vec![];
         assert!(
             super::super::node_runtime(
@@ -691,6 +825,21 @@ mod host_tests {
             .unwrap()
             .is_none()
         );
+        let unset: Vars = Arc::new(|_| None);
+        cfg.no_resume = true;
+        assert!(
+            super::super::node_runtime(
+                &cfg,
+                &store,
+                Arc::new(Ends),
+                &unset,
+                &super::super::node_secrets::NodeSecrets::new(),
+                &mut jobs
+            )
+            .unwrap()
+            .is_none()
+        );
+        cfg.no_resume = false;
         assert!(jobs.is_empty());
         assert!(!cfg.data_dir.join("node").exists());
         let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
@@ -787,11 +936,11 @@ mod host_tests {
         assert!(gone, "the adapter outlived the Hub's shutdown");
     }
 
-    /// A new session the local Node cannot run stays on the legacy runner instead of becoming a
-    /// dead Node session: a project directory added after the Node started (not among its roots)
+    /// A new session the local Node cannot run is refused, said why, instead of becoming a dead
+    /// Node session: a project directory added after the Node started (not among its roots)
     /// plans no binding, and once the Node stopped its bind is refused.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_session_the_local_node_cannot_run_stays_legacy() {
+    async fn a_session_the_local_node_cannot_run_is_refused() {
         use steve_core::AgentRuntime;
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config::from_vars(|k| match k {
@@ -830,15 +979,9 @@ mod host_tests {
             flow: Default::default(),
             yolo: Default::default(),
             local_node: Default::default(),
-            user_seqs: Default::default(),
-            transcripts: Default::default(),
         });
         let _ = host.local_node.set(node.clone());
         let routed = super::super::core::RoutedRuntime {
-            legacy: super::super::core::AcpRuntime(steve_acp::Acp::new(
-                super::super::acp_config(&cfg),
-                host.clone(),
-            )),
             node: Some(rt.clone()),
             fleet: None,
             bind_remote: None,
@@ -877,12 +1020,24 @@ mod host_tests {
         assert!(binding_for(&store, "s1", None, &|_| true).is_some());
         assert!(binding_for(&store, "s1", None, &|p| node.allows(p)).is_none());
         routed.created("s1", None);
-        assert_eq!(bound("s1"), 0, "a directory outside the roots stays legacy");
+        assert_eq!(
+            bound("s1"),
+            0,
+            "a directory outside the roots is bound nowhere"
+        );
+        let why = routed.refusal("s1").expect("refused");
+        assert!(why.contains("不在 Node 可用的目录里"), "{why}");
+        assert!(
+            routed.prompt("s1", "做事", "me", &[]).is_err(),
+            "never run on the Hub"
+        );
         // a scratch session could run there, but the Node stopped
         assert!(binding_for(&store, "s2", None, &|p| node.allows(p)).is_some());
         rt.stop("its tools did not connect");
         routed.created("s2", None);
         assert_eq!(bound("s2"), 0, "a stopped Node binds nothing");
+        let why = routed.refusal("s2").expect("refused");
+        assert!(why.contains("本机 Node 没有在运行"), "{why}");
         assert!(!super::super::node_runtime::bound(&store, "s2"));
         node.shutdown().await;
     }
