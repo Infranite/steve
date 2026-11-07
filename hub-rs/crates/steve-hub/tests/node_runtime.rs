@@ -27,8 +27,6 @@ struct Ends(
     /// While set, `attempt_finished` holds the apply worker there (mid-pass); `.7` says it does.
     std::sync::atomic::AtomicBool,
     std::sync::atomic::AtomicBool,
-    /// Harness tool calls handed over as seen (`tool_seen`): session, call, phase.
-    Mutex<Vec<(String, String, ToolPhase)>>,
 );
 
 impl NodeDomain for Ends {
@@ -74,12 +72,6 @@ impl NodeDomain for Ends {
     }
     fn permission_asked(&self, _: &str, decision: &str, _: &PermissionRequest) {
         self.3.lock().unwrap().push(decision.into());
-    }
-    fn tool_seen(&self, session: &str, tool: &ToolView) {
-        self.8
-            .lock()
-            .unwrap()
-            .push((session.into(), tool.id.to_string(), tool.phase));
     }
 }
 
@@ -824,14 +816,6 @@ async fn usage_and_tools_reach_the_session_and_the_attempts_statistics() {
     assert_eq!(f.tool_kinds.get("exec"), Some(&1));
     assert_eq!(f.tool_kinds.get("tool:Bash"), Some(&1));
     assert!((f.cost.unwrap() - 0.8).abs() < 1e-9);
-    // every update of a harness tool call is handed over (full access is watched there)
-    assert_eq!(
-        *h.ends.8.lock().unwrap(),
-        vec![
-            (S.to_string(), "c1".to_string(), ToolPhase::Running),
-            (S.to_string(), "c1".to_string(), ToolPhase::Failed)
-        ]
-    );
 }
 
 /// M3: what a Node reports as cost is checked before it reaches the session. NaN, inf, negative
