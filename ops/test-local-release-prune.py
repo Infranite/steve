@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 
 OPS = pathlib.Path(__file__).resolve().parent
 SCRIPT = OPS / "local-release.py"
@@ -98,6 +99,22 @@ class Prune(unittest.TestCase):
             "0.2.54-local-3c1c1e0", "0.2.55-local-9af7df7", "0.2.56-local-7c3020e", "0.9.0-a", "history.jsonl"]))
         self.assertEqual(sorted(pathlib.Path(p).name for p in removed),
                          ["20261101-020547-1d16430c", "20261103-002107-c2ee544c"])
+
+    def test_bundle_pruning_requires_manifest_ownership_and_preserves_current_previous(self):
+        names = [f"0.9.{n}-{uuid.uuid4()}" for n in range(8)]
+        self.release(*names)
+        for n, name in enumerate(names[:6]):
+            (self.releases / name / "release.json").write_text(json.dumps(
+                dict(format_version=1, version=f"0.9.{n}", commit="a" * 40)))
+        # A manifest with a different version does not own a UUID-named directory.
+        (self.releases / names[6] / "release.json").write_text(json.dumps(
+            dict(format_version=1, version="0.0.0", commit="a" * 40)))
+        (self.home / "current").symlink_to(self.releases / names[0])
+        (self.home / "previous").symlink_to(self.releases / names[1])
+        removed = self.m.prune()
+        self.assertEqual(removed, [str(self.releases / names[2])])
+        self.assertTrue((self.releases / names[6]).exists())
+        self.assertTrue((self.releases / names[7]).exists())
 
     def test_versions_rank_as_numbers_not_text(self):
         self.release("0.2.9-local-2ecd29d", "0.2.10-local-e319e77", "0.2.11-local-1d86008", "0.2.100-local-aaaaaaa")

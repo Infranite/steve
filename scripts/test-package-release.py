@@ -24,10 +24,15 @@ class BundleTests(unittest.TestCase):
         self.binary = root / "hub"
         self.binary.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"version":"0.2.0","commit":"' + 'a' * 40 + '","schema":24,"target":"aarch64-apple-darwin"}\'\n')
         self.binary.chmod(0o755)
+        self.node = root / "node"
+        self.node.write_text(self.binary.read_text())
+        self.node.chmod(0o755)
+        self.helper = root / "helper"
+        self.helper.write_bytes(b"helper")
         (root / "private.env").write_text("must not enter release")
         self.out = root / "out"
         self.args = SimpleNamespace(version="0.2.0", commit="a" * 40,
-            target="aarch64-apple-darwin", schema=24, binary=str(self.binary), web=str(self.web), out=str(self.out))
+            target="aarch64-apple-darwin", schema=24, binary=str(self.binary), node=str(self.node), keyhelper=str(self.helper), web=str(self.web), out=str(self.out))
 
     def test_bundle_contains_only_selected_outputs_and_consistent_version(self):
         release.package(self.args)
@@ -36,6 +41,10 @@ class BundleTests(unittest.TestCase):
         metadata = json.loads((self.out / "steve-release.json").read_text())
         with tarfile.open(self.out / metadata["assets"][0]["name"]) as bundle:
             self.assertNotIn("private.env", bundle.getnames())
+            self.assertEqual(bundle.getmember("bin/steve-node").mode, 0o755)
+            self.assertEqual(bundle.getmember("bin/steve-keyhelper").mode, 0o755)
+            self.assertEqual(set(n for n in bundle.getnames() if n.startswith("ops/")),
+                             {"ops/" + n for n in release.RUNTIME_OPS})
             self.assertEqual(bundle.getmember("bin/steve-hub").mode, 0o755)
             self.assertEqual(json.load(bundle.extractfile("release.json"))["version"], "0.2.0")
             self.assertIn(b'content="0.2.0"', bundle.extractfile("web/dist/index.html").read())
@@ -56,6 +65,7 @@ class BundleTests(unittest.TestCase):
         self.args.target = "x86_64-unknown-linux-gnu"
         self.args.commit = "b" * 40
         self.binary.write_text(self.binary.read_text().replace("a" * 40, "b" * 40).replace("aarch64-apple-darwin", "x86_64-unknown-linux-gnu"))
+        self.node.write_text(self.binary.read_text())
         release.package(self.args)
         with self.assertRaisesRegex(ValueError, "disagree"):
             release.merge(SimpleNamespace(out=str(self.out / "steve-release.json"), manifests=[str(p) for p in sorted(self.out.glob("manifest-*.json"))]))
@@ -66,6 +76,16 @@ class BundleTests(unittest.TestCase):
                 self.args.version = version
                 with self.assertRaisesRegex(ValueError, "stable SemVer"):
                     release.package(self.args)
+
+    def test_refuses_wrong_node_identity(self):
+        self.node.write_text(self.node.read_text().replace("a" * 40, "b" * 40))
+        with self.assertRaisesRegex(ValueError, "Node build identity"):
+            release.package(self.args)
+
+    def test_refuses_missing_keyhelper_on_macos(self):
+        self.args.keyhelper = None
+        with self.assertRaisesRegex(ValueError, "keyhelper"):
+            release.package(self.args)
 
     def test_refuses_wrong_binary_identity(self):
         self.args.version = "0.3.0"

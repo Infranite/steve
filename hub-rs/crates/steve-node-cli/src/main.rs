@@ -14,7 +14,7 @@ use steve_node_wire::Identity;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: steve-node pair <hub-url> [--pin sha256:…] [--name NAME] | run | status | forget\n\
+        "usage: steve-node pair <hub-url> [--pin sha256:…] [--name NAME] | run | status | forget | --build-info | --version\n\
          The pairing code is read from STEVE_PAIR_CODE or stdin, never from the command line."
     );
     std::process::exit(2)
@@ -46,6 +46,24 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--build-info") {
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": option_env!("STEVE_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
+                "commit": option_env!("STEVE_BUILD_COMMIT").unwrap_or("unknown"),
+                "target": env!("STEVE_BUILD_TARGET"),
+            })
+        );
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("--version") {
+        println!(
+            "steve-node {}",
+            option_env!("STEVE_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
     let home = Home::from_env()?;
     match args.first().map(String::as_str) {
         Some("pair") => {

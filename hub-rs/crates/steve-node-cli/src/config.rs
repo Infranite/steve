@@ -150,7 +150,9 @@ impl Home {
             steve_home: self.0.clone(),
             codex_home: user_home.join(".codex"),
             user_home,
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: option_env!("STEVE_BUILD_VERSION")
+                .unwrap_or(env!("CARGO_PKG_VERSION"))
+                .into(),
             idle_release: Duration::from_secs(600),
             retry_delays: vec![Duration::from_secs(20), Duration::from_secs(60)],
         })
