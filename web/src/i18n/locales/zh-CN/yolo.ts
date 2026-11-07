@@ -58,7 +58,7 @@ export default {
   /* the YOLO record, #/yolo */
   digest: {
     title: "YOLO 记录",
-    sub: "你不在时 Steve 替你做的每个决定，按每次打开分段。能撤销的可以撤；1 小时内撤销 2 次，YOLO 会暂停。",
+    sub: "你不在时 Steve 替你做的每个决定，按每次打开分段。能撤销的可以撤；撤销后那件事项不再交给 YOLO，1 小时内在 3 件事项上撤销（或同一条规则在 2 件上被撤销、撤回 2 条消息），整个 YOLO 会暂停。",
     noYolo: "这台 Hub 没有 YOLO",
     never: "还没开过 YOLO",
     neverSub: "打开后，Steve 替你做的每个决定都会记在这里。",
@@ -122,7 +122,7 @@ export default {
   switch: {
     never: "花钱、以你的名义发消息或邮件（除非带 [AI] 标识并通过披露检查）、推到 GitHub 等远端、删工作区外的数据、可能泄露的内容，YOLO 永远不替你做。",
     fullGives: "Agent 会以你的身份运行任何命令、修改任何文件，不再先问你。",
-    fullKeeps: "仍然守住：以你的名义发消息（只发带 [AI] 标识并通过披露检查的）、付款和银行卡、高敏感保险箱条目、Steve 自己的发布。Agent 也会被告知：不碰 ~/.steve 和 8440 端口，事项没要求就不推送，只按 PID 停自己启动的进程。",
+    fullKeeps: "仍然要你确认：付款和银行卡、高敏感保险箱条目、经 Steve 以你的名义发出的消息和邮件（只发带 [AI] 标识并通过披露检查的）、其他项目的发布。Agent 自己的命令不再先问你。Steve 只看得到 Agent 报告的工具调用，在它开始时检查：推送（git push）、用 gh 改 GitHub、用 lark-cli 或邮件程序以你的名义发消息、碰 ~/.steve、8440 端口或 launchd、用 pkill/killall，会立刻停下这一轮并通知你。这是事后拦截：那条命令可能已经开始执行，做了的事 Steve 撤不回；Agent 没报告的命令、藏在脚本文件里的命令，Steve 看不出来。Agent 的进程拿不到 GH_TOKEN 和 SSH agent；Agent 自带的沙箱（如果有）在完全放开下可能不再生效。不论用哪种 Agent 都是这样。",
     offSub: "每个决定都等你。",
     onSub: "Steve 替你做能撤回的决定：工作区里的命令、检查全过的交付、Agent 的提问。每件都记账，能一键撤销。",
     fullSub: "在 YOLO 之上，Agent 不再请求权限，想做什么就直接做。只在你信得过这段时间的所有事项时打开。",

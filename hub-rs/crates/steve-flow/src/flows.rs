@@ -427,5 +427,8 @@ pub fn view(c: &Connection, f: &FlowRow, now: i64) -> FlowResult<Value> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     v["graph"] = f.graph.clone();
     v["versions"] = Value::Array(versions);
+    // branch/edge mismatches: shown on the canvas, never a refusal
+    let g = Graph::from_value(&f.graph).unwrap_or_default();
+    v["warnings"] = serde_json::to_value(crate::graph::branch_warnings(&g))?;
     Ok(v)
 }

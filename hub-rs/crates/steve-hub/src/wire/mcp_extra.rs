@@ -38,6 +38,7 @@ enum Owner {
     Mail,
     Flow,
     ReplySource,
+    Im,
 }
 
 /// `steve_reply_source` (channels-personas.md §6): an update back to the chat an item came from.
@@ -80,6 +81,8 @@ fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::Flow)
     } else if name == REPLY_SOURCE {
         Some(Owner::ReplySource)
+    } else if steve_channels::im_mcp::handles(name) {
+        Some(Owner::Im)
     } else {
         None
     }
@@ -97,6 +100,7 @@ fn extra_tools() -> Vec<Value> {
     v.extend(steve_mail::mcp::tools().iter().cloned());
     v.extend(steve_flow::mcp::tools().iter().cloned());
     v.push(reply_source_tool());
+    v.extend(steve_channels::im_mcp::tools());
     v.push(json!({"name":"steve_upgrade","description":"Check Steve GitHub releases, inspect an upgrade, or request an instance upgrade. A request requires instance owner approval in Settings / Versions before execution. Never grants approval through an agent token.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["check","status","request"]},"version":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["action"]}}));
     v
 }
@@ -169,7 +173,7 @@ fn json_rpc(id: &Value, result: Value) -> Response {
 
 /// The user an agent works for. The Hub is single-user for now, so that is the workspace's owner (the
 /// first owner membership); with several users this becomes the item's requester.
-fn owner(store: &Store, ws: &str) -> Option<String> {
+pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
     store
         .with_conn(|c| {
             use rusqlite::OptionalExtension;
@@ -388,6 +392,7 @@ async fn call_owned(
         // `steve_mail_draft` marks the session itself (`DraftHooks::awaiting_approval`)
         Owner::Mail => steve_mail::mcp::call(&x.tools.mail, &cx, name, &args).await,
         Owner::Flow => steve_flow::mcp::call(&x.tools.flow, &cx, name, &args).await,
+        Owner::Im => steve_channels::im_mcp::call(&x.tools.channels, &cx, name, &args).await,
         Owner::ReplySource => match (
             args.get("text").and_then(Value::as_str),
             cx.item_id.as_deref(),

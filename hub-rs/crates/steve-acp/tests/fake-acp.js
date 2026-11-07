@@ -4,6 +4,7 @@
 //   @say <text>            agent_message_chunk
 //   @flood [ms]            2000 chunks of 4 KiB at once; with ms, a pause of ms after every 8 (a fast
 //                          harness a reader keeps up with, instead of one that overruns it)
+//   @drip <n> <ms>         n short chunks ("t<i> "), a pause of ms after each (a model streaming tokens)
 //   @usage <used> <size> <cost> [model] [origin]   usage_update (model → _meta._claude/model)
 //   @tally <in> <out> <cacheRead> <cacheWrite>   the response's `usage` (also on a cancel)
 //   @quota <model>:<in>:<out>:<cr>:<cw>,…        the response's `_meta.quota.model_usage`
@@ -13,6 +14,8 @@
 //   @crash                 exit(3) mid-turn
 //   @perm <toolName>       Claude-style request_permission; says "perm:<outcome>:<optionId>"
 //   @permexec <command>    request_permission for an `execute` tool call running <command>
+//   @run <command>         an `execute` tool call running <command> without asking, whatever the mode
+//                          (no `_meta` of any harness): in_progress, 2 s, completed, says "ran:<command>"
 //   @codexperm <tool>      Codex-style MCP approval form for the steve server
 //   @permtool <kind> <path> request_permission for a `kind` tool call on `path` (rawInput.file_path, locations);
 //                          like a real harness, in mode bypassPermissions / full-access it asks nothing
@@ -21,6 +24,7 @@
 //   @fsread                asks the client for fs/read_text_file; says the error it got
 // $FAKE_ACP_CODEX=1 reports the model as a config option instead of `models`.
 // $FAKE_ACP_GRANDCHILD=<file> starts `sleep 300` (same process group) and writes its pid there.
+// $FAKE_ACP_STUBBORN=<file> does the same with a `sleep 300` that ignores SIGTERM.
 // $FAKE_ACP_FLOOD_GATE=<file>: @flood sends chunk i only once the number in <file> is above i (the
 // test raises it as the client keeps up, so the flood never outruns it however slow the machine).
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
@@ -31,6 +35,10 @@ log({ spawn: { argv: process.argv.slice(2), cwd: process.cwd(), claude: process.
 if (process.env.FAKE_ACP_GRANDCHILD) {
   const c = spawn("sleep", ["300"], { stdio: "ignore" })
   writeFileSync(process.env.FAKE_ACP_GRANDCHILD, String(c.pid))
+}
+if (process.env.FAKE_ACP_STUBBORN) {
+  const c = spawn("sh", ["-c", "trap '' TERM; exec sleep 300"], { stdio: "ignore" })
+  writeFileSync(process.env.FAKE_ACP_STUBBORN, String(c.pid))
 }
 
 let buf = "", sid = "", cancel = null, nextId = 1000, mode = "default"
@@ -46,7 +54,7 @@ let toolN = 0
 async function turn(text) {
   const n = (failures.get(text) ?? 0) + 1; failures.set(text, n)
   const out = { stopReason: "end_turn" }
-  for (const [, cmd, arg] of text.matchAll(/@(flood|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|codexperm|fsread)\b([^@\n]*)/g)) {
+  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|run|codexperm|fsread)\b([^@\n]*)/g)) {
     const a = arg.trim()
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
@@ -56,6 +64,7 @@ async function turn(text) {
       say("x".repeat(4096))
       if (a && i % 8 === 7 && (await sleep(Number(a)))) return { ...out, stopReason: "cancelled" }
     }
+    if (cmd === "drip") { const [n, ms] = a.split(" ").map(Number); for (let i = 0; i < n; i++) { say(`t${i} `); if (await sleep(ms)) return { ...out, stopReason: "cancelled" } } }
     if (cmd === "bigreply") out.padding = "x".repeat(2 << 20)
     if (cmd === "bigperm") await ask("session/request_permission", {sessionId: sid, options, toolCall: {toolCallId:"large", rawInput:{data:"x".repeat(2 << 20)}}})
     if (cmd === "usage") {
@@ -86,6 +95,14 @@ async function turn(text) {
     if (cmd === "permexec") {
       const r = await ask("session/request_permission", { sessionId: sid, options, toolCall: { toolCallId: `px-${n}`, title: a, kind: "execute", rawInput: { command: a } } })
       say(`perm:${r.outcome.outcome}:${r.outcome.optionId ?? ""}`)
+    }
+    if (cmd === "run") {
+      const id = "run-" + ++toolN
+      update({ sessionUpdate: "tool_call", toolCallId: id, kind: "execute", status: "pending", title: a, rawInput: { command: a } })
+      update({ sessionUpdate: "tool_call_update", toolCallId: id, status: "in_progress" })
+      if (await sleep(2000)) return { ...out, stopReason: "cancelled" }
+      update({ sessionUpdate: "tool_call_update", toolCallId: id, status: "completed" })
+      say(`ran:${a}`)
     }
     if (cmd === "codexperm") {
       const r = await ask("session/request_permission", { sessionId: sid, options: [{ optionId: "approved", name: "Allow", kind: "allow_once" }, { optionId: "abort", name: "Deny", kind: "reject_once" }],

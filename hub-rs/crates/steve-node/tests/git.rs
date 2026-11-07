@@ -95,6 +95,7 @@ impl T {
     fn node(&self) -> LocalNode {
         let root = self.root.clone();
         let n = LocalNode::open(NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new("hub").unwrap(),
             home: root.join("node"),
             acp: AcpConfig {

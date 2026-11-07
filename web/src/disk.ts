@@ -11,6 +11,8 @@ export type DiskEntry = {
 export type DiskReport = {
   root: string; free: number | null; total: number | null; pressure: Pressure | null; policy: DiskPolicy; git: string | null
   trash: number; entries: DiskEntry[]; orphans: { path: string; bytes: number }[]; measured_at: number
+  /** items without a project, in their scratch directory (absent from a Hub before this) */
+  scratch?: DiskEntry[]
 }
 export type Freed = { item: string; caches: string[]; bytes: number }
 export type Reclaimed = { skipped: boolean; free_before: number | null; free_after: number | null; freed: Freed[]; removed: string[]; kept: { item: string; reason: string }[] }
@@ -43,6 +45,15 @@ export function diskRows(r: DiskReport) {
   /* a closed item's caches go on the next pass unless something still runs in it */
   const reclaimable = on.filter((e) => entryState(e) === "closed").reduce((s, e) => s + e.cache_bytes, 0)
   return { rows: on, total, cache, reclaimable, gone: r.entries.length - on.length }
+}
+
+/** Scratch directories (items without a project) on disk, largest first; an ended item's marked caches go
+ * only while the disk is under pressure. */
+export function scratchRows(r: DiskReport) {
+  const on = (r.scratch ?? []).filter((e) => e.exists).sort((a, b) => b.bytes - a.bytes)
+  const total = on.reduce((s, e) => s + e.bytes, 0), cache = on.reduce((s, e) => s + e.cache_bytes, 0)
+  const ended = on.filter((e) => entryState(e) === "closed").reduce((s, e) => s + e.cache_bytes, 0)
+  return { rows: on, total, cache, ended }
 }
 
 /** One line on the disk against the thresholds. */

@@ -356,14 +356,17 @@ pub fn retarget_about(
     Ok(ids)
 }
 
-/// Candidates created before `before` (the 30-day expiry job), oldest first: `(id, decision_id)`.
+/// Candidates waiting since before `before` (made then, or restored then; the 30-day expiry job),
+/// oldest first: `(id, decision_id)`.
 pub fn candidates_before(
     c: &Connection,
     ws: &str,
     before: i64,
 ) -> Result<Vec<(String, Option<String>)>> {
     let mut st = c.prepare_cached(
-        "SELECT id, decision_id FROM mems WHERE workspace_id = ? AND status = 'candidate' AND created < ? ORDER BY created",
+        "SELECT id, decision_id FROM mems WHERE workspace_id = ? AND status = 'candidate'
+           AND max(created, coalesce((SELECT k.created FROM mem_candidates k WHERE k.mem_id = mems.id), 0)) < ?
+         ORDER BY created",
     )?;
     let rows = st.query_map(params![ws, before], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

@@ -118,10 +118,7 @@ async fn setup() -> H {
     );
     vault.init(WS, ME).expect("vault init");
     let app = Arc::new(FeishuApp::new());
-    let user = Arc::new(
-        FeishuUser::with_base(fake.base_url())
-            .with_party_hooks(steve_modules::accounts::ports().hooks),
-    );
+    let user = Arc::new(FeishuUser::with_base(fake.base_url()));
     let conns = Connections::builder(
         env.modules.clone(),
         vault,
@@ -138,7 +135,7 @@ async fn setup() -> H {
         .build();
 
     let api: Router = connections::routes(conns.clone())
-        .merge(user_routes(conns.clone(), user.claims().clone()))
+        .merge(user_routes(conns.clone()))
         .with_state(env.modules.clone());
     let cb: Router = connections::callback_routes(conns.clone()).with_state(env.modules.clone());
     let me = caller(WS, ME);
@@ -791,4 +788,55 @@ async fn pollers_start_for_connections_with_receive_and_stop() {
     assert!(all.stop(&h.self_con).await);
     assert!(all.running().await.is_empty());
     assert!(!all.stop(&h.self_con).await);
+}
+
+/// `steve_im_read` through your own account: the chat's messages in the range, read with your
+/// user token, oldest first, nothing stored.
+#[tokio::test]
+async fn your_account_reads_a_chats_history_on_demand() {
+    use steve_channels::history::HistoryRead;
+    let h = setup().await;
+    let cx = h.ch.connections().cx(WS, &h.self_con).expect("cx");
+    let stored = |h: &H| {
+        q(
+            &h.env,
+            "SELECT count(*) FROM chan_messages WHERE id <> ?",
+            "-",
+        )[0][0]
+            .clone()
+    };
+    let before = stored(&h);
+    let got = HistoryRead::read(
+        h.user.as_ref(),
+        &cx,
+        ids::USER_P2P_CHAT,
+        1_761_899_000_000,
+        1_761_899_999_999,
+        10,
+    )
+    .await
+    .expect("read");
+    assert!(!got.is_empty());
+    assert!(got.windows(2).all(|w| w[0].created <= w[1].created));
+    assert!(
+        got.iter()
+            .any(|m| m.external_id == "om_userp2p0000000000000000000000001"),
+        "{got:?}"
+    );
+    assert!(got.iter().all(|m| m.space_ext_id == ids::USER_P2P_CHAT));
+    // an empty range
+    let none = HistoryRead::read(h.user.as_ref(), &cx, ids::USER_P2P_CHAT, 1_000, 2_000, 10)
+        .await
+        .expect("read");
+    assert!(none.is_empty());
+    assert_eq!(stored(&h), before);
+    // the user token, never the tenant token
+    let reads = h.fake.requests_to(Endpoint::ListMessages);
+    assert!(
+        reads
+            .last()
+            .and_then(|r| r.token.as_deref())
+            .is_some_and(|t| t.contains("u-")),
+        "{reads:?}"
+    );
 }

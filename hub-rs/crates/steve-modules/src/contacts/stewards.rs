@@ -10,8 +10,9 @@
 //!   hours through `POST /api/config/:id/undo` like every contact edit;
 //! - defaults: [`seed_defaults`] when “我” is first created, [`adopt`] for a new bot, persona or
 //!   connection, [`link`] for what a provider tells (source `sync`);
-//! - proposals from chat: [`propose`] writes a `proposed` row and opens a `confirm` decision whose
-//!   handler is [`StewardConfirm`];
+//! - from chat (`steve_steward_propose`): written confirmed at once through [`set_from`] (source
+//!   `chat`, the others of that role kept), undoable for 24 hours like a manual edit; [`propose`] and
+//!   its `confirm` handler [`StewardConfirm`] stay for proposals opened before;
 //! - merges move the rows with the person ([`merge_move`], [`split_back`]).
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -840,8 +841,8 @@ fn names(c: &Connection, rows: &[&Steward]) -> ApiResult<String> {
     Ok(shown_names(&name_list(c, rows)?))
 }
 
-fn set_op(o: &ObjectInfo, person: &str, role: &str) -> Value {
-    json!({ "op": "steward.set", "object_type": o.object_type, "object_id": o.object_id, "person_id": person, "role": role, "source": "manual" })
+fn set_op(o: &ObjectInfo, person: &str, role: &str, source: &str) -> Value {
+    json!({ "op": "steward.set", "object_type": o.object_type, "object_id": o.object_id, "person_id": person, "role": role, "source": source })
 }
 
 fn remove_op(s: &Steward) -> Value {
@@ -855,6 +856,7 @@ fn record(
     o: &ObjectInfo,
     href_person: &str,
     plan: Plan,
+    origin: Origin,
 ) -> ApiResult<Option<String>> {
     if plan.ops.is_empty() {
         return Ok(None);
@@ -876,7 +878,7 @@ fn record(
         free_text: None,
         context: Value::Null,
     };
-    let p = changes::store_plan(m, who, "contact", &prepared, plan, Origin::default())?;
+    let p = changes::store_plan(m, who, "contact", &prepared, plan, origin)?;
     match changes::apply(m, who, &p.id) {
         Some(r) => r.map(|_| Some(p.id)),
         None => Err(ApiError::Internal("steward changeset vanished".into())),
@@ -890,6 +892,19 @@ pub fn set(
     object_type: &str,
     id: &str,
     b: SetBody,
+) -> ApiResult<Changed> {
+    set_from(m, who, object_type, id, b, "manual", Origin::default())
+}
+
+/// [`set`] with the row's `source` (`manual`, `chat`) and the changeset's origin.
+pub fn set_from(
+    m: &Modules,
+    who: &Caller,
+    object_type: &str,
+    id: &str,
+    b: SetBody,
+    source: &str,
+    origin: Origin,
 ) -> ApiResult<Changed> {
     let (viewer, _) = super::service::start(m, who)?;
     let role = check_role(b.role.as_deref())?;
@@ -913,7 +928,7 @@ pub fn set(
             }
             let current = same.iter().find(|s| s.person_id == p.id);
             if current.is_none_or(|s| s.status != "confirmed") {
-                plan.ops.push(set_op(&o, &p.id, &role));
+                plan.ops.push(set_op(&o, &p.id, &role, source));
             }
             if !plan.ops.is_empty() {
                 let after: Vec<&Steward> = if b.replace.unwrap_or(true) {
@@ -940,7 +955,7 @@ pub fn set(
             Ok((o, plan, p))
         })
     })?;
-    let undo = record(m, who, &o, &person.id, plan)?;
+    let undo = record(m, who, &o, &person.id, plan, origin)?;
     let now = m.store.reader(|c| object_stewards(c, &who.ws, o))?;
     Ok(Changed {
         ok: true,
@@ -1000,7 +1015,7 @@ pub fn remove(
             Ok::<_, ApiError>((o, plan, href))
         })
     })?;
-    let undo = record(m, who, &o, &href, plan)?;
+    let undo = record(m, who, &o, &href, plan, Origin::default())?;
     let now = m.store.reader(|c| object_stewards(c, &who.ws, o))?;
     Ok(Changed {
         ok: true,

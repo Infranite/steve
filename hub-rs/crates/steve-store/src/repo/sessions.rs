@@ -287,6 +287,9 @@ impl Sessions<'_> {
 
 pub struct Events<'a>(&'a Store);
 
+/// Events [`Events::compact`] reads and rewrites per transaction.
+const COMPACT_PAGE: i64 = 200;
+
 fn event_row(r: &rusqlite::Row) -> rusqlite::Result<Event> {
     Ok(Event {
         seq: r.get(0)?,
@@ -429,6 +432,106 @@ impl Events<'_> {
         })
     }
 
+    /// Compacts the event log of session `session_id` ([`crate::compact`]: images to placeholders, a
+    /// tool's big outputs to head and tail) from where the last compaction stopped up to `upto` (the
+    /// last seq when the session was found due; events appended later are left whole), in pages of
+    /// [`COMPACT_PAGE`] events, each its own transaction, and records `upto`. Lossy, and only for
+    /// archived items whose workspace asked for it. Every page is written, and `upto` recorded, while
+    /// holding what `still_due` returns: `None` (the item was taken back up meanwhile) stops the pass
+    /// before it writes anything more, and the pass returns `None`. Otherwise it returns the events
+    /// changed.
+    pub fn compact<G>(
+        &self,
+        session_id: &str,
+        upto: i64,
+        mut still_due: impl FnMut() -> Option<G>,
+    ) -> Result<Option<usize>> {
+        let mut after = self.compacted_upto(session_id)?;
+        let mut changed = 0;
+        loop {
+            let page: Vec<Event> = self.0.read(|c| {
+                let tx = c.unchecked_transaction()?;
+                let mut events: Vec<Event> = all(
+                    &tx,
+                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?",
+                    params![session_id, after, upto, COMPACT_PAGE],
+                    event_row,
+                )?;
+                for e in &mut events {
+                    hydrate_event(&tx, session_id, e)?;
+                }
+                tx.commit()?;
+                Ok(events)
+            })?;
+            let Some(last) = page.last().map(|e| e.seq) else {
+                break;
+            };
+            after = last;
+            let mut todo = vec![];
+            for mut e in page {
+                if crate::compact::compact(&e.kind, &mut e.data) {
+                    let (stored, payloads) = crate::event_payload::split(&e.kind, &e.data)?;
+                    todo.push((e.seq, to_json(&stored)?, payloads));
+                }
+            }
+            if todo.is_empty() {
+                continue;
+            }
+            let Some(_due) = still_due() else {
+                return Ok(None);
+            };
+            changed += todo.len();
+            self.0.write(|w| {
+                let tx = w.tx()?;
+                for (seq, data, payloads) in &todo {
+                    // the refs go first: the trigger drops a payload no other event points at
+                    tx.run("DELETE FROM event_payload_refs WHERE event_seq = ?", [seq])?;
+                    tx.run(
+                        "UPDATE events SET data = ? WHERE seq = ? AND session_id = ?",
+                        params![data, seq, session_id],
+                    )?;
+                    crate::event_payload::save(&tx, session_id, *seq, payloads)?;
+                }
+                tx.commit()?;
+                Ok(())
+            })?;
+        }
+        let Some(_due) = still_due() else {
+            return Ok(None);
+        };
+        self.0.write(|w| {
+            w.c.run(
+                "INSERT INTO session_compactions (session_id, upto, events, at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (session_id) DO UPDATE SET upto = max(upto, ?2), events = events + ?3, at = ?4",
+                params![session_id, upto, changed as i64, now()],
+            )?;
+            Ok(())
+        })?;
+        Ok(Some(changed))
+    }
+
+    /// The last seq of session `session_id` compacted already (0: never compacted).
+    pub fn compacted_upto(&self, session_id: &str) -> Result<i64> {
+        self.0.read(|c| {
+            Ok(c.query_row(
+                "SELECT COALESCE(MAX(upto), 0) FROM session_compactions WHERE session_id = ?",
+                [session_id],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
+    /// The seq of session `session_id`'s last event (0: none).
+    pub fn last_seq(&self, session_id: &str) -> Result<i64> {
+        self.0.read(|c| {
+            Ok(c.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?",
+                [session_id],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
     /// Events with `seq <= seq` (the history a fork starts from).
     pub fn up_to(&self, session_id: &str, seq: i64) -> Result<Vec<Event>> {
         self.0.read(|c| {
@@ -461,6 +564,22 @@ impl QueuedRepo<'_> {
             w.c.run(
                 "INSERT INTO queued (id, session_id, text, via, created, files) VALUES (?, ?, ?, ?, ?, ?)",
                 params![uid("q"), session_id, text, via, now(), super::file_refs(files)?],
+            )?;
+            w.publish(ChangeEvent::Session {
+                id: session_id.into(),
+                item_id: None,
+            });
+            Ok(())
+        })
+    }
+
+    /// [`Self::add`] ahead of everything waiting in `session_id`'s queue.
+    pub fn add_first(&self, session_id: &str, text: &str, via: &str) -> Result<()> {
+        self.0.write(|w| {
+            w.c.run(
+                "INSERT INTO queued (id, session_id, text, via, created, files)
+                 VALUES (?1, ?2, ?3, ?4, coalesce((SELECT min(created) - 1 FROM queued WHERE session_id = ?2), ?5), NULL)",
+                params![uid("q"), session_id, text, via, now()],
             )?;
             w.publish(ChangeEvent::Session {
                 id: session_id.into(),
@@ -528,89 +647,45 @@ impl QueuedRepo<'_> {
         })
     }
 
-    /// Atomically transfer waiting messages to a durable dispatch. No destructive dequeue gap.
-    pub fn claim(&self, session_id: &str) -> Result<Vec<Queued>> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
-            let node: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)", [session_id], |r| r.get(0))?;
-            if node { return Err(crate::StoreError::Conflict("session belongs to the Node runtime".into())); }
-
-            let xs = all(&tx, "SELECT * FROM queued WHERE session_id = ? ORDER BY created, rowid", [session_id], Queued::from_row)?;
-            tx.run("INSERT INTO session_dispatch (id,session_id,text,via,created,files,state,updated) SELECT id,session_id,text,via,created,files,'claimed',? FROM queued WHERE session_id = ?", params![now(),session_id])?;
-            tx.run("DELETE FROM queued WHERE session_id = ?", [session_id])?;
-            tx.commit()?;
-            Ok(xs)
-        })
-    }
-
-    /// Receipt is committed before the protocol write. A crash after this point is ambiguous;
-    /// recovery must ask the agent to inspect history/results before continuing.
-    pub fn submitted(&self, session_id: &str) -> Result<()> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
-            let node: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)", [session_id], |r| r.get(0))?;
-            if node { return Err(crate::StoreError::Conflict("session belongs to the Node runtime".into())); }
-
-            tx.run("UPDATE session_dispatch SET state='submitted',updated=? WHERE backend='legacy' AND session_id=? AND state='claimed'", params![now(),session_id])?;
-            tx.run(r#"INSERT INTO events (session_id, kind, data, ts) SELECT ?, 'system', '{"resumed":true,"text":"Hub 重启后已提交继续请求"}', ? WHERE EXISTS (SELECT 1 FROM session_resume WHERE session_id=?)"#, params![session_id,now(),session_id])?;
-            tx.run("DELETE FROM session_resume WHERE session_id=?", [session_id])?;
-            tx.commit()?;
-            Ok(())
-        })
-    }
-
-    pub fn defer_claimed(&self, session_id: &str) -> Result<()> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
-            let node: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)", [session_id], |r| r.get(0))?;
-            if node { return Err(crate::StoreError::Conflict("session belongs to the Node runtime".into())); }
-
-            tx.run("INSERT INTO queued (id,session_id,text,via,created,files) SELECT 'q_' || lower(hex(randomblob(16))),session_id,text,via,created,files FROM session_dispatch WHERE backend='legacy' AND session_id=? AND state='claimed'", [session_id])?;
-            tx.run("UPDATE session_dispatch SET state='interrupted',updated=? WHERE backend='legacy' AND session_id=? AND state='claimed'", params![now(),session_id])?;
-            tx.commit()?;
-            Ok(())
-        })
-    }
-
-    pub fn receipt(&self, session_id: &str, state: &str) -> Result<()> {
-        self.0.write(|w| {
-            w.c.run("UPDATE session_dispatch SET state=?,updated=? WHERE backend='legacy' AND session_id=? AND state IN ('claimed','submitted')", params![state,now(),session_id])?;
-            Ok(())
-        })
-    }
-
-    /// Reclaim only on process boot, before any runner exists. Keep a receipt for interrupted
-    /// submissions, and preserve the original ids, text, source and attachments in the queue.
-    pub fn recover_dispatches(&self) -> Result<()> {
+    /// What an older Hub's legacy runner had in hand when it stopped (B7: the runner is gone), back
+    /// in the queue, before its sessions move to a Node or end: a message it claimed but never
+    /// delivered as it was; one it delivered (maybe acted on) marked `resumed:<via>`, to be checked
+    /// rather than redone, with a resume intent for its session. Their text, source, time and
+    /// attachments are kept, under fresh ids. Idempotent: the rows it took are marked interrupted.
+    pub fn return_legacy_dispatches(&self) -> Result<usize> {
         self.0.write(|w| {
             let tx = w.tx()?;
             tx.run("INSERT OR IGNORE INTO session_resume SELECT DISTINCT session_id,? FROM session_dispatch WHERE backend='legacy' AND state='submitted'", [now()])?;
-            // never delivered: back as it was; delivered (maybe acted on): back marked, to be checked, not redone
             tx.run("INSERT OR IGNORE INTO queued (id,session_id,text,via,created,files) SELECT id,session_id,text,via,created,files FROM session_dispatch WHERE backend='legacy' AND state='claimed'", [])?;
             tx.run("INSERT OR IGNORE INTO queued (id,session_id,text,via,created,files) SELECT id,session_id,text,CASE WHEN via LIKE 'resumed:%' THEN via ELSE 'resumed:' || via END,created,files FROM session_dispatch WHERE backend='legacy' AND state='submitted'", [])?;
-            // Re-claimed rows receive fresh receipt ids at the next claim.
+            // fresh ids: the old ones stay the dispatch rows' (a Node's claim copies a message into
+            // session_dispatch under its own id)
             tx.run("UPDATE queued SET id = 'q_' || lower(hex(randomblob(16))) WHERE id IN (SELECT id FROM session_dispatch WHERE backend='legacy' AND state IN ('claimed','submitted'))", [])?;
-            tx.run("UPDATE session_dispatch SET state='interrupted',updated=? WHERE backend='legacy' AND state IN ('claimed','submitted')", [now()])?;
+            let n = tx.run("UPDATE session_dispatch SET state='interrupted',updated=? WHERE backend='legacy' AND state IN ('claimed','submitted')", [now()])?;
             tx.commit()?;
-            Ok(())
+            Ok(n)
         })
     }
 
-    /// The intent and idle transition are one transaction: a second boot cannot lose the hand-off.
-    /// `true` when the intent is new (this boot found the interruption); `false` when an earlier
-    /// boot already recorded it (its notices were written then).
-    pub fn plan_resume(&self, session_id: &str) -> Result<bool> {
+    /// `session_id`'s queued `resumed:<via>` rows as the agent is to get them: `note` before the
+    /// text, and their own `via` back (so they can be edited or withdrawn again). How many.
+    pub fn unwrap_resumed(&self, session_id: &str, note: &str) -> Result<usize> {
         self.0.write(|w| {
-            let tx = w.tx()?;
-            let fresh = tx.run(
-                "INSERT OR IGNORE INTO session_resume VALUES (?,?)",
-                params![session_id, now()],
-            )? == 1;
-            tx.run("UPDATE sessions SET status='idle' WHERE id=?", [session_id])?;
-            tx.commit()?;
-            Ok(fresh)
+            let n = w.c.run(
+                "UPDATE queued SET text = ?2 || char(10) || char(10) || text, via = substr(via, 9)
+                  WHERE session_id = ?1 AND via GLOB 'resumed:*'",
+                params![session_id, note],
+            )?;
+            if n > 0 {
+                w.publish(ChangeEvent::Session {
+                    id: session_id.into(),
+                    item_id: None,
+                });
+            }
+            Ok(n)
         })
     }
+
     /// When the session's pending intent was first recorded.
     pub fn resume_created(&self, session_id: &str) -> Result<Option<i64>> {
         self.0.read(|c| {
@@ -673,11 +748,22 @@ impl QueuedRepo<'_> {
     }
 
     /// Deletes one row of `session_id`'s queue and returns it; `None` when a turn already took it.
+    /// A message a runner had delivered (`resumed:<via>`, see [`Self::unwrap_resumed`]) stays.
     pub fn remove(&self, session_id: &str, id: &str) -> Result<Option<Queued>> {
+        self.remove_where(session_id, id, "AND via NOT GLOB 'resumed:*'")
+    }
+
+    /// [`Self::remove`], a delivered (`resumed:<via>`) row included: for a session nothing will
+    /// ever run again, whose whole queue goes with it.
+    pub fn remove_any(&self, session_id: &str, id: &str) -> Result<Option<Queued>> {
+        self.remove_where(session_id, id, "")
+    }
+
+    fn remove_where(&self, session_id: &str, id: &str, guard: &str) -> Result<Option<Queued>> {
         self.0.write(|w| {
             let q = one(
                 w.c,
-                "DELETE FROM queued WHERE id = ? AND session_id = ? AND via NOT GLOB 'resumed:*' RETURNING *",
+                &format!("DELETE FROM queued WHERE id = ? AND session_id = ? {guard} RETURNING *"),
                 [id, session_id],
                 Queued::from_row,
             )?;

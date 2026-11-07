@@ -73,6 +73,7 @@ impl LocalNode {
                 .accept("start_job", &c, |_| Ok(Decided::accepted()))
                 .map(|(r, _)| r);
         }
+        self.0.cfg.ceiling.check(&spec.run.policy)?;
         let plan = self.research_plan(spec)?;
         let jobs = self.0.cfg.capacity.jobs;
         let (r, fresh) = self.accept("start_job", &c, |t| {
@@ -197,6 +198,7 @@ impl LocalNode {
             max_turns: job.budget.max_turns,
             max_tools: job.budget.max_tools,
             idle: Duration::from_millis(job.budget.idle_ms),
+            exit_wait: r::EXIT_WAIT,
         };
         let prompt = run
             .prompt
@@ -242,14 +244,15 @@ impl LocalNode {
         let mut tick = tokio::time::interval(POLL);
         // the prompt's files and images, from the Hub for this execution, while the job is wanted
         for part in &spec.run.prompt {
-            let (artifact, name) = match part {
+            let (artifact, name, earlier) = match part {
                 Part::File { artifact, name } => (
                     artifact,
                     name.strip_prefix(ATTACHMENTS_DIR)
                         .unwrap_or(name)
                         .to_string(),
+                    job.earlier.contains(name),
                 ),
-                Part::Image { artifact } => (artifact, image_name(artifact)),
+                Part::Image { artifact } => (artifact, image_name(artifact), false),
                 _ => continue,
             };
             let fetch = crate::fetch(&inner, &exec, artifact);
@@ -271,7 +274,7 @@ impl LocalNode {
                     name,
                     mime: artifact.mime.clone(),
                     size: artifact.size,
-                    earlier: false,
+                    earlier,
                 }),
                 Err(e) => {
                     let failed = r::RunStatus::Failed(format!("research attachments: {e}"));

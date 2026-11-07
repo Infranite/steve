@@ -224,11 +224,12 @@ async fn thread_routing_api() {
     let (s, v) = e.call("GET", &format!("/api/items/{item}"), None).await;
     assert_eq!((s, v["status"].as_str()), (200, Some("drop")));
 
-    /* a question is answered with an offer; taking it twice: the second is 409 with the same item */
+    /* a question is answered with an offer; taking it twice: the second is 409 with the same item
+    (a request in it, so the router sees it: a plain question would be researched without it) */
     e.call(
         "POST",
         "/api/thread",
-        Some(json!({"text": "评论支持 markdown 吗"})),
+        Some(json!({"text": "评论支持 markdown 吗，你看看"})),
     )
     .await;
     let t = e.settle(5).await;
@@ -325,6 +326,20 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
         )
         .await;
     assert_eq!(s, 400);
+    // changed to a text with a token in it: taken, with the token replaced (V4 paste guard)
+    let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let (s, _) = e
+        .call(
+            "PATCH",
+            &format!("/api/thread/queued/{one}"),
+            Some(json!({"text": format!("排队一 {token}")})),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (_, st) = e.call("GET", "/api/state", None).await;
+    let thread = st["thread"].to_string();
+    assert!(!thread.contains(token), "{thread}");
+    assert!(thread.contains("排队一 ［已拦下的机密］"), "{thread}");
     let (s, _) = e
         .call(
             "PATCH",
@@ -550,4 +565,72 @@ async fn research_runs_get_read_only_mcp() {
     )
     .await;
     assert_eq!(s, 401);
+}
+
+/// A retried send (the same draft's `client_id`) is answered like the first and sends nothing new;
+/// the same for a retried new-item form (#29).
+#[tokio::test]
+async fn retried_sends_go_once() {
+    let e = start().await;
+    let (s, _) = e
+        .call("POST", "/api/thread", Some(json!({"text": "慢慢说"})))
+        .await;
+    assert_eq!(s, 200);
+    for _ in 0..100 {
+        let (_, st) = e.call("GET", "/api/state", None).await;
+        if st["thinking"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for text in ["排队一", "排队一", "排队二"] {
+        let id = if text == "排队一" {
+            "draft-1"
+        } else {
+            "draft-2"
+        };
+        let (s, v) = e
+            .call(
+                "POST",
+                "/api/thread",
+                Some(json!({"text": text, "client_id": id})),
+            )
+            .await;
+        assert_eq!((s, v["ok"].as_bool()), (200, Some(true)));
+    }
+    let t = e.settle(3).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let t2 = e.thread().await;
+    let held: Vec<&str> = t2
+        .iter()
+        .filter(|m| m["meta"]["held"] == true)
+        .map(|m| m["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(held, ["排队一", "排队二"], "{t:#?}");
+    let (s, _) = e
+        .call(
+            "POST",
+            "/api/thread",
+            Some(json!({"text": "x", "client_id": ""})),
+        )
+        .await;
+    assert_eq!(s, 400, "an empty client_id is refused");
+
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    let bot = state["bots"][0]["id"].as_str().expect("bot").to_string();
+    let form = json!({"goal": "做一个新页面", "title": "新页面", "bot": bot, "project": null,
+        "mode": "propose", "client_id": "form-1"});
+    let (s, a) = e.call("POST", "/api/items", Some(form.clone())).await;
+    assert_eq!(s, 200, "{a}");
+    let (s, b) = e.call("POST", "/api/items", Some(form)).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(a["id"], b["id"]);
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    let made = state["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|i| i["title"] == "新页面" || i["t"] == "新页面")
+        .count();
+    assert_eq!(made, 1, "{:#?}", state["items"]);
 }

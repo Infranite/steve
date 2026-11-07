@@ -8,7 +8,10 @@
 //!   work landed in main or the item is archived (the branch always stays; [`crate::git::tidy_worktree`]);
 //! - when free space falls below [`DiskPolicy::low`], idle items' caches go too (no session busy, no process
 //!   inside, untouched for [`DiskPolicy::idle_ms`]), oldest first, until there is enough again;
-//! - below [`DiskPolicy::floor`] no new worktree is made ([`Core::disk_floor`]).
+//! - below [`DiskPolicy::floor`] no new worktree is made ([`Core::disk_floor`]);
+//! - an item without a project works in a scratch directory (`STEVE_HOME/scratch/<id>`), which has no git
+//!   to ask what is rebuildable: once the item ended, and only under pressure, its directories with a known
+//!   cache name or a `CACHEDIR.TAG` go ([`scratch_cache_dirs`]); everything else in it stays.
 //!
 //! Nothing is touched while a session of the item is busy or a process runs inside the worktree. Deleting
 //! tens of GB takes a while, so it never happens under the core's lock: caches are renamed into
@@ -147,6 +150,20 @@ pub fn human(bytes: u64) -> String {
 /// a known dependency or tool cache or marked as a cache (`CACHEDIR.TAG`). Neither `.git` nor the caches
 /// themselves are looked into; symlinks are not followed.
 pub fn cache_dirs(wt: &Path) -> Vec<PathBuf> {
+    let mut found = marked_caches(wt);
+    found.retain(|p| rebuildable(wt, p));
+    found
+}
+
+/// The caches in an ended item's scratch directory `dir`: only directories with a known cache name or a
+/// `CACHEDIR.TAG` (there is no git to ask what else is rebuildable). Symlinks are not followed.
+pub fn scratch_cache_dirs(dir: &Path) -> Vec<PathBuf> {
+    marked_caches(dir)
+}
+
+/// Directories under `wt` (to [`CACHE_DEPTH`]) with a known cache name or a `CACHEDIR.TAG`, sorted;
+/// neither `.git` nor the caches themselves are looked into.
+fn marked_caches(wt: &Path) -> Vec<PathBuf> {
     let mut found = vec![];
     let mut todo = vec![(wt.to_path_buf(), 0)];
     while let Some((dir, depth)) = todo.pop() {
@@ -165,7 +182,6 @@ pub fn cache_dirs(wt: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    found.retain(|p| rebuildable(wt, p));
     found.sort();
     found
 }
@@ -446,6 +462,9 @@ pub struct DiskReport {
     pub git: Option<String>,
     pub trash: u64,
     pub entries: Vec<Entry>,
+    /// Items' scratch directories (items without a project); `caches` are what an ended item gives
+    /// back under pressure.
+    pub scratch: Vec<Entry>,
     pub orphans: Vec<Orphan>,
     pub measured_at: i64,
 }
@@ -568,7 +587,8 @@ impl Core {
         }
         r.freed.extend(purge(&trash));
 
-        /* under pressure: idle open items' caches, oldest first, until there is enough again */
+        /* under pressure: idle open items' caches, oldest first, until there is enough again; then the
+         * scratch directories of ended items without a project, oldest first */
         let at = now();
         let mut idle: Vec<&Candidate> = candidates
             .iter()
@@ -587,6 +607,21 @@ impl Core {
                 r.freed.extend(purge(&trash));
             }
         }
+        if free().is_some_and(|f| pol.pressure(f) != Pressure::Ok) {
+            let mut ended = self.tx().scratch_candidates()?;
+            ended.sort_by_key(|c| c.updated);
+            for c in ended {
+                if free().is_none_or(|f| pol.pressure(f) == Pressure::Ok) {
+                    break;
+                }
+                if procs.as_deref().is_none_or(|p| in_use(&c.wt, p)) {
+                    continue;
+                }
+                if self.tx().shed_scratch_caches(&c.item, &c.wt)? {
+                    r.freed.extend(purge(&trash));
+                }
+            }
+        }
         r.free_after = free();
         Ok(r)
     }
@@ -595,11 +630,23 @@ impl Core {
     /// worktrees (seconds for a hundred GB); never under the lock.
     pub fn disk_report(&self) -> Result<DiskReport> {
         let root = self.config().worktrees.clone();
-        let mut entries = self.tx().workspace_entries()?;
+        let (mut entries, mut scratch) = {
+            let t = self.tx();
+            (t.workspace_entries()?, t.scratch_entries()?)
+        };
         let procs = process_dirs();
-        for e in entries.iter_mut().filter(|e| e.exists) {
+        for (e, in_scratch) in entries
+            .iter_mut()
+            .map(|e| (e, false))
+            .chain(scratch.iter_mut().map(|e| (e, true)))
+            .filter(|(e, _)| e.exists)
+        {
             let wt = Path::new(&e.path);
-            let caches = cache_dirs(wt);
+            let caches = if in_scratch {
+                scratch_cache_dirs(wt)
+            } else {
+                cache_dirs(wt)
+            };
             e.cache_bytes = caches.iter().map(|c| dir_bytes(c)).sum();
             e.caches = caches
                 .iter()
@@ -635,6 +682,7 @@ impl Core {
             git: git::version().map(|(a, b)| format!("{a}.{b}")),
             trash: dir_bytes(&trash_dir(&root)),
             entries,
+            scratch,
             orphans,
             measured_at: now(),
         })
@@ -694,6 +742,102 @@ impl Tx<'_> {
     fn under_root(&self, cwd: &str) -> bool {
         let prefix = format!("{}/", self.cfg().worktrees.to_string_lossy());
         cwd.starts_with(&prefix)
+    }
+
+    /// Whether `cwd` is an item's own scratch directory (`STEVE_HOME/scratch/<id>`).
+    fn own_scratch(&self, item: &str, cwd: &str) -> bool {
+        Path::new(cwd) == self.cfg().scratch.join(item)
+    }
+
+    /// Ended items without a project whose scratch directory exists and that no session works in now.
+    fn scratch_candidates(&self) -> Result<Vec<Candidate>> {
+        let mut out = vec![];
+        for ws in self.db().workspace_ids()? {
+            for i in self.db().items_all(&ws)? {
+                let Some(cwd) = i.cwd.as_deref().filter(|c| self.own_scratch(&i.id, c)) else {
+                    continue;
+                };
+                if !i.is_finished()
+                    || self.db().project(i.project_id.as_deref())?.is_some()
+                    || !Path::new(cwd).is_dir()
+                    || self
+                        .db()
+                        .sessions_of_item(&i.id)?
+                        .iter()
+                        .any(|s| self.busy(&s.id))
+                {
+                    continue;
+                }
+                out.push(Candidate {
+                    item: i.id.clone(),
+                    wt: cwd.into(),
+                    finished: true,
+                    updated: i.updated,
+                    repo: None,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Items' scratch directories, as the disk report lists them.
+    fn scratch_entries(&self) -> Result<Vec<Entry>> {
+        let mut out = vec![];
+        for ws in self.db().workspace_ids()? {
+            for i in self.db().items_all(&ws)? {
+                let Some(cwd) = i.cwd.as_deref().filter(|c| self.own_scratch(&i.id, c)) else {
+                    continue;
+                };
+                let busy = self
+                    .db()
+                    .sessions_of_item(&i.id)?
+                    .iter()
+                    .any(|s| self.busy(&s.id));
+                out.push(Entry {
+                    item: i.id.clone(),
+                    workspace: ws.clone(),
+                    title: i.title.clone(),
+                    status: i.status.clone(),
+                    phase: i.phase.clone(),
+                    archived: i.archived,
+                    branch: None,
+                    path: cwd.into(),
+                    exists: Path::new(cwd).is_dir(),
+                    bytes: 0,
+                    cache_bytes: 0,
+                    caches: vec![],
+                    busy,
+                    in_use: None,
+                    updated: i.updated,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Moves an ended project-less item's scratch caches to the trash, checking under the lock that it
+    /// is still ended and idle.
+    fn shed_scratch_caches(&mut self, item: &str, dir: &Path) -> Result<bool> {
+        let Some(i) = self.db().item(item)? else {
+            return Ok(false);
+        };
+        if !i.is_finished()
+            || self.db().project(i.project_id.as_deref())?.is_some()
+            || self
+                .db()
+                .sessions_of_item(item)?
+                .iter()
+                .any(|s| self.busy(&s.id))
+        {
+            return Ok(false);
+        }
+        let moved = to_trash(
+            &trash_dir(&self.cfg().worktrees),
+            item,
+            dir,
+            &scratch_cache_dirs(dir),
+        );
+        Ok(!moved.is_empty())
     }
 
     /// Items whose worktree exists under Steve's worktrees folder and that no session works in now.

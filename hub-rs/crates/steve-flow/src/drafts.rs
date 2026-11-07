@@ -18,9 +18,7 @@ use tokio::sync::Notify;
 
 use crate::cron::{CronExpr, parse_tz, validate};
 use crate::policy::{MissedPolicy, OverlapPolicy};
-use crate::schedules::{
-    self, DEFAULT_BUDGET_USD, Fields, MAX_BUDGET_USD, Mode, Origin, Schedule, Spec,
-};
+use crate::schedules::{self, Fields, MAX_BUDGET_USD, Mode, Origin, Schedule, Spec};
 use crate::when::rule_cron;
 
 pub mod flow;
@@ -585,7 +583,7 @@ fn plan_create(
         return Ok((None, errors));
     }
     let (mut name, mut time, mut what, mut bot) = (None, None, None, None);
-    let mut spec = json!({ "mode": Mode::ItemAuto.as_str(), "missed": "catch_up_once", "overlap": "skip", "budget_usd": DEFAULT_BUDGET_USD, "tz": tz, "project_id": null, "tags": [] });
+    let mut spec = json!({ "mode": Mode::ItemAuto.as_str(), "missed": "catch_up_once", "overlap": "skip", "tz": tz, "project_id": null, "tags": [] });
     let mut lines = Vec::new();
     for f in &fields {
         match f {
@@ -624,6 +622,13 @@ fn plan_create(
     spec["cron"] = json!(cron);
     spec["what"] = json!(what);
     spec["bot"] = json!(bot);
+    if spec.get("budget_usd").is_none() {
+        let mode = spec["mode"]
+            .as_str()
+            .and_then(Mode::parse)
+            .unwrap_or(Mode::ItemAuto);
+        spec["budget_usd"] = json!(schedules::default_budget_for(mode));
+    }
     let parsed: Spec = serde_json::from_value(spec.clone())?;
     lines.push(Change::new(
         steve_i18n::t!("flow.draft.schedule_name"),

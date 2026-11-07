@@ -145,7 +145,7 @@ export default {
     deletePasskeyTitle: "Delete passkey “{{name}}”?",
     deletePasskeyBody: "This device can no longer use it to view values; you'll need to register again.",
     rotateTitle: "Rotate the master key?",
-    rotateBody: "Steve creates a new master key and rewraps every item's data key in the background. Once done, the old master key and the old recovery code stop working, and you'll need to write down the new recovery code.",
+    rotateBody: "Steve creates a new master key and rewraps every item's data key. Once done, the old master key and the old recovery code stop working, and you'll need to write down the new recovery code.",
     rotate: "Rotate",
     localVerify: "Local verification",
     passkeySub: "{{rp}} · registered {{created}}",

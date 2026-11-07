@@ -31,6 +31,21 @@ pub fn strip_ai_prefix(text: &str) -> &str {
     t
 }
 
+/// Opens text somebody other than the user wrote, carried into an agent's goal (a mail, an issue,
+/// other people's messages in a group).
+pub const UNTRUSTED_OPEN: &str = "<<<外部内容开始>>>";
+/// Closes it.
+pub const UNTRUSTED_CLOSE: &str = "<<<外部内容结束>>>";
+
+/// `text` between [`UNTRUSTED_OPEN`] and [`UNTRUSTED_CLOSE`], on lines of their own; markers inside
+/// the text are defused first, so it cannot close the quote itself.
+pub fn quote_untrusted(text: &str) -> String {
+    let t = text
+        .replace(UNTRUSTED_OPEN, "<外部内容开始>")
+        .replace(UNTRUSTED_CLOSE, "<外部内容结束>");
+    format!("{UNTRUSTED_OPEN}\n{t}\n{UNTRUSTED_CLOSE}")
+}
+
 /// The settled decision's `result` says YOLO answered it (`decided_by: "yolo"`).
 pub fn decided_by_yolo(result: &serde_json::Value) -> bool {
     result.get("decided_by").and_then(serde_json::Value::as_str) == Some(YOLO_ACTOR)
@@ -66,7 +81,15 @@ pub struct KnowledgeUse {
     /// The visibility code of the source (`workspace`, `private`, `team:<id>`, `space:<id>`).
     pub visibility: String,
     pub text: String,
+    /// The index piece (`kb_chunks.seq`) of a retrieved hit, so the check can read the same text again
+    /// later ([`BasisEntry::seq`]); `None` for what was not retrieved (a memory shown by id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<i64>,
 }
+
+/// Reason of the span a later check adds when knowledge the basis names cannot be read again: the text
+/// is not checked against all of what it was written with, so it does not pass.
+pub const R_BASIS_GONE: &str = "原来用到的知识有的已经读不到，没能全部重新检查";
 
 /// Who asks, for the basis record and the models' cost.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -80,6 +103,15 @@ pub struct CheckCx {
     /// for the check only: it tells what they already know, it is not knowledge, grants no level and
     /// changes no rule. `None` when the text answers nothing (email, comments, a new message).
     pub audience_said: Option<String>,
+    /// Only the local checks (secrets, never-level knowledge, the rule check), no check model: a fixed
+    /// receipt no model wrote, or an email draft the model checks only on request. A result without
+    /// spans then has no `check_model`.
+    pub skip_model: bool,
+    /// The text goes out under a bot's own identity (not yours, not on your behalf) and the knowledge
+    /// given is everything its writer was given: then, for an audience made only of the workspace's own
+    /// people to whom every piece of it (at least one) is public, the model check is skipped. Off, the
+    /// model looks whatever the knowledge.
+    pub internal_skip: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +145,9 @@ pub struct BasisEntry {
     pub used: bool,
     /// `verbatim|conclusion|reasoning|blocked`.
     pub out: String,
+    /// [`KnowledgeUse::seq`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<i64>,
 }
 
 /// The result; serialized as the `basis` of an email draft (`{verdict, entries, spans}`).

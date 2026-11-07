@@ -55,6 +55,8 @@ pub struct FakeState {
     pub uncertain: HashSet<String>,
     /// Sessions whose backend recovers them after a restart ([`AgentRuntime::recovers_itself`]).
     pub recovers_itself: HashSet<String>,
+    /// Why new sessions cannot run ([`AgentRuntime::refusal`]); `None`: they run.
+    pub refuse: Option<String>,
     /// `flush` takes nothing and answers false (a session still opening, say).
     pub flush_stuck: bool,
     /// The next `stop` comes too late: the turn it names ended just before and took the queue as
@@ -233,11 +235,6 @@ impl AgentRuntime for FakeRuntime {
             let taken = self.store.queue_take(&turn.session).unwrap();
             let msgs: Vec<_> = taken.into_iter().map(|q| (q.text, q.via)).collect();
             self.run(&mut st, &turn.session, &msgs);
-            self.store
-                .store()
-                .queued()
-                .submitted(&turn.session)
-                .unwrap();
         }
         let stop = if st.attempts.get(&turn.session) == Some(&turn.attempt) {
             st.cancelled.push(turn.session.clone());
@@ -346,6 +343,9 @@ impl AgentRuntime for FakeRuntime {
     fn recovers_itself(&self, sid: &str) -> bool {
         self.st().recovers_itself.contains(sid)
     }
+    fn refusal(&self, _sid: &str) -> Option<String> {
+        self.st().refuse.clone()
+    }
     fn flush(&self, sid: &str, lead: Option<(&str, &str)>) -> Flushed {
         let sent = self.flush_now(sid, lead);
         self.flushed.notify_one();
@@ -382,7 +382,6 @@ impl FakeRuntime {
             return Flushed::Empty;
         }
         self.run(&mut st, sid, &msgs);
-        self.store.store().queued().submitted(sid).unwrap();
         Flushed::Started(Running {
             session: sid.into(),
             attempt: st.attempts[sid].clone(),

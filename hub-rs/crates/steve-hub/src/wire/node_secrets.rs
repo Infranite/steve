@@ -595,6 +595,7 @@ mod tests {
         store.ensure_workspace().unwrap();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
                 node: NodeId::new("local").unwrap(),
                 home: root.join("node"),
                 acp: steve_acp::AcpConfig {

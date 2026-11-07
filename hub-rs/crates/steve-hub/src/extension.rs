@@ -10,8 +10,8 @@
 //! ```
 //!
 //! Extensions are linked at compile time. Every conflict (an extension or adapter id twice, an
-//! [`Extension::api`] other than [`EXTENSION_API`], overlapping routes) stops the Hub at startup
-//! with the extension's id. These are messages for whoever assembles the Hub, in the language of
+//! [`Extension::api`] other than [`EXTENSION_API`], overlapping routes, a connection hook for an
+//! adapter the extension did not register) stops the Hub at startup with the extension's id. These are messages for whoever assembles the Hub, in the language of
 //! the Hub's other startup errors.
 
 mod builtin;
@@ -24,8 +24,8 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::Router;
 use serde_json::Value;
-use steve_channels::adapters::feishu::{FeishuUser, SendAsUser};
-use steve_channels::ext::ChannelSide;
+use steve_channels::channel::ActAsUser;
+use steve_channels::ext::{ChannelDecl, ChannelSide, ConnectionHook, MediaFetch, Queries};
 use steve_channels::{ChannelAdapter, MessageSink, ProfileAdapter};
 use steve_modules::Modules;
 use steve_modules::accounts::connections::{ConnectionProvider, Connections};
@@ -37,7 +37,7 @@ pub use crate::wire::Vars;
 pub use crate::wire::modules::Job;
 
 /// The extension API this Hub is built with; raised only on an incompatible change.
-pub const EXTENSION_API: u32 = 1;
+pub const EXTENSION_API: u32 = 2;
 
 /// Why an assembly was refused, with the extension it is about once the Hub knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +114,7 @@ impl Assembly {
     pub fn builtin() -> Self {
         let list: Vec<Arc<dyn Extension>> = vec![
             Arc::new(builtin::FeishuBot),
-            Arc::new(builtin::FeishuSelf),
+            Arc::new(builtin::FeishuSelf::default()),
             Arc::new(builtin::MailImap),
             Arc::new(builtin::GitHub),
         ];
@@ -181,12 +181,6 @@ impl Assembly {
                 .of(id));
             }
         }
-        // the built-in `feishu.self` connections are polled by the runtime `feishu.bot` starts;
-        // without it they would be accepted and never read
-        let builtin = |id: &str| self.list.iter().any(|e| e.builtin && e.ext.id() == id);
-        if builtin("feishu.self") && !builtin("feishu.bot") {
-            return Err(ExtensionError::new("needs feishu.bot in the assembly").of("feishu.self"));
-        }
         Ok(())
     }
 
@@ -201,34 +195,61 @@ impl Assembly {
             party_hooks,
             ext: String::new(),
             owners: BTreeMap::new(),
+            decls: BTreeMap::new(),
             providers: Vec::new(),
             channel_adapters: Vec::new(),
             profiles: Vec::new(),
-            as_user: Vec::new(),
+            act_as_user: Vec::new(),
+            media: Vec::new(),
+            history: Vec::new(),
             mail: Vec::new(),
             event_sources: Vec::new(),
-            feishu_user: None,
+            systems: Vec::new(),
         };
         for e in &self.list {
             let id = e.ext.id();
             d.ext = id.to_string();
             e.ext.declare(&mut d).map_err(|err| err.of(id))?;
         }
+        d.check_pairings()?;
+        d.check_systems()?;
         Ok(d)
     }
 
     /// Step two for every extension: their routes merged into `routes` (an overlap names the
-    /// extension) and their jobs.
+    /// extension), their jobs and their connection hooks (each for an adapter the extension
+    /// registered, at most one per adapter).
     pub(crate) fn start(
         &self,
         s: &Started,
+        d: &Declare<'_>,
         mut routes: Router<Modules>,
-    ) -> Result<(Router<Modules>, Vec<Job>), ExtensionError> {
+    ) -> Result<StartedAll, ExtensionError> {
         let mut jobs = Vec::new();
+        let mut hooks: Vec<Lifecycle> = Vec::new();
         for e in &self.list {
             let id = e.ext.id();
             let m = e.ext.start(s).map_err(|err| err.of(id))?;
             jobs.extend(m.jobs);
+            for (adapter, hook) in m.lifecycle {
+                if d.owners.get(&adapter).map(String::as_str) != Some(id) {
+                    return Err(ExtensionError::new(format!(
+                        "a connection hook for adapter {adapter}, which it did not register"
+                    ))
+                    .of(id));
+                }
+                if hooks.iter().any(|h| h.adapter == adapter) {
+                    return Err(ExtensionError::new(format!(
+                        "a second connection hook for adapter {adapter}"
+                    ))
+                    .of(id));
+                }
+                hooks.push(Lifecycle {
+                    decl: d.decls.get(&adapter).cloned(),
+                    adapter,
+                    hook,
+                });
+            }
             let mine = if e.builtin {
                 m.api_routes
             } else if m.api_routes.has_routes() {
@@ -238,8 +259,26 @@ impl Assembly {
             };
             routes = merge_routes(routes, mine).map_err(|e| e.of(id))?;
         }
-        Ok((routes, jobs))
+        Ok(StartedAll {
+            routes,
+            jobs,
+            hooks,
+        })
     }
+}
+
+/// What step two collected from every extension.
+pub(crate) struct StartedAll {
+    pub(crate) routes: Router<Modules>,
+    pub(crate) jobs: Vec<Job>,
+    pub(crate) hooks: Vec<Lifecycle>,
+}
+
+/// One connection hook, with the declaration of its adapter when it is a channel side.
+pub(crate) struct Lifecycle {
+    pub(crate) adapter: String,
+    pub(crate) decl: Option<ChannelDecl>,
+    pub(crate) hook: Arc<dyn ConnectionHook>,
 }
 
 /// `routes` with `mine` merged in. axum refuses an overlapping route by panicking; this turns it
@@ -267,14 +306,18 @@ pub struct Declare<'a> {
     ext: String,
     /// Adapter id → the extension that registered it.
     owners: BTreeMap<String, String>,
+    /// Adapter id → its declaration, for the channel sides.
+    decls: BTreeMap<String, ChannelDecl>,
     pub(crate) providers: Vec<Arc<dyn ConnectionProvider>>,
     pub(crate) channel_adapters: Vec<Arc<dyn ChannelAdapter>>,
     pub(crate) profiles: Vec<Arc<dyn ProfileAdapter>>,
-    pub(crate) as_user: Vec<(String, Arc<dyn SendAsUser>)>,
+    pub(crate) act_as_user: Vec<Arc<dyn ActAsUser>>,
+    pub(crate) media: Vec<Arc<dyn MediaFetch>>,
+    pub(crate) history: Vec<Arc<dyn steve_channels::ext::HistoryRead>>,
     pub(crate) mail: Vec<Arc<dyn steve_mail::MailAdapter>>,
     pub(crate) event_sources: Vec<Arc<dyn steve_flow::EventAdapter>>,
-    /// The built-in `feishu.self` provider, for the channels routes and the Feishu runtime.
-    pub(crate) feishu_user: Option<Arc<FeishuUser>>,
+    /// Handle systems declared by the extensions: `(id, label, extension)`.
+    pub(crate) systems: Vec<(String, String, String)>,
 }
 
 impl Declare<'_> {
@@ -292,16 +335,100 @@ impl Declare<'_> {
     }
 
     /// A channel-side adapter: its provider goes to `Connections`, its other views to
-    /// `Channels` and the outbox.
+    /// `Channels` (channel adapter, profiles, media) and the outbox (acting as you).
     pub fn channel(&mut self, side: ChannelSide) -> Result<(), ExtensionError> {
         side.check().map_err(ExtensionError::new)?;
-        let id = side.decl.adapter;
+        let id = side.decl.adapter.clone();
         self.claim(&id)?;
+        self.decls.insert(id.clone(), side.decl);
         self.providers.push(side.provider);
         self.channel_adapters.extend(side.adapter);
         self.profiles.extend(side.profiles);
-        if let Some(a) = side.as_user {
-            self.as_user.push((id, a));
+        self.act_as_user.extend(side.act_as_user);
+        self.media.extend(side.media);
+        self.history.extend(side.history);
+        Ok(())
+    }
+
+    /// The declarations of the channel sides registered so far.
+    pub(crate) fn decls(&self) -> impl Iterator<Item = &ChannelDecl> {
+        self.decls.values()
+    }
+
+    /// A provider whose connections need a pair of an adapter nobody registered would never run.
+    fn check_pairings(&self) -> Result<(), ExtensionError> {
+        for p in &self.providers {
+            let Some(pairing) = p.pairing() else { continue };
+            if pairing.required && !pairing.with.iter().any(|a| self.owners.contains_key(a)) {
+                let owner = self.owners.get(p.id()).cloned().unwrap_or_default();
+                return Err(ExtensionError::new(format!(
+                    "adapter {} needs one of {} in the assembly",
+                    p.id(),
+                    pairing.with.join(", ")
+                ))
+                .of(&owner));
+            }
+        }
+        Ok(())
+    }
+
+    /// A handle system that is not one of the Hub's own (`systems.id`, for example an adapter's
+    /// internal user ids), named `label`: a [`steve_channels::channel::Sender`]'s handle or aliases
+    /// may use it, and [`ChannelDecl::handle_system`] may name it. Upserted into `systems` at every
+    /// boot, owned by this extension. The id is lowercase letters, digits and `_`; one the Hub
+    /// seeds, or one another extension declared, is an error.
+    pub fn system(&mut self, id: &str, label: &str) -> Result<(), ExtensionError> {
+        let id = id.trim();
+        let label = label.trim();
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(ExtensionError::new(format!(
+                "handle system {id:?}: an id is lowercase letters, digits and '_'"
+            )));
+        }
+        if label.is_empty() {
+            return Err(ExtensionError::new(format!(
+                "handle system {id} without a label"
+            )));
+        }
+        if steve_modules::accounts::repo::BUILTIN_SYSTEMS
+            .iter()
+            .any(|b| b.0 == id)
+        {
+            return Err(ExtensionError::new(format!(
+                "handle system {id} is one of the Hub's own"
+            )));
+        }
+        if let Some((_, _, owner)) = self.systems.iter().find(|(x, _, _)| x == id) {
+            return Err(ExtensionError::new(format!(
+                "handle system {id} is already declared by {owner}"
+            )));
+        }
+        self.systems
+            .push((id.to_string(), label.to_string(), self.ext.clone()));
+        Ok(())
+    }
+
+    /// Every channel side names its people in a system the Hub seeds or an extension declared
+    /// (in any order).
+    fn check_systems(&self) -> Result<(), ExtensionError> {
+        for d in self.decls.values() {
+            let s = d.handle_system.as_str();
+            let known = steve_modules::accounts::repo::BUILTIN_SYSTEMS
+                .iter()
+                .any(|b| b.0 == s)
+                || self.systems.iter().any(|(x, _, _)| x == s);
+            if !known {
+                let owner = self.owners.get(&d.adapter).cloned().unwrap_or_default();
+                return Err(ExtensionError::new(format!(
+                    "adapter {} names its people in handle system {s}, which nobody declares",
+                    d.adapter
+                ))
+                .of(&owner));
+            }
         }
         Ok(())
     }
@@ -355,45 +482,65 @@ impl BusTap {
 }
 
 /// What step two gets: the built services. `Channels` itself and the store's write transactions
-/// are not part of it; inbound messages go through `inbound`.
+/// are not part of it; inbound messages go through `inbound` (or a connection hook's own sink).
+#[non_exhaustive]
 pub struct Started {
     pub modules: Modules,
     pub connections: Connections,
     /// The channels' inbound entry point.
     pub inbound: Arc<dyn MessageSink>,
+    /// Read views, bound to one connection with [`Queries::for_cx`].
+    pub queries: Queries,
     pub bus: BusTap,
     /// Environment variables (a map in tests).
     pub vars: Vars,
     pub(crate) channels: steve_channels::Channels,
-    pub(crate) feishu_user: Option<Arc<FeishuUser>>,
 }
 
 impl Started {
-    pub(crate) fn new(
-        channels: &steve_channels::Channels,
-        bus: &Bus,
-        vars: &Vars,
-        feishu_user: Option<Arc<FeishuUser>>,
-    ) -> Self {
+    pub(crate) fn new(channels: &steve_channels::Channels, bus: &Bus, vars: &Vars) -> Self {
         Self {
             modules: channels.modules().clone(),
             connections: channels.connections().clone(),
             inbound: Arc::new(channels.clone()),
+            queries: Queries::new(channels.clone()),
             bus: BusTap(bus.clone()),
             vars: vars.clone(),
             channels: channels.clone(),
-            feishu_user,
         }
     }
 }
 
-/// What step two hands back.
+/// What step two hands back. Build it from [`Mounted::default`] with the builders.
 #[derive(Default)]
+#[non_exhaustive]
 pub struct Mounted {
     /// Merged under `/api` behind `require_user` and the `Caller` layer (an extension that is not
     /// built in: under `/api/channels/ext/{id}`).
     pub api_routes: Router<Modules>,
     pub jobs: Vec<Job>,
+    /// What runs for each connection of an adapter (`connections.adapter`, hook).
+    pub lifecycle: Vec<(String, Arc<dyn ConnectionHook>)>,
+}
+
+impl Mounted {
+    /// Routes merged with the ones given before.
+    pub fn routes(mut self, r: Router<Modules>) -> Self {
+        self.api_routes = self.api_routes.merge(r);
+        self
+    }
+
+    pub fn job(mut self, j: Job) -> Self {
+        self.jobs.push(j);
+        self
+    }
+
+    /// The hook run for each connection of `adapter`, which this extension must have registered;
+    /// one per adapter. The Hub starts, restarts and stops its runs as the connections change.
+    pub fn lifecycle(mut self, adapter: &str, h: Arc<dyn ConnectionHook>) -> Self {
+        self.lifecycle.push((adapter.to_string(), h));
+        self
+    }
 }
 
 /// Runs the Hub with `asm`: the whole of the `steve-hub` binary.
@@ -474,19 +621,21 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         tokio::spawn(job);
     }
     crate::upgrades::spawn_auto_check((*cfg).clone());
+    crate::upgrades::signing::spawn_migrate(cfg.home.clone());
     let app = crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes);
-    let listener = tokio::net::TcpListener::bind((cfg.listen.host.as_str(), cfg.listen.port))
-        .await
-        .with_context(|| format!("listen on {}:{}", cfg.listen.host, cfg.listen.port))?;
+    let listeners = cfg.listen.bind().await?;
+    if cfg.listen.any() {
+        tracing::warn!(
+            "STEVE_HOST includes a wildcard address: the Hub is reachable from every network \
+             this machine is on; list the addresses you need instead"
+        );
+    }
     // recovery trouble is reported (`/healthz`.recovery), never a reason not to serve
     if let Err(e) = st.domain.ready().await {
         tracing::error!("recovery after start: {e}");
         crate::recovery::failed(&e.to_string());
     }
-    println!(
-        "steve hub {} on http://{}:{}",
-        cfg.version, cfg.listen.host, cfg.listen.port
-    );
+    println!("steve hub {} on {}", cfg.version, cfg.listen.urls());
 
     // SIGINT/SIGTERM: stop the adapters and exit at once; in-flight turns are not drained (as in TS)
     let domain = st.domain.clone();
@@ -507,11 +656,25 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         std::process::exit(0);
     });
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    // a Node's link is one of these connections: little unsent data in the kernel lets a
+    // permission answer overtake file chunks (steve_node_wire::sock)
+    use axum::serve::ListenerExt as _;
+    let mut servers = tokio::task::JoinSet::new();
+    for listener in listeners {
+        let app = app.clone();
+        let listener = listener
+            .tap_io(|tcp: &mut tokio::net::TcpStream| steve_node_wire::sock::low_water(tcp));
+        servers.spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+        });
+    }
+    while let Some(r) = servers.join_next().await {
+        r??;
+    }
     Ok(())
 }
 

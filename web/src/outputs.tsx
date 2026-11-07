@@ -145,8 +145,7 @@ function Folder({ p, item, art, base, open, browse }: { p: Extract<ROutPreview, 
   )
 }
 function Media({ p, url, page }: { p: Extract<ROutPreview, { type: "image" | "pdf" | "video" | "audio" }>; url: string; page?: number }) {
-  const t = useT()
-  if (p.large) return <Missing reason={t("pages:outputs.tooLarge", { size: size(p.size ?? 0) })} />
+  /* served by range at any size: the browser plays and pages through it */
   return p.type === "pdf" ? <iframe key={page ?? 0} title={p.name} src={page ? `${url}#page=${page}` : url} className="block h-[65vh] w-full rounded-xl border" data-out-pdf />
     : p.type === "video" ? <video src={url} controls className="max-h-[65vh] w-full rounded-xl bg-black" data-out-video />
     : <audio src={url} controls className="w-full" data-out-audio />

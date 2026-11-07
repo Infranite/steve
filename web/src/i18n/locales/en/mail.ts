@@ -47,6 +47,8 @@ export default {
     body: "Body",
     edited: "You edited the body. Your version is what gets sent.",
     unchecked: "No disclosure check",
+    check: "Check disclosure",
+    checked: "Disclosure check done",
     leak_one: "{{count}} possible leak",
     leak_other: "{{count}} possible leaks",
     leakUncounted: "Possible leak",

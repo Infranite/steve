@@ -98,14 +98,17 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
     for t in STUBS {
         only.execute_batch(&format!("CREATE TABLE {t} (id TEXT PRIMARY KEY, workspace_id TEXT, object_type TEXT, object_id TEXT, subject_type TEXT, subject_id TEXT, item_id TEXT, no INTEGER, created INTEGER, session_id TEXT)")).unwrap();
     }
-    // 018's backfill and 019's space merge read these TS tables (and change nothing on empty ones)
+    // 018's backfill and 019's space merge read these TS tables, 045 resets keepSess in settings (and change nothing on empty ones)
     const READ_STUBS: [(&str, &str); 7] = [
         ("revisions", "object_type TEXT, object_id TEXT"),
         (
             "audit",
             "workspace_id TEXT, ts INTEGER, actor TEXT, action TEXT, target TEXT, detail TEXT",
         ),
-        ("settings", "workspace_id TEXT, key TEXT, value TEXT"),
+        (
+            "settings",
+            "workspace_id TEXT, key TEXT, value TEXT, updated INTEGER",
+        ),
         (
             "bots",
             "id TEXT PRIMARY KEY, workspace_id TEXT, deleted INTEGER",
@@ -145,9 +148,19 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
             only.execute_batch(statement).unwrap();
         }
     }
-    // 036 and later: module objects, including 042's trigger on the existing items table.
+    // 036 to 043: module tables only
+    for m in &db::MIGRATIONS[35..43] {
+        only.execute_batch(m).unwrap();
+    }
+    // 044 indexes the TS `events` table: the TS side
+    ts.execute_batch(db::MIGRATIONS[43]).unwrap();
+    // 045: module tables (and settings rows, none here)
+    only.execute_batch(db::MIGRATIONS[44]).unwrap();
+    // 046: rows of a TS table (projects), no schema change
+    ts.execute_batch(db::MIGRATIONS[45]).unwrap();
+    // 047 and later: module objects, including 051's trigger on the existing items table.
     // Its stub is excluded below, but the trigger stays in the full schema comparison.
-    for m in &db::MIGRATIONS[35..] {
+    for m in &db::MIGRATIONS[46..] {
         only.execute_batch(m).unwrap();
     }
     let stub = |t: &str| STUBS.contains(&t) || READ_STUBS.iter().any(|(n, _)| *n == t);
@@ -169,8 +182,8 @@ fn fresh_database_is_ts_schema_plus_module_migrations() {
 
 #[test]
 fn migrations_are_the_ts_strings() {
-    assert_eq!(db::MIGRATIONS.len(), 42);
-    assert_eq!(db::SCHEMA_VERSION, 42);
+    assert_eq!(db::MIGRATIONS.len(), 51);
+    assert_eq!(db::SCHEMA_VERSION, 51);
     assert!(db::MIGRATIONS[0].starts_with("\n  CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL);"));
     assert!(
         db::MIGRATIONS[1]

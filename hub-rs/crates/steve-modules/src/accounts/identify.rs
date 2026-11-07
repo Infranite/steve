@@ -8,6 +8,7 @@
 //!    by the mail signature) → a new unconfirmed contact plus a merge proposal, never a silent merge;
 //! 4. otherwise a new unconfirmed contact, working at the domain's organization when there is one.
 
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::json;
 use steve_store::base::links::{self, NewLink};
@@ -213,6 +214,173 @@ pub fn identify(
     })
 }
 
+/// One more handle of an identity, in any system: what an adapter knows of a sender besides its
+/// primary handle (an email next to an internal user id), with its handles valid only under one
+/// connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnyHandle {
+    /// A `systems.id`.
+    pub system: String,
+    pub handle: String,
+    pub extra: Vec<ExtraHandle>,
+}
+
+/// The account holding `handle` of `system` or one of `extra` (normalized), if any.
+fn held(
+    tx: &Tx,
+    ws: &str,
+    system: &System,
+    handle: &str,
+    extra: &[ExtraHandle],
+) -> ApiResult<Option<String>> {
+    if let Some(h) = normalize(system, handle)
+        && let Some(a) = repo::by_handle(tx, ws, &system.family, &h.handle)?
+    {
+        return Ok(Some(a));
+    }
+    for x in extra {
+        let x = x.handle.trim();
+        if !x.is_empty()
+            && let Some(a) = repo::by_handle(tx, ws, &system.family, x)?
+        {
+            return Ok(Some(a));
+        }
+    }
+    Ok(None)
+}
+
+/// What a handle attached to a known party gets.
+pub(crate) struct Attach<'a> {
+    pub kind: &'a str,
+    pub display_name: &'a str,
+    pub source: &'a str,
+    pub source_label: &'a str,
+}
+
+/// Attaches `handle` of `system_id` (and its `extra` handles) to `party` as a new account, when
+/// nobody holds it yet. A handle held already only gets the extra handles, and only when its
+/// account is that party's. Unknown systems and handles that do not normalize are skipped (`None`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attach_handle(
+    tx: &Tx,
+    ws: &str,
+    actor: &str,
+    party: &str,
+    system_id: &str,
+    handle: &str,
+    extra: &[ExtraHandle],
+    what: &Attach<'_>,
+) -> ApiResult<Option<String>> {
+    let Some(system) = repo::system(tx, ws, system_id)? else {
+        return Ok(None);
+    };
+    let Some(h) = normalize(&system, handle) else {
+        return Ok(None);
+    };
+    let hints = Hints {
+        extra: extra.to_vec(),
+        ..Hints::default()
+    };
+    if let Some(id) = held(tx, ws, &system, handle, extra)? {
+        let a = repo::get(tx, &id)?.ok_or_else(|| ApiError::not_found("账号"))?;
+        if current_party(tx, &a.party_id)?.is_some_and(|p| p.id == party) {
+            repo::add_handle(tx, ws, &system.family, &h.handle, &a.id, None)?;
+            add_extra(tx, ws, &system, &a.id, &hints)?;
+        }
+        return Ok(Some(id));
+    }
+    let a = repo::insert(
+        tx,
+        ws,
+        &NewAccount {
+            system_id: system.id.clone(),
+            family: system.family.clone(),
+            party_id: party.into(),
+            kind: what.kind.into(),
+            handle: h.handle,
+            handle_display: h.display,
+            display_name: what.display_name.trim().into(),
+            verified: true,
+            confidence: 1.0,
+            source: what.source.into(),
+            source_label: what.source_label.into(),
+        },
+    )?;
+    created(tx, ws, actor, &a, &system, &hints)?;
+    Ok(Some(a.id))
+}
+
+/// [`identify`] for an identity known by several handles, in any systems: `handle` of `system_id`
+/// (with `hints.extra`) and `aliases`. The party already holding one of them (the primary first,
+/// then each alias in order) is the one: the primary is attached to it when it is new there, and so
+/// is every alias nobody holds yet. With no hit, [`identify`] of the primary decides (a match by
+/// rule, a proposal, a new unconfirmed contact) and the aliases are attached to what it found.
+/// Without aliases this is [`identify`].
+pub fn identify_any(
+    tx: &Tx,
+    ws: &str,
+    actor: &str,
+    system_id: &str,
+    handle: &str,
+    aliases: &[AnyHandle],
+    hints: &Hints,
+) -> ApiResult<Identified> {
+    if aliases.is_empty() {
+        return identify(tx, ws, actor, system_id, handle, hints);
+    }
+    svc::ensure_seeds(tx, ws)?;
+    let system = own_system(tx, ws, system_id)?;
+    normalize(&system, handle).ok_or_else(|| ApiError::invalid("handle"))?;
+    let source = hints.source.clone().unwrap_or_else(|| "identify".into());
+    let label = hints
+        .source_label
+        .clone()
+        .unwrap_or_else(|| svc::default_label(&source).into());
+    let kind = hints.kind.clone().unwrap_or_else(|| "personal".into());
+    let display_name = hints.display_name.clone().unwrap_or_default();
+    let what = Attach {
+        kind: &kind,
+        display_name: &display_name,
+        source: &source,
+        source_label: &label,
+    };
+    if held(tx, ws, &system, handle, &hints.extra)?.is_none() {
+        let mut found = None;
+        for a in aliases {
+            let Some(sys) = repo::system(tx, ws, &a.system)? else {
+                continue;
+            };
+            let Some(id) = held(tx, ws, &sys, &a.handle, &a.extra)? else {
+                continue;
+            };
+            let Some(acc) = repo::get(tx, &id)? else {
+                continue;
+            };
+            if let Some(p) = current_party(tx, &acc.party_id)?.filter(|p| p.status == "active") {
+                found = Some(p.id);
+                break;
+            }
+        }
+        if let Some(p) = found {
+            attach_handle(tx, ws, actor, &p, system_id, handle, &hints.extra, &what)?;
+        }
+    }
+    let id = identify(tx, ws, actor, system_id, handle, hints)?;
+    for a in aliases {
+        attach_handle(
+            tx,
+            ws,
+            actor,
+            &id.party_id,
+            &a.system,
+            &a.handle,
+            &a.extra,
+            &what,
+        )?;
+    }
+    Ok(id)
+}
+
 fn add_extra(tx: &Tx, ws: &str, system: &System, account: &str, hints: &Hints) -> ApiResult<()> {
     for x in &hints.extra {
         let handle = x.handle.trim();
@@ -396,6 +564,98 @@ fn new_contact(
     )?;
     party_event(tx, ws, &p.id);
     Ok(p)
+}
+
+/// A contact seen for the first time that looks like you, `me` (a user's “我”): opens a merge
+/// proposal of `party` into `me` (the `party_merge` decision), never merges by itself. It looks
+/// like you when one of `handles` is an email that is an alias of `me` or the user's own email, or
+/// when its `name` is your name or one of your aliases and one of its emails is in a domain one of
+/// your email accounts uses. Only an unconfirmed, active contact is proposed; a pair rejected
+/// before is not proposed again. Returns the proposal id.
+pub fn propose_if_me(
+    tx: &Tx,
+    ws: &str,
+    me: &str,
+    party: &str,
+    account: &str,
+    name: Option<&str>,
+    handles: &[&str],
+) -> ApiResult<Option<String>> {
+    let (Some(me), Some(from)) = (people::get(tx, me)?, current_party(tx, party)?) else {
+        return Ok(None);
+    };
+    if !me.is_me()
+        || from.id == me.id
+        || from.status != "active"
+        || from.contact_kind.as_deref() != Some("unconfirmed")
+    {
+        return Ok(None);
+    }
+    let Some(a) = repo::get(tx, account)? else {
+        return Ok(None);
+    };
+    let emails: Vec<String> = handles
+        .iter()
+        .map(|h| h.trim().to_lowercase())
+        .filter(|h| {
+            h.split_once('@')
+                .is_some_and(|(l, d)| !l.is_empty() && d.contains('.'))
+        })
+        .collect();
+    if emails.is_empty() {
+        return Ok(None);
+    }
+    let user_email: Option<String> = tx
+        .query_row(
+            "SELECT email FROM users WHERE id = ?",
+            [me.user_id.as_deref().unwrap_or_default()],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .map(|e| e.trim().to_lowercase());
+    let aliases: Vec<String> = me.aliases.iter().map(|x| x.trim().to_lowercase()).collect();
+    let reason = if let Some(e) = emails
+        .iter()
+        .find(|e| aliases.contains(e) || user_email.as_ref() == Some(*e))
+    {
+        Some(format!("邮箱 {e} 是「{}」用过的邮箱", me.name))
+    } else {
+        let key = name.map(|n| n.trim().to_lowercase()).unwrap_or_default();
+        let same_name = key.chars().count() >= 2
+            && (me.name.trim().to_lowercase() == key || aliases.contains(&key));
+        let mut domains: Vec<String> = Vec::new();
+        if same_name {
+            let mut st = tx.prepare_cached(
+                "WITH RECURSIVE ids(id) AS (SELECT ?2 UNION SELECT p.id FROM parties p JOIN ids ON p.merged_into = ids.id)
+                 SELECT a.handle FROM accounts a WHERE a.workspace_id = ?1 AND a.family = 'email' AND a.party_id IN (SELECT id FROM ids)",
+            )?;
+            for h in st.query_map(rusqlite::params![ws, me.id], |r| r.get::<_, String>(0))? {
+                if let Some((_, d)) = h?.trim().to_lowercase().split_once('@') {
+                    domains.push(d.to_string());
+                }
+            }
+            if let Some(d) = user_email.as_ref().and_then(|e| e.split_once('@')) {
+                domains.push(d.1.to_string());
+            }
+        }
+        emails
+            .iter()
+            .filter_map(|e| e.split_once('@'))
+            .find(|(_, d)| domains.iter().any(|x| x == d))
+            .map(|(_, d)| {
+                format!(
+                    "{} 和「{}」同名，邮箱域名 {d} 也是「{}」在用的",
+                    name.unwrap_or("").trim(),
+                    me.name,
+                    me.name
+                )
+            })
+    };
+    match reason {
+        Some(r) => propose(tx, ws, &from, &me, &a, &r),
+        None => Ok(None),
+    }
 }
 
 /// Writes the merge proposal and opens its decision; the `party_merge` handler (P4)

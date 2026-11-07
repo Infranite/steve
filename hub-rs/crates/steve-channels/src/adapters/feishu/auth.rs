@@ -37,10 +37,7 @@ use steve_modules::{ApiError, Caller, Modules};
 use zeroize::Zeroizing;
 
 use super::client::{self, Domain, FeishuClient, short};
-use super::user_oauth::{FeishuIds, SELF_CLAIM, SelfClaims, claim_self_for};
 use super::verify;
-use steve_modules::accounts::AccountHooks;
-use steve_modules::contacts::PartyHooks;
 
 /// `connections.adapter` and `systems.id` of the bot.
 pub const APP_ADAPTER: &str = "feishu_app";
@@ -352,10 +349,6 @@ pub struct FeishuUser {
     /// The same two for Lark (a connection with `domain: "lark"`, made through a Lark bot app).
     lark_open: String,
     lark_accounts: String,
-    /// Claim tickets of the F6 start routes (who started a flow; see [`super::user_oauth`]).
-    claims: SelfClaims,
-    /// The contacts hooks a [`super::user_oauth::claim_self`] merge runs (accounts move along).
-    hooks: Vec<Arc<dyn PartyHooks>>,
 }
 
 impl FeishuUser {
@@ -394,21 +387,7 @@ impl FeishuUser {
             accounts: accounts.to_string(),
             lark_open: lark_open.trim_end_matches('/').to_string(),
             lark_accounts: lark_accounts.trim_end_matches('/').to_string(),
-            claims: SelfClaims::default(),
-            hooks: vec![Arc::new(AccountHooks)],
         }
-    }
-
-    /// The contacts [`PartyHooks`] for the merge of a contact the bot made for you into “我”: pass
-    /// the same list the contacts router gets (default: the accounts module's alone).
-    pub fn with_party_hooks(mut self, hooks: Vec<Arc<dyn PartyHooks>>) -> Self {
-        self.hooks = hooks;
-        self
-    }
-
-    /// The claim tickets, for [`super::user_oauth::user_routes`].
-    pub fn claims(&self) -> &SelfClaims {
-        &self.claims
     }
 
     /// A client on the user endpoints' host, for calls with this connection's user token (the
@@ -527,6 +506,14 @@ impl ConnectionProvider for FeishuUser {
     fn caps(&self) -> &[&'static str] {
         &["msg.receive", "msg.send_as_user"]
     }
+    /// Paired with the bot of the same app (`config.app_connection`); not required: the device flow
+    /// signs you in without one.
+    fn pairing(&self) -> Option<steve_modules::accounts::connections::Pairing> {
+        Some(steve_modules::accounts::connections::Pairing {
+            with: vec![APP_ADAPTER.to_string()],
+            required: false,
+        })
+    }
     fn integration(&self) -> Integration {
         user_integration()
     }
@@ -578,31 +565,11 @@ impl ConnectionProvider for FeishuUser {
         app_client(cx.connections(), cx.ws, app).await.map(Some)
     }
 
-    /// `user_info`, the granted scopes; and when the flow carries a claim ticket, the contact the
-    /// bot already made for this `union_id` merged into “我” first (F6).
+    /// `user_info` and the granted scopes. The framework claims the contact the bot already made
+    /// for this `union_id` (or `open_id`) into “我” when it attaches the account (OAuth proves who
+    /// signed in: [`ConnectionProvider::claims_self`]).
     async fn verify(&self, cx: &ConnCx) -> Result<AccountInfo, ProviderError> {
-        let mut info = verify::verify_user(cx, &self.client(cx)).await?;
-        if let Some(ticket) = cx.config_str(SELF_CLAIM) {
-            let m = cx.connections().modules().clone();
-            match self.claims.take(ticket, cx.ws(), m.clock.now()) {
-                Some(user) => {
-                    let ids = FeishuIds {
-                        union_id: info.handle.clone(),
-                        open_id: info.extra_handles.first().cloned().unwrap_or_default(),
-                    };
-                    let r =
-                        claim_self_for(m, self.hooks.clone(), cx.ws().to_string(), user, ids).await;
-                    if let Err(e) = r {
-                        // the connect then reports who holds the account
-                        tracing::warn!(error = %e, "feishu: could not merge your contact into 我");
-                    }
-                }
-                None => tracing::info!("feishu: claim ticket unknown or expired, no merge"),
-            }
-            // spent: don't keep it in the connection's config
-            info.config[SELF_CLAIM] = Value::Null;
-        }
-        Ok(info)
+        verify::verify_user(cx, &self.client(cx)).await
     }
 
     async fn refresh_tokens(
@@ -781,14 +748,8 @@ impl DeviceFlows {
         };
         let me = self.clone();
         let who = who.clone();
-        // a re-authorization keeps who it is: no claim (no contact merge before the account check)
-        let config = match &reauth_of {
-            None => {
-                let ticket = self.user.claims.issue(&who, now)?;
-                json!({"app_connection": app_connection, SELF_CLAIM: ticket, "domain": domain.code()})
-            }
-            Some(_) => json!({"app_connection": app_connection, "domain": domain.code()}),
-        };
+        // a re-authorization keeps who it is: the framework claims nothing for it
+        let config = json!({"app_connection": app_connection, "domain": domain.code()});
         let mut poll_spec = self.user.device_poll_spec_on(domain);
         poll_spec.scopes = requested.clone();
         tokio::spawn(async move {

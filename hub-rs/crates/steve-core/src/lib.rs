@@ -55,9 +55,7 @@ mod tests;
 pub use config::CoreConfig;
 pub use error::{CoreError, Result};
 pub use gateway::{ClaudeCli, Fallback, LocalPrint, ModelGateway, OneModel, SharedGateway, Tier};
-pub use orchestrator::{
-    CreateItem, Forked, ItemAction, RESUMED_NOTE, SendNow, SupplementMode, resumed_text,
-};
+pub use orchestrator::{CreateItem, Forked, ItemAction, RESUMED_NOTE, SendNow, SupplementMode};
 pub use runtime::{
     AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, Output, Prompted, Released,
     Running, Stop, TurnEnd,
@@ -119,15 +117,13 @@ pub(crate) struct State {
     /// The session's last Steve tool call, with the turn it was made in (`None`: none ran then).
     pending: HashMap<String, (Mark, Option<runtime::Running>)>,
     tokens: HashMap<String, String>,
-    /// Sessions resumed after a restart, with the turn the resume started.
-    resumed: HashMap<String, runtime::Running>,
     /// The last turn end each session had (its attempt): the same end told again is ignored.
     ended: HashMap<String, String>,
-    /// Boot resumes scheduled by `recover` and not yet run: (batch, sessions); each batch runs once.
-    resumes: Vec<(u64, Vec<String>)>,
-    resume_batch: u64,
     releasing: Option<Releasing>,
     release_generation: u64,
+    /// An acceptance answered with 验收并发布 `(item, who)`: its release requirement starts the
+    /// release right away instead of asking the agent (`release.rs` `release_with_accept`).
+    release_with_accept: Option<(String, String)>,
     drafts: HashMap<String, changes::Proposal>,
     applied: HashMap<String, changes::Applied>,
     /// Item hook calls collected in this critical section, run once the lock is gone.
@@ -160,6 +156,9 @@ pub(crate) struct State {
     /// The periodic closing check is running: what it asks of a Node is no new event, so it
     /// doesn't outdate a gathering of the same facts already running (`node_git`).
     git_polling: bool,
+    /// The periodic closing check is running: it fingerprints a worktree only when nothing else
+    /// holds the closing (`cycle.rs`).
+    lc_ticking: bool,
 }
 
 /// One critical section: the core plus the held state lock.
@@ -230,6 +229,14 @@ impl Core {
         self.0.yolo.get()
     }
 
+    /// YOLO decides for the user in `ws` now (for `item`'s decisions when given): `false` without YOLO
+    /// wired or when the setting can't be read.
+    pub fn yolo_applies(&self, ws: &str, item: Option<&str>) -> bool {
+        self.yolo()
+            .and_then(|y| y.effective(ws, item).ok())
+            .is_some_and(|e| e.on)
+    }
+
     /// The database (the domain layer's adapter; `.store()` on it gives the raw `steve_store::Store`).
     pub fn store(&self) -> &Db {
         &self.0.store
@@ -259,12 +266,6 @@ impl Core {
         let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         st.tx_seq += 1;
         Tx { c: self, st }
-    }
-
-    /// Run every pending boot resume now, as if its timer fired (a timer firing later finds nothing left).
-    #[cfg(test)]
-    pub(crate) fn fire_resume(&self) {
-        self.tx().resume(None)
     }
 }
 

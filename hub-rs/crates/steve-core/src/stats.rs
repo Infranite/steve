@@ -471,8 +471,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let gw = RecordingGateway::new(fake(dir.path()), s.clone());
-        // `slow` times out, then `dead` fails at once; the bound leaves room for a loaded test run to
-        // spawn the script (300 ms was flaky)
+        // `slow` times out, and a timeout ends the chain (#9): `dead` is not tried; the bound leaves room
+        // for a loaded test run to spawn the script (300 ms was flaky)
         let e = gw
             .call(
                 "hi",
@@ -482,7 +482,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(e.to_string(), "Command failed: boom");
+        assert_eq!(e.to_string(), "Command timed out after 1500 ms");
         let r = rows(&s);
         assert_eq!(r.len(), 1, "{r:?}");
         assert_eq!(
@@ -492,15 +492,15 @@ mod tests {
                 r[0].ok,
                 r[0].attempts
             ),
-            ("other", "", false, 2)
+            ("other", "", false, 1)
         );
         assert_eq!(
             (r[0].model.as_str(), r[0].tokens),
-            ("dead", Tokens::default())
+            ("slow", Tokens::default())
         );
         assert_eq!(
             r[0].detail,
-            json!({"scope": "none", "failures": ["slow: Command timed out after 1500 ms", "dead: Command failed: boom"]})
+            json!({"scope": "none", "failures": ["slow: [timeout] Command timed out after 1500 ms"]})
         );
         let failed: i64 = s
             .with_conn(
@@ -626,7 +626,12 @@ mod tests {
                 ),
                 _ => (Err(crate::error::msg("Command failed: boom")), vec![]),
             };
-            crate::gateway::Tried { reply, usage }
+            let timed_out = model == "slow";
+            crate::gateway::Tried {
+                reply,
+                usage,
+                timed_out,
+            }
         }
     }
 
@@ -683,8 +688,8 @@ mod tests {
                 ("haiku".into(), None, false, 10_000, false),
                 ("busy".into(), None, false, 10_000, true),
                 ("haiku".into(), None, false, 10_000, true),
+                // #9: a timeout ends the chain, the next model is not tried
                 ("slow".into(), None, false, 1500, false),
-                ("dead".into(), None, false, 1500, false),
             ]
         );
     }

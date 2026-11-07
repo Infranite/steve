@@ -99,7 +99,7 @@ pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> Api
         .map(|k| k.split(',').map(|s| s.trim().to_string()).collect());
     let viewer = m.viewer(who)?;
     let now = m.clock.now();
-    let hits = m.store.reader(|c| {
+    let found = m.store.reader(|c| {
         let kinds_ref: Option<Vec<&str>> = kinds
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
@@ -107,11 +107,16 @@ pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> Api
         query.k = limit;
         query.now = now;
         query.kinds = kinds_ref.as_deref();
-        retrieve::retrieve(c, &query)
+        retrieve::retrieve_all(c, &query)
     })?;
+    let hits = found.hits;
     m.store
         .transaction(|tx| retrieve::record_use(tx, &who.ws, ("search", &who.me), &q, &hits))?;
-    Ok(json!({ "hits": hits, "took_ms": started.elapsed().as_millis() as u64 }))
+    Ok(json!({
+        "hits": hits,
+        "took_ms": started.elapsed().as_millis() as u64,
+        "semantic_down": found.semantic_down,
+    }))
 }
 
 // ---- sources

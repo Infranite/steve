@@ -226,7 +226,8 @@ pub fn hourly(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
         })
     }
     let mut cells: BTreeMap<Key, Daily> = BTreeMap::new();
-    // a turn is booked under the model of its first token record (ts = the turn's end, so in this day)
+    // a turn ended before `agent_turns.model` was kept is booked under the model of its first token
+    // record (ts = the turn's end, so in this day)
     let mut first_model: BTreeMap<String, String> = BTreeMap::new();
     {
         let mut st = c.prepare_cached(
@@ -264,7 +265,7 @@ pub fn hourly(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
     }
     let mut st = c.prepare_cached(
         "SELECT t.id, t.harness, COALESCE(t.bot_id, ''), COALESCE(t.project_id, ''), t.attempt, t.started, t.ended, t.stop_reason,
-                t.transient, t.tools, t.tool_errors, t.tool_kinds, COALESCE(NULLIF(s.model, ''), NULLIF(b.model, ''), '')
+                t.transient, t.tools, t.tool_errors, t.tool_kinds, COALESCE(NULLIF(s.model, ''), NULLIF(b.model, ''), ''), t.model
          FROM agent_turns t LEFT JOIN sessions s ON s.id = t.session_id LEFT JOIN bots b ON b.id = t.bot_id
          WHERE t.workspace_id = ?1 AND t.started < ?3 AND t.ended >= ?2 AND t.ended < ?3
            AND (?4 IS NULL OR t.project_id = ?4) AND (?5 IS NULL OR t.bot_id = ?5)",
@@ -273,7 +274,11 @@ pub fn hourly(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
     while let Some(r) = rows.next()? {
         let id: String = r.get(0)?;
         let ended: i64 = r.get(6)?;
-        let model = first_model.get(&id).cloned().unwrap_or(r.get(12)?);
+        // the model the live writer booked the turn under; older turns as `refresh::rebuild_in` does
+        let model = match r.get::<_, Option<String>>(13)? {
+            Some(m) => m,
+            None => first_model.get(&id).cloned().unwrap_or(r.get(12)?),
+        };
         let Some(h) = hour(ended).filter(|_| keep("agent", &model)) else {
             continue;
         };

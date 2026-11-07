@@ -28,9 +28,11 @@ use super::*;
 
 /// What a job attempt's caller hears, in the order the Node said it.
 #[derive(Debug)]
-pub(super) enum News {
+pub enum News {
     /// The whole text of the model's current message, each time it grew.
     Text(String),
+    /// A tool call's whole current view (research jobs).
+    Tool(ToolView),
     Usage(UsageReport),
     End(Completion),
 }
@@ -161,6 +163,7 @@ impl NodeRuntime {
                 "" => steve_store::WS.to_string(),
                 w => w.to_string(),
             });
+        self.store.reader(|c| self.owners_work_in(c, &workspace))?;
         let mut prompt = vec![Part::Text {
             text: t.message.to_string(),
         }];
@@ -311,6 +314,9 @@ impl NodeRuntime {
                 w.text.push_str(text);
                 (!text.is_empty()).then(|| News::Text(w.text.clone()))
             }),
+            EventBody::ToolChanged { tool } => {
+                self.jobs.tell(attempt, |_| Some(News::Tool(tool.clone())))
+            }
             EventBody::Usage { report } => self
                 .jobs
                 .tell(attempt, |_| Some(News::Usage(report.clone()))),
@@ -793,6 +799,7 @@ impl OneModel for NodePrint {
                             usage.push(r);
                         }
                     }
+                    Some(News::Tool(_)) => {}
                     Some(News::End(c)) => break c,
                     None => return fail("Node 没有回报这次判断的结果".into()),
                 },
@@ -834,5 +841,220 @@ impl OneModel for NodePrint {
             Err(print_error(&end, call.timeout))
         };
         Tried::of(steve_print::Ran { reply, usage }, call.codex)
+    }
+}
+
+/// A file of a research job's prompt: an attachment the Node fetches into the run's files.
+#[derive(Debug, Clone)]
+pub struct ResearchFile {
+    pub id: String,
+    /// The plain name it goes by there (one segment, unique in the job).
+    pub name: String,
+    /// Attached to the message the question follows up on.
+    pub earlier: bool,
+}
+
+/// One research attempt (one model) as a job: what the Hub's research policy chose for it
+/// (`steve_research::plan`), with the run's directories as the Node's roots.
+#[derive(Debug, Clone)]
+pub struct ResearchAttempt {
+    /// The `thread_runs` row it serves (Steve's tools answer it only while that run is running).
+    pub run: String,
+    pub workspace: String,
+    /// `claude-code` or `codex`.
+    pub harness: String,
+    /// `""`: Codex's own default.
+    pub model: String,
+    pub effort: Option<String>,
+    pub prompt: String,
+    /// The harness session to continue (`--resume`).
+    pub resume: Option<String>,
+    pub files: Vec<ResearchFile>,
+    pub cwd: Option<RootPath>,
+    pub readable: Vec<RootPath>,
+    pub budget: ResearchBudget,
+    pub sandbox: SandboxRequirement,
+    /// Steve's read-only research tools are offered.
+    pub steve_tools: bool,
+    /// The run's one deadline (ms since the epoch), the same for all of its attempts.
+    pub deadline: i64,
+}
+
+/// The tool grant of a research job: the read-only research tools of its thread run.
+pub const RESEARCH_GRANT: &str = "research";
+
+impl NodeRuntime {
+    /// Commits a research job (one attempt, `a.model` only) with its `start_job`. As with a think
+    /// job, the caller's waiter is registered first, and a caller gone before the commit has its job
+    /// stopped right away.
+    fn start_research_in(&self, attempt: &str, a: &ResearchAttempt) -> Result<(), StoreError> {
+        self.running()?;
+        self.store
+            .reader(|c| self.owners_work_in(c, &a.workspace))?;
+        let mut prompt = vec![Part::Text {
+            text: a.prompt.clone(),
+        }];
+        let mut earlier = vec![];
+        for f in &a.files {
+            let row = self
+                .store
+                .files()
+                .get(&f.id)?
+                .ok_or_else(|| conflict(format!("attachment {} is gone", f.id)))?;
+            if row.workspace_id != a.workspace || row.size < 0 {
+                return Err(conflict("attachments of another workspace"));
+            }
+            let name = format!("{ATTACHMENTS_DIR}{}", f.name);
+            if f.earlier {
+                earlier.push(name.clone());
+            }
+            prompt.push(Part::File {
+                artifact: ArtifactRef {
+                    id: idv(row.id.clone())?,
+                    sha256: idv(format!("sha256:{}", row.sha256))?,
+                    size: row.size as u64,
+                    mime: row.mime.clone(),
+                },
+                name,
+            });
+        }
+        let job = uid("job");
+        let op = format!("op_{attempt}");
+        let spec = JobSpec {
+            job: idv(job.clone())?,
+            run: RunSpec {
+                attempt: idv(attempt.to_string())?,
+                choice: HarnessChoice {
+                    harness: a.harness.clone(),
+                    model: (!a.model.is_empty()).then(|| a.model.clone()),
+                    effort: a.effort.clone(),
+                },
+                directory: RunDirectory::Scratch,
+                prompt,
+                policy: ExecutionPolicy {
+                    revision: idv("research")?,
+                    permissions: PermissionMode::Plan,
+                    sandbox: a.sandbox.clone(),
+                    readable: vec![],
+                    network: NetworkScope::Unrestricted,
+                    tools: idv(RESEARCH_GRANT)?,
+                },
+                limits: Limits {
+                    deadline: Timestamp(a.deadline),
+                    offline_until: Timestamp(a.deadline),
+                    max_output_bytes: 256 << 20,
+                    max_tokens: None,
+                    max_cost: None,
+                },
+                continuation: a
+                    .resume
+                    .as_ref()
+                    .map(|s| ResumeHandle::new(s.clone()))
+                    .transpose()
+                    .map_err(conflict)?,
+            },
+            work: JobWork::Research(ResearchJob {
+                cwd: a.cwd.clone(),
+                readable: a.readable.clone(),
+                budget: a.budget,
+                steve_tools: a.steve_tools,
+                earlier,
+            }),
+        };
+        spec.check().map_err(|e| conflict(e.safe_detail))?;
+        let exec = ExecutionRef::Job {
+            job: spec.job.clone(),
+            attempt: spec.run.attempt.clone(),
+        };
+        let (req, digest) = command(&op, spec.clone())?;
+        self.tx(|tx| {
+            jobs::create_job_in(
+                tx,
+                &jobs::NewJob {
+                    id: &job,
+                    kind: jobs::JobKind::Research,
+                    purpose: "research",
+                    workspace: &a.workspace,
+                    node: self.node_id.as_str(),
+                    thread_run: Some(&a.run),
+                },
+                &jobs::NewJobAttempt {
+                    id: attempt,
+                    ordinal: 0,
+                    model: &a.model,
+                    operation: &op,
+                    execution: &serde_json::to_value(&exec).map_err(conflict)?,
+                    spec: &serde_json::to_value(&spec).map_err(conflict)?,
+                    digest: &digest,
+                },
+                &jobs::StartJob {
+                    request: &req,
+                    digest: &digest,
+                },
+                now(),
+            )
+        })?;
+        if !self.jobs.has(attempt) {
+            self.stop_job(attempt);
+        }
+        self.wake_send.notify_one();
+        Ok(())
+    }
+
+    /// Starts one research attempt as a job on this Node. Its news come through the handle until
+    /// its end; dropping the handle before then cancels the job.
+    pub async fn start_research(
+        self: &Arc<Self>,
+        a: ResearchAttempt,
+    ) -> Result<ResearchJobRun, String> {
+        let attempt = uid("ja");
+        let news = self.jobs.add(&attempt);
+        let mut waiting = Waiting {
+            runtime: self.clone(),
+            attempt: attempt.clone(),
+            armed: true,
+        };
+        let (rt, at) = (self.clone(), attempt);
+        match tokio::task::spawn_blocking(move || rt.start_research_in(&at, &a)).await {
+            Ok(Ok(())) => Ok(ResearchJobRun {
+                news,
+                waiting,
+                cancelled: false,
+            }),
+            Ok(Err(e)) => {
+                waiting.armed = false;
+                Err(e.to_string())
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// A research attempt running as a job on the Node, for its caller.
+pub struct ResearchJobRun {
+    news: mpsc::UnboundedReceiver<News>,
+    waiting: Waiting,
+    cancelled: bool,
+}
+
+impl ResearchJobRun {
+    /// What the Node said next; after [`News::End`] nothing more comes. `None`: the coordinator
+    /// went away without telling the end.
+    pub async fn next(&mut self) -> Option<News> {
+        let n = self.news.recv().await;
+        if matches!(n, Some(News::End(_))) {
+            self.waiting.armed = false;
+        }
+        n
+    }
+
+    /// Asks the Node to stop the attempt (once); its end still comes through [`Self::next`].
+    pub fn cancel(&mut self) {
+        if self.cancelled || !self.waiting.armed {
+            return;
+        }
+        self.cancelled = true;
+        let (rt, attempt) = (self.waiting.runtime.clone(), self.waiting.attempt.clone());
+        tokio::task::spawn_blocking(move || rt.stop_job(&attempt));
     }
 }

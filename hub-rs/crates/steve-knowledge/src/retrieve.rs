@@ -180,12 +180,32 @@ fn boosted(c: &Candidate, about: &[ObjRef], q: &Query) -> f64 {
     s
 }
 
-/// Searches the knowledge base for `q.viewer`. Empty or unsearchable text gives no hits.
+/// The note that goes with hits found without the meaning search (the store's semantic pass
+/// failed): in contexts, search answers and drafts, so nobody takes a thin answer for the whole.
+pub const SEMANTIC_DOWN_NOTE: &str = "（语义检索暂时不可用，这次只按关键词查找，结果可能不全。）";
+
+/// What [`retrieve_all`] found.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Retrieved {
+    pub hits: Vec<Hit>,
+    /// The semantic pass failed (the store is down or was skipped after a failure): `hits` come
+    /// from the keyword passes only.
+    pub semantic_down: bool,
+}
+
+/// Searches the knowledge base for `q.viewer`. Empty or unsearchable text gives no hits. The hits
+/// of [`retrieve_all`], for callers that do not show [`Retrieved::semantic_down`].
 pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
+    retrieve_all(c, q).map(|r| r.hits)
+}
+
+/// [`retrieve`], and whether the semantic pass failed. A failed semantic pass does not fail the
+/// search: the keyword passes of the Hub's own index still answer.
+pub fn retrieve_all(c: &Connection, q: &Query) -> Result<Retrieved> {
     let k = q.k.clamp(1, MAX_K);
     let text = q.text.trim();
     if text.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Retrieved::default());
     }
     let scope = Scope::for_viewer(c, q.viewer, q.purpose, q.kinds)?;
     let found = |pass| -> Result<Vec<Candidate>> {
@@ -196,7 +216,17 @@ pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
             .filter(|x| scope.admits(x))
             .collect())
     };
-    let mut tiers = vec![found(Pass::Strict)?, found(Pass::Semantic)?];
+    let strict = found(Pass::Strict)?;
+    let mut semantic_down = false;
+    let semantic = found(Pass::Semantic).unwrap_or_else(|e| {
+        tracing::warn!(
+            store = q.store.id(),
+            "semantic search failed, keywords only: {e}"
+        );
+        semantic_down = true;
+        Vec::new()
+    });
+    let mut tiers = vec![strict, semantic];
     let docs: HashSet<&str> = tiers.iter().flatten().map(|x| x.obj_id.as_str()).collect();
     if docs.len() < FALLBACK_BELOW {
         tiers.push(found(Pass::Relaxed)?);
@@ -259,7 +289,10 @@ pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
             break;
         }
     }
-    Ok(hits)
+    Ok(Retrieved {
+        hits,
+        semantic_down,
+    })
 }
 
 /// The confirmed rules and preferences about any of `anchors`, newest first, independent of a
@@ -363,4 +396,71 @@ pub fn record_use(
         steve_store::now()
     ])?;
     Ok(id)
+}
+
+/// The knowledge a disclosure basis names (`entries` of `reply_basis` / a mail draft's basis), read again
+/// for a later check of the same text: a retrieved piece by its index position (`seq`), a memory shown
+/// by id by its id. The flag says whether every entry could be read again; when one cannot (removed
+/// since, or a basis written before pieces were recorded) the later check has less than the first one
+/// had and must not pass on that ([`steve_modules::outbound::R_BASIS_GONE`]).
+pub fn knowledge_again(
+    c: &Connection,
+    ws: &str,
+    entries: &[serde_json::Value],
+) -> Result<(Vec<steve_modules::outbound::KnowledgeUse>, bool)> {
+    use rusqlite::OptionalExtension;
+    use steve_modules::outbound::KnowledgeUse;
+    let mut out = Vec::new();
+    let mut complete = true;
+    for e in entries {
+        let kind = e["source_type"].as_str().unwrap_or("");
+        if kind == "span" {
+            continue;
+        }
+        let id = e["source_id"].as_str().unwrap_or("");
+        let label = e["source_label"].as_str().unwrap_or("").to_string();
+        let found = match e["seq"].as_i64() {
+            Some(seq) => c
+                .query_row(
+                    "SELECT text, level, visibility FROM kb_chunks
+                      WHERE workspace_id = ? AND obj_type = ? AND obj_id = ? AND seq = ?",
+                    params![ws, kind, id, seq],
+                    |r| {
+                        Ok(KnowledgeUse {
+                            source_type: kind.into(),
+                            source_id: id.into(),
+                            source_label: label.clone(),
+                            level: Level::from_db(&r.get::<_, String>(1)?),
+                            visibility: r.get(2)?,
+                            text: r.get(0)?,
+                            seq: Some(seq),
+                        })
+                    },
+                )
+                .optional()?,
+            None if kind == "mem" => {
+                mems::get(c, id)?
+                    .filter(|m| m.workspace_id == ws)
+                    .map(|m| KnowledgeUse {
+                        source_type: "mem".into(),
+                        source_id: m.id.clone(),
+                        source_label: if label.is_empty() {
+                            "记忆".into()
+                        } else {
+                            label.clone()
+                        },
+                        level: m.level,
+                        visibility: m.visibility.code(),
+                        text: m.text.clone(),
+                        seq: None,
+                    })
+            }
+            None => None,
+        };
+        match found {
+            Some(k) => out.push(k),
+            None => complete = false,
+        }
+    }
+    Ok((out, complete))
 }

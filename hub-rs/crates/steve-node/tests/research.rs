@@ -52,6 +52,7 @@ impl T {
     fn config(&self, jobs: u32) -> NodeConfig {
         let root = self.root.clone();
         NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new("hub").unwrap(),
             home: root.join("node"),
             acp: AcpConfig {
@@ -285,6 +286,7 @@ fn job(attempt: &str, model: &str, text: &str) -> JobSpec {
                 idle_ms: 600_000,
             },
             steve_tools: false,
+            earlier: vec![],
         }),
     }
 }

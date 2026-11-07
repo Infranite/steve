@@ -420,3 +420,131 @@ async fn a_peer_cannot_pile_up_requests_past_the_cap() {
     }
     assert_eq!(refused, 20);
 }
+
+/// Answers a file chunk big, anything else small.
+struct Chunks;
+#[async_trait]
+impl Handler for Chunks {
+    async fn handle(&self, m: &str, _: Value) -> ApiResult<Value> {
+        Ok(match m {
+            "blob.fetch" | "fs.read" => json!({"pad": "x".repeat(60 * 1024)}),
+            _ => json!({"ok": true}),
+        })
+    }
+}
+
+/// A permission answer is not queued behind file chunks answered before it: an answer goes on
+/// its request's lane, and control goes first.
+#[tokio::test]
+async fn an_answer_goes_on_its_requests_lane() {
+    let (h, n) = pair();
+    let _hub = Conn::spawn(h.sink, h.stream, 1, Arc::new(Chunks), opts("h"));
+    let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
+    let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    // the Hub's answers wait behind a stuck socket: 30 chunks, then one control answer
+    h.faults.stall(true);
+    let mut calls = vec![];
+    for _ in 0..30 {
+        let (c, o) = (node.clone(), order.clone());
+        calls.push(tokio::spawn(async move {
+            c.call("blob.fetch", json!({}), None).await.unwrap();
+            o.lock().unwrap().push("chunk");
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (c, o) = (node.clone(), order.clone());
+    calls.push(tokio::spawn(async move {
+        c.call("tool.inspect", json!({}), None).await.unwrap();
+        o.lock().unwrap().push("control");
+    }));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.faults.stall(false);
+    for c in calls {
+        c.await.unwrap();
+    }
+    let seen = order.lock().unwrap().clone();
+    let at = seen.iter().position(|m| *m == "control").unwrap();
+    // only the chunk already being written goes before it
+    assert!(at <= 1, "control answer at {at} of {}", seen.len());
+}
+
+/// Control goes first, but a lower lane is never starved by it: after a few control frames, a
+/// waiting event batch goes, and after a few more of either, a waiting chunk.
+#[tokio::test]
+async fn no_lane_starves() {
+    let (h, n) = pair();
+    let order = Arc::new(Order::default());
+    let _hub = Conn::spawn(h.sink, h.stream, 1, order.clone(), opts("h"));
+    let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
+    n.faults.stall(true);
+    let mut calls = vec![];
+    let call = |m: &'static str| {
+        let c = node.clone();
+        tokio::spawn(async move { c.call(m, json!({}), None).await })
+    };
+    for _ in 0..25 {
+        calls.push(call("tool.inspect"));
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    calls.push(call("blob.status"));
+    calls.push(call("events.commit"));
+    calls.push(call("blob.chunk"));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..25 {
+        calls.push(call("tool.inspect"));
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    n.faults.stall(false);
+    for c in calls {
+        c.await.unwrap().unwrap();
+    }
+    let seen = order.0.lock().unwrap().clone();
+    let events = seen.iter().position(|m| m == "events.commit").unwrap();
+    let chunk = seen.iter().position(|m| m == "blob.chunk").unwrap();
+    let fair = conn::FAIR as usize;
+    assert!(events <= fair + 1, "events at {events}: {seen:?}");
+    assert!(chunk <= 2 * fair + 2, "chunk at {chunk}: {seen:?}");
+    assert!(events < chunk, "events before bulk: {seen:?}");
+}
+
+/// Requests in flight are bounded by their bytes too: big ones past the budget are refused
+/// `exhausted` before the count cap is reached.
+#[tokio::test]
+async fn a_peer_cannot_pin_more_than_the_byte_budget() {
+    let (h, n) = pair();
+    let gate = Arc::new(Gate::default());
+    let _hub = Conn::spawn(h.sink, h.stream, 1, gate.clone(), opts("h"));
+    let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
+    let big = json!({"events": [], "pad": "x".repeat(270 * 1024)});
+    let per = 271 * 1024;
+    let fit = conn::MAX_INBOUND_BYTES / per;
+    assert!(fit < conn::MAX_INBOUND, "the bytes bind first");
+    let total = conn::MAX_INBOUND;
+    let mut calls = vec![];
+    for _ in 0..total {
+        let (c, p) = (node.clone(), big.clone());
+        calls.push(tokio::spawn(async move {
+            c.call("events.commit", p, None).await
+        }));
+    }
+    for _ in 0..300 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if calls.iter().filter(|c| c.is_finished()).count() >= total - fit {
+            break;
+        }
+    }
+    let entered = gate.entered.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        entered <= fit && entered >= fit - 1,
+        "{entered} reached the handler, {fit} fit"
+    );
+    gate.open.notify_waiters();
+    let mut refused = 0;
+    for c in calls {
+        if let Err(e) = c.await.unwrap() {
+            assert_eq!(e.code, ErrorCode::Exhausted);
+            refused += 1;
+        }
+    }
+    assert_eq!(refused, total - entered);
+}

@@ -9,12 +9,14 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use steve_modules::accounts::connections::ConnCx;
+use steve_flow::AdapterError;
 use steve_modules::accounts::connections::oauth::random_token;
+use steve_modules::accounts::connections::{ConnCx, ProviderError};
 
 use super::auth::{FeishuUser, USER_ADAPTER};
 use super::client::{FeishuClient, FeishuError, NO_SCOPE_CODES, data};
 use super::ratelimit;
+use crate::channel::{ActAsUser, ActTarget, MessageRef, OutContent, ReactionKind, SendKey, Sent};
 
 /// What to send: a Feishu `msg_type` and its `content` object (`{"text": "…"}` for `text`, the
 /// `post` / `interactive` structures otherwise).
@@ -53,64 +55,13 @@ pub struct SentAsUser {
     pub retried: bool,
 }
 
-/// What the outbound module (C6) calls to send as you. Implemented by [`FeishuUser`]; the
-/// integrator hands C6 the same `Arc<FeishuUser>` registered as the `feishu_user` provider.
-#[async_trait]
-pub trait SendAsUser: Send + Sync {
-    /// A new message in chat `chat_id` (`oc_…`), as the user of connection `cx`.
-    async fn send_as_user(
-        &self,
-        cx: &ConnCx,
-        chat_id: &str,
-        msg: &UserMessage,
-    ) -> Result<SentAsUser, FeishuError>;
-
-    /// A reply to `message_id` (`om_…`); `in_thread` opens or continues its topic.
-    async fn reply_as_user(
-        &self,
-        cx: &ConnCx,
-        message_id: &str,
-        msg: &UserMessage,
-        in_thread: bool,
-    ) -> Result<SentAsUser, FeishuError>;
-
-    /// A reaction on `message_id` as you (`/bot` on your own account: the “收到 → 完成” marks are
-    /// yours, like the reply). The provider's reaction id. Default: unsupported.
-    async fn react_as_user(
-        &self,
-        cx: &ConnCx,
-        message_id: &str,
-        emoji: &str,
-    ) -> Result<String, FeishuError> {
-        let _ = (cx, message_id, emoji);
-        Err(FeishuError::Token(
-            steve_modules::accounts::connections::ProviderError::Unsupported,
-        ))
-    }
-
-    /// Takes your reaction off again. Default: unsupported.
-    async fn unreact_as_user(
-        &self,
-        cx: &ConnCx,
-        message_id: &str,
-        reaction_id: &str,
-    ) -> Result<(), FeishuError> {
-        let _ = (cx, message_id, reaction_id);
-        Err(FeishuError::Token(
-            steve_modules::accounts::connections::ProviderError::Unsupported,
-        ))
-    }
-}
-
 /// The grant lacks `im:message.send_as_user` (or `im:message`): no call is made. An empty grant
 /// means Feishu didn't say; Feishu decides then.
 fn check_scopes(cx: &ConnCx) -> Result<(), FeishuError> {
     if cx.adapter() != USER_ADAPTER {
-        return Err(FeishuError::Token(
-            steve_modules::accounts::connections::ProviderError::Config(
-                "以你本人发送要用“飞书 · 你本人”的连接".into(),
-            ),
-        ));
+        return Err(FeishuError::Token(ProviderError::Config(
+            "以你本人发送要用“飞书 · 你本人”的连接".into(),
+        )));
     }
     let granted = cx.scopes();
     let has = |s: &str| granted.iter().any(|g| g == s);
@@ -166,9 +117,11 @@ async fn post_with_one_retry(
     .map(|(v, n)| (v, n > 0))
 }
 
-#[async_trait]
-impl SendAsUser for FeishuUser {
-    async fn send_as_user(
+/// Sending as you with the user token. The outbound module reaches these through
+/// [`ActAsUser`], which [`FeishuUser`] implements.
+impl FeishuUser {
+    /// A new message in chat `chat_id` (`oc_…`), as the user of connection `cx`.
+    pub async fn send_as_user(
         &self,
         cx: &ConnCx,
         chat_id: &str,
@@ -193,7 +146,8 @@ impl SendAsUser for FeishuUser {
         sent(&v, uuid, retried)
     }
 
-    async fn reply_as_user(
+    /// A reply to `message_id` (`om_…`); `in_thread` opens or continues its topic.
+    pub async fn reply_as_user(
         &self,
         cx: &ConnCx,
         message_id: &str,
@@ -221,8 +175,9 @@ impl SendAsUser for FeishuUser {
         sent(&v, uuid, retried)
     }
 
-    /// With your user token: `im:message` (which you granted to send as you) covers reactions.
-    async fn react_as_user(
+    /// A reaction on `message_id` as you; the provider's reaction id. With your user token:
+    /// `im:message` (which you granted to send as you) covers reactions.
+    pub async fn react_as_user(
         &self,
         cx: &ConnCx,
         message_id: &str,
@@ -231,13 +186,102 @@ impl SendAsUser for FeishuUser {
         super::send::add_reaction_with(&self.user_client(cx), cx, message_id, emoji).await
     }
 
-    async fn unreact_as_user(
+    /// Takes your reaction off again.
+    pub async fn unreact_as_user(
         &self,
         cx: &ConnCx,
         message_id: &str,
         reaction_id: &str,
     ) -> Result<(), FeishuError> {
         super::send::remove_reaction_with(&self.user_client(cx), cx, message_id, reaction_id).await
+    }
+}
+
+fn adapter_err(e: FeishuError) -> AdapterError {
+    ProviderError::from(e).into()
+}
+
+/// The message id an action on `msg` needs: Feishu identifies every message by its `om_…`.
+fn ext_of(msg: &MessageRef) -> Result<&str, AdapterError> {
+    msg.id()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| ProviderError::Rejected("消息 id 不对".into()).into())
+}
+
+#[async_trait]
+impl ActAsUser for FeishuUser {
+    fn adapter_id(&self) -> &str {
+        USER_ADAPTER
+    }
+
+    /// Text as you: a new message in the chat, or a reply (in its topic when `in_thread`), with
+    /// `key` as Feishu's `uuid`.
+    async fn send(
+        &self,
+        cx: &ConnCx,
+        to: &ActTarget,
+        content: &OutContent,
+        key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        let mut m = UserMessage::text(content.text.clone());
+        m.uuid = Some(key.0.clone());
+        let s = match to {
+            ActTarget::Space { ext_id } => self.send_as_user(cx, ext_id, &m).await,
+            ActTarget::Reply { to, in_thread } => {
+                self.reply_as_user(cx, ext_of(to)?, &m, *in_thread).await
+            }
+        }
+        .map_err(adapter_err)?;
+        let mut out = Sent::id(s.message_id);
+        if let Some(t) = s.create_time.and_then(|t| t.parse::<i64>().ok()) {
+            out = out.created(t);
+        }
+        if let Some(t) = s.thread_id {
+            out = out.thread_key(t);
+        }
+        Ok(out)
+    }
+
+    fn supports_reactions(&self) -> bool {
+        true
+    }
+
+    fn reaction_emoji(&self, kind: ReactionKind) -> &'static str {
+        super::send::emoji_type(kind)
+    }
+
+    async fn add_reaction(
+        &self,
+        cx: &ConnCx,
+        msg: &MessageRef,
+        kind: ReactionKind,
+    ) -> Result<String, AdapterError> {
+        self.react_as_user(cx, ext_of(msg)?, super::send::emoji_type(kind))
+            .await
+            .map_err(adapter_err)
+    }
+
+    async fn remove_reaction(
+        &self,
+        cx: &ConnCx,
+        msg: &MessageRef,
+        reaction_id: &str,
+    ) -> Result<(), AdapterError> {
+        self.unreact_as_user(cx, ext_of(msg)?, reaction_id)
+            .await
+            .map_err(adapter_err)
+    }
+
+    fn supports_recall(&self) -> bool {
+        true
+    }
+
+    /// `DELETE im/v1/messages/{id}` with your user token: you can recall what you sent, within
+    /// the time your organization allows.
+    async fn recall(&self, cx: &ConnCx, msg: &MessageRef) -> Result<(), AdapterError> {
+        super::send::recall_with(&self.user_client(cx), cx, ext_of(msg)?)
+            .await
+            .map_err(adapter_err)
     }
 }
 

@@ -52,6 +52,13 @@ export default {
     runs24_one: "{{count}} run in 24h",
     runs24_other: "{{count}} runs in 24h",
   },
+  allowPrivate: {
+    title: "Internal hosts flows may reach",
+    sub: "By default an http step can't reach this Mac, your local network or Tailscale addresses. Hosts listed here are the exception. Only you can change this list; flows Steve drafts never touch it.",
+    placeholder: "e.g. nas.local, 192.168.1.10",
+    save: "Save",
+    saved: "Saved",
+  },
   sources: {
     paused: "Paused",
     accounts_one: "{{count}} account",
@@ -122,6 +129,8 @@ export default {
     other: "Trigger",
   },
   rule: {
+    warnEdge: "The edge “{{label}}” of “{{node}}” matches none of its branches, so it is never taken",
+    warnBranch: "The branch “{{label}}” of “{{node}}” has no edge, so a run that takes it stops there",
     page: "Flow",
     notFound: "Flow not found",
     notFoundSub: "It may have been deleted.",

@@ -55,6 +55,8 @@ export const mailApi = {
   sendDraft: (id: string) => post<Draft>(`/mail/drafts/${e(id)}/send`),
   /** before `send_at`: back to pending; afterwards 409 邮件已经发出，不能撤回 */
   cancelDraft: (id: string) => post<Draft>(`/mail/drafts/${e(id)}/cancel`),
+  /** the model's disclosure check on the draft as it is now (a draft written without YOLO got only the local checks) */
+  checkDraft: (id: string) => post<Draft>(`/mail/drafts/${e(id)}/check`),
   landAttachment: (id: string) => post<RFile>(`/mail/attachments/${e(id)}/file`),
   /** the sandboxed original HTML (CSP: no scripts; remote images only with images=1) */
   htmlUrl: (id: string, images = false) => `/api/mail/messages/${e(id)}/html${images ? "?images=1" : ""}`,

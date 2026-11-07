@@ -381,3 +381,123 @@ fn the_edges_of_the_day_stay_on_their_side() {
         Some((hi - HOUR, hi))
     );
 }
+
+/// `(day, source, purpose, harness, model, bot, turns, turn_ms, interrupted, calls, input)` of a cell.
+type CubeRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+);
+
+/// `stat_daily` as the live writer left it, one [`CubeRow`] per cell.
+fn cube(s: &Store) -> Vec<CubeRow> {
+    s.with_conn(|c| {
+        let mut st = c.prepare(
+            "SELECT day, source, purpose, harness, model, bot_id, turns, turn_ms, interrupted, calls, input FROM stat_daily
+              WHERE workspace_id = 'default' ORDER BY day, source, purpose, harness, model, bot_id, project_id",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })
+    .expect("cube")
+}
+
+#[test]
+fn a_rebuild_books_every_turn_where_the_live_writer_did() {
+    let (_d, s) = store();
+    let (lo, _) = edges();
+    // the runner reported another model than its first token record's
+    let id = s
+        .stats()
+        .turn_begin(&TurnBegin {
+            workspace_id: WS.into(),
+            session_id: "s1".into(),
+            bot_id: Some("dev".into()),
+            harness: "claude-code".into(),
+            started: lo + 2 * HOUR,
+            ..TurnBegin::default()
+        })
+        .expect("begin");
+    s.stats()
+        .turn_finish(&TurnFinish {
+            turn_id: id,
+            ended: lo + 2 * HOUR + 5 * MIN,
+            day: steve_stats::day(lo + 2 * HOUR + 5 * MIN, zone()),
+            model: "claude-sonnet-5".into(),
+            stop_reason: Some("end_turn".into()),
+            usage: vec![ModelUsage {
+                model: "claude-haiku-5".into(),
+                tokens: Tokens {
+                    input: Some(3),
+                    ..Tokens::default()
+                },
+                ..ModelUsage::default()
+            }],
+            ..TurnFinish::default()
+        })
+        .expect("finish");
+    // a turn the Hub's restart cut: the live writer books it under no model
+    s.stats()
+        .turn_begin(&TurnBegin {
+            workspace_id: WS.into(),
+            session_id: "s1".into(),
+            bot_id: Some("dev".into()),
+            harness: "claude-code".into(),
+            started: lo + 3 * HOUR,
+            ..TurnBegin::default()
+        })
+        .expect("begin");
+    s.stats()
+        .interrupt_open(lo + 3 * HOUR + MIN, |_, ts| steve_stats::day(ts, zone()))
+        .expect("interrupt");
+    let live = cube(&s);
+    assert!(
+        live.iter()
+            .any(|r| r.1 == "agent" && r.4.is_empty() && r.8 == 1),
+        "{live:?}"
+    );
+    assert!(
+        live.iter()
+            .any(|r| r.1 == "agent" && r.2 == "turn" && r.4 == "claude-sonnet-5" && r.6 == 1)
+    );
+    s.with_conn(|c| refresh::rebuild_in(c, WS))
+        .expect("rebuild");
+    assert_eq!(cube(&s), live, "the rebuild moved turns to other models");
+    // and the hours of the day add up to the same cells
+    let hours = s
+        .with_conn(|c| metrics::hourly(c, &q(DAY)))
+        .expect("hourly");
+    let turns_by_model = |model: &str| -> i64 {
+        hours
+            .iter()
+            .filter(|d| d.source == "agent" && d.purpose == "turn" && d.model == model)
+            .map(|d| d.turns)
+            .sum()
+    };
+    assert_eq!(turns_by_model("claude-sonnet-5"), 1);
+    assert_eq!(turns_by_model(""), 1);
+}

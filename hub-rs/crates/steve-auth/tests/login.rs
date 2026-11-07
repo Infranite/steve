@@ -626,6 +626,27 @@ async fn back_must_be_a_path() {
     )
     .await;
     assert_eq!(r.location(), "/");
+
+    // protocol-relative and backslash forms leave the site too; a real path is kept
+    for (back, want) in [
+        ("//evil.test/", "/"),
+        ("/%5Cevil.test/", "/"),
+        ("/%0A//evil.test", "/"),
+        ("/items/7?tab=chat", "/items/7?tab=chat"),
+    ] {
+        let r = send(&app, "GET", &format!("/auth/login?back={back}"), &[]).await;
+        let cookie = pair(&r.cookies()[0]).to_owned();
+        let cb = p.approve(r.location(), "alice", None);
+        let path = cb.split_once("/auth/callback").unwrap().1;
+        let r = send(
+            &app,
+            "GET",
+            &format!("/auth/callback{path}"),
+            &[("cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(r.location(), want, "{back}");
+    }
 }
 
 #[tokio::test]
@@ -648,11 +669,14 @@ async fn oidc_not_configured() {
     assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+/// What a browser on this machine sends when it talks to the Hub directly.
+const LOCAL: &[(&str, &str)] = &[("host", "127.0.0.1:8440")];
+
 #[tokio::test]
 async fn dev_login() {
     let store = MemStore::default();
     let off = Auth::new(store.clone(), config(None, false)).unwrap();
-    let r = send(&app(&off, "127.0.0.1:1"), "GET", "/auth/dev", &[]).await;
+    let r = send(&app(&off, "127.0.0.1:1"), "GET", "/auth/dev", LOCAL).await;
     assert_eq!(
         (r.status, r.body.as_str()),
         (StatusCode::NOT_FOUND, "not found")
@@ -661,11 +685,31 @@ async fn dev_login() {
     let auth = Auth::new(store.clone(), config(None, true)).unwrap();
     let r = send(&app(&auth, "127.0.0.1:1"), "GET", "/api/me", &[]).await;
     assert_eq!(r.body, r#"{"error":"unauthenticated","login":"/auth/dev"}"#);
-    let r = send(&app(&auth, "192.168.1.2:1"), "GET", "/auth/dev", &[]).await;
+    let r = send(&app(&auth, "192.168.1.2:1"), "GET", "/auth/dev", LOCAL).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
 
+    // a loopback peer is not enough: a proxy on this machine (forwarding headers) or a
+    // non-loopback Host (DNS rebinding, a tunnel) means the browser is somewhere else
+    for headers in [
+        &[][..],
+        &[("host", "steve.example.test")][..],
+        &[
+            ("host", "127.0.0.1:8440"),
+            ("x-forwarded-for", "203.0.113.9"),
+        ][..],
+        &[("host", "localhost:8440"), ("forwarded", "for=203.0.113.9")][..],
+        &[
+            ("host", "127.0.0.1:8440"),
+            ("x-forwarded-host", "steve.example.test"),
+        ][..],
+    ] {
+        let r = send(&app(&auth, "127.0.0.1:1"), "GET", "/auth/dev", headers).await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{headers:?}");
+    }
+    assert!(store.0.users.lock().unwrap().is_empty());
+
     for peer in ["127.0.0.1:1", "[::1]:1", "[::ffff:127.0.0.1]:1"] {
-        let r = send(&app(&auth, peer), "GET", "/auth/dev", &[]).await;
+        let r = send(&app(&auth, peer), "GET", "/auth/dev", LOCAL).await;
         assert_eq!(r.status, StatusCode::FOUND, "{peer}");
         assert_eq!(r.location(), "/");
         let c = r.cookies();
@@ -692,7 +736,7 @@ async fn dev_login() {
         AuthConfig::new(None, None, OidcConfig::default(), true),
     )
     .unwrap();
-    let r = send(&app(&auth, "127.0.0.1:1"), "GET", "/auth/dev", &[]).await;
+    let r = send(&app(&auth, "127.0.0.1:1"), "GET", "/auth/dev", LOCAL).await;
     assert_eq!(
         (r.status, r.body.as_str()),
         (StatusCode::FORBIDDEN, "已有所有者，本机登录不可用")
@@ -706,6 +750,6 @@ async fn http_public_url_means_no_secure_flag() {
         AuthConfig::new(None, None, OidcConfig::default(), true),
     )
     .unwrap();
-    let r = send(&app(&auth, "127.0.0.1:1"), "GET", "/auth/dev", &[]).await;
+    let r = send(&app(&auth, "127.0.0.1:1"), "GET", "/auth/dev", LOCAL).await;
     assert!(r.cookies()[0].ends_with("; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax"));
 }

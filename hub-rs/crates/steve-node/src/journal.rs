@@ -11,6 +11,7 @@
 //! checks before letting anything go), what it did up to there is in its events, and only the Hub
 //! decides what happens next. An empty memory never means "never ran".
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -563,14 +564,33 @@ impl Tx<'_> {
         Ok(ev)
     }
 
-    /// Events not acknowledged yet, in order, at most `limit`.
-    pub fn unacked(&self, limit: usize) -> ApiResult<Vec<NodeEvent>> {
-        let rows: Vec<String> = self.rows(
-            "SELECT event FROM events ORDER BY rowid LIMIT ?1",
-            [limit as i64],
-            |r| r.get(0),
-        )?;
-        rows.iter().map(|s| from(s).map_err(internal)).collect()
+    /// Events not acknowledged yet, in order, at most `limit`, past what is in flight: an event at
+    /// or below `sent[stream]` is skipped (its batch is out already). A stream's positions only
+    /// grow, so this is what follows them.
+    pub fn unacked_past(
+        &self,
+        sent: &HashMap<String, u64>,
+        limit: usize,
+    ) -> ApiResult<Vec<NodeEvent>> {
+        let mut st = self
+            .c()
+            .prepare_cached("SELECT stream, seq, event FROM events ORDER BY rowid")
+            .map_err(internal)?;
+        let mut rows = st.query([]).map_err(internal)?;
+        let mut out = vec![];
+        while out.len() < limit {
+            let Some(r) = rows.next().map_err(internal)? else {
+                break;
+            };
+            let stream: String = r.get(0).map_err(internal)?;
+            let seq: i64 = r.get(1).map_err(internal)?;
+            if sent.get(&stream).is_some_and(|s| seq as u64 <= *s) {
+                continue;
+            }
+            let event: String = r.get(2).map_err(internal)?;
+            out.push(from(&event).map_err(internal)?);
+        }
+        Ok(out)
     }
 
     pub fn heads(&self) -> ApiResult<Vec<StreamHead>> {

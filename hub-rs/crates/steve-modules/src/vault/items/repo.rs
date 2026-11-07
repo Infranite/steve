@@ -519,6 +519,31 @@ pub fn insert_use(c: &Connection, ws: &str, u: &UseRow) -> Result<()> {
     Ok(())
 }
 
+/// The newest `internal` use of the item by `actor`: `(id, status, finished)`.
+pub fn last_internal_use(
+    c: &Connection,
+    ws: &str,
+    item_id: &str,
+    actor_id: &str,
+) -> Result<Option<(String, String, i64)>> {
+    Ok(c.prepare_cached(
+        "SELECT id, status, COALESCE(finished, created) FROM secret_uses
+          WHERE workspace_id = ? AND item_id = ? AND mode = 'internal' AND actor_id = ?
+          ORDER BY created DESC, rowid DESC LIMIT 1",
+    )?
+    .query_row(params![ws, item_id, actor_id], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })
+    .optional()?)
+}
+
+/// A failure that repeats the one before it: only its `finished` moves on.
+pub fn touch_use(c: &Connection, id: &str, finished: i64) -> Result<()> {
+    c.prepare_cached("UPDATE secret_uses SET finished = ? WHERE id = ?")?
+        .execute(params![finished, id])?;
+    Ok(())
+}
+
 /// Whether an `internal` use with this status was already recorded for the item and actor since
 /// `since` (internal uses are merged into one row per connection and day; failures each get one).
 pub fn has_internal_use(

@@ -15,6 +15,8 @@ import { SectionLabel, Segmented } from "@/ui"
 import { SOURCE_LABEL, type FlowSummary, type GEdge, type GNode, type Graph, type Source, type Step } from "@/api/flow"
 import { Pick, Json, botOptions, srcIcon, ms } from "@/auto/common"
 import { t, useT } from "@/i18n"
+import { branchLabels, renameBranchEdges, RENAMES_EDGES } from "@/auto/branches"
+export { branchLabels, renameBranchEdges, branchWarnings, type BranchWarning } from "@/auto/branches"
 
 type Grp = "trigger" | "logic" | "code" | "connect" | "ai" | "wait" | "result"
 /* [icon, group]; the group drives the palette and the inspector heading */
@@ -69,19 +71,6 @@ export function removeNode(g0: Graph, id: string): Graph {
   return g
 }
 export function patchNode(g0: Graph, id: string, f: (n: GNode) => void): Graph { const g = clone(g0); const n = g.nodes.find((x) => x.id === id); if (n) f(n); return g }
-const unq = (s: string) => s.trim().replace(/^"(.*)"$/, "$1")
-/** labels a node's outgoing edges are expected to carry */
-export function branchLabels(n: GNode): string[] {
-  const c = n.config ?? {}
-  switch (n.kind) {
-    case "filter": return [...(c.rules ?? []).map((r: any) => r.label), c.else_label].filter(Boolean)
-    case "bot": return c.branches ?? []
-    case "approve": return c.options ?? []
-    case "table": return [...new Set<string>((c.rows ?? []).map((r: string[]) => unq(r[(c.inputs ?? []).length] ?? "")).filter(Boolean))]
-    case "wait": return c.timeout_label ? ["", c.timeout_label] : []
-    default: return []
-  }
-}
 /** the nodes upstream of `id` (their outputs are `steps.<id>` there) */
 export function upstream(g: Graph, id: string) {
   const seen = new Set<string>(), q = [id]
@@ -126,7 +115,10 @@ export function Inspector({ g, n, onChange, onSelect, flows, sources, step, flow
 }) {
   const [paletteOpen, setPalette] = useState(false)
   const t = useT()
-  const set = (f: (c: Record<string, any>, n: GNode) => void) => onChange(patchNode(g, n.id, (x) => { x.config ??= {}; f(x.config, x) }))
+  const set = (f: (c: Record<string, any>, n: GNode) => void) => {
+    const next = patchNode(g, n.id, (x) => { x.config ??= {}; f(x.config, x) }), m = next.nodes.find((x) => x.id === n.id)
+    onChange(m && RENAMES_EDGES.has(n.kind) ? renameBranchEdges(next, n.id, branchLabels(n), branchLabels(m)) : next)
+  }
   const c = n.config ?? {}
   const [label, , group] = kindOf(n.kind)
   const outs = g.edges.filter((e) => e.from === n.id), labels = branchLabels(n)

@@ -154,6 +154,7 @@ pub struct OpCx<'a> {
     pub actor: &'a str,
     pub changeset_id: &'a str,
     vars: &'a RefCell<BTreeMap<String, Value>>,
+    kept: &'a RefCell<Vec<String>>,
 }
 
 impl OpCx<'_> {
@@ -161,6 +162,32 @@ impl OpCx<'_> {
     pub fn bind(&self, name: &str, value: Value) {
         self.vars.borrow_mut().insert(name.into(), value);
     }
+
+    /// An undo left the field `label` as it is: it was changed again since this changeset wrote it.
+    pub fn keep(&self, label: String) {
+        self.kept.borrow_mut().push(label);
+    }
+}
+
+/// The fields of `before` an undo may put back: those whose value `now` is still what the apply
+/// wrote (`written`); the others are reported to `cx` by `label`.
+pub fn still_ours(
+    cx: &OpCx,
+    before: &Map<String, Value>,
+    written: &Map<String, Value>,
+    now: &Map<String, Value>,
+    label: impl Fn(&str) -> String,
+) -> Map<String, Value> {
+    let mut back = Map::new();
+    for (k, v) in before {
+        match written.get(k) {
+            Some(w) if now.get(k).unwrap_or(&Value::Null) != w => cx.keep(label(k)),
+            _ => {
+                back.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    back
 }
 
 /// One operation kind (`party.patch`, `org.create`, …).
@@ -436,11 +463,13 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>>
                 }
             }
             let vars = RefCell::new(BTreeMap::new());
+            let kept = RefCell::new(Vec::new());
             let cx = OpCx {
                 ws: &cs.workspace_id,
                 actor: &caller.me,
                 changeset_id: &cs.id,
                 vars: &vars,
+                kept: &kept,
             };
             let mut before = Vec::with_capacity(cs.ops.len());
             for raw in &cs.ops {
@@ -472,7 +501,8 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>>
 
 /// `POST /api/config/:id/undo` for stored changesets. `None` = no such changeset. Not applied, another
 /// workspace, or applied more than 24 hours ago → `409 这次改动已经不能撤销了`. Undoes in reverse order
-/// in one transaction; `{ok:true}`.
+/// in one transaction; a field changed again since keeps its value and is named in `kept`;
+/// `{ok:true, kept?}`.
 pub fn undo(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>> {
     undo_at(m, caller, id, now())
 }
@@ -489,11 +519,13 @@ pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> Option<ApiRes
                 .filter(|c| c.undoable(at))
                 .ok_or_else(|| ApiError::conflict(not_undoable()))?;
             let vars = RefCell::new(BTreeMap::new());
+            let kept = RefCell::new(Vec::new());
             let cx = OpCx {
                 ws: &cs.workspace_id,
                 actor: &caller.me,
                 changeset_id: &cs.id,
                 vars: &vars,
+                kept: &kept,
             };
             for entry in cs.before.iter().flatten().rev() {
                 let op = entry.get("op").cloned().unwrap_or(Value::Null);
@@ -503,15 +535,20 @@ pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> Option<ApiRes
             if !changesets::mark_undone(tx, &cs)? {
                 return Err(ApiError::conflict(not_undoable()));
             }
+            let kept = kept.into_inner();
             base::audit(
                 tx,
                 &cs.workspace_id,
                 &caller.me,
                 "config.undo",
                 &cs.id,
-                &json!({}),
+                &json!({ "kept": kept }),
             )?;
-            Ok(json!({ "ok": true }))
+            let mut r = json!({ "ok": true });
+            if !kept.is_empty() {
+                r["kept"] = json!(kept);
+            }
+            Ok(r)
         })
     })())
 }

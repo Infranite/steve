@@ -39,7 +39,7 @@ function Rcpts({ kind, xs }: { kind: "to" | "cc" | "bcc"; xs: Rcpt[] }) {
 }
 
 /** the disclosure check (§5.3): folded; flagged spans listed, nothing rewritten */
-function Basis({ b }: { b: Draft["basis"] }) {
+function Basis({ b, onCheck, busy }: { b: Draft["basis"]; onCheck?: () => void; busy?: boolean }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const v = b?.verdict ?? "unchecked", spans = b?.spans ?? []
@@ -50,6 +50,7 @@ function Basis({ b }: { b: Draft["basis"] }) {
     <div className="type-footnote" data-basis={v}>
       <button type="button" className={cn("inline-flex items-center gap-1", cls, spans.length && "hover:text-foreground")} aria-expanded={open} disabled={!spans.length} onClick={() => setOpen(!open)}>
         <I className="size-3.5" aria-hidden />{label}{spans.length > 0 && <ChevronDownIcon className={cn("size-3.5 transition-transform", open && "rotate-180")} aria-hidden />}</button>
+      {v === "unchecked" && onCheck && <Button size="xs" variant="ghost" className="ml-1.5 text-muted-foreground" disabled={busy} onClick={onCheck} data-draft-check>{t("mail:draft.check")}</Button>}
       {open && <ul className="mt-1.5 flex flex-col gap-1 pl-5">{spans.map((s, n) => <li key={n} className="list-disc"><mark className="rounded bg-attention/15 px-0.5 text-foreground">{s.text}</mark>{s.why && <span className="text-muted-foreground"> · {s.why}</span>}</li>)}</ul>}
     </div>
   )
@@ -91,7 +92,9 @@ function useDraft(d0: Draft, onChange?: () => void) {
     if (ok) { toast(t("mail:draft.discarded")); await after() }
   }
   const save = async () => { const r = await run(() => mailApi.putDraft(d.id, { body })); if (r) { setD(r); setBody(r.body); toast(t("mail:draft.saved")) } }
-  return { d, body, setBody, dirty, busy, send, no, save, cancel }
+  /* the check reads the stored draft: an edit in progress is saved first */
+  const check = async () => { const r = await run(async () => { if (dirty) await mailApi.putDraft(d.id, { body }); return mailApi.checkDraft(d.id) }); if (r) { setD(r); setBody(r.body); toast(t("mail:draft.checked")) } }
+  return { d, body, setBody, dirty, busy, send, no, save, cancel, check }
 }
 
 function Fields({ x, readOnly }: { x: ReturnType<typeof useDraft>; readOnly: boolean }) {
@@ -106,7 +109,7 @@ function Fields({ x, readOnly }: { x: ReturnType<typeof useDraft>; readOnly: boo
         : <Textarea aria-label={t("mail:draft.body")} className="min-h-40 rounded-lg type-body" value={x.body} onChange={(e) => x.setBody(e.target.value)} maxLength={100_000} data-draft-body />}
       {x.dirty && !readOnly && <div className="type-footnote text-muted-foreground">{t("mail:draft.edited")}</div>}
       {d.files.length > 0 && <Files files={d.files} />}
-      <Basis b={d.basis} />
+      <Basis b={d.basis} busy={x.busy} onCheck={!readOnly && EDITABLE.has(d.status) ? () => void x.check() : undefined} />
       {d.error && <div className="type-footnote text-destructive" role="alert">{d.error}</div>}
     </div>
   )

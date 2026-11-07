@@ -1,7 +1,7 @@
 //! Integration point: builds the storage backend, the domain, `/auth` and `/mcp` from the sibling crates.
 //!
 //! Wired: steve-store (storage, [`store::StoreBackend`]), steve-auth (`/auth`, [`auth::AuthStore`]),
-//! steve-core on the steve-acp runtime ([`core::CoreDomain`], [`core::CoreMcp`]), and the modules
+//! steve-core on the Nodes ([`core::CoreDomain`], [`core::CoreMcp`], [`core::RoutedRuntime`]), and the modules
 //! ([`modules::build`]: contacts, accounts + connections, vault + passkeys, schedules, knowledge,
 //! GitHub), whose MCP tools [`mcp_extra`] serves next to steve-mcp's.
 
@@ -68,6 +68,9 @@ pub struct Wired {
     pub node: Option<Arc<node_runtime::NodeRuntime>>,
     /// Where projects', items', sessions' and knowledge folders' files are (which Node).
     pub workspaces: Arc<workspaces::Workspaces>,
+    /// What runs for each connection of an adapter with a connection hook (stopped by the
+    /// domain's shutdown).
+    pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
     /// Steve's tools as a Node reaches them (in-crate tests drive the bridge with them).
     #[cfg(test)]
     pub(crate) tool_service: Arc<tool_service::ToolService>,
@@ -161,19 +164,11 @@ fn node_runtime(
     jobs: &mut Vec<modules::Job>,
 ) -> Result<Option<NodeHost>, BackendError> {
     let kinds = node_jobs(vars);
-    if !local_node_mode(vars) {
-        if kinds != NodeJobs::default() {
-            tracing::warn!("STEVE_NODE_JOBS is ignored without STEVE_NODE_MODE=local");
+    if !local_node_mode(vars, cfg.no_resume)? {
+        if vars("STEVE_NODE_JOBS").is_some_and(|v| !v.trim().is_empty()) {
+            tracing::warn!("STEVE_NODE_JOBS is ignored while the local Node is off");
         }
         return Ok(None);
-    }
-    if cfg.no_resume {
-        return Err(BackendError::msg(
-            "STEVE_NODE_MODE=local is disabled on STEVE_NO_RESUME copies",
-        ));
-    }
-    if kinds.research {
-        tracing::warn!("STEVE_NODE_JOBS=research: research does not run on the local Node yet");
     }
     let node_id = steve_node_api::NodeId::new("local").expect("constant node id");
     let home = cfg.data_dir.join("node");
@@ -181,6 +176,7 @@ fn node_runtime(
         .map_err(|e| BackendError::msg(e.to_string()))?;
     let node = Arc::new(
         steve_node::LocalNode::open(steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: node_id.clone(),
             home,
             acp: acp_config(cfg),
@@ -188,7 +184,12 @@ fn node_runtime(
                 .map_err(|e| BackendError::msg(e.to_string()))?,
             capacity: steve_node_api::Capacity {
                 sessions: 64,
-                jobs: if kinds.think { LOCAL_JOB_CAPACITY } else { 0 },
+                // think and research jobs share it
+                jobs: if kinds.think || kinds.research {
+                    LOCAL_JOB_CAPACITY
+                } else {
+                    0
+                },
                 // flow `cmd` steps (N0e-E6)
                 execs: 16,
             },
@@ -227,6 +228,7 @@ fn node_runtime(
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
     // legacy's idle kill: an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
     runtime.set_idle_release(cfg.idle_release_ms as i64);
+    runtime.set_cost_caps(cost_caps(vars));
     // an attempt's deadline (default 6 h); the end-to-end tests shorten it to see a card expire
     if let Some(ms) = turn_limit(vars) {
         runtime.set_turn_limit(ms);
@@ -253,17 +255,39 @@ fn node_runtime(
     }))
 }
 
-/// Whether the local Node is switched on: `STEVE_NODE_MODE=local`, or `STEVE_NODE=local` (how
-/// 0.2.50 spelled it, kept as a deprecated alias when STEVE_NODE_MODE is unset).
-fn local_node_mode(vars: &Vars) -> bool {
-    match vars("STEVE_NODE_MODE").filter(|v| !v.trim().is_empty()) {
-        Some(mode) => mode.trim() == "local",
-        None if vars("STEVE_NODE").as_deref() == Some("local") => {
+/// Whether the local Node is switched on. It is the default (B6): an unset `STEVE_NODE_MODE`
+/// means `local`, and `off` is the rollback: sessions already bound to the Node are parked then,
+/// and nothing else runs (there is no in-process runner since B7, so a new session is refused). `STEVE_NODE=local`, how 0.2.50 spelled it, still counts as
+/// an explicit `local` when STEVE_NODE_MODE is unset. A `STEVE_NO_RESUME` copy (a DB copy that
+/// must not touch the live harnesses) resolves to off by default; an explicit `local` there is a
+/// boot error. Any other value is a boot error too, rather than a guess.
+fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, BackendError> {
+    let explicit_local = match vars("STEVE_NODE_MODE")
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+    {
+        Some(mode) => match mode.as_str() {
+            "local" => true,
+            "off" => return Ok(false),
+            other => {
+                return Err(BackendError::msg(format!(
+                    "STEVE_NODE_MODE={other:?} is not a mode: use local (the default) or off"
+                )));
+            }
+        },
+        None if vars("STEVE_NODE").as_deref().map(str::trim) == Some("local") => {
             tracing::warn!("STEVE_NODE=local is deprecated; set STEVE_NODE_MODE=local instead");
             true
         }
-        None => false,
+        // the default
+        None => return Ok(!no_resume),
+    };
+    if explicit_local && no_resume {
+        return Err(BackendError::msg(
+            "STEVE_NODE_MODE=local is disabled on STEVE_NO_RESUME copies",
+        ));
     }
+    Ok(explicit_local)
 }
 
 /// Think jobs the local Node may run at once: no limit, as in process. A bound here would turn a
@@ -273,8 +297,9 @@ fn local_node_mode(vars: &Vars) -> bool {
 /// next boot.
 pub const LOCAL_JOB_CAPACITY: u32 = u32::MAX;
 
-/// Which of Steve's own model work may run as local Node jobs (`STEVE_NODE_JOBS=think,research`,
-/// on top of `STEVE_NODE_MODE=local`). Off unless named.
+/// Which of Steve's own model work runs as local Node jobs while the local Node is on
+/// (`STEVE_NODE_JOBS`). Unset means both, `think,research` (B6); an empty value, `off` or `none`
+/// means neither, so they run in the Hub's process as before.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct NodeJobs {
     think: bool,
@@ -282,25 +307,51 @@ struct NodeJobs {
 }
 
 fn node_jobs(vars: &Vars) -> NodeJobs {
+    let Some(list) = vars("STEVE_NODE_JOBS") else {
+        return NodeJobs {
+            think: true,
+            research: true,
+        };
+    };
     let mut j = NodeJobs::default();
-    for k in vars("STEVE_NODE_JOBS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-    {
+    for k in list.split(',').map(str::trim).filter(|k| !k.is_empty()) {
         match k {
             "think" => j.think = true,
             "research" => j.research = true,
+            "off" | "none" => {}
             other => tracing::warn!("STEVE_NODE_JOBS: unknown job kind {other:?}"),
         }
     }
     j
 }
 
+/// How often sessions the boot pass left are looked at again (`STEVE_LEGACY_MOVE_EVERY_MS`, for
+/// tests); default 5 min.
+fn move_every(vars: &Vars) -> std::time::Duration {
+    vars("STEVE_LEGACY_MOVE_EVERY_MS")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(core::MOVE_EVERY, std::time::Duration::from_millis)
+}
+
 /// An attempt's deadline when set (`STEVE_NODE_TURN_LIMIT_MS`, for tests); default 6 h.
 fn turn_limit(vars: &Vars) -> Option<i64> {
     vars("STEVE_NODE_TURN_LIMIT_MS").and_then(|v| v.trim().parse::<i64>().ok())
+}
+
+/// What one usage report and one attempt of a Node may add to a session's cost at most
+/// (`STEVE_NODE_COST_REPORT_MAX`, `STEVE_NODE_COST_ATTEMPT_MAX`; 100 and 1000 unless set).
+fn cost_caps(vars: &Vars) -> node_runtime::CostCaps {
+    let d = node_runtime::CostCaps::default();
+    let num = |k: &str, d: f64| {
+        vars(k)
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(d)
+    };
+    node_runtime::CostCaps::new(
+        num("STEVE_NODE_COST_REPORT_MAX", d.report),
+        num("STEVE_NODE_COST_ATTEMPT_MAX", d.attempt),
+    )
 }
 
 /// Remote Nodes, only with `STEVE_NODE_LISTEN=1`: the service (pairing, listener) over a fleet of
@@ -328,6 +379,7 @@ fn remote_nodes(
         fleet.set_turn_limit(ms);
     }
     fleet.set_idle_release(cfg.idle_release_ms as i64);
+    fleet.set_cost_caps(cost_caps(vars));
     let svc = crate::nodes::from_vars(store, fleet, |k| vars(k));
     let bind = match bind.map(|v| steve_node_api::NodeId::new(v.trim())) {
         Some(Ok(id)) if svc.is_some() => Some(id),
@@ -398,7 +450,7 @@ pub fn wire_with(cfg: &Arc<Config>, bus: &Bus, vars: Vars) -> Result<Wired, Back
 }
 
 /// Opens the database (`cfg.db_path()`, migrations) with the store's change events going to `bus`, and
-/// builds the runner, the core, `/auth` and `/mcp` on it, with the adapters of `asm`. Must run
+/// builds the runtime, the core, `/auth` and `/mcp` on it, with the adapters of `asm`. Must run
 /// inside the tokio runtime.
 pub fn wire_assembly(
     cfg: &Arc<Config>,
@@ -426,10 +478,7 @@ pub fn wire_assembly(
         flow: std::sync::OnceLock::new(),
         yolo: std::sync::OnceLock::new(),
         local_node: std::sync::OnceLock::new(),
-        user_seqs: Default::default(),
-        transcripts: Default::default(),
     });
-    let acp = steve_acp::Acp::new(acp_config(cfg), host.clone());
     let mut core_cfg = core_config(cfg);
     /* the research and disclosure defaults of 设置 · 模型 (as steve-research and the channels read them) */
     let list = |k: &str| -> Vec<String> {
@@ -444,7 +493,10 @@ pub fn wire_assembly(
         core_cfg.models_research = list("STEVE_MODELS_RESEARCH");
     }
     core_cfg.models_check = list("STEVE_MODELS_CHECK");
-    let think_on_node = node_jobs(&vars).think;
+    let NodeJobs {
+        think: think_on_node,
+        research: research_on_node,
+    } = node_jobs(&vars);
     let mut node_jobs = vec![];
     let secrets = node_secrets::NodeSecrets::new();
     let node_host = node_runtime(cfg, &db, host.clone(), &vars, &secrets, &mut node_jobs)?;
@@ -507,22 +559,31 @@ pub fn wire_assembly(
             workspaces.clone().follow(bus.tap(&["project", "kb"])),
         ));
     }
+    let routed = Arc::new(core::RoutedRuntime {
+        node: node_host.as_ref().map(|h| h.runtime.clone()),
+        fleet: fleet.clone(),
+        bind_remote,
+        store: db.clone(),
+        host: host.clone(),
+        workspaces: workspaces.clone(),
+        worktrees: node_host.as_ref().map(|_| cfg.worktrees.clone()),
+    });
     let core = steve_core::Core::new(
         steve_core::repo::Db::new(db.clone()),
-        Arc::new(core::RoutedRuntime {
-            legacy: core::AcpRuntime(acp.clone()),
-            node: node_host.as_ref().map(|h| h.runtime.clone()),
-            fleet: fleet.clone(),
-            bind_remote,
-            store: db.clone(),
-            host: host.clone(),
-            workspaces: workspaces.clone(),
-            worktrees: node_host.as_ref().map(|_| cfg.worktrees.clone()),
-        }),
+        routed.clone(),
         gateway,
         core_cfg,
     );
     let _ = host.core.set(core.clone());
+    if node_host.is_some() {
+        // sessions from before this boot that boot could not move to the local Node yet (B7)
+        node_jobs.push(Box::pin(core::move_legacy_later(
+            routed.clone(),
+            core.clone(),
+            steve_store::now(),
+            move_every(&vars),
+        )));
+    }
     /* an item bound to a Node has its git read there (N0e-E11b); without any Node, nothing changes */
     if node_host.is_some() || fleet.is_some() {
         core.set_node_git(Arc::new(item_git::ItemGit::new(workspaces.clone())));
@@ -535,11 +596,23 @@ pub fn wire_assembly(
     );
     research.models = core.config().models_research.clone();
     research.codex_executable = Some(cfg.codex_executable.clone().into());
-    core.set_researcher(Arc::new(research::ResearchAdapter::new(
-        research,
+    let mut adapter = research::ResearchAdapter::new(
+        research.clone(),
         steve_core::repo::Db::new(db.clone()),
         cfg.data_dir.clone(),
-    )));
+    );
+    // or each attempt as a job on the local Node (`STEVE_NODE_JOBS=research`), with the same
+    // harnesses, homes and limits; admission, the attempts' order and the books stay here
+    if let Some(h) = node_host.as_ref().filter(|_| research_on_node) {
+        tracing::info!("research runs as local Node jobs (STEVE_NODE_JOBS=research)");
+        h.node.enable_research(research);
+        let ws = workspaces.clone();
+        adapter = adapter.on_node(research::NodeResearch {
+            runtime: h.runtime.clone(),
+            roots: Arc::new(move || ws.local_roots().map_err(|e| e.to_string())),
+        });
+    }
+    core.set_researcher(Arc::new(adapter));
     let auth_cfg = steve_auth::AuthConfig::from_vars(|k| vars(k))
         .map_err(|e| BackendError::msg(format!("auth config: {e}")))?;
     let backend: Arc<dyn Backend> = Arc::new(store::StoreBackend::new(db.clone())?);
@@ -658,8 +731,9 @@ pub fn wire_assembly(
         core: core.clone(),
         domain: Arc::new(core::CoreDomain {
             core,
-            acp,
+            routed,
             node: local_node,
+            lifecycle: built.lifecycle.clone(),
         }),
         auth: auth.router(),
         mcp: Some(mcp),
@@ -674,6 +748,7 @@ pub fn wire_assembly(
         nodes,
         node: local_runtime,
         workspaces,
+        lifecycle: built.lifecycle,
         #[cfg(test)]
         tool_service,
     })
@@ -688,12 +763,23 @@ mod tests {
     }
 
     #[test]
-    fn node_jobs_are_off_unless_named() {
-        assert_eq!(node_jobs(&vars(&[])), NodeJobs::default());
-        assert_eq!(
-            node_jobs(&vars(&[("STEVE_NODE_JOBS", "")])),
-            NodeJobs::default()
-        );
+    fn node_jobs_default_to_think_and_research() {
+        let both = NodeJobs {
+            think: true,
+            research: true,
+        };
+        // unset: both run on the Node (B6)
+        assert_eq!(node_jobs(&vars(&[])), both);
+        // named off: in process
+        let none: [&'static [(&str, &str)]; 4] = [
+            &[("STEVE_NODE_JOBS", "")],
+            &[("STEVE_NODE_JOBS", "off")],
+            &[("STEVE_NODE_JOBS", "none")],
+            &[("STEVE_NODE_JOBS", " , ")],
+        ];
+        for kv in none {
+            assert_eq!(node_jobs(&vars(kv)), NodeJobs::default(), "{kv:?}");
+        }
         assert_eq!(
             node_jobs(&vars(&[("STEVE_NODE_JOBS", "think")])),
             NodeJobs {
@@ -703,19 +789,16 @@ mod tests {
         );
         assert_eq!(
             node_jobs(&vars(&[("STEVE_NODE_JOBS", " research , think,bogus")])),
-            NodeJobs {
-                think: true,
-                research: true
-            }
+            both
         );
     }
 
-    /// With the local Node on, Steve's think calls go to it only when STEVE_NODE_JOBS names
-    /// `think`; otherwise they run in process and no job is written.
+    /// With the local Node on, Steve's think calls go to it when STEVE_NODE_JOBS is unset (the
+    /// default) or names `think`; with `research` alone they run in process and no job is written.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn think_runs_on_the_node_only_with_steve_node_jobs() {
         steve_modules::net::forbid_in_this_process();
-        for jobs in [None, Some("think")] {
+        for jobs in [Some("research"), Some("think"), None] {
             let dir = tempfile::tempdir().unwrap();
             let h = dir.path().canonicalize().unwrap();
             let claude = h.join("claude");
@@ -739,10 +822,10 @@ mod tests {
                 ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
                 ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
                 ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
-                ("STEVE_NODE_MODE", "local".into()),
             ]
             .into_iter()
             .collect();
+            // the local Node by default: STEVE_NODE_MODE unset
             if let Some(j) = jobs {
                 vars.insert("STEVE_NODE_JOBS", j.into());
             }
@@ -780,24 +863,52 @@ mod tests {
                     )?)
                 })
                 .unwrap();
-            assert_eq!(n, if jobs.is_some() { 1 } else { 0 }, "{jobs:?}");
+            let on_node = jobs != Some("research");
+            assert_eq!(n, if on_node { 1 } else { 0 }, "{jobs:?}");
         }
     }
 
     #[test]
+    fn the_local_node_is_the_default() {
+        let mode = |kv: &'static [(&'static str, &'static str)], no_resume: bool| {
+            local_node_mode(&vars(kv), no_resume).map_err(|e| e.to_string())
+        };
+        // unset → local; off → off
+        assert_eq!(mode(&[], false), Ok(true));
+        assert_eq!(mode(&[("STEVE_NODE_MODE", "")], false), Ok(true));
+        assert_eq!(mode(&[("STEVE_NODE_MODE", "off")], false), Ok(false));
+        assert_eq!(mode(&[("STEVE_NODE_MODE", " Local ")], false), Ok(true));
+        // a STEVE_NO_RESUME copy: off by default, an explicit local fails boot
+        assert_eq!(mode(&[], true), Ok(false));
+        assert_eq!(mode(&[("STEVE_NODE_MODE", "off")], true), Ok(false));
+        assert!(
+            mode(&[("STEVE_NODE_MODE", "local")], true)
+                .unwrap_err()
+                .contains("STEVE_NO_RESUME")
+        );
+        assert!(mode(&[("STEVE_NODE", "local")], true).is_err());
+        // a typo is not silently off (which would park every Node session) nor silently local
+        assert!(
+            mode(&[("STEVE_NODE_MODE", "loacl")], false)
+                .unwrap_err()
+                .contains("loacl")
+        );
+    }
+
+    #[test]
     fn local_node_mode_keeps_the_0_2_50_spelling() {
-        assert!(local_node_mode(&vars(&[("STEVE_NODE_MODE", "local")])));
+        let mode = |kv: &'static [(&'static str, &'static str)]| {
+            local_node_mode(&vars(kv), false).unwrap()
+        };
+        assert!(mode(&[("STEVE_NODE_MODE", "local")]));
         // a 0.2.50 config upgraded in place keeps its local Node
-        assert!(local_node_mode(&vars(&[("STEVE_NODE", "local")])));
-        // a Node.js path is not the switch, and STEVE_NODE_MODE wins when both are set
-        assert!(!local_node_mode(&vars(&[(
-            "STEVE_NODE",
-            "/opt/x/bin/node"
-        )])));
-        assert!(!local_node_mode(&vars(&[
+        assert!(mode(&[("STEVE_NODE", "local")]));
+        // a Node.js path is not the switch (the default applies), and STEVE_NODE_MODE wins when
+        // both are set
+        assert!(mode(&[("STEVE_NODE", "/opt/x/bin/node")]));
+        assert!(!mode(&[
             ("STEVE_NODE", "local"),
             ("STEVE_NODE_MODE", "off")
-        ])));
-        assert!(!local_node_mode(&vars(&[])));
+        ]));
     }
 }

@@ -34,21 +34,13 @@ fn control_token(cfg: &Config) -> Result<String> {
     atomic(&path, &token)?;
     Ok(token)
 }
-fn loopback_host(cfg: &Config) -> String {
-    match cfg.listen.host.as_str() {
-        "0.0.0.0" => "127.0.0.1".into(),
-        "::" => "[::1]".into(),
-        h if h.contains(':') => format!("[{h}]"),
-        h => h.into(),
-    }
-}
 async fn maintenance(cfg: &Config, u: &Updates, method: reqwest::Method) -> Result<Value> {
     Ok(u.client
         .request(
             method,
             format!(
                 "http://{}:{}/internal/upgrade/drain",
-                loopback_host(cfg),
+                cfg.listen.local_host(),
                 cfg.listen.port
             ),
         )
@@ -82,7 +74,7 @@ fn spawn(cfg: &Config, bundle: &Path, op: Option<&Operation>) -> Result<HubChild
     c.env("STEVE_SUPERVISOR_PID", std::process::id().to_string())
         .env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
         .env("STEVE_PORT", cfg.listen.port.to_string())
-        .env("STEVE_HOST", &cfg.listen.host)
+        .env("STEVE_HOST", cfg.listen.env_value())
         .env("STEVE_HOME", &cfg.home)
         .env("STEVE_MANAGED", "1")
         .env("STEVE_VERSION", &manifest.version)
@@ -163,12 +155,7 @@ fn restore(db: &Path, saved: &Path, failed: &Path) -> Result<()> {
     Ok(())
 }
 async fn healthy(cfg: &Config, client: &reqwest::Client, version: &str, id: Option<&str>) -> bool {
-    let host = match cfg.listen.host.as_str() {
-        "0.0.0.0" => "127.0.0.1".into(),
-        "::" => "[::1]".into(),
-        h if h.contains(':') => format!("[{h}]"),
-        h => h.to_string(),
-    };
+    let host = cfg.listen.local_host();
     let Ok(r) = client
         .get(format!("http://{host}:{}/healthz", cfg.listen.port))
         .timeout(Duration::from_secs(2))
@@ -311,7 +298,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     let instance = super::instance_lock(&cfg)?;
     // Service-manager restart must stop the complete service cgroup/job before invoking a new supervisor.
     // On a standalone launch, refuse an occupied port instead of killing an unrelated process.
-    let probe = tokio::net::TcpListener::bind((cfg.listen.host.as_str(), cfg.listen.port))
+    let probe = cfg
+        .listen
+        .bind()
         .await
         .context("Hub port occupied; stop the previous managed instance first")?;
     drop(probe);
@@ -470,16 +459,19 @@ pub async fn startup_gate(cfg: &Config) -> Result<()> {
     let version = cfg.version.clone();
     let gate_id = id.clone();
     let app=axum::Router::new().route("/healthz",axum::routing::get(move||{let (version,id)=(version.clone(),gate_id.clone());async move{axum::Json(json!({"ok":true,"version":version,"web_version":version,"upgrade_id":id,"maintenance":true,"build_commit":option_env!("STEVE_BUILD_COMMIT")}))}})).fallback(||async{(axum::http::StatusCode::SERVICE_UNAVAILABLE,"升级验证中，请稍后重试")});
-    let listener =
-        tokio::net::TcpListener::bind((cfg.listen.host.as_str(), cfg.listen.port)).await?;
-    let (done, rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = rx.await;
-            })
-            .await
-    });
+    let (done, rx) = tokio::sync::watch::channel(false);
+    let mut servers = tokio::task::JoinSet::new();
+    for listener in cfg.listen.bind().await? {
+        let (app, mut rx) = (app.clone(), rx.clone());
+        servers.spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = rx.wait_for(|d| *d).await;
+                })
+                .await
+        });
+    }
+    drop(rx);
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if unsafe { libc::getppid() } != supervisor_pid {
@@ -493,8 +485,10 @@ pub async fn startup_gate(cfg: &Config) -> Result<()> {
             bail!("upgrade gate aborted: {}", op.phase)
         }
     }
-    let _ = done.send(());
-    server.await??;
+    let _ = done.send(true);
+    while let Some(r) = servers.join_next().await {
+        r??;
+    }
     Ok(())
 }
 

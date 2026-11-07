@@ -102,6 +102,7 @@ impl T {
 
     fn config(&self, jobs: u32) -> NodeConfig {
         NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
             node: NodeId::new("hub").unwrap(),
             home: self.root.join("node"),
             acp: AcpConfig {

@@ -8,8 +8,15 @@
 //!    page has it;
 //! 3. loop guard: a message from the connection's own account is not processed (a self account's
 //!    trigger words are C6's to check), one from another bot is only recorded unless the space has
-//!    `collab`; more than 20 messages sent by Steve in a space within 10 minutes mute it and open a
-//!    `fail` decision.
+//!    `collab`. Nothing here mutes a space by itself: a space is muted only when you set it so. A
+//!    message from you (the owner's “我”, a contact merged into it, or one of its handles or aliases:
+//!    [`crate::arbiter::from_owner`]) received on your own account is yours too, whatever the adapter
+//!    made of its sender.
+//!
+//! The watermark ([`history_of`]) comes before all of that: a message written before the
+//! connection was (last) turned on, or arriving more than the connection's lateness after it was
+//! written, is stored as history (`chan_messages.history`) and only recorded — no trigger words,
+//! rules, model calls, flows, cards or replies, whatever the adapter delivers.
 //!
 //! What comes back ([`Inbound::next`]) tells steps 4–7 whether to evaluate the rules;
 //! [`Channels::on_message`] runs them (C3):
@@ -30,14 +37,15 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_flow::{ActorRef, Ingested, RawEvent};
 use steve_modules::ApiError;
-use steve_modules::accounts::{ExtraHandle, Hints, Identified, identify};
+use steve_modules::accounts::{AnyHandle, ExtraHandle, Hints, Identified, identify_any};
 use steve_store::Tx;
 
-use crate::channel::{HandleRef, InboundMessage, MemberInfo, SpaceInfo, SpaceKind};
+use crate::channel::{HandleRef, InboundMessage, MemberInfo, Sender, SpaceInfo, SpaceKind};
+use crate::ext::MessageIds;
 use crate::respond::{self, Plan, Response};
 use crate::rules::{self, ContextLine, Facts, GatewayJudge};
 use crate::spaces::{self, Attention, Mode, NewSpace};
-use crate::{ChannelResult, Channels, messages};
+use crate::{ChannelResult, Channels, fallback, messages};
 
 /// `ext_events.source` of channel messages.
 pub const SOURCE: &str = "im";
@@ -58,6 +66,68 @@ pub const LABEL_QUIET: &str = "不提醒，只记录";
 pub const LABEL_BLOCKED: &str = "已屏蔽，不处理";
 /// How long an outbound message without its provider id yet can come back as an echo.
 pub const ECHO_WINDOW_MS: i64 = 10 * 60_000;
+/// `outcome_label` of a message written before the connection was turned on.
+pub const LABEL_HISTORY_BEFORE: &str = "接入前的旧消息，只记录";
+/// `outcome_label` of a message that arrived later than the connection's lateness.
+pub const LABEL_HISTORY_LATE: &str = "到达太晚的旧消息，只记录";
+/// How late a message may arrive and still be acted on, by default ([`ConnFacts::late_ms`]).
+pub const DEFAULT_LATE_MS: i64 = 30 * 60_000;
+/// The lateness a connection may be set to (`late_minutes` 1 … 10080).
+pub const LATE_MS: std::ops::RangeInclusive<i64> = 60_000..=7 * 24 * 3_600_000;
+/// How far the provider's clock and the Hub's may disagree, on top of the adapter's create-time
+/// precision ([`crate::ext::ChannelDecl::created_precision_ms`]): a message this close to the
+/// watermark is live.
+pub const CLOCK_SKEW_MS: i64 = 2 * 60_000;
+
+/// Why a message is only history ([`history_of`]); `chan_messages.history`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum History {
+    /// Written before the connection was (last) turned on.
+    Before,
+    /// Arrived later than the connection's lateness after it was written (or last edited).
+    Late,
+}
+
+impl History {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Before => "before",
+            Self::Late => "late",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Before => LABEL_HISTORY_BEFORE,
+            Self::Late => LABEL_HISTORY_LATE,
+        }
+    }
+}
+
+/// Is a message history rather than news? `enabled_at`: when the connection was last turned on;
+/// `late_ms`: how late it may arrive; `created` / `edited`: the provider's times; `now`: when it
+/// was received; `precision_ms`: how precise the provider's times are.
+///
+/// - written more than the grace (clock skew plus precision) before `enabled_at` → [`History::Before`]
+///   (an edit later does not make an old message new);
+/// - received more than `late_ms` plus the grace after it was written, or after its last edit when
+///   the remote says it was edited → [`History::Late`]; a time ahead of the Hub's clock counts as
+///   now.
+pub fn history_of(
+    enabled_at: i64,
+    late_ms: i64,
+    created: i64,
+    edited: Option<i64>,
+    now: i64,
+    precision_ms: i64,
+) -> Option<History> {
+    let grace = CLOCK_SKEW_MS + precision_ms.max(0);
+    if created + grace < enabled_at {
+        return Some(History::Before);
+    }
+    let last = edited.map_or(created, |e| e.max(created)).min(now);
+    (now - last > late_ms + grace).then_some(History::Late)
+}
 
 /// What steps 4–7 do with the message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +168,10 @@ pub struct Inbound {
     pub next: Next,
     /// What the conditions of the rules look at (not for duplicates).
     pub facts: Option<Facts>,
+    /// Only history ([`history_of`]): stored and recorded, nothing else.
+    pub history: Option<History>,
+    /// The sender is you ([`crate::arbiter::from_owner`]): never answered as you.
+    pub from_owner: bool,
     /// Steps 4–7 ([`Channels::on_message`]; `None` from [`Channels::on_inbound`] and for
     /// duplicates).
     pub response: Option<Response>,
@@ -112,6 +186,10 @@ pub(crate) struct ConnFacts {
     pub account_name: String,
     /// The user whose “我” owns the account (a personal, `mode=self` connection).
     pub owner_user: Option<String>,
+    /// When the connection was last turned on (`connections.enabled_at`, else `created`).
+    pub enabled_at: i64,
+    /// How late a message may arrive and still be acted on (`channel_settings.late_ms`).
+    pub late_ms: i64,
 }
 
 pub(crate) fn conn_facts(
@@ -120,8 +198,10 @@ pub(crate) fn conn_facts(
     conn: &str,
 ) -> ChannelResult<ConnFacts> {
     c.query_row(
-        "SELECT c.adapter, c.account_id, c.created_by, coalesce(nullif(a.display_name, ''), a.handle_display), p.user_id
+        "SELECT c.adapter, c.account_id, c.created_by, coalesce(nullif(a.display_name, ''), a.handle_display), p.user_id,
+                coalesce(c.enabled_at, c.created), cs.late_ms
            FROM connections c JOIN accounts a ON a.id = c.account_id LEFT JOIN parties p ON p.id = a.party_id
+           LEFT JOIN channel_settings cs ON cs.connection_id = c.id
           WHERE c.id = ? AND c.workspace_id = ?",
         params![conn, ws],
         |r| {
@@ -131,6 +211,11 @@ pub(crate) fn conn_facts(
                 created_by: r.get(2)?,
                 account_name: r.get(3)?,
                 owner_user: r.get(4)?,
+                enabled_at: r.get(5)?,
+                late_ms: r
+                    .get::<_, Option<i64>>(6)?
+                    .filter(|l| LATE_MS.contains(l))
+                    .unwrap_or(DEFAULT_LATE_MS),
             })
         },
     )
@@ -165,28 +250,58 @@ pub(crate) fn identify_handle_as(
     label: &str,
     bot: bool,
 ) -> Option<Identified> {
+    identify_with_aliases(tx, ws, conn, actor, h, &[], name, label, bot)
+}
+
+/// [`identify_handle_as`] for a sender known by more handles ([`crate::channel::Sender::aliases`]):
+/// an existing contact holding the primary handle or any alias is the sender, and the handles it did
+/// not have yet are attached to it; with none, a new contact gets them all.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn identify_with_aliases(
+    tx: &Tx,
+    ws: &str,
+    conn: &str,
+    actor: &str,
+    h: &HandleRef,
+    aliases: &[HandleRef],
+    name: Option<&str>,
+    label: &str,
+    bot: bool,
+) -> Option<Identified> {
     if h.handle.trim().is_empty() {
         return None;
     }
     if tx.execute_batch("SAVEPOINT chan_identify").is_err() {
         return None;
     }
-    let hints = Hints {
-        display_name: name.map(String::from),
-        extra: h
-            .extra
+    // handles valid only under this connection (Feishu `open_id`)
+    let extra_of = |h: &HandleRef| -> Vec<ExtraHandle> {
+        h.extra
             .iter()
             .map(|x| ExtraHandle {
                 handle: x.clone(),
                 connection_id: Some(conn.into()),
             })
-            .collect(),
+            .collect()
+    };
+    let hints = Hints {
+        display_name: name.map(String::from),
+        extra: extra_of(h),
         source: Some("channel".into()),
         source_label: Some(label.chars().take(60).collect()),
         kind: bot.then(|| "bot".to_string()),
         ..Hints::default()
     };
-    match identify(tx, ws, actor, &h.system, &h.handle, &hints) {
+    let aliases: Vec<AnyHandle> = aliases
+        .iter()
+        .filter(|a| !a.handle.trim().is_empty())
+        .map(|a| AnyHandle {
+            system: a.system.clone(),
+            handle: a.handle.clone(),
+            extra: extra_of(a),
+        })
+        .collect();
+    match identify_any(tx, ws, actor, &h.system, &h.handle, &aliases, &hints) {
         Ok(id) => {
             let _ = tx.execute_batch("RELEASE chan_identify");
             Some(id)
@@ -203,9 +318,10 @@ pub(crate) fn identify_handle_as(
     }
 }
 
-/// Is any of these handles known already (so the sender's name need not be looked up)?
-fn handle_known(c: &rusqlite::Connection, ws: &str, h: &HandleRef) -> ChannelResult<bool> {
-    for x in std::iter::once(&h.handle).chain(h.extra.iter()) {
+/// Is any of the sender's handles known already (so its name need not be looked up)?
+fn handle_known(c: &rusqlite::Connection, ws: &str, sender: &Sender) -> ChannelResult<bool> {
+    let all = std::iter::once(&sender.handle).chain(sender.aliases.iter());
+    for x in all.flat_map(|h| std::iter::once(&h.handle).chain(h.extra.iter())) {
         let hit: bool = c.query_row(
             "SELECT EXISTS (SELECT 1 FROM account_handles WHERE workspace_id = ? AND handle = ?)",
             params![ws, x.trim()],
@@ -266,20 +382,32 @@ impl Channels {
         conn: &str,
         msg: InboundMessage,
     ) -> ChannelResult<Inbound> {
-        let mut c = steve_modules::Check::new();
-        c.len("space_ext_id", &msg.space_ext_id, 1, 500).len(
-            "external_id",
-            &msg.external_id,
-            1,
-            500,
-        );
-        c.done()?;
         let store = self.store().clone();
         let facts = store.reader(|c| conn_facts(c, ws, conn))?;
+        // a message without a provider id only from a side that has none; the Hub's own ids
+        // (`fp:`) are never an adapter's
+        let without_ids = self
+            .decl(&facts.adapter)
+            .is_some_and(|d| d.message_ids == MessageIds::None);
+        let mut c = steve_modules::Check::new();
+        c.len("space_ext_id", &msg.space_ext_id, 1, 500)
+            .len(
+                "external_id",
+                &msg.external_id,
+                if without_ids { 0 } else { 1 },
+                500,
+            )
+            .len("source_id", msg.source_id.as_deref().unwrap_or(""), 0, 500);
+        c.done()?;
+        if fallback::is_fallback(&msg.external_id) {
+            return Err(ApiError::rule(steve_i18n::t!(
+                "channels.error.message_id_reserved"
+            )));
+        }
         let (existing, known) = store.reader(|c| -> ChannelResult<_> {
             Ok((
                 spaces::find(c, ws, conn, &msg.space_ext_id)?,
-                handle_known(c, ws, &msg.sender.handle)?,
+                handle_known(c, ws, &msg.sender)?,
             ))
         })?;
 
@@ -303,6 +431,8 @@ impl Channels {
                 event: None,
                 next: Next::Record(LABEL_BLOCKED),
                 facts: None,
+                history: None,
+                from_owner: false,
                 response: None,
             });
         }
@@ -362,6 +492,18 @@ impl Channels {
         }
 
         let now = self.now();
+        // the watermark: history is stored and recorded, never acted on, whoever delivers it
+        let precision = self
+            .decl(&facts.adapter)
+            .map_or(1000, |d| d.created_precision_ms);
+        let history = history_of(
+            facts.enabled_at,
+            facts.late_ms,
+            msg.created,
+            msg.edited,
+            now,
+            precision,
+        );
         let written = store.transaction(|tx| {
             self.write(
                 tx,
@@ -373,6 +515,7 @@ impl Channels {
                 &members,
                 sender_name.as_deref(),
                 now,
+                history,
             )
         })?;
         let mut inbound = written.inbound;
@@ -388,10 +531,16 @@ impl Channels {
         let rf = store.reader(|c| rule_facts(c, ws, &facts, &inbound, &msg))?;
 
         // Step 2, second half: the signal.
+        // a message without a provider id is its event by the Hub's message id
+        let event_ext = if msg.external_id.is_empty() {
+            inbound.message_id.clone()
+        } else {
+            msg.external_id.clone()
+        };
         let mut ev = RawEvent::new(
             SOURCE,
             inbound.type_key.clone(),
-            msg.external_id.clone(),
+            event_ext,
             msg.created,
             summary(&written.sender_name, &msg),
         );
@@ -421,8 +570,9 @@ impl Channels {
         let addressed = store
             .reader(|c| addressed(c, ws, conn, &inbound.space_id, &inbound.message_id, &rf))?;
         inbound.facts = Some(rf);
-        // a bot the loop guard stopped drives no flow on either
-        ev.wake = !matches!(inbound.next, Next::Record(LABEL_BOT | LABEL_BOT_ANSWERED));
+        // a bot the loop guard stopped drives no flow on either, and history wakes nothing
+        ev.wake = !matches!(inbound.next, Next::Record(LABEL_BOT | LABEL_BOT_ANSWERED))
+            && inbound.history.is_none();
         ev.record_only = match &inbound.next {
             Next::Handle if !addressed => Some(rules::LABEL_UNADDRESSED.into()),
             Next::Handle => None,
@@ -485,6 +635,7 @@ impl Channels {
         members: &[MemberInfo],
         sender_name: Option<&str>,
         now: i64,
+        history: Option<History>,
     ) -> ChannelResult<Written> {
         let mode = match spaces::channel_settings(tx, ws, conn)? {
             Some(s) => s.mode,
@@ -542,23 +693,30 @@ impl Channels {
                     spaces::add_member(tx, ws, &space.id, &id.account_id, &m.role, now)?;
                 }
             }
-            if created && mode == Mode::Bot && info.kind.is_group() {
-                decision_id = Some(spaces::open_new_space_decision(
-                    tx,
-                    ws,
-                    &space,
-                    &facts.account_name,
-                )?);
-            }
+        }
+        // “新群” is asked on the group's first live message: history opens no card (a group first
+        // seen through old messages asks when someone writes there now)
+        if mode == Mode::Bot
+            && info.kind.is_group()
+            && history.is_none()
+            && (created || only_history(tx, &space.id)?)
+        {
+            decision_id = Some(spaces::open_new_space_decision(
+                tx,
+                ws,
+                &space,
+                &facts.account_name,
+            )?);
         }
 
         // 1. the sender
-        let sender = identify_handle_as(
+        let sender = identify_with_aliases(
             tx,
             ws,
             conn,
             actor,
             &msg.sender.handle,
+            &msg.sender.aliases,
             sender_name,
             &label,
             msg.sender.is_bot,
@@ -615,35 +773,111 @@ impl Channels {
             mentions.push(json!({ "account_id": account, "name": m.name }));
         }
 
-        // 2. the message (a redelivery stops here, and so does one stored through the other
-        // connection to the same chat: it only fills in fields)
-        let first = match messages::by_external(tx, &space.id, &msg.external_id)? {
-            Some(id) => {
-                messages::complete(tx, &id, msg.thread_key.as_deref(), msg.reply_to.as_deref())?;
-                Some((id, space.id.clone(), "重复的消息"))
+        // 2. the message. A redelivery stops here, and so does a copy stored through another
+        // connection to the same chat: it only fills in fields. Looked for in this order: the
+        // delivery id this connection gave it before, the provider id, the content key (when one
+        // of the two copies has no provider id), the exact time (every side to the ms), the same
+        // provider id under another connection, Steve's own send read back.
+        let has_id = !msg.external_id.is_empty();
+        let source = msg.source_id.as_deref().filter(|s| !s.trim().is_empty());
+        let key = {
+            let want = fallback::key_system(self, &facts.adapter, &msg.sender.handle.system);
+            let (sys, handle) =
+                fallback::key_sender(tx, ws, sender_party.as_deref(), &want, &msg.sender.handle)?;
+            fallback::key_of(&sys, &handle, &msg.text, &msg.attachments)
+        };
+        let mut first: Option<(String, String, &'static str)> = None;
+        if let Some(src) = source
+            && let Some(f) = fallback::by_source(tx, conn, src)?
+        {
+            if has_id {
+                fallback::upgrade(tx, &f.id, &msg.external_id)?;
             }
-            None => match messages::seen_elsewhere(
+            let label = if f.out {
+                LABEL_ECHO
+            } else {
+                messages::complete(
+                    tx,
+                    &f.id,
+                    msg.thread_key.as_deref(),
+                    msg.reply_to.as_deref(),
+                )?;
+                "重复的消息"
+            };
+            first = Some((f.id, f.space_id, label));
+        }
+        if first.is_none()
+            && has_id
+            && let Some(id) = messages::by_external(tx, &space.id, &msg.external_id)?
+        {
+            messages::complete(tx, &id, msg.thread_key.as_deref(), msg.reply_to.as_deref())?;
+            first = Some((id, space.id.clone(), "重复的消息"));
+        }
+        if first.is_none() {
+            let probe = fallback::Probe {
+                ws,
+                conn,
+                space_id: &space.id,
+                space_ext: &msg.space_ext_id,
+                own: mode == Mode::Own,
+                key: &key,
+                created: msg.created,
+                tol: fallback::tolerance(self, tx, ws, &facts.adapter, &msg.space_ext_id)?,
+                has_id,
+                party: sender_party.as_deref(),
+            };
+            let found = match fallback::by_content(tx, &probe)? {
+                Some(f) => Some(f),
+                None => {
+                    let others = fallback::other_keys(tx, &probe, &msg.text, &msg.attachments)?;
+                    match fallback::by_keys(tx, &probe, &others)? {
+                        Some(f) => Some(f),
+                        None => fallback::by_exact_time(tx, &probe)?,
+                    }
+                }
+            };
+            if let Some(f) = found {
+                if has_id {
+                    fallback::upgrade(tx, &f.id, &msg.external_id)?;
+                }
+                let label = if f.out {
+                    fallback::fill_created(tx, &f.id, msg.created)?;
+                    LABEL_ECHO
+                } else {
+                    messages::complete_from(
+                        tx,
+                        &f.id,
+                        msg.thread_key.as_deref(),
+                        msg.reply_to.as_deref(),
+                        sender_account.as_deref(),
+                        sender_party.as_deref(),
+                    )?;
+                    LABEL_ELSEWHERE
+                };
+                first = Some((f.id, f.space_id, label));
+            }
+        }
+        if first.is_none()
+            && has_id
+            && let Some((id, sp)) = messages::seen_elsewhere(
                 tx,
                 ws,
                 conn,
                 mode == Mode::Own,
                 &msg.space_ext_id,
                 &msg.external_id,
-            )? {
-                Some((id, sp)) => {
-                    messages::complete_from(
-                        tx,
-                        &id,
-                        msg.thread_key.as_deref(),
-                        msg.reply_to.as_deref(),
-                        sender_account.as_deref(),
-                        sender_party.as_deref(),
-                    )?;
-                    Some((id, sp, LABEL_ELSEWHERE))
-                }
-                None => None,
-            },
-        };
+            )?
+        {
+            messages::complete_from(
+                tx,
+                &id,
+                msg.thread_key.as_deref(),
+                msg.reply_to.as_deref(),
+                sender_account.as_deref(),
+                sender_party.as_deref(),
+            )?;
+            first = Some((id, sp, LABEL_ELSEWHERE));
+        }
         // Steve's own message read back (sent as you, or by our bot): not a new message. Only
         // what one of Steve's identities could have sent is compared.
         let first = match first {
@@ -666,7 +900,7 @@ impl Channels {
                     now - ECHO_WINDOW_MS,
                 )? {
                     Some((id, sp)) => {
-                        if sp == space.id {
+                        if sp == space.id && has_id {
                             tx.execute(
                                 "UPDATE chan_messages SET external_id = coalesce(external_id, ?) WHERE id = ?",
                                 params![msg.external_id, id],
@@ -679,6 +913,9 @@ impl Channels {
             }
             None => None,
         };
+        if let Some((id, _, _)) = &first {
+            fallback::supplied(tx, id, conn, source, !has_id)?;
+        }
         if let Some((id, space_id, label)) = first {
             return Ok(Written {
                 inbound: Inbound {
@@ -695,6 +932,8 @@ impl Channels {
                     event: None,
                     next: Next::Record(label),
                     facts: None,
+                    history: None,
+                    from_owner: false,
                     response: None,
                 },
                 sender_name: sender_display,
@@ -702,13 +941,19 @@ impl Channels {
             });
         }
         let mentions = Value::Array(mentions);
-        let attachments = Value::Array(msg.attachments.clone());
+        // each resource names the adapter its key belongs to (a merged copy keeps the first's)
+        let attachments = Value::Array(crate::media::stamped(&msg.attachments, &facts.adapter));
+        let external_id = if has_id {
+            msg.external_id.clone()
+        } else {
+            fallback::new_id(tx, &space.id, &key, msg.created)?
+        };
         let Some(message_id) = messages::insert_inbound(
             tx,
             &messages::NewInbound {
                 ws,
                 space_id: &space.id,
-                external_id: &msg.external_id,
+                external_id: &external_id,
                 thread_key: msg.thread_key.as_deref(),
                 reply_to: msg.reply_to.as_deref(),
                 sender_account_id: sender_account.as_deref(),
@@ -717,12 +962,25 @@ impl Channels {
                 attachments: &attachments,
                 mentions: &mentions,
                 created: msg.created,
+                content_key: Some(&key),
+                fallback_from: (!has_id).then_some(conn),
+                history: history.map(History::code),
             },
         )?
         else {
             return Err(ApiError::conflict("这条消息已经记下了"));
         };
-        spaces::touch(tx, &space.id, msg.created.max(now), msg.sender.external)?;
+        fallback::supplied(tx, &message_id, conn, source, false)?;
+        // history keeps the space where its own time puts it
+        let at = if history.is_some() {
+            msg.created.min(now)
+        } else {
+            msg.created.max(now)
+        };
+        spaces::touch(tx, &space.id, at, msg.sender.external)?;
+        if let Some(h) = history {
+            count_history(tx, conn, h, now)?;
+        }
 
         let kind = chat_kind(msg, &space.kind, info.kind);
         let reply_exts: Vec<&str> = [msg.reply_to.as_deref(), msg.root_id.as_deref()]
@@ -742,7 +1000,25 @@ impl Channels {
         // 3. the loop guard
         let set = spaces::settings(tx, &space.id)?;
         let sender_is_ours = sender.as_ref().is_some_and(|s| s.is_ours);
-        let own = sender_account.as_deref() == Some(facts.account_id.as_str());
+        // you, however the adapter named you (a handle of yours it saw as someone new)
+        let from_owner = !msg.sender.is_bot
+            && crate::arbiter::from_owner(
+                tx,
+                ws,
+                &owner_users(tx, ws, facts)?,
+                sender_party.as_deref(),
+                &msg.sender,
+            )?;
+        // on your own account your words are yours, never someone's to answer
+        let own = sender_account.as_deref() == Some(facts.account_id.as_str())
+            || (from_owner && mode == Mode::Own);
+        if let Some(s) = &sender
+            && s.created
+            && !msg.sender.is_bot
+        {
+            // a new contact that looks like you: a merge proposal into “我”, never a merge
+            suggest_me(tx, ws, facts, s, sender_name, &msg.sender)?;
+        }
         let next = if own {
             // your own words still count in 不提醒 (trigger words are your explicit command)
             Next::Own
@@ -772,6 +1048,11 @@ impl Channels {
             }
             n => n,
         };
+        // history: recorded, nothing else (not even your trigger words: an old `/bot` is no command)
+        let next = match history {
+            Some(h) => Next::Record(h.label()),
+            None => next,
+        };
         Ok(Written {
             inbound: Inbound {
                 message_id,
@@ -787,12 +1068,107 @@ impl Channels {
                 event: None,
                 next,
                 facts: None,
+                history,
+                from_owner,
                 response: None,
             },
             sender_name: sender_display,
             space_ext: space.external_id,
         })
     }
+}
+
+/// Has the space received only history so far (at least one message, none live)?
+fn only_history(tx: &Tx, space: &str) -> ChannelResult<bool> {
+    Ok(tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ?1 AND direction = 'in' AND history IS NOT NULL)
+            AND NOT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ?1 AND direction = 'in' AND history IS NULL)",
+        [space],
+        |r| r.get(0),
+    )?)
+}
+
+/// Counts one message only recorded as history on the connection's settings (the account page
+/// shows them).
+fn count_history(tx: &Tx, conn: &str, h: History, now: i64) -> ChannelResult<()> {
+    let col = match h {
+        History::Before => "history_before",
+        History::Late => "history_late",
+    };
+    tx.execute(
+        &format!(
+            "UPDATE channel_settings SET {col} = {col} + 1, history_at = ? WHERE connection_id = ?"
+        ),
+        params![now, conn],
+    )?;
+    tracing::info!(
+        conn,
+        history = h.code(),
+        "channel inbound: recorded as history"
+    );
+    Ok(())
+}
+
+/// The users whose messages are “yours” on this connection: the user whose “我” owns its account,
+/// else whoever connected it, and the workspace's owner.
+fn owner_users(tx: &Tx, ws: &str, facts: &ConnFacts) -> ChannelResult<Vec<String>> {
+    let mut out = vec![
+        facts
+            .owner_user
+            .clone()
+            .unwrap_or_else(|| facts.created_by.clone()),
+    ];
+    let mut st = tx.prepare_cached(
+        "SELECT user_id FROM workspace_members WHERE workspace_id = ? AND role = 'owner' ORDER BY created",
+    )?;
+    for u in st.query_map([ws], |r| r.get::<_, String>(0))? {
+        let u = u?;
+        if !out.contains(&u) {
+            out.push(u);
+        }
+    }
+    Ok(out)
+}
+
+/// A sender seen for the first time who looks like you: [`steve_modules::accounts::identify::propose_if_me`]
+/// for the “我” of the connection's owner (a failure only logs).
+fn suggest_me(
+    tx: &Tx,
+    ws: &str,
+    facts: &ConnFacts,
+    s: &Identified,
+    name: Option<&str>,
+    sender: &Sender,
+) -> ChannelResult<()> {
+    let user = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
+    let Some(me) = steve_modules::contacts::repo::me_of(tx, ws, user)? else {
+        return Ok(());
+    };
+    let handles: Vec<&str> = std::iter::once(&sender.handle)
+        .chain(sender.aliases.iter())
+        .map(|h| h.handle.as_str())
+        .collect();
+    if tx.execute_batch("SAVEPOINT chan_suggest_me").is_err() {
+        return Ok(());
+    }
+    match steve_modules::accounts::identify::propose_if_me(
+        tx,
+        ws,
+        &me.id,
+        &s.party_id,
+        &s.account_id,
+        name,
+        &handles,
+    ) {
+        Ok(_) => {
+            let _ = tx.execute_batch("RELEASE chan_suggest_me");
+        }
+        Err(e) => {
+            tracing::warn!(ws, "channel inbound: no merge proposal into 我: {e}");
+            let _ = tx.execute_batch("ROLLBACK TO chan_suggest_me; RELEASE chan_suggest_me");
+        }
+    }
+    Ok(())
 }
 
 /// `systems.id` of the connection's account (the space's `system_id`).
@@ -1033,6 +1409,10 @@ impl Channels {
             return Ok(Response::skipped(l));
         }
         if inbound.next == Next::Own {
+            return Ok(Response::skipped(LABEL_OWN));
+        }
+        // your own words are never answered as you, whichever identity received them
+        if inbound.from_owner && mode == Mode::Own {
             return Ok(Response::skipped(LABEL_OWN));
         }
         // nobody speaks here: recorded only

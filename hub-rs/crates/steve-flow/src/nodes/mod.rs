@@ -147,6 +147,11 @@ impl RunCx<'_> {
         expr::render(tpl, &self.scope(input))
     }
 
+    /// [`Self::render`], each expanded value passed through `wrap`.
+    pub fn render_with(&self, tpl: &str, input: &Value, wrap: impl Fn(String) -> String) -> String {
+        expr::render_with(tpl, &self.scope(input), wrap)
+    }
+
     pub fn render_value(&self, v: &Value, input: &Value) -> Value {
         expr::render_value(v, &self.scope(input))
     }
@@ -196,6 +201,14 @@ pub trait NodeKind: Send + Sync {
     fn grant(&self, cfg: &Value) -> Option<Grant> {
         let _ = cfg;
         None
+    }
+
+    /// Everything answering 此流程当前版本以后都执行 on the engine's approval writes, so that the next
+    /// run of this step needs no card at all (an `http` step also needs its secrets' grants);
+    /// `None` when that can't be granted, and the option is not offered.
+    fn gate_grants(&self, cx: &RunCx<'_>, cfg: &Value) -> Option<Vec<Grant>> {
+        let _ = cx;
+        self.grant(cfg).map(|g| vec![g])
     }
 
     /// Text appended to the question of the approval the engine asks for before this effectful

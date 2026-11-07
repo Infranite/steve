@@ -28,7 +28,7 @@ use crate::cron::{CronExpr, parse_tz, validate};
 use crate::policy::{MissedPolicy, OverlapPolicy};
 use crate::runs::{self, RunView};
 use crate::scheduler;
-use crate::schedules::{self, DEFAULT_BUDGET_USD, Fields, MAX_BUDGET_USD, Mode, Origin, Spec};
+use crate::schedules::{self, Fields, MAX_BUDGET_USD, Mode, Origin, Spec};
 use crate::when::{self, MODEL_TIMEOUT_SECS, Parsed, WhenError};
 use steve_modules::Tier;
 
@@ -195,18 +195,19 @@ async fn create(
     };
     let tz = zone(&tz_name)?;
     let (when, expr) = resolve_time(&cx, b.when.as_deref(), b.cron.as_deref(), tz).await?;
+    let mode = b.mode.unwrap_or(Mode::ItemAuto);
     let spec = Spec {
         when,
         cron: expr.as_str().into(),
         tz: tz.name().into(),
         what: b.what.clone().unwrap_or_default(),
         bot: b.bot.clone().unwrap_or_default(),
-        mode: b.mode.unwrap_or(Mode::ItemAuto),
+        mode,
         project_id: b.project_id.clone().flatten(),
         tags: b.tags.clone().unwrap_or_default(),
         missed: b.missed.unwrap_or_default(),
         overlap: b.overlap.unwrap_or_default(),
-        budget_usd: b.budget_usd.unwrap_or(DEFAULT_BUDGET_USD),
+        budget_usd: b.budget_usd.unwrap_or(schedules::default_budget_for(mode)),
     };
     let name = b.name.clone().unwrap_or_default();
     let now = cx.now();

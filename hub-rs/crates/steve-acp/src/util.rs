@@ -52,17 +52,6 @@ pub fn coalesce<'a>(vals: impl IntoIterator<Item = Option<&'a Value>>) -> Option
     vals.into_iter().flatten().find(|v| !v.is_null())
 }
 
-/// `JSON.stringify(v, null, 1)`.
-pub fn json_indent1(v: &Value) -> String {
-    let mut out = Vec::new();
-    let fmt = serde_json::ser::PrettyFormatter::with_indent(b" ");
-    let mut ser = serde_json::Serializer::with_formatter(&mut out, fmt);
-    if serde::Serialize::serialize(v, &mut ser).is_err() {
-        return "{}".into();
-    }
-    String::from_utf8(out).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,14 +72,5 @@ mod tests {
         assert_eq!(js_str(Some(&json!("x"))), "x");
         assert_eq!(js_str(Some(&json!(null))), "null");
         assert_eq!(js_str(Some(&json!(3))), "3");
-    }
-
-    #[test]
-    fn indent_one_matches_js() {
-        assert_eq!(json_indent1(&json!({})), "{}");
-        assert_eq!(
-            json_indent1(&json!({"a": 1, "b": [1, "x"]})),
-            "{\n \"a\": 1,\n \"b\": [\n  1,\n  \"x\"\n ]\n}"
-        );
     }
 }

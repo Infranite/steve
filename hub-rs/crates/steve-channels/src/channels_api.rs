@@ -5,7 +5,7 @@
 //! | --- | --- |
 //! | `GET /channels` | `{providers: [{system, name, features, adapter_installed}], accounts: ChannelAccount[]}` |
 //! | `GET /channels/:connection_id` | `ChannelAccount` with `spaces: Space[]` (short form) instead of the count |
-//! | `POST /channels` | `{adapter:"feishu_app", fields:{…}, persona_id?, config?}` → `ChannelAccount`; `{adapter:"feishu_user", app_connection?, caps?}` → `{url}` (OAuth) |
+//! | `POST /channels` | a registered channel side's adapter: credential form `{adapter, fields:{…}, persona_id?, config?, app_connection?}` → `ChannelAccount`; OAuth `{adapter, app_connection?, caps?, config?}` → `{url}` |
 //! | `PATCH /channels/:connection_id` | `{duty?: ≤4000, rules?, trigger?: {on?, words?, where?, mark?}, persona_id?}` → `ChannelAccount` |
 //! | `GET /spaces/:id/members?offset=&limit=` | `{total, offset, limit, members: Member[]}` (limit ≤200, default 50) |
 //! | `POST /channels/cleanup/preview`, `POST /channels/cleanup`, `GET /channels/cleanup/leftovers` | see [`crate::cleanup`] |
@@ -13,10 +13,9 @@
 //! `ChannelAccount` (see [`crate::channel_accounts::AccountOut`]) carries the permission check of
 //! `verify`: `permissions`, `missing_permissions`, `self_built`, `permissions_checked_at`.
 //!
-//! Mount: `api.merge(steve_channels::channels_api::routes(channels.clone(), Some(feishu_user.clone())))`.
+//! Mount: `api.merge(steve_channels::channels_api::routes(channels.clone()))`.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use axum::extract::{Path, Query};
 use axum::http::HeaderMap;
@@ -29,32 +28,26 @@ use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 use steve_store::base::Viewer;
 use zeroize::Zeroizing;
 
-use crate::adapters::feishu::FeishuUser;
-use crate::adapters::feishu::auth::{APP_ADAPTER, USER_ADAPTER};
-use crate::adapters::feishu::user_oauth::SELF_CLAIM;
+use steve_modules::accounts::connections::{AuthKind, PAIR_KEY};
+
 use crate::channel_accounts::{self as accounts, ChannelPatch};
+use crate::spaces::Mode;
 use crate::{Channels, members, spaces};
 
 #[derive(Clone)]
 struct Api {
     ch: Channels,
-    user: Option<Arc<FeishuUser>>,
 }
 
 type Cx = Extension<Api>;
 
-/// The channel account and member routes. `user`: the `feishu_user` provider (the one registered
-/// with `Connections`), so “授权你本人” through `POST /channels` also merges the contact the bot
-/// already made for you into “我”; without it the OAuth flow runs without that merge.
-pub fn routes(ch: Channels, user: Option<Arc<FeishuUser>>) -> Router<Modules> {
+/// The channel account and member routes.
+pub fn routes(ch: Channels) -> Router<Modules> {
     Router::new()
         .route("/channels", get(list).post(create))
         .route("/channels/{id}", get(detail).patch(patch))
         .route("/spaces/{id}/members", get(members_page))
-        .layer(Extension(Api {
-            ch: ch.clone(),
-            user,
-        }))
+        .layer(Extension(Api { ch: ch.clone() }))
         .merge(crate::cleanup::routes(ch))
 }
 
@@ -127,56 +120,81 @@ struct CreateBody {
     config: Option<Value>,
     #[serde(default)]
     persona_id: Option<String>,
-    /// `feishu_user`: the bot connection whose app you authorize (default: the only one).
+    /// The connection this one pairs with ([`PAIR_KEY`]; default: the only candidate).
     #[serde(default)]
     app_connection: Option<String>,
     #[serde(default)]
     caps: Option<Vec<String>>,
 }
 
+/// `POST /channels`: a connection of a registered channel side, made the way its provider is
+/// authorized: a credential form (`fields`) makes the connection at once, OAuth answers the URL to
+/// send you to. A pair (`app_connection`) is checked like on every connect path.
 async fn create(
     Extension(a): Cx,
     who: Caller,
     headers: HeaderMap,
     Body(b): Body<CreateBody>,
 ) -> VaultResult<Json<Value>> {
-    match b.adapter.as_str() {
-        APP_ADAPTER => create_bot(&a, &who, b).await,
-        USER_ADAPTER => start_user(&a, &who, &headers, b).await,
+    let p =
+        a.ch.connections()
+            .provider(&b.adapter)
+            .filter(|_| accounts::is_channel_adapter(&a.ch, &b.adapter))
+            .ok_or_else(|| ApiError::invalid("adapter"))?;
+    let mode = match a.ch.decl(&b.adapter) {
+        Some(d) => d.mode,
+        None if p.integration().identity == "self" => Mode::Own,
+        None => Mode::Bot,
+    };
+    let mut config = b.config.clone().unwrap_or(Value::Null);
+    if let Some(pair) = b.app_connection.as_deref().filter(|x| !x.trim().is_empty()) {
+        if !config.is_object() {
+            config = json!({});
+        }
+        config[PAIR_KEY] = json!(pair);
+    }
+    match p.auth() {
+        AuthKind::Credential => create_form(&a, &who, b, mode, config).await,
+        AuthKind::OAuth => start_oauth(&a, &who, &headers, b, config).await,
         _ => Err(ApiError::invalid("adapter").into()),
     }
 }
 
-async fn create_bot(a: &Api, who: &Caller, b: CreateBody) -> VaultResult<Json<Value>> {
-    if b.app_connection.is_some() || b.caps.is_some() {
-        return Err(ApiError::invalid(if b.caps.is_some() {
-            "caps"
-        } else {
-            "app_connection"
-        })
-        .into());
+async fn create_form(
+    a: &Api,
+    who: &Caller,
+    b: CreateBody,
+    mode: Mode,
+    config: Value,
+) -> VaultResult<Json<Value>> {
+    if b.caps.is_some() {
+        return Err(ApiError::invalid("caps").into());
+    }
+    let persona = b.persona_id.filter(|p| !p.trim().is_empty());
+    if persona.is_some() && mode == Mode::Own {
+        return Err(ApiError::invalid("persona_id").into());
     }
     let v = viewer(&a.ch, who)?;
-    let persona = b.persona_id.filter(|p| !p.trim().is_empty());
-    // checked before anything is created at Feishu's side or in the vault
+    // checked before anything is created at the provider's side or in the vault
     if let Some(p) = &persona {
         a.ch.store().reader(|c| crate::personas::own(c, &v.ws, p))?;
     }
     let conn =
         a.ch.connections()
-            .create(who, APP_ADAPTER, &b.fields, b.config.unwrap_or(Value::Null))
+            .create(who, &b.adapter, &b.fields, config)
             .await?;
     let now = a.ch.now();
     a.ch.store()
-        .transaction(|tx| accounts::created_bot(tx, &v, &conn.id, persona.as_deref(), now))?;
+        .transaction(|tx| accounts::created(tx, &v, &conn.id, mode, persona.as_deref(), now))?;
     Ok(Json(account_json(&a.ch, &v, &conn.id, false)?))
 }
 
-async fn start_user(
+async fn start_oauth(
     a: &Api,
     who: &Caller,
     headers: &HeaderMap,
     b: CreateBody,
+    config: Value,
 ) -> VaultResult<Json<Value>> {
     if !b.fields.is_empty() || b.persona_id.is_some() {
         return Err(ApiError::invalid(if b.persona_id.is_some() {
@@ -187,41 +205,9 @@ async fn start_user(
         .into());
     }
     let conns = a.ch.connections();
-    let app = match b.app_connection.filter(|x| !x.trim().is_empty()) {
-        Some(id) => {
-            let c = conns
-                .get(who, &id)
-                .map_err(|_| ApiError::not_found("连接"))?;
-            if c.adapter != APP_ADAPTER {
-                return Err(ApiError::invalid("app_connection").into());
-            }
-            c.id
-        }
-        None => {
-            let bots: Vec<String> = conns
-                .list(who)?
-                .into_iter()
-                .filter(|c| c.adapter == APP_ADAPTER && c.status != "revoked")
-                .map(|c| c.id)
-                .collect();
-            match bots.as_slice() {
-                [one] => one.clone(),
-                [] => {
-                    return Err(
-                        ApiError::rule(steve_i18n::t!("channels.error.app_bot_first")).into(),
-                    );
-                }
-                _ => return Err(ApiError::invalid("app_connection").into()),
-            }
-        }
-    };
-    let mut config = json!({"app_connection": app});
-    if let Some(u) = &a.user {
-        config[SELF_CLAIM] = json!(u.claims().issue(who, a.ch.now())?);
-    }
     let origin = conns.origin(headers);
     let url = conns
-        .oauth_start(who, &origin, USER_ADAPTER, b.caps, config, None)
+        .oauth_start(who, &origin, &b.adapter, b.caps, config, None)
         .await?;
     Ok(Json(json!({ "url": url })))
 }

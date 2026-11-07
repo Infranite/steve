@@ -105,6 +105,15 @@ pub fn live(c: &Connection) -> Result<Vec<ConnRow>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Every connection that is not waiting for a new authorization or gone (`ok`, `error`, `paused`).
+pub fn authorized(c: &Connection) -> Result<Vec<ConnRow>> {
+    let mut st = c.prepare_cached(
+        "SELECT * FROM connections WHERE status IN ('ok', 'error', 'paused') ORDER BY created, id",
+    )?;
+    let rows = st.query_map([], ConnRow::from_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn insert(c: &Connection, r: &ConnRow) -> Result<()> {
     c.prepare_cached(
         "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, granted_scopes, caps, credential_item, status, health, config, last_sync, created_by, revision, created, updated)
@@ -146,6 +155,14 @@ pub fn update(c: &Connection, r: &ConnRow, now: i64) -> Result<()> {
         now,
         r.id
     ])?;
+    Ok(())
+}
+
+/// The connection was turned on again (connected again, resumed, a capability added) at `now`:
+/// what it receives from before then is history (`connections.enabled_at`, migration 49).
+pub fn set_enabled_at(c: &Connection, id: &str, now: i64) -> Result<()> {
+    c.prepare_cached("UPDATE connections SET enabled_at = ? WHERE id = ?")?
+        .execute(params![now, id])?;
     Ok(())
 }
 

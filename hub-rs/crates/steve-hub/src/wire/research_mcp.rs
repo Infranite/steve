@@ -318,6 +318,109 @@ fn text_result(id: &Value, out: Result<String, String>) -> Response {
     }
 }
 
+/// Runs research tool `name` for thread run `run` (`owner`: the workspace owner, whose view the
+/// owner's own conversation reads with): the text the harness reads, or its error.
+async fn run_tool(
+    x: &Extra,
+    run: ThreadRun,
+    name: &str,
+    args: &Value,
+    owner: String,
+) -> Result<String, String> {
+    let ws = run.workspace_id.clone();
+    match name {
+        steve_knowledge::tools::SEARCH | steve_knowledge::tools::READ => {
+            // a user's view only when only the owner reads the answer; with anyone else
+            // listening, what the whole workspace may see (no one's private knowledge)
+            let (store, origin) = (x.store.clone(), run.message_id.clone());
+            let own = tokio::task::spawn_blocking(move || own_reader(&store, &origin))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            let user = match own {
+                Ok(true) => run.user_id.clone().unwrap_or(owner),
+                Ok(false) => String::new(),
+                Err(e) => return Err(e),
+            };
+            let cx = steve_modules::contacts::mcp::McpCx {
+                ws,
+                user,
+                bot_id: "steve".into(),
+                item_id: None,
+                session_id: None,
+            };
+            steve_knowledge::tools::call(&x.modules, &x.kb, &cx, name, args).await
+        }
+        ITEMS_SEARCH => {
+            let (store, q) = (
+                x.store.clone(),
+                args["query"].as_str().unwrap_or("").to_string(),
+            );
+            let origin = run.message_id.clone();
+            tokio::task::spawn_blocking(move || {
+                items_search(&store, &ws, &ItemScope::of(&store, &origin)?, &q)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        }
+        ITEM_READ => {
+            let (store, i) = (
+                x.store.clone(),
+                args["id"].as_str().unwrap_or("").to_string(),
+            );
+            let origin = run.message_id.clone();
+            tokio::task::spawn_blocking(move || {
+                item_read(&store, &ws, &ItemScope::of(&store, &origin)?, &i)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        }
+        SESSIONS_LIST => {
+            let (store, all) = (x.store.clone(), args["all"].as_bool().unwrap_or(false));
+            let origin = run.message_id.clone();
+            tokio::task::spawn_blocking(move || {
+                // your agents' sessions are yours: not for a run answering someone else
+                if !own_reader(&store, &origin)? {
+                    return Err(REFUSED.to_string());
+                }
+                sessions_list(&store, &ws, all)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        }
+        _ => Err(REFUSED.into()),
+    }
+}
+
+/// The research tools as a Node's catalog (a research job's grant): the very set `/mcp` lists for
+/// an in-process run's token.
+pub fn descriptors() -> Vec<steve_node_api::ToolDescriptor> {
+    tools()
+        .into_iter()
+        .map(|t| steve_node_api::ToolDescriptor {
+            name: t["name"].as_str().unwrap_or_default().to_string(),
+            description: t["description"].as_str().unwrap_or_default().to_string(),
+            input_schema: t["inputSchema"].clone(),
+            read_only: true,
+        })
+        .collect()
+}
+
+/// A research job's tool call through its Node, answered as `/mcp` answers an in-process run.
+pub async fn call_tool(
+    x: &Extra,
+    run: ThreadRun,
+    name: &str,
+    args: Value,
+) -> Result<String, String> {
+    let (store, ws) = (x.store.clone(), run.workspace_id.clone());
+    let owner = tokio::task::spawn_blocking(move || super::mcp_extra::owner(&store, &ws))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    run_tool(x, run, name, &args, owner).await
+}
+
 /// One JSON-RPC message from a research run.
 pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Response {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
@@ -346,62 +449,7 @@ pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Res
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let ws = run.workspace_id.clone();
-            let out = match name.as_str() {
-                steve_knowledge::tools::SEARCH | steve_knowledge::tools::READ => {
-                    // a user's view only when only the owner reads the answer; with anyone else
-                    // listening, what the whole workspace may see (no one's private knowledge)
-                    let (store, origin) = (x.store.clone(), run.message_id.clone());
-                    let own = tokio::task::spawn_blocking(move || own_reader(&store, &origin))
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()));
-                    let user = match own {
-                        Ok(true) => run.user_id.clone().unwrap_or(owner),
-                        Ok(false) => String::new(),
-                        Err(e) => return text_result(&id, Err(e)),
-                    };
-                    let cx = steve_modules::contacts::mcp::McpCx {
-                        ws,
-                        user,
-                        bot_id: "steve".into(),
-                        item_id: None,
-                        session_id: None,
-                    };
-                    steve_knowledge::tools::call(&x.modules, &x.kb, &cx, &name, &args).await
-                }
-                ITEMS_SEARCH => {
-                    let (store, q) = (x.store.clone(), args["query"].as_str().unwrap_or("").to_string());
-                    let origin = run.message_id.clone();
-                    tokio::task::spawn_blocking(move || {
-                        items_search(&store, &ws, &ItemScope::of(&store, &origin)?, &q)
-                    })
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
-                }
-                ITEM_READ => {
-                    let (store, i) = (x.store.clone(), args["id"].as_str().unwrap_or("").to_string());
-                    let origin = run.message_id.clone();
-                    tokio::task::spawn_blocking(move || {
-                        item_read(&store, &ws, &ItemScope::of(&store, &origin)?, &i)
-                    })
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
-                }
-                SESSIONS_LIST => {
-                    let (store, all) = (x.store.clone(), args["all"].as_bool().unwrap_or(false));
-                    let origin = run.message_id.clone();
-                    tokio::task::spawn_blocking(move || {
-                        // your agents' sessions are yours: not for a run answering someone else
-                        if !own_reader(&store, &origin)? {
-                            return Err(REFUSED.to_string());
-                        }
-                        sessions_list(&store, &ws, all)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()))
-                }
-                _ => Err(REFUSED.into()),
-            };
+            let out = run_tool(x, run, &name, &args, owner).await;
             text_result(&id, out)
         }
         _ => (

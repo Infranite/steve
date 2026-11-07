@@ -42,7 +42,7 @@
 //! registry.decision(steve_channels::respond::SUBJECT_MESSAGE, link.handler());
 //! let late = steve_channels::flow_actions::LateChannels::new();
 //! let outbox = Arc::new(steve_channels::Outbox::new(link.clone())
-//!     .as_user(steve_channels::adapters::feishu::auth::USER_ADAPTER, feishu_user.clone()));
+//!     .act_as_user(feishu_user.clone()));                              // ActAsUser: send, react, recall as you
 //! registry.item_hooks(Box::new(steve_channels::outbound::ReturnToSource::new(outbox.clone(), late.clone())));
 //! // … modules = Modules::new(store, gateway, registry) …
 //! disclosure.bind(modules.store.clone(), modules.gateway.clone());
@@ -57,6 +57,7 @@
 //! let sink: Arc<dyn steve_flow::EventSink> = Arc::new(flow.clone());     // S1
 //! let channels = steve_channels::Channels::builder(modules.clone(), conns.clone(), sink)
 //!     .adapter(feishu.clone())
+//!     .media(Arc::new(steve_channels::adapters::feishu::FeishuMedia::new("feishu_app")))
 //!     .flow(flow.clone())               // C3: to-flow validates against the registered node kinds
 //!     .guard(vault_guard.clone())       // C3: `guard::scan` before the `intent` judgement
 //!     .responder(replies.clone())       // C4 + C6
@@ -80,13 +81,18 @@
 //! steve_channels::space_decisions::register(&mut registry);          // the “新群” card (subject_type space)
 //! // Connections::builder(..).usage(Arc::new(steve_channels::usage::ChannelUsage)): spaces count,
 //! // disconnect: spaces kept as left, their settings, channel_settings and chan_cursors deleted
-//! api_router.merge(steve_channels::channels_api::routes(channels.clone(), Some(feishu_user.clone())));
+//! api_router.merge(steve_channels::channels_api::routes(channels.clone()));
 //! // long connections + self pollers, started at boot and whenever a connection changes
 //! // (connected, re-authorized, resumed → start, plus sync_bot_chats for a bot; paused, reauth,
 //! // disconnected → stop). No hook in Connections is needed: it publishes `connection` events.
-//! let rt = steve_channels::adapters::feishu::FeishuRuntime::new(channels.clone(), Some(feishu_user.clone()));
-//! rt.start_all().await;
-//! rt.spawn_watch(bus.tap(&["connection"]));
+//! use steve_channels::adapters::feishu::{BotHook, SelfPollHook};
+//! let events = bus.tap(&["connection"]);                              // tapped before listing
+//! let rt = steve_channels::lifecycle::ConnectionRuntime::builder(channels.clone())
+//!     .hook("feishu_app", Some(bot_decl), Arc::new(BotHook::new(channels.clone())))
+//!     .hook("feishu_user", Some(user_decl), Arc::new(SelfPollHook::new(channels.clone(), feishu_user.clone())))
+//!     .build();
+//! rt.start(events);
+//! // at shutdown: rt.shutdown().await
 //! ```
 
 steve_i18n::init!();
@@ -109,8 +115,12 @@ pub mod drafts;
 pub mod ext;
 #[cfg(feature = "fake")]
 pub mod fake;
+pub mod fallback;
 pub mod flow_actions;
+pub mod history;
+pub mod im_mcp;
 pub mod inbound;
+pub mod lifecycle;
 pub mod media;
 pub mod media_agent;
 pub mod members;
@@ -120,6 +130,7 @@ pub mod names;
 pub mod outbound;
 pub mod personas;
 mod personas_api;
+pub mod queries;
 pub mod reactions;
 pub mod replies;
 pub mod respond;
@@ -132,9 +143,10 @@ pub mod spaces;
 pub mod usage;
 
 pub use channel::{
-    ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, Mention, OutContent,
-    Profile, ProfileAdapter, ProfileAnswer, ProfileQuery, PushOutcome, ReactionKind, SendTarget,
-    Sender, SpaceEvent, SpaceInfo, SpaceKind, TenantInfo,
+    ActAsUser, ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo,
+    Mention, MessageRef, OutContent, Profile, ProfileAdapter, ProfileAnswer, ProfileQuery,
+    PushOutcome, ReactionKind, SendKey, SendTarget, Sender, Sent, SpaceEvent, SpaceInfo, SpaceKind,
+    TenantInfo,
 };
 pub use deliver::{Auth, Delivered, DraftOnly, OutRequest, OutTarget, Outbound};
 pub use disclosure::Disclosure;
@@ -143,7 +155,7 @@ pub use membership::SpaceChange;
 pub use outbound::{OutLink, Outbox};
 pub use replies::Replies;
 pub use respond::{By, Plan, Responder, Response};
-pub use service::{Channels, ChannelsBuilder, MessageSink, OtherEvents, WeakChannels};
+pub use service::{Channels, ChannelsBuilder, MessageSink, OtherEvents, WeakChannels, YoloSwitch};
 
 /// Errors of this crate: the module API error (`400/404/409` with Chinese text, `500` otherwise).
 pub type ChannelError = steve_modules::ApiError;

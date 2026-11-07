@@ -1,5 +1,5 @@
 //! YOLO Y2 end to end on the wired Hub: a temp STEVE_HOME (fresh, so YOLO is not forced off), the
-//! scripted ACP agent of steve-acp (`fake-acp.js`) as the claude-code adapter, YOLO switched on over
+//! scripted ACP agent of steve-acp (`fake-acp.js`) as the claude-code adapter on the local Node, YOLO switched on over
 //! the API. A tool call inside the item's own directory is answered `allow_once` by YOLO and logged
 //! with `decided_by: "yolo"`; a delete outside it stays for the user. No real agent or host.
 
@@ -87,6 +87,8 @@ async fn start() -> Env {
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         // a fresh temp home, not a production copy: YOLO may be on
         ("STEVE_NO_RESUME", "0".into()),
+        // the local Node runs the sessions (the Hub runs none itself)
+        ("STEVE_NODE_MODE", "local".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", fake.display().to_string()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
@@ -233,10 +235,15 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     assert_eq!(r[0][0], "resolved");
     let result: Value = serde_json::from_str(r[0][1].as_str().unwrap()).unwrap();
     assert_eq!(result["decided_by"], "yolo", "{result}");
-    assert_eq!(result["optionId"], "once");
+    // the Node's answer is Steve's own (it picks the adapter's allow_once option itself)
+    assert_eq!(result["optionId"], "allow_once");
     assert_eq!(
         (r[0][2].clone(), r[0][3].clone(), r[0][4].clone()),
-        (json!("decided"), json!("tool.worktree"), json!("once"))
+        (
+            json!("decided"),
+            json!("tool.worktree"),
+            json!("allow_once")
+        )
     );
     let who = rows(
         &e.db,
@@ -273,10 +280,12 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         (r[0][0].clone(), r[0][1].clone()),
         (json!("open"), json!("declined"))
     );
-    assert!(r[0][2].as_str().unwrap().starts_with("硬限制"), "{r:?}");
+    // the Node reports a delete as an action YOLO does not judge: it stays with you, said why
+    assert!(r[0][2].as_str().unwrap().contains("留给你"), "{r:?}");
     assert!(!texts(&e, &outside).await.contains("perm:selected"));
 
-    // Y4: switching off while the adapter is live switches its mode in place (session/set_mode)
+    // #38: switching off leaves a live session of an item with its own directory in acceptEdits
+    // (its mode is the same with YOLO on or off): no session/set_mode
     let set_modes = || {
         std::fs::read_to_string(&e.log)
             .unwrap_or_default()
@@ -287,10 +296,8 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     let before = set_modes();
     let (s, v) = e.call("PUT", "/api/yolo", Some(json!({"on": false}))).await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        until(10, || async { set_modes() > before }).await,
-        "a live session got session/set_mode"
-    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(set_modes(), before, "no mode switch for YOLO off");
 
     // 完全放开: only with an explicit confirm
     let (s, v) = e
@@ -375,5 +382,47 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     assert!(
         !last_free_mode.contains("bypassPermissions"),
         "{last_free_mode}"
+    );
+
+    // U2 baseline: a harness that runs a command without asking, with nothing of any harness in
+    // what it reports (plain ACP `tool_call` updates, no `_meta`, no adapter extra), meets the
+    // floor all the same. With YOLO on, the turn stops once the call starts.
+    let unasked = item(&e, "推送 @run git push origin main @say after").await;
+    assert!(
+        until(20, || async {
+            texts(&e, &unasked).await.contains("Steve 停下了这一轮")
+        })
+        .await,
+        "the turn was stopped: {}",
+        texts(&e, &unasked).await
+    );
+    assert!(
+        until(10, || async { e.session(&unasked).await["busy"] == false }).await,
+        "the turn is over"
+    );
+    let t = texts(&e, &unasked).await;
+    assert!(!t.contains("ran:git push"), "{t}");
+    assert!(t.contains("\"stopReason\":\"cancelled\""), "{t}");
+    let cancels = std::fs::read_to_string(&e.log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("\"session/cancel\""))
+        .count();
+    assert!(cancels > 0, "the adapter got session/cancel");
+    let n = rows(
+        &e.db,
+        "SELECT text FROM messages WHERE author = 'steve' AND text LIKE '%停下了这一轮%git push%'",
+        &[],
+    );
+    assert!(!n.is_empty(), "the user was told");
+    // a harmless command it runs without asking goes on
+    let fine = item(&e, "测试 @run cargo test @say after").await;
+    assert!(
+        until(20, || async {
+            texts(&e, &fine).await.contains("ran:cargo test")
+        })
+        .await,
+        "{}",
+        texts(&e, &fine).await
     );
 }

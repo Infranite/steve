@@ -661,7 +661,8 @@ impl SelfPoller {
                         Ok(i) => {
                             r.new_messages += 1;
                             k.last_new = Some(now);
-                            if i.type_key == "im.dm" && i.next != Next::Own {
+                            // someone talking to you now, not an old message caught up on
+                            if i.type_key == "im.dm" && i.next != Next::Own && i.history.is_none() {
                                 r.new_dms += 1;
                             }
                         }
@@ -826,9 +827,14 @@ fn bot_spaces(c: &rusqlite::Connection, ws: &str) -> ChannelResult<HashSet<Strin
 
 /// The bot's recorded permission check says it receives every group message (`im:message.group_msg`).
 fn all_group_messages(config: &str) -> bool {
-    serde_json::from_str::<Value>(config)
-        .ok()
-        .and_then(|v| v.get("permissions").and_then(Value::as_array).cloned())
+    serde_json::from_str::<Value>(config).is_ok_and(|v| receives_all_groups(&v))
+}
+
+/// [`all_group_messages`] of a parsed bot `config`.
+pub(crate) fn receives_all_groups(config: &Value) -> bool {
+    config
+        .get("permissions")
+        .and_then(Value::as_array)
         .is_some_and(|ps| {
             ps.iter().any(|p| {
                 p.get("scope").and_then(Value::as_str) == Some("im:message.group_msg")
@@ -915,6 +921,7 @@ fn map_message(m: &Value, chat: &ChatRow, ids: &Ids) -> InboundMessage {
     let thread_key = opt(m, "thread_id")
         .or_else(|| opt(m, "root_id"))
         .unwrap_or_else(|| id.clone());
+    let created = ms(m, "create_time").unwrap_or_else(steve_store::now);
     InboundMessage {
         space_ext_id: chat.chat_id.clone(),
         space_kind: Some(chat.kind),
@@ -928,14 +935,100 @@ fn map_message(m: &Value, chat: &ChatRow, ids: &Ids) -> InboundMessage {
             handle,
             display_name,
             is_bot: is_app,
+            aliases: Vec::new(),
             external: !chat.tenant_key.is_empty() && !stk.is_empty() && stk != chat.tenant_key,
         },
         text,
         attachments,
         mentions,
-        created: ms(m, "create_time").unwrap_or_else(steve_store::now),
+        created,
         via: Some(VIA.into()),
         raw: json!(m),
+        source_id: None,
+        edited: super::inbound::edited_at(ms(m, "update_time"), created),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reading a chat's history when an agent asks (`steve_im_read`).
+
+/// Pages of one history read at most.
+const HISTORY_PAGES: usize = 10;
+
+#[async_trait::async_trait]
+impl crate::history::HistoryRead for FeishuUser {
+    fn adapter_id(&self) -> &str {
+        USER_ADAPTER
+    }
+
+    /// `GET im/v1/messages` of the chat with your user token, `start_time`/`end_time` in seconds,
+    /// oldest first, page by page. Recalled messages are left out. Nothing is stored.
+    async fn read(
+        &self,
+        cx: &ConnCx,
+        space_ext_id: &str,
+        from_ms: i64,
+        to_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<InboundMessage>, steve_flow::AdapterError> {
+        let client = self.user_client(cx);
+        let chat = ChatRow {
+            chat_id: space_ext_id.to_string(),
+            name: String::new(),
+            kind: SpaceKind::Group,
+            tenant_key: String::new(),
+        };
+        let ids = Ids::default();
+        let (start, end) = (
+            (from_ms.max(0) / 1000).to_string(),
+            ((to_ms.max(0) + 999) / 1000).to_string(),
+        );
+        let mut out: Vec<InboundMessage> = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..HISTORY_PAGES {
+            let mut q = vec![
+                ("container_id_type", KIND_CHAT),
+                ("container_id", space_ext_id),
+                ("card_msg_content_type", "user_card_content"),
+                ("start_time", start.as_str()),
+                ("end_time", end.as_str()),
+                ("sort_type", "ByCreateTimeAsc"),
+                ("page_size", MESSAGES_PAGE),
+            ];
+            if let Some(t) = &token {
+                q.push(("page_token", t.as_str()));
+            }
+            let v = client
+                .get(cx, "/open-apis/im/v1/messages", &q)
+                .await
+                .map_err(|e| {
+                    steve_flow::AdapterError::from(
+                        steve_modules::accounts::connections::ProviderError::from(e),
+                    )
+                })?;
+            let d = client::data(&v);
+            for m in d
+                .get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if m.get("deleted").and_then(Value::as_bool).unwrap_or(false) {
+                    continue;
+                }
+                let t = ms(m, "create_time").unwrap_or(0);
+                if t >= from_ms && t <= to_ms {
+                    out.push(map_message(m, &chat, &ids));
+                }
+            }
+            token = opt(d, "page_token");
+            let more = d.get("has_more").and_then(Value::as_bool).unwrap_or(false);
+            if out.len() >= limit || !more || token.is_none() {
+                break;
+            }
+        }
+        out.truncate(limit);
+        Ok(out)
     }
 }
 

@@ -603,8 +603,8 @@ async fn a_secret_use_runs_after_its_decision() {
     assert_eq!((status.as_deref(), code), (Some("ok"), Some(0)));
 }
 
-/// The paste guard: a pasted password or token is stored replaced, answered with the fixed reply, and never
-/// routed (no model call); `/api/config/draft` refuses it the same way.
+/// The paste guard: a pasted password or token is replaced before the message is stored, the rest of
+/// the message goes on, and Steve's note says where to keep the secret; `/api/config/draft` refuses it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_paste_guard_keeps_secrets_out_of_the_thread() {
     let e = start().await;
@@ -621,7 +621,9 @@ async fn the_paste_guard_keeps_secrets_out_of_the_thread() {
     let thread = st["thread"].to_string();
     assert!(!thread.contains(token), "{thread}");
     assert!(thread.contains(steve_vault::guard::REPLACEMENT), "{thread}");
-    assert!(thread.contains(steve_vault::guard::REPLY), "{thread}");
+    assert!(thread.contains(steve_vault::guard::ROUTED), "{thread}");
+    // the message itself went on: stored as the person's, with the rest of the text
+    assert!(thread.contains("帮我记一下"), "{thread}");
     let (s, v) = e
         .call(
             "POST",
@@ -676,7 +678,13 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         "long connection up"
     );
     let before = fake.sent().len();
-    fake.ws_push_envelope(fixture("message_p2p_text").expect("fixture"));
+    // written just now: a message from before the bot was connected would only be history
+    let mut envelope = fixture("message_p2p_text").expect("fixture");
+    let now = steve_store::now().to_string();
+    envelope["header"]["create_time"] = json!(now);
+    envelope["event"]["message"]["create_time"] = json!(now);
+    envelope["event"]["message"]["update_time"] = json!(now);
+    fake.ws_push_envelope(envelope);
     if !until(20, || async { fake.sent().len() > before }).await {
         let c = rusqlite::Connection::open(&e.db).expect("db");
         let dump = |sql: &str| -> Vec<String> {

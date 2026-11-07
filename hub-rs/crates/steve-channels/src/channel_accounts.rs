@@ -12,9 +12,10 @@ use steve_modules::{ApiError, Check};
 use steve_store::base::{self, Viewer};
 use steve_store::{ChangeEvent, Tx};
 
-use crate::adapters::feishu::auth::{APP_ADAPTER, USER_ADAPTER};
+use crate::adapters::feishu;
 use crate::bindings::{self, PersonaRef};
 use crate::channel::ChannelFeatures;
+use crate::ext::{ChannelDecl, Receive};
 use crate::spaces::{self, Mode};
 use crate::{ChannelResult, Channels};
 
@@ -33,8 +34,27 @@ pub struct ProviderOut {
     pub system: String,
     pub name: String,
     pub features: ChannelFeatures,
-    /// The Hub has an adapter for it (the Feishu bot app registered with [`Channels`]).
+    /// The Hub has a channel adapter for it (the Feishu bot app registered with [`Channels`]).
     pub adapter_installed: bool,
+    /// The declared channel sides of the provider ([`decl_summary`]).
+    pub sides: Vec<Value>,
+}
+
+/// What a channel side declares, as the API shows it (`GET /channels` `providers[].sides`,
+/// `GET /connections/integrations` `adapters[].channel`): `{adapter, handle_system, mode,
+/// features, receive, receive_cap, message_ids, created_precision_ms, start}`.
+pub fn decl_summary(d: &ChannelDecl) -> Value {
+    json!({
+        "adapter": d.adapter,
+        "handle_system": d.handle_system,
+        "mode": d.mode,
+        "features": d.features,
+        "receive": d.receive,
+        "receive_cap": d.receive_cap,
+        "message_ids": d.message_ids,
+        "created_precision_ms": d.created_precision_ms,
+        "start": d.start,
+    })
 }
 
 /// The `ChannelAccount` shape, plus the connection's permission check (`verify`):
@@ -44,7 +64,7 @@ pub struct ProviderOut {
 pub struct AccountOut {
     pub connection_id: String,
     pub account_id: String,
-    /// `connections.adapter` (`feishu_app` | `feishu_user`).
+    /// `connections.adapter` (`feishu_app`, `feishu_user`, an extension's).
     pub adapter: String,
     pub system: String,
     pub provider: String,
@@ -60,6 +80,8 @@ pub struct AccountOut {
     /// Only your own accounts; `null` for bots.
     pub trigger: Option<Value>,
     pub features: ChannelFeatures,
+    /// How its messages come in, as its side declares (`null` without a declaration).
+    pub receive: Option<Receive>,
     /// Active spaces of this account.
     pub spaces: i64,
     pub permissions: Option<Value>,
@@ -67,62 +89,83 @@ pub struct AccountOut {
     pub self_built: Option<bool>,
     pub permissions_checked_at: Option<i64>,
     pub revision: i64,
+    /// The undo window after you approve a message, in seconds, as set (`null`: the default).
+    pub send_delay_s: Option<i64>,
+    /// The window it has now: the setting, or the identity's default (bot 3 s, you 10 s).
+    pub send_delay_default_s: i64,
+    /// How late a message may arrive and still be acted on, in minutes.
+    pub late_minutes: i64,
+    /// Messages only recorded as history: `{before, late, at}` (written before the connection was
+    /// on, arrived too late, the last one's time).
+    pub history: Value,
 }
 
-/// `system` and `provider` of an adapter: both Feishu connections are “飞书 / Lark”.
+/// `system` and `provider` of an adapter: its provider's integration (the adapters of one provider
+/// are listed together; both Feishu connections are “飞书 / Lark”).
 fn provider_of(ch: &Channels, adapter: &str) -> (String, String) {
-    if adapter == APP_ADAPTER || adapter == USER_ADAPTER || adapter.starts_with("feishu") {
-        return ("feishu".into(), "飞书 / Lark".into());
-    }
     match ch.connections().provider(adapter) {
-        Some(p) => (p.system().to_string(), p.name().to_string()),
+        Some(p) => {
+            let i = p.integration();
+            (i.provider, i.provider_name)
+        }
         None => (adapter.to_string(), adapter.to_string()),
     }
 }
 
-/// What a channel account can do: its channel adapter's features; your own Feishu account sends as
-/// you, replies in threads and recalls its own messages, but has no cards, buttons or edits.
+/// What a channel account can do: what its side declares ([`crate::ext::ChannelDecl::features`]),
+/// else its channel adapter's features (your own Feishu account sends as you, replies in threads,
+/// reacts and recalls its own messages, but has no cards, buttons or edits).
 fn features_of(ch: &Channels, adapter: &str) -> ChannelFeatures {
-    if let Some(a) = ch.adapter(adapter) {
-        return a.features();
+    if let Some(d) = ch.decl(adapter) {
+        return d.features;
     }
-    if adapter == USER_ADAPTER {
-        return ChannelFeatures {
-            multi_bot: false,
-            as_user: true,
-            cards: false,
-            buttons: false,
-            thread_reply: true,
-            edit: false,
-            recall: true,
-            members: false,
-            // `/bot` on your own account: the reactions are yours (as_user)
-            reactions: true,
-        };
-    }
-    ChannelFeatures::default()
+    ch.adapter(adapter)
+        .map(|a| a.features())
+        .unwrap_or_default()
 }
 
-/// The channel providers: Feishu always (installed or not), plus any other registered adapter.
+/// The channel providers: Feishu always (installed or not), then every provider with a declared
+/// channel side or a channel adapter. A provider is installed when one of its sides has a channel
+/// adapter and a connection provider; its features are that side's.
 pub fn providers(ch: &Channels) -> Vec<ProviderOut> {
     let mut out = vec![ProviderOut {
-        system: "feishu".into(),
-        name: "飞书 / Lark".into(),
-        features: features_of(ch, APP_ADAPTER),
-        adapter_installed: ch.adapter(APP_ADAPTER).is_some()
-            && ch.connections().provider(APP_ADAPTER).is_some(),
+        system: feishu::auth::PROVIDER.into(),
+        name: feishu::auth::PROVIDER_NAME.into(),
+        features: ChannelFeatures::default(),
+        adapter_installed: false,
+        sides: Vec::new(),
     }];
+    let mut ids: Vec<String> = ch.decls().map(|d| d.adapter.clone()).collect();
     for a in ch.adapters() {
-        let (system, name) = provider_of(ch, a.id());
-        if out.iter().any(|p| p.system == system) {
-            continue;
+        if !ids.iter().any(|x| x == a.id()) {
+            ids.push(a.id().to_string());
         }
-        out.push(ProviderOut {
-            system,
-            name,
-            features: a.features(),
-            adapter_installed: true,
-        });
+    }
+    for id in ids {
+        let (system, name) = provider_of(ch, &id);
+        let k = match out.iter().position(|p| p.system == system) {
+            Some(k) => k,
+            None => {
+                out.push(ProviderOut {
+                    system,
+                    name,
+                    features: ChannelFeatures::default(),
+                    adapter_installed: false,
+                    sides: Vec::new(),
+                });
+                out.len() - 1
+            }
+        };
+        if let Some(d) = ch.decl(&id) {
+            out[k].sides.push(decl_summary(d));
+        }
+        if !out[k].adapter_installed
+            && ch.adapter(&id).is_some()
+            && ch.connections().provider(&id).is_some()
+        {
+            out[k].features = features_of(ch, &id);
+            out[k].adapter_installed = true;
+        }
     }
     out
 }
@@ -190,6 +233,7 @@ pub fn out(
     let ws = &viewer.ws;
     let (_, mode) = bindings::connection_account(c, ws, conn)?;
     let settings = spaces::channel_settings(c, ws, conn)?;
+    let send_delay_s = settings.as_ref().and_then(|s| s.send_delay_s);
     let (duty, rules, trigger, revision) = match settings {
         Some(s) => (s.duty, s.rules, s.trigger, s.revision),
         None => (
@@ -213,6 +257,18 @@ pub fn out(
         params![ws, conn],
         |r| r.get(0),
     )?;
+    let (late_ms, before, late, at): (Option<i64>, i64, i64, Option<i64>) = c
+        .query_row(
+            "SELECT late_ms, history_before, history_late, history_at FROM channel_settings WHERE connection_id = ?",
+            [conn],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?
+        .unwrap_or((None, 0, 0, None));
+    let late_minutes = late_ms
+        .filter(|l| crate::inbound::LATE_MS.contains(l))
+        .unwrap_or(crate::inbound::DEFAULT_LATE_MS)
+        / 60_000;
     let (system, provider) = provider_of(ch, &f.adapter);
     let platform_name = match mode {
         Mode::Bot => format!("{}（应用机器人）", f.name),
@@ -250,6 +306,7 @@ pub fn out(
         rules,
         trigger,
         features: features_of(ch, &f.adapter),
+        receive: ch.decl(&f.adapter).map(|d| d.receive),
         spaces,
         permissions,
         missing_permissions,
@@ -259,6 +316,10 @@ pub fn out(
             .get("permissions_checked_at")
             .and_then(Value::as_i64),
         revision,
+        send_delay_s,
+        send_delay_default_s: crate::outbound::default_send_delay_ms(mode) / 1000,
+        late_minutes,
+        history: json!({"before": before, "late": late, "at": at}),
     })
 }
 
@@ -324,6 +385,16 @@ pub struct ChannelPatch {
     pub rules: Option<Value>,
     pub trigger: Option<TriggerPatch>,
     pub persona_id: Option<String>,
+    /// The undo window in seconds (0–60); `null` puts back the identity's default.
+    #[serde(default, deserialize_with = "present")]
+    pub send_delay_s: Option<Option<i64>>,
+    /// How late a message may arrive and still be acted on, in minutes (1 … 10080; default 30).
+    pub late_minutes: Option<i64>,
+}
+
+/// A key that is there, `null` included (`Some(None)`); absent stays `None`.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<i64>>, D::Error> {
+    Option::<i64>::deserialize(d).map(Some)
 }
 
 /// `trigger` of [`ChannelPatch`]: only the keys given change.
@@ -358,6 +429,15 @@ impl ChannelPatch {
         if let Some(p) = &self.persona_id {
             c.len("persona_id", p, 1, 100);
         }
+        if let Some(Some(d)) = self.send_delay_s {
+            c.that("send_delay_s", (0..=60).contains(&d));
+        }
+        if let Some(m) = self.late_minutes {
+            c.that(
+                "late_minutes",
+                crate::inbound::LATE_MS.contains(&m.saturating_mul(60_000)),
+            );
+        }
         if let Some(t) = &self.trigger {
             if let Some(w) = &t.words {
                 c.that("trigger.words", w.len() <= 10);
@@ -378,6 +458,8 @@ impl ChannelPatch {
             ("rules", self.rules.is_some()),
             ("trigger", self.trigger.is_some()),
             ("persona_id", self.persona_id.is_some()),
+            ("send_delay_s", self.send_delay_s.is_some()),
+            ("late_minutes", self.late_minutes.is_some()),
         ]
         .into_iter()
         .filter_map(|(k, on)| on.then_some(k))
@@ -495,8 +577,9 @@ pub fn patch(
     }
     let persona_after = bindings::account_persona(tx, ws, conn)?.map(|x| x.id);
     let revision = before.revision + 1;
+    let send_delay_s = p.send_delay_s.unwrap_or(before.send_delay_s);
     tx.execute(
-        "UPDATE channel_settings SET duty = ?, rules = ?, trigger = ?, revision = ?, updated = ? WHERE connection_id = ?",
+        "UPDATE channel_settings SET duty = ?, rules = ?, trigger = ?, send_delay_s = ?, revision = ?, updated = ? WHERE connection_id = ?",
         params![
             duty,
             rules.to_string(),
@@ -505,12 +588,23 @@ pub fn patch(
                 // bots keep the column's default; it is never read for them
                 Mode::Bot => before.trigger_raw(),
             },
+            send_delay_s,
             revision,
             now,
             conn
         ],
     )?;
-    let snap = |persona: &Option<String>, duty: &str, rules: &Value, trigger: &Value| json!({"persona_id": persona, "duty": duty, "rules": rules, "trigger": trigger});
+    if let Some(m) = p.late_minutes {
+        tx.execute(
+            "UPDATE channel_settings SET late_ms = ? WHERE connection_id = ?",
+            params![m * 60_000, conn],
+        )?;
+    }
+    let snap = |persona: &Option<String>,
+                duty: &str,
+                rules: &Value,
+                trigger: &Value,
+                delay: Option<i64>| json!({"persona_id": persona, "duty": duty, "rules": rules, "trigger": trigger, "send_delay_s": delay});
     base::revision(
         tx,
         ws,
@@ -522,8 +616,9 @@ pub fn patch(
             &before.duty,
             &before.rules,
             &trigger_before,
+            before.send_delay_s,
         ),
-        &snap(&persona_after, &duty, &rules, &trigger),
+        &snap(&persona_after, &duty, &rules, &trigger, send_delay_s),
         &viewer.user,
     )?;
     base::audit(
@@ -552,18 +647,19 @@ impl spaces::ChannelSettings {
     }
 }
 
-/// After `POST /channels` made a bot connection: its `channel_settings(mode=bot)`, the default
-/// persona bound (when given; else the account speaks as the default persona “Steve”), audit
-/// `channel.create`, SSE `channel`.
-pub fn created_bot(
+/// After `POST /channels` made a connection from a credential form: its
+/// `channel_settings(mode)`, the default persona bound (a bot's, when given; else the account
+/// speaks as the default persona “Steve”), audit `channel.create`, SSE `channel`.
+pub fn created(
     tx: &Tx,
     viewer: &Viewer,
     conn: &str,
+    mode: Mode,
     persona: Option<&str>,
     now: i64,
 ) -> ChannelResult<()> {
     let ws = &viewer.ws;
-    spaces::ensure_channel_settings(tx, ws, conn, Mode::Bot, now)?;
+    spaces::ensure_channel_settings(tx, ws, conn, mode, now)?;
     if let Some(p) = persona {
         bindings::set_account_default(tx, viewer, conn, p, now)?;
     }
@@ -573,7 +669,7 @@ pub fn created_bot(
         &viewer.user,
         "channel.create",
         conn,
-        &json!({"mode": "bot", "persona_id": persona}),
+        &json!({"mode": mode.code(), "persona_id": persona}),
     )?;
     tx.publish(ChangeEvent::Channel {
         id: conn.into(),

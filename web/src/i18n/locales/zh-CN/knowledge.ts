@@ -35,6 +35,7 @@ export default {
     noneSub: "知识库里没有和“{{q}}”相关的内容。",
     results: "搜索结果",
     count_other: "{{count}} 条结果 · {{ms}} ms",
+    keywordsOnly: "语义检索暂时不可用，这次只按关键词查找，结果可能不全。",
   },
   mems: {
     added: "已记下",
@@ -146,7 +147,10 @@ export default {
     evidence: "原话：{{evidence}}",
     supersedes: "会替换：{{text}}",
     no: "不保存",
-    footer: "确认后才会用到；30 天没处理的会自动过期。只是这件事的要求、复述目标或单次反馈的，选“不保存”即可，事项记录里仍然保留。",
+    expired_other: "已过期 · {{count}} 条",
+    restore: "恢复",
+    restored: "已恢复，可以重新确认",
+    footer: "确认后才会用到；30 天没处理的会自动过期，过期的可以在下面恢复。你在对话里明确说“记住”“以后”的，会直接保存。只是这件事的要求、复述目标或单次反馈的，选“不保存”即可，事项记录里仍然保留。",
   },
   /* a document or note page */
   doc: {

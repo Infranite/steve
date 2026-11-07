@@ -1201,3 +1201,206 @@ async fn a_push_still_running_is_asked_again_not_compared() {
     assert_eq!(effect(&h, &dec).0, "done");
     assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1);
 }
+
+/// `after_accept=open_pr` on the linked repo.
+async fn open_pr_on_accept(h: &H) {
+    let me = caller(WS, ME);
+    let (s, v) = call(
+        &h.api,
+        Some(&me),
+        "PATCH",
+        &format!("/github/repos/{}", h.repo),
+        Some(&json!({"settings": {"after_accept": "open_pr"}})),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_pr_on_a_private_repo_opens_a_draft_without_a_card() {
+    let h = setup().await;
+    open_pr_on_accept(&h).await;
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await, "GitHub takes the wrap-up over");
+    assert!(open_decision(&h, accept::PR_OPEN).is_none(), "no card");
+    h.gh.settle().await;
+    let sha = git(h.work.path(), &["rev-parse", BRANCH]);
+    assert_eq!(
+        pushed(&h).as_deref(),
+        Some(sha.as_str()),
+        "the checked commit"
+    );
+    let n = steve_pr(&h);
+    let pr = h.fake.pull(REPO, n).expect("PR on the fake GitHub");
+    assert!(pr.draft, "always a draft");
+    assert_eq!(pr.head_ref, BRANCH, "from the item's own branch");
+    assert!(pr.body.ends_with("ST-1 · 由 Steve 开出"), "{}", pr.body);
+    // the decision is in the history, answered by the grant
+    assert_eq!(
+        q(
+            &h,
+            "SELECT status || ' ' || json_extract(result, '$.choice') || ' ' || json_extract(result, '$.auto') FROM decisions WHERE subject_type = 'gh_pr_open'",
+            &[]
+        ),
+        json!("resolved yes after_accept")
+    );
+    assert_eq!(
+        q(
+            &h,
+            "SELECT count(*) FROM timeline WHERE item_id = ? AND text LIKE '验收后自动开草稿 PR%'",
+            &[&id]
+        ),
+        json!(1)
+    );
+    assert_eq!(
+        h.core.calls().last(),
+        Some(&CoreCall::Finish {
+            item: id.clone(),
+            now: format!("已验收，PR #{n} 已开")
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_pr_on_a_public_repo_still_asks() {
+    let h = setup().await;
+    open_pr_on_accept(&h).await;
+    h.env
+        .store()
+        .with_conn(|c| Ok(c.execute("UPDATE gh_repos SET private = 0", [])?))
+        .expect("public");
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    assert!(question.contains("公开仓库"), "{question}");
+    h.gh.settle().await;
+    assert_eq!(pushed(&h), None);
+    assert_eq!(pull_posts(&h), 0);
+}
+
+/// A repo made public on GitHub after it was linked still says private in Steve's row: GitHub is
+/// asked at acceptance, the card comes back, and the row learns the new visibility.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_pr_on_a_repo_made_public_since_linking_asks() {
+    let h = setup().await;
+    open_pr_on_accept(&h).await;
+    h.fake.set_private(REPO, false);
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    assert!(question.contains("公开仓库"), "{question}");
+    h.gh.settle().await;
+    assert_eq!(pushed(&h), None);
+    assert_eq!(pull_posts(&h), 0);
+    assert_eq!(q(&h, "SELECT private FROM gh_repos", &[]), json!(0));
+}
+
+/// GitHub not answering the visibility question is not "private": the card comes back.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_pr_when_visibility_cannot_be_read_asks() {
+    let h = setup().await;
+    open_pr_on_accept(&h).await;
+    h.fake.fail_next_on(
+        &format!("/repos/{REPO}"),
+        steve_github::fake::Fault::Status {
+            status: 404,
+            message: "Not Found".into(),
+        },
+    );
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    assert!(question.contains("公开仓库"), "{question}");
+    h.gh.settle().await;
+    assert_eq!(pushed(&h), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_pr_with_a_secret_in_the_commits_still_asks() {
+    let h = setup().await;
+    open_pr_on_accept(&h).await;
+    let w = h.work.path();
+    git(w, &["checkout", "-q", BRANCH]);
+    commit(
+        w,
+        "deploy.env",
+        &format!(
+            "TOKEN={}\n",
+            ["ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"].concat()
+        ),
+    );
+    git(w, &["checkout", "-q", "main"]);
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    assert!(
+        question.contains("泄露检查") && question.contains("token"),
+        "{question}"
+    );
+    h.gh.settle().await;
+    assert_eq!(pushed(&h), None, "nothing published");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_a_later_commit_removed_still_asks() {
+    let h = setup().await;
+    open_pr_on_accept(&h).await;
+    let w = h.work.path();
+    git(w, &["checkout", "-q", BRANCH]);
+    commit(
+        w,
+        "deploy.env",
+        &format!(
+            "TOKEN={}\n",
+            ["ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"].concat()
+        ),
+    );
+    // the net diff no longer has it; the pushed history does
+    commit(w, "deploy.env", "TOKEN=\n");
+    git(w, &["checkout", "-q", "main"]);
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    assert!(
+        question.contains("泄露检查") && question.contains("token"),
+        "{question}"
+    );
+    h.gh.settle().await;
+    assert_eq!(pushed(&h), None, "nothing published");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_binary_change_in_the_commits_asks() {
+    let h = setup().await;
+    open_pr_on_accept(&h).await;
+    let w = h.work.path();
+    git(w, &["checkout", "-q", BRANCH]);
+    std::fs::write(w.join("blob.bin"), [0u8, 1, 2, 0, 255]).expect("write");
+    git(w, &["add", "."]);
+    git(w, &["commit", "-q", "-m", "blob"]);
+    git(w, &["checkout", "-q", "main"]);
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    assert!(question.contains("二进制"), "{question}");
+    h.gh.settle().await;
+    assert_eq!(pushed(&h), None, "nothing published");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pr_card_through_a_pat_says_it_posts_as_your_account() {
+    let h = setup().await;
+    h.env
+        .store()
+        .with_conn(|c| Ok(c.execute("UPDATE connections SET adapter = 'github_pat'", [])?))
+        .expect("pat");
+    let id = item(&h, 1, Some(BRANCH));
+    assert!(accepted(&h, &id).await);
+    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
+    assert!(
+        question.starts_with(&format!(
+            "在 {REPO} 开 PR：保留 return_to 参数（以你的 GitHub 账号"
+        )),
+        "{question}"
+    );
+}

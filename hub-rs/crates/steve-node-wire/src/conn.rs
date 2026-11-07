@@ -1,5 +1,5 @@
-//! The multiplexer of one link: requests both ways, a control lane drained before the bulk lane,
-//! heartbeats, per-method deadlines and the generation stamp.
+//! The multiplexer of one link: requests both ways on three lanes (control before events before
+//! bulk, none starved), heartbeats, per-method deadlines and the generation stamp.
 //!
 //! The failure rule (the only place it lives): a request that never reached the socket fails
 //! `offline`; one that did and then lost its link or its deadline fails `outcome_unknown` when it
@@ -57,6 +57,16 @@ impl Default for ConnOptions {
 /// faster than it is served cannot pile up tasks and payloads. Refusing instead of pausing the
 /// reader keeps answers to this side's own calls flowing (a handler may be waiting on one).
 pub const MAX_INBOUND: usize = 64;
+/// The bytes of the peer's requests handled at once on one link, past which a request is
+/// answered `exhausted` as past [`MAX_INBOUND`]: a peer of big requests cannot pin more.
+pub const MAX_INBOUND_BYTES: usize = 16 << 20;
+/// The bytes waiting to be written per lane (control, events, bulk). A request waits for room
+/// within its deadline; a control message or a reader's own answer that finds none is dropped,
+/// as when its lane is full.
+pub const LANE_BYTES: [usize; 3] = [4 << 20, 2 << 20, 2 << 20];
+/// After this many frames of a higher lane in a row, one frame of a lower lane that waits goes
+/// first: control before events before bulk, but neither of the lower ones starves.
+pub const FAIR: u32 = 4;
 
 const QUEUED: u8 = 0;
 const WRITING: u8 = 1;
@@ -66,6 +76,61 @@ struct Out {
     text: String,
     /// For requests: QUEUED until the writer takes it (WRITING), or the caller gave up (ABANDONED).
     state: Option<Arc<AtomicU8>>,
+    /// Its room in the lane's byte budget, given back once it is written (or dropped).
+    _room: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// One lane's queue: frames in order, within a count and a byte budget.
+struct LaneQ {
+    tx: mpsc::Sender<Out>,
+    room: Arc<Semaphore>,
+    /// The whole budget, in KiB: a frame takes at most all of it, so it always fits an empty lane.
+    cap: u32,
+}
+
+/// A frame's share of a lane's byte budget, in KiB.
+fn kib(n: usize) -> u32 {
+    n.div_ceil(1024).max(1) as u32
+}
+
+impl LaneQ {
+    fn new(frames: usize, bytes: usize) -> (LaneQ, mpsc::Receiver<Out>) {
+        let (tx, rx) = mpsc::channel(frames);
+        let cap = (bytes / 1024) as u32;
+        let room = Arc::new(Semaphore::new(cap as usize));
+        (LaneQ { tx, room, cap }, rx)
+    }
+
+    /// Queues now or not at all.
+    fn try_send(&self, text: String, state: Option<Arc<AtomicU8>>) -> bool {
+        let need = kib(text.len()).min(self.cap);
+        let Ok(room) = self.room.clone().try_acquire_many_owned(need) else {
+            return false;
+        };
+        self.tx
+            .try_send(Out {
+                text,
+                state,
+                _room: Some(room),
+            })
+            .is_ok()
+    }
+
+    /// Queues once there is room (count and bytes); fails only once the lane is gone.
+    async fn send(&self, text: String, state: Option<Arc<AtomicU8>>) -> bool {
+        let need = kib(text.len()).min(self.cap);
+        let Ok(room) = self.room.clone().acquire_many_owned(need).await else {
+            return false;
+        };
+        self.tx
+            .send(Out {
+                text,
+                state,
+                _room: Some(room),
+            })
+            .await
+            .is_ok()
+    }
 }
 
 struct Pending {
@@ -82,8 +147,9 @@ struct Shared {
     generation: u64,
     side: &'static str,
     peer: (u16, u16),
-    ctl: mpsc::Sender<Out>,
-    bulk: mpsc::Sender<Out>,
+    ctl: LaneQ,
+    events: LaneQ,
+    bulk: LaneQ,
     pending: Mutex<HashMap<String, Pending>>,
     next: AtomicU64,
     closing: AtomicBool,
@@ -109,13 +175,15 @@ impl Conn {
         handler: Arc<dyn Handler>,
         opts: ConnOptions,
     ) -> Arc<Conn> {
-        let (ctl, ctl_rx) = mpsc::channel(256);
-        let (bulk, bulk_rx) = mpsc::channel(16);
+        let (ctl, ctl_rx) = LaneQ::new(256, LANE_BYTES[0]);
+        let (events, events_rx) = LaneQ::new(16, LANE_BYTES[1]);
+        let (bulk, bulk_rx) = LaneQ::new(16, LANE_BYTES[2]);
         let s = Arc::new(Shared {
             generation,
             side: opts.side,
             peer: opts.peer.min(PROTOCOL),
             ctl,
+            events,
             bulk,
             pending: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
@@ -125,7 +193,7 @@ impl Conn {
             closed: watch::channel(None).0,
             written: AtomicU64::new(0),
         });
-        tokio::spawn(writer(s.clone(), sink, ctl_rx, bulk_rx));
+        tokio::spawn(writer(s.clone(), sink, [ctl_rx, events_rx, bulk_rx]));
         tokio::spawn(reader(s.clone(), stream, handler, opts.clone()));
         tokio::spawn(heartbeat(Arc::downgrade(&s), opts.heartbeat));
         Arc::new(Conn { s })
@@ -176,7 +244,7 @@ impl Conn {
     /// A control message (not a request: nobody answers it).
     pub fn notify(&self, m: &str, p: Value) {
         if let Ok(text) = Envelope::ctl(self.s.id(), m, self.s.generation, p).encode() {
-            let _ = self.s.ctl.try_send(Out { text, state: None });
+            let _ = self.s.ctl.try_send(text, None);
         }
     }
 
@@ -220,15 +288,8 @@ impl Conn {
             .lock()
             .unwrap()
             .insert(id.clone(), Pending { tx });
-        let lane_tx = match lane {
-            Lane::Control => &self.s.ctl,
-            Lane::Bulk => &self.s.bulk,
-        };
+        let lane_q = self.s.lane(lane);
         let until = Instant::now() + deadline;
-        let out = Out {
-            text,
-            state: Some(state.clone()),
-        };
         let lost = |why: &str| {
             // the writer may take it right now: whoever wins the swap decides
             let never_written = state
@@ -241,8 +302,8 @@ impl Conn {
                 _ => offline(why),
             }
         };
-        let queued = tokio::time::timeout_at(until, lane_tx.send(out)).await;
-        if !matches!(queued, Ok(Ok(()))) {
+        let queued = tokio::time::timeout_at(until, lane_q.send(text, Some(state.clone()))).await;
+        if !matches!(queued, Ok(true)) {
             self.s.pending.lock().unwrap().remove(&id);
             return Err(lost("could not queue"));
         }
@@ -268,17 +329,25 @@ impl Shared {
         format!("{}_{}", self.side, self.next.fetch_add(1, Ordering::SeqCst))
     }
 
+    fn lane(&self, lane: Lane) -> &LaneQ {
+        match lane {
+            Lane::Control => &self.ctl,
+            Lane::Events => &self.events,
+            Lane::Bulk => &self.bulk,
+        }
+    }
+
     /// Answers from the reader itself (stale, unknown kind): never waits, so a full lane drops
     /// the answer and its sender meets its deadline.
     fn respond_now(&self, re: String, outcome: Outcome, generation: u64) {
-        if let Some(out) = self.response(re, outcome, generation) {
-            let _ = self.ctl.try_send(out);
+        if let Some(text) = self.response(re, outcome, generation) {
+            let _ = self.ctl.try_send(text, None);
         }
     }
 
     /// `generation`: a refusal of a stale request carries the request's own, so that its sender
     /// hears `stale` instead of waiting out its deadline.
-    fn response(&self, re: String, outcome: Outcome, generation: u64) -> Option<Out> {
+    fn response(&self, re: String, outcome: Outcome, generation: u64) -> Option<String> {
         let p = serde_json::to_value(&outcome).unwrap_or(Value::Null);
         let env = Envelope {
             v: crate::WIRE,
@@ -300,7 +369,7 @@ impl Shared {
                 env.encode().ok()?
             }
         };
-        Some(Out { text, state: None })
+        Some(text)
     }
 }
 
@@ -319,19 +388,36 @@ fn shut(s: &Arc<Shared>, pre: Option<String>, code: u16, reason: &str) {
     s.closed.send_replace(Some((code, reason.into())));
 }
 
-async fn writer(
-    s: Arc<Shared>,
-    mut sink: FrameSink,
-    mut ctl: mpsc::Receiver<Out>,
-    mut bulk: mpsc::Receiver<Out>,
-) {
+/// Writes one frame at a time: control first, then events, then bulk, except that after
+/// [`FAIR`] frames of higher lanes in a row a lower lane that has one waiting goes once (a
+/// download never holds a permission card back, and a busy control lane never stops the rest).
+async fn writer(s: Arc<Shared>, mut sink: FrameSink, mut lanes: [mpsc::Receiver<Out>; 3]) {
+    // frames of higher lanes written since each lower lane last had its turn
+    let mut since = [0u32; 3];
     loop {
-        let out = tokio::select! {
-            biased;
-            _ = s.close_wake.notified() => break,
-            Some(o) = ctl.recv() => o,
-            Some(o) = bulk.recv() => o,
-            else => break,
+        let mut out = None;
+        // a lower lane that waited long enough (events before bulk)
+        for lane in [1, 2] {
+            if since[lane] >= FAIR
+                && let Ok(o) = lanes[lane].try_recv()
+            {
+                out = Some((lane, o));
+                break;
+            }
+        }
+        let (lane, out) = match out {
+            Some(x) => x,
+            None => {
+                let [ctl, events, bulk] = &mut lanes;
+                tokio::select! {
+                    biased;
+                    _ = s.close_wake.notified() => break,
+                    Some(o) = ctl.recv() => (0, o),
+                    Some(o) = events.recv() => (1, o),
+                    Some(o) = bulk.recv() => (2, o),
+                    else => break,
+                }
+            }
         };
         if s.closing.load(Ordering::SeqCst) {
             break;
@@ -343,11 +429,21 @@ async fn writer(
         {
             continue;
         }
-        if sink.send(Frame::Text(out.text)).await.is_err() {
+        since[lane] = 0;
+        for lower in since.iter_mut().skip(lane + 1) {
+            *lower = lower.saturating_add(1);
+        }
+        let Out { text, _room, .. } = out;
+        if sink.send(Frame::Text(text)).await.is_err() {
             shut(&s, None, crate::close::GOODBYE, "write failed");
             break;
         }
+        drop(_room);
         s.written.fetch_add(1, Ordering::SeqCst);
+    }
+    // whoever still waits for room hears the link is gone
+    for q in [&s.ctl, &s.events, &s.bulk] {
+        q.room.close();
     }
     let req = s.close_req.lock().unwrap().take();
     if let Some(r) = req {
@@ -367,6 +463,7 @@ async fn reader(
 ) {
     let mut closed = s.closed.subscribe();
     let inflight = Arc::new(Semaphore::new(MAX_INBOUND));
+    let inflight_bytes = Arc::new(Semaphore::new(MAX_INBOUND_BYTES / 1024));
     loop {
         let next = tokio::select! {
             n = tokio::time::timeout(opts.dead_after, stream.next()) => n,
@@ -426,7 +523,14 @@ async fn reader(
                     );
                     continue;
                 }
-                let Ok(permit) = inflight.clone().try_acquire_owned() else {
+                let permit = inflight.clone().try_acquire_owned().ok().and_then(|n| {
+                    inflight_bytes
+                        .clone()
+                        .try_acquire_many_owned(kib(frame.len()))
+                        .ok()
+                        .map(|b| (n, b))
+                });
+                let Some(permit) = permit else {
                     s.respond_now(
                         env.id,
                         Outcome::Err(ApiError::new(
@@ -437,6 +541,10 @@ async fn reader(
                     );
                     continue;
                 };
+                drop(frame);
+                // the answer goes on its request's lane: a file chunk never sits in the
+                // control lane in front of a permission answer
+                let lane = methods::spec(&env.m).map_or(Lane::Control, |m| m.lane);
                 let (h, s2) = (handler.clone(), s.clone());
                 // the work outlives the link: a port never ties what it started to its caller
                 tokio::spawn(async move {
@@ -446,8 +554,8 @@ async fn reader(
                     };
                     // the slot is held until the answer is queued: a slow reader of answers
                     // slows the peer's new requests too
-                    if let Some(out) = s2.response(env.id, outcome, s2.generation) {
-                        let _ = s2.ctl.send(out).await;
+                    if let Some(text) = s2.response(env.id, outcome, s2.generation) {
+                        s2.lane(lane).send(text, None).await;
                     }
                     drop(permit);
                 });
@@ -491,7 +599,7 @@ async fn heartbeat(s: std::sync::Weak<Shared>, every: Duration) {
             json!({"at": crate::now_ms()}),
         );
         if let Ok(text) = env.encode() {
-            let _ = s.ctl.try_send(Out { text, state: None });
+            let _ = s.ctl.try_send(text, None);
         }
     }
 }

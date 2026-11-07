@@ -101,6 +101,7 @@ fn spawn_hub(
         .env("STEVE_VAULT_KEYSTORE", "file")
         .env("STEVE_FORBID_REAL_HOSTS", "1")
         .env("STEVE_NO_RESUME", "1")
+        .env("STEVE_NODE_MODE", "off")
         .env("CLAUDE_CODE_EXECUTABLE", fake)
         .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
@@ -635,8 +636,9 @@ async fn a_module_decision_is_undone_through_the_route() {
     );
 }
 
-/// An item whose session (its adapter fails to start, which is fine here) gets the bearer token
-/// `test-token`; returns an MCP caller with that token.
+/// An item whose session gets the bearer token `test-token`; returns an MCP caller with that token.
+/// No Node runs here (`STEVE_NODE_MODE=off`), so the new session is refused and ended at once;
+/// it is made idle again, which is all its Steve tools need.
 async fn agent_session(
     hub: &Hub,
     c: &Client,
@@ -665,7 +667,7 @@ async fn agent_session(
     db.busy_timeout(Duration::from_secs(5)).expect("timeout");
     let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"test-token"));
     db.execute(
-        "UPDATE sessions SET token_hash = ? WHERE id = ?",
+        "UPDATE sessions SET token_hash = ?, status = 'idle' WHERE id = ?",
         [&hash, &sid],
     )
     .expect("token");
@@ -705,9 +707,17 @@ async fn contacts_tools_are_served_over_mcp() {
         "steve_deliver",
         "steve_contacts_find",
         "steve_contacts_remember",
+        "steve_im_read",
     ] {
         assert!(list.contains(t), "{t} missing: {list}");
     }
+    // the chat reading tool is routed: a conversation the session cannot see is an error it reads
+    let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "steve_im_read", "arguments": { "space": "spc_nope" } } })).await;
+    assert_eq!(s, 200, "{out}");
+    assert!(
+        out.contains("\"isError\":true") && out.contains("spc_nope"),
+        "{out}"
+    );
     let (s, found) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_contacts_find", "arguments": { "query": "赵六" } } })).await;
     assert_eq!(s, 200, "{found}");
     assert!(found.contains("赵六"), "{found}");
@@ -950,21 +960,22 @@ async fn connections_passkeys_and_github_are_mounted() {
     let (_, adapters) = c.call("GET", "/api/connections/adapters", None, None).await;
     // the GitHub App connects through its manifest flow, so only the token form is listed
     assert!(adapters.to_string().contains("github_pat"), "{adapters}");
-    // 接入: every registered adapter under its provider, the planned ones marked, no connection yet
+    // 接入: every registered adapter under its provider, no provider without one, no connection yet
     let (s, ig) = c
         .call("GET", "/api/connections/integrations", None, None)
         .await;
     assert_eq!(s, 200, "{ig}");
     let ps = ig["providers"].as_array().expect("providers");
     let ids: Vec<_> = ps.iter().filter_map(|p| p["id"].as_str()).collect();
-    assert_eq!(ids, ["feishu", "github", "mail", "slack", "gcal"], "{ig}");
+    assert_eq!(ids, ["feishu", "github", "mail"], "{ig}");
     let status = |id: &str| {
         ps.iter()
             .find(|p| p["id"] == id)
             .map(|p| p["status"].clone())
     };
     assert_eq!(status("feishu"), Some(json!("supported")));
-    assert_eq!(status("slack"), Some(json!("planned")));
+    assert_eq!(status("mail"), Some(json!("supported")));
+    assert!(ps.iter().all(|p| p.get("planned").is_none()), "{ig}");
     let feishu = &ps[0];
     let adapters: Vec<_> = feishu["adapters"]
         .as_array()
@@ -973,6 +984,20 @@ async fn connections_passkeys_and_github_are_mounted() {
         .filter_map(|a| a["id"].as_str())
         .collect();
     assert_eq!(adapters, ["feishu_app", "feishu_user"]);
+    // each with what its channel side declares and whom it pairs with
+    let user = &feishu["adapters"][1];
+    assert_eq!(user["identity"], "self");
+    assert_eq!(user["pairing"]["with"], json!(["feishu_app"]));
+    assert_eq!(user["channel"]["mode"], "self");
+    assert_eq!(user["channel"]["receive"], "poll");
+    assert_eq!(
+        user["channel"]["start"],
+        json!([{"kind": "oauth"}, {"kind": "device"}])
+    );
+    let app = &feishu["adapters"][0];
+    assert_eq!(app["channel"]["receive"], "long_connection");
+    assert_eq!(app["channel"]["start"], json!([{"kind": "form"}]));
+    assert_eq!(app["pairing"], Value::Null);
     assert!(
         feishu["areas"]
             .to_string()

@@ -1,28 +1,14 @@
--- A prerequisite wait belongs to an item cycle, not to the workspace preference.
-CREATE TABLE item_dependency_waits (
- item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
- cycle INTEGER NOT NULL,
- session_id TEXT NOT NULL REFERENCES sessions(id),
- resume TEXT NOT NULL CHECK(resume IN ('automatic','notify','workspace')),
- reason TEXT NOT NULL,
- state TEXT NOT NULL CHECK(state IN ('waiting','started','notified')),
- created INTEGER NOT NULL,
- updated INTEGER NOT NULL,
- PRIMARY KEY(item_id,cycle)
-);
-
--- Completion through any writer must respect real prerequisite completion.
-CREATE TRIGGER item_dependencies_completion_gate
-BEFORE UPDATE OF phase,outcome,status,cycle ON items
-WHEN NEW.phase='closed' AND NEW.outcome='completed'
- AND (EXISTS (
-  SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id
-  WHERE d.item_id=NEW.id AND
-   (p.id IS NULL OR p.status<>'done' OR p.phase<>'closed' OR p.outcome IS NOT 'completed')
- ) OR EXISTS (
-  SELECT 1 FROM item_dependency_waits w
-  WHERE w.item_id=NEW.id AND w.cycle=NEW.cycle AND w.state='waiting'
- ))
-BEGIN
- SELECT RAISE(ABORT,'prerequisite items are not completed');
-END;
+-- 42: what acting on a sent message again needs (recall, reactions). `sent_via` is the connection
+-- a message went out through (recalled through the same one even after the space's voice changed;
+-- NULL for rows sent before: their space's voice). `ext_created` is the provider's create time of
+-- a sent message when it gave one. `chan_message_seen` keeps the remote's delivery id of a message
+-- per connection (a send's own id when the remote has no message ids). An older build ignores all
+-- three.
+ALTER TABLE chan_messages ADD COLUMN sent_via TEXT;
+ALTER TABLE chan_messages ADD COLUMN ext_created INTEGER;
+CREATE TABLE IF NOT EXISTS chan_message_seen (
+  connection_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  message_id TEXT NOT NULL REFERENCES chan_messages(id) ON DELETE CASCADE,
+  PRIMARY KEY (connection_id, source_id));
+CREATE INDEX IF NOT EXISTS chan_message_seen_message ON chan_message_seen (message_id);

@@ -172,6 +172,7 @@ impl Local {
         let store = open_store(&root);
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
                 node: NodeId::new("local").unwrap(),
                 home: root.join("node"),
                 acp: steve_acp::AcpConfig {
@@ -536,6 +537,28 @@ async fn a_timeout_reads_as_in_process() {
     assert_eq!(b, a);
     let pid: i32 = h.read("pid").trim().parse().unwrap();
     until("the harness gone", || !alive(pid)).await;
+}
+
+/// #9: a timeout ends the fallback chain in process and on the Node alike: the next model is not tried
+/// (it would wait as long), and the failure says it timed out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timeout_ends_the_chain_on_both_paths() {
+    let h = Local::new().await;
+    let t = Duration::from_millis(1500);
+    for gw in [h.legacy(&["m1", "m2"]), h.node(&["m1", "m2"])] {
+        let a = gw
+            .attempt("@hang", Tier::Smart, t, &ThinkTools::None, None)
+            .await;
+        assert!(a.result.is_err());
+        assert_eq!(a.attempts, 1, "{:?}", a.failures);
+        assert_eq!(a.failures.len(), 1);
+        assert!(
+            a.failures[0].starts_with("m1: [timeout] Command timed out"),
+            "{:?}",
+            a.failures
+        );
+        h.reset();
+    }
 }
 
 /// The same calls over the fake Node, driven by hand: the draft as it is written, the answer from

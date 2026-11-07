@@ -109,8 +109,10 @@ pub(crate) enum Msg {
     },
     /// Try again what the journal did not take.
     Retry,
+    /// The attempt's harness went past what its ingress takes ([`Ingress`]).
     Overflow {
         token: u64,
+        why: Ingress,
     },
     // from the adapter
     Update {
@@ -129,20 +131,128 @@ pub(crate) enum Msg {
     },
 }
 
-/// The token of the attempt whose prompt is out, stamped on each adapter message as it is read.
+/// Why an attempt's harness is stopped at its ingress. Being behind is not one of them: the reader
+/// waits for room on the data queue ([`enqueue`]), so the harness blocks on its stdout instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ingress {
+    /// One message over the 1 MiB frame cap.
+    Frame,
+    /// More bytes than the attempt's output budget.
+    Output,
+    /// The Node took none of its messages for [`crate::Storage::ingress_stall`].
+    Stalled,
+}
+
+impl Ingress {
+    fn stop(self, stall: Duration) -> (Outcome, ApiError) {
+        match self {
+            Ingress::Frame => (
+                Outcome::Cancelled,
+                ApiError::new(
+                    ErrorCode::Exhausted,
+                    "the harness sent a message larger than 1 MiB",
+                ),
+            ),
+            Ingress::Output => (
+                Outcome::Cancelled,
+                ApiError::new(ErrorCode::Exhausted, "the output limit was reached"),
+            ),
+            Ingress::Stalled => (
+                Outcome::Interrupted,
+                ApiError::new(
+                    ErrorCode::Busy,
+                    format!(
+                        "the node took none of the harness's output for {} s (its journal or disk is stuck)",
+                        stall.as_secs()
+                    ),
+                ),
+            ),
+        }
+    }
+}
+
+/// The token of the attempt whose prompt is out, stamped on each adapter message as it is read;
+/// the attempt's output budget; whether its ingress was stopped.
 #[derive(Default)]
 pub(crate) struct Gate(AtomicU64, AtomicU64, AtomicBool);
 impl Gate {
-    fn overflow(&self, tx: &mpsc::UnboundedSender<Msg>, token: u64) {
-        if token != 0 && !self.2.swap(true, Ordering::SeqCst) {
-            let _ = tx.send(Msg::Overflow { token });
+    /// Stops the attempt `token` at its ingress (once; never one that is over already).
+    fn overflow(&self, tx: &mpsc::UnboundedSender<Msg>, token: u64, why: Ingress) {
+        if token != 0
+            && self.0.load(Ordering::SeqCst) == token
+            && !self.2.swap(true, Ordering::SeqCst)
+        {
+            let _ = tx.send(Msg::Overflow { token, why });
         }
     }
+}
+
+/// Puts a message the reader read on the actor's data queue, in the order read. With room it goes
+/// at once. Without, the reader waits (backpressure: it reads no more, so the harness blocks on
+/// its stdout and what is buffered stays within the queue's slots of at most a frame each) for as
+/// long as the actor keeps taking messages: a slow journal, sink or Hub never ends an attempt.
+/// Only no slot freed in `stall` (the actor takes nothing: a stuck disk) stops the attempt the
+/// message is for. The wait ends too when the actor is gone or the harness is retired.
+fn enqueue(
+    data_tx: &mpsc::Sender<Msg>,
+    message: Msg,
+    token: u64,
+    ctl: &Ctl,
+) -> Option<steve_acp::rpc::Backpressure> {
+    let message = match data_tx.try_send(message) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => return None,
+        Err(mpsc::error::TrySendError::Full(m)) => m,
+    };
+    let data_tx = data_tx.clone();
+    let Ctl {
+        gate,
+        tx,
+        mut retired,
+        stall,
+    } = ctl.clone();
+    Some(Box::pin(async move {
+        let room = async {
+            if token == 0 {
+                // nobody's attempt: nothing to stop (its bytes are capped by admission)
+                return data_tx.reserve().await.ok();
+            }
+            // measured, not only timed: a wait the runtime polls late still counts in full
+            let since = tokio::time::Instant::now();
+            match tokio::time::timeout(stall, data_tx.reserve()).await {
+                Ok(Ok(permit)) if since.elapsed() < stall => Some(permit),
+                Ok(Err(_)) => None,
+                _ => {
+                    gate.overflow(&tx, token, Ingress::Stalled);
+                    None
+                }
+            }
+        };
+        tokio::select! {
+            permit = room => {
+                if let Some(p) = permit {
+                    p.send(message);
+                }
+            }
+            // stopped, released or shut down: its messages are nobody's now
+            _ = retired.wait_for(|r| *r) => {}
+        }
+    }))
+}
+
+/// What a harness's reader needs to wait for the actor ([`enqueue`]).
+#[derive(Clone)]
+struct Ctl {
+    gate: Arc<Gate>,
+    tx: mpsc::UnboundedSender<Msg>,
+    /// True (or its sender gone) once the harness is no longer the session's ([`Live`] dropped).
+    retired: watch::Receiver<bool>,
+    stall: Duration,
 }
 
 #[derive(Clone)]
 pub(crate) struct LiveNew {
     conn: Arc<Conn>,
+    retire: Arc<watch::Sender<bool>>,
     generation: u64,
     acp_id: String,
     image: bool,
@@ -153,6 +263,8 @@ pub(crate) struct LiveNew {
 
 struct Live {
     conn: Arc<Conn>,
+    /// Ends a wait of its reader on a full data queue once this harness is not the session's.
+    retire: Arc<watch::Sender<bool>>,
     generation: u64,
     acp_id: String,
     image: bool,
@@ -160,10 +272,17 @@ struct Live {
     started: Option<u64>,
 }
 
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.retire.send_replace(true);
+    }
+}
+
 impl From<LiveNew> for Live {
     fn from(l: LiveNew) -> Live {
         Live {
             conn: l.conn,
+            retire: l.retire,
             generation: l.generation,
             acp_id: l.acp_id,
             image: l.image,
@@ -208,6 +327,37 @@ enum Opening {
     Attempt(u64),
 }
 
+/// How long text deltas of one message block may be held back to go out as one event, and how
+/// much text at most. The Hub stores, sends and renders one event where the harness sent many
+/// small chunks; the final text is the same bytes (docs/node-protocol.md: increments that have no
+/// sequence number yet may be merged in memory).
+const HOLD_FOR: Duration = Duration::from_millis(50);
+const HOLD_BYTES: usize = 4096;
+
+/// Text deltas held back: contiguous text of one block, from `utf8_offset` on.
+struct Held {
+    subject: Subject,
+    message: String,
+    block: String,
+    utf8_offset: u64,
+    text: String,
+    since: tokio::time::Instant,
+}
+
+impl Held {
+    fn event(self) -> (Subject, EventBody) {
+        (
+            self.subject,
+            EventBody::TextDelta {
+                message: self.message,
+                block: self.block,
+                utf8_offset: self.utf8_offset,
+                text: self.text,
+            },
+        )
+    }
+}
+
 pub(crate) struct Actor {
     inner: Arc<Inner>,
     session: SessionId,
@@ -227,6 +377,10 @@ pub(crate) struct Actor {
     deferred_prompt: Option<Result<Value, RpcError>>,
     stage_cancel: Option<watch::Sender<bool>>,
     stage_task: Option<tokio::task::JoinHandle<()>>,
+    /// Text not journaled yet ([`HOLD_FOR`]): it goes before anything else the actor journals.
+    held: std::sync::Mutex<Option<Held>>,
+    /// Held text the journal refused, so the attempt cannot go on as if it were said.
+    held_lost: std::sync::Mutex<Option<ApiError>>,
 }
 
 impl Actor {
@@ -252,6 +406,8 @@ impl Actor {
             deferred_prompt: None,
             stage_cancel: None,
             stage_task: None,
+            held: std::sync::Mutex::new(None),
+            held_lost: std::sync::Mutex::new(None),
         };
         tokio::spawn(a.run_loop());
         tx
@@ -260,11 +416,21 @@ impl Actor {
     async fn run_loop(mut self) {
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         loop {
+            let due = self
+                .held
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|h| h.since + HOLD_FOR);
             tokio::select! {
                 biased;
                 m = self.rx.recv() => {
-                    let Some(m) = m else { return };
+                    let Some(m) = m else {
+                        let _ = self.flush_held();
+                        return;
+                    };
                     if let Msg::Shutdown { done } = m {
+                        let _ = self.flush_held();
                         if let Some(cancel) = self.stage_cancel.take() { let _ = cancel.send(true); }
                         if let Some(task) = self.stage_task.take() { let _ = task.await; }
                         self.stop_process().await;
@@ -274,13 +440,134 @@ impl Actor {
                     }
                     self.handle(m).await;
                 }
+                // before the adapter's data: a flood never keeps held text back
+                _ = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)), if due.is_some() => {
+                    let _ = self.flush_held();
+                }
                 _ = tick.tick() => self.check_limits(),
                 Some(message) = self.data_rx.recv() => self.handle(message).await,
             }
+            self.held_refused();
         }
     }
 
+    /// Journals in one transaction, after the text held so far (in a transaction of its own).
+    /// Held text the journal cannot take fails this too: nothing said later goes before it.
     fn tx<R>(&self, f: impl FnOnce(&Tx) -> ApiResult<R>) -> ApiResult<R> {
+        self.flush_held()?;
+        self.tx_now(f)
+    }
+
+    /// Journals the held text now, if any. Refused for its budget it is dropped, as an update the
+    /// journal refuses is; otherwise it is kept for the next try and the error returned. Either
+    /// way the attempt stops ([`Self::held_refused`]).
+    fn flush_held(&self) -> ApiResult<()> {
+        let Some(h) = self.held.lock().unwrap().take() else {
+            return Ok(());
+        };
+        let ev = h.event();
+        let Err(e) = self.tx_now(|t| crate::emit_all(&self.inner, t, vec![ev.clone()])) else {
+            return Ok(());
+        };
+        self.held_lost.lock().unwrap().get_or_insert(e.clone());
+        if e.code == ErrorCode::Exhausted {
+            return Ok(());
+        }
+        let (
+            subject,
+            EventBody::TextDelta {
+                message,
+                block,
+                utf8_offset,
+                text,
+            },
+        ) = ev
+        else {
+            unreachable!("held text is a text delta")
+        };
+        *self.held.lock().unwrap() = Some(Held {
+            subject,
+            message,
+            block,
+            utf8_offset,
+            text,
+            // tried again a second from now (or before the next journal write)
+            since: tokio::time::Instant::now() + Duration::from_secs(1),
+        });
+        Err(e)
+    }
+
+    /// What the attempt does once its held text could not be journaled: as for an update.
+    fn held_refused(&mut self) {
+        let Some(e) = self.held_lost.lock().unwrap().take() else {
+            return;
+        };
+        let Some(token) = self.run.as_ref().map(|r| r.token) else {
+            return;
+        };
+        if e.code == ErrorCode::Exhausted {
+            self.stopping(
+                token,
+                Outcome::Cancelled,
+                ApiError::new(ErrorCode::Exhausted, "journal data budget reached"),
+            );
+            let _ = self.tx.send(Msg::Kill { token });
+        } else {
+            self.stopping(
+                token,
+                Outcome::Failed,
+                ApiError::new(ErrorCode::Internal, "the node could not record the attempt"),
+            );
+        }
+    }
+
+    /// Holds back the text deltas of `evs` that can wait ([`HOLD_FOR`]); what is to be journaled
+    /// now comes back, in order, held text first where it was said first.
+    fn hold(&self, evs: Vec<(Subject, EventBody)>) -> Vec<(Subject, EventBody)> {
+        let mut held = self.held.lock().unwrap();
+        let mut out = vec![];
+        for (subject, body) in evs {
+            match body {
+                EventBody::TextDelta {
+                    message,
+                    block,
+                    utf8_offset,
+                    text,
+                } => {
+                    if let Some(h) = held.as_mut()
+                        && h.subject == subject
+                        && h.message == message
+                        && h.block == block
+                        && h.utf8_offset + h.text.len() as u64 == utf8_offset
+                        && h.text.len() + text.len() <= HOLD_BYTES
+                    {
+                        h.text.push_str(&text);
+                        continue;
+                    }
+                    out.extend(held.take().map(Held::event));
+                    *held = Some(Held {
+                        subject,
+                        message,
+                        block,
+                        utf8_offset,
+                        text,
+                        since: tokio::time::Instant::now(),
+                    });
+                }
+                body => {
+                    out.extend(held.take().map(Held::event));
+                    out.push((subject, body));
+                }
+            }
+        }
+        if held.as_ref().is_some_and(|h| h.text.len() >= HOLD_BYTES) {
+            out.extend(held.take().map(Held::event));
+        }
+        out
+    }
+
+    /// Journals in one transaction as it is (what is held stays held).
+    fn tx_now<R>(&self, f: impl FnOnce(&Tx) -> ApiResult<R>) -> ApiResult<R> {
         let r = self.inner.j.tx(f);
         match &r {
             Ok(_) => self.inner.wake.notify_one(),
@@ -318,12 +605,9 @@ impl Actor {
 
     async fn handle(&mut self, m: Msg) {
         match m {
-            Msg::Overflow { token } => {
-                self.stopping(
-                    token,
-                    Outcome::Cancelled,
-                    ApiError::new(ErrorCode::Exhausted, "ingress budget exceeded"),
-                );
+            Msg::Overflow { token, why } => {
+                let (outcome, e) = why.stop(self.inner.cfg.storage.ingress_stall);
+                self.stopping(token, outcome, e);
                 let _ = self.tx.send(Msg::Kill { token });
             }
             Msg::ReleaseDone { op, stopped } => self.finish_release(&op, stopped),
@@ -1072,10 +1356,12 @@ impl Actor {
                 }
             }
         }
+        let mut evs = self.hold(evs);
         if evs.is_empty() && config.is_empty() {
             return;
         }
-        let r = self.tx(|t| {
+        // what was held came out in `evs` where it belongs; what is held now was said after them
+        let r = self.tx_now(|t| {
             // cost reports are numbered on the process's meter (its running total)
             for (_, b) in evs.iter_mut() {
                 if let EventBody::Usage { report } = b
@@ -1118,6 +1404,8 @@ impl Actor {
             return;
         }
         if r.is_err() && !evs.is_empty() {
+            // tried again in order: what is held now was said after them
+            evs.extend(self.held.lock().unwrap().take().map(Held::event));
             self.later(Msg::Facts { events: evs });
         }
         if r.is_err()
@@ -1693,6 +1981,8 @@ async fn open_harness(
         .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))?;
     let generation = inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let (tx1, tx2) = (tx.clone(), tx);
+    let (retire, retired) = watch::channel(false);
+    let retire = Arc::new(retire);
     let counter = inner.output_counter(session);
     let meter = derived_id(
         "p",
@@ -1701,6 +1991,12 @@ async fn open_harness(
     let mut registered_start = None;
     let admission_gate = gate.clone();
     let admission_tx = tx1.clone();
+    let ctl = Ctl {
+        gate: gate.clone(),
+        tx: tx1,
+        retired,
+        stall: inner.cfg.storage.ingress_stall,
+    };
     let conn = Conn::spawn_registered(
         Spawn {
             program,
@@ -1724,8 +2020,15 @@ async fn open_harness(
             let total = counter
                 .fetch_add(bytes as u64, Ordering::SeqCst)
                 .saturating_add(bytes as u64);
-            if bytes > 1 << 20 || total > admission_gate.1.load(Ordering::SeqCst) {
-                admission_gate.overflow(&admission_tx, token);
+            let why = if bytes > 1 << 20 {
+                Some(Ingress::Frame)
+            } else if total > admission_gate.1.load(Ordering::SeqCst) {
+                Some(Ingress::Output)
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                admission_gate.overflow(&admission_tx, token, why);
                 return false;
             }
             !admission_gate.2.load(Ordering::SeqCst)
@@ -1758,19 +2061,14 @@ async fn open_harness(
             let token = gate.0.load(Ordering::SeqCst);
             match inc {
                 Incoming::Notification { method, params } if method == "session/update" => {
-                    if let Some(u) = params.get("update") {
-                        // counted as it arrives: a flood is stopped before it is all kept
-                        if data_tx
-                            .try_send(Msg::Update {
-                                generation,
-                                token,
-                                update: u.clone(),
-                            })
-                            .is_err()
-                        {
-                            gate.overflow(&tx1, token);
-                        }
-                    }
+                    // counted as it arrives (admission): a flood is stopped before it is all kept
+                    let u = params.get("update")?;
+                    let update = Msg::Update {
+                        generation,
+                        token,
+                        update: u.clone(),
+                    };
+                    return enqueue(&data_tx, update, token, &ctl);
                 }
                 Incoming::Notification { .. } => {}
                 Incoming::Request { id, method, params }
@@ -1778,25 +2076,23 @@ async fn open_harness(
                 {
                     if token == 0 {
                         c.respond(id, json!({"outcome": {"outcome": "cancelled"}}));
-                        return;
+                        return None;
                     }
-                    if data_tx
-                        .try_send(Msg::Permission {
-                            generation,
-                            token,
-                            rpc_id: id.clone(),
-                            params,
-                        })
-                        .is_err()
-                    {
-                        c.respond(id, json!({"outcome": {"outcome": "cancelled"}}));
-                        gate.overflow(&tx1, token);
-                    }
+                    // after the updates read before it (its tool's own facts come first): a full
+                    // queue delays it as long as the actor is behind, it is never dropped for that
+                    let ask = Msg::Permission {
+                        generation,
+                        token,
+                        rpc_id: id,
+                        params,
+                    };
+                    return enqueue(&data_tx, ask, token, &ctl);
                 }
                 Incoming::Request { id, method, .. } => {
                     c.respond_error(id, -32601, &format!("{method} not supported by Steve"));
                 }
             }
+            None
         },
         move || {
             let _ = tx2.send(Msg::Exited { generation });
@@ -1820,7 +2116,8 @@ async fn open_harness(
     }
     let seen = Seen::default();
     let mode = crate::mode(&harness, row.open.policy.permissions);
-    let handshake = acp_session::open(
+    let meta = crate::harness_meta(&harness, &inner.cfg.acp.steve_home);
+    let handshake = acp_session::open_with_meta(
         &conn,
         OpenConfig {
             client_version: &inner.cfg.acp.version,
@@ -1831,6 +2128,7 @@ async fn open_harness(
             model: row.open.choice.model.as_deref(),
             effort: row.open.choice.effort.as_deref(),
         },
+        meta,
         &seen,
         Strictness::Strict,
     );
@@ -1879,6 +2177,7 @@ async fn open_harness(
     }
     Ok(LiveNew {
         conn,
+        retire,
         generation,
         acp_id: opened.acp_id,
         image: opened.image,

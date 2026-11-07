@@ -1,28 +1,9 @@
-//! The runner's turn reports into the statistics tables (stats.md §2.2): `agent_turns`, `usage_records`
+//! Agent turns into the statistics tables (stats.md §2.2): `agent_turns`, `usage_records`
 //! and the `stat_daily` cube, through `steve_store::Stats`. Token figures are brought to one convention
 //! with `steve_stats::normalize`; days are cut in the workspace's `stats.tz`.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use serde_json::json;
 use steve_store::{ModelUsage, NewUsage, Session, Store, Tokens};
-
-/// Per session, the `events.seq` of the first `user` event written since the last turn began.
-#[derive(Default)]
-pub struct UserSeqs(Mutex<HashMap<String, i64>>);
-
-impl UserSeqs {
-    pub fn user_event(&self, session_id: &str, seq: i64) {
-        self.lock().entry(session_id.to_owned()).or_insert(seq);
-    }
-    fn take(&self, session_id: &str) -> Option<i64> {
-        self.lock().remove(session_id)
-    }
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, i64>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
 
 /// Session attribution of a turn: workspace, item, bot, project, and the fallback model.
 struct Owner {
@@ -73,122 +54,6 @@ fn day(store: &Store, ws: &str, ts: i64) -> String {
         .get(ws, "stats.tz", String::new())
         .unwrap_or_default();
     steve_stats::day(ts, steve_stats::tz(Some(&tz)))
-}
-
-pub fn turn_begin(store: &Store, seqs: &UserSeqs, b: steve_acp::TurnBegin) -> Option<String> {
-    let seq = seqs.take(&b.session_id);
-    let o = owner(store, &b.session_id)?;
-    let r = store.stats().turn_begin(&steve_store::TurnBegin {
-        workspace_id: o.s.workspace_id.clone(),
-        session_id: o.s.id.clone(),
-        item_id: o.s.item_id.clone(),
-        bot_id: o.s.bot_id.clone(),
-        project_id: o.project.clone(),
-        harness: o.s.harness.clone(),
-        user_seq: if b.user_events > 0 { seq } else { None },
-        attempt: i64::from(b.attempt),
-        started: b.started,
-    });
-    match r {
-        Ok(id) => Some(id),
-        Err(e) => {
-            tracing::error!("stats turn begin {}: {e}", b.session_id);
-            None
-        }
-    }
-}
-
-pub fn turn_finish(store: &Store, f: steve_acp::TurnFinish) {
-    let Some(o) = owner(store, &f.session_id) else {
-        return;
-    };
-    let ws = &o.s.workspace_id;
-    let codex_cache: bool = store
-        .settings()
-        .get(ws, "stats.codex_input_includes_cache", true)
-        .unwrap_or(true);
-    let mut usage: Vec<ModelUsage> = f
-        .usage
-        .iter()
-        .map(|u| ModelUsage {
-            model: o.model(u.model.as_deref().or(f.model.as_deref())),
-            tokens: steve_stats::normalize(
-                &o.s.harness,
-                steve_stats::RawUsage::from_json(&u.raw),
-                codex_cache,
-            ),
-            cost_reported: None,
-            detail: json!({ "scope": u.scope }),
-        })
-        .collect();
-    // the adapter's dollar increment goes on the turn's first row; a cost without tokens still gets one
-    if let Some(c) = f.cost.filter(|c| *c > 0.0) {
-        if usage.is_empty() {
-            usage.push(ModelUsage {
-                model: o.model(f.model.as_deref()),
-                tokens: Tokens::default(),
-                cost_reported: None,
-                detail: json!({ "scope": "main" }),
-            });
-        }
-        usage[0].cost_reported = Some(c);
-    }
-    let model = usage
-        .first()
-        .map(|u| u.model.clone())
-        .unwrap_or_else(|| o.model(f.model.as_deref()));
-    let r = store.stats().turn_finish(&steve_store::TurnFinish {
-        turn_id: f.turn_id,
-        ended: f.ended,
-        day: day(store, ws, f.ended),
-        model,
-        stop_reason: Some(f.stop_reason),
-        error: f.error,
-        transient: f.transient,
-        tools: f.tools,
-        tool_errors: f.tool_errors,
-        tool_kinds: f.tool_kinds,
-        permissions: f.permissions,
-        usage,
-    });
-    if let Err(e) = r {
-        tracing::error!("stats turn finish {}: {e}", f.session_id);
-    }
-}
-
-pub fn autonomous(store: &Store, a: steve_acp::AutonomousUsage) {
-    if a.cost <= 0.0 {
-        return;
-    }
-    let Some(o) = owner(store, &a.session_id) else {
-        return;
-    };
-    let ws = o.s.workspace_id.clone();
-    let r = store.stats().usage_add(&NewUsage {
-        day: day(store, &ws, a.ts),
-        workspace_id: ws,
-        ts: a.ts,
-        source: "agent".into(),
-        purpose: "autonomous".into(),
-        harness: o.s.harness.clone(),
-        turn_id: None,
-        session_id: Some(o.s.id.clone()),
-        item_id: o.s.item_id.clone(),
-        bot_id: o.s.bot_id.clone(),
-        project_id: o.project.clone(),
-        usage: ModelUsage {
-            model: o.model(a.model.as_deref()),
-            tokens: Tokens::default(),
-            cost_reported: Some(a.cost),
-            detail: json!({ "origin": a.origin }),
-        },
-        duration_ms: None,
-        ok: true,
-        attempts: 1,
-    });
-    if let Err(e) = r {
-        tracing::error!("stats autonomous {}: {e}", a.session_id);
-    }
 }
 
 /// Boot: Codex turns that ended without tokens get them from Codex's rollout file. codex-acp never
@@ -345,21 +210,31 @@ pub fn node_attempt_finished(
     let ws = &o.s.workspace_id;
     // a final figure replaces the attempt's deltas; deltas add up
     let tokens_of = |t: &steve_node_api::Tokens| Tokens {
-        input: t.input.map(|x| x as i64),
-        output: t.output.map(|x| x as i64),
-        cache_read: t.cache_read.map(|x| x as i64),
-        cache_write: t.cache_write.map(|x| x as i64),
+        input: t.input.and_then(super::node_runtime::usage_tokens),
+        output: t.output.and_then(super::node_runtime::usage_tokens),
+        cache_read: t.cache_read.and_then(super::node_runtime::usage_tokens),
+        cache_write: t.cache_write.and_then(super::node_runtime::usage_tokens),
         reasoning: None,
     };
-    let finals: Vec<&steve_node_api::UsageReport> = f
-        .usage
-        .iter()
-        .filter(|u| u.measurement == steve_node_api::Measurement::Final)
-        .collect();
-    let mut usage: Vec<ModelUsage> = if finals.is_empty() {
-        f.usage
+    // the per-model figures for everything (scope `all`) when there are any, else the main
+    // loop's: `all` already holds `main`, the two never add up
+    let scoped = |m: steve_node_api::Measurement| -> Vec<&steve_node_api::UsageReport> {
+        let of: Vec<_> = f.usage.iter().filter(|u| u.measurement == m).collect();
+        if of
             .iter()
-            .filter(|u| u.measurement == steve_node_api::Measurement::Delta)
+            .any(|u| u.scope == steve_node_api::UsageScope::All)
+        {
+            of.into_iter()
+                .filter(|u| u.scope == steve_node_api::UsageScope::All)
+                .collect()
+        } else {
+            of
+        }
+    };
+    let finals = scoped(steve_node_api::Measurement::Final);
+    let mut usage: Vec<ModelUsage> = if finals.is_empty() {
+        scoped(steve_node_api::Measurement::Delta)
+            .into_iter()
             .map(|u| ModelUsage {
                 model: o.model(u.model.as_deref().or(f.model.as_deref())),
                 tokens: tokens_of(&u.tokens),
@@ -418,13 +293,11 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::collections::BTreeMap;
-    use steve_acp::{AutonomousUsage, TurnBegin, TurnFinish, TurnUsage};
-    use steve_store::{NewBot, NewItem, NewSession, NoPublisher, WS};
+    use steve_store::{NewBot, NewSession, NoPublisher, WS};
 
     struct T {
         dir: tempfile::TempDir,
         store: Store,
-        seqs: UserSeqs,
     }
 
     fn fresh() -> T {
@@ -445,11 +318,7 @@ mod tests {
                 WS,
             )
             .unwrap();
-        T {
-            dir,
-            store,
-            seqs: UserSeqs::default(),
-        }
+        T { dir, store }
     }
 
     fn session(t: &T, item: Option<&str>, harness: &str) -> String {
@@ -474,36 +343,51 @@ mod tests {
         Connection::open(t.dir.path().join("steve.sqlite3")).unwrap()
     }
 
-    fn begin(t: &T, sid: &str, attempt: u32, user_events: usize) -> String {
-        turn_begin(
-            &t.store,
-            &t.seqs,
-            TurnBegin {
-                session_id: sid.into(),
-                attempt,
-                user_events,
+    fn begin(t: &T, sid: &str) -> String {
+        let s = t.store.sessions().get(sid).unwrap().unwrap();
+        t.store
+            .stats()
+            .turn_begin(&steve_store::TurnBegin {
+                workspace_id: s.workspace_id,
+                session_id: s.id,
+                item_id: s.item_id,
+                bot_id: s.bot_id,
+                project_id: None,
+                harness: s.harness,
+                user_seq: None,
+                attempt: 0,
                 started: 1_000,
-            },
-        )
-        .unwrap()
+            })
+            .unwrap()
     }
 
-    fn finish(id: &str, sid: &str, usage: Vec<TurnUsage>, cost: Option<f64>) -> TurnFinish {
-        TurnFinish {
-            turn_id: id.into(),
-            session_id: sid.into(),
-            ended: 4_000,
-            stop_reason: "end_turn".into(),
-            error: None,
-            transient: false,
-            tools: 2,
-            tool_errors: 1,
-            tool_kinds: BTreeMap::from([("execute".into(), 2)]),
-            permissions: 0,
-            usage,
-            model: None,
-            cost,
-        }
+    fn finish(t: &T, id: &str, cost: Option<f64>) {
+        let usage = cost
+            .map(|c| ModelUsage {
+                model: "m".into(),
+                tokens: Tokens::default(),
+                cost_reported: Some(c),
+                detail: json!({ "scope": "main" }),
+            })
+            .into_iter()
+            .collect();
+        t.store
+            .stats()
+            .turn_finish(&steve_store::TurnFinish {
+                turn_id: id.into(),
+                ended: 4_000,
+                day: "1970-01-01".into(),
+                model: "m".into(),
+                stop_reason: Some("end_turn".into()),
+                error: None,
+                transient: false,
+                tools: 2,
+                tool_errors: 1,
+                tool_kinds: BTreeMap::from([("execute".into(), 2)]),
+                permissions: 0,
+                usage,
+            })
+            .unwrap();
     }
 
     #[tokio::test]
@@ -516,8 +400,8 @@ mod tests {
                 [&sid],
             )
             .unwrap();
-        let id = begin(&t, &sid, 0, 1);
-        turn_finish(&t.store, finish(&id, &sid, vec![], None));
+        let id = begin(&t, &sid);
+        finish(&t, &id, None);
         let home = t.dir.path().join("codex");
         let day = home.join("sessions/1970/01/01");
         std::fs::create_dir_all(&day).unwrap();
@@ -551,150 +435,12 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_session_turn_is_recorded_with_the_bot_model_and_the_cost() {
-        let t = fresh();
-        let sid = session(&t, None, "claude-code");
-        let seq = t
-            .store
-            .events()
-            .add(&sid, "user", json!({"text": "hi"}))
-            .unwrap();
-        t.seqs.user_event(&sid, seq);
-        let id = begin(&t, &sid, 0, 1);
-        let raw = json!({"inputTokens": 3, "outputTokens": 4, "cachedReadTokens": 100, "cachedWriteTokens": 20});
-        let u = vec![TurnUsage {
-            model: None,
-            raw,
-            scope: "main",
-        }];
-        turn_finish(&t.store, finish(&id, &sid, u, Some(0.25)));
-        let c = db(&t);
-        let (item, user_seq, stop, tools): (Option<String>, Option<i64>, String, i64) = c
-            .query_row(
-                "SELECT item_id, user_seq, stop_reason, tools FROM agent_turns WHERE id = ?",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            (item, user_seq, stop.as_str(), tools),
-            (None, Some(seq), "end_turn", 2)
-        );
-        let row: (String, i64, i64, i64, i64, f64, String) = c
-            .query_row(
-                "SELECT model, input, output, cache_read, cache_write, cost_reported, detail FROM usage_records WHERE turn_id = ?",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            row,
-            (
-                "claude-opus-5-5".into(),
-                3,
-                4,
-                100,
-                20,
-                0.25,
-                r#"{"scope":"main"}"#.into()
-            )
-        );
-        let (turns, hit, model): (i64, i64, String) = c
-            .query_row(
-                "SELECT sum(turns), sum(hit_base), max(model) FROM stat_daily",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!((turns, hit, model.as_str()), (1, 123, "claude-opus-5-5"));
-    }
-
-    #[test]
-    fn codex_input_loses_the_cache_and_retries_have_no_user_seq() {
-        let t = fresh();
-        let i = t
-            .store
-            .items()
-            .create(
-                WS,
-                &NewItem {
-                    title: "x".into(),
-                    goal: "g".into(),
-                    bot_id: "steve".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .unwrap()
-            .id;
-        let sid = session(&t, Some(&i), "codex");
-        t.seqs.user_event(&sid, 7);
-        let id = begin(&t, &sid, 1, 0);
-        let u = vec![TurnUsage {
-            model: Some("gpt-5".into()),
-            raw: json!({"inputTokens": 1000, "outputTokens": 10, "cachedReadTokens": 800}),
-            scope: "main",
-        }];
-        turn_finish(&t.store, finish(&id, &sid, u, None));
-        let c = db(&t);
-        let (item, seq, attempt): (Option<String>, Option<i64>, i64) = c
-            .query_row(
-                "SELECT item_id, user_seq, attempt FROM agent_turns WHERE id = ?",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!((item.as_deref(), seq, attempt), (Some(i.as_str()), None, 1));
-        let (input, cr, cost): (i64, i64, Option<f64>) = c
-            .query_row(
-                "SELECT input, cache_read, cost_reported FROM usage_records WHERE turn_id = ?",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!((input, cr, cost), (200, 800, None));
-    }
-
-    #[test]
-    fn a_cost_without_tokens_and_autonomous_cost_get_rows() {
-        let t = fresh();
-        let sid = session(&t, None, "claude-code");
-        let id = begin(&t, &sid, 0, 0);
-        turn_finish(&t.store, finish(&id, &sid, vec![], Some(0.1)));
-        autonomous(
-            &t.store,
-            AutonomousUsage {
-                session_id: sid.clone(),
-                ts: 5_000,
-                model: Some("claude-haiku-5-5".into()),
-                origin: "task-notification".into(),
-                cost: 0.05,
-            },
-        );
-        let c = db(&t);
-        let rows: Vec<(String, String, Option<i64>, f64)> = c
-            .prepare("SELECT purpose, model, input, cost_reported FROM usage_records ORDER BY id")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert_eq!(
-            rows,
-            [
-                ("turn".into(), "claude-opus-5-5".into(), None, 0.1),
-                ("autonomous".into(), "claude-haiku-5-5".into(), None, 0.05)
-            ]
-        );
-    }
-
-    #[test]
     fn open_turns_are_interrupted_at_boot() {
         let t = fresh();
         let sid = session(&t, None, "claude-code");
-        let id = begin(&t, &sid, 0, 0);
+        let id = begin(&t, &sid);
         // a turn run on a Node: the restart did not cut it
-        let node = begin(&t, &sid, 0, 0);
+        let node = begin(&t, &sid);
         let c = db(&t);
         c.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
         c.execute(
@@ -720,7 +466,25 @@ mod tests {
         // no event of the session before the boot: it ends where it started, not at the boot
         assert_eq!((ended, stop.as_str()), (1_000, "interrupted"));
         // a late finish of the cut turn books nothing twice
-        turn_finish(&t.store, finish(&id, &sid, vec![], Some(1.0)));
+        let _ = t.store.stats().turn_finish(&steve_store::TurnFinish {
+            turn_id: id.clone(),
+            ended: 9_500,
+            day: "1970-01-01".into(),
+            model: "m".into(),
+            stop_reason: Some("end_turn".into()),
+            error: None,
+            transient: false,
+            tools: 0,
+            tool_errors: 0,
+            tool_kinds: BTreeMap::new(),
+            permissions: 0,
+            usage: vec![ModelUsage {
+                model: "m".into(),
+                tokens: Tokens::default(),
+                cost_reported: Some(1.0),
+                detail: json!({ "scope": "main" }),
+            }],
+        });
         let n: i64 = db(&t)
             .query_row("SELECT count(*) FROM usage_records", [], |r| r.get(0))
             .unwrap();

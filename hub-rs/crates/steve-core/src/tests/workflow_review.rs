@@ -98,7 +98,7 @@ fn paused_persisted_queue_stays_held_through_turn_end_and_restart() {
     assert_eq!(k.db().queued(&sid).unwrap().len(), 1);
     assert_eq!(k.rt.flush(&sid, None), Flushed::Held);
     k.core.recover().unwrap();
-    k.core.fire_resume();
+    k.core.ready();
     k.core.lifecycle_tick().unwrap();
     assert_eq!(k.rt.prompts_of(&sid).len(), before);
     assert_eq!(k.db().queued(&sid).unwrap().len(), 1);

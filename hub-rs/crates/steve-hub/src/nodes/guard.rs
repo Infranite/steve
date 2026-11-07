@@ -137,24 +137,30 @@ fn foreign(
         };
         Ok(found.is_some())
     };
+    // a batch is mostly one session's events: each subject is looked up once
+    let mut owned: Vec<&Subject> = vec![];
     for e in &batch.events {
-        let own = match &e.subject {
-            Subject::Session { session } => own_session(session)?,
-            Subject::Execution(x) => own_execution(x)?,
-            Subject::Operation { operation } => c
-                .query_row(
-                    "SELECT 1 FROM node_commands WHERE operation_id=? AND node_id=?",
-                    params![operation.as_str(), node],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some(),
-        };
+        let own = owned.contains(&&e.subject)
+            || match &e.subject {
+                Subject::Session { session } => own_session(session)?,
+                Subject::Execution(x) => own_execution(x)?,
+                Subject::Operation { operation } => c
+                    .query_row(
+                        "SELECT 1 FROM node_commands WHERE operation_id=? AND node_id=?",
+                        params![operation.as_str(), node],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some(),
+            };
         if !own {
             return Ok(Some(format!(
                 "event {} names a subject of another node",
                 e.id
             )));
+        }
+        if !owned.contains(&&e.subject) {
+            owned.push(&e.subject);
         }
         let execution = match &e.subject {
             Subject::Execution(x) => Some(x),

@@ -155,15 +155,15 @@ Steve 不动你的 harness 设置。权限提示只答这一次，从不写“�
 
 ### 🚚 合并与发布
 
-每个目标分支有一条合并通道。合并进行中到达的请求会攒成一批，一批只需批一张卡片。有冲突的成员逐个剔除。推送只做快进，重启后不会重复合并或重复发布。项目页会列出 Steve 识别出的通道配置（合并队列、必需检查、发布方式），每项都附上依据。
+每个目标分支有一条合并通道。合并进行中到达的请求会攒成一批，一批只需批一张卡片；你还没回答卡片时到达的请求，直接并入这一批和这张卡片。项目页可以设置合批窗口和每批上限，也有“立即合并发布”按钮。有冲突的成员逐个剔除。推送只做快进，托管方要求经 PR 或合并队列合入的分支绝不直接推送，重启后不会重复合并或重复发布。项目页还会列出 Steve 识别出的通道配置（合并队列、必需检查、发布方式），每项都附上依据。
 
-在 GitHub 上，你验收之后 Steve 先问你要不要开 PR，合并前再问一次。外部操作走持久队列，重试前先和 GitHub 对账。Hub 所在机器上的项目（包括 Steve 自己）可以用脚本发布：构建、排空进行中的工作、重启，起来后报告结果。旧版本读不了当前数据库时，拒绝回滚。
+在 GitHub 上，你验收之后 Steve 先问你要不要开 PR，合并前再问一次。私有仓库可以设成验收即开草稿 PR：只推事项自己的分支，提交先过泄露检查。外部操作走持久队列，重试前先和 GitHub 对账。Hub 所在机器上的项目（包括 Steve 自己）可以用脚本发布：构建、排空进行中的工作、重启，起来后报告结果。旧版本读不了当前数据库时，拒绝回滚。
 
 ### 🔌 连接
 
 所有发出去的消息走同一条路：披露检查、授权、发送、记录用了哪些知识及其级别、写审计。你自己的账号不经批准不会发消息，代你发的消息会注明。
 
-- **飞书 / Lark**：扫一次码就能建好机器人。Steve 可以以机器人身份工作，也可以通过 OAuth 以你的身份工作，消息走长连接接收。每个会话是一个空间，有关注级别（实时 / 不提醒 / 屏蔽）和响应规则（@、私聊、关键词、意图……），规则可以转成流程。人设决定回复透露多少：名字、职责、是不是 AI、是不是 Steve、主人是谁。防循环守卫会把失控的空间静音。
+- **飞书 / Lark**：扫一次码就能建好机器人。Steve 可以以机器人身份工作，也可以通过 OAuth 以你的身份工作，消息走长连接接收。每个会话是一个空间，有关注级别（实时 / 不提醒 / 屏蔽）和响应规则（@、私聊、关键词、意图……），规则可以转成流程。人设决定回复透露多少：名字、职责、是不是 AI、是不是 Steve、主人是谁。
 - **邮件**：IMAP/SMTP，内置常见服务预设。IDLE 推送同步，有“需要处理”“等对方”和草稿几个视图。HTML 在沙箱里渲染，远程图片默认拦截。发信一律要过和内容绑定的审批卡片，收件人由服务端计算，智能体加不进去。接入第一个邮箱时会装上分诊流程，通知类邮件在调用任何模型之前就被分走。
 - **GitHub**：用 GitHub App（manifest 流程）或细粒度 token 接入。Webhook 做 HMAC 校验和去重，轮询兜底。PR 自动关联事项，issue 可以转成事项，“PR 检查失败”流程会把失败回灌给事项。智能体能查状态和 CI 日志、发评论（需要有时限的授权）、开 PR。
 - **断开连接**前先给演练预览，备份数据库，再在一个事务里清理干净。
@@ -220,7 +220,8 @@ Steve 还没有运行时插件商店，“插件”页面目前只是占位。�
 
 ## 实验中与计划中
 
-- **多设备**（实验中，默认关闭）：另一台机器上的 `steve-node` 可以和 Hub 配对，在那台机器上跑 harness。Node 总是主动向外连，配对用一次性码加指纹确认，每个 Node 都有执行日志用来对账。用 `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` / `STEVE_NODE_MODE=local` 开启。配对目前只能走命令行，设计还在调整（[docs/hub-node-client.md](docs/hub-node-client.md)）。
+- **会话在 Node 上运行**：Hub 不再自己拉起 agent 进程，所有会话、Steve 自己的判断调用和就地研究都在本机 Node 上运行，本机 Node 默认开启（`STEVE_NODE_MODE=off` 时会话只排队）。
+- **多设备**（实验中，默认关闭）：另一台机器上的 `steve-node` 可以和 Hub 配对，在那台机器上跑 harness。Node 总是主动向外连，配对用一次性码加指纹确认，每个 Node 都有执行日志用来对账。远程 Node 用 `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` 开启。配对目前只能走命令行，设计还在调整（[docs/hub-node-client.md](docs/hub-node-client.md)）。
 - **还没做的**：插件页面（先用上面的扩展点）、免打扰和每日汇报（设置里标着“接入推送后生效”）、Gmail 和 Outlook API 邮件适配器、飞书文档 / 日历 / 审批，以及外部保险箱后端（1Password、Bitwarden）。
 
 ## 工作原理
@@ -314,7 +315,7 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | 变量 | 作用 |
 |---|---|
 | `STEVE_HOME` | 数据目录（默认 `~/.steve`） |
-| `STEVE_HOST`、`STEVE_PORT` | 监听地址（默认 `127.0.0.1:8440`） |
+| `STEVE_HOST`、`STEVE_PORT` | 监听地址，可用逗号分隔多个，共用一个端口（默认 `127.0.0.1:8440`）；反向代理在另一台机器上时，加上它访问的地址，例如 `127.0.0.1,100.64.0.2`。`0.0.0.0`/`::` 会被拒绝，除非设置 `STEVE_ALLOW_ANY_HOST=1` |
 | `STEVE_WEB_DIR` | Hub 提供的 Web 构建产物 |
 | `STEVE_PUBLIC_URL` | 集成回调能访问到的地址，只在需要回调时设置。不提供共享的托管地址。 |
 | `STEVE_OIDC_ISSUER`、`STEVE_OIDC_CLIENT_ID`、`STEVE_OIDC_CLIENT_SECRET_FILE` | 通过你的 OIDC 服务登录 |
@@ -323,7 +324,8 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | `STEVE_YOLO` | 设为 `off` 在整个实例上关闭 YOLO |
 | `STEVE_KB_STORE` | 设为 `openviking` 使用可选的向量后端（默认 SQLite FTS） |
 | `STEVE_VAULT_KEYSTORE` | `auto`（钥匙串 / Secret Service）、`dir`（配合 `STEVE_VAULT_KEY_DIR`），或测试用的 `file` |
-| `STEVE_NODE_LISTEN`、`STEVE_NODE_BIND`、`STEVE_NODE_MODE` | 实验中的多设备 Node，默认关闭 |
+| `STEVE_NODE_MODE` | `local`（默认）在本机 Node 上运行会话；`off` 时会话只排队 |
+| `STEVE_NODE_LISTEN`、`STEVE_NODE_BIND` | 实验中的多设备 Node，默认关闭 |
 
 > [!IMPORTANT]
 > 把监听地址暴露到本机以外之前，请先检查认证配置。Steve 下运行的智能体拥有你本机用户的权限。
@@ -356,7 +358,7 @@ hub-rs/          Rust workspace：Hub 可执行文件和各 crate
   crates/steve-flow       信号、流程、定时
   crates/steve-vault      脱敏和粘贴守卫；steve-keyhelper 持有 macOS 密钥
   crates/steve-stats      用量、花费和交付指标
-  crates/steve-node*      Hub–Node 协议和 Node 运行时（实验中）
+  crates/steve-node*      Hub–Node 协议和运行所有会话的 Node 运行时
   crates/steve-store      SQLite 表结构和迁移
 web/             React + Vite + Tailwind 界面
 ops/             安装、发布、备份、服务和 OpenViking 脚本

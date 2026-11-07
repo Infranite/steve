@@ -10,9 +10,13 @@ use steve_node_api::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
-    /// Commands, cancels, acks, tool calls, every response and control message: drained first.
+    /// Commands, cancels, acks, tool calls, their answers and control messages: written first.
     Control,
-    /// Event batches and blob/file chunks.
+    /// Event batches (a permission card is an event) and replayed events, both ways: after
+    /// control, before bulk.
+    Events,
+    /// Blob and file chunks: last, in frames of at most [`crate::envelope::BULK_FRAME`]. No lane
+    /// starves ([`crate::conn::FAIR`]). An answer travels on its request's lane.
     Bulk,
 }
 
@@ -87,7 +91,7 @@ rpc_table! {
     PERMISSION_RESOLVE = "permission.resolve": HubToNode Control Command true;
     NODE_SNAPSHOT = "node.snapshot": HubToNode Control Read false;
     NODE_STREAMS = "node.streams": HubToNode Control Read false;
-    EVENTS_REPLAY = "events.replay": HubToNode Control Read false;
+    EVENTS_REPLAY = "events.replay": HubToNode Events Read false;
     EVENTS_ACK = "events.ack": HubToNode Control Read false;
     // WorkspaceExecutor
     WORKSPACE_PREPARE = "workspace.prepare": HubToNode Control Command true;
@@ -108,7 +112,7 @@ rpc_table! {
     IMPORT_PAGE = "import.page": HubToNode Control Read false;
     HISTORY_LOCATE = "history.locate": HubToNode Control Read false;
     // EventSink
-    EVENTS_COMMIT = "events.commit": NodeToHub Bulk Commit false;
+    EVENTS_COMMIT = "events.commit": NodeToHub Events Commit false;
     // HubTools
     TOOL_CATALOG = "tool.catalog": NodeToHub Control Read false;
     TOOL_CALL = "tool.call": NodeToHub Control Tool true;
@@ -187,7 +191,11 @@ mod tests {
         assert_eq!(names.len(), ALL.len());
         assert!(spec(TURN_START).unwrap().carries_op);
         assert!(!spec(OP_INSPECT).unwrap().carries_op);
-        assert_eq!(spec(EVENTS_COMMIT).unwrap().lane, Lane::Bulk);
+        assert_eq!(spec(EVENTS_COMMIT).unwrap().lane, Lane::Events);
+        assert_eq!(spec(EVENTS_REPLAY).unwrap().lane, Lane::Events);
+        assert_eq!(spec(BLOB_FETCH).unwrap().lane, Lane::Bulk);
+        assert_eq!(spec(FS_READ).unwrap().lane, Lane::Bulk);
+        assert_eq!(spec(PERMISSION_RESOLVE).unwrap().lane, Lane::Control);
         assert!(spec("nope").is_none());
     }
 }

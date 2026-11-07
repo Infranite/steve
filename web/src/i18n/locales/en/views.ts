@@ -38,6 +38,8 @@ export default {
     undo: "Undo",
     doneNote: "Decisions from the last 7 days. Approvals, “Not needed”, “I'll take a look” and withdrawals can be undone within 24 hours; answers and approvals already sent to a bot can't be taken back.",
     doneEmpty: "No decisions in the last 7 days",
+    mems_one: "{{count}} memory to confirm",
+    mems_other: "{{count}} memories to confirm",
   },
   items: {
     title: "Items",

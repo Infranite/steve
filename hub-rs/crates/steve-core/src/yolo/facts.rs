@@ -27,8 +27,8 @@ pub struct Gathered {
 }
 
 /// `会话出错：…` and the restart texts of the orchestrator (`on_turn_end`, `recover`).
-const SESSION_ERROR: &str = "会话出错：";
-const INTERRUPTED: &str = "Hub 重启时这个会话正在运行";
+pub(super) const SESSION_ERROR: &str = "会话出错：";
+pub(super) const INTERRUPTED: &str = "Hub 重启时这个会话正在运行";
 const STOPPED: &str = "Agent 停下来了";
 
 fn ce(e: crate::CoreError) -> ApiError {
@@ -344,7 +344,7 @@ impl Engine {
                         // one at a time: a release running, the Hub holding for one, or another
                         // card YOLO already scheduled
                         releasing: self.core().release_busy() || self.release_queued(d)?,
-                        spacing_ok: self.release_spacing_ok(&d.workspace_id)?,
+                        spacing_wait_s: self.release_spacing_wait_s(&d.workspace_id)?,
                         rebase_returns: self.rebase_returns(&d.workspace_id, &i.id)?,
                     }),
                     _ => Subject::Unverified("项目没有配置发布".into()),
@@ -399,7 +399,7 @@ impl Engine {
     }
 
     /// The user acted on the item lately: a message or an answer of theirs on its timeline, or a
-    /// message of theirs waiting in its session's queue.
+    /// message of theirs queued for its session, within the same window.
     fn present(&self, item: &str, presence_s: u64) -> ApiResult<bool> {
         let since = self.yolo().now() - presence_s as i64 * 1000;
         self.yolo().store().reader(|c| {
@@ -407,7 +407,7 @@ impl Engine {
                 .prepare_cached(
                     "SELECT (SELECT count(*) FROM timeline WHERE item_id = ?1 AND kind = 'me' AND ts >= ?2)
                           + (SELECT count(*) FROM queued q JOIN sessions s ON s.id = q.session_id
-                              WHERE s.item_id = ?1 AND q.via = 'me')",
+                              WHERE s.item_id = ?1 AND q.via = 'me' AND q.created >= ?2)",
                 )?
                 .query_row(params![item, since], |r| r.get(0))?;
             Ok(n > 0)

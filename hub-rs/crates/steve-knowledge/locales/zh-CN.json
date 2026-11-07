@@ -63,6 +63,8 @@
   "knowledge.folder.steve_data": "不能是 Steve 自己的数据目录",
   "knowledge.folder.contains_steve_data": "里面包含 Steve 自己的数据目录",
   "knowledge.folder.private_dir": "不能是 ~/%{dir} 或其中的目录",
+  "knowledge.folder.cloud_root": "只能选 ~/%{dir} 里面的某个文件夹，不能是它本身",
+  "knowledge.folder.cloud_text_only": "这个文件夹在云盘里，只能收录 .md 和 .txt 文件（include 只能是这类规则）",
   "knowledge.folder.outside_home": "只能添加你主目录或外接磁盘里的文件夹",
   "knowledge.folder.refused": "这个目录不能加入知识库：%{reason}",
   "knowledge.folder.overlap": "和已有的文件夹来源“%{name}”重叠",

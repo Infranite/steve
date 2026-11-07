@@ -9,7 +9,7 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use super::oauth::{OAuthClient, OAuthSpec};
-use super::provider::{Health, ProviderError};
+use super::provider::{Health, Paired, ProviderError};
 use super::service::Connections;
 use crate::vault::VaultError;
 use crate::vault::items::Credential;
@@ -41,6 +41,42 @@ impl fmt::Debug for AccessToken {
     }
 }
 
+/// Back-off for connections whose credential the vault could not open because the key store can't
+/// be read now (a locked keychain, a missing key, a refused binary): a retry loop meets the same
+/// error without asking the key store or writing a use row, 30 s after the first failure, doubling
+/// up to 5 minutes. A use that works clears it.
+#[derive(Default)]
+pub(crate) struct VaultWait(std::collections::HashMap<String, (i64, u32, VaultError)>);
+
+const VAULT_WAIT_MS: i64 = 30_000;
+const VAULT_WAIT_MAX_MS: i64 = 300_000;
+
+impl VaultWait {
+    /// The error to answer with instead of asking the vault, while `conn` waits.
+    pub(crate) fn waiting(&self, conn: &str, now: i64) -> Option<VaultError> {
+        self.0
+            .get(conn)
+            .filter(|(until, _, _)| now < *until)
+            .map(|(_, _, e)| e.clone())
+    }
+
+    /// What a use came to.
+    pub(crate) fn record<R>(&mut self, conn: &str, now: i64, r: &Result<R, VaultError>) {
+        match r {
+            Err(e @ (VaultError::Locked | VaultError::KeyMissing | VaultError::Denied)) => {
+                let fails = self.0.get(conn).map_or(0, |(_, f, _)| *f) + 1;
+                let wait = (VAULT_WAIT_MS << (fails - 1).min(8)).min(VAULT_WAIT_MAX_MS);
+                self.0
+                    .insert(conn.to_string(), (now + wait, fails, e.clone()));
+            }
+            Ok(_) => {
+                self.0.remove(conn);
+            }
+            Err(_) => {}
+        }
+    }
+}
+
 pub(crate) fn vault_err(e: VaultError) -> ProviderError {
     match e {
         VaultError::Api(crate::ApiError::NotFound(_)) => {
@@ -60,6 +96,8 @@ pub struct ConnCx {
     pub(crate) item: Option<String>,
     pub(crate) config: Value,
     pub(crate) scopes: Vec<String>,
+    /// The connection it is paired with ([`super::ConnectionProvider::pairing`]), when it was made.
+    pub(crate) paired: Option<Paired>,
     /// Not in `connections` yet (verify during connect): health reports are dropped.
     pub(crate) pending: bool,
 }
@@ -93,6 +131,12 @@ impl ConnCx {
     pub fn config_str(&self, key: &str) -> Option<&str> {
         self.config.get(key).and_then(Value::as_str)
     }
+    /// The connection this one is paired with (`config.app_connection`), as it was when this
+    /// context was made: its id, adapter and whether it is usable. A provider that attests who an
+    /// account is ([`super::ConnectionProvider::claims_self`]) may ask it.
+    pub fn paired(&self) -> Option<&Paired> {
+        self.paired.as_ref()
+    }
     /// The scopes the provider granted.
     pub fn scopes(&self) -> &[String] {
         &self.scopes
@@ -112,10 +156,16 @@ impl ConnCx {
             .item
             .as_deref()
             .ok_or_else(|| ProviderError::Config("这个连接没有凭据".into()))?;
-        self.conns
+        let now = steve_store::now();
+        if let Some(e) = self.conns.vault_wait().waiting(&self.id, now) {
+            return Err(vault_err(e));
+        }
+        let r = self
+            .conns
             .vault()
-            .with_credential(&self.ws, item, &self.id, "连接", f)
-            .map_err(vault_err)
+            .with_credential(&self.ws, item, &self.id, "连接", f);
+        self.conns.vault_wait().record(&self.id, now, &r);
+        r.map_err(vault_err)
     }
 
     /// One credential field, by key (off the runtime).
@@ -172,5 +222,45 @@ impl StartCx<'_> {
 
     pub fn connections(&self) -> &Connections {
         self.conns
+    }
+
+    /// A variable of the Hub's environment (what [`ConnectionProvider::check_config`] allows, for
+    /// example an endpoint host list).
+    ///
+    /// [`ConnectionProvider::check_config`]: super::ConnectionProvider::check_config
+    pub fn var(&self, key: &str) -> Option<String> {
+        self.conns.env(key)
+    }
+}
+
+#[cfg(test)]
+mod vault_wait_tests {
+    use super::*;
+
+    #[test]
+    fn a_locked_key_store_is_asked_again_only_after_a_growing_wait() {
+        let mut w = VaultWait::default();
+        let locked: Result<(), VaultError> = Err(VaultError::Locked);
+        assert!(w.waiting("con_1", 0).is_none());
+        w.record("con_1", 0, &locked);
+        assert_eq!(w.waiting("con_1", 1_000), Some(VaultError::Locked));
+        assert!(w.waiting("con_2", 1_000).is_none(), "per connection");
+        assert!(w.waiting("con_1", 30_000).is_none());
+        // the next failure waits twice as long, up to five minutes
+        w.record("con_1", 30_000, &locked);
+        assert!(w.waiting("con_1", 89_999).is_some());
+        assert!(w.waiting("con_1", 90_000).is_none());
+        for i in 0..20 {
+            w.record("con_1", i, &locked);
+        }
+        assert!(w.waiting("con_1", 19 + 299_999).is_some());
+        assert!(w.waiting("con_1", 19 + 300_000).is_none());
+        // a use that works clears it; other errors don't start a wait
+        w.record("con_1", 0, &Ok(()));
+        assert!(w.waiting("con_1", 1).is_none());
+        w.record("con_1", 0, &Err::<(), _>(VaultError::NotInitialized));
+        assert!(w.waiting("con_1", 1).is_none());
+        w.record("con_1", 0, &Err::<(), _>(VaultError::KeyMissing));
+        assert_eq!(w.waiting("con_1", 1), Some(VaultError::KeyMissing));
     }
 }
