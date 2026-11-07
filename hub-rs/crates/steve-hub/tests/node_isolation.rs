@@ -4,7 +4,6 @@
 mod node_harness;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use node_harness::*;
 use serde_json::json;
@@ -31,14 +30,18 @@ async fn a_node_cannot_speak_for_another() {
     fa.connect(Arc::new(RemoteSink(la.link.clone())));
     fb.connect(Arc::new(RemoteSink(lb.link.clone())));
     // A's session runs a turn on A
+    // Welcome arrives before the Hub finishes installing its side of the link. Starting
+    // the coordinator sooner can hit Offline and its five-second reconcile backoff.
+    until("A's link installed", 15, || {
+        h.fleet.remote(&a).generation() == Some(la.generation)
+    })
+    .await;
     h.session("sa");
     let rt = h.bind(&a, "sa");
-    for _ in 0..250 {
-        if h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    until("A's session ready", 15, || {
+        h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready"
+    })
+    .await;
     rt.prompt("sa", "hello", "user", &[]).unwrap();
     until("A's attempt", 5, || {
         fa.log().iter().any(|(m, _)| *m == "start_turn")
@@ -203,9 +206,15 @@ async fn a_node_cannot_replay_events_about_another() {
     let fa = FakeNode::new(a.as_str());
     let la = dial(&h, &ida, &a, fa.clone(), 1).await.unwrap();
     fa.connect(Arc::new(RemoteSink(la.link.clone())));
+    // Welcome arrives before the Hub finishes installing its side of the link. Starting
+    // the coordinator sooner can hit Offline and its five-second reconcile backoff.
+    until("A's link installed", 15, || {
+        h.fleet.remote(&a).generation() == Some(la.generation)
+    })
+    .await;
     h.session("sa");
     let rt = h.bind(&a, "sa");
-    until("A's session ready", 5, || {
+    until("A's session ready", 15, || {
         h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready"
     })
     .await;
@@ -217,6 +226,15 @@ async fn a_node_cannot_replay_events_about_another() {
     let a_op: String = h.q(&format!(
         "SELECT operation_id FROM node_commands WHERE node_id='{a}' AND method='start_turn'"
     ));
+    // FakeNode's call log precedes the Hub committing the legitimate response. Freeze
+    // that response first, so its normal arrival cannot look like B changed A's receipt.
+    until("A's receipt committed", 15, || {
+        h.q::<Option<String>>(&format!(
+            "SELECT receipt FROM node_commands WHERE operation_id='{a_op}'"
+        ))
+        .is_some()
+    })
+    .await;
     let a_receipt: Option<String> = h.q(&format!(
         "SELECT receipt FROM node_commands WHERE operation_id='{a_op}'"
     ));
