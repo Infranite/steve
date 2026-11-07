@@ -95,7 +95,20 @@ class Service:
             return
         try:
             if self.system == "Darwin":
-                owner = plistlib.loads(self.config.read_bytes()).get("EnvironmentVariables", {}).get("STEVE_HOME")
+                definition = plistlib.loads(self.config.read_bytes())
+                environment = definition.get("EnvironmentVariables", {})
+                owner = environment.get("STEVE_HOME")
+                # The original signed Hub plist predates an explicit STEVE_HOME. Its exact entry
+                # point uses $HOME/.steve by default; no other home, command or environment is
+                # evidence of that ownership. In particular Program can override argv[0].
+                legacy_script = self.home / "current/ops/run.sh"
+                if (self.component == "hub" and self.signed and not environment
+                        and self.home == (self.user_home / ".steve").resolve()
+                        and definition.get("Label") == self.label
+                        and definition.get("ProgramArguments") == ["/bin/zsh", str(legacy_script)]
+                        and not any(key in definition for key in ("Program", "RootDirectory", "UserName", "GroupName"))
+                        and legacy_script.is_file()):
+                    return
             else:
                 owner = None
                 for line in self.config.read_text().splitlines():
