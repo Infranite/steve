@@ -1,0 +1,3 @@
+- Node 上的运行现在默认放进系统沙箱（macOS 用 seatbelt，Linux 装了 bubblewrap 时用 bubblewrap），这是“每次运行都在沙箱里”的第一步。harness 自己的 shell、流程里的命令、保险箱命令和思考、研究作业都读写不了 Steve 的控制面：签名、秘密、备份、升级记录、`steve.env`、数据库、附件和邮件原件，以及 Node 自己的日志、秘密、推送暂存和身份文件；Steve 自己的程序（releases、current、web、bin、build、plugins）也改不了。工作区和其他目录照旧可用，以前只靠 Claude Code 自己的规则挡住文件工具，现在连它的 Bash 也挡住了。
+  - 自带沙箱的 harness（目前是 Codex）不再套一层，因为 macOS 不允许沙箱里再开沙箱；它照旧用自己的沙箱，控制面对它的保护在后续版本补上。
+  - Node 启动时会先试一次沙箱，系统缺少或启动不了时，运行照常进行、不加沙箱，并在日志里写明原因；`steve-hub --check-config` 也会提示。想关掉可以在 `steve.env` 里设 `STEVE_CONFINE=off`。

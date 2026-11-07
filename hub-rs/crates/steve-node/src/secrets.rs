@@ -87,6 +87,10 @@ pub(crate) fn cleanup(home: &Path) {
 pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+
     fn create(home: &Path, op: &OperationId) -> std::io::Result<TempDir> {
         use sha2::Digest as _;
         let r = root(home);

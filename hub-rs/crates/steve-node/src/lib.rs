@@ -14,6 +14,17 @@
 mod acp_job;
 mod actor;
 mod attachments;
+mod confine;
+
+/// The OS sandbox a Node with these homes and this `STEVE_CONFINE` would give its runs
+/// (`seatbelt`, `bubblewrap`), or why none: what `steve-hub --check-config` reports before a switch.
+pub fn confinement(
+    steve_home: &Path,
+    node_home: &Path,
+    mode: Option<String>,
+) -> Result<&'static str, String> {
+    confine::Confine::choose(steve_home, node_home, mode).state()
+}
 mod exec;
 pub mod git;
 pub mod history;
@@ -318,6 +329,8 @@ pub(crate) struct Inner {
     probes: history::Probes,
     imports: history::Imports,
     research: research::Research,
+    /// The OS sandbox around what this Node starts for runs ([`confine`]).
+    confine: confine::Confine,
 }
 
 impl Inner {
@@ -1285,6 +1298,11 @@ impl LocalNode {
     /// Takes the home (one Node per journal), opens the journal (a new incarnation: what was running
     /// is `unknown` now) and stops nothing: groups left by the old incarnation keep their sessions
     /// held until the Hub abandons them.
+    /// The OS sandbox this Node's runs get (`seatbelt`, `bubblewrap`), or why they get none.
+    pub fn confinement(&self) -> Result<&'static str, String> {
+        self.0.confine.state()
+    }
+
     pub fn open(cfg: NodeConfig) -> ApiResult<LocalNode> {
         std::fs::create_dir_all(&cfg.home)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
@@ -1303,7 +1321,9 @@ impl LocalNode {
             }
             Ok(())
         })?;
+        let confine = confine::Confine::open(&cfg.acp.steve_home, &cfg.home);
         Ok(LocalNode(Arc::new_cyclic(|weak| Inner {
+            confine,
             roots: std::sync::RwLock::new(Arc::new(cfg.roots.clone())),
             discovery: std::sync::RwLock::new(None),
             probes: Default::default(),
@@ -3339,6 +3359,8 @@ impl WorkspaceExecutor for LocalNode {
             secret_env: vec![],
             stdin: None,
             mask: None,
+            confined: true,
+            readable: vec![],
         };
         let refs = c.body.secrets.clone();
         let spawned = self.spawn_owned(async move {
@@ -3353,6 +3375,7 @@ impl WorkspaceExecutor for LocalNode {
                     run.stdin = given.stdin;
                     run.mask = given.mask;
                     let temp = given.temp;
+                    run.readable = temp.iter().map(|t| t.path().to_path_buf()).collect();
                     tokio::task::spawn_blocking(move || {
                         let ran = exec::run(&inner, &op2, &run);
                         // the files go once the command (and its whole group) is done

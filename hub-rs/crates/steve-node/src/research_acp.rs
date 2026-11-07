@@ -259,6 +259,7 @@ async fn prepare(
     plan: &r::AttemptPlan,
     run_id: &str,
     adapter_state: &Path,
+    confine: Option<&str>,
 ) -> std::io::Result<Prepared> {
     let dir = cfg.scratch.join(run_id);
     tokio::fs::create_dir_all(dir.join("tmp")).await?;
@@ -281,6 +282,8 @@ async fn prepare(
             r::guard::resolve(adapter_state),
         ])
         .ok_or_else(|| std::io::Error::other("unusable research sandbox path"))?;
+        // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
+        let sb = format!("{sb}{}", confine.unwrap_or_default());
         let path = dir.join("sandbox.sb");
         tokio::fs::write(&path, sb).await?;
         Some(path)
@@ -340,7 +343,16 @@ impl LocalNode {
         let started = Instant::now();
         let run_id = workspace::dir_name(exec.attempt().as_str());
         let mut out = outcome(run_id.clone(), plan.model.clone(), r::RunStatus::Done);
-        let prepared = match prepare(cfg, req, plan, &run_id, &self.0.cfg.acp.codex_home).await {
+        let prepared = match prepare(
+            cfg,
+            req,
+            plan,
+            &run_id,
+            &self.0.cfg.acp.codex_home,
+            self.0.confine.seatbelt_rules(),
+        )
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
                 out.status = r::RunStatus::Failed(format!("research ACP setup: {e}"));

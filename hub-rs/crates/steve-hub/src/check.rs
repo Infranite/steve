@@ -22,6 +22,8 @@ pub struct Report {
     pub errors: Vec<String>,
     /// `http://host:port` for every listen host, when the configuration parsed.
     pub listen: Vec<String>,
+    /// What a start allows but an operator should know: the local Node's runs go unconfined.
+    pub warnings: Vec<String>,
 }
 
 /// Every environment check of a real start, on `get` (the process environment in production).
@@ -35,6 +37,7 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
                 ok: false,
                 errors: vec![e.to_string()],
                 listen: Vec::new(),
+                warnings: Vec::new(),
             };
         }
     };
@@ -48,8 +51,20 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
             errors.push(format!("STEVE_HOME: {e}"));
         }
     }
-    if let Err(e) = crate::wire::local_node_mode(&vars, cfg.no_resume) {
-        errors.push(e.to_string());
+    let mut warnings = Vec::new();
+    match crate::wire::local_node_mode(&vars, cfg.no_resume) {
+        Err(e) => errors.push(e.to_string()),
+        // the local Node's runs in the OS sandbox (never a reason not to start)
+        Ok(true) => {
+            if let Err(why) = steve_node::confinement(
+                &cfg.home,
+                &cfg.data_dir.join("node"),
+                vars("STEVE_CONFINE"),
+            ) {
+                warnings.push(format!("STEVE_CONFINE: runs will not be sandboxed: {why}"));
+            }
+        }
+        Ok(false) => {}
     }
     if let Err(e) = crate::nodes::Ingress::from_vars(|k| vars(k)) {
         errors.push(e);
@@ -76,6 +91,7 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
         ok: errors.is_empty(),
         errors,
         listen: cfg.listen.urls().split(", ").map(str::to_string).collect(),
+        warnings,
     }
 }
 
@@ -161,6 +177,26 @@ mod tests {
         let r = run(&[("STEVE_HOST", "127.0.0.1,192.0.2.1")]);
         assert!(!r.ok);
         assert!(r.errors.iter().any(|e| e.contains("192.0.2.1")), "{r:?}");
+    }
+
+    #[test]
+    fn unconfined_runs_are_a_warning_not_a_refusal() {
+        let r = run(&[("STEVE_CONFINE", "sometimes")]);
+        assert!(r.ok, "{r:?}");
+        assert!(
+            r.warnings.iter().any(|w| w.starts_with("STEVE_CONFINE: ")),
+            "{r:?}"
+        );
+        let r = run(&[("STEVE_CONFINE", "off"), ("STEVE_NODE_MODE", "off")]);
+        assert!(
+            r.warnings.is_empty(),
+            "no local Node, no runs of its own: {r:?}"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let r = run(&[]);
+            assert!(r.warnings.is_empty(), "this Mac sandboxes the runs: {r:?}");
+        }
     }
 
     #[test]

@@ -696,3 +696,46 @@ async fn a_node_that_dies_while_a_command_runs_never_runs_it_again() {
     assert_eq!(o, Outcome::Succeeded);
     n.shutdown().await;
 }
+
+/// A command runs in the OS sandbox (path model S12, first stage): it cannot read the Hub's
+/// signing keys or the Node's journal under the homes, nor change Steve's programs; it works in its
+/// workspace as before.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_cannot_reach_the_control_plane() {
+    let t = T::new();
+    let steve = t.root.join("steve");
+    std::fs::create_dir_all(steve.join("signing")).unwrap();
+    std::fs::create_dir_all(steve.join("releases")).unwrap();
+    std::fs::write(steve.join("signing/identity.json"), "k").unwrap();
+    std::fs::write(steve.join("steve.env"), "STEVE_X=1").unwrap();
+    let n = t.node();
+    assert_eq!(n.confinement(), Ok("seatbelt"));
+    let w = workspace(&n).await;
+    let s = steve.display();
+    let journal = t.root.join("node/node.sqlite3");
+    for (i, cmd) in [
+        format!("cat {s}/signing/identity.json"),
+        format!("cat {s}/steve.env"),
+        format!("head -c1 {}", journal.display()),
+        format!("touch {s}/releases/x"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (_, r) = run(
+            &n,
+            &format!("op_c{i}"),
+            spec(&w, cmd, Duration::from_secs(10)),
+        )
+        .await;
+        assert_ne!(r.exit_code, Some(0), "{cmd}: {r:?}");
+    }
+    let (_, r) = run(
+        &n,
+        "op_ok",
+        spec(&w, "echo hi > f && cat f", Duration::from_secs(10)),
+    )
+    .await;
+    assert_eq!((r.exit_code, r.stdout.as_str()), (Some(0), "hi\n"), "{r:?}");
+}

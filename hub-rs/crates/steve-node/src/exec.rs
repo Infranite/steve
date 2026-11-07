@@ -50,6 +50,11 @@ pub(crate) struct Run {
     pub stdin: Option<Zeroizing<Vec<u8>>>,
     /// What to mask in its output: the secrets it was given, and their temp files' directory.
     pub mask: Option<Redactor>,
+    /// Runs in the OS sandbox ([`crate::confine`]): a command for a run. The Node's own work (a
+    /// push from its throwaway repository) does not.
+    pub confined: bool,
+    /// What it may read although the sandbox hides it: its secret files' directory.
+    pub readable: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,14 +83,23 @@ pub(crate) fn run(inner: &Arc<crate::Inner>, op: &OperationId, r: &Run) -> Resul
     if inner.closed.load(Ordering::SeqCst) {
         return Err("node shutting down".into());
     }
-    let mut cmd = Command::new("/bin/sh");
     // `read` takes the go line a byte at a time, so a secret written after it is the command's stdin
     let wrapper = if r.stdin.is_some() {
         "IFS= read -r go || exit 125; exec /bin/sh -c \"$1\""
     } else {
         "IFS= read -r go || exit 125; exec /bin/sh -c \"$1\" </dev/null"
     };
-    cmd.args(["-c", wrapper, "steve-exec", &r.command])
+    let args: Vec<std::ffi::OsString> = ["-c", wrapper, "steve-exec", &r.command]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let (program, args) = if r.confined {
+        inner.confine.wrap("/bin/sh".into(), args, &r.readable)
+    } else {
+        ("/bin/sh".into(), args)
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .current_dir(&r.dir)
         .process_group(0)
         .stdin(Stdio::piped())

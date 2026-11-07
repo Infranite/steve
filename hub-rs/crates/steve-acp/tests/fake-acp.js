@@ -55,7 +55,7 @@ let toolN = 0
 async function turn(text) {
   const n = (failures.get(text) ?? 0) + 1; failures.set(text, n)
   const out = { stopReason: "end_turn" }
-  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|run|codexperm|fsread)\b([^@\n]*)/g)) {
+  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|run|codexperm|fsread|cat)\b([^@\n]*)/g)) {
     const a = arg.trim()
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
@@ -110,6 +110,7 @@ async function turn(text) {
         toolCall: { toolCallId: "cx-" + n, title: "Approve MCP tool call", rawInput: { server_name: "steve", request: { message: `Allow the steve MCP server to run tool "${a}"?`, _meta: { codex_approval_kind: "mcp_tool_call" } } } } })
       say(`perm:${r.outcome.outcome}:${r.outcome.optionId ?? ""}`)
     }
+    if (cmd === "cat") { try { readFileSync(a); say(`cat:ok `) } catch (e) { say(`cat:${e.code} `) } }
     if (cmd === "fsread") { const r = await ask("fs/read_text_file", { sessionId: sid, path: "/etc/hosts" }); say(`fs:${r.error?.code}:${r.error?.message}`) }
   }
   return out

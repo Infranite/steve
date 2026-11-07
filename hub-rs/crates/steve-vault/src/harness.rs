@@ -122,6 +122,139 @@ pub fn codex_deny_filesystem(steve_home: &Path) -> String {
     format!("{{{}}}", entries.join(","))
 }
 
+/// The parts of a Node's own home (its journal, and the secrets, pushes and attachments it keeps
+/// for runs) no run reads, relative to it. For the Hub's local Node they are also in [`PROTECTED`].
+pub const NODE_PROTECTED: [&str; 4] = ["node.sqlite3*", "secrets/", "push/", "blobs/"];
+
+/// A remote Node's own files, relative to its `$STEVE_HOME` (`~/.steve-node`): its identity, its
+/// pairing and its owner's policy, roots and harness settings.
+pub const NODE_FILES: [&str; 5] = [
+    "node/identity.key",
+    "node/node.json",
+    "policy.json",
+    "roots.json",
+    "harness.json",
+];
+
+/// Steve's own programs and their builds under `STEVE_HOME`: a run may read them, never change
+/// them (a run that could replace the Hub's binary would run as the Hub next time).
+pub const SEALED: [&str; 6] = ["releases/", "current", "web/", "bin/", "build/", "plugins/"];
+
+/// One SBPL path filter for `entry` under `root`: a trailing `/` is the directory, a trailing `*`
+/// a name prefix (a regex), else the one path. `None`: a path SBPL could not quote safely.
+fn sbpl_filter(root: &str, entry: &str) -> Option<Vec<String>> {
+    if root
+        .chars()
+        .any(|c| c == '"' || c == '\\' || c.is_control())
+    {
+        return None;
+    }
+    Some(if let Some(dir) = entry.strip_suffix('/') {
+        vec![format!("(subpath \"{root}/{dir}\")")]
+    } else if let Some(prefix) = entry.strip_suffix('*') {
+        let mut re = String::from("^");
+        for c in format!("{root}/{prefix}").chars() {
+            if ".^$|?*+()[]{}".contains(c) {
+                re.push('\\');
+            }
+            re.push(c);
+        }
+        vec![format!("(regex #\"{re}\")")]
+    } else {
+        // the path itself (a symlink such as `current` is renamed or removed by its own name) and,
+        // when it is a directory, what is under it
+        vec![
+            format!("(literal \"{root}/{entry}\")"),
+            format!("(subpath \"{root}/{entry}\")"),
+        ]
+    })
+}
+
+/// `root` as given and, when it differs, with symlinks resolved (the sandbox sees real paths).
+fn roots_of(root: &Path) -> Vec<String> {
+    let mut out = vec![root.to_string_lossy().trim_end_matches('/').to_string()];
+    let r = real(root)
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    if r != out[0] {
+        out.push(r);
+    }
+    out
+}
+
+/// The control plane as seatbelt (macOS `sandbox-exec`) rules, for any process a Node starts for a
+/// run: [`PROTECTED`] and [`NODE_FILES`] under `steve_home` and [`NODE_PROTECTED`] under `node_home`
+/// can be neither read nor written, and [`SEALED`] under `steve_home` not written. They go after a
+/// profile's own rules, so they win over its allows. `None`: a path SBPL cannot quote.
+pub fn seatbelt_rules(steve_home: &Path, node_home: &Path) -> Option<String> {
+    let mut hidden = Vec::new();
+    let mut sealed = Vec::new();
+    for root in roots_of(steve_home) {
+        for e in PROTECTED.iter().chain(NODE_FILES.iter()) {
+            hidden.extend(sbpl_filter(&root, e)?);
+        }
+        for e in SEALED {
+            sealed.extend(sbpl_filter(&root, e)?);
+        }
+    }
+    for root in roots_of(node_home) {
+        for e in NODE_PROTECTED {
+            hidden.extend(sbpl_filter(&root, e)?);
+        }
+    }
+    Some(format!(
+        "(deny file-read* file-write*\n  {})\n(deny file-write*\n  {})\n",
+        hidden.join("\n  "),
+        sealed.join("\n  ")
+    ))
+}
+
+/// The paths bubblewrap (Linux `bwrap`) hides or seals for the same rules as [`seatbelt_rules`]: a
+/// name prefix is expanded to what exists now. `(hidden, sealed)`, each existing and absolute.
+pub fn bwrap_paths(steve_home: &Path, node_home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    fn expand(root: &Path, entry: &str, out: &mut Vec<PathBuf>) {
+        let entry = entry.trim_end_matches('/');
+        match entry.strip_suffix('*') {
+            Some(prefix) => {
+                let (dir, name) = match prefix.rsplit_once('/') {
+                    Some((d, n)) => (root.join(d), n.to_string()),
+                    None => (root.to_path_buf(), prefix.to_string()),
+                };
+                if let Ok(rd) = std::fs::read_dir(&dir) {
+                    for e in rd.flatten() {
+                        if e.file_name().to_string_lossy().starts_with(&name) {
+                            out.push(e.path());
+                        }
+                    }
+                }
+            }
+            None => {
+                let p = root.join(entry);
+                if std::fs::symlink_metadata(&p).is_ok() {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    let (sh, nh) = (real(steve_home), real(node_home));
+    let (mut hidden, mut sealed) = (Vec::new(), Vec::new());
+    for e in PROTECTED.iter().chain(NODE_FILES.iter()) {
+        expand(&sh, e, &mut hidden);
+    }
+    for e in NODE_PROTECTED {
+        expand(&nh, e, &mut hidden);
+    }
+    for e in SEALED {
+        expand(&sh, e, &mut sealed);
+    }
+    hidden.sort();
+    hidden.dedup();
+    sealed.sort();
+    sealed.dedup();
+    (hidden, sealed)
+}
+
 /// A TOML basic string.
 fn toml_str(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 2);
@@ -229,6 +362,118 @@ mod tests {
         assert!(rules.contains(&format!("Read(/{}/signing/**)", link.display())));
         assert!(rules.contains(&format!("Read(/{}/signing/**)", real.display())));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn seatbelt_rules_hide_the_control_plane_and_seal_the_programs() {
+        let r = seatbelt_rules(
+            Path::new("/nonexistent-steve-home/.steve"),
+            Path::new("/nonexistent-node-home"),
+        )
+        .unwrap();
+        let (hidden, sealed) = r.split_once("(deny file-write*\n").unwrap();
+        assert!(hidden.starts_with("(deny file-read* file-write*"));
+        assert!(hidden.contains(r#"(subpath "/nonexistent-steve-home/.steve/signing")"#));
+        assert!(hidden.contains(r#"(regex #"^/nonexistent-steve-home/\.steve/steve\.env")"#));
+        assert!(hidden.contains(r#"(literal "/nonexistent-steve-home/.steve/node/identity.key")"#));
+        assert!(hidden.contains(r#"(subpath "/nonexistent-node-home/secrets")"#));
+        assert!(hidden.contains(r#"(regex #"^/nonexistent-node-home/node\.sqlite3")"#));
+        assert!(sealed.contains(r#"(subpath "/nonexistent-steve-home/.steve/releases")"#));
+        assert!(sealed.contains(r#"(literal "/nonexistent-steve-home/.steve/current")"#));
+        for own in ["worktrees", "scratch", "jobs", "codex"] {
+            assert!(
+                !r.contains(own),
+                "{own}: the runs' own directories stay open"
+            );
+        }
+        assert!(seatbelt_rules(Path::new("/a\"b"), Path::new("/n")).is_none());
+    }
+
+    /// The rules as a real `sandbox-exec` applies them: the control plane is unreadable and
+    /// unwritable, the programs are readable and unwritable, the runs' own directories are open.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_rules_hold_under_sandbox_exec() {
+        let t = std::env::temp_dir().join(format!("steve-confine-{}", std::process::id()));
+        let home = t.join("home");
+        let node = home.join("data/node");
+        for d in [
+            "signing",
+            "releases/0.1",
+            "worktrees/ST-1",
+            "data/node/secrets",
+            "data/node/jobs",
+        ] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        for f in [
+            "signing/k",
+            "steve.env",
+            "steve.env.bak",
+            "releases/0.1/steve-hub",
+            "worktrees/ST-1/a",
+            "data/node/secrets/s",
+            "data/node/node.sqlite3",
+        ] {
+            std::fs::write(home.join(f), "x").unwrap();
+        }
+        let profile = format!(
+            "(version 1)\n(allow default)\n{}",
+            seatbelt_rules(&home, &node).unwrap()
+        );
+        let sh = |cmd: &str| {
+            std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, "/bin/sh", "-c", cmd])
+                .current_dir(&t)
+                .status()
+                .unwrap()
+                .success()
+        };
+        let h = home.display();
+        for denied in [
+            format!("cat {h}/signing/k"),
+            format!("cat {h}/steve.env"),
+            format!("cat {h}/steve.env.bak"),
+            format!("ls {h}/signing"),
+            format!("cat {h}/data/node/secrets/s"),
+            format!("cat {h}/data/node/node.sqlite3"),
+            format!("echo y > {h}/releases/0.1/steve-hub"),
+            format!("echo y > {h}/signing/new"),
+            format!("rm {h}/releases/0.1/steve-hub"),
+        ] {
+            assert!(!sh(&denied), "allowed: {denied}");
+        }
+        for allowed in [
+            format!("cat {h}/releases/0.1/steve-hub"),
+            format!("cat {h}/worktrees/ST-1/a"),
+            format!("echo y > {h}/worktrees/ST-1/b"),
+            format!("echo y > {h}/data/node/jobs/j"),
+        ] {
+            assert!(sh(&allowed), "denied: {allowed}");
+        }
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn bwrap_paths_are_what_exists() {
+        let t = std::env::temp_dir().join(format!("steve-bwrap-{}", std::process::id()));
+        let home = t.join("home");
+        std::fs::create_dir_all(home.join("signing")).unwrap();
+        std::fs::create_dir_all(home.join("releases")).unwrap();
+        std::fs::write(home.join("steve.env"), "").unwrap();
+        std::fs::write(home.join("steve.env.bak"), "").unwrap();
+        let (hidden, sealed) = bwrap_paths(&home, &home.join("data/node"));
+        let real = std::fs::canonicalize(&home).unwrap();
+        assert_eq!(
+            hidden,
+            vec![
+                real.join("signing"),
+                real.join("steve.env"),
+                real.join("steve.env.bak")
+            ]
+        );
+        assert_eq!(sealed, vec![real.join("releases")]);
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]

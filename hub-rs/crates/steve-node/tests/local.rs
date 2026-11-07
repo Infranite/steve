@@ -4059,3 +4059,30 @@ async fn claude_code_is_told_to_deny_the_hubs_secret_files() {
     // the workspace stays the agent's
     assert!(!deny.iter().any(|r| r.contains("/work")), "{deny:?}");
 }
+
+/// A session's harness runs in the OS sandbox (path model S12, first stage): what it reads with
+/// its own code (not through the Hub) cannot reach the Hub's keys or the Node's journal, while its
+/// workspace stays open.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_harness_cannot_read_the_control_plane() {
+    let t = T::new(&[]);
+    let steve = t.root.join("steve");
+    std::fs::create_dir_all(steve.join("signing")).unwrap();
+    std::fs::write(steve.join("signing/identity.json"), "k").unwrap();
+    let n = t.node();
+    assert_eq!(n.confinement(), Ok("seatbelt"));
+    ready(&n, "s_1").await;
+    let text = format!(
+        "@cat {}/signing/identity.json @cat {}/node.sqlite3 @cat {}/work/proj/README",
+        steve.display(),
+        t.home.display(),
+        t.root.display()
+    );
+    std::fs::write(t.root.join("work/proj/README"), "r").unwrap();
+    n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", &text)))
+        .await
+        .unwrap();
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    assert_eq!(t.text(), "cat:EPERM cat:EPERM cat:ok ", "{:?}", t.ended());
+}
