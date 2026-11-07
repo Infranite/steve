@@ -94,7 +94,7 @@ export function PairDialog() {
         <Button disabled={busy || !!pairing && now < pairing.expires} onClick={() => void act(async () => { setPairing(await api.createPairing()) })}>{t("shell:devices.createCode")}</Button>
         {pairing && <div className="rounded-xl border p-4 space-y-2 type-callout">
           {now < pairing.expires ? <><p>{t("shell:devices.codeExpires", { time: new Date(pairing.expires).toLocaleTimeString() })}</p><code className="block break-all select-all">{pairing.code}</code></> : <p>{t("shell:devices.codeExpired")}</p>}
-          <p>{t("shell:devices.hubPin")}</p><code className="block break-all select-all">{pairing.pin}</code>
+          {pairing.pin && <><p>{t("shell:devices.hubPin")}</p><code className="block break-all select-all">{pairing.pin}</code></>}
           <p>{t("shell:devices.pairCommand")}</p><code className="block break-all select-all">steve-node pair {window.location.origin}</code>
         </div>}
         <Button variant="outline" disabled={busy} onClick={() => void act(reload)}><RefreshCwIcon />{t("shell:devices.refreshNodes")}</Button>
