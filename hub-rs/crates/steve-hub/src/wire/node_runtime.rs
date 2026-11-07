@@ -773,6 +773,15 @@ impl NodeRuntime {
                 None
             };
             super::principal::record_in(tx, &b.session, owner.as_deref())?;
+            // and what it would be given under the path model, in shadow (S2): the local Node's
+            // roots are the Hub's to list, a remote Node's are its own
+            let today = if self.is_remote() {
+                None
+            } else {
+                let (rw, ro) = super::node_binding::root_paths_in(tx)?;
+                Some(rw.into_iter().chain(ro).collect::<Vec<_>>())
+            };
+            super::view::record_in(tx, &b.session, self.node_id.as_str(), today.as_deref())?;
             let (prep, prep_d) = command(
                 &format!("op_prep_{}", b.session),
                 Prepare {

@@ -418,6 +418,26 @@ pub(crate) fn node_takes(
     Ok(remote_refusal(c, node, workspace)?.is_none())
 }
 
+/// The directories [`roots`] gives the local Node, before the configured ones: every workspace's
+/// projects, session and item directories (read-write) and knowledge folders (read-only).
+pub(crate) fn root_paths_in(
+    c: &rusqlite::Connection,
+) -> Result<(Vec<String>, Vec<String>), StoreError> {
+    let mut q = c.prepare("SELECT path FROM projects WHERE archived=0 AND device_id='hub'
+         UNION SELECT s.cwd FROM sessions s LEFT JOIN items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=i.project_id
+          WHERE s.status<>'ended' AND s.readonly=0 AND s.source='Steve' AND s.device_id='hub' AND (p.id IS NULL OR p.archived=0)
+         UNION SELECT i.cwd FROM items i LEFT JOIN projects p ON p.id=i.project_id
+          WHERE i.cwd IS NOT NULL AND (p.id IS NULL OR p.archived=0)")?;
+    let rw = q
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut q = c.prepare("SELECT json_extract(config,'$.path') FROM kb_sources WHERE kind='folder' AND json_type(config,'$.path')='text'")?;
+    let ro = q
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((rw, ro))
+}
+
 /// The local Node's allowlist: explicit configured roots (`extra`: the scratch and worktree
 /// directories) plus project and local session directories, read-write, and knowledge folders,
 /// read-only. No filesystem traversal and never `/`. A path that is both stays read-write. Built at
@@ -425,17 +445,7 @@ pub(crate) fn node_takes(
 /// project added after boot binds without a restart and an archived one is refused (with the
 /// directories of its items and their sessions).
 pub(crate) fn roots(store: &Store, extra: &[PathBuf]) -> Result<Vec<steve_node::Root>, StoreError> {
-    let (rw, ro) = store.reader(|c| {
-        let mut q = c.prepare("SELECT path FROM projects WHERE archived=0 AND device_id='hub'
-             UNION SELECT s.cwd FROM sessions s LEFT JOIN items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=i.project_id
-              WHERE s.status<>'ended' AND s.readonly=0 AND s.source='Steve' AND s.device_id='hub' AND (p.id IS NULL OR p.archived=0)
-             UNION SELECT i.cwd FROM items i LEFT JOIN projects p ON p.id=i.project_id
-              WHERE i.cwd IS NOT NULL AND (p.id IS NULL OR p.archived=0)")?;
-        let rw = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        let mut q = c.prepare("SELECT json_extract(config,'$.path') FROM kb_sources WHERE kind='folder' AND json_type(config,'$.path')='text'")?;
-        let ro = q.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        Ok::<_, StoreError>((rw, ro))
-    })?;
+    let (rw, ro) = store.reader(|c| root_paths_in(c))?;
     let mut rw: Vec<PathBuf> = rw.into_iter().map(PathBuf::from).collect();
     rw.extend(extra.iter().cloned());
     rw.sort();

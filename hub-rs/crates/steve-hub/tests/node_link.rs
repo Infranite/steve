@@ -427,6 +427,19 @@ async fn a_remote_node_takes_only_its_owners_work() {
         (p.as_str(), a.as_str()),
         ("svc:default", r#"["workspace:default"]"#)
     );
+    // and its view in shadow (S2); a remote Node's own roots are not known to the Hub
+    let (digest, extra): (String, Option<i64>) = h
+        .store
+        .reader(|c| {
+            Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT v.digest, v.extra_count FROM view_shadow v JOIN runtime_sessions r
+                  ON r.session_id=v.session_id AND r.view_digest=v.digest WHERE v.session_id='s1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!((digest.len(), extra), (64, None));
     let member = |on: bool| {
         h.store
             .transaction::<_, steve_store::StoreError>(|tx| {

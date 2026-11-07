@@ -29,6 +29,7 @@ pub mod research_mcp;
 pub mod signals;
 pub mod store;
 pub mod tool_service;
+pub mod view;
 pub mod workspaces;
 
 use std::sync::Arc;
