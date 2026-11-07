@@ -318,28 +318,27 @@ fn text_result(id: &Value, out: Result<String, String>) -> Response {
     }
 }
 
-/// Runs research tool `name` for thread run `run` (`owner`: the workspace owner, whose view the
-/// owner's own conversation reads with): the text the harness reads, or its error.
-async fn run_tool(
+/// The same read-only allowlist for HTTP MCP and authenticated Node research jobs.
+/// Callers establish the live run identity; audience checks are repeated inside every tool.
+pub async fn call(
     x: &Extra,
-    run: ThreadRun,
+    run: &ThreadRun,
     name: &str,
     args: &Value,
-    owner: String,
+    owner: &str,
 ) -> Result<String, String> {
     let ws = run.workspace_id.clone();
     match name {
         steve_knowledge::tools::SEARCH | steve_knowledge::tools::READ => {
-            // a user's view only when only the owner reads the answer; with anyone else
-            // listening, what the whole workspace may see (no one's private knowledge)
+            // A user's view only when only the owner reads the answer.
             let (store, origin) = (x.store.clone(), run.message_id.clone());
             let own = tokio::task::spawn_blocking(move || own_reader(&store, &origin))
                 .await
-                .unwrap_or_else(|e| Err(e.to_string()));
-            let user = match own {
-                Ok(true) => run.user_id.clone().unwrap_or(owner),
-                Ok(false) => String::new(),
-                Err(e) => return Err(e),
+                .map_err(|e| e.to_string())??;
+            let user = if own {
+                run.user_id.clone().unwrap_or_else(|| owner.into())
+            } else {
+                String::new()
             };
             let cx = steve_modules::contacts::mcp::McpCx {
                 ws,
@@ -418,7 +417,7 @@ pub async fn call_tool(
         .ok()
         .flatten()
         .unwrap_or_default();
-    run_tool(x, run, name, &args, owner).await
+    call(x, &run, name, &args, &owner).await
 }
 
 /// One JSON-RPC message from a research run.
@@ -449,7 +448,7 @@ pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Res
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let out = run_tool(x, run, &name, &args, owner).await;
+            let out = call(x, &run, &name, &args, &owner).await;
             text_result(&id, out)
         }
         _ => (

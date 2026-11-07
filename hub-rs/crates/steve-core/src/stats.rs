@@ -165,6 +165,10 @@ impl ModelGateway for RecordingGateway {
         tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
+        // Background callers share the durable upgrade gate with conversations. Keep one
+        // permit across every fallback so maintenance cannot seal between model attempts;
+        // an already-admitted conversation may still finish its nested calls.
+        let _activity = self.store.activity("model").await;
         let a = self
             .inner
             .attempt(prompt, tier, timeout, tools, on_text)

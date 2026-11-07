@@ -142,6 +142,63 @@ impl T {
     }
 }
 
+/// Maintenance may begin after a background YOLO worker was admitted but before its
+/// synchronous decision reaches the async model gateway. That nested call must still finish.
+#[test]
+fn an_admitted_yolo_worker_can_finish_its_model_call_during_maintenance() {
+    for from_tick in [false, true] {
+        let t = t();
+        let (item, sid, _) = t.item();
+        let d = t.card(
+            &item,
+            &sid,
+            "ask",
+            "question",
+            "用 A 还是 B？",
+            "推荐：A\n理由：更简单",
+            &["A", "B"],
+        );
+        let store = t.kit.db().store().clone();
+        let probe = store.clone();
+        t.kit.gw.set(move |_, _| {
+            let worker = if from_tick { "yolo_tick" } else { "yolo" };
+            assert_eq!(probe.activities().get(worker), Some(&1));
+            // Flip the durable gate at the model boundary, after the worker owns its permit.
+            probe.maintenance_set(true).unwrap();
+            let _model = probe
+                .try_activity("model")
+                .expect("the admitted worker's nested model must not wait for itself");
+            assert!(!probe.maintenance_seal(), "the worker is still finishing");
+            Ok(json!({
+                "act": "answer",
+                "answer": "用 A",
+                "option": "A",
+                "confidence": 0.95,
+                "reason": "推荐更简单",
+                "assumptions": []
+            })
+            .to_string())
+        });
+        if from_tick {
+            let actions = t.engine.tick();
+            assert!(
+                actions.iter().any(|a| a.decision_id.as_deref() == Some(d.as_str())
+                    && a.outcome == "decided"),
+                "{actions:?}"
+            );
+        } else {
+            assert_eq!(t.engine.kick(&d).unwrap().outcome, "decided");
+        }
+        assert_eq!(t.decision(&d).status, "resolved");
+        assert_eq!(t.kit.gw.calls.lock().unwrap().len(), 1);
+        assert!(store.activities().is_empty());
+        assert!(
+            store.maintenance_seal(),
+            "the completed worker releases admission"
+        );
+    }
+}
+
 #[test]
 fn a_tool_call_inside_the_worktree_is_allowed_once_and_recorded() {
     let t = t();
