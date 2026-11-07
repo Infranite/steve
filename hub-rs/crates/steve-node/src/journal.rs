@@ -1,4 +1,4 @@
-//! The Node's execution journal (docs/node-protocol.md §4): what it accepted, what it reported and
+//! The Node's execution journal: what it accepted, what it reported and
 //! where its streams stand, on disk. No business truth: the Hub keeps items, queues and decisions.
 //!
 //! Every change is one SQLite transaction ([`Journal::tx`]): a command with its state and the events
