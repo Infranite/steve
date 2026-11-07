@@ -1,9 +1,10 @@
 import { useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
+import { DependencyWaitPanel } from "../../src/dependency-wait-panel"
 import { WorkflowPanel } from "../../src/workflow-panel"
 import type { Workflow, WorkflowUnit } from "../../src/workflow"
-import { api, type RItemDetail } from "../../src/api"
+import { api, type RItemDetail, type DependencyWait } from "../../src/api"
 import { setLang } from "../../src/i18n"
 
 setLang("zh-CN")
@@ -27,6 +28,25 @@ const initial: Workflow = {
 
 function Fixture() {
   const [workflow, setWorkflow] = useState(initial)
+  const query = new URLSearchParams(location.search)
+  const [wait, setWait] = useState<DependencyWait>({
+    item_id: "ST-60", status: "block", phase: "active", cycle: 11,
+    dependencies: [{ id: "ST-59", status: "run", phase: "active" }], open_dependencies: ["ST-59"],
+    resume_mode: "automatic", resume_source: "workspace", resume_override: "workspace",
+    resume_enabled: !query.has("held"), resume_blocker: query.has("held") ? "实例暂时暂停调度" : null,
+    resume_fallback_reason: null, waiting: false, wait_state: null, reason: null, active_turn: false,
+    can_register: true, register_blocker: null,
+  })
+  api.saveDependencyWait = async (_id, args) => {
+    ;(window as any).__waitChanges ??= []
+    ;(window as any).__waitChanges.push(args)
+    if (query.has("stale")) throw new Error("事项已进入另一轮，请刷新后再设置等待")
+    const next: DependencyWait = { ...wait, waiting: true, wait_state: "waiting", reason: args.reason,
+      resume_override: args.resume, resume_source: args.resume === "workspace" ? "workspace" : "item",
+      resume_mode: args.resume === "notify" ? "notify" : "automatic" }
+    setWait(next)
+    return next
+  }
   // The panel refreshes after an action. Keep fixture interactions off every real Hub.
   api.item = async () => ({} as RItemDetail)
   api.workflowChange = async (_id, args) => {
@@ -40,6 +60,7 @@ function Fixture() {
     setWorkflow(next)
     return next
   }
+  if (query.has("wait")) return <main className="mx-auto max-w-3xl p-5"><DependencyWaitPanel item="ST-60" wait={wait} /></main>
   return <main className="mx-auto max-w-3xl p-5"><WorkflowPanel item="ST-60" workflow={workflow} /></main>
 }
 createRoot(document.getElementById("root")!).render(<Fixture />)

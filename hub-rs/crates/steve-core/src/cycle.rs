@@ -823,7 +823,7 @@ impl Tx<'_> {
             if !crate::lifecycle::deps_open(self.db(), item_id)?.is_empty() {
                 self.db().item_patch(
                     item_id,
-                    crate::patch![status: "block", now: "等前置事项完成后自动开始"],
+                    crate::patch![status: "block", now: "等待前置事项完成"],
                 )?;
             } else {
                 self.ensure_cwd(item_id)?;

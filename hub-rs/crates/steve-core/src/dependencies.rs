@@ -4,13 +4,51 @@ use serde_json::{Value, json};
 
 use crate::cycle::{ACTIVE, conflict};
 use crate::lifecycle::deps_open;
-use crate::repo::Session;
+use crate::repo::{Item, Session};
 use crate::{Core, Result, Tx};
 
 impl Core {
     pub fn tool_item_dependencies(&self, session: &Session, args: Value) -> Result<Value> {
+        self.tx().tool_item_dependencies(session, args)
+    }
+
+    pub fn dependency_get(&self, item: &str) -> Result<Value> {
+        self.tx().dependency_view(item)
+    }
+
+    /// An item-page action: resolve the current session on the server without a separate agent
+    /// turn to register the policy. The same transaction checks the cycle and agent gates.
+    pub fn dependency_wait(
+        &self,
+        item: &str,
+        expected_cycle: i64,
+        resume: &str,
+        reason: &str,
+    ) -> Result<Value> {
         let mut t = self.tx();
+        let i = t.item(item)?;
+        if i.cycle != expected_cycle {
+            return Err(conflict("事项已进入另一轮，请刷新后再设置等待"));
+        }
         let s = t
+            .dependency_session(item)?
+            .ok_or_else(|| conflict("没有当前有效事项会话，不能登记持久等待"))?;
+        let deps = t.db().deps_of(item)?;
+        if deps.is_empty() {
+            return Err(conflict("请先添加前置事项"));
+        }
+        t.tool_item_dependencies(
+            &s,
+            json!({
+                "action":"wait", "deps":deps, "resume":resume, "reason":reason,
+            }),
+        )
+    }
+}
+
+impl Tx<'_> {
+    fn tool_item_dependencies(&mut self, session: &Session, args: Value) -> Result<Value> {
+        let s = self
             .db()
             .session(&session.id)?
             .filter(|s| {
@@ -24,44 +62,36 @@ impl Core {
             .item_id
             .as_deref()
             .ok_or_else(|| conflict("需要事项会话"))?;
-        let item = t.item(id)?;
+        let item = self.item(id)?;
         let bot = s
             .bot_id
             .as_deref()
-            .map(|id| t.db().bot(id))
+            .map(|id| self.db().bot(id))
             .transpose()?
             .flatten();
         if item.workspace_id != s.workspace_id
             || item.bot_id != s.bot_id
             || bot.is_none_or(|b| !b.enabled)
-            || !t
+            || !self
                 .db()
                 .bot_in_workspace(s.bot_id.as_deref().unwrap_or(""), &s.workspace_id)?
-            || t.dependency_session(id)?
+            || self
+                .dependency_session(id)?
                 .is_none_or(|latest| latest.id != s.id)
         {
             return Err(conflict("只有事项当前负责人和有效会话可以操作前置等待"));
         }
-        if t.workflow_child(&item)? {
+        if self.workflow_child(&item)? {
             return Err(conflict(
                 "工作单元不能修改事项依赖，请向主事项负责人报告阻塞",
             ));
         }
         let action = args["action"].as_str().unwrap_or("get");
         match action {
-            "get" => t.dependency_view(id),
+            "get" => self.dependency_view(id),
             "wait" => {
-                if item.phase != ACTIVE || item.archived {
-                    return Err(conflict("事项已结束或正在结束，不能登记前置等待"));
-                }
-                if let Some(graph) = t.db().store().workflows().get(id)? {
-                    for unit in &graph.units {
-                        if t.workflow_busy(unit)? {
-                            return Err(conflict(
-                                "协作工作仍在执行或停止尚未确认，请先暂停工作图并确认停止后再登记前置等待",
-                            ));
-                        }
-                    }
+                if let Some(why) = self.dependency_registration_blocker(&item, Some(&s))? {
+                    return Err(conflict(why));
                 }
                 let deps: Vec<String> = serde_json::from_value(args["deps"].clone())
                     .map_err(|_| conflict("deps 必须是前置事项编号数组"))?;
@@ -73,11 +103,11 @@ impl Core {
                 if !["automatic", "notify", "workspace"].contains(&resume) {
                     return Err(conflict("无效的前置完成后续跑方式"));
                 }
-                t.db()
+                self.db()
                     .store()
                     .dependency_waits()
                     .register(id, &s.id, &deps, resume, reason)?;
-                t.diagnostic_session(
+                self.diagnostic_session(
                     &s.id,
                     None,
                     "dependency.wait_registered",
@@ -86,21 +116,66 @@ impl Core {
                     Default::default(),
                 );
                 // If this call arrives outside a busy turn, no turn-end callback is needed to wake.
-                t.check_blocked(id)?;
-                let mut view = t.dependency_view(id)?;
+                self.check_blocked(id)?;
+                let mut view = self.dependency_view(id)?;
                 view["end_turn"] = json!(view["waiting"] == true);
                 Ok(view)
             }
             _ => Err(conflict("只支持 get 或 wait")),
         }
     }
-}
 
-impl Tx<'_> {
     fn dependency_session(&self, id: &str) -> Result<Option<Session>> {
         Ok(self.db().sessions_of_item(id)?.into_iter().rfind(|s| {
             s.status != "ended" && s.readonly == 0 && s.source == "Steve" && s.device_id == "hub"
         }))
+    }
+
+    /// The item page and the authenticated tool explain the same registration gate. This is
+    /// separate from execution readiness: saving a policy never authorizes an isolated run.
+    fn dependency_registration_blocker(
+        &self,
+        item: &Item,
+        session: Option<&Session>,
+    ) -> Result<Option<&'static str>> {
+        if item.phase != ACTIVE || item.archived {
+            return Ok(Some("事项已结束或正在结束，不能登记前置等待"));
+        }
+        if self.workflow_child(item)? {
+            return Ok(Some("请由主事项负责人管理前置等待"));
+        }
+        let bot = item
+            .bot_id
+            .as_deref()
+            .map(|id| self.db().bot(id))
+            .transpose()?
+            .flatten();
+        if session.is_none_or(|s| s.bot_id != item.bot_id || s.workspace_id != item.workspace_id)
+            || bot.is_none_or(|b| !b.enabled)
+            || !self
+                .db()
+                .bot_in_workspace(item.bot_id.as_deref().unwrap_or(""), &item.workspace_id)?
+        {
+            return Ok(Some("没有当前负责人可续跑的有效会话"));
+        }
+        if let Some(graph) = self.db().store().workflows().get(&item.id)? {
+            for unit in &graph.units {
+                if self.workflow_busy(unit)? {
+                    return Ok(Some(
+                        "协作工作仍在执行或停止尚未确认，请先暂停工作图并确认停止后再登记前置等待",
+                    ));
+                }
+            }
+        }
+        if self
+            .db()
+            .decisions_of_item(&item.id)?
+            .iter()
+            .any(|d| d.status == "open" && !matches!(d.kind.as_str(), "ask" | "fail"))
+        {
+            return Ok(Some("事项还有验收或授权待处理，不能改为前置等待"));
+        }
+        Ok(None)
     }
     pub(crate) fn dependency_view(&self, id: &str) -> Result<Value> {
         let item = self.item(id)?;
@@ -137,6 +212,14 @@ impl Tx<'_> {
             Some(s) => self.busy(&s.id) || self.rt().uncertain(&s.id),
             None => false,
         };
+        // Registration is a management action. It does not establish that the Node can execute
+        // collaboration, and missing registration still retains the workspace's legacy policy.
+        let session = self.dependency_session(id)?;
+        let register_blocker = if dependencies.is_empty() {
+            Some("请先添加前置事项")
+        } else {
+            self.dependency_registration_blocker(&item, session.as_ref())?
+        };
         Ok(json!({
             "item_id":id,"status":item.status,"phase":item.phase,"cycle":item.cycle,
             "dependencies":dependencies,"open_dependencies":deps_open(self.db(),id)?,
@@ -150,6 +233,7 @@ impl Tx<'_> {
             "waiting":wait.as_ref().is_some_and(|w|w.state=="waiting"),
             "wait_state":wait.as_ref().map(|w|&w.state),
             "reason":wait.as_ref().map(|w|&w.reason),"active_turn":busy,
+            "can_register":register_blocker.is_none(),"register_blocker":register_blocker,
         }))
     }
 
