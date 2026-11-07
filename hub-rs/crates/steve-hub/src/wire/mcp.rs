@@ -1,4 +1,4 @@
-//! steve-mcp's [`Backend`](steve_mcp::Backend): sessions by bearer token from steve-store; the five tools
+//! steve-mcp's [`Backend`](steve_mcp::Backend): sessions by bearer token from steve-store; the Steve tools
 //! are steve-core operations and answer an error until the core is wired.
 
 use steve_mcp::{Check, Output, PlanStep, ToolError};
@@ -64,5 +64,8 @@ impl steve_mcp::Backend for McpBackend {
         _summary: String,
     ) -> Result<(), ToolError> {
         not_wired("steve_publish")
+    }
+    async fn lane_status(&self, _s: &Session) -> Result<String, ToolError> {
+        not_wired("steve_lane_status").map(|_| String::new())
     }
 }

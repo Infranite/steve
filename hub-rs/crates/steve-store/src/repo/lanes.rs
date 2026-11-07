@@ -183,6 +183,16 @@ pub fn request_of_item(c: &Connection, item: &str) -> Result<Option<LaneRequest>
     .optional()?)
 }
 
+/// The item's newest request, whatever became of it (released, left): what `steve_lane_status` reports.
+pub fn request_last_of_item(c: &Connection, item: &str) -> Result<Option<LaneRequest>> {
+    Ok(c.query_row(
+        "SELECT * FROM lane_requests WHERE item_id = ? ORDER BY arrived DESC, rowid DESC LIMIT 1",
+        [item],
+        request,
+    )
+    .optional()?)
+}
+
 /// A lane's requests, oldest first (`open`: only those still in it).
 pub fn requests_of(c: &Connection, lane: &str, open: bool) -> Result<Vec<LaneRequest>> {
     let sql = if open {
@@ -331,4 +341,31 @@ pub fn units_of(c: &Connection, lane: &str) -> Result<Vec<LaneUnit>> {
         .query_map([lane], unit)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(v)
+}
+
+pub fn unit_get(c: &Connection, lane: &str, no: i64) -> Result<Option<LaneUnit>> {
+    Ok(c.query_row(
+        "SELECT * FROM lane_units WHERE lane_id = ? AND no = ?",
+        params![lane, no],
+        unit,
+    )
+    .optional()?)
+}
+
+/// The newest card of `kind` about a batch, whole ([`batch_card`] gives only its status and result).
+pub fn batch_card_decision(
+    c: &Connection,
+    subject: &str,
+    kind: &str,
+) -> Result<Option<crate::Decision>> {
+    Ok(c
+        .query_row(
+            "SELECT * FROM decisions
+              WHERE subject_type = 'delivery_batch' AND subject_id = ? AND kind = ?
+                AND NOT (status = 'expired' AND json_extract(coalesce(result, '{}'), '$.renewed') IS NOT NULL)
+              ORDER BY created DESC, rowid DESC LIMIT 1",
+            params![subject, kind],
+            crate::Decision::from_row,
+        )
+        .optional()?)
 }

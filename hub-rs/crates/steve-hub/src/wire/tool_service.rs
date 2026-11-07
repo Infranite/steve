@@ -1,4 +1,4 @@
-//! Steve's tools, independent of any tool protocol: the five Steve tools
+//! Steve's tools, independent of any tool protocol: the Steve tools
 //! (steve-mcp) and the modules' tools (`mcp_extra`), listed and run for one session. The Hub's MCP
 //! endpoint is one way to reach them (for harnesses the in-process runner starts); a Node's
 //! `tool.call` is the other. Both get the same definitions, checks and texts.
@@ -18,6 +18,7 @@ pub struct ToolService {
 
 /// Tools the agent only reads with (they change nothing).
 const READ_ONLY: &[&str] = &[
+    steve_mcp::tools::LANE_STATUS,
     "steve_event_get",
     "steve_knowledge_search",
     "steve_knowledge_get",
@@ -75,7 +76,7 @@ impl ToolService {
 mod tests {
     use super::*;
 
-    /// The names `tools/list` of the Hub's MCP endpoint gives: the five, then the modules'.
+    /// The names `tools/list` of the Hub's MCP endpoint gives: Steve's own, then the modules'.
     fn mcp_names() -> Vec<String> {
         let mut v: Vec<String> = steve_mcp::tools::list()
             .into_iter()
