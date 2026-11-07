@@ -296,6 +296,8 @@ async fn dm_external_bots_and_own_messages() {
     h.fake
         .ws_push_envelope(fixture("message_p2p_text").unwrap());
     until(&h, MSGS, 1).await;
+    // The channel message commits before the asynchronous event sink finishes.
+    until(&h, EVENTS, 1).await;
     let s = &q(
         &h,
         "SELECT name, kind FROM spaces WHERE external_id = ?",

@@ -1103,6 +1103,43 @@ async fn maintenance_allows_nested_work_only_in_an_already_admitted_task() {
     assert!(t.store.try_activity("mail_send").is_none());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_blocking_workers_can_finish_nested_async_work() {
+    let t = with_steve();
+    let permit = t.store.try_activity("yolo").unwrap();
+    t.store.maintenance_set(true).unwrap();
+    let store = t.store.clone();
+    tokio::task::spawn_blocking(move || {
+        store.admitted_sync(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let nested = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    store.activity("model"),
+                )
+                .await
+                .expect("an admitted blocking worker can finish its model call");
+                let unrelated = store.clone();
+                assert!(
+                    tokio::spawn(async move { unrelated.try_activity("model").is_none() })
+                        .await
+                        .unwrap(),
+                    "a newly spawned task does not inherit the permit"
+                );
+                drop(nested);
+            });
+        });
+        assert!(store.try_activity("model").is_none(), "scope was restored");
+    })
+    .await
+    .unwrap();
+    assert!(
+        !t.store.maintenance_seal(),
+        "the parent still owns its permit"
+    );
+    drop(permit);
+    assert!(t.store.maintenance_seal());
+}
+
 #[tokio::test]
 async fn sealed_drain_refuses_late_running_tokens_until_explicit_cancel() {
     let t = with_steve();

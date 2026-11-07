@@ -277,6 +277,78 @@ fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// A background model request must not start a harness behind a persisted upgrade drain.
+/// Reopening admission releases that same request exactly once, for either gateway.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_calls_wait_for_maintenance_before_starting() {
+    let h = Local::new().await;
+    for gw in [h.legacy(&["m1"]), h.node(&["m1"])] {
+        let spawns = h.spawns();
+        let jobs: i64 = q(&h.store, "SELECT COUNT(*) FROM runtime_jobs");
+        h.store.maintenance_set(true).unwrap();
+        let call = gw.call(
+            "维护后再回答",
+            Tier::Smart,
+            Duration::from_secs(10),
+            &ThinkTools::None,
+        );
+        tokio::pin!(call);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut call)
+                .await
+                .is_err(),
+            "new model work waits for the drain to reopen"
+        );
+        assert_eq!(h.spawns(), spawns, "no harness starts behind the drain");
+        assert_eq!(
+            q::<i64>(&h.store, "SELECT COUNT(*) FROM runtime_jobs"),
+            jobs,
+            "no Node job is queued behind the drain"
+        );
+        assert!(h.store.maintenance_seal(), "waiting calls hold no permit");
+        h.store.maintenance_set(false).unwrap();
+        let out = tokio::time::timeout(Duration::from_secs(15), call)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.text, "答案");
+        assert_eq!(h.spawns(), spawns + 1, "the waiting call runs once");
+        assert!(h.store.activities().is_empty());
+    }
+}
+
+/// A conversation admitted before maintenance may finish its nested model call, including
+/// fallback. The drain still waits for that conversation's permit before sealing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_model_calls_finish_during_maintenance() {
+    let h = Local::new().await;
+    let gw = h.node(&["m-busy", "m1"]);
+    let permit = h.store.try_activity("thread_answer").unwrap();
+    h.store.maintenance_set(true).unwrap();
+    let out = tokio::time::timeout(
+        Duration::from_secs(15),
+        h.store.admitted(gw.attempt(
+            "继续已开始的回答",
+            Tier::Smart,
+            Duration::from_secs(10),
+            &ThinkTools::None,
+            None,
+        )),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.result.unwrap().text, "答案");
+    assert_eq!(out.attempts, 2, "fallback stays inside the admitted call");
+    assert_eq!(h.spawns(), 2);
+    assert!(
+        !h.store.maintenance_seal(),
+        "the conversation still owns its permit"
+    );
+    drop(permit);
+    assert!(h.store.activities().is_empty());
+    assert!(h.store.maintenance_seal());
+}
+
 /// More think calls at once than any small job bound (the local Node used to stop at 16): all of
 /// them run at once and answer within their timeout, as in process, none refused as exhausted,
 /// backed off and timed out into a fallback.
