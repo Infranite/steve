@@ -631,8 +631,11 @@ fn a_target_that_takes_changes_only_through_a_pr_is_never_pushed_to() {
         0,
         "no approval card for a batch that cannot merge"
     );
-    let item = k.db().item(&i).unwrap().unwrap();
-    assert_ne!(item.status, "run", "not reopened to its agent");
+    // the card comes first and the item's status right after it (not in one transaction)
+    assert!(
+        k.wait(|| k.db().item(&i).unwrap().unwrap().status != "run"),
+        "not reopened to its agent"
+    );
     assert_eq!(
         run(&origin, &["rev-parse", "main"]),
         main_before,

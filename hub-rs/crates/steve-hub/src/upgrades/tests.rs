@@ -1099,3 +1099,59 @@ fn the_runner_trusts_the_accounts_own_steve_home_not_the_environment() {
             .all(|d| t.python_dirs.contains(&PathBuf::from(d)))
     );
 }
+
+/// The supervisor asks the candidate's own `--check-config` before it drains, in the environment the
+/// child would get; a candidate from before the check is not asked (it would start a Hub).
+#[cfg(unix)]
+#[tokio::test]
+async fn the_supervisor_asks_the_candidate_about_this_environment_before_draining() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let cfg = crate::config::Config::from_vars(|k: &str| match k {
+        "HOME" | "STEVE_HOME" => Some(home.path().to_string_lossy().into_owned()),
+        "STEVE_HOST" => Some("127.0.0.1,::1".into()),
+        "STEVE_PORT" => Some("9123".into()),
+        "STEVE_ADAPTER_CLAUDE" | "STEVE_ADAPTER_CODEX" => Some("unused".into()),
+        _ => None,
+    })
+    .unwrap();
+    let bundle = |name: &str, check: bool| {
+        let d = home.path().join(name);
+        fs::create_dir_all(d.join("bin")).unwrap();
+        let asked = d.join("asked");
+        let info = if check { r#","check_config":true"# } else { "" };
+        let hub = d.join("bin/steve-hub");
+        fs::write(
+            &hub,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --build-info) echo '{{\"version\":\"0.2.0\"{info}}}' ;;\n  \
+                 --check-config) echo \"$STEVE_HOST|$STEVE_PORT|$STEVE_HOME\" > '{}'\n    \
+                 echo '{{\"ok\":false,\"errors\":[\"STEVE_X: refused\"],\"listen\":[]}}'; exit 2 ;;\n  \
+                 *) exit 9 ;;\nesac\n",
+                asked.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hub, fs::Permissions::from_mode(0o755)).unwrap();
+        (d, asked)
+    };
+    let (d, asked) = bundle("new", true);
+    let e = supervisor::check_candidate(&cfg, &d, &fixture())
+        .await
+        .expect_err("refused");
+    let e = format!("{e:#}");
+    assert!(
+        e.contains("STEVE_X: refused") && e.contains("没有排空"),
+        "{e}"
+    );
+    assert_eq!(
+        fs::read_to_string(&asked).unwrap().trim(),
+        format!("127.0.0.1,::1|9123|{}", home.path().display())
+    );
+
+    let (d, asked) = bundle("old", false);
+    supervisor::check_candidate(&cfg, &d, &fixture())
+        .await
+        .expect("an older candidate is not asked");
+    assert!(!asked.exists());
+}

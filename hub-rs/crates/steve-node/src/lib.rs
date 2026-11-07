@@ -516,10 +516,7 @@ pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) ->
                 > limit
             {
                 inner.full.store(true, Ordering::SeqCst);
-                return Err(ApiError::new(
-                    ErrorCode::Exhausted,
-                    "journal data budget reached",
-                ));
+                return Err(NodeStop::JournalBudget.error());
             }
         }
         let stream: StreamId = id(stream_of(&subject))?;

@@ -33,8 +33,10 @@ impl Listen {
         if listen.any() && !allow_any {
             return Err(ConfigError::Invalid {
                 var: "STEVE_HOST",
-                msg: "0.0.0.0 / :: listens on every network; list the addresses instead \
-                      (e.g. 127.0.0.1,100.64.0.2) or set STEVE_ALLOW_ANY_HOST=1"
+                msg: "0.0.0.0 / :: listens on every network, so the Hub refuses it. In steve.env \
+                      either set STEVE_ALLOW_ANY_HOST=1 to keep listening everywhere, or narrow \
+                      STEVE_HOST to 127.0.0.1 plus the addresses that must reach the Hub \
+                      (e.g. 127.0.0.1,100.64.0.2)"
                     .into(),
             });
         }

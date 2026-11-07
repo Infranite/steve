@@ -6,6 +6,7 @@
 The service is this script (`__service start|stop`, through STEVE_SERVICE_CMD) instead of launchd. Cases:
   - a deploy drains the running Hub, switches, and leaves no drain behind (business answers, /healthz drain false);
   - a release that can't open the database is refused before anything stops;
+  - a steve.env the release's Hub would refuse at start (STEVE_HOST=0.0.0.0) is refused before anything stops;
   - a release whose probe fails gets the backup put back, the old version restarted, the drain lifted;
   - a switch that fails halfway (the web link) puts the links and the database back, restarts and lifts the drain;
   - only a healthy deploy prunes old release dirs and pre-release backups.
@@ -111,6 +112,8 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
            if not k.startswith(("STEVE_", "LARK_", "FEISHU_", "GITHUB_", "CLAUDE_"))}
     env.update(STEVE_HOME=str(home), STEVE_PORT=str(port),
                STEVE_SERVICE_CMD=f"{sys.executable} {pathlib.Path(__file__).resolve()} __service")
+    # the caller's own STEVE_* (an agent session started by a Hub has them) must not reach the Hubs here
+    os.environ.clear()
     os.environ.update(env)
 
     def health():
@@ -188,6 +191,19 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         assert (home / "current").resolve() == b.resolve() and pid() == before
         assert health()["drain"] is False
         ok("refused by the gate, same Hub process, no drain")
+
+        print("── a steve.env the new Hub would refuse (STEVE_HOST=0.0.0.0, no opt-in): refused before the drain")
+        steve_env = (home / "steve.env").read_text()
+        (home / "steve.env").write_text(steve_env.replace("STEVE_HOST=127.0.0.1", "STEVE_HOST=0.0.0.0"))
+        try:
+            r = deploy(bundle("0.9.0-anyhost"))
+        finally:
+            (home / "steve.env").write_text(steve_env)
+        assert r.returncode == 1 and "STEVE_ALLOW_ANY_HOST=1" in r.stdout and "127.0.0.1,100.64.0.2" in r.stdout, \
+            r.stdout + r.stderr
+        assert (home / "current").resolve() == b.resolve() and pid() == before
+        assert health()["drain"] is False and not list((home / "backups").glob("pre-0.9.0-anyhost-*"))
+        ok("--check-config refused the real steve.env: no drain, no stop, no backup, no switch, both fixes named")
 
         print("── a probe that fails: the backup is back, the old version runs, no drain")
         with sqlite3.connect(home / "data/steve.sqlite3") as c:

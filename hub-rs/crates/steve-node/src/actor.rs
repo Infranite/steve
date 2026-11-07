@@ -146,26 +146,14 @@ pub(crate) enum Ingress {
 impl Ingress {
     fn stop(self, stall: Duration) -> (Outcome, ApiError) {
         match self {
-            Ingress::Frame => (
-                Outcome::Cancelled,
-                ApiError::new(
-                    ErrorCode::Exhausted,
-                    "the harness sent a message larger than 1 MiB",
-                ),
-            ),
-            Ingress::Output => (
-                Outcome::Cancelled,
-                ApiError::new(ErrorCode::Exhausted, "the output limit was reached"),
-            ),
+            Ingress::Frame => (Outcome::Cancelled, NodeStop::FrameTooLarge.error()),
+            Ingress::Output => (Outcome::Cancelled, NodeStop::OutputLimit.error()),
             Ingress::Stalled => (
                 Outcome::Interrupted,
-                ApiError::new(
-                    ErrorCode::Busy,
-                    format!(
-                        "the node took none of the harness's output for {} s (its journal or disk is stuck)",
-                        stall.as_secs()
-                    ),
-                ),
+                NodeStop::IngressStalled {
+                    secs: stall.as_secs(),
+                }
+                .error(),
             ),
         }
     }
@@ -506,18 +494,10 @@ impl Actor {
             return;
         };
         if e.code == ErrorCode::Exhausted {
-            self.stopping(
-                token,
-                Outcome::Cancelled,
-                ApiError::new(ErrorCode::Exhausted, "journal data budget reached"),
-            );
+            self.stopping(token, Outcome::Cancelled, NodeStop::JournalBudget.error());
             let _ = self.tx.send(Msg::Kill { token });
         } else {
-            self.stopping(
-                token,
-                Outcome::Failed,
-                ApiError::new(ErrorCode::Internal, "the node could not record the attempt"),
-            );
+            self.stopping(token, Outcome::Failed, NodeStop::NotRecorded.error());
         }
     }
 
@@ -729,14 +709,11 @@ impl Actor {
                     .is_some_and(|r| r.token == token && r.ending.is_none())
                 {
                     let s = self.stop_process().await;
-                    let (outcome, e) =
-                        self.run
-                            .as_ref()
-                            .and_then(|r| r.stopped.clone())
-                            .unwrap_or((
-                                Outcome::Interrupted,
-                                ApiError::new(ErrorCode::Internal, "stopped by the node"),
-                            ));
+                    let (outcome, e) = self
+                        .run
+                        .as_ref()
+                        .and_then(|r| r.stopped.clone())
+                        .unwrap_or((Outcome::Interrupted, NodeStop::StoppedByNode.error()));
                     let acted = self.run.as_ref().is_some_and(|r| r.acted);
                     if s.gone() {
                         self.end(failure(outcome, e, acted));
@@ -1188,14 +1165,14 @@ impl Actor {
         {
             return self.end(failure(
                 Outcome::TimedOut,
-                ApiError::new(ErrorCode::Expired, "past its deadline"),
+                NodeStop::Deadline.error(),
                 false,
             ));
         }
         let Some(l) = self.live.as_ref() else {
             return self.end(failure(
                 Outcome::Interrupted,
-                ApiError::new(ErrorCode::Offline, "the harness is gone"),
+                NodeStop::HarnessGone.error(),
                 false,
             ));
         };
@@ -1394,11 +1371,7 @@ impl Actor {
         });
         if r.as_ref().is_err_and(|e| e.code == ErrorCode::Exhausted) {
             if let Some(token) = self.run.as_ref().map(|r| r.token) {
-                self.stopping(
-                    token,
-                    Outcome::Cancelled,
-                    ApiError::new(ErrorCode::Exhausted, "journal data budget reached"),
-                );
+                self.stopping(token, Outcome::Cancelled, NodeStop::JournalBudget.error());
                 let _ = self.tx.send(Msg::Kill { token });
             }
             return;
@@ -1412,11 +1385,7 @@ impl Actor {
             && let Some(token) = self.run.as_ref().map(|r| r.token)
         {
             // what the harness said is lost: the attempt cannot go on as if it were not
-            self.stopping(
-                token,
-                Outcome::Failed,
-                ApiError::new(ErrorCode::Internal, "the node could not record the attempt"),
-            );
+            self.stopping(token, Outcome::Failed, NodeStop::NotRecorded.error());
         }
     }
 
@@ -1915,35 +1884,20 @@ impl Actor {
         let lim = &run.spec.run.limits;
         let hub_down = self.inner.hub_down_since().is_some_and(|since| since < now);
         let why = if now >= lim.deadline.0 {
-            Some((
-                Outcome::TimedOut,
-                ApiError::new(ErrorCode::Expired, "past its deadline"),
-            ))
+            Some((Outcome::TimedOut, NodeStop::Deadline.error()))
         } else if hub_down && now >= lim.offline_until.0 {
-            Some((
-                Outcome::TimedOut,
-                ApiError::new(ErrorCode::Offline, "the Hub was unreachable past the lease"),
-            ))
+            Some((Outcome::TimedOut, NodeStop::HubUnreachable.error()))
         } else if self.inner.output(&self.session) > lim.max_output_bytes {
-            Some((
-                Outcome::Cancelled,
-                ApiError::new(ErrorCode::Exhausted, "the output limit was reached"),
-            ))
+            Some((Outcome::Cancelled, NodeStop::OutputLimit.error()))
         } else if self
             .inner
             .j
             .read(|t| self.inner.over_limit(t))
             .unwrap_or(false)
         {
-            Some((
-                Outcome::Cancelled,
-                ApiError::new(ErrorCode::Exhausted, "journal data budget reached"),
-            ))
+            Some((Outcome::Cancelled, NodeStop::JournalBudget.error()))
         } else if self.inner.faulted() {
-            Some((
-                Outcome::Failed,
-                ApiError::new(ErrorCode::Internal, "the node's journal fails"),
-            ))
+            Some((Outcome::Failed, NodeStop::JournalFails.error()))
         } else {
             None
         };
@@ -2173,7 +2127,7 @@ async fn open_harness(
             ));
         }
         inner.j.tx(|t| t.drop_proc(session, pgid))?;
-        return Err(ApiError::new(ErrorCode::Offline, "adapter exited"));
+        return Err(NodeStop::AdapterExited.error());
     }
     Ok(LiveNew {
         conn,
