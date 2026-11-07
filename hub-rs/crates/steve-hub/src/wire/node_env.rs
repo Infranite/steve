@@ -7,11 +7,14 @@
 //! user reads them through Steve; they are kept in plain text in the Hub's database and the
 //! Node's journal. A value kept in the vault (`vault_ref`) is not supported yet.
 //!
-//! Until a run uses its principal's own harness credentials and the Hub records who sent each
-//! message into a session, they reach a run only when that cannot hand them to anyone else: its
-//! principal is the person who owns the Node (their own machine, their own logins) and the only
-//! member of the run's workspace (nobody else can steer the session and ask it to print them).
-//! Anything else is kept and waits.
+//! Until a run uses its principal's own harness credentials, the Hub records who sent each message
+//! into a session, and runs on one Node cannot see each other's processes, they reach a run only
+//! when that cannot hand them to anyone else: its principal is the person who owns the Node (their
+//! own machine, their own logins), the only member of the run's workspace (nobody else can steer
+//! the session and ask it to print them), and nobody else's runs share the Node (a process's
+//! environment is readable to every process of the same OS user: on the Hub's local Node, a Hub
+//! with one user only; a remote Node runs only its owner's own work, H1). Anything else is kept
+//! and waits.
 
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
@@ -67,6 +70,12 @@ pub fn for_session(
     )?;
     if node_owner(c, node)?.as_deref() != Some(me) || others > 0 {
         return Ok(vec![]);
+    }
+    if node == "local" {
+        let users: i64 = c.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+        if users > 1 {
+            return Ok(vec![]);
+        }
     }
     let mut q = c.prepare(
         "SELECT key, value FROM node_env WHERE node_id=? AND principal=? AND value IS NOT NULL ORDER BY key",
@@ -220,8 +229,8 @@ mod tests {
         put(&c, "local", "u1", "HOME", "/h", "", "u1").unwrap();
         let env = |node: &str, s: &str| for_session(&c, node, s).unwrap();
         let one = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
-        // the instance's owner on the Hub's own Node, in a workspace of their own
-        assert_eq!(env("local", "s3"), one("NPM_TOKEN", "t1"));
+        // the Hub has another user: their runs on its local Node could read the owner's environment
+        assert_eq!(env("local", "s3"), vec![]);
         // a member on their own paired Node, alone in the workspace
         assert_eq!(env("n_u2", "s4"), one("GOPRIVATE", "x"));
         // not their Node: they would steer its owner's logins
@@ -234,6 +243,9 @@ mod tests {
             vec![],
             "the service principal's: anyone's run"
         );
+        // a Hub of one user: its owner's, on the local Node
+        c.execute("DELETE FROM users WHERE id='u2'", []).unwrap();
+        assert_eq!(env("local", "s3"), one("NPM_TOKEN", "t1"));
         put(&c, "local", "u1", "NPM_TOKEN", "t1b", "new", "u1").unwrap();
         assert_eq!(env("local", "s3"), one("NPM_TOKEN", "t1b"));
         assert!(delete(&c, "local", "u1", "NPM_TOKEN").unwrap());

@@ -138,28 +138,35 @@ impl Confine {
         args: Vec<OsString>,
         readable: &[PathBuf],
     ) -> (PathBuf, Vec<OsString>) {
-        self.wrap_in(program, args, readable, None)
+        self.wrap_in(program, args, readable, &[], None)
     }
 
     /// [`Self::wrap`] for a run that works in `cwd`: bubblewrap changes into it itself, so a
     /// directory the sandbox hides fails the start instead of leaving the run in `$HOME`.
+    /// `writable`: directories it may read and write although they are under what is hidden (a
+    /// session's own harness directory, under the Node's `state/`).
     pub(crate) fn wrap_in(
         &self,
         program: PathBuf,
         args: Vec<OsString>,
         readable: &[PathBuf],
+        writable: &[PathBuf],
         cwd: Option<&Path>,
     ) -> (PathBuf, Vec<OsString>) {
         match self {
             Confine::Off(_) => (program, args),
             Confine::Seatbelt(rules) => {
                 let mut profile = format!("(version 1)\n(allow default)\n{rules}");
-                for r in readable {
+                let opened = readable
+                    .iter()
+                    .map(|r| (r, "file-read*"))
+                    .chain(writable.iter().map(|w| (w, "file-read* file-write*")));
+                for (r, ops) in opened {
                     let real = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
                     for r in [r, &real] {
                         let r = r.to_string_lossy();
                         if !r.contains(['"', '\\']) {
-                            profile.push_str(&format!("(allow file-read* (subpath \"{r}\"))\n"));
+                            profile.push_str(&format!("(allow {ops} (subpath \"{r}\"))\n"));
                         }
                     }
                 }
@@ -207,6 +214,10 @@ impl Confine {
                 for r in readable {
                     let r = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
                     a.extend(["--ro-bind".into(), r.clone().into(), r.into()]);
+                }
+                for w in writable {
+                    let w = std::fs::canonicalize(w).unwrap_or_else(|_| w.clone());
+                    a.extend(["--bind".into(), w.clone().into(), w.into()]);
                 }
                 if let Some(cwd) = cwd {
                     let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
@@ -256,6 +267,7 @@ mod tests {
         let (p, a) = c.wrap_in(
             "/bin/sh".into(),
             vec!["-c".into(), "x".into()],
+            &[],
             &[],
             Some(&home.join("worktrees")),
         );
@@ -346,6 +358,7 @@ mod tests {
                 "/bin/sh".into(),
                 vec!["-c".into(), cmd.into()],
                 readable,
+                &[],
                 Some(&home.join("worktrees/ST-1")),
             );
             std::process::Command::new(p).args(a).output().unwrap()
@@ -383,6 +396,7 @@ mod tests {
                 "-c".into(),
                 format!("sleep 1; cat {h}/steve.env.new").into(),
             ],
+            &[],
             &[],
             Some(&home.join("worktrees/ST-1")),
         );

@@ -4184,8 +4184,34 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
         !other.join("settings.json").exists(),
         "nothing of the owner's"
     );
+    // in the sandbox, a session reads its own directory and nobody else's
+    if steve_vault::harness::seatbelt_works() && n.confinement().is_ok() {
+        std::fs::write(other.join("mine.txt"), "m").unwrap();
+        let text = format!(
+            "@cat {}/mine.txt @cat {}/settings.json",
+            other.display(),
+            owner.display()
+        );
+        n.start_turn(now_cmd("op_t2", turn("s_2", "t_1", "a_1", &text)))
+            .await
+            .unwrap();
+        t.until("the end", |t| !t.ended().is_empty()).await;
+        assert_eq!(t.text(), "cat:ok cat:EPERM ");
+    }
     n.open_session(now_cmd("op_open_s_3", open("s_3", "../escape", true)))
         .await
         .unwrap();
     assert!(!ok(&finished(&n, "op_open_s_3").await));
+    // a link someone left on the way is not followed
+    let elsewhere = t.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, t.home.join("state/planted")).unwrap();
+    n.open_session(now_cmd(
+        "op_open_s_4",
+        open("s_4", "planted/x/dev/claude-code", true),
+    ))
+    .await
+    .unwrap();
+    assert!(!ok(&finished(&n, "op_open_s_4").await));
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }

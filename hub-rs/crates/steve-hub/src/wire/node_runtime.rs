@@ -807,7 +807,8 @@ impl NodeRuntime {
             // the principal's own variables on this Node, as recorded just now (node_env)
             let mut open = open.clone();
             open.env = super::node_env::for_session(tx, self.node_id.as_str(), &b.session)?;
-            if self.principal_state.load(Ordering::Relaxed) {
+            // a session moved from the legacy runner resumes its conversation where it was kept
+            if self.principal_state.load(Ordering::Relaxed) && adopted.is_none() {
                 open.state = super::principal::harness_state_in(
                     tx,
                     &b.session,
@@ -930,6 +931,24 @@ impl NodeRuntime {
         )?;
         if n == 0 {
             return Ok(false);
+        }
+        // never sent yet: it goes with the principal's variables as they are now
+        let op = format!("op_open_{session}");
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT request FROM node_commands WHERE operation_id=? AND state='pending'",
+                [&op],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(req) = stored {
+            let mut open = serde_json::from_str::<Command<OpenSession>>(&req)?.body;
+            open.env = super::node_env::for_session(tx, self.node_id.as_str(), session)?;
+            let (req, digest) = command(&op, open)?;
+            tx.execute(
+                "UPDATE node_commands SET request=?, digest=? WHERE operation_id=? AND state='pending'",
+                rusqlite::params![req.to_string(), digest, op],
+            )?;
         }
         let rev = session_revision(tx, session)?;
         rt::session_cas_in(

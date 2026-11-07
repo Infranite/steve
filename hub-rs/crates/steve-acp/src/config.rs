@@ -24,8 +24,8 @@ pub struct StateDir {
     pub env: &'static str,
     /// Where it is under the user's home when the variable is not set.
     pub default: &'static str,
-    /// What of the Node owner's own directory the owner's state starts with (their own settings
-    /// and login, never anyone else's).
+    /// What of the Node owner's own directory the owner's state starts with (their own settings,
+    /// never anyone else's; a login only where a copy cannot sign the original out).
     pub import: &'static [&'static str],
 }
 
@@ -52,7 +52,8 @@ const BUNDLED_PROPERTIES: &[(&str, AdapterProperties)] = &[
             state: Some(StateDir {
                 env: "CODEX_HOME",
                 default: ".codex",
-                import: &["config.toml", "auth.json"],
+                // not its login: copies refreshing on their own would sign the owner's out
+                import: &["config.toml"],
             }),
         },
     ),

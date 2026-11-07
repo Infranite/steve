@@ -1916,19 +1916,29 @@ fn harness_state(
     s: &HarnessState,
     sd: steve_acp::StateDir,
 ) -> ApiResult<std::path::PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::fs::DirBuilderExt;
     if !s.valid() {
         return Err(ApiError::new(
             ErrorCode::Invalid,
             "a harness state directory that is not a plain path",
         ));
     }
-    let dir = inner.cfg.home.join("state").join(&s.dir).join("harness");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)
-        .map_err(|e| internal(format!("harness state: {e}")))?;
+    // every step a real directory made here, never one a run planted as a link
+    let mut dir = inner.cfg.home.clone();
+    let parts = std::iter::once("state")
+        .chain(s.dir.split('/'))
+        .chain(std::iter::once("harness"));
+    for part in parts {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(m) if m.file_type().is_dir() => {}
+            Ok(_) => return Err(internal("harness state: not a directory")),
+            Err(_) => std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir)
+                .map_err(|e| internal(format!("harness state: {e}")))?,
+        }
+    }
     if s.import_owner {
         let own = std::env::var_os(sd.env)
             .filter(|v| !v.is_empty())
@@ -1936,13 +1946,21 @@ fn harness_state(
             .unwrap_or_else(|| inner.cfg.acp.user_home.join(sd.default));
         for f in sd.import {
             let (from, to) = (own.join(f), dir.join(f));
-            if from.is_file() && !to.exists() {
-                std::fs::copy(&from, &to)
-                    .and_then(|_| {
-                        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600))
-                    })
-                    .map_err(|e| internal(format!("harness state: {f}: {e}")))?;
+            if !from.is_file() || std::fs::symlink_metadata(&to).is_ok() {
+                continue;
             }
+            // a new file of its own: never through a link left there
+            let copied = std::fs::read(&from).and_then(|bytes| {
+                use std::io::Write as _;
+                use std::os::unix::fs::OpenOptionsExt as _;
+                let mut out = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&to)?;
+                out.write_all(&bytes)
+            });
+            copied.map_err(|e| internal(format!("harness state: {f}: {e}")))?;
         }
     }
     Ok(dir)
@@ -2013,9 +2031,13 @@ async fn open_harness(
     };
     // in the OS sandbox, unless the harness sandboxes its own shell (macOS nests none)
     let (program, args) = if inner.cfg.acp.adapter_properties(&harness).nested_sandbox {
-        inner
-            .confine
-            .wrap_in(program, args, &[], Some(std::path::Path::new(&cwd)))
+        inner.confine.wrap_in(
+            program,
+            args,
+            &[],
+            &state.iter().map(|(_, d)| d.clone()).collect::<Vec<_>>(),
+            Some(std::path::Path::new(&cwd)),
+        )
     } else {
         (program, args)
     };
