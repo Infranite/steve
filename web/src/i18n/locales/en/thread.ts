@@ -189,6 +189,7 @@ export default {
     failed: "Not sent",
     unknown: "May have been sent, checking",
     discarded: "You didn't send it",
+    disconnected: "Not sent: the connected account was removed",
     discard: "Don't send",
     review: "Approve…",
   },

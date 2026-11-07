@@ -194,6 +194,7 @@ export default {
     failed: "没有发出去",
     unknown: "可能已经发出，正在核对",
     discarded: "你没有发出",
+    disconnected: "没有发出去：接入的账号已经移除",
     discard: "不发出",
     review: "去批准…",
   },

@@ -158,6 +158,19 @@ pub enum Forked {
     Item(String),
 }
 
+/// Whether answering a decision of `kind`/`subject_type` with `choice` decides on its item's
+/// result, so it is answered on fresh git facts ([`Core::git_before`]): an acceptance, a release's
+/// approval, a failure's choice that ends in an acceptance, a release check or a drop. Not a
+/// permission card, an approval the agent asked for, a question, nor going on after a failure.
+pub(crate) fn decides_on_result(kind: &str, subject_type: &str, choice: &str) -> bool {
+    match kind {
+        "accept" => true,
+        "approve" => subject_type == "release",
+        "fail" => !matches!(choice, "continue" | "look" | "tosteve"),
+        _ => false,
+    }
+}
+
 /// Where a decision's follow-up message goes (the `send` closures of orchestrator.ts).
 #[derive(Clone)]
 pub(crate) enum To {
@@ -397,11 +410,13 @@ impl Core {
         self.tx().rm_dep(item, dep)
     }
     pub fn resolve(&self, id: &str, choice: &str, text: &str, actor: &str) -> Result<Decision> {
-        /* an acceptance (or a release, or a failure's choice) decides on an item's result: on a
-         * Node, on what its Node says now */
+        /* an acceptance (or a release, or a failure's choice about the result) decides on an
+         * item's result: on a Node, on what its Node says now. The gathering is one or two git
+         * reads on the Node and the answer waits for it, so only those wait: a permission card
+         * or an approval the agent asked for decides nothing about the result */
         if self.node_git().is_some()
             && let Ok(Some(d)) = self.store().decision(id)
-            && matches!(d.kind.as_str(), "accept" | "approve" | "fail")
+            && decides_on_result(&d.kind, &d.subject_type, choice)
             && let Some(item) = &d.item_id
         {
             self.git_before(item);
