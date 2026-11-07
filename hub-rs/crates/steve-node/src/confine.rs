@@ -158,6 +158,19 @@ impl Confine {
                 steve_home,
                 node_home,
             } => {
+                // what the Node makes for runs and later for itself (its secrets, pushes,
+                // attachments) exists first: open or hidden from the start
+                for d in steve_vault::harness::RUN_DIRS {
+                    let _ = std::fs::create_dir_all(steve_home.join(d));
+                }
+                for d in steve_vault::harness::NODE_PROTECTED {
+                    if let Some(d) = d.strip_suffix('/') {
+                        let _ = std::fs::DirBuilder::new()
+                            .recursive(true)
+                            .mode(0o700)
+                            .create(node_home.join(d));
+                    }
+                }
                 let p = steve_vault::harness::bwrap_plan(steve_home, node_home);
                 let mut a: Vec<OsString> = vec!["--dev-bind".into(), "/".into(), "/".into()];
                 for d in &p.read_only {
@@ -167,11 +180,6 @@ impl Confine {
                     a.extend(["--bind".into(), d.into(), d.into()]);
                 }
                 for d in &p.hidden_dirs {
-                    // one the Hub or the Node makes later is hidden too
-                    let _ = std::fs::DirBuilder::new()
-                        .recursive(true)
-                        .mode(0o700)
-                        .create(d);
                     if d.is_dir() {
                         a.extend(["--tmpfs".into(), d.into()]);
                     }
@@ -233,9 +241,10 @@ mod tests {
         assert_eq!(a[at(&home_s) - 1], "--ro-bind", "the home read-only first");
         assert_eq!(a[at(&r("worktrees")) - 1], "--bind");
         assert_eq!(a[at(&r("signing")) - 1], "--tmpfs");
-        // a protected directory that did not exist is made, so it is hidden too
-        assert_eq!(a[at(&r("secrets")) - 1], "--tmpfs");
-        assert!(real.join("secrets").is_dir());
+        // the Node's protected directories are made first, so one it fills later is hidden too
+        assert_eq!(a[at(&r("data/node/secrets")) - 1], "--tmpfs");
+        assert!(real.join("data/node/secrets").is_dir());
+        assert!(real.join("scratch").is_dir(), "the run directories exist and are writable");
         assert_eq!(
             a[at(&r("steve.env")) - 2..at(&r("steve.env"))],
             ["--ro-bind", "/dev/null"]

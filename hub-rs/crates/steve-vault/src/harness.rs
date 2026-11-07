@@ -528,6 +528,7 @@ mod tests {
             format!("echo y > {h}/data/node/jobs/j"),
             format!("mkdir {h}/worktrees/ST-2 && mv {h}/worktrees/ST-2 {h}/worktrees/ST-3"),
             format!("echo y > {h}/new-file"),
+            format!("mkdir -p {h}/data/node/jobs/x/y"),
         ] {
             assert!(sh(&allowed), "denied: {allowed}");
         }
