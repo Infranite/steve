@@ -142,6 +142,73 @@ async fn until(what: &str, f: impl Fn() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
+/// A normal item's pause must also gate the coordinator's direct follow-up path. The core's
+/// turn-end hook runs after this path, too late to protect the queued input on its own.
+#[tokio::test]
+async fn a_paused_item_keeps_queued_input_until_cancel_finishes_and_resume_claims_it_once() {
+    let h = hub();
+    h.bind(worktree());
+    h.rt.prompt(S, "first turn", "user", &[]).unwrap();
+    until("the first turn", || h.count("start_turn") == 1).await;
+    let first = h.rt.active_attempt(S).unwrap().unwrap();
+    let execution: ExecutionRef =
+        serde_json::from_str(&h.q::<String>("SELECT execution FROM runtime_attempts LIMIT 1"))
+            .unwrap();
+    h.rt.prompt(S, "continue the original goal", "user", &[])
+        .unwrap();
+    let queued: String = h.q("SELECT id FROM queued WHERE session_id='s1'");
+
+    // The item action persists this state and requests this cancellation. A successful request
+    // is not the attempt's completion; the Node still owns the running work until its event.
+    h.exec("UPDATE items SET status='pause' WHERE id='i1'");
+    assert!(h.rt.cancel(S).unwrap());
+    until("the cancel request", || h.count("cancel") == 1).await;
+    assert_eq!(
+        h.rt.active_attempt(S).unwrap().as_deref(),
+        Some(first.as_str())
+    );
+    assert!(h.rt.is_busy(S));
+    assert_eq!(
+        h.q::<String>("SELECT id FROM queued WHERE session_id='s1'"),
+        queued
+    );
+
+    let mut completion = build::done();
+    completion.outcome = Outcome::Cancelled;
+    completion.stop_reason = "cancelled".into();
+    h.node.finish(&execution, completion).await.unwrap();
+    until("the cancelled attempt's completion", || {
+        h.q::<String>("SELECT state FROM runtime_attempts ORDER BY created LIMIT 1") == "finished"
+    })
+    .await;
+    assert!(h.rt.active_attempt(S).unwrap().is_none());
+    assert!(!h.rt.is_busy(S));
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts"), 1);
+    assert_eq!(
+        h.q::<String>("SELECT id FROM queued WHERE session_id='s1'"),
+        queued
+    );
+    assert_eq!(
+        h.q::<String>("SELECT text FROM queued WHERE session_id='s1'"),
+        "continue the original goal"
+    );
+    assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
+
+    h.exec("UPDATE items SET status='run' WHERE id='i1'");
+    assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Created);
+    until("the resumed turn", || h.count("start_turn") == 2).await;
+    assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Busy);
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts"), 2);
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM queued WHERE session_id='s1'"),
+        0
+    );
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM session_dispatch WHERE text='continue the original goal' AND state='claimed'"),
+        1
+    );
+}
+
 #[tokio::test]
 async fn a_worktree_it_made_is_told_given_back_once_and_made_again_before_it_opens_again() {
     let h = hub();
@@ -249,9 +316,10 @@ async fn an_item_paused_while_its_session_opened_starts_nothing_until_it_continu
     let h = hub();
     h.exec("UPDATE items SET status='pause' WHERE id='i1'");
     h.bind(worktree());
-    assert_eq!(h.rt.prompt(S, "hello", "user", &[]).unwrap(), Planned::Busy);
+    assert_eq!(h.rt.prompt(S, "hello", "user", &[]).unwrap(), Planned::Held);
     until("ready", || h.phase() == "ready").await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts"), 0);
     assert_eq!(h.count("start_turn"), 0, "{:?}", h.methods());
     let queued: i64 = h.q("SELECT COUNT(*) FROM queued WHERE session_id='s1'");
     assert_eq!(queued, 1, "the message waits");
