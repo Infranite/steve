@@ -5,9 +5,9 @@
 //!   in-process runner any more (B7): a session no Node takes is refused, never run on the Hub.
 //! - [`CoreDomain`]: the HTTP layer's [`Domain`] over [`Core`]. The core's mutating calls are synchronous (and
 //!   may run git under its lock), so they run on the blocking pool.
-//! - [`CoreMcp`]: steve-mcp's backend, the five tools → `core.tool_*`.
+//! - [`CoreMcp`]: steve-mcp's backend, the Steve tools → `core.tool_*` (and `core.lane_status`).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -255,102 +255,8 @@ pub(crate) fn yolo_input(
     }
 }
 
-/// What YOLO's floor reads of a tool call a Node reported ([`steve_node_api::ToolView`]):
-/// the command of an `exec` (a command with its own directory or an argv comes as the action's
-/// summary), the path of an edit, delete, move or read (its target: relative to the workspace, or
-/// absolute outside it), the URL of a fetch. `None`: nothing to read there.
-pub(crate) fn seen_input(
-    bound: Option<&steve_node_api::WorkspaceRef>,
-    dir: Option<&steve_node::LocalDir>,
-    t: &steve_node_api::ToolView,
-) -> Option<steve_core::yolo::ToolInput> {
-    use steve_node_api::{Action, ToolCategory};
-    let root = dir.filter(|_| bound.is_some());
-    let abs = |p: &str| match root {
-        Some(r) if !Path::new(p).is_absolute() => r.path.join(p).to_string_lossy().into_owned(),
-        _ => p.to_string(),
-    };
-    let (kind, raw, locations) = match (t.category, &t.action) {
-        // a shell command whatever kind the harness gave it; an argv only as an `execute`
-        (_, Some(Action::Exec { command, .. }))
-        | (ToolCategory::Exec, Some(Action::Unknown { summary: command })) => {
-            let mut raw = serde_json::json!({ "command": command });
-            if let Some(r) = root {
-                raw["cwd"] = serde_json::json!(r.path.to_string_lossy());
-            }
-            ("execute", raw, vec![])
-        }
-        (ToolCategory::Fetch, Some(Action::Fetch { url })) => {
-            ("fetch", serde_json::json!({ "url": url }), vec![])
-        }
-        (
-            c @ (ToolCategory::Edit
-            | ToolCategory::Delete
-            | ToolCategory::Move
-            | ToolCategory::Read),
-            _,
-        ) => {
-            let target = t.target.as_deref().filter(|p| !p.is_empty())?;
-            let kind = match c {
-                ToolCategory::Edit => "edit",
-                ToolCategory::Delete => "delete",
-                ToolCategory::Move => "move",
-                _ => "read",
-            };
-            (kind, serde_json::json!({}), vec![abs(target)])
-        }
-        _ => return None,
-    };
-    Some(steve_core::yolo::ToolInput {
-        raw,
-        kind: Some(kind.into()),
-        locations,
-        own_dir: root.filter(|d| d.owned).map(|d| d.path.clone()),
-        own_pids: Some(Vec::new()),
-    })
-}
-
 /// Turn ends of Node sessions reach the core the same way the ACP runner's do.
 impl super::node_runtime::NodeDomain for HubHost {
-    fn tool_seen(&self, session: &str, tool: &steve_node_api::ToolView) {
-        // the floor on what the harness reported, for calls no permission request came for
-        let (Some(core), Some(_)) = (self.core.get().cloned(), self.yolo.get()) else {
-            return;
-        };
-        // the turn and whether the call was asked about, read now: the turn may end (and forget
-        // both) before the work below gets to it
-        let Some(seen) = core.yolo_saw(session, tool.id.as_str()) else {
-            return;
-        };
-        let store = self.store.clone();
-        let local = self.local_node.get().cloned();
-        let (sid, tool) = (session.to_string(), tool.clone());
-        let work = move || {
-            if !core.yolo_watches(&sid) {
-                return;
-            }
-            let bound = store
-                .reader(|c| steve_store::runtime::workspace_ref_of(c, &sid))
-                .ok()
-                .flatten()
-                .and_then(|w| serde_json::from_str::<steve_node_api::WorkspaceRef>(&w).ok());
-            let dir = bound
-                .as_ref()
-                .and_then(|w| prepared_dir(&store, local.as_deref(), w));
-            if let Some(input) = seen_input(bound.as_ref(), dir.as_ref(), &tool) {
-                let pending = tool.phase == steve_node_api::ToolPhase::Pending;
-                core.yolo_seen(&sid, tool.id.as_str(), &tool.title, pending, input, seen);
-            }
-        };
-        match tokio::runtime::Handle::try_current() {
-            Ok(h) => {
-                h.spawn_blocking(work);
-            }
-            Err(_) => {
-                std::thread::spawn(work);
-            }
-        }
-    }
     fn workspace_changed(&self, fact: super::node_runtime::WorkspaceFact) {
         use super::node_runtime::WorkspaceFact;
         let Some(core) = self.core.get().cloned() else {
@@ -482,15 +388,10 @@ impl super::node_runtime::NodeDomain for HubHost {
     }
     fn permission_asked(
         &self,
-        session: &str,
+        _session: &str,
         decision: &str,
-        request: &steve_node_api::PermissionRequest,
+        _request: &steve_node_api::PermissionRequest,
     ) {
-        // the guard judges this call: the floor on seen calls leaves it alone (recorded before
-        // the call's later updates are looked at, which come after this in the Node's order)
-        if let Some(core) = self.core.get() {
-            core.yolo_asked(session, request.invocation.as_str());
-        }
         // its tool input was armed before the commit (permission_arming)
         let Some(engine) = self.yolo.get().cloned() else {
             return;
@@ -513,7 +414,6 @@ impl super::node_runtime::NodeDomain for HubHost {
         error: Option<String>,
     ) {
         let Some(core) = self.core.get() else { return };
-        core.yolo_turn_over(session);
         let t = steve_core::TurnEnd {
             session_id: session.into(),
             attempt: attempt.map(String::from),
@@ -2164,6 +2064,13 @@ impl steve_mcp::Backend for CoreMcp {
         let (c, s) = (self.core.clone(), s.clone());
         tool(move || c.tool_publish(&s, &branch, &summary)).await
     }
+    async fn lane_status(&self, s: &steve_store::Session) -> Result<String, steve_mcp::ToolError> {
+        let (c, s) = (self.core.clone(), s.clone());
+        match tokio::task::spawn_blocking(move || c.lane_status(&s).map(|st| st.render())).await {
+            Ok(r) => r.map_err(|e| e.to_string().into()),
+            Err(e) => Err(e.to_string().into()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2585,73 +2492,6 @@ mod yolo_input_tests {
             change_summary: "edit".into(),
             change: None,
         }
-    }
-
-    fn view(category: ToolCategory, target: Option<&str>, action: Option<Action>) -> ToolView {
-        ToolView {
-            id: CallId::new("c1").unwrap(),
-            parent: None,
-            origin: ToolOrigin::Harness,
-            name: "Bash".into(),
-            category,
-            title: "t".into(),
-            description: None,
-            target: target.map(String::from),
-            phase: ToolPhase::Running,
-            action,
-            result: vec![],
-            error: None,
-            duration_ms: None,
-        }
-    }
-
-    /// What the floor reads of a tool call it saw: a shell line, an argv line (carried as the
-    /// summary), an edit's path under the Node's directory.
-    #[test]
-    fn a_seen_tool_call_reads_as_a_tool_input() {
-        use super::seen_input;
-        let w = ws("w1");
-        let dir = LocalDir {
-            path: PathBuf::from("/node/worktrees/w1"),
-            owned: true,
-        };
-        let exec = Action::Exec {
-            command: "git push".into(),
-            cwd: None,
-            network: NetworkScope::Unrestricted,
-        };
-        let t = seen_input(
-            Some(&w),
-            Some(&dir),
-            &view(ToolCategory::Exec, None, Some(exec)),
-        )
-        .unwrap();
-        assert_eq!(t.kind.as_deref(), Some("execute"));
-        assert_eq!(t.raw["command"], "git push");
-        assert_eq!(t.raw["cwd"], "/node/worktrees/w1");
-        assert_eq!(t.own_dir, Some(PathBuf::from("/node/worktrees/w1")));
-        let argv = Action::Unknown {
-            summary: "/bin/zsh -lc 'git push'".into(),
-        };
-        let t = seen_input(None, None, &view(ToolCategory::Exec, None, Some(argv))).unwrap();
-        assert_eq!(t.raw["command"], "/bin/zsh -lc 'git push'");
-        assert!(t.raw.get("cwd").is_none());
-        let t = seen_input(
-            Some(&w),
-            Some(&dir),
-            &view(ToolCategory::Edit, Some("src/a.rs"), None),
-        )
-        .unwrap();
-        assert_eq!(t.kind.as_deref(), Some("edit"));
-        assert_eq!(t.locations, vec!["/node/worktrees/w1/src/a.rs".to_string()]);
-        let t = seen_input(
-            Some(&w),
-            Some(&dir),
-            &view(ToolCategory::Edit, Some("/srv/steve/a"), None),
-        )
-        .unwrap();
-        assert_eq!(t.locations, vec!["/srv/steve/a".to_string()]);
-        assert!(seen_input(Some(&w), Some(&dir), &view(ToolCategory::Think, None, None)).is_none());
     }
 
     /// The Node's directory, not the session's cwd (which the Hub never trusts for a Node session).

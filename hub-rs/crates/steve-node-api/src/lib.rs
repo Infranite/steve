@@ -1,4 +1,4 @@
-//! The contract between the Hub and a Node (docs/hub-node-client.md, docs/node-protocol.md).
+//! The contract between the Hub and a Node.
 //!
 //! The Hub is the brain: queue, decisions, model choice and retries, permission rulings, Steve's tools.
 //! A Node hosts harnesses: it runs attempts, owns the project directories on its machine and reports
@@ -18,6 +18,7 @@ pub mod glob;
 pub mod ids;
 pub mod ports;
 pub mod run;
+pub mod stop;
 pub mod tools;
 pub mod workspace;
 
@@ -31,6 +32,7 @@ pub use events::*;
 pub use ids::*;
 pub use ports::*;
 pub use run::*;
+pub use stop::*;
 pub use tools::*;
 pub use workspace::*;
 

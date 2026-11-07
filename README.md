@@ -221,7 +221,7 @@ There is no runtime plugin store yet; the Plugins page is a placeholder. Today y
 ## Experimental and planned
 
 - **Sessions run on a Node.** The Hub does not start agent processes itself: every session, Steve's own judgment calls and inline research run on the local Node, which is on by default (`STEVE_NODE_MODE=off` parks it).
-- **Multiple devices** (experimental, off by default). A `steve-node` on another machine can pair with the Hub and run harnesses there. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. Turn remote Nodes on with `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND`. Pairing is CLI-only for now, and the design is still moving ([docs/hub-node-client.md](docs/hub-node-client.md)).
+- **Multiple devices** (experimental, off by default). A `steve-node` on another machine can pair with the Hub and run harnesses there. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. Turn remote Nodes on with `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND`. Pairing is CLI-only for now ([docs/deployment.md](docs/deployment.md)).
 - **Not built yet:** the Plugins page (use the extension points above), quiet hours and a daily digest (marked *Works once push is connected* in Settings), Gmail and Outlook API mail adapters, Feishu docs, calendar and approvals, and external vault backends (1Password, Bitwarden).
 
 ## How it works
@@ -260,8 +260,6 @@ flowchart LR
 - **Runtime drivers.** Agent protocols (ACP, MCP, stream-json) stop at the driver. The rest of Steve only deals in sessions, turns, events, tool calls and approvals, so a new harness should need one more driver and nothing else.
 - **Modules.** Channels, mail, GitHub, knowledge, flows and the vault register through the [extension points above](#extending-steve). Events between modules go through a durable outbox.
 - **Clients.** Everyone in a workspace, on every device, sees the same state live.
-
-The design is in [docs/hub-node-client.md](docs/hub-node-client.md) and the wire contract in [docs/node-protocol.md](docs/node-protocol.md).
 
 ## Quick start
 

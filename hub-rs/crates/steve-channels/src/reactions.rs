@@ -212,39 +212,41 @@ pub fn expect_answer(c: &Connection, message_id: &str, out_id: &str) -> ChannelR
 /// Where a message is, for the provider calls.
 struct Target {
     ws: String,
-    conn: String,
     space: String,
     ext: String,
-    /// The message as the voice's adapter acts on it.
-    msg: MessageRef,
+    /// The voice's connection and the message as its adapter acts on it; `None` once no identity
+    /// of the space is connected any more (its connections removed: `spaces.connection_id` is
+    /// NULL, migration 012). The state then changes here only, without a provider call.
+    via: Option<(String, MessageRef)>,
 }
 
 /// The message reacts as the space's voice (the identity that answers there,
 /// [`crate::spaces::voice`]), whichever identity received it.
 fn target(c: &Connection, message_id: &str) -> ChannelResult<Option<Target>> {
-    let t = c.query_row(
-        "SELECT m.workspace_id, s.connection_id, m.space_id, coalesce(m.external_id, '')
-           FROM chan_messages m JOIN spaces s ON s.id = m.space_id WHERE m.id = ? AND m.direction = 'in'",
-        [message_id],
-        |r| {
-            Ok(Target {
-                ws: r.get(0)?,
-                conn: r.get(1)?,
-                space: r.get(2)?,
-                ext: r.get(3)?,
-                msg: MessageRef::platform("", ""),
-            })
-        },
-    )
-    .optional()?
-    .filter(|t: &Target| !t.ext.is_empty());
+    let t = c
+        .query_row(
+            "SELECT m.workspace_id, m.space_id, coalesce(m.external_id, '')
+               FROM chan_messages m WHERE m.id = ? AND m.direction = 'in'",
+            [message_id],
+            |r| {
+                Ok(Target {
+                    ws: r.get(0)?,
+                    space: r.get(1)?,
+                    ext: r.get(2)?,
+                    via: None,
+                })
+            },
+        )
+        .optional()?
+        .filter(|t: &Target| !t.ext.is_empty());
     let Some(mut t) = t else { return Ok(None) };
-    if let Some(v) = crate::spaces::voice(c, &t.space)? {
-        t.conn = v;
-    }
-    match crate::messages::message_ref(c, message_id, &t.conn)? {
-        Some(m) => t.msg = m,
-        None => return Ok(None),
+    // the voice falls back to the connection the space was first seen through; neither once the
+    // space's connections were all removed
+    if let Some(conn) = crate::spaces::voice(c, &t.space)? {
+        match crate::messages::message_ref(c, message_id, &conn)? {
+            Some(m) => t.via = Some((conn, m)),
+            None => return Ok(None),
+        }
     }
     Ok(Some(t))
 }
@@ -302,7 +304,10 @@ impl Channels {
         let (t, row) = self.store().reader(|c| {
             Ok::<_, crate::ChannelError>((target(c, message_id)?, get(c, message_id)?))
         })?;
-        let Some(t) = t else { return Ok(None) };
+        // no connected identity: nobody to react as, nothing to record
+        let Some(t) = t.filter(|t| t.via.is_some()) else {
+            return Ok(None);
+        };
         if row.is_some_and(|r| r.state != "cleared") {
             return Ok(None);
         }
@@ -324,9 +329,12 @@ impl Channels {
     /// Puts the acknowledgement on at the provider and records its id (or the failure). The caller holds
     /// the message's reaction lock, so nothing takes it off before it is on.
     async fn ack_provider(&self, message_id: &str, t: &Target) -> ChannelResult<()> {
+        let Some((conn, msg)) = &t.via else {
+            return Ok(());
+        };
         let added = timed(
             self.reactor()
-                .add(self, &t.ws, &t.conn, &t.msg, ReactionKind::Ack),
+                .add(self, &t.ws, conn, msg, ReactionKind::Ack),
         )
         .await;
         if let Err(e) = &added {
@@ -379,25 +387,39 @@ impl Channels {
             return Ok(());
         }
         let mut err: Option<String> = None;
-        if let Some(rid) = &row.reaction_id
-            && let Err(e) =
-                timed(
-                    self.reactor()
-                        .remove(self, &t.ws, &t.conn, &t.msg, rid, row.as_user),
-                )
-                .await
-        {
-            tracing::info!(message = message_id, "reaction not removed: {e}");
-            err = Some(e);
-        }
+        // the space's connections were removed: nothing can be put on or taken off at the
+        // provider any more, the state ends here only
         let kind = match how {
             Finish::Done => Some(ReactionKind::Done),
             Finish::Failed => Some(ReactionKind::Failed),
             Finish::Clear => None,
         };
-        let added = match kind {
-            Some(k) => Some(timed(self.reactor().add(self, &t.ws, &t.conn, &t.msg, k)).await),
-            None => None,
+        let added = match &t.via {
+            Some((conn, msg)) => {
+                if let Some(rid) = &row.reaction_id
+                    && let Err(e) =
+                        timed(
+                            self.reactor()
+                                .remove(self, &t.ws, conn, msg, rid, row.as_user),
+                        )
+                        .await
+                {
+                    tracing::info!(message = message_id, "reaction not removed: {e}");
+                    err = Some(e);
+                }
+                match kind {
+                    Some(k) => Some(timed(self.reactor().add(self, &t.ws, conn, msg, k)).await),
+                    None => None,
+                }
+            }
+            None => {
+                tracing::debug!(
+                    message = message_id,
+                    "{} reaction recorded only: the space has no connection",
+                    how.state()
+                );
+                None
+            }
         };
         let (id, emoji, as_user) = match &added {
             Some(Ok(a)) => (

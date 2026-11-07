@@ -274,5 +274,103 @@ class SigningKeychain(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), self.PW)
 
 
+class ConfigGate(unittest.TestCase):
+    """deploy asks the release's own Hub (`steve-hub --check-config`) about this machine's real steve.env before it
+    drains anything, since the probe runs on a private host and port. The Hub here is a fake that refuses
+    STEVE_HOST=0.0.0.0 without STEVE_ALLOW_ANY_HOST=1 the way the real one does (hub-rs tests/check_config.rs);
+    codesign is a fake on PATH. Draining, stopping, the probe and the switch are tripwires."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self.tmp.name)
+        (self.home / "signing").mkdir()
+        (self.home / "signing/identity.json").write_text(json.dumps(dict(
+            label="test.unused", hub_identifier="test.hub", keyhelper_identifier="test.kh", vault_service="test.v")))
+        self.bin = self.home / "fakebin"
+        self.bin.mkdir()
+        f = self.bin / "codesign"
+        f.write_text('#!/bin/sh\n[ "$1" = -dv ] && echo Identifier=test.hub >&2\nexit 0\n')
+        f.chmod(0o755)
+        self.path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{self.bin}:{self.path}"
+        self.old = self.release("0.3.0-local-aaaaaaa", check=True)
+        (self.home / "current").symlink_to(self.old)
+        (self.home / "web").mkdir()
+        (self.home / "web/current").symlink_to(self.old / "web/dist")
+        self.m = Journal.module(self)
+        self.m.schema_gate.check = lambda db, candidate: None
+        self.reached = []
+
+        def tripwire(name):
+            def f(*a, **kw):
+                self.reached.append(name)
+                raise RuntimeError(f"tripwire: {name}")
+            return f
+        for name in ("control", "launchd", "probe", "link"):
+            setattr(self.m, name, tripwire(name))
+        # what a failed drain undoes is ops/test-local-release.py's business
+        self.m.restore = lambda *a: (True, ["stub"])
+
+    def tearDown(self):
+        os.environ["PATH"] = self.path
+        self.tmp.cleanup()
+
+    def release(self, name, check):
+        d = self.home / "releases" / name
+        (d / "bin").mkdir(parents=True)
+        (d / "web/dist").mkdir(parents=True)
+        (d / "web/dist/index.html").write_text("<!doctype html>")
+        (d / "release.json").write_text(json.dumps(dict(version=name.split("-")[0], commit="c" * 40)))
+        asked = d / "asked"
+        hub = d / "bin/steve-hub"
+        hub.write_text(f"""#!/bin/sh
+case "$1" in
+  --build-info) echo '{{"version":"{name.split("-")[0]}","commit":"{"c" * 40}","schema":1{',"check_config":true' if check else ''}}}' ;;
+  --check-config)
+    echo "$STEVE_HOST|$STEVE_HOME|$STEVE_PORT" > "{asked}"
+    if [ "$STEVE_HOST" = 0.0.0.0 ] && [ "$STEVE_ALLOW_ANY_HOST" != 1 ]; then
+      echo '{{"ok":false,"errors":["STEVE_HOST: 0.0.0.0 / :: listens on every network, so the Hub refuses it. In steve.env either set STEVE_ALLOW_ANY_HOST=1 ..."],"listen":[]}}'
+      exit 2
+    fi
+    echo '{{"ok":true,"errors":[],"listen":["http://127.0.0.1:8440"]}}' ;;
+  *) echo "a Hub was started" >&2; exit 9 ;;
+esac
+""")
+        hub.chmod(0o755)
+        return d
+
+    def deploy(self, steve_env, check=True):
+        (self.home / "steve.env").write_text(steve_env)
+        new = self.release(f"0.3.1-local-{len(self.reached)}{'c' if check else 'n'}bbbbb", check=check)
+        args = type("Args", (), dict(release=str(new), drain_s=1))
+        return new, args
+
+    def test_a_steve_env_the_new_hub_refuses_stops_the_deploy_before_anything(self):
+        new, args = self.deploy("STEVE_PORT=8440\nSTEVE_HOST=0.0.0.0\n")
+        with self.assertRaises(self.m.Refused) as e:
+            self.m.deploy(args)
+        msg = str(e.exception)
+        self.assertIn("没有排空也没有停止", msg)
+        self.assertIn("STEVE_ALLOW_ANY_HOST=1", msg)
+        self.assertIn("127.0.0.1,100.64.0.2", msg, "both ways out are named")
+        self.assertEqual(self.reached, [], "nothing drained, stopped, probed or switched")
+        self.assertEqual((self.home / "current").resolve(), self.old.resolve())
+        # asked with the real steve.env: its host and port, not the probe's private ones
+        self.assertEqual((new / "asked").read_text().strip(), f"0.0.0.0|{self.home}|8440")
+
+    def test_the_opt_in_lets_the_deploy_go_on_to_the_drain(self):
+        new, args = self.deploy("STEVE_HOST=0.0.0.0\nSTEVE_ALLOW_ANY_HOST=1\n")
+        self.assertEqual(self.m.deploy(args), 1)
+        self.assertEqual(self.reached[0], "control", "on to the drain")
+        self.assertTrue((new / "asked").exists())
+
+    def test_a_release_without_the_check_is_not_asked(self):
+        # an older binary would take --check-config for a normal start
+        new, args = self.deploy("STEVE_HOST=0.0.0.0\n", check=False)
+        self.assertEqual(self.m.deploy(args), 1)
+        self.assertEqual(self.reached[0], "control")
+        self.assertFalse((new / "asked").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

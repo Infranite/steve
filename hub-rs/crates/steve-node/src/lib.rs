@@ -1,4 +1,4 @@
-//! A Steve Node: the host of harnesses on one machine (docs/hub-node-client.md).
+//! A Steve Node: the host of harnesses on one machine.
 //!
 //! It runs exactly what the Hub asks, one attempt at a time per session, and reports facts. It never
 //! retries, never picks the next message, never decides about permissions: the Hub does. Agent
@@ -516,10 +516,7 @@ pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) ->
                 > limit
             {
                 inner.full.store(true, Ordering::SeqCst);
-                return Err(ApiError::new(
-                    ErrorCode::Exhausted,
-                    "journal data budget reached",
-                ));
+                return Err(NodeStop::JournalBudget.error());
             }
         }
         let stream: StreamId = id(stream_of(&subject))?;

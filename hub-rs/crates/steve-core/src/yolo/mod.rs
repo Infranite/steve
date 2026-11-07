@@ -79,7 +79,7 @@ pub struct Switch {
 }
 
 /// Text of the confirmation the enable flow shows and the notice when full access comes on.
-pub const FULL_WARNING: &str = "完全放开：Agent 以你的身份运行任何命令、改任何文件，不再先问你。仍然要你确认：付款和银行卡、高敏感保险箱条目、经 Steve 以你的名义发出的消息和邮件（只发带 [AI] 标识并通过披露检查的）、其他项目的发布。Agent 报告的命令若是推送、用 gh 改 GitHub、用 lark-cli 或邮件程序以你的名义发消息、碰 ~/.steve、8440 端口或 launchd、用 pkill/killall，Steve 一看到就停下这一轮并通知你；但这是事后拦截，那条命令可能已经开始执行，Agent 没报告或藏在脚本文件里的命令 Steve 看不出来。";
+pub const FULL_WARNING: &str = "完全放开：Agent 以你的身份运行任何命令、改任何文件，不再先问你。仍然要你确认：付款和银行卡、高敏感保险箱条目、经 Steve 以你的名义发出的消息和邮件（只发带 [AI] 标识并通过披露检查的）、其他项目的发布。Agent 自己的命令不再请求权限，Steve 也就不会拦截它们；仍然起保护作用的是：Steve 的机密尽量不放在 Agent 看得到的环境变量和文件里，Agent 的进程拿不到 GH_TOKEN 和 SSH agent。系统级的沙箱还在开发中。";
 
 impl Switch {
     /// Parses the body: `{on}` or `{mode: off|on|full}`; full access also needs `confirm: true`, so it

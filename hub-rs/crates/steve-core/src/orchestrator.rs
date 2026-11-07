@@ -158,6 +158,19 @@ pub enum Forked {
     Item(String),
 }
 
+/// Whether answering a decision of `kind`/`subject_type` with `choice` decides on its item's
+/// result, so it is answered on fresh git facts ([`Core::git_before`]): an acceptance, a release's
+/// approval, a failure's choice that ends in an acceptance, a release check or a drop. Not a
+/// permission card, an approval the agent asked for, a question, nor going on after a failure.
+pub(crate) fn decides_on_result(kind: &str, subject_type: &str, choice: &str) -> bool {
+    match kind {
+        "accept" => true,
+        "approve" => subject_type == "release",
+        "fail" => !matches!(choice, "continue" | "look" | "tosteve"),
+        _ => false,
+    }
+}
+
 /// Where a decision's follow-up message goes (the `send` closures of orchestrator.ts).
 #[derive(Clone)]
 pub(crate) enum To {
@@ -221,12 +234,15 @@ pub(crate) fn lane_releases(p: &crate::repo::Project) -> bool {
     }
 }
 
+/// The prompt line for `steve_lane_status`, next to `steve_publish`'s.
+pub(crate) const LANE_STATUS_LINE: &str = "- steve_lane_status: after steve_publish, to see where the release is: the merge-lane batch it is in (MQ-<n>), an approval it waits for and who answers it, a failure and why, the merged commit and released version, and what you should do next. Read-only. Call it instead of asking the user which batch you are in or how the release is going.";
+
 /// What the agent hears when only the release is left: publish, which for a lane project hands the branch
 /// to the merge lane (Steve merges, checks and releases it; the agent pushes, merges and tags nothing).
 pub(crate) fn publish_text(lane: bool, branch: &str) -> String {
     if lane {
         format!(
-            "确认改动都已提交到 {branch} 后，用 steve_publish 把它交给合并通道：Steve 会和同一目标的其他改动一起合并、等检查通过、发布。不要自己推送、开 PR、合并或打 tag。"
+            "确认改动都已提交到 {branch} 后，用 steve_publish 把它交给合并通道：Steve 会和同一目标的其他改动一起合并、等检查通过、发布。不要自己推送、开 PR、合并或打 tag。进展用 steve_lane_status 查看，不要问用户。"
         )
     } else {
         format!("确认改动都已提交到 {branch} 后，用 steve_publish 请求发布。")
@@ -397,11 +413,13 @@ impl Core {
         self.tx().rm_dep(item, dep)
     }
     pub fn resolve(&self, id: &str, choice: &str, text: &str, actor: &str) -> Result<Decision> {
-        /* an acceptance (or a release, or a failure's choice) decides on an item's result: on a
-         * Node, on what its Node says now */
+        /* an acceptance (or a release, or a failure's choice about the result) decides on an
+         * item's result: on a Node, on what its Node says now. The gathering is one or two git
+         * reads on the Node and the answer waits for it, so only those wait: a permission card
+         * or an approval the agent asked for decides nothing about the result */
         if self.node_git().is_some()
             && let Ok(Some(d)) = self.store().decision(id)
-            && matches!(d.kind.as_str(), "accept" | "approve" | "fail")
+            && decides_on_result(&d.kind, &d.subject_type, choice)
             && let Some(item) = &d.item_id
         {
             self.git_before(item);
@@ -1032,6 +1050,7 @@ impl Tx<'_> {
                 l.push_str(crate::yolo::agent::PUBLISH);
             }
             lines.push(l);
+            lines.push(LANE_STATUS_LINE.into());
             /* the project's own rule of done (ST-31): what finishes the item, and what does not hold it */
             if let Some(rule) = p
                 .as_ref()
@@ -1766,7 +1785,7 @@ impl Tx<'_> {
             self.db().event_add(
                 &s.id,
                 "system",
-                json!({"text": format!("已进入合并通道（{where_}）：Steve 会和同一目标的其他改动一起合并、检查、发布，完成后这件事项自动结束。结束这一回合即可。")}),
+                json!({"text": format!("已进入合并通道（{where_}）：Steve 会和同一目标的其他改动一起合并、检查、发布，完成后这件事项自动结束。结束这一回合即可；之后想知道进展，用 steve_lane_status 查看，不要问用户。")}),
             )?;
             self.db()
                 .item_patch(item_id, patch![now: format!("在合并通道里（{where_}）")])?;

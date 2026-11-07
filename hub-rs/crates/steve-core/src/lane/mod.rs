@@ -16,5 +16,6 @@ pub mod drive;
 pub mod exec;
 pub mod precheck;
 pub mod profile;
+pub mod status;
 pub mod store;
 pub mod target;

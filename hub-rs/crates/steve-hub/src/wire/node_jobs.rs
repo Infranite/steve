@@ -710,11 +710,7 @@ impl Drop for Waiting {
 /// caller sees the very error the in-process run gives.
 fn print_error(c: &Completion, timeout: Duration) -> steve_print::PrintError {
     use steve_print::PrintError as P;
-    let detail = c
-        .error
-        .as_ref()
-        .map(|e| e.safe_detail.clone())
-        .unwrap_or_default();
+    let detail = c.error.as_ref().map(super::said).unwrap_or_default();
     match (c.outcome, c.stop_reason.as_str()) {
         (Outcome::TimedOut, _) | (_, "timeout") => P::Timeout(timeout),
         (_, "failed") => P::Failed(detail),

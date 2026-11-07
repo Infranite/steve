@@ -12,7 +12,10 @@ name the version and commit, and the Web is built and packaged the way CI does (
 
 deploy, in order; any failure before the switch leaves the running version as it was:
   1. the release can open the database (ops/schema_gate.py): an older release on a database a newer one migrated
-     is refused here, so this is also the only way back to an earlier release;
+     is refused here, so this is also the only way back to an earlier release; and the release's Hub accepts this
+     machine's steve.env (`steve-hub --check-config`: every startup check a real start makes on its environment,
+     listen addresses included, without the database or the port). A setting it would refuse stops the deploy here
+     with what to set, while the old version keeps serving;
   2. drain: the Hub's own maintenance drain (/internal/upgrade/drain) until it reports ready: no new work, running
      turns finished, adapters stopped. Not ready in --drain-s seconds: the drain is lifted and nothing changes;
   3. stop the service, back up the database (quick_check must pass) into $STEVE_HOME/backups;
@@ -388,8 +391,49 @@ def link(path, target):
     os.replace(tmp, path)
 
 
+def hub_env(candidate):
+    """The production environment (what run.sh gives the Hub) for `candidate`'s Hub."""
+    env = {k: os.environ[k] for k in ("HOME", "PATH", "TMPDIR") if k in os.environ}
+    env.update(env_file())
+    env.update(STEVE_HOME=str(HOME), STEVE_WEB_DIR=str(candidate / "web/dist"))
+    env.setdefault("STEVE_KEYHELPER", str(HOME / "bin/steve-keyhelper"))
+    return env
+
+
+ANY_HOST_HINT = ("二选一：在 steve.env 里加上 STEVE_ALLOW_ANY_HOST=1（继续监听所有网络），或者把 STEVE_HOST 改成 127.0.0.1 "
+                 "加上需要访问 Hub 的地址（例如 127.0.0.1,100.64.0.2）")
+
+
+def check_config(candidate, info):
+    """The candidate's own startup checks on the real steve.env (`steve-hub --check-config`, hub-rs check.rs), before
+    anything is drained: the probe below runs on a private port and host, so it cannot see a listen address the new
+    Hub would refuse. A release from before the check (no check_config in its --build-info) is not asked: that
+    binary would start a whole Hub instead."""
+    if not info.get("check_config"):
+        log(f"{candidate.name} has no --check-config; its startup checks are left to the probe")
+        return
+    try:
+        r = subprocess.run([str(candidate / "bin/steve-hub"), "--check-config"], env=hub_env(candidate),
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Refused(f"不能切到 {candidate.name}：它的 --check-config 没能跑完（{e}），没有排空也没有停止，当前版本照常运行")
+    try:
+        report = json.loads(r.stdout)
+    except ValueError:
+        report = None
+    if not isinstance(report, dict):
+        report = dict(ok=False, errors=[(r.stdout + r.stderr).strip() or f"exit {r.returncode}"])
+    if r.returncode == 0 and report.get("ok") is True:
+        return
+    errors = [str(e) for e in report.get("errors") or []] or [f"exit {r.returncode}"]
+    hint = f"。{ANY_HOST_HINT}" if any(e.startswith("STEVE_HOST: 0.0.0.0") for e in errors) else ""
+    raise Refused(f"不能切到 {candidate.name}：它按 {HOME / 'steve.env'} 启动不了，没有排空也没有停止，当前版本照常运行。"
+                  f"改好 steve.env 再部署：{'；'.join(errors)}{hint}")
+
+
 def probe(candidate, version):
-    """The candidate's Hub on the live database in maintenance: migrations, vault read; business must be off."""
+    """The candidate's Hub on the live database in maintenance: migrations, vault read; business must be off. Its
+    listen address and port are its own: the environment's own startup checks ran in check_config()."""
     ident = str(uuid.uuid4())
     ops = HOME / "updates/operations"
     ops.mkdir(parents=True, exist_ok=True)
@@ -403,13 +447,11 @@ def probe(candidate, version):
     # the production environment (what run.sh gives the Hub), then only what keeps the probe private: its own
     # port, the upgrade gate, no resumed work, no agent that could start, and no local Node (an explicit
     # STEVE_NODE_MODE=local in steve.env would refuse a STEVE_NO_RESUME copy, and the Node's home is the live one's)
-    env = {k: os.environ[k] for k in ("HOME", "PATH", "TMPDIR") if k in os.environ}
-    env.update(env_file())
-    env.update(STEVE_HOME=str(HOME), STEVE_PORT=str(p_port), STEVE_HOST="127.0.0.1", STEVE_WEB_DIR=str(candidate / "web/dist"),
+    env = hub_env(candidate)
+    env.update(STEVE_PORT=str(p_port), STEVE_HOST="127.0.0.1",
                STEVE_UPGRADE_ID=ident, STEVE_NO_RESUME="1", STEVE_NODE_MODE="off", STEVE_REPO=str(HOME / "probe-unused-repo"),
                STEVE_ADAPTER_CLAUDE="/usr/bin/false", STEVE_ADAPTER_CODEX="/usr/bin/false",
                CLAUDE_CODE_EXECUTABLE="/usr/bin/false")
-    env.setdefault("STEVE_KEYHELPER", str(HOME / "bin/steve-keyhelper"))
     logf = HOME / f"logs/release/probe-{version}-{ident[:8]}.log"
     logf.parent.mkdir(parents=True, exist_ok=True)
     with logf.open("w") as out:
@@ -466,6 +508,7 @@ def deploy(args, journal=Journal(None)):
     why = schema_gate.check(DB, candidate)
     if why:
         raise Refused(f"不能切到 {candidate.name}：{why}")
+    check_config(candidate, info)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     result = dict(version=version, release=str(candidate), previous=str(old_hub), previous_web=str(old_web),
                   db_before=schema_gate.state(DB), started=stamp)

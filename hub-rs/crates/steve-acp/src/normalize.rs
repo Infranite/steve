@@ -564,8 +564,8 @@ impl ToolFact {
                     cwd: None,
                     network: NetworkScope::Unrestricted,
                 }),
-                // its command line as written (argv words quoted), what the Hub's floor for calls
-                // nobody was asked about reads; the directory it runs in is the harness's own
+                // its command line as written (argv words quoted), for the timeline and the
+                // tool facts; the directory it runs in is the harness's own
                 (Some(c), _) => Some(Action::Unknown {
                     summary: command_line(c),
                 }),
@@ -872,7 +872,7 @@ mod tests {
     }
 
     /// A harness that runs an argv (`["/bin/zsh", "-lc", script]`) in a directory of its own: the
-    /// view carries the whole command line, what the Hub's floor for unasked calls reads.
+    /// view carries the whole command line, as the timeline shows it.
     #[test]
     fn an_argv_command_keeps_its_command_line_in_the_view() {
         let mut n = n();

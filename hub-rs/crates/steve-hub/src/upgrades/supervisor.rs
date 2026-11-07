@@ -67,20 +67,72 @@ async fn release_maintenance(cfg: &Config, u: &Updates) -> Result<()> {
     maintenance(cfg, u, reqwest::Method::DELETE).await?;
     Ok(())
 }
-fn spawn(cfg: &Config, bundle: &Path, op: Option<&Operation>) -> Result<HubChild> {
-    let manifest: Manifest = read(&bundle.join("release.json"))?;
-    let _ = control_token(cfg)?;
+/// `bundle`'s Hub in the environment a child of this supervisor gets.
+fn hub_command(cfg: &Config, bundle: &Path, manifest: &Manifest) -> Command {
     let mut c = Command::new(bundle.join("bin/steve-hub"));
-    c.env("STEVE_SUPERVISOR_PID", std::process::id().to_string())
-        .env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
+    c.env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
         .env("STEVE_PORT", cfg.listen.port.to_string())
         .env("STEVE_HOST", cfg.listen.env_value())
         .env("STEVE_HOME", &cfg.home)
-        .env("STEVE_MANAGED", "1")
         .env("STEVE_VERSION", &manifest.version)
         .env("STEVE_WEB_DIR", bundle.join("web/dist"))
-        .process_group(0)
         .kill_on_drop(true);
+    c
+}
+/// The candidate's own startup checks (`--check-config`, check.rs) on the environment it would
+/// start with, before anything is drained: a setting the new Hub refuses fails the upgrade while
+/// the current version keeps serving. A candidate from before `--check-config` is not asked.
+pub(super) async fn check_candidate(
+    cfg: &Config,
+    bundle: &Path,
+    manifest: &Manifest,
+) -> Result<()> {
+    let bin = bundle.join("bin/steve-hub");
+    let run = |mut c: Command| async move {
+        tokio::time::timeout(Duration::from_secs(30), c.output())
+            .await
+            .context("candidate check timed out")?
+            .context("candidate check")
+    };
+    let mut info = Command::new(&bin);
+    info.arg("--build-info").kill_on_drop(true);
+    // no answer here is left to the gate after the switch, which still rolls back
+    let asks = match run(info).await {
+        Ok(out) => serde_json::from_slice::<Value>(&out.stdout)
+            .is_ok_and(|info| info["check_config"] == true),
+        Err(_) => false,
+    };
+    if !asks {
+        return Ok(());
+    }
+    let mut c = hub_command(cfg, bundle, manifest);
+    c.arg("--check-config").env_remove("STEVE_UPGRADE_ID");
+    let out = run(c).await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let errors = serde_json::from_slice::<Value>(&out.stdout)
+        .ok()
+        .and_then(|v| v["errors"].as_array().cloned())
+        .map(|e| {
+            e.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string());
+    bail!(
+        "{} 按当前环境（steve.env）启动不了，没有排空也没有切换，当前版本照常运行。改好 steve.env 里的以下设置，重启 Steve 服务（托管模式只在启动时读取 steve.env）后再升级：{errors}",
+        manifest.version
+    )
+}
+fn spawn(cfg: &Config, bundle: &Path, op: Option<&Operation>) -> Result<HubChild> {
+    let manifest: Manifest = read(&bundle.join("release.json"))?;
+    let _ = control_token(cfg)?;
+    let mut c = hub_command(cfg, bundle, &manifest);
+    c.env("STEVE_SUPERVISOR_PID", std::process::id().to_string())
+        .env("STEVE_MANAGED", "1")
+        .process_group(0);
 
     if let Some(op) = op {
         c.env("STEVE_UPGRADE_ID", &op.id);
@@ -207,6 +259,7 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
     let target = PathBuf::from(op.target.as_ref().context("staged target missing")?);
     let manifest: Manifest = read(&target.join("release.json"))?;
     super::client::validate_manifest(&manifest, &op.version)?;
+    check_candidate(cfg, &target, &manifest).await?;
     op.previous = Some(previous.to_string_lossy().into());
     u.phase(op, "draining", None)?;
     if let Err(e) = drain(cfg, u).await {

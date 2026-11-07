@@ -12,6 +12,7 @@ mod inbox;
 mod kinds;
 mod lane;
 mod lane_drive;
+mod lane_status;
 mod lifecycle;
 mod models;
 mod module_undo;

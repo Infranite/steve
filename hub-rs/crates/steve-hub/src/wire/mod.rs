@@ -261,7 +261,7 @@ fn node_runtime(
 /// an explicit `local` when STEVE_NODE_MODE is unset. A `STEVE_NO_RESUME` copy (a DB copy that
 /// must not touch the live harnesses) resolves to off by default; an explicit `local` there is a
 /// boot error. Any other value is a boot error too, rather than a guess.
-fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, BackendError> {
+pub(crate) fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, BackendError> {
     let explicit_local = match vars("STEVE_NODE_MODE")
         .map(|v| v.trim().to_ascii_lowercase())
         .filter(|v| !v.is_empty())

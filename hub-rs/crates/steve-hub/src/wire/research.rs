@@ -639,7 +639,7 @@ impl r::AttemptRunner for OnNode<'_> {
         let error = (c.outcome != api::Outcome::Succeeded).then(|| {
             c.error
                 .as_ref()
-                .map(|e| e.safe_detail.clone())
+                .map(super::node_runtime::said)
                 .unwrap_or_else(|| c.stop_reason.clone())
         });
         let result = matches!(report, Some(api::JobEnd::Done)).then_some(Ok(()));

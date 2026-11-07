@@ -23,7 +23,7 @@ export default {
   harnessModel: "{{harness}} · {{model}}",
   projectByItem: "Inferred from the item",
   brief: { titled: "Task brief · {{title}}", plain: "Task brief" },
-  steveTool: { steve_update: "Update plan", steve_ask: "Ask you", steve_request_approval: "Request approval", steve_deliver: "Deliver", steve_publish: "Request release" },
+  steveTool: { steve_update: "Update plan", steve_ask: "Ask you", steve_request_approval: "Request approval", steve_deliver: "Deliver", steve_publish: "Request release", steve_lane_status: "Check release progress" },
   tool: { fallback: "Tool", permission: "Tool call" },
   queueLine: {
     queued: "Queued: {{text}}",

@@ -217,7 +217,7 @@ export function BotView({ k }: { k: string }) {
       {botTab === "能力" && (
         <div className="flex flex-col gap-7" data-caps>
           <section><SectionLabel>{t("manage:caps.steveTools")}</SectionLabel>
-            <Group>{([["steve_update", "toolUpdate"], ["steve_ask", "toolAsk"], ["steve_request_approval", "toolApproval"], ["steve_deliver", "toolDeliver"], ["steve_publish", "toolPublish"]] as const).map(([c, l]) => <Row key={c} title={t(`manage:caps.${l}`)} sub={<span className="font-mono">{c}</span>}><CheckIcon className="size-4 text-success" /></Row>)}</Group></section>
+            <Group>{([["steve_update", "toolUpdate"], ["steve_ask", "toolAsk"], ["steve_request_approval", "toolApproval"], ["steve_deliver", "toolDeliver"], ["steve_publish", "toolPublish"], ["steve_lane_status", "toolLaneStatus"]] as const).map(([c, l]) => <Row key={c} title={t(`manage:caps.${l}`)} sub={<span className="font-mono">{c}</span>}><CheckIcon className="size-4 text-success" /></Row>)}</Group></section>
           <section><SectionLabel>{t("manage:caps.harnessTools", { harness: b.h })}</SectionLabel>
             <Group><Row title={t("manage:caps.builtin")} sub={t("manage:caps.builtinSub", { harness: b.h })} /><Row title={t("manage:caps.perm")} sub={permLabel(t, b.permMode)}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { botTab = "设置"; r() }}>{t("manage:caps.change")}</Button></Row></Group></section>
           <div className="px-1 type-footnote text-muted-foreground">{t("manage:caps.later")}</div>

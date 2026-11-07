@@ -1,4 +1,4 @@
-//! The Hub's coordinator for sessions that run on a Node (docs/hub-node-client.md, D3).
+//! The Hub's coordinator for sessions that run on a Node.
 //!
 //! The Hub decides, the Node executes. Here the Hub's decisions become durable commands and the
 //! Node's facts become the Hub's state, each in one store transaction:
@@ -66,6 +66,37 @@ const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
 const ACCEPT_WINDOW_MS: i64 = 10 * 60_000;
 /// A worker's hold on a command it sends.
 const LEASE_MS: i64 = 60_000;
+
+/// What the user reads for a Node's error: a cause the Node decided on its own ([`NodeStop`]) in
+/// words of ours, anything else as the Node said it. Stored (timeline, fail cards), so zh-CN;
+/// that is also the language a model reads it in where it reaches one (a gateway or research
+/// error), as the prompts are.
+pub(crate) fn said(e: &ApiError) -> String {
+    steve_i18n::stored(|| match NodeStop::of(e) {
+        Some(stop) => stop_text(stop),
+        None => e.safe_detail.clone(),
+    })
+}
+
+fn stop_text(stop: NodeStop) -> String {
+    use steve_i18n::t;
+    match stop {
+        NodeStop::Deadline => t!("hub.node.stop.deadline"),
+        NodeStop::JobDeadline => t!("hub.node.stop.job_deadline"),
+        NodeStop::HubUnreachable => t!("hub.node.stop.hub_unreachable"),
+        NodeStop::OutputLimit => t!("hub.node.stop.output_limit"),
+        NodeStop::FrameTooLarge => t!("hub.node.stop.frame_too_large"),
+        NodeStop::IngressStalled { secs } => t!("hub.node.stop.ingress_stalled", secs = secs),
+        NodeStop::JournalBudget => t!("hub.node.stop.journal_budget"),
+        NodeStop::JournalFails => t!("hub.node.stop.journal_fails"),
+        NodeStop::NotRecorded => t!("hub.node.stop.not_recorded"),
+        NodeStop::HarnessGone => t!("hub.node.stop.harness_gone"),
+        NodeStop::AdapterExited => t!("hub.node.stop.adapter_exited"),
+        NodeStop::StoppedByNode => t!("hub.node.stop.stopped_by_node"),
+        NodeStop::HarnessIdle => t!("hub.node.stop.harness_idle"),
+        NodeStop::ResearchBudget => t!("hub.node.stop.research_budget"),
+    }
+}
 
 /// A turn's end for the business side, told after its commit.
 #[derive(Debug)]
@@ -146,12 +177,6 @@ pub trait NodeDomain: Send + Sync + 'static {
     /// A permission card was made for a Node's request (committed): YOLO may answer it now.
     fn permission_asked(&self, session: &str, decision: &str, request: &PermissionRequest) {
         let _ = (session, decision, request);
-    }
-    /// A harness tool call of a session's turn was seen (committed), as it starts or changes: a
-    /// call no permission request came for (any under full access, one a harness ran without
-    /// asking) is looked at here. Must return promptly.
-    fn tool_seen(&self, session: &str, tool: &ToolView) {
-        let _ = (session, tool);
     }
     /// A workspace prepare or tidy is over (committed). Must return promptly and never call back
     /// into the coordinator synchronously.
@@ -1795,7 +1820,7 @@ impl NodeRuntime {
             session: session.to_string(),
             attempt: Some(attempt.to_string()),
             stop: completion.stop_reason.clone(),
-            error: completion.error.as_ref().map(|e| e.safe_detail.clone()),
+            error: completion.error.as_ref().map(said),
         });
         let mut staged = self.staged.lock().unwrap();
         staged.0.push(finished);
@@ -1887,7 +1912,7 @@ impl NodeRuntime {
                     "open_session" => {
                         let s = command_session_in(tx, &lease.operation)?;
                         self.config_opened_in(tx, &s, &lease.operation, false)?;
-                        self.opened_in(tx, &s, false, &e.safe_detail)?
+                        self.opened_in(tx, &s, false, &said(e))?
                     }
                     "abandon" => self.abandon_failed_in(tx, &lease.operation, Some(e))?,
                     "prepare_workspace" => {
@@ -2029,7 +2054,7 @@ impl NodeRuntime {
             return Ok(None);
         }
         let detail = match &receipt.state {
-            Observed::Finished { error: Some(e), .. } => e.safe_detail.clone(),
+            Observed::Finished { error: Some(e), .. } => said(e),
             Observed::Unknown { reason } => reason.clone(),
             _ => String::new(),
         };
@@ -2301,13 +2326,13 @@ impl NodeRuntime {
             return Ok(None);
         }
         // the user hears why even when no turn waited (the queued message stays for the next try)
+        let text =
+            steve_i18n::stored(|| steve_i18n::t!("hub.node.stop.reopen_failed", detail = detail));
         let mut end = Some(End {
             session: s.to_string(),
             attempt: None,
             stop: "error".to_string(),
-            error: Some(format!(
-                "the Node could not open the session again: {detail}"
-            )),
+            error: Some(text.clone()),
         });
         if let Some(turn) = waiting {
             let c = Completion {
@@ -2328,7 +2353,7 @@ impl NodeRuntime {
                 session: s.to_string(),
                 attempt: Some(last_attempt_in(tx, &turn)?),
                 stop: c.stop_reason.clone(),
-                error: c.error.as_ref().map(|e| e.safe_detail.clone()),
+                error: Some(text),
             });
         }
         let rev = session_revision(tx, s)?;
@@ -3048,7 +3073,6 @@ impl NodeRuntime {
                         .attempt_finished(&session, &attempt, &completion, &facts, at);
                 }
                 After::Cost { session } => self.domain.cost_changed(&session),
-                After::Tool { session, tool } => self.domain.tool_seen(&session, &tool),
             }
         }
     }
@@ -3104,15 +3128,6 @@ impl NodeRuntime {
                 if delta.is_some_and(|d| d > 0.0) {
                     out.push(After::Cost { session });
                 }
-            }
-            EventBody::ToolChanged { tool }
-                if tool.origin == ToolOrigin::Harness
-                    && matches!(ev.subject, Subject::Execution(ExecutionRef::Turn { .. })) =>
-            {
-                out.push(After::Tool {
-                    session,
-                    tool: Box::new(tool.clone()),
-                });
             }
             EventBody::SessionChanged { view } => {
                 // the Node's revision of the session, kept here (the inbox it came in is pruned)
@@ -3570,7 +3585,7 @@ impl NodeRuntime {
             session: session.to_string(),
             attempt: Some(last_attempt_in(tx, turn)?),
             stop: c.stop_reason.clone(),
-            error: c.error.as_ref().map(|e| e.safe_detail.clone()),
+            error: c.error.as_ref().map(said),
         }))
     }
 
@@ -3681,10 +3696,6 @@ enum After {
     },
     Cost {
         session: String,
-    },
-    Tool {
-        session: String,
-        tool: Box<ToolView>,
     },
 }
 
@@ -4267,6 +4278,32 @@ mod tests {
         ) {
             self.finished.lock().unwrap().push(attempt.into());
         }
+    }
+
+    /// A cause the Node decided on is told in our words (zh-CN even inside an en request: it is
+    /// stored); a harness's own words pass as they came.
+    #[tokio::test]
+    async fn a_nodes_stop_reason_is_said_in_chinese() {
+        steve_i18n::scope(steve_i18n::EN, async {
+            assert_eq!(
+                said(&NodeStop::Deadline.error()),
+                "运行超过了时限，Node 已停止它"
+            );
+            assert_eq!(
+                said(&NodeStop::OutputLimit.error()),
+                "输出超过了这次运行的上限，Node 已停止它"
+            );
+            assert_eq!(
+                said(&NodeStop::IngressStalled { secs: 90 }.error()),
+                "Node 连续 90 秒没能接收 harness 的输出（它的本地运行记录或磁盘卡住了），已中断这次运行"
+            );
+            // the very words, but another code: not ours to rephrase
+            let other = ApiError::new(ErrorCode::Stale, NodeStop::HarnessGone.detail());
+            assert_eq!(said(&other), "the harness is gone");
+            let harness = ApiError::new(ErrorCode::Internal, "rate limited, try later");
+            assert_eq!(said(&harness), "rate limited, try later");
+        })
+        .await;
     }
 
     async fn until(what: &str, f: impl Fn() -> bool) {

@@ -146,6 +146,7 @@ export default {
     toolApproval: "对外操作前请你批准",
     toolDeliver: "交付，请你验收",
     toolPublish: "验收后申请发布（只在配置了发布的项目里）",
+    toolLaneStatus: "查看自己的发布进度：在哪一批、等谁批准、失败原因、发布的版本（只读）",
     harnessTools: "{{harness}} 自带的工具",
     builtin: "读写文件、执行命令、搜索网页",
     builtinSub: "由 {{harness}} 提供；能不能直接用，看下面的权限",

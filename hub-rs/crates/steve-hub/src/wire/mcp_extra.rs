@@ -1,4 +1,4 @@
-//! The modules' MCP tools served next to steve-mcp's five Steve tools without changing steve-mcp: contacts
+//! The modules' MCP tools served next to steve-mcp's Steve tools without changing steve-mcp: contacts
 //! (P3), knowledge (K3/K4), the vault's secret tools (V4), GitHub (G4), mail (E5) and the flow's
 //! `steve_event_get` (S10). A tool that opened an approval marks the session as waiting, like
 //! `steve_request_approval`: `tools/list` answers get the module's

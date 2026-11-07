@@ -30,7 +30,7 @@ export default {
   harnessModel: "{{harness}} · {{model}}",
   projectByItem: "按事项推断",
   brief: { titled: "任务说明 · {{title}}", plain: "任务说明" },
-  steveTool: { steve_update: "更新计划", steve_ask: "向你提问", steve_request_approval: "请求批准", steve_deliver: "交付", steve_publish: "申请发布" },
+  steveTool: { steve_update: "更新计划", steve_ask: "向你提问", steve_request_approval: "请求批准", steve_deliver: "交付", steve_publish: "申请发布", steve_lane_status: "查看发布进度" },
   tool: { fallback: "工具", permission: "工具调用" },
   queueLine: {
     queued: "已排队：{{text}}",

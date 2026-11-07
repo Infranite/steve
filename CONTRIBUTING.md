@@ -20,6 +20,8 @@ The full Rust test suite also requires `zsh` at `/bin/zsh` for the existing sour
 
 CI (`.github/workflows/ci.yml`) runs on every pull request (Linux) and every push to `main` (Linux and macOS). It runs the Rust tests with [cargo-nextest](https://nexte.st) instead, one process per test: `cargo nextest run --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 2`, then `cargo test --doc`. A test that passes only on a retry does not fail the run, but the job summary lists it (`scripts/nextest-summary.py`); fix it rather than relying on the retry. The release workflow, on the tag, only builds, packages and publishes.
 
+- **No process documents.** Design notes, plans, proposals, specs, reviews, prototypes and runbooks are the maintainers' own thinking and are kept outside the repository. What a user or operator needs goes into the README, `docs/deployment.md` or the release notes; what a reader of the code needs goes into its comments. `python3 scripts/check-public-boundary.py --strict` (run by CI) rejects any other Markdown file, and anything under `docs/` other than `deployment.md`, `releases/` and `assets/`; test fixtures are exempt.
+
 ## Changes and releases
 
 A version is chosen when it is released, never ahead on a branch:
