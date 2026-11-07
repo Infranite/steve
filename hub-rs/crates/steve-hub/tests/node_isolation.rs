@@ -226,6 +226,15 @@ async fn a_node_cannot_replay_events_about_another() {
     let a_op: String = h.q(&format!(
         "SELECT operation_id FROM node_commands WHERE node_id='{a}' AND method='start_turn'"
     ));
+    // FakeNode's call log precedes the Hub committing the legitimate response. Freeze
+    // that response first, so its normal arrival cannot look like B changed A's receipt.
+    until("A's receipt committed", 15, || {
+        h.q::<Option<String>>(&format!(
+            "SELECT receipt FROM node_commands WHERE operation_id='{a_op}'"
+        ))
+        .is_some()
+    })
+    .await;
     let a_receipt: Option<String> = h.q(&format!(
         "SELECT receipt FROM node_commands WHERE operation_id='{a_op}'"
     ));
