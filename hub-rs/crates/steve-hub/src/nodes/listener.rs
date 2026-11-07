@@ -19,7 +19,7 @@ use steve_node_wire::{Conn, ConnOptions, Handler, ServeHub, close};
 use steve_store::StoreError;
 
 use super::guard::{GuardedFiles, GuardedSink, GuardedTools, LinkCtx};
-use super::{NodeService, Peer, now, peer_allowed};
+use super::{NodeService, Peer, now};
 use crate::wire::node_runtime::{catch_up_streams, read_snapshot};
 
 pub async fn upgrade(
@@ -28,7 +28,7 @@ pub async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !peer_allowed(peer, &headers) {
+    if !svc.ingress.allows(peer, &headers) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     ws.max_message_size(MAX_FRAME)
