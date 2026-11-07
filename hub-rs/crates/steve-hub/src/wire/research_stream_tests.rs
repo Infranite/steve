@@ -201,9 +201,48 @@ impl Test {
     }
 
     async fn run(&self, q: ResearchRequest, sink: &Seen) -> ResearchOutcome {
-        tokio::time::timeout(Duration::from_secs(15), self.research.research(q, sink))
-            .await
-            .unwrap()
+        // This is a safety guard for real Node processes, not a response-latency assertion.
+        // A fallback opens and reaps two ACP peers; allow busy CI scheduling without
+        // retrying the run or changing its completion/order/content assertions.
+        let limit = Duration::from_secs(60);
+        let run = q.run.clone();
+        match tokio::time::timeout(limit, self.research.research(q, sink)).await {
+            Ok(out) => out,
+            Err(_) => {
+                let state = self.store.reader(|c| {
+                    let mut st = c.prepare(
+                        "SELECT a.attempt_id,a.model,a.state,a.cancel_requested,
+                         json_extract(a.completion,'$.outcome'),
+                         c.method,c.state FROM runtime_job_attempts a
+                         JOIN runtime_jobs j ON j.job_id=a.job_id
+                         LEFT JOIN node_commands c ON c.target_job_attempt=a.attempt_id
+                         WHERE j.thread_run_id=? ORDER BY a.created,a.rowid,c.created,c.rowid",
+                    )?;
+                    st.query_map([&run], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, bool>(3)?,
+                            r.get::<_, Option<String>>(4)?,
+                            r.get::<_, Option<String>>(5)?,
+                            r.get::<_, Option<String>>(6)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(StoreError::from)
+                });
+                let text = sink.0.lock().unwrap().clone();
+                // Best-effort fixture cleanup, still bounded if the Node itself is stuck.
+                // Dropping the timed-out future may already have requested cancellation.
+                let cleanup = tokio::time::timeout(Duration::from_secs(5), self.close()).await;
+                panic!(
+                    "research {run} did not complete within {limit:?}; \
+                     attempts (id,model,state,cancelled,outcome,command,state): {state:?}; \
+                     received text: {text:?}; cleanup: {cleanup:?}"
+                );
+            }
+        }
     }
 
     async fn close(&self) {
