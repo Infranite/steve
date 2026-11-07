@@ -184,6 +184,38 @@ pub struct OpenSession {
     /// refuses is dropped. An older Node ignores them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<(String, String)>,
+    /// The harness's own directory for this session's principal ([`HarnessState`]); `None`: the
+    /// Node's, as before. An older Node ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<HarnessState>,
+}
+
+/// A principal's own directory for one harness (path model §4.5.1): its configuration, logins,
+/// history and memory, apart from everybody else's and from the Node owner's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessState {
+    /// Under the Node's state root: `/`-separated names of letters, digits, `.`, `_` and `-`
+    /// (workspace, principal, bot, adapter); never `.` or `..`.
+    pub dir: String,
+    /// The principal is the Node's owner: their state starts from what the adapter declares of
+    /// their own directory on this machine (their settings and login). Anyone else's starts empty.
+    #[serde(default)]
+    pub import_owner: bool,
+}
+
+impl HarnessState {
+    /// Whether [`Self::dir`] is a safe relative path.
+    pub fn valid(&self) -> bool {
+        !self.dir.is_empty()
+            && self.dir.len() <= 512
+            && self.dir.split('/').all(|s| {
+                !s.is_empty()
+                    && s != "."
+                    && s != ".."
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            })
+    }
 }
 
 /// One attempt of a turn. At most one attempt per session runs at a time: a busy session refuses

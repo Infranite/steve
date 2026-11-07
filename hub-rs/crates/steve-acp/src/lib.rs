@@ -23,7 +23,7 @@ mod util;
 
 pub use codex::{codex_args, codex_mode, sanitize_catalog};
 pub use config::{
-    AcpConfig, AdapterProperties, default_claude_adapter, default_codex_adapter, npm_root,
+    AcpConfig, AdapterProperties, StateDir, default_claude_adapter, default_codex_adapter, npm_root,
 };
 pub use errors::{is_dead_agent, is_transient};
 pub use rollout::find as codex_rollout;

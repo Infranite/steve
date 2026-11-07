@@ -5041,16 +5041,22 @@ async fn a_stopped_node_adopts_nothing() {
     assert_eq!(h.rt.adopted(), 0);
 }
 
-/// The principal's own variables on this Node (`node_env`) go with the open, and only theirs.
+/// The principal's own variables on this Node (`node_env`) go with the open, and only theirs:
+/// the Node's owner, alone in the workspace, on an item they asked for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_open_carries_the_principals_variables_on_this_node() {
     let h = hub();
     h.store
         .transaction::<_, StoreError>(|tx| {
             tx.execute_batch(
-                "INSERT INTO node_env(node_id,principal,key,value,updated_by,updated) VALUES
-                   ('n1','svc:default','NPM_TOKEN','tok','u',1),
-                   ('n2','svc:default','ELSEWHERE','x','u',1),
+                "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','u','u','owner',1);
+                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
+                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n1','u','n1',zeroblob(32),'f1','active',1);
+                 INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated,requested_by) VALUES ('i1','default',1,'t','run','执行',1,1,'u');
+                 UPDATE sessions SET item_id='i1' WHERE id='s1';
+                 INSERT INTO node_env(node_id,principal,key,value,updated_by,updated) VALUES
+                   ('n1','u','NPM_TOKEN','tok','u',1),
+                   ('n2','u','ELSEWHERE','x','u',1),
                    ('n1','someone','THEIRS','y','u',1);",
             )?;
             Ok(())

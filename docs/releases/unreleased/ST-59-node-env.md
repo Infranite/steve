@@ -1,4 +1,6 @@
-- 新增“每个人在每台 Node 上自己的环境变量”：用 `PUT /api/node-env/{node}/{key}`（`{"value": …, "note": …}`）保存，`GET /api/node-env/{node}` 查看，`DELETE` 删除。本机 Node 的编号是 `local`。这些变量只注入你自己发起的运行，而且只在那台 Node 上；`PATH_PREPEND` 会把目录加到 `PATH` 前面。工作区所有者还可以为工作区本身（`principal: "svc:<工作区>"`）设置，用于没有记录发起人的运行。
-  - 只能改自己的，并且只能用在本机 Node 或你自己配对的 Node 上；别人的变量谁都看不到。
-  - Steve 自己设置的键不能改：`HOME`、`TMPDIR`、`PATH`、`XDG_*`、git 全局配置、`STEVE_*`、`*_FILE`，以及 `DYLD_*`、`LD_*` 这类会把代码注入其他进程的键。
-  - 改动对之后新开的会话生效。保存在保险箱里的值（引用）还不支持。网页上的编辑界面也还没做。
+- 新增“每个人在每台 Node 上自己的环境变量”：用 `PUT /api/node-env/{node}/{key}`（`{"value": …, "note": …}`）保存，`GET /api/node-env/{node}` 查看，`DELETE` 删除。本机 Node 的编号是 `local`。`PATH_PREPEND` 会把目录加到 `PATH` 前面。
+  - 只能改自己的，且只能用在本机 Node 或自己配对的 Node 上；工作区所有者还可以为工作区本身（`principal: "svc:<工作区>"`）保存。值以明文保存在 Hub 数据库和 Node 的运行记录里，其他用户不能通过 Steve 读取，但能读取数据库的人能看到。
+  - 目前只在一种情况下注入：运行的发起人就是这台 Node 的主人，并且是这个工作区唯一的成员。其他情况先保存、暂不注入。原因是现在的运行还在用 Node 主人的登录，而且 Hub 还不记录每条消息是谁发的，注入到共享的会话里，其他成员可能借此拿到这些值。
+  - 会话每次重新打开时按当时的值注入，删掉或改掉的值不会再带上。
+  - 这些键不能设置：Steve 自己设置的（`HOME`、`TMPDIR`、`PATH`、`XDG_*`、git 全局配置、`STEVE_*`、`*_FILE`）；会把代码注入其他进程的（`DYLD_*`、`LD_*`、`NODE_*`、`BASH_ENV`、`ENV` 等）；控制 harness 本身的（`CLAUDE_*`、`CODEX_*`、`ANTHROPIC_*`、`OPENAI_*`），这类设置以后随每个人自己的 harness 凭据提供。
+  - 保存在保险箱里的值（引用）还不支持，网页上的编辑界面也还没做。

@@ -747,14 +747,9 @@ impl NodeRuntime {
             choice: b.choice.clone(),
             policy: b.policy.clone(),
             resume: adopted.clone().flatten(),
-            // the principal's own variables on this Node (node_env): a read that fails sends none
-            env: self
-                .store
-                .reader(|c| super::node_env::for_session(c, self.node_id.as_str(), &b.session))
-                .unwrap_or_else(|e| {
-                    tracing::warn!(session = %b.session, "node_env: {e}");
-                    vec![]
-                }),
+            // set in the bind's transaction, once its principal is recorded
+            env: vec![],
+            state: None,
         };
         let fresh = self.tx(|tx| {
             self.session_owners_work_in(tx, &b.session)?;
@@ -806,6 +801,9 @@ impl NodeRuntime {
                 now(),
             )?;
             let open_op = format!("op_open_{}", b.session);
+            // the principal's own variables on this Node, as recorded just now (node_env)
+            let mut open = open.clone();
+            open.env = super::node_env::for_session(tx, self.node_id.as_str(), &b.session)?;
             let (open_v, open_d) = command(&open_op, open.clone())?;
             rt::insert_command_in(
                 tx,
@@ -963,6 +961,8 @@ impl NodeRuntime {
         let mut open = self.open_of(tx, session)?;
         self.fold_desired_in(tx, session, &mut open)?;
         open.resume = resume_of_in(tx, &self.node_id, session)?;
+        // the variables as they are now: a removed or changed one does not come back
+        open.env = super::node_env::for_session(tx, self.node_id.as_str(), session)?;
         let op = uid(&format!("op_open_{session}"));
         let (req, digest) = command(&op, open)?;
         rt::insert_command_in(

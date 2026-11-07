@@ -3,10 +3,15 @@
 //! workspace's service principal), on that Node. They take the place of inheriting the Node
 //! owner's environment for what a run needs of its own: a registry token, `GOPRIVATE`, a proxy.
 //!
-//! Only the user edits their own rows; a workspace's owner edits its service principal's. Nobody
-//! else reads them, the Node's owner included (who can still see a running process's environment
-//! on their machine: that is why a Node's owner is in every run's audience). A value kept in the
-//! vault (`vault_ref`) is not supported yet: such a row is refused.
+//! Only the user edits their own rows; a workspace's owner edits its service principal's. No other
+//! user reads them through Steve; they are kept in plain text in the Hub's database and the
+//! Node's journal. A value kept in the vault (`vault_ref`) is not supported yet.
+//!
+//! Until a run uses its principal's own harness credentials and the Hub records who sent each
+//! message into a session, they reach a run only when that cannot hand them to anyone else: its
+//! principal is the person who owns the Node (their own machine, their own logins) and the only
+//! member of the run's workspace (nobody else can steer the session and ask it to print them).
+//! Anything else is kept and waits.
 
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
@@ -27,15 +32,42 @@ pub struct Row {
     pub updated: i64,
 }
 
-/// The variables `session`'s harness gets on `node`: its principal's rows with a value.
+/// Who owns `node`: the user who paired it, or for the Hub's local Node the instance's owner.
+pub fn node_owner(c: &Connection, node: &str) -> Result<Option<String>, StoreError> {
+    let sql = if node == "local" {
+        "SELECT id FROM users WHERE role='owner' ORDER BY created, id LIMIT 1"
+    } else {
+        "SELECT owner FROM nodes WHERE node_id=?1 AND state IN ('active','paused')"
+    };
+    let owner = if node == "local" {
+        c.query_row(sql, [], |r| r.get(0)).optional()?
+    } else {
+        c.query_row(sql, [node], |r| r.get(0)).optional()?
+    };
+    Ok(owner)
+}
+
+/// The variables `session`'s harness gets on `node`: its principal's rows with a value, when its
+/// principal owns the Node and is the only member of the session's workspace (see the module).
 pub fn for_session(
     c: &Connection,
     node: &str,
     session: &str,
 ) -> Result<Vec<(String, String)>, StoreError> {
-    let Some((_, p)) = principal::of_session(c, session)? else {
+    let Some((ws, p)) = principal::of_session(c, session)? else {
         return Ok(vec![]);
     };
+    let Some(me) = p.user() else {
+        return Ok(vec![]);
+    };
+    let others: i64 = c.query_row(
+        "SELECT COUNT(*) FROM workspace_members WHERE workspace_id=? AND user_id<>?",
+        [ws.as_str(), me],
+        |r| r.get(0),
+    )?;
+    if node_owner(c, node)?.as_deref() != Some(me) || others > 0 {
+        return Ok(vec![]);
+    }
     let mut q = c.prepare(
         "SELECT key, value FROM node_env WHERE node_id=? AND principal=? AND value IS NOT NULL ORDER BY key",
     )?;
@@ -164,10 +196,13 @@ mod tests {
              CREATE TABLE nodes(node_id TEXT, owner TEXT, state TEXT);
              CREATE TABLE node_env(node_id TEXT, principal TEXT, key TEXT, value TEXT, vault_ref TEXT,
                note TEXT NOT NULL DEFAULT '', updated_by TEXT, updated INTEGER, PRIMARY KEY(node_id,principal,key));
-             INSERT INTO workspace_members VALUES ('team','u1','owner',1),('team','u2','member',2);
-             INSERT INTO items VALUES ('i1','team','u2'),('i2','team',NULL);
-             INSERT INTO sessions VALUES ('s1','team','i1'),('s2','team','i2');
-             INSERT INTO runtime_sessions(session_id) VALUES ('s1'),('s2');
+             CREATE TABLE users(id TEXT, role TEXT, created INTEGER);
+             INSERT INTO users VALUES ('u1','owner',1),('u2','member',2);
+             INSERT INTO workspace_members VALUES ('team','u1','owner',1),('team','u2','member',2),
+               ('solo1','u1','owner',1),('solo2','u2','owner',1);
+             INSERT INTO items VALUES ('i1','team','u2'),('i2','team',NULL),('i3','solo1','u1'),('i4','solo2','u2'),('i5','team','u1');
+             INSERT INTO sessions VALUES ('s1','team','i1'),('s2','team','i2'),('s3','solo1','i3'),('s4','solo2','i4'),('s5','team','i5');
+             INSERT INTO runtime_sessions(session_id) VALUES ('s1'),('s2'),('s3'),('s4'),('s5');
              INSERT INTO nodes VALUES ('n_u1','u1','active'),('n_u2','u2','active'),('n_old','u2','revoked');",
         )
         .unwrap();
@@ -175,34 +210,35 @@ mod tests {
     }
 
     #[test]
-    fn a_run_gets_its_principals_variables_on_its_node_only() {
+    fn only_the_nodes_owner_alone_in_the_workspace_gets_them() {
         let c = db();
-        put(&c, "local", "u2", "NPM_TOKEN", "t2", "", "u2").unwrap();
         put(&c, "local", "u1", "NPM_TOKEN", "t1", "", "u1").unwrap();
+        put(&c, "local", "u2", "NPM_TOKEN", "t2", "", "u2").unwrap();
         put(&c, "n_u2", "u2", "GOPRIVATE", "x", "", "u2").unwrap();
         put(&c, "local", "svc:team", "CI", "1", "", "u1").unwrap();
         // a row someone wrote past the checks is still not handed over
-        put(&c, "local", "u2", "HOME", "/h", "", "u2").unwrap();
+        put(&c, "local", "u1", "HOME", "/h", "", "u1").unwrap();
+        let env = |node: &str, s: &str| for_session(&c, node, s).unwrap();
+        let one = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
+        // the instance's owner on the Hub's own Node, in a workspace of their own
+        assert_eq!(env("local", "s3"), one("NPM_TOKEN", "t1"));
+        // a member on their own paired Node, alone in the workspace
+        assert_eq!(env("n_u2", "s4"), one("GOPRIVATE", "x"));
+        // not their Node: they would steer its owner's logins
+        assert_eq!(env("local", "s4"), vec![]);
+        // a shared workspace: another member could ask the session to print them
+        assert_eq!(env("local", "s1"), vec![]);
+        assert_eq!(env("local", "s5"), vec![], "even the owner's, there");
         assert_eq!(
-            for_session(&c, "local", "s1").unwrap(),
-            [("NPM_TOKEN".to_string(), "t2".to_string())]
+            env("local", "s2"),
+            vec![],
+            "the service principal's: anyone's run"
         );
-        assert_eq!(
-            for_session(&c, "n_u2", "s1").unwrap(),
-            [("GOPRIVATE".to_string(), "x".to_string())]
-        );
-        assert_eq!(
-            for_session(&c, "local", "s2").unwrap(),
-            [("CI".to_string(), "1".to_string())],
-            "nobody asked: the service principal's"
-        );
-        put(&c, "local", "u2", "NPM_TOKEN", "t2b", "new", "u2").unwrap();
-        assert_eq!(
-            list(&c, "local", "u2").unwrap()[1].value.as_deref(),
-            Some("t2b")
-        );
-        assert!(delete(&c, "local", "u2", "NPM_TOKEN").unwrap());
-        assert!(!delete(&c, "local", "u2", "NPM_TOKEN").unwrap());
+        put(&c, "local", "u1", "NPM_TOKEN", "t1b", "new", "u1").unwrap();
+        assert_eq!(env("local", "s3"), one("NPM_TOKEN", "t1b"));
+        assert!(delete(&c, "local", "u1", "NPM_TOKEN").unwrap());
+        assert!(!delete(&c, "local", "u1", "NPM_TOKEN").unwrap());
+        assert_eq!(env("local", "s3"), vec![]);
     }
 
     #[test]
