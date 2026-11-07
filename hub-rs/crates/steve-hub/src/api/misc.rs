@@ -523,7 +523,7 @@ pub async fn thread_promote(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    ok(Value::Object(st.domain.promote(&c.ws, &id).await?))
+    ok(Value::Object(st.domain.promote(&c.ws, &id, &c.me).await?))
 }
 
 /// A thread action's answer: the result, or `409 已经处理过了` with the result when it was handled before.
@@ -554,7 +554,7 @@ pub async fn thread_reroute(
     {
         return Err(ApiError::Invalid(vec!["to".into()]));
     }
-    thread_result(st.domain.reroute(&c.ws, &id, &to).await?)
+    thread_result(st.domain.reroute(&c.ws, &id, &to, &c.me).await?)
 }
 
 /// `POST /api/thread/:id/offer {take: bool}`.
@@ -571,7 +571,7 @@ pub async fn thread_offer(
     let Some(take) = take else {
         return Err(ApiError::Invalid(vec!["take".into()]));
     };
-    thread_result(st.domain.offer(&c.ws, &id, take).await?)
+    thread_result(st.domain.offer(&c.ws, &id, take, &c.me).await?)
 }
 
 /// `POST /api/thread/:id/suggest {choice: "here" | "item" | "new"}`.
@@ -585,7 +585,7 @@ pub async fn thread_suggest(
     let mut k = Check::object(&v);
     let choice = k.enum_("choice", &["here", "item", "new"]);
     k.finish()?;
-    thread_result(st.domain.suggest(&c.ws, &id, &choice).await?)
+    thread_result(st.domain.suggest(&c.ws, &id, &choice, &c.me).await?)
 }
 
 /// `POST /api/thread/:id/a2ui` (ST-46): a button of an A2UI interface in Steve's reply. Answers the record

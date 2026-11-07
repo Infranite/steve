@@ -27,7 +27,7 @@ async fn promoting_the_same_answer_twice_at_once_makes_one_item() {
     let k = Kit::new();
     let m = chat_answer(&k);
     let before = count(&k);
-    let (a, b) = tokio::join!(k.core.promote(WS, &m), k.core.promote(WS, &m));
+    let (a, b) = tokio::join!(k.core.promote(WS, &m, None), k.core.promote(WS, &m, None));
     assert_eq!(a.unwrap().id, b.unwrap().id);
     assert_eq!(count(&k), before + 1);
 }
@@ -45,8 +45,8 @@ async fn promoting_with_a_slow_router_waits_for_the_same_item() {
     let c1 = k.core.clone();
     let c2 = k.core.clone();
     let (m1, m2) = (m.clone(), m.clone());
-    let a = tokio::spawn(async move { c1.promote(WS, &m1).await.map(|i| i.id) });
-    let b = tokio::spawn(async move { c2.promote(WS, &m2).await.map(|i| i.id) });
+    let a = tokio::spawn(async move { c1.promote(WS, &m1, None).await.map(|i| i.id) });
+    let b = tokio::spawn(async move { c2.promote(WS, &m2, None).await.map(|i| i.id) });
     let (a, b) = (a.await.unwrap().unwrap(), b.await.unwrap().unwrap());
     assert_eq!(a, b);
     assert_eq!(count(&k), before + 1);
@@ -56,9 +56,9 @@ async fn promoting_with_a_slow_router_waits_for_the_same_item() {
 async fn promoting_an_answer_that_was_already_promoted_returns_the_same_item() {
     let k = Kit::new();
     let m = chat_answer(&k);
-    let first = k.core.promote(WS, &m).await.unwrap();
+    let first = k.core.promote(WS, &m, None).await.unwrap();
     let before = count(&k);
-    let again = k.core.promote(WS, &m).await.unwrap();
+    let again = k.core.promote(WS, &m, None).await.unwrap();
     assert_eq!(again.id, first.id);
     assert_eq!(count(&k), before);
     let meta = k.db().message(&m).unwrap().unwrap().meta;
@@ -79,14 +79,14 @@ async fn promoting_a_message_from_another_workspace_is_refused() {
     let m = chat_answer(&k);
     assert_eq!(
         k.core
-            .promote("elsewhere", &m)
+            .promote("elsewhere", &m, None)
             .await
             .unwrap_err()
             .to_string(),
         "这条消息不能转成事项"
     );
     let plain = k.db().message_add(WS, "steve", "x", None, None).unwrap();
-    assert!(k.core.promote(WS, &plain).await.is_err());
+    assert!(k.core.promote(WS, &plain, None).await.is_err());
 }
 
 fn waiting(k: &Kit, kind: &str) -> (String, String) {

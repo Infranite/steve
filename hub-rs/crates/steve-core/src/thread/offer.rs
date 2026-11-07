@@ -309,8 +309,9 @@ impl Core {
 
     /// Take (`take: true`) or dismiss an offer on Steve's answer `msg_id` (`POST /api/thread/:id/offer`).
     /// Taken by you (the web's button): an item that starts.
-    pub fn offer(&self, ws: &str, msg_id: &str, take: bool) -> Result<Handled> {
-        self.offer_as(ws, msg_id, take, true)
+    /// `by`: the member who took it, whose access the item runs with.
+    pub fn offer(&self, ws: &str, msg_id: &str, take: bool, by: Option<&str>) -> Result<Handled> {
+        self.offer_as(ws, msg_id, take, true, by)
     }
 
     /// `start`: the one taking the offer may start work (see [`ThreadItem::start`]).
@@ -320,6 +321,7 @@ impl Core {
         msg_id: &str,
         take: bool,
         start: bool,
+        by: Option<&str>,
     ) -> Result<Handled> {
         let _one = lock(&self.0.thread.acting);
         let m = self
@@ -384,7 +386,7 @@ impl Core {
             from_question,
             start,
             answer: Some(&m),
-            by: None,
+            by: by.map(String::from),
         })?;
         meta["offer"]["state"] = json!("taken");
         meta["offer"]["item"] = json!(item.id);

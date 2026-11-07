@@ -103,7 +103,14 @@ impl Core {
     /// message in place (the answer continues this card), `item` makes the item, or appends the message to
     /// the item a card about an existing item recommends; `new` (that card's other choice) makes an item
     /// of its own.
-    pub fn suggest(&self, ws: &str, msg_id: &str, choice: &str) -> Result<Handled> {
+    /// `by`: the member who picked, whose access an item made here runs with.
+    pub fn suggest(
+        &self,
+        ws: &str,
+        msg_id: &str,
+        choice: &str,
+        by: Option<&str>,
+    ) -> Result<Handled> {
         if !matches!(choice, "here" | "item" | "new") {
             return Err(CoreError::Status(
                 400,
@@ -227,7 +234,7 @@ impl Core {
                 .unwrap_or_default(),
             files,
             from_question: super::decide::pure_question(&om.text),
-            by: None,
+            by: by.map(String::from),
             answer: Some(&m),
             start: true, // your action in the web
         })?;
