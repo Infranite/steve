@@ -108,7 +108,7 @@ fn validate_args(name: &str, args: &Value) -> Result<(), String> {
 }
 
 /// Scope derives from persisted identity, never from a tool argument or a workspace-owner fallback.
-fn scope(store: &Store, session: &Session) -> Result<(Session, ItemScope), String> {
+pub(super) fn scope(store: &Store, session: &Session) -> Result<(Session, ItemScope), String> {
     let denied = || "This session is not the current responsible item session.".to_string();
     let s = store
         .sessions()

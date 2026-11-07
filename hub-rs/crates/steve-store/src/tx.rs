@@ -13,6 +13,7 @@ use crate::{ChangeEvent, Store, StoreError};
 pub struct Tx<'a> {
     c: &'a Connection,
     events: RefCell<Vec<ChangeEvent>>,
+    diagnostics: RefCell<Vec<crate::diagnostics::Record>>,
     /// An outbox event was emitted: wake the dispatcher after the commit.
     outbox: Cell<bool>,
 }
@@ -26,6 +27,11 @@ impl Tx<'_> {
     pub(crate) fn mark_outbox(&self) {
         self.outbox.set(true);
     }
+
+    /// Metadata is queued only after commit, never for a rolled-back business write.
+    pub(crate) fn diagnostic(&self, event: crate::diagnostics::Record) {
+        self.diagnostics.borrow_mut().push(event);
+    }
 }
 
 impl<'a> Tx<'a> {
@@ -34,6 +40,7 @@ impl<'a> Tx<'a> {
         Tx {
             c,
             events: RefCell::new(Vec::new()),
+            diagnostics: RefCell::new(Vec::new()),
             outbox: Cell::new(false),
         }
     }
@@ -66,11 +73,16 @@ impl Store {
         let t = Tx {
             c: &tx,
             events: RefCell::new(Vec::new()),
+            diagnostics: RefCell::new(Vec::new()),
             outbox: Cell::new(false),
         };
         let out = f(&t)?;
         let (events, outbox) = (t.events.into_inner(), t.outbox.get());
+        let diagnostics = t.diagnostics.into_inner();
         tx.commit().map_err(StoreError::from)?;
+        for event in diagnostics {
+            self.diagnostics().record(event);
+        }
         for e in events {
             self.inner.bus.publish(e);
         }

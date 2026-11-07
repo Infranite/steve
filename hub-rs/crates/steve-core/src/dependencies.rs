@@ -77,6 +77,14 @@ impl Core {
                     .store()
                     .dependency_waits()
                     .register(id, &s.id, &deps, resume, reason)?;
+                t.diagnostic_session(
+                    &s.id,
+                    None,
+                    "dependency.wait_registered",
+                    "prerequisites",
+                    false,
+                    Default::default(),
+                );
                 // If this call arrives outside a busy turn, no turn-end callback is needed to wake.
                 t.check_blocked(id)?;
                 let mut view = t.dependency_view(id)?;
@@ -189,6 +197,18 @@ impl Tx<'_> {
             return Ok(false);
         }
         if self.holding() || self.cfg().no_resume {
+            self.diagnostic_session(
+                &wait.session_id,
+                None,
+                "dependency.resume_evaluated",
+                if self.cfg().no_resume {
+                    "resume_disabled"
+                } else {
+                    "dispatch_held"
+                },
+                true,
+                Default::default(),
+            );
             return Ok(true);
         }
         // A dependency finishing during the registering turn must not queue a competing turn.
@@ -197,6 +217,18 @@ impl Tx<'_> {
                 || self.rt().uncertain(&s.id)
                 || matches!(s.status.as_str(), "running" | "starting")
             {
+                self.diagnostic_session(
+                    &s.id,
+                    None,
+                    "dependency.resume_evaluated",
+                    "execution_pending",
+                    true,
+                    steve_store::diagnostics::Details {
+                        busy: Some(self.busy(&s.id)),
+                        uncertain: Some(self.rt().uncertain(&s.id)),
+                        ..Default::default()
+                    },
+                );
                 return Ok(true);
             }
         }
@@ -206,6 +238,14 @@ impl Tx<'_> {
             .iter()
             .any(|d| d.status == "open")
         {
+            self.diagnostic_session(
+                &wait.session_id,
+                None,
+                "dependency.resume_evaluated",
+                "open_decision",
+                true,
+                Default::default(),
+            );
             return Ok(true);
         }
         let item = self.item(id)?;
@@ -241,13 +281,25 @@ impl Tx<'_> {
             wait.reason
         );
         let sid = session.as_ref().map(|s| s.id.as_str()).unwrap_or("");
-        if self
+        let changed = self
             .db()
             .store()
             .dependency_waits()
-            .ready(id, automatic, sid, &text)?
-            && automatic
-        {
+            .ready(id, automatic, sid, &text)?;
+        if changed {
+            self.diagnostic_item(
+                &item,
+                "dependency.ready",
+                if automatic {
+                    "automatic_resume"
+                } else {
+                    "notify"
+                },
+                false,
+                Default::default(),
+            );
+        }
+        if changed && automatic {
             self.rt().flush(sid, None);
         }
         Ok(true)

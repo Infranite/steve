@@ -3026,7 +3026,55 @@ impl NodeRuntime {
                             | EventBody::Plan { .. }
                     );
                     let tells = out.is_some() || !ask.is_empty() || self.staged_any();
-                    told.push((out, ask));
+                    let diagnostic = match &ev.body {
+                        EventBody::Diagnostic {
+                            code,
+                            severity,
+                            details: Some(details),
+                            ..
+                        } if code == "adapter_exited" => ev_session(&ev).map(|session| {
+                            let mut d = steve_store::diagnostics::Details {
+                                exit_code: details.exit_code,
+                                signal: details.signal,
+                                generation: details.generation,
+                                parse_errors: Some(details.parse_errors),
+                                drain_timed_out: Some(details.drain_timed_out),
+                                reader_failed: Some(details.reader_failed),
+                                wait_error: Some(details.wait_error),
+                                source_at: Some(ev.at.0),
+                                source_node: Some(node.clone()),
+                                source_epoch: Some(ev.cursor.epoch.to_string()),
+                                ..Default::default()
+                            };
+                            d.code = Some(
+                                if details.wait_error {
+                                    "wait_error"
+                                } else if details.reader_failed {
+                                    "reader_failed"
+                                } else {
+                                    "process_exit"
+                                }
+                                .into(),
+                            );
+                            steve_store::diagnostics::Record {
+                                session_id: Some(session),
+                                cause_id: Some(ev.id.to_string()),
+                                kind: "adapter.exited".into(),
+                                reason_code: "process_exit".into(),
+                                severity: match severity {
+                                    Severity::Info => steve_store::diagnostics::Severity::Info,
+                                    Severity::Warning => {
+                                        steve_store::diagnostics::Severity::Warning
+                                    }
+                                    Severity::Error => steve_store::diagnostics::Severity::Error,
+                                },
+                                details: d,
+                                ..Default::default()
+                            }
+                        }),
+                        _ => None,
+                    };
+                    told.push((out, ask, diagnostic));
                     if tells || !flow {
                         through = p.seq;
                         break;
@@ -3039,7 +3087,10 @@ impl NodeRuntime {
             match r {
                 Ok(Some(told)) => {
                     any = true;
-                    for (end, ask) in told {
+                    for (end, ask, diagnostic) in told {
+                        if let Some(record) = diagnostic {
+                            let _ = self.store.diagnostics().record(record);
+                        }
                         self.after(ask);
                         if let Some(end) = end {
                             self.tell_end(end);
@@ -4368,6 +4419,146 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("timed out waiting for {what}");
+    }
+
+    #[tokio::test]
+    async fn adapter_exit_evidence_follows_commit_and_replay_without_claiming_the_current_attempt()
+    {
+        let h = super::super::node_tools::tests::fixture(vec![]).await;
+        until("current attempt running", || {
+            h.store
+                .reader(|c| {
+                    Ok::<_, StoreError>(c.query_row(
+                        "SELECT state='running' FROM runtime_attempts WHERE attempt_id=?",
+                        [h.exec.attempt().as_str()],
+                        |r| r.get::<_, bool>(0),
+                    )?)
+                })
+                .unwrap()
+        })
+        .await;
+        let current = h._rt.active_attempt("s1").unwrap();
+        assert_eq!(current.as_deref(), Some(h.exec.attempt().as_str()));
+        let source_at = now() - 60_000;
+        let batch = EventBatch {
+            events: vec![NodeEvent {
+                schema: 1,
+                id: EventId::new("exit-from-retired-adapter").unwrap(),
+                at: Timestamp(source_at),
+                cursor: Watermark {
+                    stream: StreamId::new("exit-evidence").unwrap(),
+                    epoch: Epoch::new("old-node-epoch").unwrap(),
+                    seq: 1,
+                },
+                // A delayed process exit describes its session, not whichever attempt runs now.
+                subject: Subject::Session {
+                    session: SessionId::new("s1").unwrap(),
+                },
+                body: EventBody::Diagnostic {
+                    severity: Severity::Error,
+                    code: "adapter_exited".into(),
+                    safe_text: "Adapter process exited.".into(),
+                    details: Some(DiagnosticDetails {
+                        exit_code: Some(0),
+                        signal: None,
+                        generation: Some(7),
+                        parse_errors: 3,
+                        reader_failed: true,
+                        drain_timed_out: true,
+                        wait_error: true,
+                    }),
+                },
+            }],
+        };
+        let evidence = || {
+            h.store
+                .diagnostics()
+                .events(
+                    "default",
+                    "i1",
+                    steve_store::diagnostics::Filter {
+                        kind: Some("adapter.exited".into()),
+                        limit: 20,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        };
+        let pending = || {
+            h.store.diagnostics().explain("default", "i1").unwrap()["coverage"]["pending_count"]
+                == 0
+        };
+        let applied = || {
+            h.store
+                .reader(|c| {
+                    Ok::<_, StoreError>(c.query_row(
+            "SELECT applied FROM node_event_inbox WHERE event_id='exit-from-retired-adapter'",
+            [], |r| r.get::<_, i64>(0),
+        )?)
+                })
+                .unwrap()
+        };
+
+        // Fail after the inbox row was marked, at the enclosing transaction's watermark update.
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute_batch(
+                    "CREATE TRIGGER refuse_exit_apply BEFORE UPDATE OF applied ON node_streams
+                WHEN NEW.stream='exit-evidence' AND NEW.applied>OLD.applied
+                BEGIN SELECT RAISE(ABORT, 'test apply rollback'); END;",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let first_ack = h._rt.receive(&batch).unwrap();
+        assert_eq!(h._rt.receive(&batch).unwrap(), first_ack);
+        h._rt.apply_some();
+        until("recorder settled after rolled-back apply", pending).await;
+        assert_eq!(applied(), 0);
+        assert!(
+            evidence()["events"].as_array().unwrap().is_empty(),
+            "rolled-back facts must not become diagnostic evidence"
+        );
+
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute_batch("DROP TRIGGER refuse_exit_apply")?;
+                Ok(())
+            })
+            .unwrap();
+        h._rt.apply_some();
+        until("committed exit evidence", || {
+            evidence()["events"].as_array().unwrap().len() == 1
+        })
+        .await;
+        assert_eq!(applied(), 1);
+        assert_eq!(h._rt.receive(&batch).unwrap(), first_ack);
+        h._rt.apply_some();
+        until("recorder settled after replay", pending).await;
+        let page = evidence();
+        let events = page["events"].as_array().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "a resent Node envelope must not count twice"
+        );
+        let event = &events[0];
+        assert_eq!(event["session_id"], "s1");
+        assert_eq!(event["cause_id"], "exit-from-retired-adapter");
+        assert!(event["attempt_id"].is_null() && event["operation_id"].is_null());
+        assert_eq!(event["severity"], "error");
+        assert!(event["at"].as_i64().unwrap() >= source_at + 60_000);
+        let details = &event["details"];
+        assert_eq!(details["source_at"], source_at);
+        assert_eq!(details["source_node"], "local");
+        assert_eq!(details["source_epoch"], "old-node-epoch");
+        assert_eq!(details["generation"], 7);
+        assert_eq!(details["exit_code"], 0);
+        assert_eq!(details["parse_errors"], 3);
+        assert_eq!(details["reader_failed"], true);
+        assert_eq!(details["wait_error"], true);
+        assert_eq!(details["drain_timed_out"], true);
+        assert_eq!(h._rt.active_attempt("s1").unwrap(), current);
     }
 
     /// A Node fact starts follow-ups inside the coordinator, without the public runtime router.

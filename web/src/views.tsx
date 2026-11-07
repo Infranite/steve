@@ -1,5 +1,6 @@
 import { api } from "@/api"
 import { WorkflowPanel } from "@/workflow-panel"
+import { ItemDebugDialog } from "@/debug-panel"
 import { usePeopleOn } from "@/api/people"
 import { Files } from "@/attach"
 import { SessionCards } from "@/chat2"
@@ -352,10 +353,12 @@ export function ItemView({ id }: { id: string }) {
   const [editing, setEditing] = useState(false), [gtxt, setG] = useState("")
   const [confirmDrop, setConfirmDrop] = useState(false), [confirmDel, setConfirmDel] = useState(false)
   const [doneBusy, setDoneBusy] = useState(false)
+  const [debugOpen, setDebugOpen] = useState(false)
   const itemComposer = useRef<ComposerHandle | null>(null)
   const [older, setOlder] = useState(false), [titleEdit, setTitleEdit] = useState(false), [preview, setPreview] = useState<OutOpen | null>(null)
   if (lastItem !== id) { lastItem = id; dtab = "动态" }
   useEffect(() => { void loadItem(id, true) }, [id])
+  useEffect(() => { setDebugOpen(false) }, [id])
   const i = st.items.find((x) => x.id === id)
   /* replies to comments are read from the sessions' events */
   const latest = i && (active(i)?.id ?? i.ss.at(-1))
@@ -380,6 +383,7 @@ export function ItemView({ id }: { id: string }) {
         <DropdownMenuItem onClick={() => { setG(i.goals[i.goals.length - 1]); setEditing(true) }}>{t("views:item.editGoal")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => setTitleEdit(true)}>{t("views:item.rename")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => openSheet("graph", { k: id })}>{t("views:item.viewGraph")}</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setDebugOpen(true)} data-item-debug>{t("views:debug.open")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => { const k = i.ss[i.ss.length - 1]; openSheet("fork", { k, at: Math.max(0, (st.S[k]?.seqs.length ?? 1) - 1) }) }} disabled={!i.ss.length}>{t("views:item.fork")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => { navigator.clipboard?.writeText(location.href).catch(() => {}); toast(t("views:item.linkCopied")) }}><LinkIcon />{t("views:item.copyLink")}</DropdownMenuItem>
         <DropdownMenuSeparator />
@@ -436,6 +440,7 @@ export function ItemView({ id }: { id: string }) {
       </div></div></div>}
       sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><Status s={i.st} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span></Meta>}>
       {st.yolo && !over && <div className="-mt-3 mb-5"><YoloItemSwitch i={i} /></div>}
+      {debugOpen && <ItemDebugDialog item={i.id} onClose={() => setDebugOpen(false)} />}
       <AlertDialog open={confirmDel} onOpenChange={setConfirmDel}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("views:item.deleteTitle", { id: i.id })}</AlertDialogTitle><AlertDialogDescription>{t("views:item.deleteDesc", { count: i.ss.length })}</AlertDialogDescription></AlertDialogHeader>
@@ -574,10 +579,12 @@ export function SessionView({ k }: { k: string }) {
   const t = useT()
   const [mode, setMode] = useState<"插话" | "排队">("插话"), [renaming, setRenaming] = useState(false)
   const [infoOpen, setInfoOpen] = useState(false)
+  const [debugOpen, setDebugOpen] = useState(false)
   const composer = useRef<ComposerHandle | null>(null)
   const s = st.S[k]
   const scroller = useRef<HTMLDivElement>(null)
   useEffect(() => { void loadEvents(k) }, [k])
+  useEffect(() => { setDebugOpen(false) }, [k])
   useEffect(() => { scroller.current?.scrollTo({ top: 1e9 }) }, [s?.ev.length, k])
   if (!s) return <Page title={t("views:session.title")} back={["#/sessions", t("views:sessions.title")]}><Empty title={t("views:session.notFound")} /></Page>
   const i = s.item ? it(s.item) : null, run = s.st === "run"
@@ -591,6 +598,7 @@ export function SessionView({ k }: { k: string }) {
       <DropdownMenuContent align="end" className="min-w-40">
         {!s.ro && <DropdownMenuItem onClick={() => setRenaming(true)} data-rename><PencilIcon />{t("views:session.rename")}</DropdownMenuItem>}
         <DropdownMenuItem onClick={exportMd} data-export><DownloadIcon />{t("views:session.export")}</DropdownMenuItem>
+        {s.item && <DropdownMenuItem onClick={() => setDebugOpen(true)} data-session-debug>{t("views:debug.open")}</DropdownMenuItem>}
         {!s.ro && s.st === "idle" && <DropdownMenuItem onClick={() => sessPatch(k, { st: "ended" }, t("views:session.ended"))} data-end><SquareIcon />{t("views:session.end")}</DropdownMenuItem>}
         {s.ro && <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => { go("#/sessions"); sessRemove(k) }} data-remove-import><TrashIcon />{t("views:session.remove")}</DropdownMenuItem></>}
       </DropdownMenuContent>
@@ -648,6 +656,7 @@ export function SessionView({ k }: { k: string }) {
         </Page>
       </div>
       <aside className="hidden w-[300px] shrink-0 overflow-y-auto border-l border-sidebar-border bg-sidebar px-5 py-5 xl:block" data-session-panel>{panel}</aside>
+      {debugOpen && s.item && <ItemDebugDialog item={s.item} session={k} onClose={() => setDebugOpen(false)} />}
       <Dialog open={infoOpen} onOpenChange={setInfoOpen}><DialogContent className="max-h-[85dvh] overflow-y-auto"><DialogHeader><DialogTitle>{t("views:session.info")}</DialogTitle><DialogDescription>{t("views:session.infoDesc")}</DialogDescription></DialogHeader>{panel}</DialogContent></Dialog>
     </div>
   )

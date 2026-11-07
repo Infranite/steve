@@ -249,15 +249,42 @@ impl Tx<'_> {
         text: &str,
     ) -> Result<Option<String>> {
         let Some(s) = self.db().session(sid)?.filter(|s| s.status != "ended") else {
+            self.diagnostic_item(
+                i,
+                "takeover.evaluated",
+                "session_unavailable",
+                true,
+                Default::default(),
+            );
             return Ok(Some(why.into()));
         };
         /* the stop was answered already: a turn runs or a message waits for the session */
         if self.busy(&s.id) || !self.db().queued(&s.id)?.is_empty() {
+            self.diagnostic_session(
+                &s.id,
+                None,
+                "takeover.evaluated",
+                "work_pending",
+                true,
+                Default::default(),
+            );
             return Ok(None);
         }
         let n = self.takeover_count(&i.id)?;
         let cap = self.cfg().takeover_continues;
         if n >= cap {
+            self.diagnostic_session(
+                &s.id,
+                None,
+                "takeover.evaluated",
+                "budget_exhausted",
+                false,
+                steve_store::diagnostics::Details {
+                    attempt_ordinal: Some(u64::from(n)),
+                    limit: Some(u64::from(cap)),
+                    ..Default::default()
+                },
+            );
             return Ok(Some(if n == 0 {
                 why.into()
             } else {
@@ -278,6 +305,18 @@ impl Tx<'_> {
         self.db().item_patch(&i.id, patch![now: "Steve 让它继续"])?;
         settle(self.db(), &i.id)?;
         self.prompt(&s.id, text, "steve");
+        self.diagnostic_session(
+            &s.id,
+            None,
+            "takeover.continue_requested",
+            "no_delivery_or_question",
+            false,
+            steve_store::diagnostics::Details {
+                attempt_ordinal: Some(u64::from(n + 1)),
+                limit: Some(u64::from(cap)),
+                ..Default::default()
+            },
+        );
         Ok(None)
     }
 

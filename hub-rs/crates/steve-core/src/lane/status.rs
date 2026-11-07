@@ -164,6 +164,11 @@ impl Core {
             st.advice = "不需要做什么。".into();
             return Ok(st);
         };
+        self.lane_status_of_item(item_id)
+    }
+
+    /// The same read-only release projection without impersonating an item's session.
+    pub(crate) fn lane_status_of_item(&self, item_id: &str) -> Result<LaneStatus> {
         let Some(item) = self.store().item(item_id)? else {
             return Err(crate::error::msg(format!("没有这个事项：{item_id}")));
         };

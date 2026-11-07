@@ -33,6 +33,7 @@ pub fn tools() -> Vec<Value> {
         })
         .cloned()
         .collect();
+    v.push(super::diagnostics::tool());
     v.push(json!({
         "name": ITEMS_SEARCH,
         "description": "Search this workspace's tracked work by ST item ID or words in title, goal or current status. Use this for task progress, not knowledge search. Returns id, title, status and what is happening now.",
@@ -329,6 +330,19 @@ pub async fn call(
 ) -> Result<String, String> {
     let ws = run.workspace_id.clone();
     match name {
+        super::diagnostics::TOOL => {
+            let (store, core, run, args) = (
+                x.store.clone(),
+                x.tools.core.clone(),
+                run.clone(),
+                args.clone(),
+            );
+            tokio::task::spawn_blocking(steve_i18n::carry(move || {
+                super::diagnostics::for_research(&store, &core, &run, args)
+            }))
+            .await
+            .map_err(|_| "Diagnostic query unavailable.".to_string())?
+        }
         steve_knowledge::tools::SEARCH | steve_knowledge::tools::READ => {
             // A user's view only when only the owner reads the answer.
             let (store, origin) = (x.store.clone(), run.message_id.clone());

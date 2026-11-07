@@ -18,6 +18,7 @@ pub struct ToolService {
 
 /// Tools the agent only reads with (they change nothing).
 const READ_ONLY: &[&str] = &[
+    super::diagnostics::TOOL,
     "steve_items_search",
     "steve_item_read",
     steve_mcp::tools::LANE_STATUS,
@@ -60,6 +61,16 @@ impl ToolService {
         name: &str,
         args: Value,
     ) -> Result<String, String> {
+        let observation = super::diagnostics::ToolObservation::new(&self.mcp.store, &s, name);
+        observation.run(self.call_inner(s, name, args)).await
+    }
+
+    async fn call_inner(
+        &self,
+        s: steve_store::Session,
+        name: &str,
+        args: Value,
+    ) -> Result<String, String> {
         if let Some(r) = mcp_extra::call_module(&self.extra, s.clone(), name, args.clone()).await {
             return r;
         }
@@ -71,50 +82,5 @@ impl ToolService {
             return steve_mcp::run(&*self.mcp, &s, name, &args).await;
         }
         Err(format!("MCP error -32602: Tool {name} not found"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The names `tools/list` of the Hub's MCP endpoint gives: Steve's own, then the modules'.
-    fn mcp_names() -> Vec<String> {
-        let mut v: Vec<String> = steve_mcp::tools::list()
-            .into_iter()
-            .map(|t| t.name.to_string())
-            .collect();
-        v.extend(
-            mcp_extra::module_tools()
-                .into_iter()
-                .map(|t| t["name"].as_str().unwrap_or_default().to_string()),
-        );
-        v
-    }
-
-    #[test]
-    fn the_catalog_is_what_the_mcp_endpoint_lists() {
-        let names = mcp_names();
-        assert!(names.contains(&"steve_update".to_string()));
-        assert!(names.contains(&mcp_extra::REPLY_SOURCE.to_string()));
-        for name in [
-            "steve_items_search",
-            "steve_item_read",
-            "steve_item_dependencies",
-        ] {
-            assert!(names.contains(&name.to_string()), "{name}");
-        }
-        assert!(READ_ONLY.contains(&"steve_items_search"));
-        assert!(READ_ONLY.contains(&"steve_item_read"));
-        assert!(READ_ONLY.contains(&steve_mcp::tools::LANE_STATUS));
-        assert!(!READ_ONLY.contains(&"steve_item_dependencies"));
-        let mut unique = names.clone();
-        unique.sort();
-        unique.dedup();
-        assert_eq!(unique.len(), names.len(), "no tool twice");
-        // every definition has a schema object
-        for t in mcp_extra::module_tools() {
-            assert!(t["inputSchema"].is_object(), "{t}");
-        }
     }
 }

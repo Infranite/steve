@@ -121,6 +121,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/052.sql"),
     // 53: path model S2: each Node session's view and its difference from today's roots, in shadow.
     include_str!("../migrations/053.sql"),
+    // 54: bounded, item-scoped diagnostic capture and metadata.
+    include_str!("../migrations/054.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

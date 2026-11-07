@@ -484,6 +484,7 @@ fn fit(subject: &Subject, body: EventBody) -> Vec<EventBody> {
         severity: Severity::Warning,
         code: "event_too_large".into(),
         safe_text: format!("a {kind} event of {was} bytes was too big to report"),
+        details: None,
     }]
 }
 

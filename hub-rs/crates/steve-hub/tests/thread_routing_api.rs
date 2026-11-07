@@ -433,6 +433,170 @@ async fn research_runs_get_read_only_mcp() {
             (s, r.json::<Value>().await.unwrap_or(Value::Null))
         }
     };
+    // Diagnostics use the real owner REST identity and the same read-only MCP run.
+    let debug = format!("/api/items/{item}/debug");
+    let (status, snapshot) = e.call("GET", &debug, None).await;
+    assert_eq!(status, 200, "{snapshot}");
+    assert_eq!(snapshot["item"]["id"], item);
+    assert_eq!(snapshot["can_capture"], true);
+    assert!(snapshot["state"].is_object());
+    let (status, enabled) = e
+        .call("POST", &debug, Some(json!({"enabled":true,"minutes":30})))
+        .await;
+    assert_eq!(status, 200, "{enabled}");
+    assert_eq!(enabled["capture"]["active"], true);
+    assert!(
+        enabled["state"].is_object(),
+        "POST returns the complete explain view"
+    );
+    assert_eq!(
+        e.call("POST", &debug, Some(json!({"enabled":true,"minutes":61})))
+            .await
+            .0,
+        400
+    );
+    for n in 0..3 {
+        let _ = store
+            .diagnostics()
+            .record(steve_store::diagnostics::Record {
+                workspace_id: "default".into(),
+                item_id: Some(item.clone()),
+                kind: "test.event".into(),
+                reason_code: format!("fixture_{n}"),
+                severity: if n == 2 {
+                    steve_store::diagnostics::Severity::Error
+                } else {
+                    steve_store::diagnostics::Severity::Info
+                },
+                ..Default::default()
+            });
+    }
+    let mut persisted = false;
+    for _ in 0..100 {
+        let page = store
+            .diagnostics()
+            .events(
+                "default",
+                &item,
+                steve_store::diagnostics::Filter {
+                    kind: Some("test.event".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        if page["events"].as_array().unwrap().len() == 3 {
+            persisted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        persisted,
+        "the asynchronous recorder persisted the fixture events"
+    );
+    let (status, first) = e
+        .call(
+            "GET",
+            &format!("{debug}/events?limit=1&kinds=test.event"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["events"].as_array().unwrap().len(), 1);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let (status, next) = e
+        .call(
+            "GET",
+            &format!("{debug}/events?limit=1&kinds=test.event&cursor={cursor}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{next}");
+    assert_eq!(next["snapshot_cursor"], first["snapshot_cursor"]);
+    assert_ne!(
+        next["events"][0]["event_id"],
+        first["events"][0]["event_id"]
+    );
+    assert_eq!(
+        e.call(
+            "GET",
+            &format!("{debug}/events?cursor={cursor}&kinds=changed"),
+            None
+        )
+        .await
+        .0,
+        400
+    );
+    let event_id = first["events"][0]["event_id"].as_str().unwrap();
+    let (status, detail) = e
+        .call("GET", &format!("{debug}/events?event_id={event_id}"), None)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["events"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["events"][0]["event_id"], event_id);
+    let (status, errors) = e
+        .call(
+            "GET",
+            &format!("{debug}/events?kinds=test.event&severity=error"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{errors}");
+    assert_eq!(errors["events"].as_array().unwrap().len(), 1);
+    assert_eq!(errors["events"][0]["reason_code"], "fixture_2");
+    assert_eq!(
+        e.call("GET", &format!("{debug}/events?severity=fatal"), None)
+            .await
+            .0,
+        400
+    );
+    let (_, reply) = rpc(json!({"jsonrpc":"2.0","id":"debug","method":"tools/call","params":{"name":"steve_debug","arguments":{"action":"explain","item_id":item}}}), token).await;
+    let full: Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(full["access"], "full");
+    assert_eq!(
+        full["can_capture"], false,
+        "the Agent never receives capture authority"
+    );
+    let (_, reply) = rpc(json!({"jsonrpc":"2.0","id":"events","method":"tools/call","params":{"name":"steve_debug","arguments":{"action":"events","item_id":item,"event_id":event_id}}}), token).await;
+    let page: Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(page["events"][0]["event_id"], event_id);
+    for args in [
+        json!({"action":"capture","item_id":item}),
+        json!({"action":"events","item_id":item,"workspace_id":"elsewhere"}),
+        json!({"action":"explain","item_id":item,"session_id":"forged"}),
+    ] {
+        let (_, denied) = rpc(json!({"jsonrpc":"2.0","id":"invalid_debug","method":"tools/call","params":{"name":"steve_debug","arguments":args}}), token).await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+    }
+    store.with_conn(|c| {
+        c.execute("INSERT INTO workspaces(id,name,created) VALUES('elsewhere','Other workspace',1)", [])?;
+        c.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('foreign-item','elsewhere',1,'Private item','done','结束',1,1)", [])?;
+        Ok(())
+    }).unwrap();
+    for suffix in ["debug", "debug/events"] {
+        assert_eq!(
+            e.call("GET", &format!("/api/items/foreign-item/{suffix}"), None)
+                .await
+                .0,
+            404
+        );
+    }
+    assert_eq!(
+        e.call(
+            "POST",
+            "/api/items/foreign-item/debug",
+            Some(json!({"enabled":true}))
+        )
+        .await
+        .0,
+        404
+    );
+    for action in ["explain", "events"] {
+        let (_, denied) = rpc(json!({"jsonrpc":"2.0","id":"foreign_debug","method":"tools/call","params":{"name":"steve_debug","arguments":{"action":action,"item_id":"foreign-item"}}}), token).await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+    }
     let (s, v) = rpc(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}), token).await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["result"]["serverInfo"]["name"], "steve");
@@ -447,15 +611,18 @@ async fn research_runs_get_read_only_mcp() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
+    let unique: std::collections::BTreeSet<_> = names.iter().copied().collect();
+    assert_eq!(unique.len(), names.len(), "tools are not duplicated");
     assert_eq!(
-        names,
-        [
+        unique,
+        std::collections::BTreeSet::from([
             "steve_knowledge_search",
             "steve_knowledge_read",
             "steve_items_search",
             "steve_item_read",
-            "steve_sessions_list"
-        ]
+            "steve_sessions_list",
+            "steve_debug"
+        ])
     );
     for tool in v["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["annotations"]["readOnlyHint"], true);
@@ -547,6 +714,38 @@ async fn research_runs_get_read_only_mcp() {
         t.contains("目标：把 X 改成 Y") && !t.contains("现在：") && !t.contains("时间线"),
         "{t}"
     );
+    let (_, reply) = rpc(json!({"jsonrpc":"2.0","id":"shared_debug","method":"tools/call","params":{"name":"steve_debug","arguments":{"action":"explain","item_id":item}}}), "research-token-3").await;
+    let safe: Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(safe["access"], "summary");
+    assert!(safe.get("state").is_none() && safe.get("sessions").is_none());
+    let (_, denied) = rpc(json!({"jsonrpc":"2.0","id":"shared_events","method":"tools/call","params":{"name":"steve_debug","arguments":{"action":"events","item_id":item}}}), "research-token-3").await;
+    assert_eq!(denied["result"]["isError"], true);
+    // An ordinary workspace member can read the item, but cannot enable capture.
+    store
+        .with_conn(|c| {
+            c.execute("UPDATE users SET role='member' WHERE role='owner'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let (status, member) = e.call("GET", &debug, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(member["can_capture"], false);
+    assert_eq!(
+        e.call("POST", &debug, Some(json!({"enabled":false})))
+            .await
+            .0,
+        403
+    );
+    store
+        .with_conn(|c| {
+            c.execute("UPDATE users SET role='owner' WHERE role='member'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let (status, stopped) = e.call("POST", &debug, Some(json!({"enabled":false}))).await;
+    assert_eq!(status, 200);
+    assert_eq!(stopped["capture"]["active"], false);
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-2").await;
     assert_eq!(text(&v), "No items match.", "still not for a run elsewhere");
     /* the run ended: the token is dead */
