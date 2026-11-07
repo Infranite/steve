@@ -84,7 +84,7 @@ export default {
     approve: "批准",
   },
   /* the buttons of a card about something that went wrong; also what was chosen on one */
-  fail: { continue: "让它继续", delivered: "它其实做完了", look: "我来看看", tosteve: "换成 Steve", drop: "放弃", release_waive: "不需要发布", release_retry: "需要发布", release_live: "已经上线" },
+  fail: { retry: "重试发布", continue: "让它继续", delivered: "它其实做完了", look: "我来看看", tosteve: "换成 Steve", drop: "放弃", release_waive: "不需要发布", release_retry: "需要发布", release_live: "已经上线" },
   snooze: {
     hour: "1 小时后",
     tonight: "今晚 20:00",

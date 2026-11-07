@@ -355,7 +355,7 @@ function choiceLabel(d: RDecision) {
   return r.approved ? t("core:choice.approve") : t("core:choice.deny")
 }
 /** the choices on a card about something that went wrong, by the Hub's choice id */
-export const FAIL_CHOICE: Record<string, string> = live(["continue", "delivered", "look", "tosteve", "drop", "release_waive", "release_retry", "release_live"] as const, (k) => t(`core:fail.${k}`))
+export const FAIL_CHOICE: Record<string, string> = live(["continue", "delivered", "look", "tosteve", "drop", "release_waive", "release_retry", "retry", "release_live"] as const, (k) => t(`core:fail.${k}`))
 /* ── which agent turn answered a comment in the work log ──
  * a comment (timeline kind "me") becomes a user prompt in one of the item's sessions: "补充信息：…", "用户的回答：…", a merged queue…
  * the first unclaimed prompt sent at or after the comment that contains its text is the one; the reply is that turn */
