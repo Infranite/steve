@@ -12,9 +12,12 @@ const w: Wait = { type: "accept", q: "做完了，请验收", draft: "改好了�
 const i = { id: "ST-7", t: "改登录页", b: "dev", st: "wait", src: ["", ""], ws: "default", project: "prj_1", up: "", acc: "inherit", goals: [], now: "交付了，等你验收", rounds: [], wait: w, waits: [w], ss: [], tl: [], outs: [], anns: [], q: [], qs: null, branch: "steve/st-7", cwd: "/x/wt", detail: false, dependents: [], created: 0, updated: 0 } as unknown as Item
 st.ready = true
 st.projects = [p]
+if (location.search.includes("lane-failed")) {
+  w.type = "fail"; w.subject = "lane_unit"; w.options = ["retry", "drop"]; w.q = "MQ-5 已合并，但发布失败"
+}
 st.items = [i]
 const calls: unknown[] = ((window as any).__calls = [])
-api.decide = async (id, choice, text) => { calls.push({ id, choice, text }); return { id, status: "resolved", result: text === "release" ? { choice, release: "started" } : { choice } } as any }
+api.decide = async (id, choice, text) => { calls.push({ id, choice, text }); if (location.search.includes("lane-failed")) { const out = document.createElement("output"); out.textContent = JSON.stringify({ id, choice }); document.body.append(out) }; return { id, status: "resolved", result: text === "release" ? { choice, release: "started" } : { choice } } as any }
 /* what the item reads after the answer: releasing, or (`__done`) finished without a release */
 api.item = async () => ((window as any).__done ? { ...i, status: "done", now: "完成" } : { ...i, status: "wait", now: "正在发布" }) as any
 function App() { useStore(); return <main className="mx-auto max-w-[640px] px-4 py-6"><DecisionCard i={st.items[0] ?? i} /><Toaster /></main> }

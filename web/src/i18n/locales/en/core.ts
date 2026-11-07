@@ -71,7 +71,7 @@ export default {
     noRelease: "Don't release",
     approve: "Approve",
   },
-  fail: { continue: "Let it continue", delivered: "It's actually done", look: "I'll take a look", tosteve: "Hand to Steve", drop: "Drop", release_waive: "No release needed", release_retry: "Needs a release", release_live: "Already live" },
+  fail: { retry: "Retry release", continue: "Let it continue", delivered: "It's actually done", look: "I'll take a look", tosteve: "Hand to Steve", drop: "Drop", release_waive: "No release needed", release_retry: "Needs a release", release_live: "Already live" },
   snooze: {
     hour: "In 1 hour",
     tonight: "Tonight at 20:00",

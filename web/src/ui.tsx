@@ -950,7 +950,7 @@ export function ReplyBlock({ r }: { r: Reply }) {
 
 /* ───────── decisions ───────── */
 /** the buttons of a failure card in their order, with their look; the words are FAIL_CHOICE */
-const FAIL: Record<string, "ghost" | "outline" | "default"> = { look: "ghost", drop: "outline", tosteve: "outline", delivered: "outline", release_waive: "outline", release_retry: "outline", release_live: "default", continue: "default" }
+const FAIL: Record<string, "ghost" | "outline" | "default"> = { look: "ghost", drop: "outline", tosteve: "outline", delivered: "outline", release_waive: "outline", release_retry: "outline", retry: "default", release_live: "default", continue: "default" }
 export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?: Item["wait"] & {}; showItem?: boolean }) {
   const t = useT()
   const [rework, setRework] = useState(false), [txt, setTxt] = useState(""), [localBusy, setBusy] = useState(false), [free, setFree] = useState(false)
