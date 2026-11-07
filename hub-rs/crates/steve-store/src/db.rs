@@ -112,6 +112,9 @@ pub const MIGRATIONS: &[&str] = &[
     // 49: the inbound watermark: when a connection was last turned on, how late a channel message
     // may arrive, the history counts, and which messages were only recorded as history.
     include_str!("../migrations/049.sql"),
+    // 50: path model S1: who a run works for (`items.requested_by`, `runtime_sessions.principal`,
+    // `audience`), `bots.owner`, and `node_grants`, `node_roots`, `node_env`, with their backfill.
+    include_str!("../migrations/050.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

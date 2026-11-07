@@ -42,6 +42,10 @@ pub struct NewItem {
     /// ([`super::kinds::checked`]). The domain layer always gives them; empty writes none.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The member who asked for it (`items.requested_by`): whose access its runs use. `None`: Steve,
+    /// a flow, a schedule (the workspace's service principal).
+    #[serde(default)]
+    pub requested_by: Option<String>,
 }
 
 /// Patchable item fields. Deserializable so a stored decision `undo` (`{status, now, stage}`) can be applied.
@@ -158,7 +162,7 @@ impl Items<'_> {
             };
             let parent = p.parent.as_ref().map(to_json).transpose()?;
             w.c.run(
-                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, bot_id, project_id, source, parent, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, bot_id, project_id, source, parent, created, updated, requested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     id,
                     ws,
@@ -172,7 +176,8 @@ impl Items<'_> {
                     source,
                     parent,
                     t,
-                    t
+                    t,
+                    p.requested_by
                 ],
             )?;
             super::put_item_tags(w.c, &id, &tags)?;

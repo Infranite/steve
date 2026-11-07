@@ -761,6 +761,18 @@ impl NodeRuntime {
             if !fresh {
                 return Ok(false);
             }
+            // whose access it runs with and who reads it, fixed now (a remote Node's owner reads it too)
+            let owner: Option<String> = if self.is_remote() {
+                tx.query_row(
+                    "SELECT owner FROM nodes WHERE node_id=?",
+                    [self.node_id.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?
+            } else {
+                None
+            };
+            super::principal::record_in(tx, &b.session, owner.as_deref())?;
             let (prep, prep_d) = command(
                 &format!("op_prep_{}", b.session),
                 Prepare {
