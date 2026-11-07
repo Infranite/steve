@@ -1301,3 +1301,33 @@ fn persisted_lane_wait_survives_a_new_core_and_accepts_user_work() {
     );
     assert_eq!(k.rt.prompts_of(&sid).last().unwrap(), "继续修正文档");
 }
+
+#[test]
+fn a_lane_entered_while_the_remote_probe_runs_owns_the_wait() {
+    let k = kit(2);
+    let x = remote(&k, upstream::DONE_MERGE, false);
+    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    k.rt.st().turning.clear();
+    let before = k.rt.prompts_of(&x.session).len();
+    {
+        // Hold the core lock so the probe cannot return until the persisted request exists.
+        let mut tx = k.core.tx();
+        assert!(
+            tx.takeover(
+                &x.item,
+                &x.session,
+                crate::takeover::Stop::Idle {
+                    why: "等待核对".into(),
+                }
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(!tx.st.probing.is_empty());
+        lane_request(&k, &x.item, "collecting");
+    }
+    assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
+    assert_eq!(k.rt.prompts_of(&x.session).len(), before);
+    assert!(steve_lines(&k, &x.item).is_empty());
+    assert!(k.open_fails(&x.item).is_empty());
+}

@@ -424,6 +424,7 @@ impl Tx<'_> {
                     || i.is_settled()
                     || i.status == "block"
                     || self.dependency_waiting(item_id)?
+                    || self.waiting_on_lane(item_id)?
                     || self.busy(&session)
                     || !self.db().queued(&session)?.is_empty()
                     || self
