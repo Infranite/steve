@@ -17,6 +17,7 @@ mod artifact;
 mod attachments;
 mod confine;
 
+pub mod cow;
 pub mod disk_observation;
 pub mod disk_usage;
 mod exec;
@@ -25,6 +26,7 @@ pub mod history;
 mod job;
 mod journal;
 mod procs;
+pub mod reclaim;
 mod research;
 mod scan;
 mod secrets;
