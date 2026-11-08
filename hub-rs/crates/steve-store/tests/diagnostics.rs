@@ -90,6 +90,9 @@ fn events(store: &Store, item: &str) -> Value {
 fn critical_facts_survive_reopen_and_details_obey_the_capture_window() {
     let (t, item, session) = setup();
     let s = &t.store;
+    s.diagnostics()
+        .capture(WS, &item, "owner", Some(0))
+        .unwrap();
     assert_eq!(
         s.diagnostics()
             .record(record(&item, &session, "turn.ended", false)),
@@ -146,6 +149,104 @@ fn critical_facts_survive_reopen_and_details_obey_the_capture_window() {
             .unwrap()["capture"]["stop_reason"],
         "manual"
     );
+}
+
+#[test]
+fn new_items_capture_immediately_without_reads_or_owner_activation() {
+    let (t, item, session) = setup();
+    let s = &t.store;
+    // Recording before the first debug read proves creation also activates the recorder cache.
+    assert_eq!(
+        s.diagnostics()
+            .record(record(&item, &session, "dependency.checked", true)),
+        RecordStatus::Queued
+    );
+    assert_eq!(events(s, &item)["events"].as_array().unwrap().len(), 1);
+    let created = s.items().get(&item).unwrap().unwrap().created;
+    let capture = s.diagnostics().explain(WS, &item).unwrap()["capture"].clone();
+    assert_eq!(capture["active"], true);
+    assert_eq!(capture["started_at"], created);
+    assert_eq!(capture["expires_at"], created + 30 * 60_000);
+    let actor: String = s
+        .reader(|c| {
+            Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT actor FROM diagnostic_captures WHERE item_id=?",
+                [&item],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(actor, "system:item-created");
+    let reopened = Store::open(s.path(), NoPublisher).unwrap();
+    assert_eq!(
+        reopened.diagnostics().explain(WS, &item).unwrap()["capture"],
+        capture
+    );
+    let chat = reopened
+        .items()
+        .create(
+            WS,
+            &NewItem {
+                kind: Some("chat".into()),
+                title: "New conversation".into(),
+                bot_id: "worker".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let chat_capture = reopened.diagnostics().explain(WS, &chat.id).unwrap();
+    assert_eq!(chat_capture["capture"]["active"], true);
+    assert_eq!(chat_capture["capture"]["started_at"], chat.created);
+}
+
+#[test]
+fn default_capture_does_not_restart_after_expiry_manual_stop_or_legacy_reads() {
+    let (t, item, _) = setup();
+    let s = &t.store;
+    let original = s.diagnostics().explain(WS, &item).unwrap()["capture"].clone();
+    s.diagnostics()
+        .capture(WS, &item, "owner", Some(0))
+        .unwrap();
+    let reopened = Store::open(s.path(), NoPublisher).unwrap();
+    reopened
+        .items()
+        .patch(
+            &item,
+            &steve_store::ItemPatch {
+                stage: Some("执行".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for _ in 0..2 {
+        let stopped = reopened.diagnostics().explain(WS, &item).unwrap();
+        assert_eq!(stopped["capture"]["active"], false);
+        assert_eq!(stopped["capture"]["stop_reason"], "manual");
+        assert_eq!(stopped["capture"]["expires_at"], original["expires_at"]);
+    }
+    s.with_conn(|c| {
+        c.execute("UPDATE diagnostic_captures SET stop_reason=NULL,stopped_at=NULL,expires_at=? WHERE item_id=?",
+            params![steve_store::now() - 1, item])?;
+        Ok(())
+    }).unwrap();
+    let expired_store = Store::open(s.path(), NoPublisher).unwrap();
+    for _ in 0..2 {
+        let expired = expired_store.diagnostics().explain(WS, &item).unwrap();
+        assert_eq!(expired["capture"]["active"], false);
+        assert_eq!(expired["capture"]["stop_reason"], "expired");
+    }
+    // A pre-upgrade item has no capture row; neither opening the Store nor reading creates one.
+    s.with_conn(|c| {
+        c.execute("DELETE FROM diagnostic_captures WHERE item_id=?", [&item])?;
+        Ok(())
+    })
+    .unwrap();
+    let legacy = Store::open(s.path(), NoPublisher).unwrap();
+    let view = legacy.diagnostics().explain(WS, &item).unwrap();
+    assert_eq!(view["capture"]["active"], false);
+    assert!(view["capture"]["started_at"].is_null());
+    assert!(view["capture"]["expires_at"].is_null());
 }
 
 #[test]

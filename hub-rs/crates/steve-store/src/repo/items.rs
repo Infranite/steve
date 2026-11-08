@@ -186,6 +186,9 @@ impl Items<'_> {
                 // stats: the item's first status
                 status_mark(w.c, ws, &id, t, None, p.status.as_deref().unwrap_or("run"))?;
             }
+            if let Some(until) = crate::diagnostics::capture_created(w.c, ws, &id, t) {
+                self.0.diagnostics().activate_until(until);
+            }
             w.publish(ChangeEvent::Item { id: id.clone() });
             one(w.c, ITEM, [&id], Item::from_row)
         })

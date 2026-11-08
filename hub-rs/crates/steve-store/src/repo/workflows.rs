@@ -693,6 +693,7 @@ impl Workflows<'_> {
                 "INSERT INTO item_goals(item_id,version,text,created) VALUES (?,1,?,?)",
                 params![child,unit.spec.goal,t],
             )?;
+            tx.capture_created(&item.workspace_id, &child, t);
             tx.execute(
                 "UPDATE workflow_units SET status='dispatching',item_id=?,session_id=NULL,
                  attempt=attempt+1,reason=NULL WHERE workflow_id=? AND id=?",
