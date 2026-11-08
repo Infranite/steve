@@ -21,9 +21,9 @@ const open = async (opts, query = "") => {
 try {
   for (const theme of ["light", "dark"]) {
     const { page, v } = await open({ locale: "zh-CN", colorScheme: theme })
-    assert.equal((await v.innerText()).trim(), "前端 4d419d6a · 后端 0.2.53")
+    assert.equal((await v.innerText()).trim(), "客户端 4d419d6a · 服务端 0.2.53")
     assert.equal(await v.getAttribute("href"), "#/settings/about")
-    assert.equal(await v.getAttribute("title"), "前端 20261105-120301-4d419d6a · 后端 0.2.53")
+    assert.equal(await v.getAttribute("title"), "客户端 20261105-120301-4d419d6a · 服务端 0.2.53")
     assert.equal(await page.evaluate(() => document.documentElement.classList.contains("dark")), theme === "dark")
     // readable on its background, in both themes
     const [fg, bg] = await v.evaluate((el) => {
@@ -46,8 +46,8 @@ try {
   {
     // not known yet: says so instead of an empty name
     const { page, v } = await open({ locale: "zh-CN" }, "?hub=")
-    assert.equal((await v.innerText()).trim(), "前端 4d419d6a · 后端 …")
-    assert.equal(await v.getAttribute("title"), "前端 20261105-120301-4d419d6a · 后端 正在获取…")
+    assert.equal((await v.innerText()).trim(), "客户端 4d419d6a · 服务端 …")
+    assert.equal(await v.getAttribute("title"), "客户端 20261105-120301-4d419d6a · 服务端 正在获取…")
     await page.close()
   }
   assert.deepEqual(errors, [])
