@@ -8,7 +8,7 @@ Thanks for helping. Build and run Steve locally as described in the [README](REA
 python3 scripts/test-public-boundary.py
 python3 scripts/check-public-boundary.py --strict
 python3 ops/test-cut-release.py
-python3 ops/test-steve-cli.py
+cargo test --locked --manifest-path hub-rs/Cargo.toml -p steve-install
 python3 packaging/homebrew/test-sync.py
 python3 ops/cut-release.py lint
 cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace

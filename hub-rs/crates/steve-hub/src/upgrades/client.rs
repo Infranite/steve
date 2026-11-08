@@ -17,6 +17,13 @@ struct RemoteAsset {
     browser_download_url: String,
 }
 impl Release {
+    pub(super) fn contains_asset(&self, name: &str) -> bool {
+        self.assets
+            .iter()
+            .filter(|asset| asset.name == name)
+            .count()
+            == 1
+    }
     pub fn version(&self) -> Result<semver::Version> {
         Ok(semver::Version::parse(
             self.tag_name.trim_start_matches('v'),
@@ -85,7 +92,7 @@ impl Updates {
                     .any(|remote| remote.name == asset.name)
         }))
     }
-    async fn fetch(&self, url: &str, limit: u64) -> Result<Vec<u8>> {
+    pub(super) async fn fetch(&self, url: &str, limit: u64) -> Result<Vec<u8>> {
         self.fetch_progress(url, limit, None).await
     }
     async fn fetch_progress(

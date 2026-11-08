@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 RUNTIME_OPS = ("run.sh", "run-managed.sh", "backup.sh", "schema_gate.py", "local-release.py", "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh")
+INSTALLER_OPS = ("run.sh", "run-managed.sh", "backup.sh", "sign-setup.sh", "release-lib.sh")
 
 
 def write(path, value):
@@ -52,11 +53,13 @@ def package(a):
     if not binary.is_file() or not (web / "index.html").is_file():
         raise ValueError("build Hub and Web before packaging")
     installer = getattr(a, "installer", False)
-    cli = ops / "steve.py"
+    cli = Path(a.cli) if getattr(a, "cli", None) else None
     license_file = Path(getattr(a, "license", None) or Path(__file__).resolve().parent.parent / "LICENSE")
+    if installer and cli is None:
+        raise ValueError("installer requires a prebuilt --cli binary and LICENSE")
     installer_files = [cli, license_file] if installer else []
     if any(not p.is_file() for p in installer_files):
-        raise ValueError("installer requires ops/steve.py and LICENSE")
+        raise ValueError("installer requires a prebuilt --cli binary and LICENSE")
     for path in [binary, node, *([helper] if helper else []), *runtime, *installer_files, web, *web.rglob("*")]:
         if path.is_symlink():
             raise ValueError(f"symlink in build output: {path}")
@@ -66,6 +69,10 @@ def package(a):
     node_identity = json.loads(subprocess.check_output([str(node.resolve()), "--build-info"], timeout=15))
     if any(node_identity.get(k) != getattr(a, k) for k in ("version", "commit", "target")):
         raise ValueError("Node build identity does not match release")
+    if installer:
+        cli_identity = json.loads(subprocess.check_output([str(cli.resolve()), "--build-info"], timeout=15))
+        if any(cli_identity.get(k) != getattr(a, k) for k in ("version", "commit", "target")):
+            raise ValueError("CLI build identity does not match release")
     schema = identity.get("schema")
     if not isinstance(schema, int) or schema < 1:
         raise ValueError("binary did not report a valid schema")
@@ -99,12 +106,16 @@ def package(a):
         archive_bundle(root, manifest, a.target, asset, out / f"manifest-{a.target}.json")
         if installer:
             # Old installed upgraders have an exact path allowlist and compare inner/outer
-            # manifests. Keep their payload unchanged; the CLI has its own distribution.
-            shutil.copyfile(cli, root / "ops/steve.py")
-            (root / "ops/steve.py").chmod(0o755)
+            # manifests. Keep their payload unchanged; only the native installer drops
+            # the legacy Python bridge after the runtime archive has been completed.
+            for name in RUNTIME_OPS:
+                if name not in INSTALLER_OPS:
+                    (root / "ops" / name).unlink()
+            shutil.copyfile(cli, root / "bin/steve")
+            (root / "bin/steve").chmod(0o755)
             shutil.copyfile(license_file, root / "LICENSE")
             (root / "LICENSE").chmod(0o644)
-            archive_bundle(root, dict(manifest, cli_protocol=1), a.target,
+            archive_bundle(root, dict(manifest, cli_protocol=2), a.target,
                            out / f"steve-{a.version}-{a.target}-installer.tar.gz",
                            out / f"installer-manifest-{a.target}.json")
 
@@ -138,6 +149,7 @@ if __name__ == "__main__":
     pack.add_argument("--keyhelper")
     pack.add_argument("--ops")
     pack.add_argument("--installer", action="store_true", help="also package the standalone CLI installer")
+    pack.add_argument("--cli", help="prebuilt native steve binary (required with --installer)")
     pack.add_argument("--license")
     join = sub.add_parser("merge")
     join.add_argument("--out", required=True)

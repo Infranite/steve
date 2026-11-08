@@ -271,20 +271,20 @@ brew install infranite/tap/steve
 steve setup
 ```
 
-The setup wizard asks whether this machine is a Hub or Node. For a Hub it collects your OIDC settings, prepares its private runtime directory and macOS signing identity, checks the configuration, and registers a user service. For a Node it accepts the Hub's HTTPS address and reads the one-time pairing code from stdin; confirm the fingerprint in Hub **Devices**. Then start the role you configured:
+The setup wizard asks whether this machine is a Hub or Node. For a Hub it defaults to listening on `0.0.0.0:8440`, asks separately for the browser/OIDC callback URL, collects your OIDC settings, prepares its private runtime directory and macOS signing identity, checks the configuration, and registers a user service. For a Node it accepts the Hub's HTTPS address and reads the one-time pairing code from stdin; confirm the fingerprint in Hub **Devices**. Then start the role you configured:
 
 ```sh
 steve hub start       # on the Hub
 steve node start      # on a separate Node, after fingerprint confirmation
 ```
 
-Homebrew verifies and installs the published binaries; no Steve source checkout, Cargo or npm build is needed. Setup preserves existing data and does not import harness logins. Models and their ACP adapters remain optional, separately configured tools. See [deployment](docs/deployment.md#homebrew-installation) for supported platforms, configuration, lifecycle commands and upgrades. The source-build instructions below are for development.
+Homebrew verifies and installs the published native binaries; no Python runtime, Steve source checkout, Cargo or npm build is needed. Setup preserves existing data and does not import harness logins. Models and their ACP adapters remain optional, separately configured tools. See [deployment](docs/deployment.md#homebrew-installation) for supported platforms, configuration, lifecycle commands and upgrades. The source-build instructions below are for development.
 
 ### Requirements
 
 | | |
 |---|---|
-| **Homebrew install** | Homebrew and its managed Python runtime; Apple Silicon macOS, or Linux x86_64 with glibc 2.35+. Homebrew's own OS support policy also applies. |
+| **Homebrew install** | Homebrew; no Python runtime dependency. Apple Silicon macOS, or Linux x86_64 with glibc 2.35+. Homebrew's own OS support policy also applies. |
 | **Source build** | Git, stable Rust/Cargo, Node.js 24 LTS with npm |
 | **Run** | Apple Silicon macOS 14+, or Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+, Debian 12+). Windows isn't supported. |
 | **Agents** *(optional)* | [Claude Code](https://docs.anthropic.com/claude-code) and/or [Codex](https://github.com/openai/codex), installed and signed in |
@@ -331,7 +331,7 @@ Steve reads its settings from the environment. For a service, put them in `$STEV
 | Variable | Purpose |
 |---|---|
 | `STEVE_HOME` | Data directory (default `~/.steve`) |
-| `STEVE_HOST`, `STEVE_PORT` | Listen addresses, comma-separated, on one port (default `127.0.0.1:8440`); for a proxy on another machine add the address it reaches, e.g. `127.0.0.1,100.64.0.2`. `0.0.0.0`/`::` is refused unless `STEVE_ALLOW_ANY_HOST=1` |
+| `STEVE_HOST`, `STEVE_PORT` | Listen addresses, comma-separated, on one port (bare-binary default `127.0.0.1:8440`; `steve setup` writes `0.0.0.0:8440` and enables wildcard listening); for a proxy on another machine add the address it reaches, e.g. `127.0.0.1,100.64.0.2`. `0.0.0.0`/`::` is refused unless `STEVE_ALLOW_ANY_HOST=1` |
 | `STEVE_WEB_DIR` | The built web UI the Hub serves |
 | `STEVE_PUBLIC_URL` | A URL your integrations can reach, only needed for callbacks. No shared hosted endpoint is provided. |
 | `STEVE_OIDC_ISSUER`, `STEVE_OIDC_CLIENT_ID`, `STEVE_OIDC_CLIENT_SECRET_FILE` | Sign-in through your OIDC provider |

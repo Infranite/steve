@@ -77,13 +77,13 @@ jobs:
           python3 ops/test-steve-service.py
           python3 -m py_compile ops/local-release.py ops/test-local-release.py
           bash ops/check-migration-lock.sh "$GITHUB_REF_NAME"
-      - name: Build Hub, Node and keyhelper
+      - name: Build native CLI, Hub, Node and keyhelper
         shell: bash
-        run: STEVE_RELEASE_VERSION="${GITHUB_REF_NAME#v}" STEVE_RELEASE_COMMIT="$GITHUB_SHA" cargo build --locked --release --manifest-path hub-rs/Cargo.toml -p steve-hub -p steve-node-cli -p steve-keyhelper
+        run: STEVE_RELEASE_VERSION="${GITHUB_REF_NAME#v}" STEVE_RELEASE_COMMIT="$GITHUB_SHA" cargo build --locked --release --manifest-path hub-rs/Cargo.toml -p steve-install -p steve-hub -p steve-node-cli -p steve-keyhelper
       - name: Verify actual release binary identity and health
         run: python3 ops/test-release-identity.py hub-rs/target/release/steve-hub --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA" --target "${{ matrix.target }}"
       - name: Preserve executable modes for packaging
-        run: tar -cf release-binaries.tar -C hub-rs/target/release steve-hub steve-node steve-keyhelper
+        run: tar -cf release-binaries.tar -C hub-rs/target/release steve steve-hub steve-node steve-keyhelper
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: binaries-${{ matrix.target }}
@@ -125,7 +125,7 @@ jobs:
           python3 scripts/package-release.py package --version "$version" --commit "$GITHUB_SHA" \
             --target "$TARGET" --binary release-binaries/steve-hub \
             --node release-binaries/steve-node --keyhelper release-binaries/steve-keyhelper \
-            --web web/dist --out release-assets --installer
+            --web web/dist --out release-assets --installer --cli release-binaries/steve
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bundle-${{ matrix.target }}

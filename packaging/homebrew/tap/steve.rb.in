@@ -19,19 +19,13 @@ class Steve < Formula
     sha256 "@LINUX_SHA@"
   end
 
-  depends_on "python@3.13"
-
   def install
     if OS.linux?
       glibc = Utils.safe_popen_read("getconf", "GNU_LIBC_VERSION").split.last
       odie "Steve requires glibc 2.35 or newer" if glibc.nil? || Version.new(glibc) < Version.new("2.35")
     end
     libexec.install "bin", "ops", "web", "release.json", "LICENSE"
-    (bin/"steve").write <<~SH
-      #!/bin/sh
-      exec "#{Formula["python@3.13"].opt_bin}/python3.13" "#{libexec}/ops/steve.py" "$@"
-    SH
-    (bin/"steve").chmod 0755
+    bin.install_symlink libexec/"bin/steve"
   end
 
   def caveats
