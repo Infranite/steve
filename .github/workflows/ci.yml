@@ -31,6 +31,7 @@ jobs:
           python3 scripts/test-public-boundary.py
           python3 scripts/test-package-release.py
           python3 packaging/homebrew/test-sync.py
+          python3 scripts/test-install-nextest.py
       - name: Release scripts
         run: |
           python3 ops/test-schema-gate.py

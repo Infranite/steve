@@ -36,9 +36,10 @@ jobs:
           restore-keys: rust-test-v1-${{ inputs.runner }}-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml') }}-
       - name: Always rebuild workspace packages from this checkout
         run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
-        with:
-          tool: cargo-nextest@0.9.151
+      - name: Install checksum-pinned nextest from the official release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/install-nextest.py
       - name: Compile and archive all Rust tests
         run: |
           mkdir -p ci-artifacts
@@ -106,9 +107,10 @@ jobs:
       - name: Install Linux test prerequisites
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
-        with:
-          tool: cargo-nextest@0.9.151
+      - name: Install checksum-pinned nextest from the official release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/install-nextest.py
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rust-archive-${{ inputs.runner }}
