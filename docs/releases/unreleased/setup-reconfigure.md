@@ -1,3 +1,0 @@
-`steve setup --reconfigure` lets an existing managed Hub edit its listening addresses, browser URL and current OIDC issuer/client ID using the actual configuration as defaults. It preserves other environment lines and comments, the secret file, installation identity, service registration, databases and Node pairing.
-
-Changes are previewed with confirmation defaulting to No, checked against the installed Hub, backed up privately, and read back after saving. Interrupted writes can be recovered by rerunning the command and confirming recovery; external edits are not overwritten. Saving does not restart the service, and Node reconfiguration is refused.
