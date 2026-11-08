@@ -157,28 +157,98 @@ fn unmerged_work_keeps_its_worktree_until_archived_and_dirty_work_stays() {
     let (dirty, _, dirty_wt) = item_with_caches(&k, &r, &p, "drop");
     fs::write(dirty_wt.join("notes.txt"), "not committed").unwrap();
 
+    // Only inspect the environment after an assertion fails: these Git calls and the process
+    // sample must not change the timing of the reclaim pass we are trying to diagnose.
+    let diagnose = |res: &workspace::Reclaimed| {
+        let root = &k.core.config().worktrees;
+        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let procs = workspace::process_dirs().map(|dirs| {
+            dirs.into_iter()
+                .filter(|path| path.starts_with(&root))
+                .collect::<Vec<_>>()
+        });
+        let describe = |label: &str, path: &Path| {
+            format!(
+                "{label}: path={path:?}, exists={}, notes={:?}, x_exists={}, \
+                 node_modules_exists={}, target_exists={}, sampled_in_use={:?}, \
+                 git_status={:?}, git_check_ignore={:?}, git_ls_files={:?}",
+                path.exists(),
+                fs::read_to_string(path.join("notes.txt")),
+                path.join("x.txt").exists(),
+                path.join("node_modules").exists(),
+                path.join("target").exists(),
+                procs.as_deref().map(|p| workspace::in_use(path, p)),
+                crate::git::git_read(
+                    path,
+                    &[
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=all",
+                        "--ignored"
+                    ],
+                ),
+                crate::git::git_read(
+                    path,
+                    &[
+                        "check-ignore",
+                        "-v",
+                        "--",
+                        "notes.txt",
+                        "node_modules/",
+                        "target/"
+                    ],
+                ),
+                crate::git::git_read(
+                    path,
+                    &["ls-files", "--", "notes.txt", "node_modules", "target"],
+                ),
+            )
+        };
+        format!(
+            "reclaim result={res:#?}\n{}\n{}\n\
+             process_dirs under {root:?}, sampled AFTER failure \
+             (not the reclaim pass's snapshot)={procs:#?}",
+            describe("unmerged", &wt),
+            describe("dirty", &dirty_wt),
+        )
+    };
+
     let res = k.core.reclaim_workspaces().unwrap();
-    assert!(wt.join("x.txt").exists() && !wt.join("target").exists());
-    assert!(dirty_wt.join("notes.txt").exists() && !dirty_wt.join("node_modules").exists());
+    assert!(wt.join("x.txt").exists(), "{}", diagnose(&res));
+    assert!(!wt.join("target").exists(), "{}", diagnose(&res));
+    assert!(dirty_wt.join("notes.txt").exists(), "{}", diagnose(&res));
+    assert!(
+        !dirty_wt.join("node_modules").exists(),
+        "{}",
+        diagnose(&res)
+    );
     let reason = |id: &str| {
         res.kept
             .iter()
             .find(|x| x.item == id)
             .map(|x| x.reason.clone())
     };
-    assert!(reason(&done).unwrap().contains("还没合入主线"));
-    assert!(reason(&dirty).unwrap().contains("未提交"));
+    assert!(
+        reason(&done).is_some_and(|r| r.contains("还没合入主线")),
+        "{}",
+        diagnose(&res)
+    );
+    assert!(
+        reason(&dirty).is_some_and(|r| r.contains("未提交")),
+        "{}",
+        diagnose(&res)
+    );
 
     k.db().item_patch(&done, patch![archived: true]).unwrap();
     let res = k.core.reclaim_workspaces().unwrap();
-    assert_eq!(res.removed, vec![done.clone()]);
-    assert!(!wt.exists());
+    assert_eq!(res.removed, vec![done.clone()], "{}", diagnose(&res));
+    assert!(!wt.exists(), "{}", diagnose(&res));
     assert_eq!(
         g(&r, &["rev-list", "--count", &format!("main..{branch}")]),
         "1",
         "the commit stays on its branch"
     );
-    assert!(dirty_wt.join("notes.txt").exists());
+    assert!(dirty_wt.join("notes.txt").exists(), "{}", diagnose(&res));
 }
 
 #[test]
