@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import tarfile
 import tempfile
 from types import SimpleNamespace
@@ -11,6 +12,10 @@ import unittest
 spec = importlib.util.spec_from_file_location("package_release", Path(__file__).with_name("package-release.py"))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
+legacy_spec = importlib.util.spec_from_file_location(
+    "legacy_bundle_reader", Path(__file__).parent / "tests/fixtures/legacy-bundle-reader.py")
+legacy = importlib.util.module_from_spec(legacy_spec)
+legacy_spec.loader.exec_module(legacy)
 
 
 class BundleTests(unittest.TestCase):
@@ -92,6 +97,73 @@ class BundleTests(unittest.TestCase):
     def test_refuses_wrong_binary_identity(self):
         self.args.version = "0.3.0"
         with self.assertRaisesRegex(ValueError, "build identity"):
+            release.package(self.args)
+
+    def test_installer_does_not_break_the_published_legacy_updater(self):
+        self.args.installer = True
+        release.package(self.args)
+        runtime = json.loads((self.out / "manifest-aarch64-apple-darwin.json").read_text())
+        installer = json.loads((self.out / "installer-manifest-aarch64-apple-darwin.json").read_text())
+        destination = self.out / "legacy-home"
+        legacy.unpack_bundle(self.out / runtime["assets"][0]["name"], destination)
+        inner = json.loads((destination / "release.json").read_text())
+        legacy.verify_manifest(inner, runtime)
+        self.assertEqual(set(inner), {"format_version", "version", "commit", "hub_version", "web_version",
+                                      "api_protocol", "schema", "assets"})
+        self.assertNotIn("cli_protocol", runtime)
+        self.assertFalse((destination / "ops/steve.py").exists())
+        self.assertFalse((destination / "LICENSE").exists())
+        # Sending the new distribution to an old updater is an error, not a fallback.
+        with self.assertRaisesRegex(legacy.Refused, "unexpected release archive member"):
+            legacy.unpack_bundle(self.out / installer["assets"][0]["name"], self.out / "wrong-channel")
+        with self.assertRaisesRegex(legacy.Refused, "manifest differs"):
+            legacy.verify_manifest(inner, dict(runtime, cli_protocol=1))
+        with tarfile.open(self.out / installer["assets"][0]["name"]) as bundle:
+            self.assertEqual(bundle.getmember("ops/steve.py").mode, 0o755)
+            self.assertEqual(bundle.getmember("LICENSE").mode, 0o644)
+            self.assertEqual(bundle.extractfile("LICENSE").read(), (Path(__file__).parents[1] / "LICENSE").read_bytes())
+            installed = json.load(bundle.extractfile("release.json"))
+            self.assertEqual(installed["cli_protocol"], 1)
+            self.assertEqual(installed["assets"], [])
+            self.assertEqual(dict(installed, assets=[]), dict(installer, assets=[]))
+
+    def test_installer_merge_requires_matching_protocol_and_both_platforms(self):
+        self.args.installer = True
+        release.package(self.args)
+        mac = self.out / "installer-manifest-aarch64-apple-darwin.json"
+        args = SimpleNamespace(out=str(self.out / "steve-installer.json"), manifests=[str(mac)],
+                               expected_target=["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"])
+        with self.assertRaisesRegex(ValueError, "missing expected platforms"):
+            release.merge(args)
+        self.args.target = "x86_64-unknown-linux-gnu"
+        self.binary.write_text(self.binary.read_text().replace("aarch64-apple-darwin", self.args.target))
+        self.node.write_text(self.binary.read_text())
+        release.package(self.args)
+        linux = self.out / "installer-manifest-x86_64-unknown-linux-gnu.json"
+        args.manifests.append(str(linux))
+        release.merge(args)
+        self.assertEqual(len(json.loads(Path(args.out).read_text())["assets"]), 2)
+        args.manifests[1] = str(self.out / "manifest-x86_64-unknown-linux-gnu.json")
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            release.merge(args)
+
+    def test_installer_requires_the_cli_and_refuses_symlinked_license(self):
+        self.args.installer = True
+        ops = Path(self.tmp.name) / "ops"
+        ops.mkdir()
+        for name in release.RUNTIME_OPS:
+            shutil.copyfile(Path(__file__).parents[1] / "ops" / name, ops / name)
+        self.args.ops = str(ops)
+        with self.assertRaisesRegex(ValueError, "ops/steve.py and LICENSE"):
+            release.package(self.args)
+        self.args.ops = None
+        self.args.license = str(self.out / "missing-license")
+        with self.assertRaisesRegex(ValueError, "ops/steve.py and LICENSE"):
+            release.package(self.args)
+        license_link = Path(self.tmp.name) / "license-link"
+        license_link.symlink_to(Path(__file__).parents[1] / "LICENSE")
+        self.args.license = str(license_link)
+        with self.assertRaisesRegex(ValueError, "symlink"):
             release.package(self.args)
 
 

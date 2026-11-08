@@ -30,6 +30,7 @@ jobs:
           python3 scripts/check-public-boundary.py --strict
           python3 scripts/test-public-boundary.py
           python3 scripts/test-package-release.py
+          python3 packaging/homebrew/test-sync.py
       - name: Release scripts
         run: |
           python3 ops/test-schema-gate.py
@@ -37,6 +38,7 @@ jobs:
           python3 ops/test-local-release-prune.py
           python3 ops/test-prepare-bundle.py
           python3 ops/test-steve-service.py
+          python3 ops/test-steve-cli.py
           python3 ops/test-upgrade.py
           python3 ops/test-cut-release.py
           python3 -m py_compile ops/local-release.py ops/test-local-release.py ops/upgrade.py
