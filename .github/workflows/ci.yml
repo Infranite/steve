@@ -1,7 +1,6 @@
 name: CI
-# The tests, before a version exists: on every pull request (Linux) and every push to main (Linux and
-# macOS). ops/cut-release.py tags only a main whose run of this workflow passed, so a red test costs a
-# rerun or a fix, never a version number. The Release workflow (on the tag) builds, packages and publishes.
+# Compile once per platform, then run disjoint nextest partitions from that exact build.
+# cut-release.py accepts only this entire workflow's successful push run on the release head.
 on:
   pull_request:
   push:
@@ -9,30 +8,20 @@ on:
 permissions:
   contents: read
 concurrency:
-  # a newer push to the same pull request replaces its run; every main commit keeps its own
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  test:
+  scripts:
     strategy:
       fail-fast: false
       matrix:
-        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || '["ubuntu-22.04","macos-15"]') }}
+        runner: [ubuntu-22.04, macos-15]
     runs-on: ${{ matrix.runner }}
-    env:
-      MACOSX_DEPLOYMENT_TARGET: '14.0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '24'
-          cache: npm
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
-        with:
-          toolchain: 1.99.1
       - name: Install Linux test prerequisites
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
@@ -53,18 +42,64 @@ jobs:
           python3 -m py_compile ops/local-release.py ops/test-local-release.py ops/upgrade.py
           bash ops/check-migration-lock.sh
           python3 scripts/test-nextest-summary.py
+          python3 scripts/test-nextest-partitions.py
+  web:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, macos-15]
+    uses: ./.github/workflows/rust-tests.yml
+    with:
+      runner: ${{ matrix.runner }}
+  test:
+    name: CI gate
+    if: ${{ always() }}
+    needs: [scripts, web, rust]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require every job, including every platform and partition
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert set(results) == {'scripts', 'web', 'rust'}, results
+          assert all(job['result'] == 'success' for job in results.values()), results
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          tool: cargo-nextest@0.9.151
-      # One process per test. A test that fails and then passes on a retry passes and is listed in the
-      # job summary; a test that fails all three tries fails the run.
-      - name: Rust tests
-        id: rust-tests
-        run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 2 --no-fail-fast
-      - name: Rust doctests
-        run: cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace --doc
-      - name: Rust tests that passed only on retry
-        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
-        run: python3 scripts/nextest-summary.py hub-rs/target/nextest/ci/junit.xml
+          pattern: rust-inventory-*
+          path: ci-artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: rust-results-*
+          path: ci-artifacts
+      - name: Verify each platform ran its entire test inventory exactly once
+        run: |
+          for platform in ubuntu-22.04 macos-15; do
+            python3 scripts/nextest-partitions.py "ci-artifacts/rust-inventory-$platform/full.json" \
+              "ci-artifacts/rust-results-$platform-1/ci-artifacts/selected.json" \
+              "ci-artifacts/rust-results-$platform-2/ci-artifacts/selected.json" \
+              "ci-artifacts/rust-results-$platform-3/ci-artifacts/selected.json" \
+              "ci-artifacts/rust-results-$platform-4/ci-artifacts/selected.json" \
+              --junit "ci-artifacts/rust-results-$platform-1/hub-rs/target/nextest/ci/junit.xml" \
+              --junit "ci-artifacts/rust-results-$platform-2/hub-rs/target/nextest/ci/junit.xml" \
+              --junit "ci-artifacts/rust-results-$platform-3/hub-rs/target/nextest/ci/junit.xml" \
+              --junit "ci-artifacts/rust-results-$platform-4/hub-rs/target/nextest/ci/junit.xml"
+          done

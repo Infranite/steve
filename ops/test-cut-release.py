@@ -131,9 +131,15 @@ def main():
         assert any(f"head_sha={head}" in c for c in gh_calls()), gh_calls()
         ok("a red CI run on the head refuses the release and says how to rerun its failed jobs")
 
-        set_ci(conclusion=None, status="in_progress")
+        # Even a success value cannot release while other parallel jobs are still running.
+        set_ci(conclusion="success", status="in_progress")
         r = cut(a, "cut", "--ci-wait", "0")
         assert r.returncode == 1 and "still in_progress" in r.stderr and "runs/42" in r.stderr, r
+        for conclusion in ("cancelled", "skipped", "neutral"):
+            set_ci(conclusion=conclusion)
+            r = cut(a, "cut", "--ci-wait", "0")
+            assert r.returncode == 1 and f"{conclusion} on" in r.stderr, r
+            assert git(origin, "tag", "-l", "v0.2.25") == ""
         set_ci(none=True)
         r = cut(a, "cut", "--ci-wait", "0")
         assert r.returncode == 1 and "has no push run on" in r.stderr, r

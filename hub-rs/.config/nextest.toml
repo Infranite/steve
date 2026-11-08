@@ -1,9 +1,9 @@
-# cargo-nextest, as the release workflow runs it (`--profile ci`). Every test runs in its own
-# process. A test that fails and then passes on a retry is reported, not hidden:
-# `scripts/nextest-summary.py` lists each one in the job summary.
+# Every CI test runs in its own process, from a platform-specific nextest archive.
+# Fail the first attempt: retries must not turn a flaky release gate green.
+# scripts/nextest-summary.py preserves the failure details in the job summary.
 
 [profile.ci]
-retries = 2
+retries = 0
 fail-fast = false
 failure-output = "immediate-final"
 

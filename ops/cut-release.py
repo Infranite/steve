@@ -16,7 +16,7 @@ someone else pushed or released first, it starts again from the new state, a few
 Only a tested commit is tagged: `cut` first asks GitHub (`gh`: $STEVE_GH, else on PATH, else in /opt/homebrew/bin,
 /usr/local/bin or /usr/bin, as the Hub finds it) for the CI workflow's run (`.github/workflows/
 ci.yml`) pushed to the branch at the head it is about to release (a pull request's run of the same commit
-does not count: it tests Linux only). It waits while that run is queued or running (up to
+does not count: it is not the trusted branch push). It waits while that run is queued or running (up to
 `--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and how to
 run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. `--skip-ci` releases without
 that check, on purpose (it says so). `--dry-run` does not ask.
@@ -131,7 +131,7 @@ def gh(*args, cwd):
 
 def ci_run(repo, sha, branch):
     """The newest run of the CI workflow pushed to `branch` at `sha`, or None. Only a push run: a pull
-    request's run of the same commit tests Linux alone."""
+    request's run is not the trusted branch's push run."""
     out = gh("api", f"repos/{{owner}}/{{repo}}/actions/workflows/{CI_WORKFLOW}/runs"
              f"?head_sha={sha}&event=push&branch={branch}&per_page=20", cwd=repo)
     try:
@@ -150,7 +150,7 @@ def rerun_hint(run):
 
 def ci_gate(repo, sha, branch, wait):
     """Return once the CI workflow passed on `sha`; refuse when it failed, is missing, or still runs after
-    `wait` seconds."""
+    `wait` seconds. This is the workflow conclusion, never a successful job or shard."""
     short = sha[:7]
     start = time.monotonic()
     said = None
