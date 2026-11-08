@@ -19,10 +19,20 @@ class Manager:
     def __init__(self, system):
         self.system, self.running, self.loaded, self.calls = system, False, False, []
         self.unknown = False
+        self.fail_action = None
+        self.fail_after_removal = False
+        self.show_exit_code = 0
+        self.absent = False
+        self.absent_after_reload = False
+        self.needs_reload = "no"
+        self.dropin = ""
+        self.pending_dropin = ""
 
     def __call__(self, args, **kw):
         self.calls.append(args)
         out, error, code = "", "", 0
+        if self.fail_action in args and (not self.fail_after_removal or not self.config.exists()):
+            return SimpleNamespace(returncode=1, stdout="", stderr="test manager failure")
         if "print" in args:
             if self.unknown:
                 error, code = "access denied", 1
@@ -30,9 +40,20 @@ class Manager:
                 error, code = "Could not find service in domain", 113
             else:
                 out = "state = running\n" + ("pid = 123\n" if self.running else "")
+        elif "--property=NeedDaemonReload" in args:
+            out = self.needs_reload + "\n"
+        elif "cat" in args:
+            out = "# " + str(self.config) + "\n" + self.config.read_text() + self.dropin
         elif "show" in args:
-            out = ("" if self.unknown else "LoadState=loaded\nActiveState=" + ("active" if self.running else "inactive")
+            out = ("" if self.unknown else "LoadState=" + ("not-found" if self.absent else "loaded") + "\nActiveState=" + ("active" if self.running else "inactive")
                    + "\nMainPID=" + ("123" if self.running else "0") + "\nExecMainStatus=0\n")
+            code = self.show_exit_code
+        elif "daemon-reload" in args:
+            if self.absent_after_reload:
+                self.absent = True
+            if self.pending_dropin:
+                self.dropin = self.pending_dropin
+                self.pending_dropin = ""
         elif any(a in args for a in ("bootstrap", "kickstart", "start", "restart")):
             self.loaded = self.running = True
         elif any(a in args for a in ("bootout", "stop")):
@@ -76,6 +97,7 @@ class Services(unittest.TestCase):
     def service(self, system="Darwin", component="node"):
         manager = Manager(system)
         service = m.Service(component, self.home, system=system, user_home=self.root, runner=manager)
+        manager.config = service.config
         return service, manager
 
     def assert_preserved(self):
@@ -303,6 +325,195 @@ class Services(unittest.TestCase):
         report = s.status(doctor=True)
         self.assertFalse(report["pairing"]["configured"])
         self.assertFalse(report["pairing"]["identity_present"])
+
+    def test_uninstall_requires_stopped_known_state_and_unloaded_launchd(self):
+        for system in ("Darwin", "Linux"):
+            s, manager = self.service(system)
+            s.install(self.release)
+            before = s.config.read_bytes(), s.record_path.read_bytes()
+            for mode in ("running", "unknown", "loaded"):
+                if system == "Linux" and mode == "loaded":
+                    continue
+                with self.subTest(system=system, mode=mode):
+                    manager.running = mode == "running"
+                    manager.loaded = mode in ("running", "loaded")
+                    manager.unknown = mode == "unknown"
+                    manager.calls.clear()
+                    with self.assertRaisesRegex(m.Refused, "explicitly stop"):
+                        s.uninstall()
+                    self.assertEqual((s.config.read_bytes(), s.record_path.read_bytes()), before)
+                    self.assertTrue(all("print" in c or "show" in c for c in manager.calls))
+                    self.assertFalse((self.home / "services/retired").exists())
+                    self.assert_preserved()
+
+    def test_uninstall_backs_up_registration_preserves_home_and_is_repeatable(self):
+        for name, value in {"data/test.db":"database", "signing/test.key":"key", "releases/retained":"release"}.items():
+            path = self.home / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(value)
+            self.protected[name] = value
+        for system in ("Darwin", "Linux"):
+            with self.subTest(system=system):
+                s, manager = self.service(system)
+                s.install(self.release)
+                before = s.config.read_bytes(), s.record_path.read_bytes()
+                manager.calls.clear()
+                result = s.uninstall()
+                archive = Path(result["archive"])
+                self.assertEqual(archive.parent, self.home / "services/retired")
+                self.assertEqual((archive / "definition").read_bytes(), before[0])
+                self.assertEqual((archive / "record.json").read_bytes(), before[1])
+                self.assertFalse(s.config.exists())
+                self.assertTrue(json.loads(s.record_path.read_text())["uninstalled"])
+                self.assertTrue(result["home_preserved"])
+                self.assertTrue(result["changed"])
+                self.assertFalse(result["started"])
+                mutation = [c for c in manager.calls if "print" not in c and "show" not in c and "cat" not in c]
+                expected = [] if system == "Darwin" else [
+                    ["systemctl", "--user", "daemon-reload"],
+                    ["systemctl", "--user", "disable", s.label + ".service"],
+                    ["systemctl", "--user", "daemon-reload"]]
+                self.assertEqual(mutation, expected)
+                retained = {p:p.read_bytes() for p in (self.home / "services").rglob("*") if p.is_file()}
+                manager.calls.clear()
+                resumed = m.Service("node", self.home, system=system, user_home=self.root, runner=manager)
+                self.assertFalse(resumed.uninstall()["changed"])
+                self.assertEqual(retained, {p:p.read_bytes() for p in (self.home / "services").rglob("*") if p.is_file()})
+                self.assertTrue(all("print" in c or "show" in c for c in manager.calls))
+                self.assert_preserved()
+                self.assertTrue(resumed.install(self.release)["installed"])
+                self.assertNotIn("uninstall", resumed.record)
+                self.assertFalse(manager.running)
+                self.assert_preserved()
+
+    def test_uninstall_refuses_foreign_home_label_and_symlink_without_changes(self):
+        for system in ("Darwin", "Linux"):
+            with self.subTest(system=system):
+                s, manager = self.service(system)
+                s.install(self.release)
+                original = s.config.read_bytes()
+                manager.calls.clear()
+                other = m.Service("node", self.root / "foreign", system=system, user_home=self.root, runner=manager)
+                with self.assertRaisesRegex(m.Refused, "another or unknown home"):
+                    other.uninstall()
+                self.assertEqual(manager.calls, [])
+                if system == "Darwin":
+                    changed = plistlib.loads(original)
+                    changed["Label"] = "foreign.label"
+                    s.config.write_bytes(plistlib.dumps(changed))
+                    with self.assertRaisesRegex(m.Refused, "exact owned label"):
+                        s.uninstall()
+                    self.assertEqual(manager.calls, [])
+                    s.config.write_bytes(original)
+                target = self.root / (system + "-foreign-definition")
+                s.config.rename(target)
+                s.config.symlink_to(target)
+                with self.assertRaisesRegex(m.Refused, "owned regular file"):
+                    s.uninstall()
+                self.assertEqual(target.read_bytes(), original)
+                self.assertTrue(s.config.is_symlink())
+                self.assertEqual(manager.calls, [])
+                self.assert_preserved()
+
+    def test_uninstall_resumes_failed_reload_without_losing_backup_or_data(self):
+        s, manager = self.service("Linux")
+        s.install(self.release)
+        original = s.config.read_bytes()
+        manager.fail_action = "daemon-reload"
+        manager.fail_after_removal = True
+        with self.assertRaisesRegex(m.Refused, "manager command failed"):
+            s.uninstall()
+        self.assertFalse(s.config.exists())
+        record = json.loads(s.record_path.read_text())
+        self.assertEqual(record["uninstall"]["phase"], "pending")
+        archive = self.home / "services/retired" / record["uninstall"]["archive"]
+        self.assertEqual((archive / "definition").read_bytes(), original)
+        manager.fail_action = None
+        manager.calls.clear()
+        resumed = m.Service("node", self.home, system="Linux", user_home=self.root, runner=manager)
+        self.assertTrue(resumed.uninstall()["changed"])
+        self.assertFalse(any("disable" in c for c in manager.calls))
+        self.assertTrue(any("daemon-reload" in c for c in manager.calls))
+        self.assertEqual((archive / "definition").read_bytes(), original)
+        self.assert_preserved()
+
+    def test_systemd_missing_unit_is_known_stopped_but_failed_query_is_unknown(self):
+        s, manager = self.service("Linux")
+        manager.absent = True
+        self.assertFalse(s.uninstall()["changed"])
+        self.assertFalse(s.record_path.exists())
+        s.install(self.release)
+        manager.absent = False
+        manager.show_exit_code = 1
+        with self.assertRaisesRegex(m.Refused, "state is unknown"):
+            s.uninstall()
+        self.assertTrue(s.config.is_file())
+        self.assertFalse((self.home / "services/retired").exists())
+        manager.show_exit_code = 0
+        manager.absent_after_reload = True
+        self.assertTrue(s.uninstall()["changed"])
+        self.assertTrue(manager.absent)
+        self.assertFalse(s.uninstall()["changed"])
+
+    def test_uninstall_preserves_definition_on_disable_failure_and_detects_changed_backup(self):
+        s, manager = self.service("Linux")
+        s.install(self.release)
+        original = s.config.read_bytes()
+        manager.fail_action = "disable"
+        with self.assertRaises(m.Refused):
+            s.uninstall()
+        self.assertEqual(s.config.read_bytes(), original)
+        archive = self.home / "services/retired" / s.record["uninstall"]["archive"]
+        (archive / "definition").write_text("changed archive")
+        manager.fail_action = None
+        manager.calls.clear()
+        resumed = m.Service("node", self.home, system="Linux", user_home=self.root, runner=manager)
+        with self.assertRaisesRegex(m.Refused, "backup changed"):
+            resumed.uninstall()
+        self.assertTrue(all("show" in c or "cat" in c or "daemon-reload" in c for c in manager.calls))
+        self.assertEqual(s.config.read_bytes(), original)
+        self.assert_preserved()
+
+    def test_uninstall_rejects_also_in_main_or_dropin_and_stale_dropin_cache(self):
+        s, manager = self.service("Linux")
+        s.install(self.release)
+        original = s.config.read_text()
+        for source in ("main", "dropin", "continued_dropin", "new_dropin_directory", "stale", "unknown_freshness"):
+            with self.subTest(source=source):
+                manager.calls.clear()
+                manager.dropin = ""
+                manager.needs_reload = "no"
+                s.config.write_text(original)
+                if source == "main":
+                    s.config.write_text(original + "Also=another.service\n")
+                elif source == "dropin":
+                    manager.dropin = "\n# override.conf\n[Install]\nAlso=another.service\n"
+                elif source == "continued_dropin":
+                    manager.dropin = "\n# override.conf\n[Install]\nAl\\\nso=another.service\n"
+                elif source == "new_dropin_directory":
+                    manager.pending_dropin = "\n# new-dir/override.conf\n[Install]\nAlso=another.service\n"
+                else:
+                    manager.needs_reload = "yes" if source == "stale" else ""
+                before = s.config.read_bytes(), s.record_path.read_bytes()
+                with self.assertRaisesRegex(m.Refused, "Also=|freshness is unknown"):
+                    s.uninstall()
+                self.assertEqual((s.config.read_bytes(), s.record_path.read_bytes()), before)
+                self.assertTrue(all("show" in c or "cat" in c or "daemon-reload" in c for c in manager.calls))
+                self.assertFalse((self.home / "services/retired").exists())
+                self.assert_preserved()
+
+    def test_legacy_signed_hub_uninstall_preserves_identity_current_and_release(self):
+        s, manager, _ = self.legacy_signed_hub()
+        manager.loaded = manager.running = False
+        identity = (s.home / "signing/identity.json").read_bytes()
+        before = s.config.read_bytes()
+        result = s.uninstall()
+        self.assertEqual((Path(result["archive"]) / "definition").read_bytes(), before)
+        self.assertFalse((Path(result["archive"]) / "record.json").exists())
+        self.assertEqual((s.home / "signing/identity.json").read_bytes(), identity)
+        self.assertEqual((s.home / "current").resolve(), self.release)
+        self.assertTrue(self.release.is_dir())
+        self.assertTrue(all("print" in c for c in manager.calls))
 
 
 if __name__ == "__main__":

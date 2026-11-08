@@ -21,6 +21,16 @@ def write(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
+def archive_bundle(root, manifest, target, asset, platform_manifest):
+    write(root / "release.json", dict(manifest, assets=[]))
+    with tarfile.open(asset, "w:gz", format=tarfile.USTAR_FORMAT) as archive:
+        for path in sorted(root.rglob("*")):
+            archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
+    write(platform_manifest, dict(manifest, assets=[dict(
+        target=target, name=asset.name,
+        sha256=hashlib.sha256(asset.read_bytes()).hexdigest(), size=asset.stat().st_size)]))
+
+
 def package(a):
     if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", a.version):
         raise ValueError("version must be a stable SemVer without v")
@@ -41,7 +51,13 @@ def package(a):
         raise ValueError("missing runtime ops scripts")
     if not binary.is_file() or not (web / "index.html").is_file():
         raise ValueError("build Hub and Web before packaging")
-    for path in [binary, node, *([helper] if helper else []), *runtime, web, *web.rglob("*")]:
+    installer = getattr(a, "installer", False)
+    cli = ops / "steve.py"
+    license_file = Path(getattr(a, "license", None) or Path(__file__).resolve().parent.parent / "LICENSE")
+    installer_files = [cli, license_file] if installer else []
+    if any(not p.is_file() for p in installer_files):
+        raise ValueError("installer requires ops/steve.py and LICENSE")
+    for path in [binary, node, *([helper] if helper else []), *runtime, *installer_files, web, *web.rglob("*")]:
         if path.is_symlink():
             raise ValueError(f"symlink in build output: {path}")
     identity = json.loads(subprocess.check_output([str(binary.resolve()), "--build-info"], timeout=15))
@@ -79,14 +95,18 @@ def package(a):
             raise ValueError("Web index has no head")
         index.write_text(html.replace("</head>", f'<meta name="steve-web-version" content="{a.version}" /></head>', 1))
         write(root / "web/dist/release.json", dict(version=a.version, commit=a.commit))
-        write(root / "release.json", manifest)
         asset = out / f"steve-{a.version}-{a.target}.tar.gz"
-        with tarfile.open(asset, "w:gz", format=tarfile.USTAR_FORMAT) as archive:
-            for path in sorted(root.rglob("*")):
-                archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
-        manifest["assets"] = [dict(target=a.target, name=asset.name,
-            sha256=hashlib.sha256(asset.read_bytes()).hexdigest(), size=asset.stat().st_size)]
-        write(out / f"manifest-{a.target}.json", manifest)
+        archive_bundle(root, manifest, a.target, asset, out / f"manifest-{a.target}.json")
+        if installer:
+            # Old installed upgraders have an exact path allowlist and compare inner/outer
+            # manifests. Keep their payload unchanged; the CLI has its own distribution.
+            shutil.copyfile(cli, root / "ops/steve.py")
+            (root / "ops/steve.py").chmod(0o755)
+            shutil.copyfile(license_file, root / "LICENSE")
+            (root / "LICENSE").chmod(0o644)
+            archive_bundle(root, dict(manifest, cli_protocol=1), a.target,
+                           out / f"steve-{a.version}-{a.target}-installer.tar.gz",
+                           out / f"installer-manifest-{a.target}.json")
 
 
 def merge(a):
@@ -117,6 +137,8 @@ if __name__ == "__main__":
         pack.add_argument("--" + name, required=True)
     pack.add_argument("--keyhelper")
     pack.add_argument("--ops")
+    pack.add_argument("--installer", action="store_true", help="also package the standalone CLI installer")
+    pack.add_argument("--license")
     join = sub.add_parser("merge")
     join.add_argument("--out", required=True)
     join.add_argument("--expected-target", action="append")

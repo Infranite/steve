@@ -1,0 +1,39 @@
+name: Sync published Steve installer
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 */6 * * *'
+permissions:
+  contents: write
+concurrency:
+  group: sync-steve-installer
+  cancel-in-progress: false
+jobs:
+  sync:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Verify published release and generate Formula
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 sync.py
+      - name: Commit the verified Formula and release lock together
+        env:
+          TAP_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git diff --check
+          git add -- Formula/steve.rb steve-installer.lock.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Update verified Steve installer'
+          git push origin "HEAD:refs/heads/$TAP_BRANCH"

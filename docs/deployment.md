@@ -1,7 +1,8 @@
 # Deploying and upgrading Steve
 
-[README](../README.md) gets a local instance running in a few minutes. This page covers running Steve as a long-lived service: a source-based macOS installation, managed Release bundles with automatic upgrades, and how an upgrade behaves.
+[README](../README.md) describes the Homebrew installation and source-based development setup. This page covers first-time configuration, user services, managed releases and upgrades.
 
+- [Homebrew installation](#homebrew-installation)
 - [Hub and Node service commands](#hub-and-node-service-commands)
 - [Source-based macOS service installation](#source-based-macos-service-installation)
 - [Managed Release bundles and automatic upgrades](#managed-release-bundles-and-automatic-upgrades)
@@ -9,6 +10,49 @@
 - [Remote Nodes](#remote-nodes)
 - [Harness setup](#harness-setup)
 - [Diagnostic capture and queries](#diagnostic-capture-and-queries)
+
+## Homebrew installation
+
+```sh
+brew install infranite/tap/steve
+steve setup
+```
+
+The official [tap](https://github.com/Infranite/homebrew-tap) downloads a versioned installer archive, verifies its SHA256 and installs the complete precompiled Hub, Node, Web and CLI. It depends on a Homebrew-managed Python runtime, not a Steve compiler or source checkout. Supported Steve binaries are Apple Silicon macOS 14+ and Linux x86_64 with glibc 2.35+; Homebrew may require a newer OS under its own support policy. Intel macOS and Linux ARM binaries are not available.
+
+`steve setup` asks you to select Hub or Node; `steve setup hub` and `steve setup node --hub https://<hub>` select it explicitly. Default data directories are `~/.steve` and `~/.steve-node`, respectively; `--home <absolute-directory>` selects a separate directory. Setup copies the immutable package into a private `<home>/releases/<version>` directory before signing or registering anything. It refuses an unknown existing home or identity. Its private setup receipt allows the same interrupted setup to continue while retaining the completed configuration and keys.
+
+For a Hub, the wizard asks for its public URL and your OIDC issuer, client ID and client secret. The secret is entered without echo and written to a private file; it is never a command-line argument. Register the displayed callback URL with your OIDC provider. The default listener is `127.0.0.1:8440`; a public HTTPS URL still requires your reverse proxy and network configuration. macOS setup prepares and signs the private Hub/helper copies, with system authorization prompts when required. Linux asks for a separate protected `0700` directory for its persistent vault keys. Setup does not enable development login or copy another harness's credentials.
+
+For a Node, supply a reachable HTTPS Hub and enter the code generated in **Devices → Add device**. Compare and confirm the displayed fingerprint in Devices before starting it. `--pin sha256:<verified-certificate-DER-hash>` is available for a certificate you have explicitly verified. Roots start empty, and registration does not move projects, grant directories or enable multi-Bot execution. See [pairing verification](#verify-and-recover-a-node).
+
+Setup registers the existing Steve user service and does not start or restart it during that command. The registered service is configured to start in subsequent user sessions. Start the selected component explicitly:
+
+```sh
+steve hub start
+steve hub status
+steve hub doctor
+
+steve node start
+steve node status
+steve node doctor
+```
+
+Use only the commands for the role installed on that machine. Both roles also support `stop` and `restart`; `--home` and the original `--label` select a custom installation. Node connection and idle state must still be verified in Devices. Principal-specific model authentication and the [harness setup gap](#harness-setup) are separate from installing Steve.
+
+Homebrew manages the installed package and CLI. `brew upgrade infranite/tap/steve` downloads a newer package without switching a running Hub or its database. The CLI reports its **package version** with `steve --version`; `steve hub status` reports the configured runtime separately, and `/healthz` verifies the actually running Hub. Keep using **Settings → About** or `steve upgrade` for supported signed-Hub upgrades: the existing coordinator retains task drain, backup, schema checks, activation and rollback. A Node update uses the [stopped-service procedure](#hub-and-node-service-commands). Services run from their private runtime copies, so Homebrew cleanup does not remove their executables or data.
+
+Homebrew does not manage these services through `brew services`. Stop and unregister the relevant Steve service before removing its Homebrew package:
+
+```sh
+steve hub stop
+steve hub uninstall
+brew uninstall steve
+```
+
+Use `node` instead of `hub` on a separate Node and verify its sessions in Devices before stopping it. `uninstall` requires a known stopped, unloaded service and preserves a backup of its registration. It does not remove the private runtime, configuration, keys, data or Node pairing; keep those for diagnosis or a separately planned removal. Revoke a retired Node from Hub Devices when you intend to remove its access.
+
+Without Homebrew, use the verified installer archive from the same [Release](https://github.com/Infranite/steve/releases), then run `python3 <installer>/ops/steve.py setup`. The separate runtime archives and `steve-release.json` remain compatible with existing upgrade clients; Homebrew uses `steve-installer.json` and the installer archives.
 
 ## Diagnostic capture and queries
 

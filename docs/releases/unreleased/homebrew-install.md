@@ -1,0 +1,3 @@
+Homebrew now installs the precompiled Hub, Node, Web and a unified `steve` command from the official tap. The interactive `steve setup` wizard prepares separate user directories, collects OIDC settings privately, performs macOS Keychain setup and registers the selected user service; start it explicitly with `steve hub start` or `steve node start`.
+
+Package upgrades remain separate from activating a running Hub, preserving the existing drain, backup, migration and rollback flow. Node pairing still requires owner fingerprint confirmation and starts with no project roots. Dedicated installer artifacts keep the existing runtime bundle and upgrade manifest contract compatible.

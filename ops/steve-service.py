@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """User services for a verified Steve release (Python 3.9+).
 
-python3 ops/steve-service.py {hub|node} {install|start|stop|restart|status|doctor|update}
+python3 ops/steve-service.py {hub|node} {install|uninstall|start|stop|restart|status|doctor|update}
     [--home PATH] [--release EXTRACTED_BUNDLE] [--label LABEL] [--wait SECONDS]
 
 install registers a service without starting it or pairing a Node. update switches only a stopped Node;
@@ -10,6 +10,7 @@ use Settings > About, or ops/upgrade.py for a signed macOS Hub at the OS account
 so migrations, backups and task drain remain owned by the upgrade coordinator.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import platform
 import plistlib
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -142,7 +144,7 @@ class Service:
         pid = int(values.get("MainPID", "0") or "0")
         active = values.get("ActiveState", "unknown")
         running = bool(pid) or active in ("active", "activating", "deactivating", "reloading")
-        if not values or active == "unknown":
+        if r.returncode or not values or active == "unknown":
             running = None
         return dict(installed=self.config.is_file(), loaded=values.get("LoadState") == "loaded",
                     running=running, pid=pid or None, state=active)
@@ -258,6 +260,129 @@ class Service:
             self.command(["systemctl", "--user", action, self.label + ".service"])
         return self.status()
 
+    def uninstall(self):
+        """Remove only this stopped service's registration; keep its home and identities intact.
+
+        The retained record journals the archive before removing a definition. A failed disable or
+        daemon-reload can therefore resume without guessing ownership or overwriting the backup.
+        """
+        def regular(path):
+            mode = path.lstat()
+            if not stat.S_ISREG(mode.st_mode) or mode.st_uid != os.getuid():
+                raise Refused(f"uninstall requires an owned regular file: {path}")
+            return path.read_bytes()
+
+        def directory(path):
+            if not path.exists() and not path.is_symlink():
+                path.mkdir(mode=0o700)
+            mode = path.lstat()
+            if not stat.S_ISDIR(mode.st_mode) or mode.st_uid != os.getuid():
+                raise Refused(f"uninstall requires an owned directory: {path}")
+
+        def stopped():
+            state = self.state()
+            if state["running"] is not False or (self.system == "Darwin" and state["loaded"]):
+                raise Refused("service is running, loaded, or its state is unknown; no service was stopped. "
+                              "Finish sessions, verify Hub Devices, then explicitly stop before uninstall")
+
+        def isolated_unit(definition):
+            # disable follows [Install] Also=, including drop-ins. cat uses the manager's
+            # DropInPaths cache, so require NeedDaemonReload=no before and after reading it.
+            def fresh():
+                report = self.command(["systemctl", "--user", "show", self.label + ".service",
+                                       "--property=NeedDaemonReload", "--value"])
+                if report.stdout.strip() != "no":
+                    raise Refused("unit definitions need reload or freshness is unknown; inspect them and run "
+                                  "systemctl --user daemon-reload before retrying uninstall")
+            fresh()
+            report = self.command(["systemctl", "--user", "cat", "--no-pager", self.label + ".service"])
+            if report.stderr.strip() or definition.decode() not in report.stdout:
+                raise Refused("cannot verify the complete owned unit and its drop-ins; no unit was disabled")
+            logical = re.sub(r"\\\n[ \t]*", "", report.stdout)
+            if re.search(r"^[ \t]*(?:Also[ \t]*=|\.include(?:[ \t]|$))", logical, re.M):
+                raise Refused("unit or drop-in has Also= or .include; uninstall will not disable other services")
+            fresh()
+            return report.stdout
+
+        exists = os.path.lexists(self.config)
+        definition = regular(self.config) if exists else None
+        if exists and self.system == "Darwin" and plistlib.loads(definition).get("Label") != self.label:
+            raise Refused("service definition label differs from the exact owned label")
+        old_record = regular(self.record_path) if os.path.lexists(self.record_path) else None
+        if self.record and (self.record.get("component") != self.component or self.record.get("label") != self.label):
+            raise Refused("service record does not identify this component and label")
+        stopped()
+        if exists and self.system == "Linux":
+            # Refresh first: cat reads cached DropInPaths, and even NeedDaemonReload may use
+            # the manager's directory cache. A newly added drop-in must not hide an Also=.
+            self.command(["systemctl", "--user", "daemon-reload"])
+            stopped()
+        effective = isolated_unit(definition) if exists and self.system == "Linux" else None
+        pending = self.record.get("uninstall", {})
+        if not isinstance(pending, dict):
+            raise Refused("uninstall receipt is invalid; inspect the retained service record")
+        if not exists and pending.get("phase") != "pending":
+            return dict(installed=False, changed=False, started=False, home_preserved=True,
+                        archive=pending.get("archive"))
+
+        services = self.home / "services"
+        directory(services)
+        retired = services / "retired"
+        directory(retired)
+        if pending.get("phase") == "pending":
+            name = pending.get("archive", "")
+            if (not re.fullmatch(re.escape(self.component) + r"-[0-9a-f]{32}", name)
+                    or pending.get("config") != str(self.config)):
+                raise Refused("uninstall receipt does not identify this service archive")
+            archive = retired / name
+            directory(archive)
+            saved = regular(archive / "definition")
+            if hashlib.sha256(saved).hexdigest() != pending.get("definition_sha256"):
+                raise Refused("uninstall backup changed; no definition will be removed")
+            if pending.get("record_sha256") is not None:
+                if hashlib.sha256(regular(archive / "record.json")).hexdigest() != pending["record_sha256"]:
+                    raise Refused("uninstall record backup changed; inspect the retained archive")
+            if exists and saved != definition:
+                raise Refused("service definition changed during uninstall; original backup is retained")
+        else:
+            archive = retired / (self.component + "-" + uuid.uuid4().hex)
+            archive.mkdir(mode=0o700)
+            atomic(archive / "definition", definition)
+            if regular(archive / "definition") != definition:
+                raise Refused("service definition backup did not verify")
+            if old_record is not None:
+                atomic(archive / "record.json", old_record)
+                if regular(archive / "record.json") != old_record:
+                    raise Refused("service record backup did not verify")
+            pending = dict(phase="pending", archive=archive.name, config=str(self.config),
+                           definition_sha256=hashlib.sha256(definition).hexdigest(),
+                           record_sha256=hashlib.sha256(old_record).hexdigest() if old_record is not None else None)
+            self.record.update(component=self.component, label=self.label, uninstall=pending, uninstalled=False)
+            atomic(self.record_path, (json.dumps(self.record, indent=2) + "\n").encode())
+        if exists:
+            stopped()
+            if regular(self.config) != definition:
+                raise Refused("service definition changed; original backup is retained")
+            if self.system == "Linux":
+                if isolated_unit(definition) != effective:
+                    raise Refused("unit or drop-ins changed during uninstall; original backup is retained")
+                self.command(["systemctl", "--user", "disable", self.label + ".service"])
+                stopped()
+                if regular(self.config) != definition:
+                    raise Refused("service definition changed after disable; original backup is retained")
+            self.config.unlink()
+        if self.system == "Linux":
+            self.command(["systemctl", "--user", "daemon-reload"])
+        stopped()
+        if os.path.lexists(self.config):
+            raise Refused("service definition reappeared; inspect it before retrying uninstall")
+        pending["phase"] = "complete"
+        self.record["uninstalled"] = True
+        atomic(self.record_path, (json.dumps(self.record, indent=2) + "\n").encode())
+        if regular(self.record_path) != (json.dumps(self.record, indent=2) + "\n").encode():
+            raise Refused("uninstall receipt did not verify")
+        return dict(installed=False, changed=True, started=False, home_preserved=True, archive=str(archive))
+
     def status(self, candidate=None, doctor=False):
         state = self.state()
         release = self.home / "current" if self.component == "hub" else Path(self.record.get("release", self.home / "current"))
@@ -321,7 +446,7 @@ class Service:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("component", choices=("hub", "node"))
-    p.add_argument("action", choices=("install", "start", "stop", "restart", "status", "doctor", "update"))
+    p.add_argument("action", choices=("install", "uninstall", "start", "stop", "restart", "status", "doctor", "update"))
     p.add_argument("--home")
     p.add_argument("--release")
     p.add_argument("--label")
@@ -335,6 +460,8 @@ def main():
             result = service.install(release, update=a.action == "update", wait=max(0, a.wait))
         elif a.action in ("status", "doctor"):
             result = service.status(a.release, doctor=a.action == "doctor")
+        elif a.action == "uninstall":
+            result = service.uninstall()
         else:
             result = service.action(a.action)
         print(json.dumps(result, indent=2))
