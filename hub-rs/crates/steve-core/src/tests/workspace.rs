@@ -384,25 +384,48 @@ fn reclaiming_frees_the_disk_space() {
 
 #[test]
 fn one_pass_at_a_time() {
+    use std::sync::atomic::Ordering;
+
     let k = Kit::new();
-    let (r, p) = project(&k);
-    let (_, _, wt) = item_with_caches(&k, &r, &p, "done");
-    k.core
-        .0
-        .reclaiming
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let res = k.core.reclaim_workspaces().unwrap();
-    assert!(res.skipped && res.freed.is_empty());
+    // Trash is already eligible for deletion. A live worktree may legitimately be kept by the
+    // process or Git guards, which say nothing about whether the reclaim gate was acquired.
+    let trash = trash_dir(&k.core.config().worktrees);
+    let cache = trash.join("closed-item@1/0-target");
+    fs::create_dir_all(&cache).unwrap();
+    let payload = cache.join("rebuildable");
+    fs::write(&payload, vec![7u8; 4096]).unwrap();
+
+    k.core.0.reclaiming.store(true, Ordering::SeqCst);
+    let skipped = k.core.reclaim_workspaces().unwrap();
+    assert!(skipped.skipped && skipped.freed.is_empty(), "{skipped:?}");
+    assert!(skipped.removed.is_empty(), "{skipped:?}");
     assert!(
-        wt.join("target").exists(),
-        "the second caller touched nothing"
+        k.core.0.reclaiming.load(Ordering::SeqCst),
+        "a skipped caller must not release the current owner's gate: {skipped:?}"
     );
-    k.core
-        .0
-        .reclaiming
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    assert!(!k.core.reclaim_workspaces().unwrap().skipped);
-    assert!(!wt.join("target").exists());
+    assert!(
+        payload.exists(),
+        "a skipped caller must not purge the trash: {skipped:?}"
+    );
+
+    k.core.0.reclaiming.store(false, Ordering::SeqCst);
+    let reclaimed = k.core.reclaim_workspaces().unwrap();
+    assert!(!reclaimed.skipped, "{reclaimed:?}");
+    assert!(
+        !k.core.0.reclaiming.load(Ordering::SeqCst),
+        "a completed pass must release its gate: {reclaimed:?}"
+    );
+    assert!(
+        !cache.exists() && trash.read_dir().unwrap().next().is_none(),
+        "the admitted pass must actually purge eligible trash: {reclaimed:?}"
+    );
+    assert!(
+        reclaimed
+            .freed
+            .iter()
+            .any(|f| { f.item == "closed-item" && f.caches == ["target"] && f.bytes > 0 }),
+        "the purge must report the cache it deleted: {reclaimed:?}"
+    );
 }
 
 /// An item without a project in its scratch directory, with a node and a Rust cache (1 MB each), its own
