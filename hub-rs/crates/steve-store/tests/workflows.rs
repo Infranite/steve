@@ -114,6 +114,82 @@ fn is_conflict<T: std::fmt::Debug>(r: Result<T>, wanted: &str) {
 }
 
 #[test]
+fn child_capture_commits_with_claim_and_repeated_claim_does_not_renew_it() {
+    let (t, parent, specs) = setup();
+    plan(&t, &parent, &specs);
+    t.store
+        .diagnostics()
+        .capture(WS, &parent, "owner", Some(0))
+        .unwrap();
+    // Fail after the child and capture were inserted, exercising the actual claim transaction.
+    t.store
+        .with_conn(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER reject_claim BEFORE UPDATE OF status ON workflow_units
+            WHEN NEW.status='dispatching' BEGIN SELECT RAISE(ABORT,'fixture rejects claim'); END",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(t.store.workflows().claim(&parent, "a").is_err());
+    t.store
+        .with_conn(|c| {
+            assert_eq!(count(c, "SELECT count(*) FROM items"), 1);
+            assert_eq!(count(c, "SELECT count(*) FROM diagnostic_captures"), 1);
+            c.execute_batch("DROP TRIGGER reject_claim")?;
+            Ok(())
+        })
+        .unwrap();
+    let observation = |item: &str| diagnostics::Record {
+        workspace_id: WS.into(),
+        item_id: Some(item.into()),
+        kind: "dependency.checked".into(),
+        reason_code: "fixture_condition".into(),
+        detail: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        t.store.diagnostics().record(observation(&parent)),
+        diagnostics::RecordStatus::Skipped
+    );
+    let child = t
+        .store
+        .workflows()
+        .claim(&parent, "a")
+        .unwrap()
+        .item_id
+        .unwrap();
+    assert_eq!(
+        t.store.diagnostics().record(observation(&child)),
+        diagnostics::RecordStatus::Queued
+    );
+    let view = t.store.diagnostics().explain(WS, &child).unwrap();
+    let created = t.store.items().get(&child).unwrap().unwrap().created;
+    assert_eq!(view["capture"]["active"], true);
+    assert_eq!(view["capture"]["expires_at"], created + 30 * 60_000);
+    t.store
+        .diagnostics()
+        .capture(WS, &child, "owner", Some(0))
+        .unwrap();
+    assert_eq!(
+        t.store
+            .workflows()
+            .claim(&parent, "a")
+            .unwrap()
+            .item_id
+            .as_deref(),
+        Some(child.as_str())
+    );
+    let stopped = t.store.diagnostics().explain(WS, &child).unwrap();
+    assert_eq!(stopped["capture"]["active"], false);
+    assert_eq!(stopped["capture"]["stop_reason"], "manual");
+    assert_eq!(
+        stopped["capture"]["expires_at"],
+        view["capture"]["expires_at"]
+    );
+}
+
+#[test]
 fn rejects_cycles_missing_dependencies_and_non_independent_reviews_before_writing() {
     let (t, parent, specs) = setup();
     for (changed, wanted) in [

@@ -439,6 +439,15 @@ async fn research_runs_get_read_only_mcp() {
     assert_eq!(status, 200, "{snapshot}");
     assert_eq!(snapshot["item"]["id"], item);
     assert_eq!(snapshot["can_capture"], true);
+    assert_eq!(
+        snapshot["capture"]["active"], true,
+        "new items capture by default"
+    );
+    assert_eq!(
+        snapshot["capture"]["expires_at"].as_i64().unwrap()
+            - snapshot["capture"]["started_at"].as_i64().unwrap(),
+        30 * 60_000
+    );
     assert!(snapshot["state"].is_object());
     let (status, enabled) = e
         .call("POST", &debug, Some(json!({"enabled":true,"minutes":30})))

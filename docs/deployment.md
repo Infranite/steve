@@ -7,11 +7,14 @@
 - [Managed Release bundles and automatic upgrades](#managed-release-bundles-and-automatic-upgrades)
 - [Pairing a separate Node](#pairing-a-separate-node)
 - [Remote Nodes](#remote-nodes)
+- [Harness setup](#harness-setup)
 - [Diagnostic capture and queries](#diagnostic-capture-and-queries)
 
 ## Diagnostic capture and queries
 
-Open **Debug** from the item or session menu. The snapshot shows current lifecycle blockers, dependency policy and release-lane state using the same rules as execution. A session entry preselects that session's events; capture still covers the entire item. The instance owner can enable detailed capture for 1–60 minutes (30 by default) or stop it early. Restarting the Hub does not extend the expiry. Ordinary reads do not enable capture, advance an item, answer a card or start another turn.
+New items, including ordinary conversation items and workflow child items, automatically start one 30-minute window of detailed capture. The deadline is persisted when the item is created; queries, restarts and continuing the item never extend it. Older items are not enabled retroactively. Once a window expires or the owner stops it, it stays stopped until the instance owner explicitly starts another 1–60 minute window in **Debug**. There is no new environment switch.
+
+Open **Debug** from the item or session menu. The snapshot shows current lifecycle blockers, dependency policy and release-lane state using the same rules as execution. A session entry preselects that session's events; capture still covers the entire item. The instance owner can stop capture early or enable a new window (30 minutes by default). Ordinary reads do not enable capture, advance an item, answer a card or start another turn.
 
 Decision creation/resolution/reopening, dependency handoffs, execution errors and adapter exits retain bounded metadata even with capture off. Capture adds successful tool calls and branch decisions. These records use typed identifiers, reason codes, durations and process status; they do not copy prompts, tool arguments/results, environment variables or raw stderr. A newly enabled window cannot recover detail that was never recorded.
 
@@ -36,7 +39,7 @@ Snapshots are sampled reads, not a distributed transaction. `changed_during_read
 
 Remote Nodes are experimental. They run `bin/steve-node`, shipped alongside the Hub and Web in the platform Release bundle. Download the same release for the Node's OS and architecture, verify its manifest, size and SHA256, then extract it into a permanent release directory on that machine. `bin/steve-node --build-info` reports its release version, full commit and target; packaging rejects a Node whose identity differs from the Hub. Source builds remain available for development with `cargo build --locked --release --manifest-path hub-rs/Cargo.toml -p steve-node-cli`.
 
-Before pairing, verify that the Hub has `STEVE_NODE_LISTEN=1` and that its HTTPS reverse proxy forwards `/node/pair` and WebSocket upgrades at `/node/ws` to the Hub. Loopback TCP peers are accepted by default; a proxy on another machine needs its exact TCP peer IP in `STEVE_NODE_PROXY_PEERS` and must overwrite `X-Forwarded-Proto` with its actual incoming scheme. See [Remote Nodes](#remote-nodes) for the HTTPS header requirements and proxy trust boundary. Back up existing configuration, run `steve-hub --check-config` before applying changes, and use the installation's normal restart procedure.
+Before pairing, verify that the Hub has not disabled its default listener with `STEVE_NODE_LISTEN=0` and that its HTTPS reverse proxy forwards `/node/pair` and WebSocket upgrades at `/node/ws` to the Hub. `STEVE_NO_RESUME=1` diagnostic database copies never accept remote Nodes, even when `STEVE_NODE_LISTEN=1` was copied from production. Loopback TCP peers are accepted by default; a proxy on another machine needs its exact TCP peer IP in `STEVE_NODE_PROXY_PEERS` and must overwrite `X-Forwarded-Proto` with its actual incoming scheme. See [Remote Nodes](#remote-nodes) for the HTTPS header requirements and proxy trust boundary. Back up existing configuration, run `steve-hub --check-config` before applying changes, and use the installation's normal restart procedure.
 
 Give the Node its own data directory. Set `STEVE_HOME` explicitly for every Node invocation and in its service environment; never inherit the Hub's data directory. The default, when unset, is `~/.steve-node`. Preserve an existing Node's `node/identity.key`, `node/node.json` and `node/local/` journal when updating it. Do not re-pair an existing identity as a way to reconnect.
 
@@ -186,15 +189,36 @@ New Hubs advertise `upgrade_runner` in `--build-info`; the CLI selects `release_
 
 ## Remote Nodes
 
-With `STEVE_NODE_LISTEN=1`, the owner can use Devices → Add device to generate a ten-minute, one-use pairing code. On the target machine, run `steve-node pair https://your-hub.example --name my-device` and enter the code through standard input. Compare the fingerprint printed by the CLI with the pending device in the owner page, then confirm it before starting the Node service. Pairing does not grant access to any project directories; configure roots separately.
+The listener is enabled by default; `STEVE_NODE_LISTEN=0` disables it. The owner can use Devices → Add device to generate a ten-minute, one-use pairing code. On the target machine, run `steve-node pair https://your-hub.example --name my-device` and enter the code through standard input. Compare the fingerprint printed by the CLI with the pending device in the owner page, then confirm it before starting the Node service. Pairing does not grant access to any project directories; configure roots separately. `STEVE_NODE_BIND` has no default: assigning new eligible sessions to a paired Node remains an explicit operator choice. This does not enable the unfinished multi-Bot workflow execution path or change its required guarantees.
 
 The `/node/pair` and `/node/ws` routes accept only loopback TCP peers by default, for a TLS proxy on the Hub machine. If TLS terminates on a different host, set `STEVE_NODE_PROXY_PEERS` to that proxy's exact IP address as seen by the Hub (comma-separated for multiple proxies). Hostnames, CIDRs, wildcards and unspecified addresses are rejected by `steve-hub --check-config` before deployment. An unset or empty value preserves loopback-only behavior.
 
 Only the actual TCP peer is trusted; `X-Forwarded-For` never grants access. A configured non-loopback proxy must overwrite `X-Forwarded-Proto` with its actual incoming scheme. The Node routes require exactly one value, `https`; missing, duplicate and comma-joined values are refused. Protect the proxy-to-Hub hop with a private encrypted network or tunnel, restrict who can originate from the configured peer, and never copy a caller-provided scheme header. This configuration does not replace pairing, signature verification, owner confirmation or per-Node authorization.
 
-## Optional Node disk observations
+## Harness setup
 
-Set `STEVE_DISK_OBSERVE=on` in the Node process environment to record working-directory disk usage near the beginning and end of session turns. It is off by default; `off` stops new records. This does not change execution permissions, disk admission or cleanup. Samples are asynchronous observations with possible concurrent writers, not reliable baselines, attributable growth or permission to delete anything. They do not yet produce per-principal or per-project historical estimates.
+Run `steve-hub --check-config` in the Hub service's environment before installation or an upgrade. Missing local ACP adapters and Node.js are reported as setup warnings with the setting to fix; the Hub can still start so its settings and diagnostics remain usable. Install the adapters for the harnesses you use and set `STEVE_ADAPTER_CODEX` / `STEVE_ADAPTER_CLAUDE` to their absolute entry points. For JavaScript adapters, set `STEVE_NODE` to the Node.js executable when it is absent from the service's `PATH`. A separate Node uses its own `harness.json` and installed adapters; a successful Hub preflight does not certify a remote machine's environment.
+
+`STEVE_PRINCIPAL_STATE` now defaults to `on` on the Hub. New sessions use their principal's own harness state; existing sessions retain their recorded state. The Node imports only the owner's adapter-declared settings (`config.toml` for Codex, `settings.json` for Claude Code). Codex login is never copied, and other principals begin without the owner's settings or login. The preflight and normal startup log explicitly flag this migration; Steve does not read login contents or certify authentication by checking for a file.
+
+**Current setup gap:** Steve does not yet provide an owner UI, API or Node CLI that returns the principal's exact harness state directory or manages its login. The ordinary session resume action uses the configured harness home and is not a way to discover this directory. Default-on principal state therefore does not yet provide complete self-service authentication setup. A new session that requires authentication can remain blocked until its operator completes the following maintenance procedure; do not assume the Node service account's existing Codex login applies.
+
+As a temporary operator procedure, pause the target session and identify its exact session ID in Steve. An operator authorized to access the Hub database can query only its binding through SQLite in read-only mode:
+
+```sh
+sqlite3 -readonly "<configured Hub data directory>/steve.sqlite3" \
+  "SELECT session_id, node_id, state_dir FROM runtime_sessions WHERE session_id = '<session-id>';"
+```
+
+This is an internal-schema lookup, not a stable public setup API or a normal end-user onboarding step. Do not update the database. If there is no row or `state_dir` is empty, the session has no recorded independent directory: stop here rather than guessing a hashed path or fabricating a binding. Match the returned `node_id` to the actual selected Node. Its directory is `<Node journal directory>/state/<recorded state_dir>/harness`: `<STEVE_HOME>/data/node` is the local Hub Node's journal directory, and `<its STEVE_HOME>/node/local` is a separate Node's. Use the recorded value without reconstructing its segments.
+
+On that Node, authenticate the intended principal with the harness's normal login command and this directory. For Codex, run `CODEX_HOME="<absolute recorded harness directory>" codex login` as the Node service account, using that principal's own authentication, then verify authentication before retrying the paused session. Do not copy another installation's `auth.json` or refresh tokens. If the operator cannot complete this procedure, authentication setup remains a blocker; this release does not replace it with an automatic login import. `STEVE_PRINCIPAL_STATE=off` remains an explicit shared-state configuration for new sessions only; it does not migrate existing session state.
+
+`STEVE_TOOLCHAINS` defaults to `on` on each Node. Detected build outputs go into the item's `.steve/build/` and cache-only directories go into the known principal's Node cache; the first build after relocation may be cold. A session without a principal receives no invented cache or identity. Set `STEVE_TOOLCHAINS=off` on that Node to retain the original toolchain locations. Toolchain relocation and separate harness directories are not claims of complete principal isolation: Codex retains its own sandbox and approval controls, Linux outer confinement remains opt-in, and the existing single-owner and workflow execution guards still apply.
+
+## Node disk observations
+
+Working-directory disk observations near the beginning and end of session turns are enabled by default. Set `STEVE_DISK_OBSERVE=off` in the Node process environment to stop new records. This does not change execution permissions, disk admission or cleanup. Samples are asynchronous observations with possible concurrent writers, not reliable baselines, attributable growth or permission to delete anything. They do not yet produce per-principal or per-project historical estimates.
 
 Sampling budgets are configurable with `STEVE_DISK_OBSERVE_ENTRIES` (default `100000`), `STEVE_DISK_OBSERVE_DEPTH` (`64`) and `STEVE_DISK_OBSERVE_MS` (`500` milliseconds). Exhausted budgets preserve incomplete results. Each Node starts at most one sampler at a time. Disabling observations or shutting down cancels traversal at its next check; path validation and a single blocked system call cannot be interrupted. The async worker can stop waiting, but process exit may still wait for that blocking call to return.
 

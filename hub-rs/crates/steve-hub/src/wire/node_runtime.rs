@@ -4191,7 +4191,7 @@ fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
 
 /// `/healthz`'s `node` block: what rollout and rollback decisions read instead of the database.
 /// `local`: the local Node's coordinator when `STEVE_NODE_MODE=local`; `remote`: remote Nodes are
-/// listened for (`STEVE_NODE_LISTEN=1`). The counts come from the store, so they are there with
+/// listened for (unless `STEVE_NODE_LISTEN=0`). The counts come from the store, so they are there with
 /// the Node off too:
 ///
 /// - `sessions` / `open`: sessions bound to any Node / not released by it; `running`: their turns

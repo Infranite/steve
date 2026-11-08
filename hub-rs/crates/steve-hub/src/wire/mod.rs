@@ -66,7 +66,7 @@ pub struct Wired {
     pub yolo: steve_core::yolo::Yolo,
     /// The YOLO executor (its event and tick loops are in `jobs`).
     pub yolo_engine: steve_core::yolo::Engine,
-    /// Remote Nodes (`STEVE_NODE_LISTEN=1`): their routes and the coordinators sessions go to.
+    /// Remote Nodes (enabled by default): their routes and the coordinators sessions go to.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
     pub node: Option<Arc<node_runtime::NodeRuntime>>,
@@ -156,7 +156,7 @@ struct NodeHost {
     tools: Arc<node_tools::NodeTools>,
 }
 
-/// Construct the opt-in local host. Initialization errors fail boot rather than silently routing
+/// Construct the local host. Initialization errors fail boot rather than silently routing
 /// persisted Node sessions to legacy. ToolService is installed later, once core/modules exist;
 /// the returned startup job connects its endpoint before dispatch workers begin.
 fn node_runtime(
@@ -173,6 +173,9 @@ fn node_runtime(
             tracing::warn!("STEVE_NODE_JOBS is ignored while the local Node is off");
         }
         return Ok(None);
+    }
+    for warning in crate::check::local_node_warnings(cfg, vars) {
+        tracing::warn!("{warning}");
     }
     let node_id = steve_node_api::NodeId::new("local").expect("constant node id");
     let home = cfg.data_dir.join("node");
@@ -339,11 +342,17 @@ fn node_jobs(vars: &Vars) -> NodeJobs {
     j
 }
 
-/// `STEVE_PRINCIPAL_STATE=on`: each session's principal gets their own harness directory on its
-/// Node (path model §4.5.1), new sessions only. Off by default: a principal other than the Node's
-/// owner starts without a login there until their own harness credentials come.
-fn principal_state(vars: &Vars) -> bool {
-    vars("STEVE_PRINCIPAL_STATE").is_some_and(|v| v.trim() == "on")
+/// New sessions get their principal's own harness directory by default. An explicit `off`
+/// keeps the Node's shared harness state; existing sessions retain their recorded directory.
+pub(crate) fn principal_state(vars: &Vars) -> bool {
+    match vars("STEVE_PRINCIPAL_STATE").as_deref().map(str::trim) {
+        None | Some("") | Some("on") => true,
+        Some("off") => false,
+        Some(_) => {
+            tracing::warn!("STEVE_PRINCIPAL_STATE must be on or off; principal state disabled");
+            false
+        }
+    }
 }
 
 /// How often sessions the boot pass left are looked at again (`STEVE_LEGACY_MOVE_EVERY_MS`, for
@@ -375,7 +384,7 @@ fn cost_caps(vars: &Vars) -> node_runtime::CostCaps {
     )
 }
 
-/// Remote Nodes, only with `STEVE_NODE_LISTEN=1`: the service (pairing, listener) over a fleet of
+/// Remote Nodes, unless `STEVE_NODE_LISTEN=0` or a NO_RESUME copy: pairing and a listener over a fleet of
 /// coordinators reporting to `domain`, and the Node new sessions are bound to (`STEVE_NODE_BIND`,
 /// a paired Node's id; unset: none, sessions go where they went before).
 fn remote_nodes(
@@ -387,10 +396,15 @@ fn remote_nodes(
     Option<Arc<crate::nodes::NodeService>>,
     Option<steve_node_api::NodeId>,
 ) {
+    // A diagnostic database copy must never accept real Nodes or reconcile their stored sessions,
+    // even when the copied environment explicitly enabled the listener and bound a remote Node.
+    if cfg.no_resume {
+        return (None, None);
+    }
     let bind = vars("STEVE_NODE_BIND").filter(|v| !v.trim().is_empty());
     if !crate::nodes::enabled(|k| vars(k)) {
         if bind.is_some() {
-            tracing::warn!("STEVE_NODE_BIND is ignored without STEVE_NODE_LISTEN=1");
+            tracing::warn!("STEVE_NODE_BIND is ignored while the remote Node listener is disabled");
         }
         return (None, None);
     }
@@ -815,6 +829,74 @@ mod tests {
 
     fn vars(kv: &'static [(&'static str, &'static str)]) -> Vars {
         Arc::new(move |k| kv.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string()))
+    }
+
+    #[test]
+    fn principal_state_defaults_on_and_respects_explicit_off() {
+        assert!(principal_state(&vars(&[])));
+        assert!(principal_state(&vars(&[("STEVE_PRINCIPAL_STATE", "on")])));
+        assert!(!principal_state(&vars(&[("STEVE_PRINCIPAL_STATE", "off")])));
+        assert!(!principal_state(&vars(&[(
+            "STEVE_PRINCIPAL_STATE",
+            "typo"
+        )])));
+    }
+
+    #[tokio::test]
+    async fn remote_listener_defaults_on_without_registering_devices_and_copies_stay_inert() {
+        steve_modules::net::forbid_in_this_process();
+        for (listen, copy, bind, expected) in [
+            (None, false, None, true),
+            (Some("0"), false, None, false),
+            (Some("off"), false, None, false),
+            (None, true, None, false),
+            (Some("1"), true, Some("remote-test"), false),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut kv = std::collections::HashMap::from([
+                ("STEVE_HOME".to_string(), tmp.path().display().to_string()),
+                ("HOME".to_string(), tmp.path().display().to_string()),
+                ("STEVE_NODE_MODE".into(), "off".into()),
+                ("STEVE_NODE_JOBS".into(), "off".into()),
+                ("STEVE_VAULT_KEYSTORE".into(), "file".into()),
+                ("STEVE_ADAPTER_CLAUDE".into(), "/usr/bin/false".into()),
+                ("STEVE_ADAPTER_CODEX".into(), "/usr/bin/false".into()),
+            ]);
+            if let Some(value) = listen {
+                kv.insert("STEVE_NODE_LISTEN".into(), value.into());
+            }
+            if let Some(value) = bind {
+                kv.insert("STEVE_NODE_BIND".into(), value.into());
+            }
+            if copy {
+                kv.insert("STEVE_NO_RESUME".into(), "1".into());
+            }
+            let get: Vars = Arc::new(move |k| kv.get(k).cloned());
+            let cfg = Arc::new(Config::from_vars(|k| get(k)).unwrap());
+            for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            let w = wire_with(&cfg, &crate::bus::Bus::new(), get).unwrap();
+            assert_eq!(
+                w.nodes.is_some(),
+                expected,
+                "listen={listen:?}, copy={copy}"
+            );
+            assert!(
+                w.node.is_none(),
+                "local execution remains explicitly disabled"
+            );
+            let store =
+                steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
+            let registered: i64 = store
+                .reader(|c| {
+                    c.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+                        .map_err(steve_store::StoreError::from)
+                })
+                .unwrap();
+            assert_eq!(registered, 0, "enabling a listener never registers a Node");
+            w.domain.shutdown().await;
+        }
     }
 
     #[test]

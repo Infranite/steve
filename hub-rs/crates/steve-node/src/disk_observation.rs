@@ -60,8 +60,8 @@ impl Policy {
 
     fn configured(mut get: impl FnMut(&str) -> Option<String>) -> Result<Option<Self>, String> {
         match get("STEVE_DISK_OBSERVE").as_deref().map(str::trim) {
-            None | Some("") | Some("off") => return Ok(None),
-            Some("on") => {}
+            Some("off") => return Ok(None),
+            None | Some("") | Some("on") => {}
             Some(_) => return Err("STEVE_DISK_OBSERVE must be on or off".into()),
         }
         let mut p = Self::default();

@@ -1,15 +1,15 @@
 /* zh-CN strings for the "views" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
   debug: {
-    open: "调试", title: "{{item}} · 调试", description: "查看当前阻塞与执行证据，按需记录判断细节。",
+    open: "调试", title: "{{item}} · 调试", description: "查看当前阻塞与执行证据，新事项默认记录创建后 30 分钟的判断细节。",
     current: "当前状态", refresh: "刷新", loading: "正在读取…",
     itemState: "事项状态：{{status}}", revision: "周期 {{cycle}} · 目标版本 {{revision}}", observed: "采样于 {{time}}",
     blockers: "当前阻塞", noState: "尚未取得阻塞快照，请刷新后再判断。", noBlocker: "此快照未报告生命周期阻塞；请结合执行事件判断。",
     dependencies: "等待前置：{{items}}", resumeMode: "前置完成后：{{mode}} · 策略来源：{{source}}",
     resumeAutomatic: "自动继续", resumeNotify: "提醒开始", unknown: "未知", stateChanged: "读取期间事项发生了变化，请刷新以取得最新快照。", snapshotDetails: "快照详情",
     recording: "详细记录中 · 剩余 {{duration}}", notRecording: "详细记录未开启", expiryChecking: "采集已到期，正在核对状态…",
-    captureScope: "采集范围为此事项的所有关联会话，筛选只影响查看。", stopReason: "停止原因：{{reason}}",
-    duration: "记录时长", minutes_other: "{{count}} 分钟", start: "开启详细记录", stop: "停止记录", ownerOnly: "由实例管理员开启详细记录",
+    captureScope: "新事项从创建起默认采集 30 分钟，到期或停止后不会自动续期，刷新和重启也不延长。采集覆盖全部关联会话，筛选只影响查看。", stopReason: "停止原因：{{reason}}",
+    duration: "记录时长", minutes_other: "{{count}} 分钟", start: "开启详细记录", stop: "停止记录", ownerOnly: "仅实例所有者可停止采集或重新开启限时窗口",
     dropped_other: "有 {{count}} 条记录未保存，证据可能不完整。",
     events: "事件时间线", loaded_other: "已加载 {{count}} 条", session: "会话", allSessions: "全部会话", kind: "事件类别", allKinds: "全部类别",
     severity: "级别", allLevels: "全部级别", info: "信息", warning: "警告", error: "错误", attempt: "执行次数 ID", allAttempts: "全部执行",

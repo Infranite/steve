@@ -52,7 +52,7 @@ pub struct Inner {
     pub dedupe: dedupe::Dedupe,
     /// The new modules (steve-modules), for config drafts and decisions they own.
     pub modules: Option<steve_modules::Modules>,
-    /// Remote Nodes (`STEVE_NODE_LISTEN=1`): pairing, the `/node/ws` listener, their coordinators.
+    /// Remote Nodes (enabled by default): pairing, the `/node/ws` listener, their coordinators.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
     pub node: Option<Arc<crate::wire::node_runtime::NodeRuntime>>,

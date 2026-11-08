@@ -1,7 +1,7 @@
 //! Remote Nodes (N2): pairing, the `/node/ws` listener, the registry of live links, the guards
 //! every Node request passes and the fleet of per-Node coordinators.
 //!
-//! Off by default: nothing here is mounted unless `STEVE_NODE_LISTEN=1`. The Hub decides, the
+//! On by default; `STEVE_NODE_LISTEN=0` disables it. NO_RESUME copies never mount it. The Hub decides, the
 //! Node executes; ACP and MCP never cross the link. The listener rides the Hub's own port and
 //! accepts loopback peers or explicitly configured TLS-terminating proxy peers.
 
@@ -31,9 +31,16 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// `STEVE_NODE_LISTEN=1`.
+/// Enabled unless explicitly disabled; database-copy isolation is enforced by the Hub wiring.
 pub fn enabled(var: impl Fn(&str) -> Option<String>) -> bool {
-    var("STEVE_NODE_LISTEN").as_deref() == Some("1")
+    match var("STEVE_NODE_LISTEN").as_deref().map(str::trim) {
+        None | Some("") | Some("1") => true,
+        Some("0") | Some("off") => false,
+        Some(_) => {
+            tracing::warn!("STEVE_NODE_LISTEN must be 1 or 0; remote Node listener disabled");
+            false
+        }
+    }
 }
 
 /// The TCP peer, when the server records it.
@@ -126,7 +133,7 @@ impl NodeService {
     }
 }
 
-/// The service when `STEVE_NODE_LISTEN=1`, over `fleet`; `None` otherwise (and on a store error,
+/// The service unless `STEVE_NODE_LISTEN=0`, over `fleet`; `None` otherwise (and on a store error,
 /// which is logged: the Hub runs on without remote Nodes, their sessions wait).
 pub fn from_vars(
     store: &Store,
