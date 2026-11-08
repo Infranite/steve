@@ -1,8 +1,8 @@
 //! A session's toolchains (path model §6.5, `steve-toolchains`): what its project uses, detected in
 //! its working directory, and the variables that put those tools' outputs into the item's own
 //! `.steve/build/<id>` (ignored by git) and their shared caches into the person's own cache on this
-//! Node, instead of the Node owner's home. Off unless `STEVE_TOOLCHAINS=on` on the Node: moving a
-//! build's output means its first build there starts cold.
+//! Node, instead of the Node owner's home. On by default; `STEVE_TOOLCHAINS=off` on the Node
+//! disables it. Moving a build's output means its first build there starts cold.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,18 @@ use steve_toolchains::{Places, Toolchains};
 
 fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("STEVE_TOOLCHAINS").is_ok_and(|v| v.trim() == "on"))
+    *ON.get_or_init(|| configured(std::env::var("STEVE_TOOLCHAINS").ok().as_deref()))
+}
+
+fn configured(value: Option<&str>) -> bool {
+    match value.map(str::trim) {
+        None | Some("") | Some("on") => true,
+        Some("off") => false,
+        Some(_) => {
+            tracing::warn!("STEVE_TOOLCHAINS must be on or off; toolchains disabled");
+            false
+        }
+    }
 }
 
 fn definitions() -> &'static Toolchains {
@@ -295,6 +306,10 @@ dirs = [
 
     #[test]
     fn a_cargo_project_builds_in_its_item_and_caches_in_its_person() {
+        assert!(configured(None), "toolchain relocation is on by default");
+        assert!(configured(Some("on")));
+        assert!(!configured(Some("off")));
+        assert!(!configured(Some("typo")));
         let t = tempfile::tempdir().unwrap();
         let (home, work) = (t.path().join("node"), t.path().join("work"));
         std::fs::create_dir_all(&work).unwrap();
@@ -328,7 +343,7 @@ dirs = [
         assert!(!empty.join(".steve").exists());
         // whose run it is not known: no one's cache, nothing set
         let anon = for_run_with(&Toolchains::builtin(), &home, &work, None);
-        assert!(anon.env.is_empty());
+        assert!(anon.env.is_empty() && anon.person.is_none());
         // a person's cache reached through a planted link is refused
         let go = t.path().join("go");
         std::fs::create_dir_all(&go).unwrap();

@@ -196,7 +196,7 @@ pub fn app(
         st.clone(),
         api::optional_user,
     ));
-    // remote Nodes (N2): mounted only with STEVE_NODE_LISTEN=1 (wired with the Hub's coordinators)
+    // remote Nodes (N2): mounted unless STEVE_NODE_LISTEN=0 or a NO_RESUME copy (wired with the Hub's coordinators)
     let nodes = st.nodes.clone();
     let (base, modules) = match nodes {
         Some(svc) => (
