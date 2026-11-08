@@ -14,6 +14,8 @@ pub struct Tx<'a> {
     c: &'a Connection,
     events: RefCell<Vec<ChangeEvent>>,
     diagnostics: RefCell<Vec<crate::diagnostics::Record>>,
+    /// New item capture windows become visible to producers only after commit.
+    diagnostic_until: Cell<i64>,
     /// An outbox event was emitted: wake the dispatcher after the commit.
     outbox: Cell<bool>,
 }
@@ -32,6 +34,13 @@ impl Tx<'_> {
     pub(crate) fn diagnostic(&self, event: crate::diagnostics::Record) {
         self.diagnostics.borrow_mut().push(event);
     }
+
+    pub(crate) fn capture_created(&self, ws: &str, item: &str, created: i64) {
+        if let Some(until) = crate::diagnostics::capture_created(self.c, ws, item, created) {
+            self.diagnostic_until
+                .set(self.diagnostic_until.get().max(until));
+        }
+    }
 }
 
 impl<'a> Tx<'a> {
@@ -41,6 +50,7 @@ impl<'a> Tx<'a> {
             c,
             events: RefCell::new(Vec::new()),
             diagnostics: RefCell::new(Vec::new()),
+            diagnostic_until: Cell::new(0),
             outbox: Cell::new(false),
         }
     }
@@ -74,12 +84,15 @@ impl Store {
             c: &tx,
             events: RefCell::new(Vec::new()),
             diagnostics: RefCell::new(Vec::new()),
+            diagnostic_until: Cell::new(0),
             outbox: Cell::new(false),
         };
         let out = f(&t)?;
         let (events, outbox) = (t.events.into_inner(), t.outbox.get());
         let diagnostics = t.diagnostics.into_inner();
+        let diagnostic_until = t.diagnostic_until.get();
         tx.commit().map_err(StoreError::from)?;
+        self.diagnostics().activate_until(diagnostic_until);
         for event in diagnostics {
             self.diagnostics().record(event);
         }

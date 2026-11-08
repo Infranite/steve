@@ -1,15 +1,15 @@
 /* English strings for the "views" namespace: the same keys as ../zh-CN/views.ts. Conventions: web/src/i18n/index.ts */
 export default {
   debug: {
-    open: "Debug", title: "{{item}} · Debug", description: "Inspect blockers and execution evidence, and capture decision details when needed.",
+    open: "Debug", title: "{{item}} · Debug", description: "Inspect blockers and execution evidence. New items capture decision details for their first 30 minutes.",
     current: "Current state", refresh: "Refresh", loading: "Loading…",
     itemState: "Item state: {{status}}", revision: "Cycle {{cycle}} · Goal revision {{revision}}", observed: "Observed at {{time}}",
     blockers: "Current blockers", noState: "No blocker snapshot is available yet. Refresh before drawing a conclusion.", noBlocker: "This snapshot reports no lifecycle blockers. Check the execution events as well.",
     dependencies: "Waiting for: {{items}}", resumeMode: "When prerequisites finish: {{mode}} · Policy source: {{source}}",
     resumeAutomatic: "continue automatically", resumeNotify: "notify to start", unknown: "unknown", stateChanged: "The item changed during this read. Refresh for a current snapshot.", snapshotDetails: "Snapshot details",
     recording: "Capturing details · {{duration}} left", notRecording: "Detailed capture is off", expiryChecking: "Capture has expired. Checking its state…",
-    captureScope: "Capture covers every session linked to this item. Filters only affect this view.", stopReason: "Stopped: {{reason}}",
-    duration: "Capture duration", minutes_one: "{{count}} minute", minutes_other: "{{count}} minutes", start: "Capture details", stop: "Stop capture", ownerOnly: "An instance administrator can enable detailed capture",
+    captureScope: "New items capture details for 30 minutes from creation. Expiry, stopping, refreshing or restarting never renews the window. Capture covers all linked sessions; filters only affect this view.", stopReason: "Stopped: {{reason}}",
+    duration: "Capture duration", minutes_one: "{{count}} minute", minutes_other: "{{count}} minutes", start: "Capture details", stop: "Stop capture", ownerOnly: "Only the instance owner can stop capture or start another window",
     dropped_one: "{{count}} record was not saved. Evidence may be incomplete.", dropped_other: "{{count}} records were not saved. Evidence may be incomplete.",
     events: "Event timeline", loaded_one: "{{count}} loaded", loaded_other: "{{count}} loaded", session: "Session", allSessions: "All sessions", kind: "Event kind", allKinds: "All kinds",
     severity: "Level", allLevels: "All levels", info: "Info", warning: "Warning", error: "Error", attempt: "Attempt ID", allAttempts: "All attempts",

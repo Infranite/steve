@@ -311,6 +311,14 @@ fn own(c: &Connection, ws: &str, item: &str) -> Result<()> {
 }
 
 impl Diagnostics<'_> {
+    /// Called under the writer lock, after the transaction that created the capture committed.
+    /// The cache only avoids pointless enqueueing; persistence still checks each item's window.
+    pub(crate) fn activate_until(&self, until: i64) {
+        if let Some(recorder) = self.0.inner.diagnostics.get() {
+            recorder.active_until.fetch_max(until, Ordering::Relaxed);
+        }
+    }
+
     fn snapshot<T>(&self, read: impl FnOnce(&Connection, Snapshot) -> Result<T>) -> Result<T> {
         self.0.reader(|c| {
             // Sample before the first SELECT fixes the SQLite snapshot. Sampling
@@ -519,6 +527,25 @@ impl Diagnostics<'_> {
         Ok(
             json!({"earliest_cursor":first,"latest_cursor":last,"removed_through":removed,"retention_days":RETENTION_DAYS,"max_item_bytes":MAX_ITEM_BYTES,"max_total_bytes":MAX_TOTAL_BYTES,"instance_dropped":(persisted.max(0)as u64).saturating_add(pending),"loss_count_stable":loss_count_stable,"refresh_required":!loss_count_stable,"item_dropped":item_dropped,"instance_pending":queued,"pending_count":queued,"pending_scope":"instance","pending_basis":"before_snapshot","recorder_available":self.0.inner.diagnostics.get().is_some(),"async":true,"delivery":"best_effort","unobserved_gaps":"unknown"}),
         )
+    }
+}
+
+/// A new item gets one bounded window, anchored to creation rather than its first read or run.
+/// Never replace an existing row: a stopped or expired capture is an owner's explicit choice
+/// until they start another window. Diagnostic failure must not fail the business creation.
+pub(crate) fn capture_created(c: &Connection, ws: &str, item: &str, created: i64) -> Option<i64> {
+    let until = created.saturating_add(i64::from(DEFAULT_CAPTURE_MINUTES) * 60_000);
+    match c.execute(
+        "INSERT INTO diagnostic_captures(item_id,workspace_id,actor,started_at,expires_at)
+         VALUES(?,?,'system:item-created',?,?) ON CONFLICT(item_id) DO NOTHING",
+        params![item, ws, created, until],
+    ) {
+        Ok(1) => Some(until),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::warn!(item, %error, "could not start the new item's diagnostic capture");
+            None
+        }
     }
 }
 
