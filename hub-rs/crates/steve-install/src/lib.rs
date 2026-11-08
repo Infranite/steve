@@ -1,5 +1,6 @@
 //! Operator-owned installation and maintenance. No task or harness execution lives here.
 pub mod common;
+pub(crate) mod env_file;
 pub mod release;
 pub mod service;
 pub mod setup;

@@ -5,7 +5,7 @@ use steve_install::{common, setup};
 
 mod output;
 
-const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL] [--json]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n\nsetup 默认监听 0.0.0.0:8440，浏览器/OIDC 地址单独配置。\nsetup 注册服务，本次不启动服务；不导入登录凭据或授予 Node 工作目录。\n服务命令在终端显示摘要；管道或 --json 保持 JSON 输出。\n";
+const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n  steve setup [hub] --reconfigure [--home PATH] [--listen IP:port]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL] [--json]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n\nsetup 默认监听 0.0.0.0:8440，浏览器/OIDC 地址单独配置。\nsetup 注册服务，本次不启动服务；不导入登录凭据或授予 Node 工作目录。\n--reconfigure 只维护已安装 Hub 的网络与现有 OIDC 配置，保留 secret、身份和数据；不会自动重启。\n服务命令在终端显示摘要；管道或 --json 保持 JSON 输出。\n";
 
 fn option(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
     let mut found = None;
@@ -17,6 +17,17 @@ fn option(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
         found = Some(args.remove(at));
     }
     Ok(found)
+}
+
+fn flag(args: &mut Vec<String>, name: &str) -> Result<bool> {
+    let Some(at) = args.iter().position(|value| value == name) else {
+        return Ok(false);
+    };
+    args.remove(at);
+    if args.iter().any(|value| value == name) {
+        bail!("{name} cannot repeat");
+    }
+    Ok(true)
 }
 
 fn role_home(role: &str, selected: Option<String>) -> Result<PathBuf> {
@@ -71,6 +82,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
     match command.as_str() {
         "setup" => {
             let options = setup::Options {
+                reconfigure: flag(&mut args, "--reconfigure")?,
                 home: option(&mut args, "--home")?.map(PathBuf::from),
                 hub: option(&mut args, "--hub")?,
                 pin: option(&mut args, "--pin")?,
@@ -87,7 +99,11 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             if !args.is_empty() {
                 bail!("unknown setup arguments; use steve --help");
             }
-            setup::run(&bundle()?, options)?;
+            if options.reconfigure {
+                setup::reconfigure_existing(options)?;
+            } else {
+                setup::run(&bundle()?, options)?;
+            }
             Ok(0)
         }
         "hub" | "node" => {

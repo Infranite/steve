@@ -43,6 +43,35 @@ pub struct Service {
     runner: Runner,
 }
 
+/// An existing Hub installation that may have its configuration edited without
+/// reinstalling its service. The caller snapshots these paths for its transaction.
+pub(crate) struct ReconfigurationContext {
+    pub release: PathBuf,
+    pub config: PathBuf,
+    pub record_path: PathBuf,
+    pub label: String,
+}
+
+fn maintenance_file(path: &Path) -> Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && metadata.uid() == unsafe { libc::getuid() }
+            && metadata.mode() & 0o022 == 0
+            && metadata.len() <= 1024 * 1024,
+        "configuration maintenance requires an owned regular metadata file not writable by others: {}",
+        path.display()
+    );
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 1024 * 1024, "metadata file is too large");
+    Ok(bytes)
+}
+
 fn text(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)
@@ -229,6 +258,86 @@ impl Service {
             &user_home,
             Arc::new(execute),
         )
+    }
+
+    /// Inspect only: do not ask the service manager for state or recreate its
+    /// registration. An upgrade changes `current` but may retain the original
+    /// installation receipt's release and build, so those versions are not compared.
+    pub(crate) fn reconfiguration_context(&self) -> Result<ReconfigurationContext> {
+        self.reconfiguration_context_with_tools(&crate::signing::Tools::default())
+    }
+
+    fn reconfiguration_context_with_tools(
+        &self,
+        signing_tools: &crate::signing::Tools,
+    ) -> Result<ReconfigurationContext> {
+        ensure!(
+            self.component == "hub",
+            "only Hub configuration can be edited here"
+        );
+        ensure!(
+            self.system != System::Darwin || self.signed,
+            "original macOS Hub signing identity is missing or empty; configuration was not changed"
+        );
+        let record_bytes = maintenance_file(&self.record_path)
+            .context("original Hub service registration is missing or untrusted")?;
+        let record: Value = serde_json::from_slice(&record_bytes)?;
+        ensure!(
+            record == self.record
+                && record["component"] == "hub"
+                && record["label"].as_str() == Some(&self.label)
+                && record["release"].as_str().is_some_and(|s| !s.is_empty())
+                && record["build"].is_object()
+                && record.get("uninstall").is_none()
+                && record["uninstalled"] != true,
+            "original Hub service registration changed, is incomplete, or was retired"
+        );
+        let definition = maintenance_file(&self.config)
+            .context("original Hub service definition is missing or untrusted")?;
+        if self.system == System::Darwin {
+            let value: Value = plist::from_bytes(&definition)?;
+            ensure!(
+                value["Label"] == self.label,
+                "service definition label differs from its registration"
+            );
+        }
+        self.check_owner()?;
+
+        let current = self.home.join("current");
+        let release = resolve(&current)?;
+        for relative in ["release.json", "bin/steve-hub", "web/dist/release.json"] {
+            crate::signing::owned_file(&release.join(relative))?;
+        }
+        if self.signed {
+            ensure!(
+                self.system == System::Darwin,
+                "signed Hub maintenance requires macOS"
+            );
+            crate::signing::owned_file(&self.home.join("bin/steve-keyhelper"))?;
+            let identity = crate::signing::identity(&self.home, signing_tools)?;
+            ensure!(
+                identity["label"] == self.label,
+                "original signing identity changed"
+            );
+        }
+        // Verify a signed binary before executing even its read-only build-info command.
+        let (release, build) = self.bundle(&release)?;
+        ensure!(
+            build["check_config"] == true,
+            "installed Hub does not support --check-config; upgrade it before reconfiguring"
+        );
+        ensure!(
+            maintenance_file(&self.record_path)? == record_bytes
+                && maintenance_file(&self.config)? == definition
+                && resolve(&current)? == release,
+            "Hub installation changed while inspecting its configuration"
+        );
+        Ok(ReconfigurationContext {
+            release,
+            config: self.config.clone(),
+            record_path: self.record_path.clone(),
+            label: self.label.clone(),
+        })
     }
 
     fn with_runner(
@@ -1182,6 +1291,211 @@ mod tests {
                 fs::read_to_string(self.home.join("retained.data")).unwrap(),
                 "retained data"
             );
+        }
+
+        fn maintenance_tools(&self, system: System) -> crate::signing::Tools {
+            let mut tools = crate::signing::Tools::default();
+            if system == System::Darwin {
+                fs::create_dir_all(self.home.join("signing")).unwrap();
+                fs::create_dir_all(self.home.join("bin")).unwrap();
+                fs::write(
+                    self.home.join("signing/identity.json"),
+                    json_bytes(&json!({
+                        "label":"io.github.infranite.steve.hub",
+                        "hub_identifier":"io.github.infranite.steve.hub",
+                        "keyhelper_identifier":"io.github.infranite.steve.keyhelper",
+                        "vault_service":"io.github.infranite.steve.vault"
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                crate::signing::tests::executable(
+                    &self.home.join("bin/steve-keyhelper"),
+                    "#!/bin/sh\nexit 0\n",
+                );
+                tools.codesign = self.root.join("readonly-codesign");
+                // This fixture accepts only signature inspection. No signing or
+                // security command can reach an operator's Keychain.
+                crate::signing::tests::executable(
+                    &tools.codesign,
+                    r#"#!/bin/sh
+set -eu
+case "$1" in
+  --verify) test "$#" -eq 3 && test "$2" = --strict ;;
+  -dv)
+    test "$#" -eq 2
+    case "$2" in
+      */steve-keyhelper) printf 'Identifier=io.github.infranite.steve.keyhelper\n' >&2 ;;
+      */steve-hub) printf 'Identifier=io.github.infranite.steve.hub\n' >&2 ;;
+      *) exit 1 ;;
+    esac ;;
+  *) exit 1 ;;
+esac
+"#,
+                );
+            }
+            tools
+        }
+    }
+
+    #[test]
+    fn reconfiguration_uses_current_release_without_touching_the_service() {
+        for system in [System::Darwin, System::Linux] {
+            let f = Fixture::new();
+            let tools = f.maintenance_tools(system);
+            let (mut s, manager) = f.service(system, "hub");
+            s.dispatch("install", Some(&f.release), 0).unwrap();
+            let mut manifest = object(&f.next.join("release.json")).unwrap();
+            manifest["check_config"] = true.into();
+            fs::write(f.next.join("release.json"), json_bytes(&manifest).unwrap()).unwrap();
+            fs::remove_file(f.home.join("current")).unwrap();
+            symlink(&f.next, f.home.join("current")).unwrap();
+            let record = fs::read(&s.record_path).unwrap();
+            let definition = fs::read(&s.config).unwrap();
+            {
+                let mut manager = manager.lock().unwrap();
+                manager.calls.clear();
+                manager.unknown = true;
+            }
+
+            let context = s.reconfiguration_context_with_tools(&tools).unwrap();
+            assert_eq!(context.release, f.next);
+            assert_eq!(context.record_path, s.record_path);
+            assert_eq!(context.config, s.config);
+            assert_eq!(context.label, s.label);
+            assert_eq!(fs::read(&s.record_path).unwrap(), record);
+            assert_eq!(fs::read(&s.config).unwrap(), definition);
+            assert_eq!(fs::read_link(f.home.join("current")).unwrap(), f.next);
+            assert_eq!(
+                manager.lock().unwrap().calls,
+                vec![vec![
+                    text(&f.next.join("bin/steve-hub")).unwrap(),
+                    "--build-info".into()
+                ]]
+            );
+            f.preserved();
+        }
+    }
+
+    #[test]
+    fn reconfiguration_refuses_missing_changed_or_retired_registration_and_unsupported_builds() {
+        for system in [System::Darwin, System::Linux] {
+            for failure in [
+                "missing-record",
+                "record-link",
+                "changed-record",
+                "retired",
+                "missing-definition",
+                "wrong-home",
+                "unsupported",
+                "web-mismatch",
+            ] {
+                let f = Fixture::new();
+                let tools = f.maintenance_tools(system);
+                if failure != "unsupported" {
+                    let mut manifest = object(&f.release.join("release.json")).unwrap();
+                    manifest["check_config"] = true.into();
+                    fs::write(
+                        f.release.join("release.json"),
+                        json_bytes(&manifest).unwrap(),
+                    )
+                    .unwrap();
+                }
+                let (mut s, manager) = f.service(system, "hub");
+                s.dispatch("install", Some(&f.release), 0).unwrap();
+                match failure {
+                    "missing-record" => fs::remove_file(&s.record_path).unwrap(),
+                    "record-link" => {
+                        let saved = f.root.join("record.json");
+                        fs::rename(&s.record_path, &saved).unwrap();
+                        symlink(saved, &s.record_path).unwrap();
+                    }
+                    "changed-record" => {
+                        let mut changed = s.record.clone();
+                        changed["previous"] = "changed during inspection".into();
+                        atomic(&s.record_path, &json_bytes(&changed).unwrap()).unwrap();
+                    }
+                    "retired" => {
+                        s.record["uninstalled"] = true.into();
+                        atomic(&s.record_path, &json_bytes(&s.record).unwrap()).unwrap();
+                    }
+                    "missing-definition" => fs::remove_file(&s.config).unwrap(),
+                    "wrong-home" => {
+                        let definition = if system == System::Darwin {
+                            let mut bytes = Vec::new();
+                            plist::to_writer_xml(&mut bytes, &json!({"Label":s.label,"EnvironmentVariables":{"STEVE_HOME":f.root}})).unwrap();
+                            bytes
+                        } else {
+                            format!(
+                                "[Service]\nEnvironment={}\n",
+                                unit_quote(&format!("STEVE_HOME={}", f.root.display()), false)
+                                    .unwrap()
+                            )
+                            .into_bytes()
+                        };
+                        fs::write(&s.config, definition).unwrap();
+                    }
+                    "unsupported" => {}
+                    "web-mismatch" => {
+                        fs::write(f.release.join("web/dist/release.json"), b"{}").unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                manager.lock().unwrap().calls.clear();
+                assert!(
+                    s.reconfiguration_context_with_tools(&tools).is_err(),
+                    "{system:?}/{failure}"
+                );
+                assert!(
+                    manager
+                        .lock()
+                        .unwrap()
+                        .calls
+                        .iter()
+                        .all(|args| args.get(1).is_some_and(|arg| arg == "--build-info"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reconfiguration_requires_the_original_signing_identity_before_running_the_hub() {
+        for failure in [
+            "missing",
+            "empty",
+            "invalid",
+            "missing-helper",
+            "signature-mismatch",
+        ] {
+            let f = Fixture::new();
+            let tools = f.maintenance_tools(System::Darwin);
+            let (mut original, _) = f.service(System::Darwin, "hub");
+            original.dispatch("install", Some(&f.release), 0).unwrap();
+            let identity = f.home.join("signing/identity.json");
+            match failure {
+                "missing" => fs::remove_file(&identity).unwrap(),
+                "empty" => fs::write(&identity, b"{}").unwrap(),
+                "invalid" => fs::write(
+                    &identity,
+                    json_bytes(&json!({"label":original.label,"hub_identifier":"invalid!"}))
+                        .unwrap(),
+                )
+                .unwrap(),
+                "missing-helper" => fs::remove_file(f.home.join("bin/steve-keyhelper")).unwrap(),
+                "signature-mismatch" => crate::signing::tests::executable(
+                    &tools.codesign,
+                    "#!/bin/sh\ncase \"$1\" in --verify) exit 0;; -dv) printf 'Identifier=wrong\\n' >&2;; *) exit 1;; esac\n",
+                ),
+                _ => unreachable!(),
+            }
+            // Reconstruct just as a fresh CLI invocation does. Missing identity
+            // must not turn an existing signed installation into an unsigned one.
+            let (service, manager) = f.service(System::Darwin, "hub");
+            assert!(
+                service.reconfiguration_context_with_tools(&tools).is_err(),
+                "{failure}"
+            );
+            assert!(manager.lock().unwrap().calls.is_empty(), "{failure}");
         }
     }
 

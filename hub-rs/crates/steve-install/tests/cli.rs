@@ -28,7 +28,7 @@ fn read_only_cli_commands_work_without_python_or_an_existing_home() {
         assert!(!home.exists());
         let text = String::from_utf8(out.stdout).unwrap();
         if args == ["--help"] {
-            for command in ["setup", "hub", "node", "upgrade"] {
+            for command in ["setup", "--reconfigure", "hub", "node", "upgrade"] {
                 assert!(text.contains(command));
             }
         }
@@ -52,6 +52,9 @@ fn rejected_arguments_never_echo_a_mistaken_secret() {
     let sentinel = "fixture-secret-never-log-this";
     for args in [
         vec!["setup", "hub", "--client-secret", sentinel],
+        vec!["setup", "--reconfigure"],
+        vec!["setup", "node", "--reconfigure"],
+        vec!["setup", "--reconfigure", "--reconfigure"],
         vec![sentinel],
     ] {
         let out = invoke(&home, &args);
