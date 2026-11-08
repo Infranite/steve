@@ -125,7 +125,17 @@ impl Prompts for Terminal {
 }
 
 pub fn browser_url(value: &str, label: &str) -> Result<String> {
-    let value = value.trim().trim_end_matches('/');
+    Ok(http_url(value, label)?.trim_end_matches('/').into())
+}
+
+fn oidc_issuer_url(value: &str) -> Result<String> {
+    // An issuer is an exact identifier: discovery and ID tokens must match it,
+    // including any trailing slash in its path.
+    http_url(value, "OIDC issuer")
+}
+
+fn http_url(value: &str, label: &str) -> Result<String> {
+    let value = value.trim();
     let url = url::Url::parse(value).with_context(|| format!("{label}需要完整 HTTP(S) URL"))?;
     let host = url.host_str().context("URL 缺少主机")?;
     if !matches!(url.scheme(), "http" | "https")
@@ -563,7 +573,7 @@ impl<'a> Wizard<'a> {
                 .line("浏览器访问地址", default_url.as_deref(), false)?,
             "访问地址",
         )?;
-        let issuer = browser_url(&self.input.line("OIDC issuer", None, false)?, "OIDC issuer")?;
+        let issuer = oidc_issuer_url(&self.input.line("OIDC issuer", None, false)?)?;
         let client = self.input.line("OIDC client ID", None, false)?;
         println!("请在 OIDC 提供方登记回调：{public}/auth/callback");
         let secret_path = self.home.join("secrets/oidc-client-secret");
@@ -832,10 +842,32 @@ mod tests {
         json!({"version":version,"commit":"a".repeat(40)})
     }
     #[test]
-    fn browser_address_cannot_be_a_listener_wildcard_or_plain_remote_origin() {
-        assert!(browser_url("http://0.0.0.0:8440", "browser").is_err());
-        assert!(browser_url("http://192.0.2.20:8440", "browser").is_err());
-        assert!(browser_url("https://hub.example", "browser").is_ok());
+    fn setup_urls_reject_listener_addresses_plain_remote_http_and_ambiguous_urls() {
+        for invalid in [
+            "http://0.0.0.0:8440",
+            "https://[::]:8440",
+            "http://192.0.2.20:8440",
+            "ftp://identity.example/",
+            "https://user:password@identity.example/",
+            "https://identity.example/?query=1",
+            "https://identity.example/#fragment",
+            "https://identity.example/a b",
+        ] {
+            assert!(browser_url(invalid, "browser").is_err(), "{invalid}");
+            assert!(oidc_issuer_url(invalid).is_err(), "{invalid}");
+        }
+        for valid in [
+            "https://identity.example/",
+            "http://localhost:8440/issuer/",
+            "http://127.0.0.1:8440/issuer/",
+            "http://[::1]:8440/issuer/",
+        ] {
+            assert_eq!(oidc_issuer_url(valid).unwrap(), valid);
+            assert_eq!(
+                browser_url(valid, "browser").unwrap(),
+                valid.trim_end_matches('/')
+            );
+        }
     }
     #[test]
     fn unknown_home_and_modified_receipt_files_are_not_adopted() {
@@ -874,30 +906,44 @@ mod tests {
     }
     #[test]
     fn new_hub_configuration_binds_all_interfaces_and_keeps_callback_separate() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("package");
-        private_dir(&source).unwrap();
-        let home = temp.path().join("home");
-        let keys = temp.path().join("keys");
-        let mut answers = vec![
-            "https://hub.example".into(),
-            "https://identity.example".into(),
-            "client".into(),
-        ];
-        if cfg!(target_os = "linux") {
-            answers.push(keys.to_str().unwrap().into());
+        for issuer in [
+            "https://identity.example",
+            "https://identity.example/",
+            "https://identity.example/realms/workspace",
+            "https://identity.example/application/o/steve/",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("package");
+            private_dir(&source).unwrap();
+            let home = temp.path().join("home");
+            let keys = temp.path().join("keys");
+            let mut answers = vec![
+                "https://hub.example/".into(),
+                format!(" {issuer} "),
+                "client".into(),
+            ];
+            if cfg!(target_os = "linux") {
+                answers.push(keys.to_str().unwrap().into());
+            }
+            let mut input = Answers(answers);
+            let mut wizard =
+                Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input).unwrap();
+            let env = wizard.hub_config(Some("0.0.0.0:8440")).unwrap();
+            assert_eq!(env["STEVE_HOST"], "0.0.0.0");
+            assert_eq!(env["STEVE_ALLOW_ANY_HOST"], "1");
+            assert_eq!(env["STEVE_PUBLIC_URL"], "https://hub.example");
+            assert_eq!(env["STEVE_OIDC_ISSUER"], issuer);
+            let bytes = fs::read_to_string(home.join("steve.env")).unwrap();
+            assert!(
+                bytes
+                    .lines()
+                    .any(|line| line == format!("STEVE_OIDC_ISSUER='{issuer}'"))
+            );
+            assert!(!bytes.contains("fixture-only"));
+            assert_eq!(
+                fs::read(home.join("secrets/oidc-client-secret")).unwrap(),
+                b"fixture-only"
+            );
         }
-        let mut input = Answers(answers);
-        let mut wizard = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input).unwrap();
-        let env = wizard.hub_config(Some("0.0.0.0:8440")).unwrap();
-        assert_eq!(env["STEVE_HOST"], "0.0.0.0");
-        assert_eq!(env["STEVE_ALLOW_ANY_HOST"], "1");
-        assert_eq!(env["STEVE_PUBLIC_URL"], "https://hub.example");
-        let bytes = fs::read_to_string(home.join("steve.env")).unwrap();
-        assert!(!bytes.contains("fixture-only"));
-        assert_eq!(
-            fs::read(home.join("secrets/oidc-client-secret")).unwrap(),
-            b"fixture-only"
-        );
     }
 }

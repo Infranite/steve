@@ -137,12 +137,11 @@ struct Provider {
 }
 
 async fn discovery(State(p): State<Arc<Provider>>) -> Json<Value> {
-    let i = &p.issuer;
     Json(json!({
-        "issuer": i,
-        "authorization_endpoint": format!("{i}/authorize"),
-        "token_endpoint": format!("{i}/token"),
-        "jwks_uri": format!("{i}/jwks"),
+        "issuer": p.issuer,
+        "authorization_endpoint": p.endpoint("authorize"),
+        "token_endpoint": p.endpoint("token"),
+        "jwks_uri": p.endpoint("jwks"),
         "response_types_supported": ["code"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
@@ -235,8 +234,12 @@ async fn token(
 }
 
 async fn start_provider() -> Arc<Provider> {
+    start_provider_at("").await
+}
+
+async fn start_provider_at(path: &str) -> Arc<Provider> {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let issuer = format!("http://{}", l.local_addr().unwrap());
+    let issuer = format!("http://{}{path}", l.local_addr().unwrap());
     let key = CoreRsaPrivateSigningKey::from_pem(
         include_str!("fixtures/test_rsa_key.pem"),
         Some(JsonWebKeyId::new("k1".into())),
@@ -248,21 +251,29 @@ async fn start_provider() -> Arc<Provider> {
         grants: Mutex::default(),
         wrong_nonce: Mutex::new(false),
     });
+    let prefix = path.trim_end_matches('/');
     let app = Router::new()
-        .route("/.well-known/openid-configuration", get(discovery))
-        .route("/jwks", get(jwks))
-        .route("/token", post(token))
+        .route(
+            &format!("{prefix}/.well-known/openid-configuration"),
+            get(discovery),
+        )
+        .route(&format!("{prefix}/jwks"), get(jwks))
+        .route(&format!("{prefix}/token"), post(token))
         .with_state(p.clone());
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
     p
 }
 
 impl Provider {
+    fn endpoint(&self, name: &str) -> String {
+        format!("{}/{name}", self.issuer.trim_end_matches('/'))
+    }
+
     /// What the IdP does when the user approves: checks the request and redirects back with a code.
     fn approve(&self, authorize_url: &str, sub: &str, name: Option<&str>) -> String {
         let url = url::Url::parse(authorize_url).unwrap();
         assert!(
-            authorize_url.starts_with(&format!("{}/authorize?", self.issuer)),
+            authorize_url.starts_with(&format!("{}?", self.endpoint("authorize"))),
             "{authorize_url}"
         );
         let q: HashMap<_, _> = url.query_pairs().into_owned().collect();
@@ -396,6 +407,45 @@ async fn login_as(app: &Router, p: &Provider, host: &str, sub: &str, name: Optio
         &[("host", host), ("cookie", pair(&login_cookie))],
     )
     .await
+}
+
+#[tokio::test]
+async fn issuer_paths_and_trailing_slashes_are_preserved_and_must_match_exactly() {
+    for path in ["/", "/tenant/steve", "/tenant/steve/"] {
+        let p = start_provider_at(path).await;
+        let store = MemStore::default();
+        let auth = Auth::new(store.clone(), config(Some(&p.issuer), false)).unwrap();
+        let r = login_as(
+            &app(&auth, "127.0.0.1:1"),
+            &p,
+            "steve.home:8440",
+            "alice",
+            None,
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::FOUND, "{path}: {}", r.body);
+        assert_eq!(r.location(), "/items/ST-1");
+        assert_eq!(store.0.users.lock().unwrap()[0].role, "owner");
+        assert_eq!(store.0.sessions.lock().unwrap().len(), 1);
+
+        if path == "/" {
+            continue;
+        }
+        // Both spellings request the same discovery URL; only the exact issuer
+        // identifier differs. A new client must still refuse that mismatch.
+        let mismatched = match p.issuer.strip_suffix('/') {
+            Some(without_slash) => without_slash.to_owned(),
+            None => format!("{}/", p.issuer),
+        };
+        let rejected = MemStore::default();
+        let auth = Auth::new(rejected.clone(), config(Some(&mismatched), false)).unwrap();
+        let r = send(&app(&auth, "127.0.0.1:1"), "GET", "/auth/login", &[]).await;
+        assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+        assert!(!r.headers.contains_key(header::LOCATION));
+        assert!(r.cookies().is_empty());
+        assert!(rejected.0.users.lock().unwrap().is_empty());
+        assert!(rejected.0.sessions.lock().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
