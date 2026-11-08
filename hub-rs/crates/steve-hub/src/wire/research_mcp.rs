@@ -41,7 +41,7 @@ pub fn tools() -> Vec<Value> {
     }));
     v.push(json!({
         "name": ITEM_READ,
-        "description": "Read the current progress of one workspace item by its ST number (for example ST-23): goal, status, plan, the last 20 timeline entries and the latest delivery summary. Prefer this when the user mentions an ST number.",
+        "description": "Read one workspace item by its ST number (for example ST-23). For the owner: current goal with its version, original goal with its version when different, status, plan, the last 20 timeline entries and the latest delivery summary. Shared conversations only receive their item's title, status and current goal. Use this when the user mentions an ST number, especially to compare progress against the original goal.",
         "inputSchema": schema(json!({"id": {"type": "string", "description": "e.g. ST-20"}}), &["id"]),
     }));
     v.push(json!({
@@ -254,8 +254,8 @@ pub fn item_read(store: &Store, ws: &str, scope: &ItemScope, id: &str) -> Result
     else {
         return Err(format!("No item {id} in this workspace."));
     };
-    let goal = store.items().goal(&i.id).unwrap_or_default();
     if !matches!(scope, ItemScope::All) {
+        let goal = store.items().goal(&i.id).unwrap_or_default();
         return Ok(format!(
             "{} {}\n状态：{}\n目标：{goal}\n",
             i.id,
@@ -263,13 +263,30 @@ pub fn item_read(store: &Store, ws: &str, scope: &ItemScope, id: &str) -> Result
             status_label(&i.status)
         ));
     }
+    // Read both ends of the history in one query so a concurrent goal edit cannot
+    // pair a version with another version's text. Only the owner sees the history.
+    let goals = store.items().goals(&i.id).map_err(|e| e.to_string())?;
     let mut s = format!(
-        "{} {}\n状态：{}\n现在：{}\n目标：{goal}\n",
+        "{} {}\n状态：{}\n现在：{}\n",
         i.id,
         i.title,
         status_label(&i.status),
         i.now
     );
+    if let Some(current) = goals.last() {
+        s.push_str(&format!(
+            "目标：{}\n当前目标版本：{}\n",
+            current.text, current.version
+        ));
+        if let Some(original) = goals.first().filter(|g| g.text != current.text) {
+            s.push_str(&format!(
+                "原始目标（版本 {}）：{}\n",
+                original.version, original.text
+            ));
+        }
+    } else {
+        s.push_str("目标：未记录\n");
+    }
     if !i.plan.is_empty() {
         s.push_str("计划：\n");
         for p in &i.plan {
