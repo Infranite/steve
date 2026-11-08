@@ -10,11 +10,6 @@ permissions:
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-env:
-  MACOSX_DEPLOYMENT_TARGET: '14.0'
-  CARGO_INCREMENTAL: '0'
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 jobs:
   scripts:
     strategy:
@@ -62,140 +57,18 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
-  rust-build:
+  rust:
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-22.04, macos-15]
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.13'
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
-        with:
-          toolchain: 1.99.1
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        id: rust-cache
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            hub-rs/target/debug
-          key: rust-test-v1-${{ matrix.runner }}-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml') }}-${{ github.sha }}
-          restore-keys: rust-test-v1-${{ matrix.runner }}-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml') }}-
-      - name: Always rebuild workspace packages from this checkout
-        run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
-        with:
-          tool: cargo-nextest@0.9.151
-      - name: Compile and archive all Rust tests
-        run: |
-          mkdir -p ci-artifacts
-          cargo nextest archive --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --archive-file ci-artifacts/tests.tar.zst --zstd-level 1 --zstd-long
-          cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --message-format json > ci-artifacts/full.json
-          python3 - <<'PY'
-          import json, os, pathlib, subprocess
-          contract = {key: os.environ[key] for key in ('GITHUB_SHA', 'RUNNER_OS', 'RUNNER_ARCH')}
-          contract['workspace'] = str(pathlib.Path.cwd().resolve())
-          contract['rustc'] = subprocess.check_output(['rustc', '--version'], text=True).strip()
-          pathlib.Path('ci-artifacts/archive.json').write_text(json.dumps(contract))
-          size = pathlib.Path('ci-artifacts/tests.tar.zst').stat().st_size
-          print(f'nextest archive: {size:,} bytes')
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write(f"Rust archive ({contract['RUNNER_OS']}): {size / 1024**2:.1f} MiB\n")
-          PY
-      - name: Rust doctests (reuse the compiled workspace)
-        run: cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace --doc
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: rust-archive-${{ matrix.runner }}
-          path: |
-            ci-artifacts/tests.tar.zst
-            ci-artifacts/archive.json
-          compression-level: 0
-          retention-days: 2
-          if-no-files-found: error
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: rust-inventory-${{ matrix.runner }}
-          path: ci-artifacts/full.json
-          retention-days: 7
-          if-no-files-found: error
-      # Only third-party dependencies enter the trusted cache. Workspace artifacts always come
-      # from this checkout, even when cache fingerprints or file timestamps would allow reuse.
-      - name: Keep only dependency artifacts in the cache
-        if: github.event_name == 'push'
-        run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: github.event_name == 'push' && steps.rust-cache.outputs.cache-hit != 'true'
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            hub-rs/target/debug
-          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
-  rust-test:
-    needs: rust-build
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-22.04, macos-15]
-        partition: [1, 2, 3, 4]
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.13'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '24'
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
-        with:
-          toolchain: 1.99.1
-      - name: Install Linux test prerequisites
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
-        with:
-          tool: cargo-nextest@0.9.151
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: rust-archive-${{ matrix.runner }}
-          path: ci-artifacts
-      - name: Verify archive platform, commit, toolchain and absolute fixture paths
-        run: |
-          python3 - <<'PY'
-          import json, os, pathlib, subprocess
-          actual = {key: os.environ[key] for key in ('GITHUB_SHA', 'RUNNER_OS', 'RUNNER_ARCH')}
-          actual['workspace'] = str(pathlib.Path.cwd().resolve())
-          actual['rustc'] = subprocess.check_output(['rustc', '--version'], text=True).strip()
-          expected = json.loads(pathlib.Path('ci-artifacts/archive.json').read_text())
-          assert actual == expected, f'archive build environment differs: {expected!r} != {actual!r}'
-          PY
-      - name: Extract archive and record selected tests (no build)
-        run: cargo nextest list --archive-file ci-artifacts/tests.tar.zst --extract-to "$GITHUB_WORKSPACE/hub-rs" --profile ci --partition hash:${{ matrix.partition }}/4 --message-format json > ci-artifacts/selected.json
-      - name: Rust tests (no build)
-        id: rust-tests
-        run: cargo nextest run --cargo-metadata hub-rs/target/nextest/cargo-metadata.json --binaries-metadata hub-rs/target/nextest/binaries-metadata.json --profile ci --partition hash:${{ matrix.partition }}/4 --retries 0 --no-fail-fast
-      - name: Rust test report (first-attempt failures remain failures)
-        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
-        run: python3 scripts/nextest-summary.py hub-rs/target/nextest/ci/junit.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: ${{ !cancelled() }}
-        with:
-          name: rust-results-${{ matrix.runner }}-${{ matrix.partition }}
-          path: |
-            ci-artifacts/selected.json
-            hub-rs/target/nextest/ci/junit.xml
-          retention-days: 7
-          if-no-files-found: error
+    uses: ./.github/workflows/rust-tests.yml
+    with:
+      runner: ${{ matrix.runner }}
   test:
     name: CI gate
     if: ${{ always() }}
-    needs: [scripts, web, rust-build, rust-test]
+    needs: [scripts, web, rust]
     runs-on: ubuntu-22.04
     steps:
       - name: Require every job, including every platform and partition
@@ -205,7 +78,7 @@ jobs:
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          assert set(results) == {'scripts', 'web', 'rust-build', 'rust-test'}, results
+          assert set(results) == {'scripts', 'web', 'rust'}, results
           assert all(job['result'] == 'success' for job in results.values()), results
           PY
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
