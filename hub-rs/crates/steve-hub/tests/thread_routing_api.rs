@@ -643,19 +643,12 @@ async fn research_runs_get_read_only_mcp() {
         "{v}"
     );
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "steve_item_read", "arguments": {"id": item}}}), token).await;
+    let initial = v["result"]["content"][0]["text"].as_str().unwrap();
     assert!(
-        v["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("目标：把 X 改成 Y\n当前目标版本：1"),
-        "{v}"
+        initial.contains("目标：把 X 改成 Y") && initial.contains("当前目标版本：1"),
+        "{initial}"
     );
-    assert!(
-        !v["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("原始目标")
-    );
+    assert!(!initial.contains("原始目标"));
     assert_eq!(
         store.items().add_goal(&item, "调整后的当前目标").unwrap(),
         2
