@@ -59,23 +59,33 @@ def digest(data):
 class Redirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         url = urllib.parse.urlparse(newurl)
+        try:
+            valid_port = url.port in (None, 443)
+        except ValueError:
+            valid_port = False
         require(url.scheme == "https" and not url.username and not url.password and not url.fragment
+                and valid_port
                 and (url.hostname in {"api.github.com", "github.com"}
                      or (url.hostname or "").endswith(".githubusercontent.com")),
                 "release redirect left GitHub HTTPS")
-        require(not req.has_header("Authorization") or url.hostname == "api.github.com",
-                "refusing to forward the API token to release storage")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and url.hostname != urllib.parse.urlparse(req.full_url).hostname:
+            # urllib copies ordinary headers. Drop the token before following asset
+            # storage redirects; a later redirect back to the API must not restore it.
+            for group in (redirected.headers, redirected.unredirected_hdrs):
+                for name in list(group):
+                    if name.lower() == "authorization":
+                        del group[name]
+        return redirected
 
 
 class GitHub:
     def __init__(self):
         self.opener = urllib.request.build_opener(Redirect())
 
-    def download(self, url, limit, destination=None):
-        headers = {"User-Agent": "Steve-Homebrew-sync", "Accept": "application/octet-stream"}
+    def download(self, url, limit, destination=None, *, accept="application/octet-stream"):
+        headers = {"User-Agent": "Steve-Homebrew-sync", "Accept": accept}
         if urllib.parse.urlparse(url).hostname == "api.github.com":
-            headers["Accept"] = "application/vnd.github+json"
             token = os.environ.get("GITHUB_TOKEN")
             if token:
                 headers["Authorization"] = "Bearer " + token
@@ -93,11 +103,16 @@ class GitHub:
         return (total, checksum.hexdigest()) if destination else b"".join(chunks)
 
     def json(self, url):
-        return read_json(self.download(url, MAX_JSON))
+        return read_json(self.download(url, MAX_JSON, accept="application/vnd.github+json"))
 
 
 def release_base(repository, version):
     return f"https://github.com/{repository}/releases/download/v{version}/"
+
+
+def asset_download_url(repository, asset):
+    require(type(asset.get("id")) is int and asset["id"] > 0, "invalid GitHub release asset ID")
+    return f"https://api.github.com/repos/{repository}/releases/assets/{asset['id']}"
 
 
 def check_manifest(manifest):
@@ -137,6 +152,7 @@ def check_remote_asset(asset, repository, version, name, limit):
             f"release asset is not completely uploaded: {name}")
     require(asset.get("browser_download_url") == release_base(repository, version) + name,
             f"release asset URL is not pinned to the expected tag: {name}")
+    asset_download_url(repository, asset)
     require(type(asset.get("size")) is int and 0 < asset["size"] <= limit, f"invalid asset size: {name}")
     require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(asset.get("digest", ""))),
             f"GitHub did not report an asset SHA256: {name}")
@@ -159,7 +175,7 @@ def published_installer(client, repository):
         remote[asset["name"]] = asset
     metadata = remote.get(MANIFEST_NAME)
     check_remote_asset(metadata, repository, version, MANIFEST_NAME, MAX_JSON)
-    body = client.download(metadata["browser_download_url"], metadata["size"])
+    body = client.download(asset_download_url(repository, metadata), metadata["size"])
     require(len(body) == metadata["size"] and "sha256:" + digest(body) == metadata["digest"],
             "installer manifest download differs from GitHub's digest/size")
     manifest = check_manifest(read_json(body))
@@ -217,13 +233,15 @@ def verify_bundle(path, manifest):
             "installer Web identity differs from the published manifest")
 
 
-def render_formula(manifest, repository, template):
+def render_formula(manifest, remote, repository, template):
     check_manifest(manifest)
     assets = {asset["target"]: asset for asset in manifest["assets"]}
     substitutions = {"VERSION": manifest["version"], "REPOSITORY": repository}
     for name, target in (("MAC", TARGETS[0]), ("LINUX", TARGETS[1])):
         asset = assets[target]
-        substitutions[name + "_URL"] = release_base(repository, manifest["version"]) + asset["name"]
+        metadata = remote[asset["name"]]
+        asset_download_url(repository, metadata)
+        substitutions[name + "_ASSET_ID"] = str(metadata["id"])
         substitutions[name + "_SHA"] = asset["sha256"]
     for name, value in substitutions.items():
         template = template.replace("@" + name + "@", value)
@@ -235,6 +253,8 @@ def sync(client, root, repository="Infranite/steve"):
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
             and all(p not in {".", ".."} for p in repository.split("/")), "invalid upstream repository")
     manifest, remote = published_installer(client, repository)
+    download_urls = {asset["target"]: asset_download_url(repository, remote[asset["name"]])
+                     for asset in manifest["assets"]}
     formula_path, lock_path = root / "Formula/steve.rb", root / LOCK_NAME
     require(formula_path.exists() == lock_path.exists(), "Formula and release lock must be installed together")
     if lock_path.exists():
@@ -247,15 +267,18 @@ def sync(client, root, repository="Infranite/steve"):
         require(after >= before, "refusing to downgrade the tap")
         if after == before:
             require(manifest == old, "published installer changed without a version change")
+            require(lock.get("download_urls") == download_urls,
+                    "published installer asset IDs changed without a version change")
             return dict(changed=False, version=manifest["version"])
     with tempfile.TemporaryDirectory(prefix="steve-homebrew-") as tmp:
         for asset in manifest["assets"]:
             path = Path(tmp) / asset["name"]
-            size, sha = client.download(remote[asset["name"]]["browser_download_url"], asset["size"], path)
+            size, sha = client.download(asset_download_url(repository, remote[asset["name"]]), asset["size"], path)
             require(size == asset["size"] and sha == asset["sha256"], "installer download failed size/SHA256 verification")
             verify_bundle(path, manifest)
-    formula = render_formula(manifest, repository, (root / "steve.rb.in").read_text())
-    lock = json_bytes(dict(repository=repository, manifest=manifest, formula_sha256=digest(formula)))
+    formula = render_formula(manifest, remote, repository, (root / "steve.rb.in").read_text())
+    lock = json_bytes(dict(repository=repository, manifest=manifest, download_urls=download_urls,
+                          formula_sha256=digest(formula)))
     # Nothing is written until every platform has passed. The workflow commits both files
     # together; a failed run cannot publish a partially generated Formula.
     formula_path.parent.mkdir(parents=True, exist_ok=True)

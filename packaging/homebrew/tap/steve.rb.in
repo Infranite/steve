@@ -7,13 +7,15 @@ class Steve < Formula
   on_macos do
     depends_on arch: :arm64
     depends_on macos: :sonoma
-    url "@MAC_URL@"
+    url "https://api.github.com/repos/@REPOSITORY@/releases/assets/@MAC_ASSET_ID@",
+        headers: ["Accept: application/octet-stream"]
     sha256 "@MAC_SHA@"
   end
 
   on_linux do
     depends_on arch: :x86_64
-    url "@LINUX_URL@"
+    url "https://api.github.com/repos/@REPOSITORY@/releases/assets/@LINUX_ASSET_ID@",
+        headers: ["Accept: application/octet-stream"]
     sha256 "@LINUX_SHA@"
   end
 
