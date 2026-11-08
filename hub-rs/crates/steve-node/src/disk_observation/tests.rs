@@ -50,8 +50,15 @@ fn done(mut record: Record) -> Record {
 }
 
 #[test]
-fn configuration_is_opt_in_validated_and_all_numbers_are_configurable() {
-    assert_eq!(Policy::configured(|_| None).unwrap(), None);
+fn configuration_defaults_to_bounded_observation_and_all_numbers_are_configurable() {
+    assert_eq!(
+        Policy::configured(|_| None).unwrap(),
+        Some(Policy::default())
+    );
+    assert_eq!(
+        Policy::configured(|key| (key == "STEVE_DISK_OBSERVE").then(|| "off".into())).unwrap(),
+        None
+    );
     let values = std::collections::HashMap::from([
         ("STEVE_DISK_OBSERVE", "on"),
         ("STEVE_DISK_OBSERVE_ENTRIES", "12345"),

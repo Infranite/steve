@@ -22,7 +22,7 @@ pub struct Report {
     pub errors: Vec<String>,
     /// `http://host:port` for every listen host, when the configuration parsed.
     pub listen: Vec<String>,
-    /// What a start allows but an operator should know: the local Node's runs go unconfined.
+    /// Non-blocking setup or migration work, and unavailable optional confinement.
     pub warnings: Vec<String>,
 }
 
@@ -56,6 +56,7 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
         Err(e) => errors.push(e.to_string()),
         // the local Node's runs in the OS sandbox (never a reason not to start)
         Ok(true) => {
+            warnings.extend(local_node_warnings(&cfg, &vars));
             if let Err(why) = steve_node::confinement(
                 &cfg.home,
                 &cfg.data_dir.join("node"),
@@ -93,6 +94,55 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
         listen: cfg.listen.urls().split(", ").map(str::to_string).collect(),
         warnings,
     }
+}
+
+/// Setup guidance shared by preflight and a normal boot. No harness is spawned and no login
+/// contents are inspected: the operator, not Steve, authenticates each principal's harness.
+pub(crate) fn local_node_warnings(cfg: &Config, vars: &crate::wire::Vars) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let path = vars("PATH").unwrap_or_default();
+    let available = |program: &str, executable: bool| {
+        use std::os::unix::fs::PermissionsExt;
+        let usable = |p: &std::path::Path| {
+            p.metadata()
+                .is_ok_and(|m| m.is_file() && (!executable || m.permissions().mode() & 0o111 != 0))
+        };
+        let p = std::path::Path::new(program);
+        if p.components().count() > 1 {
+            usable(p)
+        } else {
+            std::env::split_paths(&path).any(|d| usable(&d.join(p)))
+        }
+    };
+    for (harness, adapter) in &cfg.adapters {
+        let js = std::path::Path::new(adapter)
+            .extension()
+            .is_some_and(|e| e == "js");
+        if !available(adapter, !js) {
+            warnings.push(format!(
+                "ACP adapter {harness} is unavailable at {adapter}; install its ACP adapter \
+                 and configure its registry entry with an absolute path before starting \
+                 {harness} tasks (docs/deployment.md#harness-setup)"
+            ));
+        } else if js && !available(&cfg.node, true) {
+            warnings.push(format!(
+                "STEVE_NODE: Node.js executable is unavailable at {}; install Node.js or set \
+                 its absolute path before starting {harness} tasks",
+                cfg.node
+            ));
+        }
+    }
+    if crate::wire::principal_state(vars) {
+        warnings.push(
+            "STEVE_PRINCIPAL_STATE=on (default): new sessions use a separate harness directory; \
+             existing sessions keep their recorded state. Codex login is not copied. Authenticate \
+             each principal in the Node's state/<runtime_sessions.state_dir>/harness directory \
+             before continuing their tasks; see docs/deployment.md#harness-setup. \
+             STEVE_PRINCIPAL_STATE=off restores shared state for new sessions only."
+                .into(),
+        );
+    }
+    warnings
 }
 
 /// A start makes `d` (`create_dir_all`): it is a directory already, or its nearest existing
@@ -194,8 +244,35 @@ mod tests {
         );
         if steve_vault::harness::seatbelt_works() {
             let r = run(&[]);
-            assert!(r.warnings.is_empty(), "this Mac sandboxes the runs: {r:?}");
+            assert!(
+                r.warnings.iter().all(|w| !w.starts_with("STEVE_CONFINE:")),
+                "this Mac sandboxes the runs: {r:?}"
+            );
         }
+    }
+
+    #[test]
+    fn missing_adapters_and_principal_login_migration_are_actionable_warnings() {
+        let r = run(&[("STEVE_ADAPTER_CODEX", "/nonexistent/steve-test/codex-acp")]);
+        assert!(r.ok, "the Hub remains available for setup: {r:?}");
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("ACP adapter codex") && w.contains("install its ACP adapter"))
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("Codex login is not copied") && w.contains("harness-setup"))
+        );
+        let r = run(&[("STEVE_PRINCIPAL_STATE", "off")]);
+        assert!(
+            r.warnings
+                .iter()
+                .all(|w| !w.starts_with("STEVE_PRINCIPAL_STATE"))
+        );
+        let r = run(&[("STEVE_NO_RESUME", "1")]);
+        assert!(r.warnings.is_empty(), "no local execution on a copy: {r:?}");
     }
 
     #[test]

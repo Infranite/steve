@@ -107,7 +107,15 @@ async fn start_with(node: bool, listen: bool) -> Env {
         vars.insert("STEVE_NODE_MODE".into(), "local".into());
     }
     if listen {
+        // This fixture owns fresh temporary state and deliberately runs remote coordinators.
+        // NO_RESUME copies never accept remote Nodes, even with an explicit listener switch.
+        vars.remove("STEVE_NO_RESUME");
         vars.insert("STEVE_NODE_LISTEN".into(), "1".into());
+        if !node {
+            vars.insert("STEVE_NODE_MODE".into(), "off".into());
+        }
+    } else {
+        vars.insert("STEVE_NODE_LISTEN".into(), "0".into());
     }
     let vars = Arc::new(vars);
     let get = {

@@ -435,7 +435,7 @@ impl super::node_runtime::NodeDomain for HubHost {
 pub struct RoutedRuntime {
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`, the default).
     pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
-    /// The remote Nodes' coordinators (`STEVE_NODE_LISTEN=1`).
+    /// The remote Nodes' coordinators (enabled by default).
     pub fleet: Option<Arc<crate::nodes::NodeFleet>>,
     /// The remote Node new sessions are bound to when they can be (`STEVE_NODE_BIND`); unset: none.
     pub bind_remote: Option<steve_node_api::NodeId>,
