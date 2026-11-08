@@ -394,6 +394,14 @@ pub(crate) mod tests {
         g(&r, &["config", "user.email", "t@t"]);
         g(&r, &["config", "user.name", "t"]);
         g(&r, &["config", "commit.gpgsign", "false"]);
+        // A synchronous fixture command must not leave a maintenance process with a worktree
+        // as its cwd: the process guard would correctly keep that worktree until it exits.
+        // Keep the older GC setting too, for Git versions without maintenance.autoDetach.
+        g(
+            &r,
+            &["config", "--local", "maintenance.autoDetach", "false"],
+        );
+        g(&r, &["config", "--local", "gc.autoDetach", "false"]);
         fs::write(r.join("a.txt"), "a\n").unwrap();
         g(&r, &["add", "."]);
         g(&r, &["commit", "-q", "-m", "a"]);
