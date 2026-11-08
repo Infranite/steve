@@ -1,0 +1,1 @@
+Make the Node tool timeout/cancellation replay check deterministic under scheduler load. It now proves the service has started before advancing test time, while preserving the uncertain-result and exactly-once execution assertions. Application behavior is unchanged.

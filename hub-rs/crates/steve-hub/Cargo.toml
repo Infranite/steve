@@ -67,6 +67,7 @@ tar = "0.4"
 libc = "0.2"
 
 [dev-dependencies]
+tokio = { version = "=1.54.1", features = ["test-util"] }
 steve-node-cli = { path = "../steve-node-cli" }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake"] }
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }

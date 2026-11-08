@@ -1042,21 +1042,67 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn timeout_and_cancel_are_uncertain_never_reinvoked() {
+        struct GatedService {
+            calls: AtomicUsize,
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait]
+        impl Service for GatedService {
+            fn catalog(&self) -> Vec<ToolDescriptor> {
+                Mock {
+                    calls: AtomicUsize::new(0),
+                    gate: None,
+                }
+                .catalog()
+            }
+            async fn call(
+                &self,
+                _: Session,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<String, String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(format!("ok {}", steve_mcp::tools::END))
+            }
+        }
         let h = fixture(vec![]).await;
         let tools =
             NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
-        let gate = Arc::new(tokio::sync::Notify::new());
-        let service = Arc::new(Mock {
+        let service = Arc::new(GatedService {
             calls: AtomicUsize::new(0),
-            gate: Some(gate.clone()),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
         });
         tools.install(service.clone()).unwrap();
-        let mut q = request(&tools, h.exec.clone()).await;
-        q.deadline = Timestamp(steve_store::now() + 50);
-        assert!(matches!(
-            tools.call(q.clone()).await.unwrap(),
-            ToolResult::Unknown { .. }
-        ));
+        let q = request(&tools, h.exec.clone()).await;
+        let call = tokio::spawn({
+            let (tools, q) = (tools.clone(), q.clone());
+            async move { tools.call(q).await }
+        });
+        // A wall-clock deadline of 50 ms can expire during authorization or the durable
+        // fence. Cancellation there correctly records Failed before any invocation.
+        // This case is specifically an already-running side effect: establish that
+        // boundary before advancing Tokio time to expire the caller's wait. The fixture
+        // has no remote heartbeat transport; its authorization/leases use wall time.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            service.entered.notified(),
+        )
+        .await
+        .expect("tool service must be entered before testing its timeout");
+        assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        tokio::time::resume();
+        tools.authorized(&h.exec, true).await.unwrap();
+        let timed_out = call.await.unwrap().unwrap();
+        assert!(
+            matches!(timed_out, ToolResult::Unknown { .. }),
+            "{timed_out:?}"
+        );
         assert!(matches!(
             tools.cancel_call(q.key()).await.unwrap(),
             ToolResult::Unknown { .. }
@@ -1065,20 +1111,22 @@ pub(crate) mod tests {
             tools.call(q.clone()).await.unwrap(),
             ToolResult::Unknown { .. }
         ));
-        gate.notify_one();
-        for _ in 0..100 {
-            if matches!(
-                tools.call_status(q.key()).await.unwrap(),
-                ToolResult::Completed { .. }
-            ) {
-                break;
+        service.release.notify_one();
+        // Wait for the detached task's durable result, rather than assuming that a
+        // fixed number of scheduler yields is enough for SQLite to finish its write.
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let result = tools.call_status(q.key()).await.unwrap();
+                if matches!(result, ToolResult::Completed { .. }) {
+                    break result;
+                }
+                assert!(matches!(result, ToolResult::Unknown { .. }), "{result:?}");
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
-            tokio::task::yield_now().await;
-        }
-        assert!(matches!(
-            tools.call_status(q.key()).await.unwrap(),
-            ToolResult::Completed { .. }
-        ));
+        })
+        .await
+        .expect("released tool must persist its completed result");
+        assert!(matches!(completed, ToolResult::Completed { .. }));
         assert_eq!(service.calls.load(Ordering::SeqCst), 1);
     }
     #[tokio::test]
