@@ -9,6 +9,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+mod reconfigure;
+
 #[derive(Default)]
 pub struct Options {
     pub role: Option<String>,
@@ -16,6 +18,7 @@ pub struct Options {
     pub hub: Option<String>,
     pub pin: Option<String>,
     pub listen: Option<String>,
+    pub reconfigure: bool,
 }
 
 trait Prompts {
@@ -771,7 +774,15 @@ impl<'a> Wizard<'a> {
     }
 }
 
+pub fn reconfigure_existing(options: Options) -> Result<()> {
+    validate_options(&options)?;
+    reconfigure::run(&options, &mut Terminal)
+}
+
 pub fn run(source: &Path, options: Options) -> Result<()> {
+    if options.reconfigure {
+        return reconfigure_existing(options);
+    }
     validate_options(&options)?;
     let mut input = Terminal;
     let role = match options.role.as_deref() {

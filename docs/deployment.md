@@ -3,6 +3,7 @@
 [README](../README.md) describes the Homebrew installation and source-based development setup. This page covers first-time configuration, user services, managed releases and upgrades.
 
 - [Homebrew installation](#homebrew-installation)
+- [Reconfiguring an installed Hub](#reconfiguring-an-installed-hub)
 - [Hub and Node service commands](#hub-and-node-service-commands)
 - [Source-based macOS service installation](#source-based-macos-service-installation)
 - [Managed Release bundles and automatic upgrades](#managed-release-bundles-and-automatic-upgrades)
@@ -22,7 +23,7 @@ The official [tap](https://github.com/Infranite/homebrew-tap) downloads a versio
 
 `steve setup` asks you to select Hub or Node; `steve setup hub` and `steve setup node --hub https://<hub>` select it explicitly. Default data directories are `~/.steve` and `~/.steve-node`, respectively; `--home <absolute-directory>` selects a separate directory. Setup copies the immutable package into a private `<home>/releases/<version>` directory before signing or registering anything. It refuses an unknown existing home or identity. Its private setup receipt allows the same interrupted setup to continue while retaining the completed configuration and keys. A package upgrade can resume an earlier setup that has not yet signed, paired or registered anything, after verifying its receipt and copied files and backing up the receipt; an existing identity is never replaced.
 
-Interactive input validation explains the error and asks for that field again, keeping the earlier answers. EOF, terminal cancellation and filesystem or ownership errors still stop setup and preserve its progress. Explicit invalid command-line options fail instead of opening another prompt. Setup resumes its own unfinished installation; it is not a configuration editor. If a receipt-owned file has been edited, setup refuses to overwrite it. Preserve the changed file and the original identity and inspect the existing service with `status`/`doctor`. For an intentional change to an installed Hub, back up its `steve.env`, review only the intended assignments and explicitly restart the existing service after checking the configuration. Do not delete its home or modify the setup receipt to bypass the ownership check.
+Interactive input validation explains the error and asks for that field again, keeping the earlier answers. EOF, terminal cancellation and filesystem or ownership errors still stop setup and preserve its progress. Explicit invalid command-line options fail instead of opening another prompt. Ordinary setup resumes its own unfinished installation and refuses to overwrite receipt-owned files that have been edited. For an installed managed Hub, use the separate [`steve setup --reconfigure` workflow](#reconfiguring-an-installed-hub) to review and save supported configuration changes. Preserve the original home, setup receipt and identity; do not remove them to bypass an ownership check.
 
 For a Hub, the wizard asks for its public URL and your OIDC issuer, client ID and client secret. The secret is entered without echo and written to a private file; it is never a command-line argument. Register the displayed callback URL with your OIDC provider. Setup first asks for the listening address, default `0.0.0.0:8440`, and writes the existing `STEVE_ALLOW_ANY_HOST=1` setting for a wildcard. `--listen <IP:port>` selects a different bind. The browser/OIDC callback URL is separate: `0.0.0.0` is not a browser destination. The default browser URL is local loopback; a public HTTPS URL still requires your reverse proxy and network configuration. Existing explicit configurations are retained. macOS setup prepares and signs the private Hub/helper copies, with system authorization prompts when required. Linux asks for a separate protected `0700` directory for its persistent vault keys. Setup does not enable development login or copy another harness's credentials.
 
@@ -55,6 +56,30 @@ brew uninstall steve
 Use `node` instead of `hub` on a separate Node and verify its sessions in Devices before stopping it. `uninstall` requires a known stopped service, also unloaded from launchd on macOS, and preserves a backup of its registration. It does not remove the private runtime, configuration, keys, data or Node pairing; keep those for diagnosis or a separately planned removal. Revoke a retired Node from Hub Devices when you intend to remove its access.
 
 Without Homebrew, use the verified installer archive from the same [Release](https://github.com/Infranite/steve/releases), then run `<installer>/bin/steve setup`. The separate runtime archives and `steve-release.json` remain compatible with existing upgrade clients; Homebrew uses `steve-installer.json` and the installer archives.
+
+## Reconfiguring an installed Hub
+
+Run the interactive maintenance wizard as the OS user who owns the Hub:
+
+```sh
+steve setup --reconfigure
+```
+
+For a custom installation, add `--home /absolute/path/to/hub`. This requires a completed managed Hub setup, its original `setup.json`, registered service, and a current release under that home's `releases` directory. The installed Hub must support `--check-config`; macOS also requires its original signing identity and keyhelper. Upgrades may leave the original version in installation receipts; maintenance validates the current release separately. Unknown, incomplete or retired installations are refused. `steve setup node --reconfigure` is refused.
+
+Defaults come from the current `steve.env`, including intentional edits since setup. The parser reads literal `KEY=value` or `export KEY=value` assignments without sourcing shell code. Other assignments, comments, spacing and line endings are retained; duplicate keys, expansions, commands and unsupported syntax are rejected with a line number. The wizard edits listening addresses and their shared port, wildcard permission, the browser URL, and the existing OIDC issuer and client ID. When a browser URL list is configured, changing the primary URL preserves its other aliases. The OIDC secret must already have a file reference: its path and contents are retained, and the wizard does not request or rotate it.
+
+The wizard previews the changes and asks for confirmation with **No** as the default. Before saving, it checks the candidate environment with the currently installed Hub's `--check-config` and rechecks that the installation has not changed while you were answering. It then stores private backups of `steve.env` and `setup.json`, saves both, and reads them back along with the protected installation files. A failed save restores the originals when they still match the transaction; concurrent external edits are not overwritten. If both configuration and receipt already agree, a repeated run leaves them untouched. Signing identity, vault configuration, databases, service registration, current release and Node pairing are preserved.
+
+Saving does not start or restart a service. Use the original home and label when ready to apply the saved configuration:
+
+```sh
+steve hub restart --home /absolute/path/to/hub --label <original-service-label>
+```
+
+Omitting `--label` reads the label from the existing service registration; omitting `--home` selects `~/.steve`. The command's local checks do not test reverse-proxy routing, OIDC discovery or browser login. After restarting, verify `/healthz`, browser access and OIDC login; update the registered callback URL at your OIDC provider if the browser address changed.
+
+Backups and transaction records remain under `<home>/setup-reconfigure/`. If interruption leaves a `pending` transaction, rerun `steve setup --reconfigure` with the same home and confirm recovery. Recovery verifies the installation and preserves a committed change or restores an uncommitted change from its private backups. If files have been edited externally, it retains the recovery record and refuses to overwrite them. After recovery, run the wizard again for further changes. EOF or declining confirmation before saving leaves the configuration untouched.
 
 ## Diagnostic capture and queries
 

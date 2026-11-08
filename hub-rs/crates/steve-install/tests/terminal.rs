@@ -1,14 +1,15 @@
-//! Exercise the actual CLI's secret cancellation on an OS pseudo-terminal.
+//! Exercise actual CLI configuration and cancellation on an OS pseudo-terminal.
 //! Every installation path and executable except the CLI is an isolated fixture.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -389,5 +390,445 @@ fn service_output_uses_stdout_terminal_and_preserves_json_for_automation() {
     assert_eq!(
         fs::read_to_string(temporary.path().join("manager-calls")).unwrap(),
         "read\n".repeat(5)
+    );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TreeEntry {
+    Directory(u32),
+    File(u32, String),
+    Link(PathBuf),
+}
+
+fn installation_tree(root: &Path) -> BTreeMap<PathBuf, TreeEntry> {
+    fn collect(root: &Path, directory: &Path, entries: &mut BTreeMap<PathBuf, TreeEntry>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            let mode = metadata.permissions().mode() & 0o777;
+            let value = if metadata.file_type().is_symlink() {
+                TreeEntry::Link(fs::read_link(&path).unwrap())
+            } else if metadata.is_dir() {
+                collect(root, &path, entries);
+                TreeEntry::Directory(mode)
+            } else {
+                assert!(metadata.is_file(), "unexpected fixture file type");
+                TreeEntry::File(mode, steve_install::common::digest(&path).unwrap())
+            };
+            entries.insert(path.strip_prefix(root).unwrap().to_owned(), value);
+        }
+    }
+    let mut entries = BTreeMap::new();
+    collect(root, root, &mut entries);
+    entries
+}
+
+fn private_fixture_file(path: &Path, bytes: impl AsRef<[u8]>) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// A native, offline fixture lets macOS exercise the production signature verifier.
+/// Ad-hoc signatures apply only to these temporary binaries; no certificate or Keychain
+/// is created, queried, or used. The helper is never executable by the tested workflow.
+fn maintenance_hub(root: &Path, binary: &Path, info: &Value, calls: &Path) {
+    let source = root.join("fixture_hub.rs");
+    fs::write(
+        &source,
+        format!(
+            r##"use std::io::Write;
+fn main() {{
+    let args: Vec<_> = std::env::args().collect();
+    let operation = args.get(1).map(String::as_str).unwrap_or("unexpected");
+    let mut log = std::fs::OpenOptions::new().create(true).append(true).open({calls:?}).unwrap();
+    writeln!(log, "{{}}", operation).unwrap();
+    if args.len() != 2 || !args[0].ends_with("/steve-hub") {{ std::process::exit(95); }}
+    match operation {{
+        "--build-info" => println!("{{}}", {info:?}),
+        "--check-config" => {{
+            for (key, expected) in [
+                ("STEVE_HOST", "0.0.0.0"), ("STEVE_PORT", "8555"),
+                ("STEVE_PUBLIC_URL", "https://updated.example"),
+                ("STEVE_OIDC_ISSUER", "https://issuer.example/new/"),
+                ("STEVE_OIDC_CLIENT_ID", "updated-client"),
+            ] {{ assert_eq!(std::env::var(key).unwrap(), expected); }}
+            assert!(std::env::var_os("STEVE_OIDC_CLIENT_SECRET").is_none());
+            assert!(std::path::Path::new(&std::env::var("STEVE_OIDC_CLIENT_SECRET_FILE").unwrap()).is_file());
+            println!("{{}}", r#"{{"ok":true,"warnings":[]}}"#);
+        }}
+        _ => std::process::exit(95),
+    }}
+}}
+"##,
+            calls = calls.to_str().unwrap(),
+            info = info.to_string(),
+        ),
+    )
+    .unwrap();
+    // Only the test compiler inherits its toolchain environment. The actual CLI below
+    // receives an empty environment plus a temporary HOME and a denying fixture PATH.
+    let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = Command::new(compiler)
+        .arg("--edition=2024")
+        .arg(&source)
+        .arg("-o")
+        .arg(binary)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "compile isolated Hub fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn actual_reconfigure_preserves_installation_and_supports_noop_and_eof() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let account = root.join("existing account");
+    let home = account.join(".steve");
+    let release = home.join("releases/1.2.3");
+    let deny_bin = root.join("deny-bin");
+    let calls = root.join("hub-calls");
+    let forbidden = root.join("forbidden-calls");
+    let label = "io.github.infranite.steve.terminal-fixture";
+    for directory in [
+        account.clone(),
+        home.clone(),
+        home.join("releases"),
+        release.clone(),
+        release.join("bin"),
+        release.join("web"),
+        release.join("web/dist"),
+        home.join("web"),
+        home.join("services"),
+        home.join("secrets"),
+        home.join("data"),
+        home.join("vault-keys"),
+        deny_bin.clone(),
+    ] {
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let forbidden_quoted = steve_install::common::shell_quote(forbidden.to_str().unwrap()).unwrap();
+    for name in ["launchctl", "systemctl", "security"] {
+        executable(
+            &deny_bin.join(name),
+            &format!("#!/bin/sh\nprintf '{name}\\n' >> {forbidden_quoted}\nexit 95\n"),
+        );
+    }
+    let info =
+        json!({"format_version":1,"version":"1.2.3","commit":"a".repeat(40),"check_config":true});
+    for relative in ["release.json", "web/dist/release.json"] {
+        private_fixture_file(&release.join(relative), serde_json::to_vec(&info).unwrap());
+    }
+    maintenance_hub(&root, &release.join("bin/steve-hub"), &info, &calls);
+    symlink(&release, home.join("current")).unwrap();
+    symlink(release.join("web/dist"), home.join("web/current")).unwrap();
+    let service_definition = if cfg!(target_os = "macos") {
+        account
+            .join("Library/LaunchAgents")
+            .join(format!("{label}.plist"))
+    } else {
+        account
+            .join(".config/systemd/user")
+            .join(format!("{label}.service"))
+    };
+    fs::create_dir_all(service_definition.parent().unwrap()).unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        for directory in [home.join("signing"), home.join("bin")] {
+            fs::create_dir(&directory).unwrap();
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let helper = home.join("bin/steve-keyhelper");
+        fs::copy(release.join("bin/steve-hub"), &helper).unwrap();
+        for (binary, identifier) in [
+            (release.join("bin/steve-hub"), format!("{label}.hub")),
+            (helper, format!("{label}.keyhelper")),
+        ] {
+            let output = Command::new("/usr/bin/codesign")
+                .args(["--force", "--sign", "-", "--identifier", &identifier])
+                .arg(&binary)
+                .env_clear()
+                .env("HOME", &account)
+                .env("PATH", &deny_bin)
+                .env("TMPDIR", &root)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "ad-hoc fixture signature: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        private_fixture_file(&home.join("signing/identity.json"), serde_json::to_vec(&json!({
+            "label":label,"hub_identifier":format!("{label}.hub"),
+            "keyhelper_identifier":format!("{label}.keyhelper"),"vault_service":format!("{label}.vault")
+        })).unwrap());
+        let mut definition = Vec::new();
+        plist::to_writer_xml(
+            &mut definition,
+            &json!({
+                "Label":label,"EnvironmentVariables":{"STEVE_HOME":home},
+                "ProgramArguments":["/usr/bin/false"]
+            }),
+        )
+        .unwrap();
+        private_fixture_file(&service_definition, definition);
+    }
+    #[cfg(target_os = "linux")]
+    private_fixture_file(
+        &service_definition,
+        format!(
+            "[Service]\nEnvironment={}\nExecStart=/usr/bin/false\n",
+            serde_json::to_string(&format!("STEVE_HOME={}", home.display())).unwrap()
+        ),
+    );
+    private_fixture_file(
+        &home.join("services/hub.json"),
+        serde_json::to_vec(&json!({
+            "component":"hub","label":label,"release":release,"build":info
+        }))
+        .unwrap(),
+    );
+    let secret = home.join("secrets/oidc-client-secret");
+    let sentinel = "reconfigure-existing-secret-never-output-83db7";
+    private_fixture_file(&secret, sentinel);
+    private_fixture_file(
+        &home.join("data/hub.sqlite3"),
+        b"existing database fixture; never open or replace",
+    );
+    private_fixture_file(
+        &home.join("vault-keys/existing.key"),
+        b"existing vault identity fixture",
+    );
+    let mut environment = BTreeMap::from([
+        ("STEVE_HOME".to_owned(), home.to_str().unwrap().to_owned()),
+        ("STEVE_HOST".into(), "127.0.0.1".into()),
+        ("STEVE_PORT".into(), "8440".into()),
+        ("STEVE_ALLOW_ANY_HOST".into(), "0".into()),
+        (
+            "STEVE_PUBLIC_URL".into(),
+            "https://original.example/".into(),
+        ),
+        (
+            "STEVE_PUBLIC_URLS".into(),
+            "https://original.example/,https://alias.example/".into(),
+        ),
+        (
+            "STEVE_OIDC_ISSUER".into(),
+            "https://issuer.example/old/".into(),
+        ),
+        ("STEVE_OIDC_CLIENT_ID".into(), "original-client".into()),
+        (
+            "STEVE_OIDC_CLIENT_SECRET_FILE".into(),
+            secret.to_str().unwrap().to_owned(),
+        ),
+        ("STEVE_VAULT_KEYSTORE".into(), "file".into()),
+        (
+            "UNRELATED".into(),
+            "literal $HOME; $(do-not-run) ' preserved".into(),
+        ),
+    ]);
+    let render = |values: &BTreeMap<String, String>| {
+        let mut bytes = String::from("# operator comment stays byte-for-byte\r\n");
+        for (key, value) in values {
+            bytes.push_str(&format!(
+                "export {key}={} # keep {key}\r\n",
+                steve_install::common::shell_quote(value).unwrap()
+            ));
+        }
+        bytes.into_bytes()
+    };
+    let original_env = render(&environment);
+    private_fixture_file(&home.join("steve.env"), &original_env);
+    let original_receipt = json!({
+        "format":1,"component":"hub","home":home,"version":"1.2.3","commit":"a".repeat(40),
+        "steps":["environment","verified","installed"],"environment":environment,
+        "files":{"steve.env":steve_install::common::digest(&home.join("steve.env")).unwrap(),
+            "secrets/oidc-client-secret":steve_install::common::digest(&secret).unwrap()},
+        "retained_operator_metadata":{"example":"must remain"}
+    });
+    let original_receipt_bytes = serde_json::to_vec(&original_receipt).unwrap();
+    private_fixture_file(&home.join("setup.json"), &original_receipt_bytes);
+    let before = installation_tree(&account);
+    let start = || {
+        let pty = Pty::open().unwrap();
+        let process = Process(
+            Command::new(env!("CARGO_BIN_EXE_steve"))
+                .args(["setup", "hub", "--reconfigure", "--home"])
+                .arg(&home)
+                .env_clear()
+                .env("HOME", &account)
+                .env("PATH", &deny_bin)
+                .env("TMPDIR", &root)
+                .current_dir(&root)
+                .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+                .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
+                .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        (pty, process)
+    };
+    let (mut pty, mut process) = start();
+    for (prompt, answer) in [
+        (
+            "监听地址（多个 IP:端口用逗号分隔） [127.0.0.1:8440]: ",
+            "0.0.0.0:8555\n",
+        ),
+        (
+            "浏览器访问地址 [https://original.example/]: ",
+            "https://updated.example/\n",
+        ),
+        (
+            "OIDC issuer [https://issuer.example/old/]: ",
+            "https://issuer.example/new/\n",
+        ),
+        ("OIDC client ID [original-client]: ", "updated-client\n"),
+        ("确认保存并备份现有配置？[y/N] [N]: ", "y\n"),
+    ] {
+        pty.wait_prompt(&mut process.0, prompt);
+        pty.master.write_all(answer.as_bytes()).unwrap();
+    }
+    let status = pty.wait_exit(&mut process.0);
+    let output = String::from_utf8_lossy(&pty.output);
+    assert!(status.success(), "{output}");
+    assert!(
+        output.contains("配置与收据已保存，本机配置检查通过"),
+        "{output}"
+    );
+    assert!(output.contains("steve hub restart --home"), "{output}");
+    assert!(!output.contains(sentinel) && !output.contains("OIDC client secret（不回显）"));
+    for (key, value) in [
+        ("STEVE_HOST", "0.0.0.0"),
+        ("STEVE_PORT", "8555"),
+        ("STEVE_ALLOW_ANY_HOST", "1"),
+        ("STEVE_PUBLIC_URL", "https://updated.example"),
+        (
+            "STEVE_PUBLIC_URLS",
+            "https://updated.example,https://alias.example/",
+        ),
+        ("STEVE_OIDC_ISSUER", "https://issuer.example/new/"),
+        ("STEVE_OIDC_CLIENT_ID", "updated-client"),
+    ] {
+        environment.insert(key.into(), value.into());
+    }
+    assert_eq!(
+        fs::read(home.join("steve.env")).unwrap(),
+        render(&environment)
+    );
+    let mut expected_receipt = original_receipt.clone();
+    expected_receipt["environment"] = serde_json::to_value(&environment).unwrap();
+    expected_receipt["files"]["steve.env"] = steve_install::common::digest(&home.join("steve.env"))
+        .unwrap()
+        .into();
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(home.join("setup.json")).unwrap()).unwrap();
+    assert_eq!(receipt, expected_receipt);
+    let protected = |mut tree: BTreeMap<PathBuf, TreeEntry>| {
+        tree.retain(|path, _| {
+            ![
+                ".steve/steve.env",
+                ".steve/setup.json",
+                ".steve/.setup.lock",
+                ".steve/releases/.release.lock",
+                ".steve/setup-reconfigure",
+            ]
+            .iter()
+            .any(|editable| path.starts_with(editable))
+        });
+        tree
+    };
+    let committed = installation_tree(&account);
+    assert_eq!(
+        protected(before),
+        protected(installation_tree(&account)),
+        "secret, database, identity, service and release links must be unchanged"
+    );
+    let archives: Vec<_> = fs::read_dir(home.join("setup-reconfigure"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(archives.len(), 1);
+    assert_ne!(archives[0].file_name().unwrap(), "pending");
+    assert_eq!(
+        fs::read(archives[0].join("before.env")).unwrap(),
+        original_env
+    );
+    assert_eq!(
+        fs::read(archives[0].join("before-setup.json")).unwrap(),
+        original_receipt_bytes
+    );
+    assert_eq!(
+        fs::metadata(archives[0].join("before.env"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let prompts = [
+        "监听地址（多个 IP:端口用逗号分隔） [0.0.0.0:8555]: ",
+        "浏览器访问地址 [https://updated.example]: ",
+        "OIDC issuer [https://issuer.example/new/]: ",
+        "OIDC client ID [updated-client]: ",
+    ];
+    let (mut pty, mut process) = start();
+    for prompt in prompts {
+        pty.wait_prompt(&mut process.0, prompt);
+        pty.master.write_all(b"\n").unwrap();
+    }
+    let status = pty.wait_exit(&mut process.0);
+    let output = String::from_utf8_lossy(&pty.output);
+    assert!(status.success(), "{output}");
+    assert!(output.contains("配置与收据已经一致，无需修改"), "{output}");
+    assert!(!output.contains("确认保存") && !output.contains(sentinel));
+    assert_eq!(
+        installation_tree(&account),
+        committed,
+        "no-op must not create another transaction or rewrite any file"
+    );
+    let (mut pty, mut process) = start();
+    pty.wait_prompt(&mut process.0, prompts[0]);
+    pty.master.write_all(b"127.0.0.1:9999\n").unwrap();
+    pty.wait_prompt(&mut process.0, prompts[1]);
+    let eof = pty.attributes().c_cc[libc::VEOF];
+    pty.master.write_all(&[eof]).unwrap();
+    let status = pty.wait_exit(&mut process.0);
+    let output = String::from_utf8_lossy(&pty.output);
+    assert_eq!(status.code(), Some(1), "{output}");
+    assert!(
+        output.contains("中断") && !output.contains(sentinel),
+        "{output}"
+    );
+    assert_eq!(
+        installation_tree(&account),
+        committed,
+        "EOF after editing a field must leave all installation bytes and modes unchanged"
+    );
+    assert!(
+        !forbidden.exists(),
+        "service or Keychain command was executed"
+    );
+    let calls = fs::read_to_string(calls).unwrap();
+    assert!(
+        calls
+            .lines()
+            .all(|call| matches!(call, "--build-info" | "--check-config")),
+        "{calls}"
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| *call == "--check-config")
+            .count(),
+        1,
+        "only the committed modification runs candidate validation"
     );
 }
