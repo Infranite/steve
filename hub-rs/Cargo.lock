@@ -3448,6 +3448,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "plist"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "740ebea15c5d1428f910cd1a5f52cebf8d25006245ed8ade92702f4943d91e07"
+dependencies = [
+ "base64 0.22.1",
+ "indexmap 2.14.2",
+ "quick-xml 0.38.4",
+ "serde",
+ "time",
+]
+
+[[package]]
 name = "poly1305"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3618,7 +3631,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3640,6 +3653,15 @@ name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
+
+[[package]]
+name = "quick-xml"
+version = "0.38.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "quick-xml"
@@ -3963,6 +3985,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -5092,6 +5115,7 @@ dependencies = [
  "steve-flow",
  "steve-github",
  "steve-i18n",
+ "steve-install",
  "steve-knowledge",
  "steve-mail",
  "steve-mcp",
@@ -5133,6 +5157,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "steve-install"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "plist",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "shlex",
+ "tempfile",
+ "url",
+ "uuid",
+ "wait-timeout",
+ "zeroize",
+]
+
+[[package]]
 name = "steve-keyhelper"
 version = "1.0.0"
 dependencies = [
@@ -5154,7 +5201,7 @@ dependencies = [
  "html2text",
  "pdf-extract",
  "pulldown-cmark",
- "quick-xml",
+ "quick-xml 0.42.0",
  "rusqlite",
  "rust-i18n",
  "serde",

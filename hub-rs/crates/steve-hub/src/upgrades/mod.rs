@@ -1,6 +1,8 @@
 //! Instance updates. The journal is deliberately outside SQLite: rollback must not erase its receipt.
+pub mod cli;
 mod client;
 pub mod install;
+pub mod maintenance;
 pub mod runner;
 pub mod signing;
 pub mod supervisor;

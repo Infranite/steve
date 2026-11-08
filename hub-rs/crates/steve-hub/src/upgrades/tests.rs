@@ -602,7 +602,7 @@ async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside
     assert_eq!(op.phase, "staging");
     let spec = op.runner.clone().unwrap();
     assert_eq!(spec.kind, "release_bundle");
-    assert!(spec.repo.is_empty() && spec.cargo.is_empty());
+    assert!(spec.repo.is_empty() && spec.cargo.is_empty() && spec.python.is_empty());
     assert!(spec.source.ends_with("/test/good.git"), "{}", spec.source);
     assert_eq!(
         spec.commit, None,
@@ -824,12 +824,11 @@ fn runner_op(u: &Updates, key: &str, commit: &str, python: &str) -> Operation {
     op
 }
 
-/// Signing an artifact passes only the installation password over stdin. No build or checkout
-/// command runs, and a changed release identity is rejected before the installer gets that secret.
+/// Native signing receives the installation password in-process after checking release trust.
+/// An unusable legacy interpreter field must never be consulted by this artifact path.
 #[test]
 #[cfg_attr(not(target_os = "macos"), ignore = "local signing needs macOS")]
 fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
-    let python = python().expect("Python is an installer prerequisite");
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let (u, _) = local(home.path(), repo.path(), String::new());
@@ -839,37 +838,32 @@ fn verified_bundle_preparation_needs_no_checkout_and_rechecks_trust() {
         .path()
         .join("releases")
         .join(format!("0.3.0-{}", op.id));
-    fs::create_dir_all(candidate.join("ops")).unwrap();
-    for name in ["schema_gate.py", "run.sh"] {
-        fs::write(candidate.join("ops").join(name), "").unwrap();
-    }
-    fs::write(
-        candidate.join("ops/local-release.py"),
-        r#"import sys,pathlib,os
-assert sys.argv[1]=='prepare-bundle'
-assert sys.argv[3:]==['--version','0.3.0','--commit','b'*40,'--keychain-pass-stdin']
-assert sys.stdin.readline().strip()=='0123456789abcdef'*4
-pathlib.Path(os.environ['STEVE_HOME'],'prepared').write_text(sys.argv[2])
-"#,
-    )
-    .unwrap();
+    fs::create_dir_all(&candidate).unwrap();
     let mut spec = op.runner.clone().unwrap();
     spec.commit = Some("b".repeat(40));
-    spec.python = python.clone();
+    spec.python = "/no-interpreter-is-needed".into();
     let source = spec.source.clone();
     let trust = runner::Trust {
         home: Some(home.path().into()),
-        python_dirs: vec![Path::new(&python).parent().unwrap().into()],
+        python_dirs: vec![],
         release: Box::new(move |_| Ok((source.clone(), "b".repeat(40)))),
     };
-    runner::prepare_bundle(&u, &mut op, &spec, &candidate, &trust).unwrap();
+    let prepare =
+        |home: &Path, bundle: &Path, version: &str, commit: &str, password: &str| -> Result<()> {
+            assert_eq!(version, "0.3.0");
+            assert_eq!(commit, "b".repeat(40));
+            assert_eq!(password, "0123456789abcdef".repeat(4));
+            fs::write(home.join("prepared"), bundle.to_string_lossy().as_bytes())?;
+            Ok(())
+        };
+    runner::prepare_bundle_with(&u, &mut op, &spec, &candidate, &trust, prepare).unwrap();
     assert_eq!(
         fs::read_to_string(home.path().join("prepared")).unwrap(),
         candidate.to_string_lossy()
     );
     fs::remove_file(home.path().join("prepared")).unwrap();
     spec.commit = Some("a".repeat(40));
-    assert!(runner::prepare_bundle(&u, &mut op, &spec, &candidate, &trust).is_err());
+    assert!(runner::prepare_bundle_with(&u, &mut op, &spec, &candidate, &trust, prepare).is_err());
     assert!(!home.path().join("prepared").exists());
 }
 
@@ -1158,7 +1152,7 @@ fn fake_python(dir: &Path, name: &str, code: i32) {
 
 #[cfg(unix)]
 #[test]
-fn an_unusable_python_is_not_offered_for_an_artifact_upgrade() {
+fn legacy_source_interpreter_discovery_rejects_unusable_interpreters() {
     let old = tempfile::tempdir().unwrap();
     let brew = tempfile::tempdir().unwrap();
     // An interpreter failing the installer prerequisites is never selected.

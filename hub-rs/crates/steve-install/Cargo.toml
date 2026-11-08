@@ -1,0 +1,31 @@
+[package]
+name = "steve-install"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Native Steve installation, service management and release maintenance"
+
+[[bin]]
+name = "steve"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "=1.0.104"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+sha2 = "=0.11.1"
+hex = "=0.4.3"
+uuid = { version = "=1.29.0", features = ["v4"] }
+zeroize = "=1.9.1"
+libc = "0.2"
+semver = "=1.0.28"
+url = "=2.5.8"
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
+regex = "=1.13.1"
+shlex = "=2.0.1"
+wait-timeout = "=0.2.1"
+plist = "=1.8.0"
+
+[dev-dependencies]
+tempfile = "=3.27.0"

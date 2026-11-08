@@ -20,10 +20,12 @@ spec.loader.exec_module(sync)
 API = "https://api.github.com/repos/Infranite/steve/"
 
 
-def bundle(manifest, change=None):
+def bundle(manifest, change=None, target="aarch64-apple-darwin"):
     files = {name: (b"#!/bin/sh\nexit 0\n" if name.startswith(("bin/", "ops/")) else b"fixture\n")
              for name in sync.REQUIRED}
     files["release.json"] = sync.json_bytes(dict(manifest, assets=[]))
+    files["bin/steve"] = (b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01" + b"\0" * 24
+                          if target == "aarch64-apple-darwin" else b"\x7fELF\x02\x01" + b"\0" * 12 + b"\x3e\x00" + b"\0" * 44)
     files["web/dist/release.json"] = sync.json_bytes({k: manifest[k] for k in ("version", "commit")})
     if change:
         change(files)
@@ -43,7 +45,7 @@ def bundle(manifest, change=None):
 class FakeGitHub:
     def __init__(self, version="1.2.3", commit="a" * 40, change_bundle=None):
         self.downloads, self.calls = {}, []
-        self.manifest = dict(format_version=1, cli_protocol=1, version=version, commit=commit,
+        self.manifest = dict(format_version=1, cli_protocol=2, version=version, commit=commit,
                              hub_version=version, web_version=version, api_protocol=1,
                              schema=dict(min_read=24, max_read=24, target=24), assets=[])
         self.release = dict(draft=False, prerelease=False, published_at="2026-11-08T00:00:00Z",
@@ -51,7 +53,7 @@ class FakeGitHub:
         self.objects = {API + "git/ref/tags/v" + version: {"object": {"type": "commit", "sha": commit}}}
         for target in sync.TARGETS:
             name = f"steve-{version}-{target}-installer.tar.gz"
-            data = bundle(self.manifest, change_bundle)
+            data = bundle(self.manifest, change_bundle, target)
             self.manifest["assets"].append(dict(target=target, name=name, size=len(data), sha256=sync.digest(data)))
             self.add_remote(name, data)
         self.refresh_manifest()
@@ -98,9 +100,9 @@ class SyncTests(unittest.TestCase):
         formula, lock = self.root / "Formula/steve.rb", self.root / sync.LOCK_NAME
         text = formula.read_text()
         self.assertIn('version "1.2.3"', text)
-        self.assertIn('depends_on "python@3.13"', text)
-        self.assertIn('#{libexec}/ops/steve.py', text)
-        self.assertIn('(bin/"steve").chmod 0755', text)
+        self.assertNotIn('depends_on "python', text)
+        self.assertNotIn('ops/steve.py', text)
+        self.assertIn('bin.install_symlink libexec/"bin/steve"', text)
         self.assertNotIn("post_install", text)
         self.assertNotIn("service do", text)
         self.assertNotIn("cargo", text)
@@ -135,7 +137,7 @@ class SyncTests(unittest.TestCase):
                 self.untouched()
 
     def test_protocol_and_complete_platform_contract_are_required(self):
-        cases = [lambda m: m.pop("cli_protocol"), lambda m: m.update(cli_protocol=2),
+        cases = [lambda m: m.pop("cli_protocol"), lambda m: m.update(cli_protocol=1),
                  lambda m: m.update(cli_protocol=True), lambda m: m.update(version="01.2.3"),
                  lambda m: m["assets"].pop(), lambda m: m["assets"].append(m["assets"][0]),
                  lambda m: m["assets"][1].update(target=m["assets"][0]["target"])]
@@ -190,10 +192,13 @@ class SyncTests(unittest.TestCase):
             manifest["commit"] = "b" * 40
             files["release.json"] = sync.json_bytes(manifest)
         def symlink(files):
-            item = tarfile.TarInfo("ops/steve.py")
+            item = tarfile.TarInfo("bin/steve")
             item.type, item.linkname = tarfile.SYMTYPE, "../../outside"
-            files["ops/steve.py"] = item
-        cases = [lambda files: files.pop("ops/steve.py"), wrong_identity, symlink,
+            files["bin/steve"] = item
+        cases = [lambda files: files.pop("bin/steve"), wrong_identity, symlink,
+                 lambda files: files.update({"bin/steve": b"#!/usr/bin/env python3\n"}),
+                 lambda files: files.update({"bin/steve": b"\x7fELF\x02\x01" + b"\0" * 12 + b"\xb7\x00"}),
+                 lambda files: files.update({"ops/upgrade.py": b"legacy bridge must stay in runtime\n"}),
                  lambda files: files.update({"../escape": b"outside"})]
         for change in cases:
             with self.subTest(change=change):
@@ -217,6 +222,15 @@ class SyncTests(unittest.TestCase):
                 self.assertEqual(before, {name: (self.root / name).read_bytes() for name in before})
         self.assertEqual(sync.sync(FakeGitHub(version="1.2.4", commit="b" * 40), self.root),
                          dict(changed=True, version="1.2.4"))
+
+    def test_a_legacy_protocol_one_lock_can_advance_to_a_new_native_release(self):
+        sync.sync(FakeGitHub(), self.root)
+        lock_path = self.root / sync.LOCK_NAME
+        lock = json.loads(lock_path.read_text())
+        lock["manifest"]["cli_protocol"] = 1
+        lock_path.write_bytes(sync.json_bytes(lock))
+        self.assertEqual(sync.sync(FakeGitHub(version="1.2.4"), self.root), dict(changed=True, version="1.2.4"))
+        self.assertEqual(json.loads(lock_path.read_text())["manifest"]["cli_protocol"], 2)
 
     def test_a_locally_changed_or_partially_installed_formula_is_not_overwritten(self):
         sync.sync(FakeGitHub(), self.root)

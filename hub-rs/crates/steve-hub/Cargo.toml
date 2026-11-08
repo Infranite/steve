@@ -13,6 +13,7 @@ name = "steve-hub"
 path = "src/main.rs"
 
 [dependencies]
+steve-install = { path = "../steve-install" }
 steve-store = { path = "../steve-store" }
 steve-auth = { path = "../steve-auth" }
 steve-mcp = { path = "../steve-mcp" }

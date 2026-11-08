@@ -18,11 +18,11 @@ brew install infranite/tap/steve
 steve setup
 ```
 
-The official [tap](https://github.com/Infranite/homebrew-tap) downloads a versioned installer archive, verifies its SHA256 and installs the complete precompiled Hub, Node, Web and CLI. It depends on a Homebrew-managed Python runtime, not a Steve compiler or source checkout. Supported Steve binaries are Apple Silicon macOS 14+ and Linux x86_64 with glibc 2.35+; Homebrew may require a newer OS under its own support policy. Intel macOS and Linux ARM binaries are not available.
+The official [tap](https://github.com/Infranite/homebrew-tap) downloads a versioned installer archive, verifies its SHA256 and installs the complete precompiled Hub, Node, Web and CLI. The CLI, setup, service management and signed-Hub artifact upgrade paths are native Rust; no Python interpreter, Steve compiler or source checkout is required. Supported Steve binaries are Apple Silicon macOS 14+ and Linux x86_64 with glibc 2.35+; Homebrew may require a newer OS under its own support policy. Intel macOS and Linux ARM binaries are not available.
 
-`steve setup` asks you to select Hub or Node; `steve setup hub` and `steve setup node --hub https://<hub>` select it explicitly. Default data directories are `~/.steve` and `~/.steve-node`, respectively; `--home <absolute-directory>` selects a separate directory. Setup copies the immutable package into a private `<home>/releases/<version>` directory before signing or registering anything. It refuses an unknown existing home or identity. Its private setup receipt allows the same interrupted setup to continue while retaining the completed configuration and keys.
+`steve setup` asks you to select Hub or Node; `steve setup hub` and `steve setup node --hub https://<hub>` select it explicitly. Default data directories are `~/.steve` and `~/.steve-node`, respectively; `--home <absolute-directory>` selects a separate directory. Setup copies the immutable package into a private `<home>/releases/<version>` directory before signing or registering anything. It refuses an unknown existing home or identity. Its private setup receipt allows the same interrupted setup to continue while retaining the completed configuration and keys. A package upgrade can resume an earlier setup that has not yet signed, paired or registered anything, after verifying its receipt and copied files and backing up the receipt; an existing identity is never replaced.
 
-For a Hub, the wizard asks for its public URL and your OIDC issuer, client ID and client secret. The secret is entered without echo and written to a private file; it is never a command-line argument. Register the displayed callback URL with your OIDC provider. The default listener is `127.0.0.1:8440`; a public HTTPS URL still requires your reverse proxy and network configuration. macOS setup prepares and signs the private Hub/helper copies, with system authorization prompts when required. Linux asks for a separate protected `0700` directory for its persistent vault keys. Setup does not enable development login or copy another harness's credentials.
+For a Hub, the wizard asks for its public URL and your OIDC issuer, client ID and client secret. The secret is entered without echo and written to a private file; it is never a command-line argument. Register the displayed callback URL with your OIDC provider. Setup first asks for the listening address, default `0.0.0.0:8440`, and writes the existing `STEVE_ALLOW_ANY_HOST=1` setting for a wildcard. `--listen <IP:port>` selects a different bind. The browser/OIDC callback URL is separate: `0.0.0.0` is not a browser destination. The default browser URL is local loopback; a public HTTPS URL still requires your reverse proxy and network configuration. Existing explicit configurations are retained. macOS setup prepares and signs the private Hub/helper copies, with system authorization prompts when required. Linux asks for a separate protected `0700` directory for its persistent vault keys. Setup does not enable development login or copy another harness's credentials.
 
 For a Node, supply a reachable HTTPS Hub and enter the code generated in **Devices → Add device**. Compare and confirm the displayed fingerprint in Devices before starting it. `--pin sha256:<verified-certificate-DER-hash>` is available for a certificate you have explicitly verified. Roots start empty, and registration does not move projects, grant directories or enable multi-Bot execution. See [pairing verification](#verify-and-recover-a-node).
 
@@ -52,7 +52,7 @@ brew uninstall steve
 
 Use `node` instead of `hub` on a separate Node and verify its sessions in Devices before stopping it. `uninstall` requires a known stopped service, also unloaded from launchd on macOS, and preserves a backup of its registration. It does not remove the private runtime, configuration, keys, data or Node pairing; keep those for diagnosis or a separately planned removal. Revoke a retired Node from Hub Devices when you intend to remove its access.
 
-Without Homebrew, use the verified installer archive from the same [Release](https://github.com/Infranite/steve/releases), then run `python3 <installer>/ops/steve.py setup`. The separate runtime archives and `steve-release.json` remain compatible with existing upgrade clients; Homebrew uses `steve-installer.json` and the installer archives.
+Without Homebrew, use the verified installer archive from the same [Release](https://github.com/Infranite/steve/releases), then run `<installer>/bin/steve setup`. The separate runtime archives and `steve-release.json` remain compatible with existing upgrade clients; Homebrew uses `steve-installer.json` and the installer archives.
 
 ## Diagnostic capture and queries
 
@@ -125,17 +125,17 @@ If deployment fails, stop only the newly installed service. Preserve its logs, i
 
 ## Hub and Node service commands
 
-Every platform bundle includes `ops/steve-service.py` (Python 3.9+). It manages user launchd jobs on macOS and user systemd units on Linux. Use a stable, verified extracted bundle and explicit data directories; Hub and Node must have separate homes. Linux requires a working user systemd session. macOS LaunchAgents run in the signed-in user's session. A new macOS Hub requires the explicit first-time Keychain setup below before `hub install`; the installer will refuse an unsigned home instead of silently selecting another vault backend.
+The native `steve` CLI manages user launchd jobs on macOS and user systemd units on Linux. A verified installer archive provides the same executable at `<installer>/bin/steve` when Homebrew is not used. Use a stable, verified extracted bundle and explicit data directories; Hub and Node must have separate homes. Linux requires a working user systemd session. macOS LaunchAgents run in the signed-in user's session. A new macOS Hub requires the explicit first-time Keychain setup below before `hub install`; the installer will refuse an unsigned home instead of silently selecting another vault backend.
 
 ```sh
-python3 <bundle>/ops/steve-service.py hub install --home "$HOME/.steve" --release <bundle>
-python3 <bundle>/ops/steve-service.py hub start --home "$HOME/.steve"
-python3 <bundle>/ops/steve-service.py hub status --home "$HOME/.steve"
-python3 <bundle>/ops/steve-service.py hub doctor --home "$HOME/.steve"
+steve hub install --home "$HOME/.steve" --release <bundle>
+steve hub start --home "$HOME/.steve"
+steve hub status --home "$HOME/.steve"
+steve hub doctor --home "$HOME/.steve"
 
-python3 <bundle>/ops/steve-service.py node install --home "$HOME/.steve-node" --release <bundle>
-python3 <bundle>/ops/steve-service.py node start --home "$HOME/.steve-node"
-python3 <bundle>/ops/steve-service.py node doctor --home "$HOME/.steve-node"
+steve node install --home "$HOME/.steve-node" --release <bundle>
+steve node start --home "$HOME/.steve-node"
+steve node doctor --home "$HOME/.steve-node"
 ```
 
 Both components also support `stop` and `restart`; these commands work without a reachable Hub. `install` is idempotent and does not start the service, create a pairing, change roots or permissions, install a keyhelper, or rewrite `steve.env`. Reinstalling the same configuration leaves a running process alone. `--label` selects a custom service label at initial installation; signed Hub installations retain the label and launch mode in `signing/identity.json`. Changed service definitions have a `.previous` backup. Service metadata is under `<home>/services/`; macOS logs are `<home>/logs/<component>.log`, and Linux logs are in `journalctl --user -u <label>`.
@@ -145,10 +145,10 @@ Both components also support `stop` and `restart`; these commands work without a
 To update a separate Node, verify and extract the new bundle, inspect the candidate, finish its sessions in Steve and stop its service, then switch its service definition:
 
 ```sh
-python3 <new-bundle>/ops/steve-service.py node doctor --home "$HOME/.steve-node" --release <new-bundle>
-python3 <new-bundle>/ops/steve-service.py node stop --home "$HOME/.steve-node"
-python3 <new-bundle>/ops/steve-service.py node update --home "$HOME/.steve-node" --release <new-bundle>
-python3 <new-bundle>/ops/steve-service.py node start --home "$HOME/.steve-node"
+steve node doctor --home "$HOME/.steve-node" --release <new-bundle>
+steve node stop --home "$HOME/.steve-node"
+steve node update --home "$HOME/.steve-node" --release <new-bundle>
+steve node start --home "$HOME/.steve-node"
 ```
 
 An update refuses a running or unknown service state before changing files. Optional `--wait <seconds>` waits only for the service to stop; it does not drain sessions, stop the service or kill a process. The executable path is pinned to the selected release, and `node/identity.key`, pairing, journals, `roots.json`, `policy.json` and `harness.json` remain in the same home. Keep the previous bundle. Selecting it uses the same stopped-service `update` procedure, but an older Node may reject a newer journal format; verify compatibility before rollback and verify the original fingerprint reconnects. Use **Settings → About** for Hub upgrades: direct service replacement would skip its drain, database backup and migration checks.
@@ -170,14 +170,14 @@ Initial installation uses a verified bundle:
 1. Select a stable release from [Infranite/steve Releases](https://github.com/Infranite/steve/releases) with a bundle for your OS and architecture. Verify its manifest and SHA256 before extracting it. If no matching release asset has been published, this installation path is not available yet.
 2. Install the extracted, paired Hub/Web bundle under `$STEVE_HOME/releases/<version>` and use the service `install --release` command to create `$STEVE_HOME/current`. A bundle contains `bin/steve-hub`, `bin/steve-node`, `bin/steve-keyhelper`, `web/dist`, `release.json` and the runtime `ops/` scripts; do not substitute a source checkout or mix separate frontend/backend builds.
 3. Configure `$STEVE_HOME/steve.env`, authentication, the optional public URL, and a supported persistent vault backend. New Linux installations can explicitly use `STEVE_VAULT_KEYSTORE=dir` with `STEVE_VAULT_KEY_DIR` outside `STEVE_HOME`, on protected storage owned by the Hub user with mode 0700, kept mounted across releases. The `file` backend is for isolated development and tests only. Existing macOS Keychain/helper installations use the local release runner below, which signs the downloaded Hub with the original certificate. Do not change their vault backend or namespace.
-4. Run `python3 <bundle>/ops/steve-service.py hub install --home "$STEVE_HOME" --release <bundle>`, then `hub start --home "$STEVE_HOME"`. New managed installations run `ops/run-managed.sh` as the foreground service process (`steve-hub --supervise`). An existing signed installation keeps `ops/run.sh` and its original launchd label. Use `hub doctor` and `/healthz` to verify startup.
+4. Run `steve hub install --home "$STEVE_HOME" --release <bundle>`, then `hub start --home "$STEVE_HOME"`. New managed installations run `ops/run-managed.sh` as the foreground service process (`steve-hub --supervise`). An existing signed installation keeps `ops/run.sh` and its original launchd label. Use `hub doctor` and `/healthz` to verify startup.
 
 
 For a new macOS home, extract the verified bundle under `$STEVE_HOME/releases/<version>` and run this once before step 4:
 
 ```sh
-STEVE_HOME="$HOME/.steve" python3 "$HOME/.steve/releases/<version>/ops/local-release.py" \
-  setup-keychain "$HOME/.steve/releases/<version>"
+"$HOME/.steve/releases/<version>/bin/steve-hub" --local-release \
+  setup-keychain "$HOME/.steve/releases/<version>" --home "$HOME/.steve"
 ```
 
 This explicit setup creates a private local signing certificate, signs the already compiled Hub and keyhelper, installs the helper once outside the release directory and writes `signing/identity.json`. It uses the system `security`, `codesign`, `openssl` and `zsh`, with no Cargo or npm. It refuses an existing helper, signing identity, current Hub or nonempty data directory; existing installations must use their preserved identity and the upgrade path. Repeating a completed setup is a no-op. An interrupted partial installation is left for inspection, never overwritten. The initial password file is private; the signed Hub moves it into the login Keychain and removes it on startup. The bundled helper remains untouched during every subsequent upgrade.
@@ -207,7 +207,7 @@ This path needs Python 3.9+, `codesign`, the original `signing/identity.json` an
 
 For the first upgrade from an older local runner, its legacy `build` call now downloads and prepares the release bundle by default; it does not compile. That older runner still needs Git and a Python with `tarfile.data_filter` to read the new tag's scripts once. The CLI supplies an isolated bare object cache; the older Settings path uses its configured checkout. Subsequent upgrades use the bundle path directly. A failed download or integrity check never falls back to an unrequested source build.
 
-The operation journal records download bytes, preparation, the actual drain snapshot, backup, probe, restart and health verification. Waiting for active work is a separate phase, not a simulated percentage. Its log is `$STEVE_HOME/logs/release/upgrade-<version>-<id>.log`. `ops/release.sh`, `local-release.py` and the runner share `releases/.release.lock`, so only one release can switch the installation at a time.
+The operation journal records download bytes, preparation, the actual drain snapshot, backup, probe, restart and health verification. Waiting for active work is a separate phase, not a simulated percentage. Its log is `$STEVE_HOME/logs/release/upgrade-<version>-<id>.log`. The native installer, runner and legacy maintenance scripts share the POSIX record lock `releases/.release.lock`, so only one release can switch the installation at a time.
 
 Eligible interrupted work resumes through task recovery. Paused work and pending approvals remain waiting; uncertain external delivery outcomes require reconciliation. Keep `$STEVE_HOME/updates` journals, backups and old versions until you accept the upgrade. After a healthy local deployment, pruning keeps the current and previous releases plus the newest three recognized release directories and eight pre-deployment database backups. UUID-named bundle directories are eligible only when their manifest identifies the same version; unrelated directories are not pruned.
 
@@ -216,11 +216,11 @@ Eligible interrupted work resumes through task recovery. Paused work and pending
 For a signed macOS Hub installed at the current OS account's default `~/.steve`, run the bundled CLI as that account, without `sudo`:
 
 ```sh
-python3 "$HOME/.steve/current/ops/upgrade.py" check
-python3 "$HOME/.steve/current/ops/upgrade.py" check --version X.Y.Z
-python3 "$HOME/.steve/current/ops/upgrade.py" request --version X.Y.Z --key upgrade-X.Y.Z
-python3 "$HOME/.steve/current/ops/upgrade.py" watch --timeout 600
-python3 "$HOME/.steve/current/ops/upgrade.py" status --operation <operation-uuid>
+steve upgrade check
+steve upgrade check --version X.Y.Z
+steve upgrade request --version X.Y.Z --key upgrade-X.Y.Z
+steve upgrade watch --timeout 600
+steve upgrade status --operation <operation-uuid>
 ```
 
 Replace `X.Y.Z` with the published stable version selected by `check`. The request returns a durable operation ID; submission is not completion. `watch` emits JSON when the journal changes and exits 0 only for `succeeded`, 1 for a failed or rolled-back operation, and 2 when its time limit expires. Closing the terminal does not stop launchd's runner. Repeat the same key to retrieve the same operation; a conflicting version or actor is refused. A lost runner is recorded as failed after its startup grace period, without repeating possibly executed work. Inspect the recorded log, current version and backup before using a new key.
@@ -229,7 +229,7 @@ The CLI derives the account and home from the OS user database, verifies the ins
 
 Release repository and port come from the installed service definition, overridden by literal `STEVE_UPDATE_REPOSITORY` and `STEVE_PORT` assignments in `steve.env`, matching `run.sh`. The CLI does not source that file; duplicates, expansions and shell expressions in these settings are refused. Defaults are `Infranite/steve` and port 8440. Caller environment overrides, Git configuration and credentials are not forwarded. Both the CLI and signed runner verify the published release identity; the runner verifies and prepares the actual bundle.
 
-New Hubs advertise `upgrade_runner` in `--build-info`; the CLI selects `release_bundle` without Git or a checkout. A legacy signed Hub without that field uses the compatibility path once. To bootstrap an installation predating this CLI, run `ops/upgrade.py` alongside `ops/steve-service.py` from a verified official release bundle. Unknown capabilities are refused rather than guessed from a version number. Linux managed Hubs and custom macOS homes retain their existing upgrade paths; `steve-service.py` install/status commands remain available on both platforms.
+New Hubs advertise `upgrade_runner.native=true` in `--build-info`. The native CLI verifies this capability before passing an internal command to the signed Hub, then uses `release_bundle` without Python, Git or a checkout. For an already-running older Hub, use its existing Settings upgrade path for the first transition: its old runner may still use its already-installed Python once. Runtime archives retain those legacy scripts and their frozen extraction contract; new native installer archives omit the Python scripts. The running new Hub and all subsequent native upgrades do not invoke them. Unknown capabilities are refused rather than guessed from a version number. Linux managed Hubs and custom macOS homes retain their existing upgrade paths; native `steve hub` and `steve node` lifecycle commands work on both platforms.
 
 ## Remote Nodes
 

@@ -23,10 +23,9 @@ MAX_BUNDLE = 2 * 1024 * 1024 * 1024
 MANIFEST_NAME = "steve-installer.json"
 LOCK_NAME = "steve-installer.lock.json"
 VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
-RUNTIME_OPS = {"run.sh", "run-managed.sh", "backup.sh", "schema_gate.py", "local-release.py",
-               "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh", "steve.py"}
-REQUIRED = {"release.json", "LICENSE", "bin/steve-hub", "bin/steve-node", "bin/steve-keyhelper",
-            "web/dist/index.html", "web/dist/release.json", *("ops/" + name for name in RUNTIME_OPS)}
+INSTALLER_OPS = {"run.sh", "run-managed.sh", "backup.sh", "sign-setup.sh", "release-lib.sh"}
+REQUIRED = {"release.json", "LICENSE", "bin/steve", "bin/steve-hub", "bin/steve-node", "bin/steve-keyhelper",
+            "web/dist/index.html", "web/dist/release.json", *("ops/" + name for name in INSTALLER_OPS)}
 
 
 class Refused(ValueError):
@@ -115,11 +114,14 @@ def asset_download_url(repository, asset):
     return f"https://api.github.com/repos/{repository}/releases/assets/{asset['id']}"
 
 
-def check_manifest(manifest):
+def check_manifest(manifest, *, legacy_lock=False):
     require(isinstance(manifest, dict), "installer manifest must be an object")
     require(type(manifest.get("format_version")) is int and manifest["format_version"] == 1,
             "unsupported installer manifest format")
-    require(type(manifest.get("cli_protocol")) is int and manifest["cli_protocol"] == 1,
+    # An already-installed v1 lock is evidence for monotonic version checks,
+    # never permission to publish a new Python-based installer.
+    require(type(manifest.get("cli_protocol")) is int
+            and manifest["cli_protocol"] in ({1, 2} if legacy_lock else {2}),
             "release does not provide CLI protocol 1")
     version = manifest.get("version", "")
     require(isinstance(version, str) and re.fullmatch(VERSION, version), "invalid stable release version")
@@ -199,7 +201,7 @@ def published_installer(client, repository):
     return manifest, remote
 
 
-def verify_bundle(path, manifest):
+def verify_bundle(path, manifest, target):
     seen, content, total = set(), {}, 0
     with tarfile.open(path, "r:gz") as archive:
         for member in archive:
@@ -221,6 +223,12 @@ def verify_bundle(path, manifest):
                 require(member.size > 0, "empty required installer file: " + name)
             if name.startswith(("bin/", "ops/")):
                 require(member.mode & 0o111, "installer runtime file is not executable: " + name)
+            if name == "bin/steve":
+                header = archive.extractfile(member).read(20)
+                native = ((target == "aarch64-apple-darwin" and header[:8] == b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01")
+                          or (target == "x86_64-unknown-linux-gnu" and header[:6] == b"\x7fELF\x02\x01"
+                              and header[18:20] == b"\x3e\x00"))
+                require(native, "installer CLI is not a native binary for " + target)
             if name in {"release.json", "web/dist/release.json"}:
                 require(member.size <= MAX_JSON, "installer metadata exceeds size limit")
                 content[name] = read_json(archive.extractfile(member).read())
@@ -262,7 +270,7 @@ def sync(client, root, repository="Infranite/steve"):
         require(lock.get("repository") == repository, "tap lock belongs to another upstream")
         require(digest(formula_path.read_bytes()) == lock.get("formula_sha256"),
                 "existing Formula differs from its verified lock")
-        old = check_manifest(lock["manifest"])
+        old = check_manifest(lock["manifest"], legacy_lock=True)
         before, after = (tuple(map(int, m["version"].split("."))) for m in (old, manifest))
         require(after >= before, "refusing to downgrade the tap")
         if after == before:
@@ -275,7 +283,7 @@ def sync(client, root, repository="Infranite/steve"):
             path = Path(tmp) / asset["name"]
             size, sha = client.download(asset_download_url(repository, remote[asset["name"]]), asset["size"], path)
             require(size == asset["size"] and sha == asset["sha256"], "installer download failed size/SHA256 verification")
-            verify_bundle(path, manifest)
+            verify_bundle(path, manifest, asset["target"])
     formula = render_formula(manifest, remote, repository, (root / "steve.rb.in").read_text())
     lock = json_bytes(dict(repository=repository, manifest=manifest, download_urls=download_urls,
                           formula_sha256=digest(formula)))
