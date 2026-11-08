@@ -1,1 +1,0 @@
-CI fetches its fixed nextest test runner through official GitHub asset routes with pinned size and SHA256 checks, avoiding stale download redirects. Tool installation verifies the archive and version before exposing the executable; test coverage and the release gate are unchanged.
