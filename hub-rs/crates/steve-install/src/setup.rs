@@ -19,32 +19,43 @@ pub struct Options {
 }
 
 trait Prompts {
+    fn interactive(&self) -> bool;
     fn line(&mut self, title: &str, default: Option<&str>, optional: bool) -> Result<String>;
     fn secret(&mut self, title: &str) -> Result<Zeroizing<String>>;
 }
 
 struct Terminal;
 impl Prompts for Terminal {
+    fn interactive(&self) -> bool {
+        io::stdin().is_terminal()
+    }
+
     fn line(&mut self, title: &str, default: Option<&str>, optional: bool) -> Result<String> {
-        print!(
-            "{title}{}: ",
-            default.map(|v| format!(" [{v}]")).unwrap_or_default()
-        );
-        io::stdout().flush()?;
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line)? == 0 {
-            bail!("初始化已中断；已完成步骤保留，可稍后继续。");
+        loop {
+            print!(
+                "{title}{}: ",
+                default.map(|v| format!(" [{v}]")).unwrap_or_default()
+            );
+            io::stdout().flush()?;
+            let mut line = String::new();
+            if io::stdin().read_line(&mut line)? == 0 {
+                bail!("初始化已中断；已完成步骤保留，可稍后继续。");
+            }
+            let answer = line.trim();
+            let answer = if answer.is_empty() {
+                default.unwrap_or("")
+            } else {
+                answer
+            };
+            if (!optional && answer.is_empty()) || answer.contains(['\n', '\r', '\0']) {
+                if self.interactive() {
+                    eprintln!("需要填写有效值，请重新输入当前字段。");
+                    continue;
+                }
+                bail!("需要填写有效值；已完成的步骤保留。");
+            }
+            return Ok(answer.into());
         }
-        let answer = line.trim();
-        let answer = if answer.is_empty() {
-            default.unwrap_or("")
-        } else {
-            answer
-        };
-        if (!optional && answer.is_empty()) || answer.contains(['\n', '\r', '\0']) {
-            bail!("需要填写有效值；已完成的步骤保留。");
-        }
-        Ok(answer.into())
     }
     fn secret(&mut self, title: &str) -> Result<Zeroizing<String>> {
         use std::os::fd::AsRawFd;
@@ -122,6 +133,139 @@ impl Prompts for Terminal {
         }
         Ok(value)
     }
+}
+
+/// Only retry validation of a value read from an interactive prompt. Cancellation,
+/// EOF and I/O errors come from `line` and must leave the wizard immediately.
+fn ask_value<T>(
+    input: &mut dyn Prompts,
+    title: &str,
+    default: Option<&str>,
+    optional: bool,
+    validate: impl Fn(&str) -> Result<T>,
+) -> Result<T> {
+    loop {
+        let value = input.line(title, default, optional)?;
+        match validate(&value) {
+            Ok(value) => return Ok(value),
+            Err(error) if input.interactive() => {
+                eprintln!("{error}；请重新输入当前字段。");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn listen_address(value: &str) -> Result<SocketAddr> {
+    let address: SocketAddr = value
+        .trim()
+        .parse()
+        .context("监听地址应为 IP:端口，例如 0.0.0.0:8440 或 [::1]:8440")?;
+    if address.port() == 0 {
+        bail!("服务监听端口不能是 0");
+    }
+    Ok(address)
+}
+
+fn node_hub_url(value: &str) -> Result<String> {
+    let hub = browser_url(value, "Hub")?;
+    if !hub.starts_with("https://") {
+        bail!("Node 配对需要 HTTPS Hub");
+    }
+    Ok(hub)
+}
+
+fn setup_role(value: &str, options: &Options) -> Result<String> {
+    let role = value.trim().to_lowercase();
+    if !matches!(role.as_str(), "hub" | "node") {
+        bail!("请选择 hub 或 node");
+    }
+    if role == "hub" && (options.hub.is_some() || options.pin.is_some()) {
+        bail!("--hub/--pin 只用于 Node，请选择 node");
+    }
+    if role == "node" && options.listen.is_some() {
+        bail!("--listen 只用于 Hub，请选择 hub");
+    }
+    Ok(role)
+}
+
+/// Reject invalid explicit arguments before prompting, inspecting a bundle or creating a home.
+fn validate_options(options: &Options) -> Result<()> {
+    if let Some(role) = &options.role {
+        setup_role(role, options)?;
+    }
+    if let Some(listen) = &options.listen {
+        listen_address(listen)?;
+        if options.hub.is_some() || options.pin.is_some() {
+            bail!("--listen 只用于 Hub，不能与 Node 的 --hub/--pin 一起使用");
+        }
+    }
+    if let Some(hub) = &options.hub {
+        node_hub_url(hub)?;
+    }
+    if options.pin.as_ref().is_some_and(|v| {
+        !v.starts_with("sha256:") || v.len() != 71 || !v[7..].bytes().all(|b| b.is_ascii_hexdigit())
+    }) {
+        bail!("--pin 需要 sha256: 加 64 位证书指纹");
+    }
+    Ok(())
+}
+
+fn modified_setup_file(name: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "初始化文件已被修改：{name}；setup 只续接未完成的初始化，不会覆盖现有配置。请保留当前文件、setup.json 和身份密钥；先核对修改，并用对应角色的 status/doctor 确认安装进度。只有原服务已注册且配置核验通过时才显式重启；重启不能补完初始化。不要删除收据或重置数据目录来绕过检查。"
+    )
+}
+
+fn completion_lines(
+    role: &str,
+    home: &Path,
+    environment: &Value,
+    paired: bool,
+) -> Result<Vec<String>> {
+    let quoted_home = shell_quote(home.to_str().context("home 路径必须为 UTF-8")?)?;
+    let mut lines = vec![format!(
+        "{role} 已配置并注册服务；本次 setup 未启动或重启服务。数据目录：{}",
+        home.display()
+    )];
+    if role == "hub" {
+        let host = environment["STEVE_HOST"]
+            .as_str()
+            .context("原监听地址缺失")?
+            .parse()?;
+        let port = environment["STEVE_PORT"]
+            .as_str()
+            .context("原监听端口缺失")?
+            .parse()?;
+        lines.push(format!("监听地址：{}", SocketAddr::new(host, port)));
+        lines.push(format!(
+            "浏览器地址（配置值，尚未验证可达）：{}",
+            environment["STEVE_PUBLIC_URL"].as_str().unwrap_or("")
+        ));
+    } else if paired {
+        lines.push(
+            "Node 配对信息已保存；请先在 Hub Devices 核对并确认完整指纹，再启动。初始 roots 为空。"
+                .into(),
+        );
+    } else {
+        lines.push("Node 尚未配对，初始 roots 为空。请先准备可达的 HTTPS Hub，再继续配对：".into());
+        lines.push(format!("steve setup node --home {quoted_home}"));
+    }
+    lines.push(if role == "node" {
+        "完成配对及 Hub 确认后启动：".into()
+    } else {
+        "启动服务：".into()
+    });
+    lines.push(format!("steve {role} start --home {quoted_home}"));
+    lines.push("查看本机服务状态与安装检查：".into());
+    lines.push(format!("steve {role} status --home {quoted_home}"));
+    lines.push(format!("steve {role} doctor --home {quoted_home}"));
+    if role == "hub" {
+        lines.push("下一步：启动后在上述浏览器地址完成 OIDC 登录，并用该 Hub 的 /healthz 核验运行版本。服务启动和本机安装检查不代表登录已通过。".into());
+    } else {
+        lines.push("下一步：在 Hub Devices 核验同一设备已连接；本机进程运行不代表已连接，也不代表可以执行任务。".into());
+    }
+    Ok(lines)
 }
 
 pub fn browser_url(value: &str, label: &str) -> Result<String> {
@@ -334,7 +478,7 @@ impl<'a> Wizard<'a> {
             if exists(&path) {
                 owned(&path, false)?;
                 if digest(&path)? != value.as_str().context("收据摘要无效")? {
-                    bail!("初始化文件已被修改：{name}");
+                    return Err(modified_setup_file(name));
                 }
             }
         }
@@ -399,7 +543,7 @@ impl<'a> Wizard<'a> {
         if exists(&path) {
             owned(&path, false)?;
             if digest(&path)? != expected {
-                bail!("文件已修改，初始化不会覆盖：{name}");
+                return Err(modified_setup_file(name));
             }
         } else {
             let bytes = data.context("初始化中断在写文件前，需要原输入才能继续")?;
@@ -528,7 +672,7 @@ impl<'a> Wizard<'a> {
         if self.record["environment"].is_object() {
             let env = self.record["environment"].clone();
             if let Some(listen) = listen {
-                let selected: SocketAddr = listen.parse().context("监听地址应为 IP:端口")?;
+                let selected = listen_address(listen)?;
                 let saved_ip: std::net::IpAddr = env["STEVE_HOST"]
                     .as_str()
                     .context("原监听地址缺失")?
@@ -546,15 +690,15 @@ impl<'a> Wizard<'a> {
             return Ok(env);
         }
         let bind = match listen {
-            Some(v) => v.to_string(),
-            None => self.input.line("监听地址", Some("0.0.0.0:8440"), false)?,
+            Some(value) => listen_address(value)?,
+            None => ask_value(
+                self.input,
+                "监听地址",
+                Some("0.0.0.0:8440"),
+                false,
+                listen_address,
+            )?,
         };
-        let bind: SocketAddr = bind
-            .parse()
-            .context("监听地址应为 IP:端口，例如 0.0.0.0:8440")?;
-        if bind.port() == 0 {
-            bail!("服务监听端口不能是 0");
-        }
         println!(
             "监听地址决定哪些网络可连接；浏览器地址用于登录及 OIDC 回调。0.0.0.0 不能用作回调地址。"
         );
@@ -567,13 +711,14 @@ impl<'a> Wizard<'a> {
         } else {
             None
         };
-        let public = browser_url(
-            &self
-                .input
-                .line("浏览器访问地址", default_url.as_deref(), false)?,
-            "访问地址",
+        let public = ask_value(
+            self.input,
+            "浏览器访问地址",
+            default_url.as_deref(),
+            false,
+            |value| browser_url(value, "访问地址"),
         )?;
-        let issuer = oidc_issuer_url(&self.input.line("OIDC issuer", None, false)?)?;
+        let issuer = ask_value(self.input, "OIDC issuer", None, false, oidc_issuer_url)?;
         let client = self.input.line("OIDC client ID", None, false)?;
         println!("请在 OIDC 提供方登记回调：{public}/auth/callback");
         let secret_path = self.home.join("secrets/oidc-client-secret");
@@ -627,25 +772,18 @@ impl<'a> Wizard<'a> {
 }
 
 pub fn run(source: &Path, options: Options) -> Result<()> {
+    validate_options(&options)?;
     let mut input = Terminal;
-    let role = match options.role {
-        Some(value) => value,
-        None => input.line("安装角色（hub / node）", Some("hub"), false)?,
-    }
-    .to_lowercase();
-    if !matches!(role.as_str(), "hub" | "node")
-        || (role == "hub" && (options.hub.is_some() || options.pin.is_some()))
-    {
-        bail!("请选择 hub 或 node；--hub/--pin 只用于 Node");
-    }
-    if role == "node" && options.listen.is_some() {
-        bail!("--listen 只用于 Hub");
-    }
-    if options.pin.as_ref().is_some_and(|v| {
-        !v.starts_with("sha256:") || v.len() != 71 || !v[7..].bytes().all(|b| b.is_ascii_hexdigit())
-    }) {
-        bail!("--pin 需要 sha256: 加 64 位证书指纹");
-    }
+    let role = match options.role.as_deref() {
+        Some(value) => setup_role(value, &options)?,
+        None => ask_value(
+            &mut input,
+            "安装角色（hub / node）",
+            Some("hub"),
+            false,
+            |value| setup_role(value, &options),
+        )?,
+    };
     let home = canonical(&options.home.unwrap_or(user_home()?.join(if role == "hub" {
         ".steve"
     } else {
@@ -738,20 +876,26 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 bail!("Node 配对状态无法确认");
             }
         } else {
-            let chosen = match options
+            let hub = match options
                 .hub
                 .or_else(|| wizard.record["hub_url"].as_str().map(str::to_string))
             {
-                Some(url) => url,
-                None => wizard
-                    .input
-                    .line("Hub HTTPS URL（留空稍后配对）", None, true)?,
+                Some(url) => node_hub_url(&url)?,
+                None => ask_value(
+                    wizard.input,
+                    "Hub HTTPS URL（留空稍后配对）",
+                    None,
+                    true,
+                    |value| {
+                        if value.is_empty() {
+                            Ok(String::new())
+                        } else {
+                            node_hub_url(value)
+                        }
+                    },
+                )?,
             };
-            if !chosen.is_empty() {
-                let hub = browser_url(&chosen, "Hub")?;
-                if !hub.starts_with("https://") {
-                    bail!("Node 配对需要 HTTPS Hub");
-                }
+            if !hub.is_empty() {
                 if wizard.record["pair_started"] != true && exists(&home.join("node/identity.key"))
                 {
                     bail!("已有 Node 身份不属于本次初始化");
@@ -799,27 +943,14 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             .push("installed".into());
     }
     wizard.save()?;
-    println!(
-        "{role} 已配置并注册服务；本次 setup 未启动或重启服务。数据目录：{}",
-        home.display()
-    );
-    if role == "node" {
-        println!("请先在 Hub Devices 确认同一指纹，再启动；初始 roots 为空。");
-    } else {
-        println!(
-            "监听地址：{}；浏览器地址：{}",
-            wizard.record["environment"]["STEVE_HOST"]
-                .as_str()
-                .unwrap_or(""),
-            wizard.record["environment"]["STEVE_PUBLIC_URL"]
-                .as_str()
-                .unwrap_or("")
-        );
+    for line in completion_lines(
+        &role,
+        &home,
+        &wizard.record["environment"],
+        home.join("node/node.json").is_file(),
+    )? {
+        println!("{line}");
     }
-    println!(
-        "启动：steve {role} start --home {}",
-        shell_quote(home.to_str().context("home 路径必须为 UTF-8")?)?
-    );
     Ok(())
 }
 
@@ -828,9 +959,12 @@ mod tests {
     use super::*;
     struct Answers(Vec<String>);
     impl Prompts for Answers {
-        fn line(&mut self, _: &str, default: Option<&str>, _: bool) -> Result<String> {
+        fn interactive(&self) -> bool {
+            true
+        }
+        fn line(&mut self, _: &str, _: Option<&str>, _: bool) -> Result<String> {
             if self.0.is_empty() {
-                return Ok(default.unwrap_or("").into());
+                bail!("fixture input exhausted");
             }
             Ok(self.0.remove(0))
         }
@@ -840,6 +974,162 @@ mod tests {
     }
     fn meta(version: &str) -> Value {
         json!({"version":version,"commit":"a".repeat(40)})
+    }
+    #[test]
+    fn interactive_values_retry_but_end_of_input_is_not_retried() {
+        let mut input = Answers(vec!["wrong-role".into(), "node".into()]);
+        assert_eq!(
+            ask_value(&mut input, "role", None, false, |value| {
+                setup_role(value, &Options::default())
+            })
+            .unwrap(),
+            "node"
+        );
+        let mut input = Answers(vec!["0.0.0.0:0".into(), "[::1]:8440".into()]);
+        assert_eq!(
+            ask_value(&mut input, "listen", None, false, listen_address)
+                .unwrap()
+                .to_string(),
+            "[::1]:8440"
+        );
+        let mut input = Answers(vec![
+            "http://localhost:8440".into(),
+            "https://hub.example/".into(),
+        ]);
+        assert_eq!(
+            ask_value(&mut input, "hub", None, true, node_hub_url).unwrap(),
+            "https://hub.example"
+        );
+        let mut input = Answers(vec!["not-a-url".into()]);
+        let error = ask_value(&mut input, "issuer", None, false, oidc_issuer_url).unwrap_err();
+        assert_eq!(error.to_string(), "fixture input exhausted");
+    }
+
+    #[test]
+    fn noninteractive_invalid_values_and_input_errors_never_retry() {
+        struct Input {
+            interactive: bool,
+            fail_read: bool,
+            reads: usize,
+        }
+        impl Prompts for Input {
+            fn interactive(&self) -> bool {
+                self.interactive
+            }
+            fn line(&mut self, _: &str, _: Option<&str>, _: bool) -> Result<String> {
+                self.reads += 1;
+                assert_eq!(self.reads, 1, "input must not be retried");
+                if self.fail_read {
+                    return Err(
+                        io::Error::new(io::ErrorKind::Interrupted, "input interrupted").into(),
+                    );
+                }
+                Ok("invalid-url".into())
+            }
+            fn secret(&mut self, _: &str) -> Result<Zeroizing<String>> {
+                unreachable!()
+            }
+        }
+        for (interactive, fail_read) in [(false, false), (true, true)] {
+            let mut input = Input {
+                interactive,
+                fail_read,
+                reads: 0,
+            };
+            let error = ask_value(&mut input, "issuer", None, false, oidc_issuer_url).unwrap_err();
+            assert_eq!(input.reads, 1);
+            if fail_read {
+                assert!(error.downcast_ref::<io::Error>().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_invalid_options_fail_before_creating_a_home_or_reading_a_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        for (mut options, expected) in [
+            (
+                Options {
+                    listen: Some("localhost:8440".into()),
+                    ..Default::default()
+                },
+                "监听地址应为",
+            ),
+            (
+                Options {
+                    listen: Some("127.0.0.1:0".into()),
+                    ..Default::default()
+                },
+                "端口不能是 0",
+            ),
+            (
+                Options {
+                    hub: Some("http://localhost:8440".into()),
+                    ..Default::default()
+                },
+                "Node 配对需要 HTTPS",
+            ),
+            (
+                Options {
+                    pin: Some("sha256:short".into()),
+                    ..Default::default()
+                },
+                "--pin 需要",
+            ),
+            (
+                Options {
+                    role: Some("hub".into()),
+                    hub: Some("https://hub.example".into()),
+                    ..Default::default()
+                },
+                "--hub/--pin 只用于 Node",
+            ),
+            (
+                Options {
+                    role: Some("node".into()),
+                    listen: Some("0.0.0.0:8440".into()),
+                    ..Default::default()
+                },
+                "--listen 只用于 Hub",
+            ),
+        ] {
+            let home = temp.path().join("must-not-exist");
+            options.home = Some(home.clone());
+            let error = run(&temp.path().join("missing-bundle"), options).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+            assert!(!home.exists());
+        }
+    }
+
+    #[test]
+    fn completion_distinguishes_configuration_from_runtime_and_unpaired_nodes() {
+        let home = Path::new("/tmp/steve user's data");
+        for (host, address) in [("0.0.0.0", "0.0.0.0:8440"), ("::1", "[::1]:8440")] {
+            let env = json!({"STEVE_HOST":host,"STEVE_PORT":"8440","STEVE_PUBLIC_URL":"https://hub.example"});
+            let lines = completion_lines("hub", home, &env, false).unwrap();
+            assert!(lines.contains(&format!("监听地址：{address}")));
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("配置值，尚未验证可达"))
+            );
+            for action in ["start", "status", "doctor"] {
+                assert!(lines.contains(&format!(
+                    r"steve hub {action} --home '/tmp/steve user'\''s data'"
+                )));
+            }
+            assert!(lines.iter().any(|line| line.contains("完成 OIDC 登录")));
+        }
+        let lines = completion_lines("node", home, &Value::Null, false)
+            .unwrap()
+            .join("\n");
+        assert!(lines.contains("Node 尚未配对"));
+        assert!(lines.contains("steve setup node --home"));
+        assert!(!lines.contains("完整指纹"));
+        let lines = completion_lines("node", home, &Value::Null, true)
+            .unwrap()
+            .join("\n");
+        assert!(lines.contains("核对并确认完整指纹"));
     }
     #[test]
     fn setup_urls_reject_listener_addresses_plain_remote_http_and_ambiguous_urls() {
@@ -884,8 +1174,13 @@ mod tests {
         wizard.owned_file("config", Some(b"initial")).unwrap();
         drop(wizard);
         fs::write(home.join("config"), "changed").unwrap();
-        assert!(Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input).is_err());
+        let receipt = fs::read(home.join("setup.json")).unwrap();
+        let error = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("setup 只续接"));
         assert_eq!(fs::read(home.join("config")).unwrap(), b"changed");
+        assert_eq!(fs::read(home.join("setup.json")).unwrap(), receipt);
     }
     #[test]
     fn interrupted_unsigned_setup_can_resume_after_a_package_upgrade() {

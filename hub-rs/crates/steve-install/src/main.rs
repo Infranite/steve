@@ -1,8 +1,11 @@
 use anyhow::{Context, Result, bail};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use steve_install::{common, setup};
 
-const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n\nsetup 默认监听 0.0.0.0:8440，浏览器/OIDC 地址单独配置。\nsetup 注册服务，本次不启动服务；不导入登录凭据或授予 Node 工作目录。\n";
+mod output;
+
+const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL] [--json]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n\nsetup 默认监听 0.0.0.0:8440，浏览器/OIDC 地址单独配置。\nsetup 注册服务，本次不启动服务；不导入登录凭据或授予 Node 工作目录。\n服务命令在终端显示摘要；管道或 --json 保持 JSON 输出。\n";
 
 fn option(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
     let mut found = None;
@@ -106,6 +109,12 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             {
                 bail!("unknown service action");
             }
+            let json = if let Some(at) = args.iter().position(|v| v == "--json") {
+                args.remove(at);
+                true
+            } else {
+                false
+            };
             let home = role_home(&command, option(&mut args, "--home")?)?;
             let label = option(&mut args, "--label")?;
             let release = option(&mut args, "--release")?.map(PathBuf::from);
@@ -119,7 +128,14 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             let mut service =
                 steve_install::service::Service::new(&command, &home, label.as_deref())?;
             let report = service.dispatch(&action, release.as_deref(), wait)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            if json || !std::io::stdout().is_terminal() {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!(
+                    "{}",
+                    output::service(&command, &action, &home, label.as_deref(), &report)
+                );
+            }
             Ok(if report["ok"] == false { 1 } else { 0 })
         }
         "upgrade" => {
