@@ -106,12 +106,16 @@ class SyncTests(unittest.TestCase):
         self.assertNotIn("post_install", text)
         self.assertNotIn("service do", text)
         self.assertNotIn("cargo", text)
+        platforms = {"aarch64-apple-darwin": "macos", "x86_64-unknown-linux-gnu": "linux"}
         for asset in github.manifest["assets"]:
-            self.assertIn(asset["sha256"], text)
+            block = text.split(f'  on_{platforms[asset["target"]]} do\n', 1)[1].split("\n  end", 1)[0]
             metadata = next(a for a in github.release["assets"] if a["name"] == asset["name"])
             url = API + f"releases/assets/{metadata['id']}"
-            self.assertIn(url, text)
+            self.assertIn(f'url "{url}",', block)
+            self.assertIn(f'mirror "{metadata["browser_download_url"]}"', block)
+            self.assertIn(f'sha256 "{asset["sha256"]}"', block)
             self.assertEqual(json.loads(lock.read_text())["download_urls"][asset["target"]], url)
+        self.assertEqual(text.count('    mirror "'), 2)
         self.assertEqual(text.count('headers: ["Accept: application/octet-stream"]'), 2)
         self.assertNotIn("Authorization", text)
         before = (formula.read_bytes(), lock.read_bytes(), formula.stat().st_mtime_ns, lock.stat().st_mtime_ns)
