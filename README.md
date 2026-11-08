@@ -278,7 +278,9 @@ steve hub start       # on the Hub
 steve node start      # on a separate Node, after fingerprint confirmation
 ```
 
-Homebrew verifies and installs the published native binaries; no Python runtime, Steve source checkout, Cargo or npm build is needed. Setup preserves existing data and does not import harness logins. Models and their ACP adapters remain optional, separately configured tools. See [deployment](docs/deployment.md#homebrew-installation) for supported platforms, configuration, lifecycle commands and upgrades. The source-build instructions below are for development.
+Service commands show a readable summary in a terminal. Use `steve hub status --json` or `steve node status --json` for machine-readable output; piping a service command also retains JSON output. The summary separates the service process, configured build and runtime identity that still needs verification. `doctor` checks the local installation and service configuration; verify the Hub's `/healthz`, browser login and Node connection separately.
+
+Homebrew verifies and installs the published native binaries; no Python runtime, Steve source checkout, Cargo or npm build is needed. Setup preserves existing data and does not import harness logins. Running Agent tasks additionally requires the selected harness and its ACP adapter on the Node that executes them; the service and diagnostics remain available without these tools. See [deployment](docs/deployment.md#homebrew-installation) for supported platforms, configuration, lifecycle commands and upgrades. The source-build instructions below are for development.
 
 ### Requirements
 
@@ -287,7 +289,7 @@ Homebrew verifies and installs the published native binaries; no Python runtime,
 | **Homebrew install** | Homebrew; no Python runtime dependency. Apple Silicon macOS, or Linux x86_64 with glibc 2.35+. Homebrew's own OS support policy also applies. |
 | **Source build** | Git, stable Rust/Cargo, Node.js 24 LTS with npm |
 | **Run** | Apple Silicon macOS 14+, or Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+, Debian 12+). Windows isn't supported. |
-| **Agents** *(optional)* | [Claude Code](https://docs.anthropic.com/claude-code) and/or [Codex](https://github.com/openai/codex), installed and signed in |
+| **Agent execution** | The selected [Claude Code](https://docs.anthropic.com/claude-code) or [Codex](https://github.com/openai/codex) harness, its ACP adapter and authentication on the executing Node |
 
 ### 1. Build from source *(development)*
 
@@ -299,9 +301,9 @@ npm run build:web
 cargo build --locked --manifest-path hub-rs/Cargo.toml -p steve-hub
 ```
 
-### 2. Install the agent adapters *(optional)*
+### 2. Install the adapters for the harnesses you use
 
-Steve talks to harnesses through their ACP adapters. It finds them in the global npm root:
+Steve talks to harnesses through their ACP adapters. These are required for Agent execution with the selected harness, but are not required to start the Hub or open its settings. Install only the adapters you use on each executing Node. The current implementation finds them in the global npm root:
 
 ```sh
 npm install -g @agentclientprotocol/claude-agent-acp @zed-industries/codex-acp

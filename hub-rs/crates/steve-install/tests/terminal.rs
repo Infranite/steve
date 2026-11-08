@@ -16,6 +16,7 @@ struct Pty {
     master: File,
     slave: File,
     output: Vec<u8>,
+    prompt_cursor: usize,
 }
 
 impl Pty {
@@ -39,6 +40,7 @@ impl Pty {
             master: unsafe { File::from_raw_fd(master) },
             slave: unsafe { File::from_raw_fd(slave) },
             output: Vec::new(),
+            prompt_cursor: 0,
         };
         for fd in [master, slave] {
             // SAFETY: keep fixture-only descriptors out of the executed CLI; its stdio
@@ -97,7 +99,11 @@ impl Pty {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             self.drain();
-            if String::from_utf8_lossy(&self.output).contains(prompt) {
+            if let Some(offset) = self.output[self.prompt_cursor..]
+                .windows(prompt.len())
+                .position(|bytes| bytes == prompt.as_bytes())
+            {
+                self.prompt_cursor += offset + prompt.len();
                 return;
             }
             assert!(
@@ -212,14 +218,23 @@ fn actual_setup_ctrl_c_restores_echo_and_never_persists_the_secret() {
         .process_group(0);
     let mut process = Process(command.spawn().unwrap());
     for (prompt, answer) in [
-        ("浏览器访问地址", "\n"),
-        ("OIDC issuer", "https://issuer.example\n"),
-        ("OIDC client ID", "terminal-client\n"),
+        (
+            "浏览器访问地址 [http://127.0.0.1:8440]: ",
+            "http://0.0.0.0:8440\n",
+        ),
+        (
+            "浏览器访问地址 [http://127.0.0.1:8440]: ",
+            "https://hub.example/\n",
+        ),
+        ("OIDC issuer: ", "http://192.0.2.20/issuer/\n"),
+        ("OIDC issuer: ", "https://issuer.example/tenant/\n"),
+        ("OIDC client ID: ", "\n"),
+        ("OIDC client ID: ", "terminal-client\n"),
     ] {
         pty.wait_prompt(&mut process.0, prompt);
         pty.master.write_all(answer.as_bytes()).unwrap();
     }
-    pty.wait_prompt(&mut process.0, "OIDC client secret（不回显）");
+    pty.wait_prompt(&mut process.0, "OIDC client secret（不回显）: ");
     let hidden = pty.attributes();
     assert_eq!(hidden.c_lflag & (libc::ECHO | libc::ICANON | libc::ISIG), 0);
     let sentinel = "terminal-secret-must-never-appear-7f0a34";
@@ -237,6 +252,13 @@ fn actual_setup_ctrl_c_restores_echo_and_never_persists_the_secret() {
         "terminal input controls must be restored"
     );
     let output = String::from_utf8_lossy(&pty.output);
+    for prompt in [
+        "浏览器访问地址 [http://127.0.0.1:8440]: ",
+        "OIDC issuer: ",
+        "OIDC client ID: ",
+    ] {
+        assert_eq!(output.matches(prompt).count(), 2, "{output}");
+    }
     assert!(output.contains("secret 输入已中断"), "{output}");
     assert!(
         !output.contains(sentinel),
@@ -266,4 +288,106 @@ fn actual_setup_ctrl_c_restores_echo_and_never_persists_the_secret() {
     }
     assert!(!account.join("Library/LaunchAgents").exists());
     assert!(!account.join(".config/systemd/user").exists());
+}
+
+fn terminal_output(command: &mut Command) -> (ExitStatus, String) {
+    let mut pty = Pty::open().unwrap();
+    let mut process = Process(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap(),
+    );
+    let status = pty.wait_exit(&mut process.0);
+    (
+        status,
+        String::from_utf8(pty.output).unwrap().replace("\r\n", "\n"),
+    )
+}
+
+#[test]
+fn service_output_uses_stdout_terminal_and_preserves_json_for_automation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let account = temporary.path().join("account");
+    let bin = temporary.path().join("bin");
+    fs::create_dir_all(&account).unwrap();
+    fs::create_dir(&bin).unwrap();
+    let called = temporary.path().join("manager-calls");
+    let called = steve_install::common::shell_quote(called.to_str().unwrap()).unwrap();
+    let (manager, output, permitted) = if cfg!(target_os = "macos") {
+        (
+            "launchctl",
+            "printf '%s\\n' 'Could not find service' >&2; exit 113",
+            "[ \"$1\" = print ]",
+        )
+    } else {
+        (
+            "systemctl",
+            "printf '%s\\n' 'LoadState=not-found' 'ActiveState=inactive' 'MainPID=0' 'ExecMainStatus=0'",
+            "[ \"$1\" = --user ] && [ \"$2\" = show ]",
+        )
+    };
+    let manager = bin.join(manager);
+    fs::write(
+        &manager,
+        format!("#!/bin/sh\n{permitted} || exit 97\nprintf 'read\\n' >> {called}\n{output}\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&manager, fs::Permissions::from_mode(0o755)).unwrap();
+    let command = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_steve"));
+        cmd.args(args)
+            .env_clear()
+            .env("HOME", &account)
+            .env("PATH", &bin);
+        cmd
+    };
+    let automatic = command(&["node", "status"]).output().unwrap();
+    let explicit = command(&["node", "status", "--json"]).output().unwrap();
+    assert!(automatic.status.success() && explicit.status.success());
+    assert_eq!(automatic.stdout, explicit.stdout);
+    let report: serde_json::Value = serde_json::from_slice(&automatic.stdout).unwrap();
+    assert_eq!(
+        automatic.stdout,
+        format!("{}\n", serde_json::to_string_pretty(&report).unwrap()).as_bytes()
+    );
+    assert_eq!(report["service"]["running"], false);
+    assert!(report["running_build"].is_null());
+
+    let (status, human) = terminal_output(&mut command(&["node", "status"]));
+    assert!(status.success());
+    assert!(human.starts_with("Steve Node · 状态\n"));
+    for text in [
+        "服务进程：已停止",
+        "运行版本：未核验",
+        "设备配对：尚未配置",
+        "Hub 连接与活动会话：未核验",
+    ] {
+        assert!(human.contains(text), "missing {text}: {human}");
+    }
+    let (status, json) = terminal_output(&mut command(&["node", "status", "--json"]));
+    assert!(status.success());
+    assert_eq!(json.as_bytes(), automatic.stdout);
+    let (status, doctor) = terminal_output(&mut command(&["node", "doctor"]));
+    assert!(
+        status.success(),
+        "doctor's existing exit semantics must not change"
+    );
+    assert!(doctor.contains("本地静态检查"));
+    assert!(doctor.contains("服务尚未注册"));
+    assert!(doctor.contains("Node 尚未配对"));
+    let (status, info) = terminal_output(&mut command(&["--build-info"]));
+    assert!(status.success());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&info).unwrap()["cli_protocol"],
+        2
+    );
+    assert!(!account.join(".steve-node").exists());
+    assert_eq!(
+        fs::read_to_string(temporary.path().join("manager-calls")).unwrap(),
+        "read\n".repeat(5)
+    );
 }
