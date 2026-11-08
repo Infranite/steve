@@ -643,13 +643,23 @@ async fn research_runs_get_read_only_mcp() {
         "{v}"
     );
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "steve_item_read", "arguments": {"id": item}}}), token).await;
+    let initial = v["result"]["content"][0]["text"].as_str().unwrap();
     assert!(
-        v["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("目标：把 X 改成 Y"),
-        "{v}"
+        initial.contains("目标：把 X 改成 Y") && initial.contains("当前目标版本：1"),
+        "{initial}"
     );
+    assert!(!initial.contains("原始目标"));
+    assert_eq!(
+        store.items().add_goal(&item, "调整后的当前目标").unwrap(),
+        2
+    );
+    let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": "goal_versions", "method": "tools/call", "params": {"name": "steve_item_read", "arguments": {"id": item}}}), token).await;
+    let goals = v["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        goals.contains("目标：调整后的当前目标\n当前目标版本：2"),
+        "{goals}"
+    );
+    assert!(goals.contains("原始目标（版本 1）：把 X 改成 Y"), "{goals}");
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "steve_item_read", "arguments": {"id": "ST-999"}}}), token).await;
     assert_eq!(v["result"]["isError"], true);
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "steve_sessions_list", "arguments": {}}}), token).await;
@@ -711,7 +721,11 @@ async fn research_runs_get_read_only_mcp() {
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": {"name": "steve_item_read", "arguments": {"id": item}}}), "research-token-3").await;
     let t = text(&v);
     assert!(
-        t.contains("目标：把 X 改成 Y") && !t.contains("现在：") && !t.contains("时间线"),
+        t.contains("目标：调整后的当前目标")
+            && !t.contains("现在：")
+            && !t.contains("时间线")
+            && !t.contains("原始目标")
+            && !t.contains("把 X 改成 Y"),
         "{t}"
     );
     let (_, reply) = rpc(json!({"jsonrpc":"2.0","id":"shared_debug","method":"tools/call","params":{"name":"steve_debug","arguments":{"action":"explain","item_id":item}}}), "research-token-3").await;

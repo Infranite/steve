@@ -22,20 +22,21 @@ struct T {
 
 impl T {
     fn acp_node(&self) -> LocalNode {
+        self.acp_node_for("sample-adapter")
+    }
+
+    fn acp_node_for(&self, harness: &str) -> LocalNode {
         let mut cfg = self.config(2);
         cfg.acp.adapters.insert(
-            "sample-adapter".into(),
+            harness.into(),
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/research-acp.mjs"),
         );
         // A wrapper is executable regardless of whether an adapter entry point ends in .js.
         let wrapper = self.harness(
             "research-acp.sh",
-            &format!(
-                "exec node '{}'",
-                cfg.acp.adapters["sample-adapter"].display()
-            ),
+            &format!("exec node '{}'", cfg.acp.adapters[harness].display()),
         );
-        cfg.acp.adapters.insert("sample-adapter".into(), wrapper);
+        cfg.acp.adapters.insert(harness.into(), wrapper);
         let n = LocalNode::open(cfg).unwrap();
         n.connect(self.sink.clone(), Some(Arc::new(Files::default())));
         n.enable_research(self.research(Path::new("unused"), None));
@@ -463,6 +464,44 @@ async fn acp_research_checks_mcp_identity_without_trusting_display_titles() {
             );
         }
         assert!(report.files_read.is_empty());
+        n.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acp_research_checks_command_backed_reads_and_searches_in_the_same_sandbox() {
+    for (harness, prompt, denied) in [
+        ("codex", "command_list", None),
+        ("codex", "command_read", None),
+        ("codex", "command_search", None),
+        ("codex", "command_outside", Some(ViolationRule::OutOfScope)),
+        ("codex", "command_secret", Some(ViolationRule::Sensitive)),
+        ("codex", "command_edit", Some(ViolationRule::Tool)),
+        ("codex", "command_external", Some(ViolationRule::Tool)),
+        ("sample-adapter", "command_list", Some(ViolationRule::Tool)),
+    ] {
+        let t = T::new();
+        let n = t.acp_node_for(harness);
+        let mut spec = acp_job("a_acp_command", prompt);
+        spec.run.choice.harness = harness.into();
+        n.start_job(now_cmd("acp_command", spec)).await.unwrap();
+        let completion = t.end_of(&n, "acp_command").await;
+        let report = completion.job.unwrap();
+        if let Some(expected) = denied {
+            assert!(
+                matches!(report.end, JobEnd::Violated { rule, .. } if rule == expected),
+                "{harness}/{prompt}: {:?}",
+                report.end
+            );
+        } else {
+            assert_eq!(report.end, JobEnd::Done, "{harness}/{prompt}");
+            assert_eq!(
+                completion.result,
+                vec![Part::Text {
+                    text: "已读取项目证据".into()
+                }]
+            );
+        }
         n.shutdown().await;
     }
 }

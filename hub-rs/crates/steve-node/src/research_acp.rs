@@ -77,7 +77,13 @@ pub(crate) fn guard(
         r::guard::check_path(&tool, cwd, &scope)?;
         scope.cwd = r::guard::resolve(&scope.cwd.join(cwd));
     }
-    if fact.category == ToolCategory::Exec && sandboxed_shell {
+    // ACP adapters may describe a shell command by its purpose (Read/Search), while
+    // retaining the full command input. It needs exactly the same sandbox and path
+    // checks as Exec; its display title never grants a capability.
+    let command_backed = fact.category == ToolCategory::Exec
+        || (matches!(fact.category, ToolCategory::Read | ToolCategory::Search)
+            && fact.command.is_some());
+    if fact.origin == ToolOrigin::Harness && command_backed && sandboxed_shell {
         for path in &fact.paths {
             r::guard::check_path(&tool, path, &scope)?;
         }

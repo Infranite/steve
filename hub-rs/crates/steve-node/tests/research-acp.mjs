@@ -33,6 +33,29 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     }
     text("我先");
     if (prompt === "cancel") continue;
+    if (prompt.startsWith("command_")) {
+      const [kind, title, command, paths] = {
+        command_list: ["search", "List src", ["ls", "src"], ["src"]],
+        command_read: ["read", "Read lib.rs", ["cat", "src/lib.rs"], ["src/lib.rs"]],
+        command_search: ["search", "Search add in src", ["/bin/sh", "-lc", "rg add src"], []],
+        command_outside: ["search", "List /etc", ["ls", "/etc"], []],
+        command_secret: ["read", "Read .env.local", ["cat", ".env.local"], []],
+        command_edit: ["edit", "Edit lib.rs", ["true"], ["src/lib.rs"]],
+        command_external: ["read", "Read lib.rs", ["cat", "src/lib.rs"], ["src/lib.rs"]],
+      }[prompt];
+      // codex-acp 0.16's exec_command_begin preserves the full command event while
+      // parse_command_tool_call classifies ls/rg as search and cat as read.
+      update({ sessionUpdate: "tool_call", toolCallId: "command-1", kind, title,
+        ...(prompt === "command_external" ? { name: "mcp__other__reader" } : {}),
+        status: "in_progress", locations: paths.map(path => ({ path })),
+        rawInput: { call_id: "command-1", turn_id: "turn-1", command,
+          cwd: process.cwd(), source: "unified_exec", interaction_input: null,
+          process_id: null, started_at_ms: null } });
+      update({ sessionUpdate: "tool_call_update", toolCallId: "command-1", status: "completed" });
+      text("已读取项目证据");
+      reply(req.id, { stopReason: "end_turn" });
+      continue;
+    }
     if (prompt.startsWith("mcp_")) {
       const input = prompt === "mcp_title_only" ? { id: "ST-1" } : {
         server: prompt === "mcp_external" ? "other" : "steve",
