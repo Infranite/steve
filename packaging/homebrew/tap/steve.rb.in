@@ -9,6 +9,7 @@ class Steve < Formula
     depends_on macos: :sonoma
     url "https://api.github.com/repos/@REPOSITORY@/releases/assets/@MAC_ASSET_ID@",
         headers: ["Accept: application/octet-stream"]
+    mirror "https://github.com/@REPOSITORY@/releases/download/v@VERSION@/steve-@VERSION@-aarch64-apple-darwin-installer.tar.gz"
     sha256 "@MAC_SHA@"
   end
 
@@ -16,6 +17,7 @@ class Steve < Formula
     depends_on arch: :x86_64
     url "https://api.github.com/repos/@REPOSITORY@/releases/assets/@LINUX_ASSET_ID@",
         headers: ["Accept: application/octet-stream"]
+    mirror "https://github.com/@REPOSITORY@/releases/download/v@VERSION@/steve-@VERSION@-x86_64-unknown-linux-gnu-installer.tar.gz"
     sha256 "@LINUX_SHA@"
   end
 
