@@ -17,23 +17,79 @@ const Ico = ({ d, size = 36 }: { d: RDevice; size?: number }) => <span className
 const onDevice = (id: string) => Object.keys(st.S).filter((k) => st.S[k].device === id && !st.S[k].ro)
 const stateText = (d: RDevice) => (d.status === "暂停接活" ? t("shell:devices.onlinePaused") : t("shell:devices.online"))
 
+/** Node registration is separate from the legacy device inventory. Only the owner's Node API
+ * establishes its visible identities and current transport links; Hub harnesses are not Node caps. */
+function useRemoteNodes() {
+  const [nodes, setNodes] = useState<RNode[] | null>(null)
+  const [error, setError] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [revision, setRevision] = useState(0)
+  useEffect(() => {
+    let live = true, busy = false, timer: ReturnType<typeof setTimeout> | undefined
+    const load = async () => {
+      if (!live || busy) return
+      if (document.hidden) { timer = setTimeout(() => void load(), 10_000); return }
+      busy = true; setLoading(true)
+      try {
+        const r = await api.nodes()
+        if (live) { setNodes([...new Map(r.nodes.filter(n => !n.local).map(n => [n.node_id, n])).values()]); setError("") }
+      } catch (e) { if (live) setError((e as Error).message) }
+      finally { if (live) { busy = false; setLoading(false); timer = setTimeout(() => void load(), 10_000) } }
+    }
+    const visible = () => { if (!document.hidden && !busy) { clearTimeout(timer); void load() } }
+    void load()
+    document.addEventListener("visibilitychange", visible)
+    return () => { live = false; clearTimeout(timer); document.removeEventListener("visibilitychange", visible) }
+  }, [revision])
+  return { nodes, error, loading, reload: () => setRevision(x => x + 1) }
+}
+
+const NodeIco = ({ node, stale }: { node: RNode; stale: boolean }) => <span className="relative flex size-9 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground"><ServerIcon className="size-[45%]" strokeWidth={1.5} />
+  <span className={cn("absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-background", stale || node.state === "revoked" ? "bg-muted-foreground" : node.state === "pending" || node.state === "paused" ? "bg-attention" : node.linked ? "bg-success" : "bg-muted-foreground")} /></span>
+
 export function DevicesView() {
   const t = useT()
-  const ds = st.devices, hub = ds.find((d) => d.roles.includes("Hub")), rest = ds.filter((d) => d !== hub)
+  const { nodes, error, loading, reload } = useRemoteNodes()
+  const [selected, setSelected] = useState<string | null>(null)
+  const ids = new Set(nodes?.map(n => n.node_id))
+  const ds = st.devices, hub = ds.find((d) => d.roles.includes("Hub")), rest = ds.filter((d) => d !== hub && !ids.has(d.id))
+  const node = nodes?.find(n => n.node_id === selected)
+  const connection = (n: RNode) => error ? t("shell:devices.connectionUnknown") : n.linked ? t("shell:devices.linked") : t("shell:devices.disconnected")
+  const registration = (n: RNode) => error ? t("shell:devices.registrationPrevious", { state: t(`shell:devices.nodeState.${n.state}`) }) : t(`shell:devices.nodeState.${n.state}`)
   return (
+    <>
     <Page title={t("shell:devices.title")} sub={t("shell:devices.sub")} max={760}
       actions={<Button size="sm" variant="outline" onClick={() => openSheet("pair")} data-pair><PlusIcon />{t("shell:devices.add")}</Button>}>
       <div className="flex flex-col gap-8">
         {hub && <section><SectionLabel>Hub</SectionLabel>
           <Group><Row icon={<Ico d={hub} />} onClick={() => go("#/devices/" + hub.id)} data-device-row={hub.name} title={<span className="inline-flex items-center gap-1.5">{hub.name}{hub.roles.map((r) => <Badge key={r} variant="outline" className="font-normal text-muted-foreground">{r}</Badge>)}</span>}
-            sub={<Meta><span>{stateText(hub)}</span><span>{t("shell:devices.running", { count: onDevice(hub.id).filter((k) => st.S[k].st === "run").length })}</span><span>{st.runtimes.filter((r) => r.ok).map((r) => r.name).join(t("shell:list.sep")) || t("shell:devices.noHarness")}</span></Meta>}><OwnerChip objectType="device" objectId={hub.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></Row></Group></section>}
-        <section><SectionLabel>{t("shell:devices.others", { count: rest.length })}</SectionLabel>
-          {rest.length ? <Group>{rest.map((d) => <Row key={d.id} icon={<Ico d={d} />} title={d.name} sub={d.roles.join(" · ")} onClick={() => go("#/devices/" + d.id)}><OwnerChip objectType="device" objectId={d.id} bare /></Row>)}</Group>
-            : <Empty title={t("shell:devices.noOthers")} sub={t("shell:devices.noOthersSub")} />}</section>
+            sub={<Meta><span>{stateText(hub)}</span><span>{st.runtimes.filter((r) => r.ok).map((r) => r.name).join(t("shell:list.sep")) || t("shell:devices.noHarness")}</span></Meta>}><OwnerChip objectType="device" objectId={hub.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></Row></Group></section>}
+        <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={loading} onClick={reload} data-refresh-nodes>{loading ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.refreshNodes")}</Button>}>{nodes !== null && !error ? t("shell:devices.others", { count: rest.length + nodes.length }) : t("shell:devices.othersTitle")}</SectionLabel>
+          {(rest.length > 0 || !!nodes?.length) && <Group>{rest.map((d) => <Row key={d.id} icon={<Ico d={d} />} title={d.name} sub={d.roles.join(" · ")} onClick={() => go("#/devices/" + d.id)}><OwnerChip objectType="device" objectId={d.id} bare /></Row>)}
+            {nodes?.map(n => <Row key={n.node_id} icon={<NodeIco node={n} stale={!!error} />} data-node-row={n.node_id} onClick={() => setSelected(n.node_id)}
+              title={<span className="inline-flex flex-wrap items-center gap-1.5">{n.name}<Badge variant="outline" className="font-normal text-muted-foreground">Node</Badge><Badge variant="outline" className="font-normal text-muted-foreground">{registration(n)}</Badge></span>}
+              sub={<Meta><span>{connection(n)}</span><span className="font-mono break-all">{n.node_id}</span></Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
+          </Group>}
+          {error && <p role="alert" className="px-1 py-3 type-callout text-destructive" data-node-error>{t("shell:devices.nodesUnavailable")} · {error}</p>}
+          {nodes === null && !error && <p className="px-1 py-4 type-callout text-muted-foreground" role="status" data-nodes-loading>{t("shell:devices.loadingNodes")}</p>}
+          {nodes !== null && !error && !rest.length && !nodes.length && <Empty title={t("shell:devices.noOthers")} sub={t("shell:devices.noOthersSub")} />}
+        </section>
         <section><SectionLabel>{t("shell:devices.scheduling")}</SectionLabel>
-          <Group><Row title={t("shell:devices.where")} sub={t("shell:devices.whereSub")}><span className="type-footnote text-muted-foreground">{t("shell:devices.allOnHub")}</span></Row></Group></section>
+          <Group><Row title={t("shell:devices.where")} sub={t("shell:devices.whereSub")} /></Group></section>
       </div>
     </Page>
+    {selected && <Dialog open onOpenChange={open => !open && setSelected(null)}><DialogContent className="rounded-2xl sm:max-w-[560px]" data-node-detail>
+      <DialogHeader><DialogTitle>{node?.name ?? t("shell:devices.remoteNode")}</DialogTitle><DialogDescription>{t("shell:devices.nodeDetailSub")}</DialogDescription></DialogHeader>
+      {node ? <Group>
+        <Row title={t("shell:devices.registrationState")} sub={registration(node)} />
+        <Row title={t("shell:devices.connection")} sub={connection(node)} />
+        <Row title={t("shell:devices.nodeId")} sub={<span className="font-mono break-all select-all">{node.node_id}</span>} />
+        <Row title={t("shell:devices.fingerprint")} sub={<span className="font-mono break-all select-all">{node.fingerprint}</span>} />
+        {node.last_seen != null && <Row title={t("shell:devices.lastConnected")} sub={tm(node.last_seen)} />}
+      </Group> : <p role="status">{t("shell:devices.nodeNotVisible")}</p>}
+      <DialogFooter><Button variant="outline" onClick={() => setSelected(null)}>{t("shell:devices.gotIt")}</Button></DialogFooter>
+    </DialogContent></Dialog>}
+    </>
   )
 }
 
