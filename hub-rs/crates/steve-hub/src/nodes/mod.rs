@@ -11,6 +11,7 @@ mod ingress;
 pub mod listener;
 pub mod pairing;
 pub mod registry;
+pub mod tailcat;
 pub use ingress::Ingress;
 
 use std::net::SocketAddr;
@@ -76,6 +77,8 @@ pub struct NodeService {
     /// Vault uses' values for the commands given to each Node (set once at boot; without it a
     /// Node's `secret.take` is `unsupported`).
     pub secrets: std::sync::OnceLock<Arc<crate::wire::node_secrets::NodeSecrets>>,
+    /// Reaching the Node routes over tailcat (set once at boot).
+    pub tailcat: std::sync::OnceLock<Arc<tailcat::Tailcat>>,
 }
 
 const HUB_ID_KEY: &str = "node.hub_id";
@@ -129,6 +132,7 @@ impl NodeService {
             limiter: pairing::Limiter::default(),
             links: tokio::sync::Mutex::new(()),
             secrets: std::sync::OnceLock::new(),
+            tailcat: std::sync::OnceLock::new(),
         }))
     }
 }
@@ -173,6 +177,7 @@ pub fn api_router(svc: Arc<NodeService>) -> Router {
     Router::new()
         .route("/nodes", get(pairing::list))
         .route("/nodes/pairings", post(pairing::create))
+        .route("/nodes/tailcat", get(tailcat::get).put(tailcat::put))
         .route("/nodes/{id}/{action}", post(pairing::act))
         .with_state(svc)
 }

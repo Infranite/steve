@@ -22,6 +22,7 @@ pub mod remote_hub;
 pub mod remote_node;
 pub mod serve_hub;
 pub mod sock;
+pub mod tailcat;
 pub mod testkit;
 pub mod tls;
 pub mod ws;

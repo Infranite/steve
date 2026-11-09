@@ -291,6 +291,8 @@ const ALLOWED: &[Entry] = &[
     e(Spawn, "steve-core/src/yolo/procs.rs", 1, Hub, "`ps`: the process table"),
     e(Spawn, "steve-hub/src/config.rs", 1, Hub, "npm config"),
     e(Spawn, "steve-hub/src/system.rs", 1, Hub, "host facts (sw_vers, sysctl, uname, hostname)"),
+    e(Spawn, "steve-hub/src/nodes/tailcat.rs", 2, Hub, "tailcat genkey and serve: the Hub's own tunnel for remote Nodes"),
+    e(Fs, "steve-hub/src/nodes/tailcat.rs", 2, Hub, "the Hub's tailcat key directory"),
     e(Spawn, "steve-hub/src/upgrades/runner.rs", 6, Hub, "the upgrader and explicit legacy source-maintenance path; published bundles prepare and deploy in native Rust"),
     e(Spawn, "steve-hub/src/upgrades/cli.rs", 1, Hub, "OS-owner upgrade CLI queries the signed Hub's service and code identity, never a task harness"),
     e(Dir, "steve-hub/src/upgrades/cli.rs", 1, Hub, "OS-owner upgrade CLI lists this installation's operation journals only"),

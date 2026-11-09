@@ -419,6 +419,17 @@ fn remote_nodes(
     fleet.set_principal_state(principal_state(vars));
     fleet.set_cost_caps(cost_caps(vars));
     let svc = crate::nodes::from_vars(store, fleet, |k| vars(k));
+    if let Some(svc) = &svc {
+        let port = vars("STEVE_TAILCAT_PORT")
+            .and_then(|v| v.trim().parse::<u16>().ok())
+            .filter(|p| *p != 0)
+            .unwrap_or(cfg.listen.port.saturating_add(2));
+        let t = crate::nodes::tailcat::Tailcat::new(&cfg.home, port, svc);
+        let _ = svc.tailcat.set(t.clone());
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(crate::nodes::tailcat::restore(t, store.clone()));
+        }
+    }
     let bind = match bind.map(|v| steve_node_api::NodeId::new(v.trim())) {
         Some(Ok(id)) if svc.is_some() => Some(id),
         Some(Ok(_)) => None,

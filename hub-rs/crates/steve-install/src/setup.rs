@@ -92,7 +92,20 @@ fn listen_address(value: &str) -> Result<SocketAddr> {
     Ok(address)
 }
 
+/// `tailcat:<address>:<port>`, a Hub reached over tailcat (steve_node_wire::tailcat checks it fully).
+fn tailcat_hub(value: &str) -> Option<String> {
+    let (addr, port) = value.trim().strip_prefix("tailcat:")?.rsplit_once(':')?;
+    let ok = addr.starts_with("tc")
+        && addr.len() >= 8
+        && addr.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && port.parse::<u16>().is_ok_and(|p| p != 0);
+    ok.then(|| format!("tailcat:{addr}:{port}"))
+}
+
 fn node_hub_url(value: &str) -> Result<String> {
+    if let Some(hub) = tailcat_hub(value) {
+        return Ok(hub);
+    }
     let hub = browser_url(value, "Hub")?;
     if !hub.starts_with("https://") {
         bail!("Node 配对需要 HTTPS Hub");
@@ -825,7 +838,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             let requested_hub = options
                 .hub
                 .as_ref()
-                .map(|v| browser_url(v, "Hub"))
+                .map(|v| node_hub_url(v))
                 .transpose()?;
             if paired["hub_url"] != wizard.record["hub_url"]
                 || requested_hub
@@ -852,7 +865,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 Some(url) => node_hub_url(&url)?,
                 None => ask_value(
                     wizard.input,
-                    "Hub HTTPS URL（留空稍后配对）",
+                    "Hub HTTPS URL 或 tailcat: 地址（留空稍后配对）",
                     None,
                     true,
                     |value| {
@@ -966,6 +979,14 @@ mod tests {
             ask_value(&mut input, "hub", None, true, node_hub_url).unwrap(),
             "https://hub.example"
         );
+        // a Hub reached over tailcat (A6): the address and port, nothing that could be an argument
+        assert_eq!(
+            node_hub_url(" tailcat:tcAbC_-123456:8442 ").unwrap(),
+            "tailcat:tcAbC_-123456:8442"
+        );
+        for bad in ["tailcat:tcAbC_-123456", "tailcat:tc;rm -rf /:1", "tailcat:xyz12345678:1"] {
+            assert!(node_hub_url(bad).is_err(), "{bad}");
+        }
         let mut input = Answers(vec!["not-a-url".into()]);
         let error = ask_value(&mut input, "issuer", None, false, oidc_issuer_url).unwrap_err();
         assert_eq!(error.to_string(), "fixture input exhausted");

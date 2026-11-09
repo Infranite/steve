@@ -24,7 +24,8 @@ use steve_node_api::{NodeId, RootId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pairing {
-    /// `https://hub.example` (or `http://127.0.0.1:port` with the loopback flag).
+    /// `https://hub.example` (or `http://127.0.0.1:port` with the loopback flag, or
+    /// `tailcat:<address>:<port>`).
     pub hub_url: String,
     pub node_id: String,
     pub hub_id: String,
