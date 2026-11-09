@@ -408,6 +408,12 @@ impl LocalNode {
                 "headers": [{ "name": "Authorization", "value": format!("Bearer {}", m.token) }] }])
             },
         );
+        let properties = self.0.cfg.acp.adapter_properties(&req.harness);
+        let wrap = acp_job::wrap(
+            prepared.profile.as_deref(),
+            properties.nested_sandbox.then_some(&self.0.confine),
+            &prepared.cwd,
+        );
         let mut run = Box::pin(acp_job::run(
             acp_job::Request {
                 cfg: &self.0.cfg.acp,
@@ -418,14 +424,7 @@ impl LocalNode {
                 resume: plan.resume.as_deref(),
                 prompt: prepared.prompt,
                 mcp_servers: mcp,
-                sandbox: prepared.profile.as_deref(),
-                confine: self
-                    .0
-                    .cfg
-                    .acp
-                    .adapter_properties(&req.harness)
-                    .nested_sandbox
-                    .then_some(&self.0.confine),
+                wrap: Some(&wrap),
                 timeout: budget.hard.unwrap_or(Duration::from_secs(86400)),
                 prefix: exec.attempt().as_str(),
                 allow_tool: &allow,
@@ -518,14 +517,14 @@ impl LocalNode {
                         _ => r::RunStatus::Done,
                     }
                 }
-                Some(Err(steve_print::PrintError::Timeout(_))) => {
+                Some(Err(acp_job::OneShotError::Timeout(_))) => {
                     r::RunStatus::Budget(r::BudgetHit::Time)
                 }
-                Some(Err(steve_print::PrintError::OutputLimit)) => {
+                Some(Err(acp_job::OneShotError::OutputLimit)) => {
                     why = Some(Stop::Output);
                     r::RunStatus::Stopped
                 }
-                Some(Err(e)) => r::RunStatus::Failed(format!("{e:?}")),
+                Some(Err(e)) => r::RunStatus::Failed(e.to_string()),
                 None => r::RunStatus::Stopped,
             }
         };
