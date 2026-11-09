@@ -3,6 +3,7 @@
 //! collects what merged and releases it at once, by time, by count or when you say so ([`train`]).
 //! Both are pure state machines over the target's rows; [`policy`] holds every number they go by.
 
+pub mod drive;
 pub mod exec;
 pub mod policy;
 pub mod queue;

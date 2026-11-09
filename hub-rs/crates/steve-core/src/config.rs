@@ -54,6 +54,8 @@ pub struct CoreConfig {
     pub commit: Option<String>,
     /// Disk thresholds for the worktrees' volume (`workspace`).
     pub disk: crate::workspace::DiskPolicy,
+    /// `STEVE_MQ=1`: accepted results merge through the merge queue (`mq`) instead of the lanes.
+    pub mq: bool,
 }
 
 /// The GitHub CLI: `STEVE_GH`, else the first of the usual places that exists, else `gh` on `PATH`.
@@ -68,6 +70,11 @@ pub fn gh_cli() -> PathBuf {
         .map(PathBuf::from)
         .find(|p| p.exists())
         .unwrap_or_else(|| "gh".into())
+}
+
+/// `STEVE_MQ=1` turns the merge queue on.
+pub fn mq_from_env() -> bool {
+    std::env::var("STEVE_MQ").is_ok_and(|v| v.trim() == "1")
 }
 
 fn env(k: &str, d: &str) -> String {
@@ -128,6 +135,7 @@ impl CoreConfig {
         c.debug_route = std::env::var("STEVE_DEBUG_ROUTE").is_ok_and(|v| !v.is_empty());
         c.disk = crate::workspace::DiskPolicy::from_env();
         c.version = env("STEVE_VERSION", "dev");
+        c.mq = mq_from_env();
         c
     }
 
@@ -159,6 +167,7 @@ impl CoreConfig {
             version: "dev".into(),
             commit: None,
             disk: Default::default(),
+            mq: false,
         }
     }
 
