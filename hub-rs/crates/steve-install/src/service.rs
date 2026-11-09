@@ -760,6 +760,9 @@ impl Service {
     fn action(&self, action: &str) -> Result<Value> {
         let state = self.state()?;
         if action == "stop" && state["running"] == false && state["loaded"] == false {
+            if self.component == "hub" {
+                self.stop_local_node()?;
+            }
             return Ok(state);
         }
         ensure!(
@@ -795,7 +798,67 @@ impl Service {
         } else {
             self.systemctl(&[action, &self.unit()], true)?;
         }
+        if action == "stop" && self.component == "hub" {
+            self.stop_local_node()?;
+        }
         self.status(None, false)
+    }
+
+    /// The Hub's own Node in a process of its own (`STEVE_NODE_MODE=service`) outlives a Hub restart
+    /// or upgrade so its turns keep running; a stop stops it too. Only the process this home's
+    /// `steve-hub --local-node` wrote into its pid file.
+    fn stop_local_node(&self) -> Result<()> {
+        let data = fs::read_to_string(self.home.join("steve.env"))
+            .ok()
+            .and_then(|env| {
+                env.lines().find_map(|l| {
+                    l.trim()
+                        .strip_prefix("STEVE_DATA_DIR=")
+                        .map(|v| PathBuf::from(v.trim().trim_matches(['\'', '"'])))
+                })
+            })
+            .unwrap_or_else(|| self.home.join("data"));
+        let Some(pid) = fs::read_to_string(data.join("node/service.pid"))
+            .ok()
+            .and_then(|p| p.trim().parse::<u32>().ok())
+            .filter(|p| *p > 1)
+        else {
+            return Ok(());
+        };
+        let pid = pid.to_string();
+        let ours = |out: &Output| {
+            let cmd = out.stdout.trim();
+            out.code == 0
+                && cmd.ends_with("steve-hub --local-node")
+                && fs::canonicalize(&self.home).is_ok_and(|h| {
+                    cmd.starts_with(&*h.to_string_lossy())
+                        || cmd.starts_with(&*self.home.to_string_lossy())
+                })
+        };
+        let ps = || {
+            self.command(
+                vec![
+                    "ps".into(),
+                    "-p".into(),
+                    pid.clone(),
+                    "-o".into(),
+                    "command=".into(),
+                ],
+                false,
+            )
+        };
+        if !ours(&ps()?) {
+            return Ok(());
+        }
+        self.command(vec!["kill".into(), pid.clone()], false)?;
+        let until = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < until {
+            if !ours(&ps()?) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        bail!("the Hub's local Node (pid {pid}) did not stop; stop it before uninstalling")
     }
 
     fn stopped(&self) -> Result<()> {
