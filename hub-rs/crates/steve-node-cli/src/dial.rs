@@ -70,6 +70,79 @@ fn http(trust: &Trust) -> Result<reqwest::Client> {
     Ok(b.build()?)
 }
 
+/// How this machine reaches `hub_url` over HTTP: a client, the base to address, and the tunnel
+/// (over tailcat) that must live as long as the requests.
+async fn hub_http(
+    hub_url: &str,
+    pin: Option<&str>,
+    plain_ok: bool,
+) -> Result<(reqwest::Client, String, Option<Tunnel>)> {
+    let tunnel = match tailcat::parse(hub_url) {
+        Some((addr, port)) => Some(Tunnel::open(addr, port).await?),
+        None => None,
+    };
+    let (trust, base) = match &tunnel {
+        Some(t) => (Trust::LoopbackPlaintext, t.url.clone()),
+        None => {
+            let trust = tls::policy(&ws_url(hub_url)?, pin, plain_ok).map_err(|e| anyhow!(e))?;
+            same_host(hub_url)?;
+            (trust, hub_url.to_string())
+        }
+    };
+    Ok((http(&trust)?, base, tunnel))
+}
+
+/// Replaces this Node's key (M4): the new key is made and kept aside, both keys sign the change
+/// at the Hub, and only once the Hub took it does the new key replace the old one (the old one is
+/// kept as `identity.key.previous`). The running Node is refused with its old key from then on and
+/// must be restarted. Returns the new fingerprint.
+pub async fn rotate(home: &Home) -> Result<String> {
+    let p = home.pairing()?;
+    let old = Identity::load(&home.identity()).context("identity key")?;
+    let next_path = home.identity().with_extension("key.next");
+    let _ = std::fs::remove_file(&next_path);
+    let new = Identity::generate()?;
+    new.save(&next_path)?;
+    let msg = identity::rotate_message(&p.hub_id, &p.node_id, &old.public(), &new.public());
+    let (client, base, _tunnel) = hub_http(
+        &p.hub_url,
+        p.pin.as_deref(),
+        p.loopback && loopback_plaintext_allowed(),
+    )
+    .await?;
+    let sent = client
+        .post(format!("{base}/node/rotate"))
+        .json(&json!({
+            "node_id": p.node_id,
+            "new_pubkey": hex::encode(new.public()),
+            "sig_old": hex::encode(old.sign(&msg)),
+            "sig_new": hex::encode(new.sign(&msg)),
+        }))
+        .send()
+        .await
+        .context("reaching the hub");
+    let res = match sent {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            let _ = std::fs::remove_file(&next_path);
+            bail!("the hub refused the new key ({})", r.status());
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&next_path);
+            return Err(e);
+        }
+    };
+    let previous = home.identity().with_extension("key.previous");
+    let _ = std::fs::remove_file(&previous);
+    std::fs::rename(home.identity(), &previous).context("keeping the old key")?;
+    std::fs::rename(&next_path, home.identity()).context("putting the new key in place")?;
+    let v: serde_json::Value = res.json().await.unwrap_or_default();
+    Ok(v["fingerprint"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| new.fingerprint()))
+}
+
 /// Claims `code` at the Hub with a new (or the existing) key; the Node is pending until its owner
 /// confirms the fingerprint this prints.
 pub async fn pair(
@@ -80,25 +153,14 @@ pub async fn pair(
     name: &str,
 ) -> Result<Pairing> {
     let hub_url = hub_url.trim_end_matches('/').to_string();
-    // over tailcat: the request goes to the tunnel's local end, the pairing keeps the address
-    let tunnel = match tailcat::parse(&hub_url) {
-        Some((addr, port)) => Some(Tunnel::open(addr, port).await?),
-        None => None,
-    };
     let plain = hub_url.starts_with("http://");
-    let (trust, base) = match &tunnel {
-        Some(t) => (Trust::LoopbackPlaintext, t.url.clone()),
-        None => {
-            let trust = tls::policy(
-                &ws_url(&hub_url)?,
-                pin.as_deref(),
-                plain && loopback_plaintext_allowed(),
-            )
-            .map_err(|e| anyhow!(e))?;
-            same_host(&hub_url)?;
-            (trust, hub_url.clone())
-        }
-    };
+    // over tailcat: the request goes to the tunnel's local end, the pairing keeps the address
+    let (client, base, _tunnel) = hub_http(
+        &hub_url,
+        pin.as_deref(),
+        plain && loopback_plaintext_allowed(),
+    )
+    .await?;
     let id = match Identity::load(&home.identity()) {
         Ok(id) => id,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -110,7 +172,7 @@ pub async fn pair(
     };
     let pubkey = id.public();
     let sig = id.sign(&identity::pair_message(code, &pubkey));
-    let res = http(&trust)?
+    let res = client
         .post(format!("{base}/node/pair"))
         .json(&json!({
             "code": code,

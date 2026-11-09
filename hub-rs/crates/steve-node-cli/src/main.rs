@@ -14,7 +14,7 @@ use steve_node_wire::Identity;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: steve-node pair <hub-url> [--pin sha256:…] [--name NAME] | run | status | forget | --build-info | --version\n\
+        "usage: steve-node pair <hub-url> [--pin sha256:…] [--name NAME] | run | rotate | status | forget | --build-info | --version\n\
          The pairing code is read from STEVE_PAIR_CODE or stdin, never from the command line."
     );
     std::process::exit(2)
@@ -85,6 +85,13 @@ async fn main() -> Result<()> {
             println!("confirm this fingerprint on the hub, then run: steve-node run");
         }
         Some("run") => dial::run(&home).await?,
+        Some("rotate") => {
+            let fp = dial::rotate(&home).await?;
+            println!("new key in place; fingerprint {fp}");
+            println!(
+                "restart the Node now (steve node restart): its running process still has the old key, which the hub no longer takes"
+            );
+        }
         Some("status") => {
             let id = Identity::load(&home.identity())?;
             match home.pairing() {

@@ -199,6 +199,7 @@ pub fn from_vars(
 pub fn node_router(svc: Arc<NodeService>) -> Router {
     Router::new()
         .route("/node/pair", post(pairing::claim))
+        .route("/node/rotate", post(pairing::rotate))
         .route("/node/ws", get(listener::upgrade))
         .with_state(svc)
 }
