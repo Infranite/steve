@@ -221,7 +221,7 @@ Steve 还没有运行时插件商店，“插件”页面目前只是占位。�
 ## 实验中与计划中
 
 - **会话在 Node 上运行**：Hub 不再自己拉起 agent 进程，所有会话、Steve 自己的判断调用和就地研究都在本机 Node 上运行，本机 Node 默认开启（`STEVE_NODE_MODE=off` 时会话只排队）。
-- **多设备**（实验中，默认关闭）：另一台机器上的 `steve-node` 可以和 Hub 配对，在那台机器上跑 harness。Node 总是主动向外连，配对用一次性码加指纹确认，每个 Node 都有执行日志用来对账。远程 Node 用 `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` 开启。配对目前只能走命令行（[docs/deployment.md](docs/deployment.md)）。
+- **多设备**（实验中，默认关闭）：另一台机器上的 `steve-node` 可以和 Hub 配对，在那台机器上跑 harness。Node 总是主动向外连，配对用一次性码加指纹确认，每个 Node 都有执行日志用来对账。远程 Node 用 `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` 开启。在“设备”页生成配对码，按页面上的命令在目标机器上完成配对（[docs/deployment.md](docs/deployment.md)）。
 - **还没做的**：插件页面（先用上面的扩展点）、免打扰和每日汇报（设置里标着“接入推送后生效”）、Gmail 和 Outlook API 邮件适配器、飞书文档 / 日历 / 审批，以及外部保险箱后端（1Password、Bitwarden）。
 
 ## 工作原理
