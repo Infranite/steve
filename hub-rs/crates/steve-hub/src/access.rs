@@ -170,10 +170,11 @@ pub const COOKIE: &str = "steve_client";
 /// How long that cookie lasts: a year (the client is revoked, not the cookie timed out).
 const COOKIE_AGE: i64 = 365 * 24 * 3600;
 
-fn client_cookie(value: &str, max_age: i64, secure: bool) -> String {
+fn client_cookie(value: &str, max_age: i64, secure: bool, cross_site: bool) -> String {
     format!(
-        "{COOKIE}={value}; Max-Age={max_age}; Path=/; HttpOnly{}; SameSite=Lax",
-        if secure { "; Secure" } else { "" }
+        "{COOKIE}={value}; Max-Age={max_age}; Path=/; HttpOnly{}; SameSite={}",
+        if secure { "; Secure" } else { "" },
+        if cross_site { "None" } else { "Lax" }
     )
 }
 
@@ -227,6 +228,12 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
     let origin = req
         .headers()
         .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(|o| o.trim_end_matches('/').to_string());
+    let origin_seen = origin.clone();
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     /* this machine is not slowed down: what the limit guards against comes from elsewhere */
@@ -301,9 +308,22 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
             );
             if b.cookie {
                 let secure = route.ends_with("+tls") || st.cfg.public_url.starts_with("https://");
-                if let Ok(v) = client_cookie(&cred, COOKIE_AGE, secure).parse() {
+                /* a page on another host (not only another port) is another site: its requests carry
+                 * the cookie only as SameSite=None, which browsers take over TLS only */
+                let cross_site = origin_seen.as_deref().is_some_and(|o| {
+                    host_of(o)
+                        != host
+                            .as_deref()
+                            .and_then(|h| host_of(&format!("http://{h}")))
+                });
+                if let Ok(v) =
+                    client_cookie(&cred, COOKIE_AGE, secure, cross_site && secure).parse()
+                {
                     res.headers_mut().append(axum::http::header::SET_COOKIE, v);
                 }
+            }
+            if let Some(o) = &origin_seen {
+                forget_origin(o);
             }
             res
         }
@@ -345,7 +365,7 @@ async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::respo
         .await;
     }
     let mut res = reply(StatusCode::OK, json!({"ok": true}));
-    if let Ok(v) = client_cookie("", 0, false).parse() {
+    if let Ok(v) = client_cookie("", 0, false, false).parse() {
         res.headers_mut().append(axum::http::header::SET_COOKIE, v);
     }
     res
@@ -576,5 +596,160 @@ mod tests {
         );
         assert_eq!(bearer(&h(&[("authorization", "Basic x")])), None);
         assert_eq!(bearer(&h(&[])), None);
+    }
+}
+
+/// The host of a URL or origin, without scheme or port (`http://10.0.0.5:8441` → `10.0.0.5`).
+fn host_of(url: &str) -> Option<String> {
+    reqwest::Url::parse(url).ok().and_then(|u| {
+        u.host_str()
+            .map(|h| h.trim_matches(['[', ']']).to_lowercase())
+    })
+}
+
+/// The paths any web origin may call: what a page needs before it is signed in.
+fn open_path(path: &str) -> bool {
+    matches!(path, "/auth/hello" | "/auth/token" | "/auth/client/logout")
+}
+
+/// How long whether an origin may call is remembered.
+const ORIGIN_TTL: Duration = Duration::from_secs(30);
+static ORIGINS: LazyLock<Mutex<HashMap<String, (Instant, bool)>>> = LazyLock::new(Default::default);
+
+/// Whether a page on `origin` may call this Hub with its credentials: one of `STEVE_CLIENT_ORIGINS`,
+/// or the origin a live web client signed in from.
+async fn origin_allowed(st: &AppState, origin: &str) -> bool {
+    if st.cfg.client_origins.iter().any(|o| o == origin) {
+        return true;
+    }
+    if let Some((at, ok)) = ORIGINS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(origin)
+        .copied()
+        && at.elapsed() < ORIGIN_TTL
+    {
+        return ok;
+    }
+    let Some(store) = st.modules.as_ref().map(|m| m.store.clone()) else {
+        return false;
+    };
+    let o = origin.to_string();
+    let ok =
+        tokio::task::spawn_blocking(move || store.access().origin_signed_in(&o).unwrap_or(false))
+            .await
+            .unwrap_or(false);
+    ORIGINS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(origin.to_string(), (Instant::now(), ok));
+    ok
+}
+
+/// Forgets what was decided about `origin` (a client signed in or out from it).
+fn forget_origin(origin: &str) {
+    ORIGINS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(origin);
+}
+
+/// Cross-origin calls (A3): a web client served apart from the Hub calls it with its credentials.
+/// Only the sign-in paths answer any origin; everything else answers the origins of
+/// `STEVE_CLIENT_ORIGINS` and of signed-in web clients. A page of this Hub's own origin is not
+/// cross-origin and passes untouched.
+pub async fn cors(
+    State(st): State<AppState>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{HeaderValue, Method, header};
+    use axum::response::IntoResponse;
+    let Some(origin) = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|o| o.trim_end_matches('/').to_string())
+    else {
+        return next.run(req).await;
+    };
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let own = st.cfg.public_urls.contains(&origin)
+        || origin
+            .split("://")
+            .nth(1)
+            .is_some_and(|h| h.eq_ignore_ascii_case(host));
+    if own {
+        return next.run(req).await;
+    }
+    let allowed = open_path(req.uri().path()) || origin_allowed(&st, &origin).await;
+    let preflight = req.method() == Method::OPTIONS
+        && req
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+    let mark = |res: &mut axum::response::Response| {
+        let h = res.headers_mut();
+        if let Ok(v) = HeaderValue::from_str(&origin) {
+            h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+        }
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+            HeaderValue::from_static("true"),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            HeaderValue::from_static("x-steve-cursor, content-disposition"),
+        );
+        h.append(header::VARY, HeaderValue::from_static("origin"));
+    };
+    if preflight {
+        if !allowed {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        let mut res = StatusCode::NO_CONTENT.into_response();
+        mark(&mut res);
+        let h = res.headers_mut();
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static(
+                "authorization, content-type, x-steve-ws, accept-language, last-event-id",
+            ),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("600"),
+        );
+        return res;
+    }
+    let mut res = next.run(req).await;
+    /* a page not signed in yet must be able to read that it is not (a 401 says nothing else), or it
+     * never shows its sign-in */
+    if allowed || res.status() == StatusCode::UNAUTHORIZED {
+        mark(&mut res);
+    }
+    res
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+
+    #[test]
+    fn hosts_ignore_scheme_and_port() {
+        assert_eq!(host_of("http://10.0.0.5:8441").as_deref(), Some("10.0.0.5"));
+        assert_eq!(
+            host_of("https://Steve.Example:443").as_deref(),
+            Some("steve.example")
+        );
+        assert_eq!(host_of("http://[::1]:8441").as_deref(), Some("::1"));
+        assert!(open_path("/auth/token") && !open_path("/api/me"));
     }
 }

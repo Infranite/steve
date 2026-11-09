@@ -447,6 +447,14 @@ export default {
     accessToken: "Access token",
     tokenHint: "The Hub issues tokens: run steve-hub --access token create on the Hub's machine to get one.",
     cantConnect: "Can't reach Steve",
+    connectTitle: "Connect to your Hub",
+    hubAddress: "Hub address",
+    connect: "Connect",
+    connectHint: "Enter the Hub's address, e.g. http://192.168.1.10:8440. A Hub on another machine needs HTTPS.",
+    badAddress: "That is not a valid address",
+    notSteve: "No Steve Hub answers at that address",
+    apiMismatch: "This Hub ({{version}}) does not work with this version of the page",
+    changeHub: "Use another Hub",
   },
   office: {
     /* where a note on selected text sits (data-ann-at), shown with the note */

@@ -1,3 +1,4 @@
+import { hubUrl } from "../hub.ts"
 /* The channel sides as the Hub declares them (`GET /connections/integrations` `adapters[].channel` and `pairing`): who acts
  * as you and pairs with which bot, how a connection is made, how messages come in. Pure, so the node tests import it. */
 
@@ -38,7 +39,7 @@ export const offers = (starts: StartMethod[], kind: StartMethod["kind"]) => star
 
 /** the extension's own pages among `starts`, as links under the Hub's API */
 export const routesOf = (starts: StartMethod[]): { href: string; label: string }[] =>
-  starts.flatMap((s) => (s.kind === "route" && s.path.startsWith("/") && !s.path.startsWith("//") ? [{ href: "/api" + s.path, label: s.label }] : []))
+  starts.flatMap((s) => (s.kind === "route" && s.path.startsWith("/") && !s.path.startsWith("//") ? [{ href: hubUrl("/api" + s.path), label: s.label }] : []))
 
 /** the account page's line about receiving, by the side's declaration */
 export const receiveNote = (r: Receive | string | null | undefined): "polling" | "longConnection" | null =>

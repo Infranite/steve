@@ -1,6 +1,7 @@
 /* Hub API: raw shapes (mirroring hub/src/repo.ts) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
+import { hubUrl } from "./hub"
 import type { Workflow } from "./workflow"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
@@ -125,7 +126,7 @@ export const setPageWorkspace = (id: string) => { pageWs = id }
 /* and the UI language, so the Hub answers errors and labels in it (the Hub falls back to zh-CN) */
 export const wsHeaders = (h: Record<string, string> = {}): Record<string, string> => ({ ...h, "accept-language": lang(), ...(pageWs ? { "x-steve-ws": pageWs } : {}) })
 /** the same for what can't carry a header (an EventSource, an <img>, a download link): `?ws=` */
-export const withWs = (url: string) => (pageWs ? `${url}${url.includes("?") ? "&" : "?"}ws=${encodeURIComponent(pageWs)}` : url)
+export const withWs = (path: string) => { const url = hubUrl(path); return pageWs ? `${url}${url.includes("?") ? "&" : "?"}ws=${encodeURIComponent(pageWs)}` : url }
 
 /** what the Hub's last 401 offered: its sign-in page (`link`: OIDC or the local development login) and/or signing in
  * with a user's name and an access token (`token`, A1) */
@@ -134,7 +135,7 @@ export class Unauthenticated extends Error { login: string | null; constructor(l
 const CUT = {}
 async function req<T>(method: string, path: string, body?: unknown, seen?: (r: Response) => void): Promise<T> {
   /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever */
-  const r = await fetch("/api" + path, { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined })
+  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined })
   if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null, j.token === true) }
   const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
   if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
@@ -159,7 +160,7 @@ export const isNotWired = (e: unknown): e is NotWired => e instanceof NotWired
 export async function modReq<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   let r: Response
   try {
-    r = await fetch("/api" + path, { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
+    r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
   } catch { throw new NotWired() }
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
@@ -248,17 +249,17 @@ export const api = {
   confirmNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/confirm`),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
-    const r = await fetch("/api/files?name=" + encodeURIComponent(name), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "same-origin" })
+    const r = await fetch(hubUrl("/api/files?name=" + encodeURIComponent(name)), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "include" })
     if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null, j.token === true) }
     const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error ?? t("shell:http.uploadFailed", { status: r.status })); return j as RFile
   },
   /* a browser session and a token-signed client alike */
-  logout: () => Promise.all([fetch("/auth/logout", { method: "POST", credentials: "same-origin" }), fetch("/auth/client/logout", { method: "POST", credentials: "same-origin" })]),
+  logout: () => Promise.all([fetch(hubUrl("/auth/logout"), { method: "POST", credentials: "include" }), fetch(hubUrl("/auth/client/logout"), { method: "POST", credentials: "include" })]),
   /** signs this page in with a user's name and an access token; the Hub keeps the client's credential in an HttpOnly cookie */
   tokenSignIn: async (user: string, token: string, version: string): Promise<void> => {
     const ua = navigator.userAgent
     const browser = /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" : /Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "Browser"
-    const r = await fetch("/auth/token", { method: "POST", headers: { "content-type": "application/json", "accept-language": lang() }, credentials: "same-origin",
+    const r = await fetch(hubUrl("/auth/token"), { method: "POST", headers: { "content-type": "application/json", "accept-language": lang() }, credentials: "include",
       body: JSON.stringify({ user, token, cookie: true, client: { kind: "web", name: browser, platform: (navigator as any).userAgentData?.platform ?? navigator.platform ?? "", version } }) })
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error ?? t("shell:http.failed", { status: r.status })) }
   },
@@ -268,7 +269,7 @@ export const api = {
 export function stream(on: (e: HubEvent) => void, onOpen: (resumed: boolean) => void, cursor: () => string | null = () => null) {
   const s = resumableStream({
     url: (after) => withWs(`/api/stream?lang=${encodeURIComponent(lang())}${after ? "&after=" + encodeURIComponent(after) : ""}`), // the workspace and language at each (re)connect
-    source: (url) => new EventSource(url),
+    source: (url) => new EventSource(url, { withCredentials: true }),
     on: (data) => { try { on(JSON.parse(data)) } catch {} },
     onOpen, cursor,
     setTimeout: (f, ms) => setTimeout(f, ms), clearTimeout: (x) => clearTimeout(x as ReturnType<typeof setTimeout>), now: Date.now,

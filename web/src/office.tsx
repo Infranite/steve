@@ -259,7 +259,7 @@ export function OfficeView({ url, name, fallback }: { url: string; name: string;
   useEffect(() => {
     let live = true; const px = pics()
     setDoc(null); setErr("")
-    fetch(url, { credentials: "same-origin" }).then((r) => { if (!r.ok) throw new Error(t("shell:office.fetchFailed", { status: r.status })); return r.arrayBuffer() })
+    fetch(url, { credentials: "include" }).then((r) => { if (!r.ok) throw new Error(t("shell:office.fetchFailed", { status: r.status })); return r.arrayBuffer() })
       .then((b) => readOffice(b, name, px)).then((d) => live && setDoc(d), (e: Error) => live && setErr(e.message || t("shell:office.parseFailed")))
     return () => { live = false; px.urls.forEach((u) => URL.revokeObjectURL(u)) }
   }, [url, name])
