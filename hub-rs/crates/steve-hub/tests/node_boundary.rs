@@ -334,6 +334,7 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-hub/src/upgrades/signing.rs", 4, Hub, "the signing keychain password file, moved into the key store; the rotation lock"),
     e(Fs, "steve-hub/src/upgrades/supervisor.rs", 12, Hub, "the supervisor"),
     e(Fs, "steve-hub/src/web.rs", 3, Hub, "the web assets"),
+    e(Fs, "steve-hub/src/access.rs", 5, Hub, "the single sign-on client secret the settings keep in the Hub's own data directory"),
     e(Fs, "steve-hub/src/wire/node_files.rs", 4, Hub, "files a Node sends, into the blob store"),
     e(Fs, "steve-hub/src/wire/node_tools.rs", 2, Hub, "a Node's tool ledger lock in the Hub data dir"),
     e(Fs, "steve-knowledge/src/sources/files.rs", 1, Hub, "a blob read"),

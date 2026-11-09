@@ -22,7 +22,9 @@ export type Sess = { id: string; n: number; item: string | null; b: string | nul
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
   /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
-  yolo?: string }
+  yolo?: string
+  /** the client it was answered from (A4c `result.via`), when it was one signed in with a token */
+  via?: string }
 /** what became of an approved release (hub decision.result.outcome): the card says this, never a bare "approved" */
 export type Rel = { tone: "run" | "fail" | "ok"; text: string; /** the Hub's outcome, for deciding (text is a translated label) */ outcome?: "releasing" | "not_released" | "failed" | "released"; /** the release decision it comes from */ key?: string }
 /** an earlier plan: replaced (its open steps abandoned) or done (a new round followed) */
@@ -497,7 +499,8 @@ function build() {
   st.notices = (s.notifications ?? []).map((n) => (n.level === "fail" && !n.closed && n.item_id && finished(itemIndex.get(n.item_id)?.status) ? { ...n, closed: true } : n)); st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
   st.orphans = openDec.filter((d) => !d.item_id || !s.items.some((i) => i.id === d.item_id)).map(orphanOf)
   st.done = s.recent.filter((d) => d.item_id).map((d) => ({ id: d.item_id!, type: d.kind, q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), decision: d.id, canUndo: !!d.undo && !!d.resolved && Date.now() - d.resolved < 86400_000, rel: relOf(d),
-    how: d.result?.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: d.result?.decided_by === "yolo" ? String(d.result?.yolo_reason ?? "") : undefined }))
+    how: d.result?.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: d.result?.decided_by === "yolo" ? String(d.result?.yolo_reason ?? "") : undefined,
+    via: typeof d.result?.via?.name === "string" ? d.result.via.name : undefined }))
   st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
   st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
   if (st.onboard < 0 && !s.thread.length && !s.items.length && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0

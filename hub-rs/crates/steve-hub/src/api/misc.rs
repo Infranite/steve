@@ -686,6 +686,9 @@ pub async fn decision_resolve(
         .ok()
         .flatten();
         if let Some(r) = r {
+            if r.is_ok() {
+                crate::access::note_via(&st, &id, &c);
+            }
             return Ok(match r {
                 Ok(d) => super::ok(
                     serde_json::to_value(d).map_err(|e| ApiError::internal(e.to_string()))?,
@@ -694,11 +697,12 @@ pub async fn decision_resolve(
             });
         }
     }
-    ok(Value::Object(
-        st.domain
-            .resolve(&id, &choice, text.as_deref().unwrap_or(""), &c.me)
-            .await?,
-    ))
+    let done = st
+        .domain
+        .resolve(&id, &choice, text.as_deref().unwrap_or(""), &c.me)
+        .await?;
+    crate::access::note_via(&st, &id, &c);
+    ok(Value::Object(done))
 }
 
 pub async fn decision_dismiss(

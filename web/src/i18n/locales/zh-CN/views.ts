@@ -65,6 +65,7 @@ export default {
     yoloChose: "选了「{{choice}}」",
     yoloChoseWhy: "选了「{{choice}}」：{{reason}}",
     undone: "已撤销",
+    via: "在 {{client}} 上",
     dismissed: "你撤回了",
     expired: "已失效：{{choice}}",
     chose: "你选了「{{choice}}」",

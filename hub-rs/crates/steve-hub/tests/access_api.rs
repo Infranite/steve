@@ -86,7 +86,9 @@ async fn start() -> Env {
     }
     let bus = Bus::new();
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
-    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_modules(w.modules)
+        .with_oidc(w.oidc.clone());
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
         tokio::spawn(job);
@@ -376,4 +378,85 @@ async fn the_settings_list_and_revoke_your_own_tokens_and_clients() {
     assert_eq!(s, 200);
     let (s, _) = e.call("GET", "/api/access", Some(&cred), None).await;
     assert_eq!(s, 401);
+}
+
+/// A4b: single sign-on set up in the settings takes effect at once and can be turned off; only the owner.
+#[tokio::test]
+async fn single_sign_on_is_set_up_in_the_settings_without_a_restart() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (_, token) = st.access().token_create(&owner.id, "o", None).unwrap();
+    let (_, ok) = e
+        .call(
+            "POST",
+            "/auth/token",
+            None,
+            Some(json!({"user": owner.name, "token": token})),
+        )
+        .await;
+    let cred = ok["credential"].as_str().unwrap().to_string();
+    let (s, v) = e.call("GET", "/api/access/oidc", Some(&cred), None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        (v["source"].as_str(), v["enabled"].as_bool()),
+        (Some("none"), Some(false))
+    );
+    let (_, unauth) = e.call("GET", "/api/me", None, None).await;
+    assert_ne!(unauth["login"], "/auth/login");
+    // a plain-http issuer elsewhere is refused
+    let (s, _) = e
+        .call(
+            "PUT",
+            "/api/access/oidc",
+            Some(&cred),
+            Some(json!({"issuer": "http://id.example", "client_id": "steve"})),
+        )
+        .await;
+    assert_eq!(s, 400);
+    let (s, v) = e
+        .call("PUT", "/api/access/oidc", Some(&cred), Some(json!({"issuer": "https://id.example/o/steve/", "client_id": "steve", "secret": "s3cret"})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["issuer"], "https://id.example/o/steve");
+    assert_eq!(
+        (v["has_secret"].as_bool(), v["enabled"].as_bool()),
+        (Some(true), Some(true))
+    );
+    assert!(
+        !v.to_string().contains("s3cret"),
+        "the secret is never shown"
+    );
+    // in force now: the sign-in page offers it
+    let (_, unauth) = e.call("GET", "/api/me", None, None).await;
+    assert_eq!(unauth["login"], "/auth/login");
+    let (_, hello) = e.call("GET", "/auth/hello", None, None).await;
+    assert_eq!(hello["login"]["oidc"], true);
+    // a member may not change it
+    let m = st
+        .users()
+        .create("local:m", "Member", None, "member")
+        .unwrap();
+    let (_, mt) = st.access().token_create(&m, "m", None).unwrap();
+    let (_, mok) = e
+        .call(
+            "POST",
+            "/auth/token",
+            None,
+            Some(json!({"user": "Member", "token": mt})),
+        )
+        .await;
+    let mcred = mok["credential"].as_str().unwrap().to_string();
+    let (s, _) = e
+        .call("DELETE", "/api/access/oidc", Some(&mcred), None)
+        .await;
+    assert_eq!(s, 403);
+    // off again
+    let (s, v) = e
+        .call("DELETE", "/api/access/oidc", Some(&cred), None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["enabled"], false);
+    let (_, unauth) = e.call("GET", "/api/me", None, None).await;
+    assert_ne!(unauth["login"], "/auth/login");
 }

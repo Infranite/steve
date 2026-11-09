@@ -102,6 +102,8 @@ steve-hub --access client revoke ID
 
 On a Hub nobody has signed in to yet, `token create` makes `--user` (default: your account name) its owner.
 
+Single sign-on through OIDC is optional. The owner sets it up in **Settings · Access & clients** with an issuer, a client ID and a secret. It takes effect without a restart. The secret is kept in `secrets/oidc-client-secret` (mode 0600). The page shows the callback to register with the provider. An `STEVE_OIDC_*` environment configuration takes precedence and is shown read-only. When the web client has a port of its own, its `/auth/…` paths redirect to the Hub's port, so a callback registered on the web address works.
+
 ## A web client apart from the Hub
 
 The web page can run on its own origin instead of the Hub's port.

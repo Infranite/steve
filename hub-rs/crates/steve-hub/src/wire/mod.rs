@@ -48,6 +48,8 @@ pub struct Wired {
     pub domain: Arc<dyn Domain>,
     /// steve-auth's `/auth` router (login, callback, logout, dev).
     pub auth: Router,
+    /// Single sign-on's switch: the settings put a configuration in force through it (A4b).
+    pub oidc: Option<Arc<dyn crate::access::OidcSwitch>>,
     /// steve-mcp's streamable HTTP service, mounted behind the loopback gate.
     pub mcp: Option<Router>,
     /// The new modules (contacts, accounts, vault, schedules); `None` without them.
@@ -734,6 +736,12 @@ pub fn wire_assembly(
 
     let auth = steve_auth::Auth::new(auth::AuthStore(db.clone()), auth_cfg)
         .map_err(|e| BackendError::msg(e.to_string()))?;
+    /* single sign-on set up in the settings (A4b), unless the environment configures it */
+    if !auth.oidc_enabled()
+        && let Err(e) = crate::access::restore_oidc(&db, &cfg.home, &auth)
+    {
+        tracing::warn!("single sign-on from the settings: {e}");
+    }
     let extra = mcp_extra::Extra {
         store: db.clone(),
         modules: built.modules.clone(),
@@ -805,6 +813,7 @@ pub fn wire_assembly(
             lifecycle: built.lifecycle.clone(),
         }),
         auth: auth.router(),
+        oidc: Some(Arc::new(auth.clone())),
         mcp: Some(mcp),
         modules: Some(built.modules),
         module_routes,

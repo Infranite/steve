@@ -66,6 +66,7 @@ export default {
     yoloChose: "chose “{{choice}}”",
     yoloChoseWhy: "chose “{{choice}}”: {{reason}}",
     undone: "Undone",
+    via: "on {{client}}",
     dismissed: "You withdrew it",
     expired: "Expired: {{choice}}",
     chose: "You chose “{{choice}}”",
