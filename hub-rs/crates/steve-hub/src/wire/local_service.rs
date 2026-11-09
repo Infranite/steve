@@ -233,6 +233,17 @@ async fn keep_running(
 /// when the Hub runs under systemd, so the Hub's service stopping leaves it running.
 fn spawn(home: &Path) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
+    // only the Hub's own binary has `--local-node` (a test harness wiring the Hub in its own
+    // process starts the Node itself, or runs without it)
+    if !exe
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("steve-hub"))
+    {
+        return Err(std::io::Error::other(format!(
+            "{} is not steve-hub: start `steve-hub --local-node` yourself",
+            exe.display()
+        )));
+    }
     let log_dir = home.join("logs");
     std::fs::create_dir_all(&log_dir)?;
     let log = std::fs::OpenOptions::new()
