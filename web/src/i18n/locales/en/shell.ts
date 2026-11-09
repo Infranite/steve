@@ -150,6 +150,12 @@ export default {
     createCode: "Generate pairing code",
     codeExpires: "Code expires at {{time}}. Share only with the device you intend to connect.",
     codeExpired: "This code has expired. Generate a new one.",
+    tags: {
+      title: "Tags",
+      sub: "Agents and flows can send work to this device by tag, such as gpu or macos",
+      add: "Add a tag, then Enter",
+      remove: "Remove tag {{tag}}",
+    },
     vitals: {
       title: "Status",
       none: "No figures yet (this device's Node is older, or just linked)",

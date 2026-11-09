@@ -2128,3 +2128,94 @@ async fn a_service_node_turn_outlives_the_hub() {
         "the same Node process went on"
     );
 }
+
+/// B7: tags on the Hub's own Node; an item asking for one the Hub has keeps its new sessions
+/// here, and one asking for a tag no device has is told so, placed as usual.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_tags_send_work_where_it_fits() {
+    let h = Home::new();
+    let _hub = spawn(&h, true, &[]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    let (s, v) = c
+        .call(
+            "PUT",
+            "/api/node-tags/local",
+            Some(json!({"tags": ["GPU", "bad tag!", "macos"]})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["tags"], json!(["gpu", "macos"]));
+    let (_, v) = c.call("GET", "/api/node-tags", None).await;
+    assert_eq!(v["tags"]["local"], json!(["gpu", "macos"]));
+
+    let sid = c.item(&h, "标签验收 @say hello-tags-5T").await;
+    let item = h
+        .one("SELECT item_id FROM sessions WHERE id=?", &sid)
+        .expect("item");
+    let (s, _) = c
+        .call(
+            "PUT",
+            &format!("/api/items/{item}/node-tag"),
+            Some(json!({"tag": "not ok!"})),
+        )
+        .await;
+    assert_eq!(s, 400);
+    let (s, _) = c
+        .call(
+            "PUT",
+            &format!("/api/items/{item}/node-tag"),
+            Some(json!({"tag": "gpu"})),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (s, v) = c
+        .call(
+            "POST",
+            &format!("/api/sessions/{sid}/continue"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let next = v["session"].as_str().expect("new session").to_string();
+    assert!(
+        wait(30, || h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
+            &next
+        ) == 1)
+        .await,
+        "the Hub has the tag: the session runs here"
+    );
+
+    let (s, _) = c
+        .call(
+            "PUT",
+            &format!("/api/items/{item}/node-tag"),
+            Some(json!({"tag": "cuda"})),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (s, v) = c
+        .call(
+            "POST",
+            &format!("/api/sessions/{next}/continue"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let third = v["session"].as_str().expect("new session").to_string();
+    assert!(
+        wait(30, || h.count("SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND instr(data,'cuda')>0", &third) == 1).await,
+        "told no device has the tag; log:\n{}",
+        hub_log(&h)
+    );
+    assert!(
+        wait(30, || h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
+            &third
+        ) == 1)
+        .await,
+        "placed as usual"
+    );
+}

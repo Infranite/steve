@@ -187,6 +187,14 @@ Where new sessions go:
 - `STEVE_NODE_PLACEMENT=spread` sends a new session (for an item without a project) to the linked remote Node that is clearly less loaded than the Hub's machine. Load per CPU, from the devices' vitals, must be lower by 0.25. Otherwise the session stays on the Hub's machine (`local`, the default).
 - A remote Node runs only its owner's work, whichever way it is chosen.
 
+Every Node can carry tags (Devices → a device → Tags), the Hub's own Node (`local`) included. An item may ask for a tag in several ways:
+
+- `PUT /api/items/<id>/node-tag`;
+- the `node_tag` setting of a flow's `item.create`;
+- an agent's `steve_devices` tool (`require`), which also lists the devices and their tags.
+
+The item's new sessions then go to a Node with that tag: the Hub's own when it has it, otherwise a linked remote Node that may take the work. When no available Node has the tag, the session says so and is placed as usual.
+
 When a device stays offline for `STEVE_NODE_HANDOFF_MIN` minutes (default 30; `0` turns this off) while messages wait for one of its sessions, Steve ends that session and continues the item in a new one, placed as any new session is. The new session carries the conversation and the waiting messages, and is told that work on the offline device that was never pushed is not visible to it. Steve posts a notice. A device counts as away from when its link closed, and never longer than the Hub has been up.
 
 ### Verify and recover a Node

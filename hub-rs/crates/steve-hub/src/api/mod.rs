@@ -9,6 +9,7 @@ mod files;
 mod items;
 mod misc;
 mod node_env;
+mod node_tags;
 mod outputs;
 mod projects;
 mod sessions;
@@ -669,6 +670,9 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/config/{id}/drop", post(misc::config_drop))
         // devices
         .route("/devices", get(misc::devices))
+        .route("/node-tags", get(node_tags::list))
+        .route("/node-tags/{node}", put(node_tags::set))
+        .route("/items/{id}/node-tag", put(node_tags::set_item))
         .route("/vitals", get(crate::nodes::vitals::get))
         .route("/devices/{id}", patch(misc::device_patch))
         .route("/system/models", get(misc::system_models))
