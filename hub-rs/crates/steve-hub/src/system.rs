@@ -169,6 +169,8 @@ fn shown(mut list: Value) -> Value {
             "no_claude" => steve_i18n::t!("hub.runtime.no_claude"),
             "no_codex" => steve_i18n::t!("hub.runtime.no_codex"),
             "acp" => steve_i18n::t!("hub.runtime.via_acp"),
+            "adapter_missing" => steve_i18n::t!("hub.runtime.adapter_missing"),
+            "initialize_failed" => steve_i18n::t!("hub.runtime.initialize_failed"),
             code => match code.strip_prefix("no_adapter:") {
                 Some(adapter) => steve_i18n::t!("hub.runtime.no_adapter", adapter = adapter),
                 None => code.to_string(),
@@ -191,23 +193,59 @@ async fn version_of(bin: &str) -> String {
     }
 }
 
-/// The versions the local Node's probe reports (`claude-code`, `codex`), `""` when it has none.
-async fn node_versions(node: &dyn steve_node_api::Node, fresh: bool) -> (String, String) {
-    let caps = match node.probe(fresh).await {
-        Ok(c) => c,
+/// What the local Node's probe reports about its harnesses (none when it cannot say).
+async fn node_harnesses(
+    node: &dyn steve_node_api::Node,
+    fresh: bool,
+) -> Vec<steve_node_api::HarnessCapability> {
+    match node.probe(fresh).await {
+        Ok(c) => c.harnesses,
         Err(e) => {
             tracing::warn!("probe of the local Node: {e}");
-            return Default::default();
+            vec![]
         }
-    };
-    let of = |name: &str| {
-        caps.harnesses
-            .iter()
-            .find(|h| h.name == name)
-            .map(|h| h.version.clone())
-            .unwrap_or_default()
-    };
-    (of("claude-code"), of("codex"))
+    }
+}
+
+/// Rows for the adapters a manifest adds (harness parity S1): what their `initialize` said through
+/// the local Node, or (without one) whether their command is there. Notes are codes ([`shown`]).
+fn declared_rows(
+    cfg: &Config,
+    harnesses: Option<&[steve_node_api::HarnessCapability]>,
+) -> Vec<Value> {
+    use steve_node_api::AdapterStatus;
+    let builtin: Vec<&str> = steve_acp::adapters::builtin_ids().collect();
+    cfg.adapters
+        .iter()
+        .filter(|(id, _)| !builtin.contains(&id.as_str()))
+        .map(|(id, path)| {
+            let spec = steve_acp::adapters::spec(id, cfg.declared_adapters.get(id));
+            let reported = harnesses.and_then(|hs| hs.iter().find(|h| &h.name == id));
+            let adapter = reported.and_then(|h| h.adapter.as_ref());
+            let (ok, note) = match (adapter.map(|a| a.status), harnesses) {
+                (Some(AdapterStatus::Ready), _) => (true, "acp".to_string()),
+                (Some(AdapterStatus::AdapterMissing), _) => (false, "adapter_missing".into()),
+                (Some(AdapterStatus::InitializeFailed), _) => {
+                    (false, "initialize_failed".to_string())
+                }
+                // without a Node to ask: there or not
+                (None, None) if Path::new(path).exists() => (true, "acp".into()),
+                (None, _) => (false, "adapter_missing".into()),
+            };
+            json!({
+                "id": id,
+                "name": adapter.map(|a| a.title.clone()).unwrap_or(spec.name),
+                "path": path,
+                "version": reported.map(|h| h.version.clone()).unwrap_or_default(),
+                "models": reported.map(|h| h.models.clone()).unwrap_or_default(),
+                "ok": ok,
+                "note": note,
+                "custom": true,
+                "error": adapter.and_then(|a| a.error.clone()),
+                "install_hint": spec.install_hint,
+            })
+        })
+        .collect()
 }
 
 /// The harness list. `node`: the local Node runs the binaries (`fresh`: it probes again).
@@ -218,8 +256,20 @@ async fn probe(cfg: &Config, node: Option<&dyn steve_node_api::Node>, fresh: boo
         .find(|p| exists(p))
         .unwrap_or("");
     // two CLI start-ups, side by side
-    let (claude_v, codex_v) = match node {
-        Some(n) => node_versions(n, fresh).await,
+    let harnesses = match node {
+        Some(n) => Some(node_harnesses(n, fresh).await),
+        None => None,
+    };
+    let (claude_v, codex_v) = match &harnesses {
+        Some(hs) => {
+            let of = |name: &str| {
+                hs.iter()
+                    .find(|h| h.name == name)
+                    .map(|h| h.version.clone())
+                    .unwrap_or_default()
+            };
+            (of("claude-code"), of("codex"))
+        }
         None => tokio::join!(version_of(&cfg.claude_executable), version_of(codex_bin)),
     };
     let claude_adapter = cfg
@@ -236,7 +286,7 @@ async fn probe(cfg: &Config, node: Option<&dyn steve_node_api::Node>, fresh: boo
         .strip_prefix("codex-cli")
         .map(|s| s.trim_start().to_string())
         .unwrap_or_else(|| codex_v.clone());
-    json!([
+    let mut list = json!([
         {
             "id": "claude-code", "name": "Claude Code", "path": cfg.claude_executable,
             "version": claude_v.split(' ').next().unwrap_or(""),
@@ -253,7 +303,11 @@ async fn probe(cfg: &Config, node: Option<&dyn steve_node_api::Node>, fresh: boo
             "ok": !codex_v.is_empty() && codex_adapter,
             "note": if codex_v.is_empty() { "no_codex" } else if !codex_adapter { "no_adapter:@zed-industries/codex-acp" } else { "acp" },
         }
-    ])
+    ]);
+    if let Some(rows) = list.as_array_mut() {
+        rows.extend(declared_rows(cfg, harnesses.as_deref()));
+    }
+    list
 }
 
 // ── local harness history ──
@@ -659,5 +713,70 @@ mod tests {
         let list = rt.get(false).await;
         assert_eq!(list[0]["id"], json!("claude-code"));
         assert_eq!(list[0]["ok"], json!(false));
+    }
+
+    /// Harness parity S1: an adapter the Hub's manifest adds is a runtime like the built-in ones,
+    /// with what the local Node's probe said about it.
+    #[test]
+    fn declared_adapters_are_runtimes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness.json"),
+            r#"{"adapters": {"mine": {"command": "/nonexistent/mine", "name": "Mine"}}}"#,
+        )
+        .unwrap();
+        let home = dir.path().to_string_lossy().into_owned();
+        let vars = [
+            ("STEVE_HOME", home.as_str()),
+            ("STEVE_ADAPTER_CLAUDE", "/x/claude.js"),
+            ("STEVE_ADAPTER_CODEX", "/x/codex"),
+        ];
+        let cfg = Config::from_vars(|k| {
+            vars.iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        })
+        .expect("config");
+        let rows = declared_rows(&cfg, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], json!("mine"));
+        assert_eq!(rows[0]["name"], json!("Mine"));
+        assert_eq!(rows[0]["ok"], json!(false));
+        assert_eq!(rows[0]["note"], json!("adapter_missing"));
+        let reported = steve_node_api::HarnessCapability {
+            name: "mine".into(),
+            version: "1.0".into(),
+            sessions: true,
+            jobs: false,
+            models: vec!["m1".into()],
+            resume: true,
+            cancel: true,
+            permissions: true,
+            images: false,
+            enforcement: vec![],
+            adapter: Some(steve_node_api::AdapterInfo {
+                title: "Mine".into(),
+                builtin: false,
+                status: steve_node_api::AdapterStatus::Ready,
+                error: None,
+                version: Some("1.0".into()),
+                load_session: true,
+                list_sessions: false,
+                mcp_http: true,
+                embedded_context: false,
+                auth: vec![],
+                install_hint: None,
+            }),
+        };
+        let rows = declared_rows(&cfg, Some(&[reported]));
+        assert_eq!(rows[0]["ok"], json!(true));
+        assert_eq!(rows[0]["models"], json!(["m1"]));
+        let shown = shown(json!(rows));
+        assert!(
+            shown[0]["note"]
+                .as_str()
+                .is_some_and(|n| !n.is_empty() && n != "acp")
+        );
+        assert!(cfg.harness_ids().contains(&"mine".to_string()));
     }
 }

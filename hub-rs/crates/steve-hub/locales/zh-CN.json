@@ -117,6 +117,8 @@
   "hub.runtime.no_codex": "没有找到 codex",
   "hub.runtime.no_adapter": "缺少 ACP 适配器 %{adapter}",
   "hub.runtime.via_acp": "通过 ACP 适配器运行",
+  "hub.runtime.adapter_missing": "无法启动该适配器",
+  "hub.runtime.initialize_failed": "适配器没有响应 initialize",
   "hub.runtime.path_missing": "未找到",
   "hub.import.gone": "本机记录不存在了",
   "hub.import.already": "已经导入过了",

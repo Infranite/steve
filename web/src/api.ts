@@ -77,7 +77,8 @@ export type RPairing = { code: string; expires: number; pin: string | null; hub_
 /** a remote install over tailcat's SSH (A6b): the command for the target, then its steps */
 export type RInstall = { id: string; state: "waiting" | "running" | "done" | "failed"; command: string; steps: { at: number; text: string }[]; node_id: string | null; error: string | null }
 export type RTailcat = { available: boolean; enabled: boolean; running?: boolean; address?: string | null; hub_url?: string | null; port?: number; error?: string | null }
-export type RRuntime = { id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string }
+/* `custom`: an adapter the Hub's harness manifest adds (harness parity S1), with `error` and `install_hint` when it has them */
+export type RRuntime = { id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; error?: string | null; install_hint?: string | null }
 export type REvent = { seq: number; ts: number; kind: string; data: any }
 export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[] }
 export type LocalSession = { key: string; harness: string; title: string; cwd: string; when: number; size: number; imported: boolean }
