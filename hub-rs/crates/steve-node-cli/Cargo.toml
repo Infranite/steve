@@ -22,7 +22,7 @@ steve-acp = { path = "../steve-acp" }
 steve-node = { path = "../steve-node" }
 steve-node-api = { path = "../steve-node-api" }
 steve-node-wire = { path = "../steve-node-wire" }
-tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "io-std", "io-util"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "io-std", "io-util", "process"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
 

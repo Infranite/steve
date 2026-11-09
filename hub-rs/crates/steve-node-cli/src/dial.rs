@@ -16,8 +16,14 @@ use steve_node_wire::{
 };
 
 use crate::config::{Home, Pairing, loopback_plaintext_allowed, ws_url};
+use crate::tunnel::Tunnel;
+use steve_node_wire::tailcat;
 
 pub fn trust(p: &Pairing) -> Result<Trust> {
+    // the tunnel's local end: WireGuard to the key the address names stands where TLS would
+    if tailcat::parse(&p.hub_url).is_some() {
+        return Ok(Trust::LoopbackPlaintext);
+    }
     let url = ws_url(&p.hub_url)?;
     tls::policy(
         &url,
@@ -74,14 +80,25 @@ pub async fn pair(
     name: &str,
 ) -> Result<Pairing> {
     let hub_url = hub_url.trim_end_matches('/').to_string();
+    // over tailcat: the request goes to the tunnel's local end, the pairing keeps the address
+    let tunnel = match tailcat::parse(&hub_url) {
+        Some((addr, port)) => Some(Tunnel::open(addr, port).await?),
+        None => None,
+    };
     let plain = hub_url.starts_with("http://");
-    let trust = tls::policy(
-        &ws_url(&hub_url)?,
-        pin.as_deref(),
-        plain && loopback_plaintext_allowed(),
-    )
-    .map_err(|e| anyhow!(e))?;
-    same_host(&hub_url)?;
+    let (trust, base) = match &tunnel {
+        Some(t) => (Trust::LoopbackPlaintext, t.url.clone()),
+        None => {
+            let trust = tls::policy(
+                &ws_url(&hub_url)?,
+                pin.as_deref(),
+                plain && loopback_plaintext_allowed(),
+            )
+            .map_err(|e| anyhow!(e))?;
+            same_host(&hub_url)?;
+            (trust, hub_url.clone())
+        }
+    };
     let id = match Identity::load(&home.identity()) {
         Ok(id) => id,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -94,7 +111,7 @@ pub async fn pair(
     let pubkey = id.public();
     let sig = id.sign(&identity::pair_message(code, &pubkey));
     let res = http(&trust)?
-        .post(format!("{hub_url}/node/pair"))
+        .post(format!("{base}/node/pair"))
         .json(&json!({
             "code": code,
             "pubkey": hex::encode(pubkey),
@@ -190,12 +207,26 @@ pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -
     node.connect_tools(Arc::new(RemoteTools(link.clone())))
         .await
         .context("tool endpoint")?;
-    let url = ws_url(&p.hub_url)?;
+    let over = tailcat::parse(&p.hub_url).map(|(a, port)| (a.to_string(), port));
+    let fixed = match over {
+        None => Some(ws_url(&p.hub_url)?),
+        Some(_) => None,
+    };
+    let mut tunnel = None;
     let node_id = NodeId::new(p.node_id.clone()).map_err(|_| anyhow!("bad node id"))?;
     let server = NodeServer::new(Arc::new(node.clone()));
     let mut backoff = Duration::from_millis(200);
     loop {
-        match link_once(&node, &server, &link, &url, &node_id, &p.hub_id, id, trust).await {
+        let url = match (&fixed, &over) {
+            (Some(url), _) => Ok(url.clone()),
+            (None, Some((addr, port))) => tunnel_url(&mut tunnel, addr, *port).await,
+            (None, None) => unreachable!(),
+        };
+        let linked = match url {
+            Ok(url) => link_once(&node, &server, &link, &url, &node_id, &p.hub_id, id, trust).await,
+            Err(e) => Err(Stop::Retry(format!("{e:#}"))),
+        };
+        match linked {
             Ok(()) => backoff = Duration::from_millis(200),
             Err(Stop::Refused(e)) => {
                 link.set(None);
@@ -208,6 +239,15 @@ pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -
         tokio::time::sleep(steve_node_wire::jitter(backoff)).await;
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
+}
+
+/// The tunnel's `ws://` URL, the tunnel opened again when its program has exited.
+async fn tunnel_url(tunnel: &mut Option<Tunnel>, addr: &str, port: u16) -> Result<String> {
+    if !tunnel.as_mut().is_some_and(Tunnel::alive) {
+        *tunnel = None;
+        *tunnel = Some(Tunnel::open(addr, port).await?);
+    }
+    ws_url(&tunnel.as_ref().expect("opened").url)
 }
 
 #[derive(Debug, PartialEq)]

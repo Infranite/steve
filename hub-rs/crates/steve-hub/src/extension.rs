@@ -684,6 +684,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
         }
+        crate::nodes::tailcat::shutdown();
         domain.shutdown().await;
         std::process::exit(0);
     });

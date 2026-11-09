@@ -66,6 +66,7 @@
   "hub.prices.syncing": "Syncing, one moment",
   "hub.prices.sync_failed": "%{error}; keeping the prices from the last sync",
   "hub.stats.owner_only": "Only the space's owner can rebuild statistics",
+  "hub.nodes.tailcat_owner_only": "Only the instance owner can turn Nodes over tailcat on or off",
   "hub.upgrade.owner_only": "Only the instance admin can upgrade Steve",
   "hub.upgrade.owner_only_reason": "Only the instance admin can approve and run upgrades",
   "hub.upgrade.reason.release_script": "This machine runs a version published by ops/release.sh under launchd, without the managed upgrader (ops/run-managed.sh), so the Hub can't replace and restart itself. Upgrade with the release script.",

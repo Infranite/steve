@@ -66,6 +66,7 @@
   "hub.prices.syncing": "正在同步，稍等",
   "hub.prices.sync_failed": "%{error}；继续使用上次同步的价格",
   "hub.stats.owner_only": "只有工作空间的所有者能重建统计",
+  "hub.nodes.tailcat_owner_only": "仅实例管理员可开关经 tailcat 接入 Node",
   "hub.upgrade.owner_only": "仅实例管理员可升级 Steve",
   "hub.upgrade.owner_only_reason": "仅实例管理员可批准和执行升级",
   "hub.upgrade.reason.release_script": "这台机器由 launchd 运行 ops/release.sh 发布的版本，没有使用托管升级器（ops/run-managed.sh），Hub 不能替换并重启自己，需要用发布脚本升级。",
