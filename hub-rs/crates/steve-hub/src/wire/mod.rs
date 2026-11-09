@@ -420,6 +420,15 @@ fn remote_nodes(
     fleet.set_cost_caps(cost_caps(vars));
     let svc = crate::nodes::from_vars(store, fleet, |k| vars(k));
     if let Some(svc) = &svc {
+        // a Hub that cannot keep a key still runs; its welcomes go unsigned and say so in the log
+        match crate::nodes::identity_at(&cfg.home) {
+            Ok(id) => {
+                let _ = svc.identity.set(Arc::new(id));
+            }
+            Err(e) => tracing::error!("the hub's identity key: {e}; node welcomes go unsigned"),
+        }
+    }
+    if let Some(svc) = &svc {
         let port = vars("STEVE_TAILCAT_PORT")
             .and_then(|v| v.trim().parse::<u16>().ok())
             .filter(|p| *p != 0)

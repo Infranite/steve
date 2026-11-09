@@ -320,6 +320,7 @@ pub async fn dial_url_as(
             heads: vec![],
             caps: None,
             hub_id: Some(hub_id),
+            hub_key: None,
         },
         proto,
     )

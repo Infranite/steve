@@ -67,6 +67,7 @@ async fn run(
             heads: vec![],
             caps: None,
             hub_id: Some("hub_1"),
+            hub_key: None,
         },
     )
     .await;
@@ -201,6 +202,7 @@ async fn a_node_refuses_a_hub_it_did_not_pair_with() {
             heads: vec![],
             caps: None,
             hub_id: Some("hub_1"),
+            hub_key: None,
         },
     )
     .await
@@ -244,9 +246,121 @@ async fn a_bare_close_is_not_a_refusal() {
             heads: vec![],
             caps: None,
             hub_id: Some("hub_1"),
+            hub_key: None,
         },
     )
     .await
     .unwrap_err();
     assert_eq!(e.code, "offline");
+}
+
+/// One handshake between a Hub that signs with `hub` (or not) and a Node that expects `known`.
+async fn run_signed(
+    hub: Option<Identity>,
+    known: Option<[u8; 32]>,
+) -> Result<(handshake::Challenge, handshake::Welcome), handshake::Refused> {
+    let adm = Arc::new(Mem::default());
+    let id = Identity::generate().unwrap();
+    adm.keys.lock().unwrap().insert("n1".into(), id.public());
+    let (mut h, mut n) = pair();
+    tokio::spawn(async move {
+        let _ = handshake::accept_as(
+            &mut h.sink,
+            &mut h.stream,
+            "hub_1",
+            adm.as_ref(),
+            hub.as_ref(),
+        )
+        .await;
+        h
+    });
+    let nodeid = nid("n1");
+    handshake::dial(
+        &mut n.sink,
+        &mut n.stream,
+        NodeIntro {
+            node: &nodeid,
+            identity: &id,
+            incarnation: 1,
+            heads: vec![],
+            caps: None,
+            hub_id: Some("hub_1"),
+            hub_key: known,
+        },
+    )
+    .await
+}
+
+/// M1: the Hub signs its welcome; a Node that knows the Hub's key takes only a welcome that key
+/// signed, whoever ends the TLS on the way.
+#[tokio::test]
+async fn a_node_that_knows_its_hub_takes_only_its_signed_welcome() {
+    let seed = [7u8; 32];
+    let key = Identity::from_seed(seed).public();
+    // first contact, nothing known: the welcome proves the key it carries
+    let (c, w) = run_signed(Some(Identity::from_seed(seed)), None)
+        .await
+        .unwrap();
+    assert_eq!(w.hub_key, hex::encode(key));
+    assert!(!w.sig.is_empty());
+    let _ = c;
+    // known: the same Hub is welcome
+    assert!(
+        run_signed(Some(Identity::from_seed(seed)), Some(key))
+            .await
+            .is_ok()
+    );
+    // another key, or none at all, is not the Hub this Node paired with
+    let other = run_signed(Some(Identity::generate().unwrap()), Some(key))
+        .await
+        .unwrap_err();
+    assert_eq!(other.code, handshake::DENIED);
+    let unsigned = run_signed(None, Some(key)).await.unwrap_err();
+    assert_eq!(unsigned.code, handshake::DENIED);
+    // a Node that knows nothing still takes an unsigned welcome (a Hub of an earlier release)
+    let (_, w) = run_signed(None, None).await.unwrap();
+    assert!(w.hub_key.is_empty() && w.sig.is_empty());
+}
+
+/// M1: a signature over anything else than this welcome (a field changed on the way) holds for
+/// nothing.
+#[test]
+fn a_changed_welcome_no_longer_holds() {
+    use handshake::{Challenge, ProtoRange, Welcome, welcome_key, welcome_message};
+    let hub = Identity::generate().unwrap();
+    let c = Challenge {
+        nonce: "nn".into(),
+        hub_id: "hub_1".into(),
+        conn_id: "cc".into(),
+        proto: ProtoRange {
+            min: (1, 0),
+            max: (1, 0),
+        },
+        hub_time: 0,
+    };
+    let h = Hello {
+        node_id: nid("n1"),
+        incarnation: 1,
+        proto: (1, 0),
+        codecs: vec!["json".into()],
+        heads: vec![],
+        caps: None,
+        sig: "ab".into(),
+    };
+    let mut w = Welcome {
+        generation: 4,
+        proto: (1, 0),
+        paused: false,
+        heartbeat_ms: 10_000,
+        hub_key: hex::encode(hub.public()),
+        sig: String::new(),
+    };
+    w.sig = hex::encode(hub.sign(&welcome_message(&c, &h, &w)));
+    assert_eq!(welcome_key(&c, &h, &w).unwrap(), Some(hub.public()));
+    let mut paused = w.clone();
+    paused.paused = true;
+    assert!(welcome_key(&c, &h, &paused).is_err());
+    let mut other_conn = c.clone();
+    other_conn.conn_id = "dd".into();
+    assert!(welcome_key(&other_conn, &h, &w).is_err());
 }

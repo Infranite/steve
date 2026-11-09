@@ -255,7 +255,15 @@ pub async fn claim(
     })
     .await;
     match owner {
-        Ok(Some(_)) => json_response(200, &json!({ "node_id": node_id, "hub_id": svc.hub_id })),
+        Ok(Some(_)) => json_response(
+            200,
+            &json!({
+                "node_id": node_id,
+                "hub_id": svc.hub_id,
+                // the Node refuses welcomes this key did not sign (M1)
+                "hub_key": svc.identity.get().map(|k| hex::encode(k.public())),
+            }),
+        ),
         Ok(None) => denied(),
         Err(r) => *r,
     }
