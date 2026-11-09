@@ -1,6 +1,7 @@
-//! Think jobs: one Steve model call (`claude -p`, `codex exec`) with exactly one model, in a scratch
-//! directory of its own. The Hub chose the model and keeps the fallback; a failing model ends the
-//! attempt as failed and nothing here tries another.
+//! Think jobs: one Steve model call, a one-shot ACP call of the chosen harness adapter
+//! ([`steve_acp::oneshot`]) with exactly one model, in a scratch directory of its own. The Hub chose
+//! the model and keeps the fallback; a failing model ends the attempt as failed and nothing here
+//! tries another.
 //!
 //! The harness leads its own process group, recorded in the journal before it runs on ([`procs`]),
 //! so a cancel, a deadline or the Hub's abandon after a restart stops the whole group and proves it
@@ -12,41 +13,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use steve_acp::oneshot::{Image, OneShotError};
 use steve_node_api::*;
-use steve_print::{Harness, Image, PrintError, PrintRun, Ran, ToolMode};
 use tokio::sync::Notify;
 
 use crate::journal::Tx;
 use crate::procs::{self, Stopped};
 use crate::{Inner, emit_all, now};
-
-/// The print-mode CLIs think jobs run with; `None`: that harness runs no jobs here.
-#[derive(Debug, Clone, Default)]
-pub struct JobHarnesses {
-    /// `claude` (harness `claude-code`).
-    pub claude: Option<PathBuf>,
-    /// `codex` (harness `codex`).
-    pub codex: Option<PathBuf>,
-}
-
-impl JobHarnesses {
-    pub(crate) fn executable(&self, harness: &str) -> Option<(Harness, &Path)> {
-        match harness {
-            "claude-code" => self.claude.as_deref().map(|p| (Harness::Claude, p)),
-            "codex" => self.codex.as_deref().map(|p| (Harness::Codex, p)),
-            _ => None,
-        }
-    }
-
-    /// The harnesses that run jobs.
-    pub(crate) fn names(&self) -> Vec<&'static str> {
-        [("claude-code", &self.claude), ("codex", &self.codex)]
-            .into_iter()
-            .filter(|(_, p)| p.is_some())
-            .map(|(n, _)| n)
-            .collect()
-    }
-}
 
 /// The key a job attempt's process group is recorded under (the journal keeps groups by session).
 pub(crate) fn group_key(attempt: &AttemptId) -> SessionId {
@@ -85,7 +58,7 @@ enum Stop {
 /// What the model has written so far, as events went out.
 #[derive(Default)]
 struct Draft {
-    /// steve-print's number of the current message.
+    /// The number of the adapter's current message.
     current: Option<u32>,
     /// Messages started (for their ids).
     n: u32,
@@ -156,47 +129,16 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
             Ok(x) => x,
             Err(e) => return Err(e),
         };
-        let JobWork::Think(think) = &spec.work else {
-            return Err(ApiError::new(ErrorCode::Unsupported, "not a think job"));
-        };
-        if inner
-            .cfg
-            .acp
-            .adapters
-            .contains_key(&spec.run.choice.harness)
-        {
-            return Ok(acp_think(
-                &inner,
-                &spec,
-                &dir,
-                &message,
-                &images,
-                &spawned,
-                &on_message,
-            )
-            .await);
-        }
-        let Some((harness, exe)) = inner.cfg.jobs.executable(&spec.run.choice.harness) else {
-            return Err(ApiError::new(ErrorCode::Unsupported, "no such harness"));
-        };
-        let left = (lim.deadline.0 - now()).max(0) as u64;
-        let run = PrintRun {
-            harness,
-            executable: exe,
-            cwd: &dir,
-            model: spec.run.choice.model.as_deref().unwrap_or(""),
-            effort: spec.run.choice.effort.as_deref(),
-            head: think.instructions.as_deref(),
-            message: &message,
-            tools: match think.tools {
-                ThinkToolMode::None => ToolMode::None,
-                ThinkToolMode::ReadAttached => ToolMode::ReadOnly,
-            },
-            images: &images,
-            // the Node's own deadline comes first; this only bounds a run nobody stops
-            timeout: Duration::from_millis(left) + Duration::from_secs(5),
-        };
-        Ok(steve_print::run_supervised(&run, &spawned, &on_message).await)
+        Ok(acp_think(
+            &inner,
+            &spec,
+            &dir,
+            &message,
+            &images,
+            &spawned,
+            &on_message,
+        )
+        .await)
     };
     let stop = async {
         loop {
@@ -274,8 +216,17 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
     end_with(&inner, &op, &exec, &key, recorded, completion, vec![]).await;
 }
 
-/// ACP is the baseline for registered adapters. The print-mode path above remains only for
-/// hosts that have explicitly configured a CLI without an ACP adapter.
+/// What the adapter ended the call with: its answer or error, how it stopped (ACP's
+/// `stopReason`), and the usage it reported either way.
+struct Ran {
+    reply: Result<String, OneShotError>,
+    stop_reason: String,
+    usage: Vec<UsageReport>,
+}
+
+/// The think job as a one-shot ACP call. The prompt's stable head goes as the session's system
+/// prompt where the adapter takes one; without tools the harness's own tools are off where it
+/// declares how.
 async fn acp_think(
     inner: &Inner,
     spec: &JobSpec,
@@ -291,10 +242,11 @@ async fn acp_think(
 
     let failed = |error| Ran {
         reply: Err(error),
+        stop_reason: "error".into(),
         usage: vec![],
     };
     let JobWork::Think(think) = &spec.work else {
-        return failed(PrintError::Failed("not a think job".into()));
+        return failed(OneShotError::Failed("not a think job".into()));
     };
     let readable: Vec<PathBuf> = spec
         .run
@@ -318,18 +270,8 @@ async fn acp_think(
                 .self_read_only,
         )
     };
-    let text = match &think.instructions {
-        Some(head) => format!("{head}\n\n{message}"),
-        None => message.to_string(),
-    };
-    let mut prompt = vec![json!({"type": "text", "text": text})];
-    prompt.extend(images.iter().map(|image| {
-        steve_acp::oneshot::Image {
-            mime: image.mime.clone(),
-            bytes: image.bytes.clone(),
-        }
-        .block()
-    }));
+    let mut prompt = vec![json!({"type": "text", "text": message})];
+    prompt.extend(images.iter().map(Image::block));
     let properties = inner.cfg.acp.adapter_properties(&spec.run.choice.harness);
     // Keep the existing Auto sandbox policy: use the adapter's own read-only sandbox where
     // declared, otherwise apply the host's read-only wrapper when the platform provides it.
@@ -337,13 +279,17 @@ async fn acp_think(
         && properties.nested_sandbox
         && steve_research::sandbox::available()
     {
-        let writable = [
-            dir.to_path_buf(),
-            inner.cfg.acp.codex_home.clone(),
-            inner.cfg.acp.user_home.join(".claude"),
-        ];
+        // the job's own directory, and the harness's own state where it declares one
+        let state = properties.state.as_ref().map(|st| {
+            std::env::var_os(&st.env)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| inner.cfg.acp.user_home.join(&st.default))
+        });
+        let writable: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(state).collect();
         let Some(profile) = steve_research::sandbox::profile(&writable) else {
-            return failed(PrintError::Failed("invalid read-only sandbox paths".into()));
+            return failed(OneShotError::Failed(
+                "invalid read-only sandbox paths".into(),
+            ));
         };
         // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
         let profile = format!(
@@ -354,7 +300,7 @@ async fn acp_think(
         if let Err(e) =
             std::fs::create_dir_all(dir.join("tmp")).and_then(|_| std::fs::write(&path, profile))
         {
-            return failed(PrintError::Io(e));
+            return failed(OneShotError::Io(e));
         }
         Some(path)
     } else {
@@ -396,6 +342,8 @@ async fn acp_think(
         model: spec.run.choice.model.as_deref(),
         effort: spec.run.choice.effort.as_deref(),
         resume: None,
+        head: think.instructions.as_deref(),
+        tools_off: think.tools == ThinkToolMode::None,
         prompt,
         mcp_servers: json!([]),
         wrap: Some(&wrap),
@@ -407,31 +355,14 @@ async fn acp_think(
         allow_tool: &allow,
     };
     match crate::acp_job::run(req, spawned, &event).await {
-        Ok(out) if out.stop_reason == "end_turn" => Ran {
-            reply: Ok(steve_print::Reply {
-                text: out.text,
-                cost: None,
-            }),
-            usage: out.usage,
-        },
         Ok(out) => Ran {
-            reply: Err(PrintError::Failed(format!(
-                "ACP stopped: {}",
-                out.stop_reason
-            ))),
+            reply: Ok(out.text),
+            stop_reason: out.stop_reason,
             usage: out.usage,
         },
         Err(e) => Ran {
-            reply: Err(match e {
-                OneShotError::OutputLimit => PrintError::OutputLimit,
-                OneShotError::Timeout(t) => PrintError::Timeout(t),
-                OneShotError::Failed(e) => PrintError::Failed(e),
-                OneShotError::Harness {
-                    text, transient, ..
-                } => PrintError::Harness { text, transient },
-                e @ OneShotError::Unsupported(_) => PrintError::Failed(e.to_string()),
-                OneShotError::Io(e) => PrintError::Io(e),
-            }),
+            reply: Err(e),
+            stop_reason: "error".into(),
             usage: usage.lock().unwrap().clone(),
         },
     }
@@ -615,9 +546,10 @@ fn ended_with(outcome: Outcome, stop_reason: &str) -> Completion {
     }
 }
 
-/// The harness's own end. `stop_reason` says how a failed run failed (`timeout`, `failed`, `harness`,
-/// `codex_failed`, `no_result`, `no_output`, `io`); `error.safe_detail` is what it said, so the Hub
-/// can put it in its own words.
+/// The adapter's own end. A turn it ended (`end_turn`) succeeds with its answer; any other
+/// `stopReason` it gave (`max_tokens`, `refusal`, `cancelled`) fails with that reason. A call that
+/// failed is `timeout` or `error`, its `error.safe_detail` what the adapter said and `transient`
+/// whether another try may succeed, so the Hub can put it in its own words.
 async fn end(
     inner: &Inner,
     op: &OperationId,
@@ -627,48 +559,39 @@ async fn end(
     ran: Ran,
 ) {
     let completion = match ran.reply {
-        Ok(reply) => Completion {
-            result: vec![Part::Text { text: reply.text }],
+        Ok(text) if ran.stop_reason == "end_turn" => Completion {
+            result: vec![Part::Text { text }],
             ..ended_with(Outcome::Succeeded, "end_turn")
+        },
+        Ok(_) => Completion {
+            error: Some(ApiError::new(
+                ErrorCode::Internal,
+                format!("the harness stopped: {}", ran.stop_reason),
+            )),
+            ..ended_with(Outcome::Failed, &ran.stop_reason)
         },
         Err(e) => {
             let transient = e.transient();
             let (outcome, code, kind, detail) = match e {
-                PrintError::OutputLimit => (
+                OneShotError::OutputLimit => (
                     Outcome::Cancelled,
                     ErrorCode::Exhausted,
                     "error",
                     NodeStop::OutputLimit.detail(),
                 ),
-                PrintError::Timeout(_) => (
+                OneShotError::Timeout(_) => (
                     Outcome::TimedOut,
                     ErrorCode::Expired,
                     "timeout",
                     NodeStop::Deadline.detail(),
                 ),
-                PrintError::Failed(err) => (Outcome::Failed, ErrorCode::Internal, "failed", err),
-                PrintError::Harness { text, .. } => {
-                    (Outcome::Failed, ErrorCode::Internal, "harness", text)
-                }
-                PrintError::CodexFailed => (
+                e @ OneShotError::Unsupported(_) => (
                     Outcome::Failed,
-                    ErrorCode::Internal,
-                    "codex_failed",
-                    String::new(),
+                    ErrorCode::Unsupported,
+                    "error",
+                    e.to_string(),
                 ),
-                PrintError::NoResult => (
-                    Outcome::Failed,
-                    ErrorCode::Internal,
-                    "no_result",
-                    String::new(),
-                ),
-                PrintError::NoOutput => (
-                    Outcome::Failed,
-                    ErrorCode::Internal,
-                    "no_output",
-                    String::new(),
-                ),
-                PrintError::Io(e) => (Outcome::Failed, ErrorCode::Internal, "io", e.to_string()),
+                e => (Outcome::Failed, ErrorCode::Internal, "error", e.to_string()),
             };
             Completion {
                 outcome,

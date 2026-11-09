@@ -55,7 +55,7 @@ mod tests;
 
 pub use config::CoreConfig;
 pub use error::{CoreError, Result};
-pub use gateway::{ClaudeCli, Fallback, LocalPrint, ModelGateway, OneModel, SharedGateway, Tier};
+pub use gateway::{Fallback, InProcess, LocalAcp, ModelGateway, OneModel, SharedGateway, Tier};
 pub use orchestrator::{CreateItem, Forked, ItemAction, RESUMED_NOTE, SendNow, SupplementMode};
 pub use runtime::{
     AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, Output, Prompted, Released,
@@ -75,7 +75,7 @@ pub(crate) struct Inner {
     runtime: Arc<dyn AgentRuntime>,
     gateway: Arc<dyn ModelGateway>,
     config: CoreConfig,
-    /// 设置 · 模型 (the same resolver the gateway's [`ClaudeCli`] uses).
+    /// 设置 · 模型 (the same resolver the gateway's [`Fallback`] uses).
     models: models::Models,
     state: Mutex<State>,
     thread: thread::Lanes,

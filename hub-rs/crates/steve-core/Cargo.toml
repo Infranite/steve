@@ -21,8 +21,8 @@ steve-modules = { path = "../steve-modules" }
 # Work's published facts (`work.item.done`), emitted in the transaction that finishes an item.
 steve-work-api = { path = "../steve-work-api" }
 steve-stats = { path = "../steve-stats" }
-# One model run of claude -p / codex exec; the gateway keeps model choice and fallback.
-steve-print = { path = "../steve-print" }
+# One-shot ACP calls of the gateway in process; the gateway keeps model choice and fallback.
+steve-acp = { path = "../steve-acp" }
 steve-transcript = { path = "../steve-transcript" }
 steve-i18n = { path = "../steve-i18n" }
 # The Workspace port's git kinds, for items on a Node (node_git).
@@ -38,6 +38,5 @@ uuid = { version = "=1.29.0", features = ["v4"] }
 [dev-dependencies]
 # node_git against a real local Node
 steve-node = { path = "../steve-node" }
-steve-acp = { path = "../steve-acp" }
 proptest = "=1.12.0"
 tempfile = "=3.27.0"

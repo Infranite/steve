@@ -6,7 +6,7 @@
 //! of models, an effort. Overrides are stored per workspace in the settings table (`models.<purpose>`);
 //! both are read on every call, so a change takes effect without a restart.
 //!
-//! Every model call goes through [`Models::for_call`]: [`crate::ClaudeCli`] asks it with the call's
+//! Every model call goes through [`Models::for_call`]: [`crate::Fallback`] asks it with the call's
 //! [`crate::stats::CallTag`] (purpose and workspace). The agent-session default per harness
 //! (`models.agent.<harness>`) is unchanged.
 //!
@@ -650,7 +650,6 @@ impl Models {
         let mut by: BTreeMap<String, Vec<Used>> = BTreeMap::new();
         for (p, h, m, n, at, failed) in rows {
             let p = purpose_of(&p).map_or(p, |x| x.key.to_string());
-            let h = gateway_harness(&h).to_string();
             let list = by.entry(p).or_default();
             match list.iter_mut().find(|x| x.0 == h && x.1 == m) {
                 Some(x) => {
@@ -678,18 +677,14 @@ impl Models {
     /// per model the calls, the last success and the last failure. A passive check of which models
     /// currently answer: no model is asked anything.
     pub fn used(&self, ws: &str, harness: &str, since: i64) -> BTreeMap<String, Value> {
-        let names: [&str; 2] = match harness {
-            CODEX => [CODEX, "codex-cli"],
-            _ => [CLAUDE_CODE, "claude-cli"],
-        };
         self.store
             .reader::<_, steve_store::StoreError>(|c| {
                 let mut st = c.prepare(
                     "SELECT model, count(*), max(CASE WHEN ok = 1 THEN ts END), max(CASE WHEN ok = 0 THEN ts END) FROM usage_records
-                     WHERE workspace_id = ? AND day >= ? AND harness IN (?, ?) AND ts >= ? AND model != '' GROUP BY model",
+                     WHERE workspace_id = ? AND day >= ? AND harness = ? AND ts >= ? AND model != '' GROUP BY model",
                 )?;
                 let v = st
-                    .query_map(rusqlite::params![ws, day_floor(since), names[0], names[1], since], |r| {
+                    .query_map(rusqlite::params![ws, day_floor(since), harness, since], |r| {
                         Ok((
                             r.get::<_, String>(0)?,
                             json!({"calls": r.get::<_, i64>(1)?, "ok_at": r.get::<_, Option<i64>>(2)?, "failed_at": r.get::<_, Option<i64>>(3)?}),
@@ -808,15 +803,6 @@ impl Models {
             &json!({"before": before, "after": values}),
             ws,
         )
-    }
-}
-
-/// The judgment harness of a gateway usage row (`claude-cli` → `claude-code`, `codex-cli` → `codex`).
-pub fn gateway_harness(h: &str) -> &str {
-    match h {
-        "claude-cli" => CLAUDE_CODE,
-        "codex-cli" => CODEX,
-        h => h,
     }
 }
 
@@ -1334,10 +1320,16 @@ mod tests {
                 .unwrap();
         };
         let now = steve_store::now();
-        add("route", "claude-cli", "claude-haiku-5-5", true, now - 5000);
-        add("intent", "claude-cli", "claude-haiku-5-5", true, now - 4000);
-        add("route", "codex-cli", "gpt-6-luna", false, now - 1000);
-        add("chat", "claude-cli", "old", true, now - 30 * 86_400_000);
+        add("route", "claude-code", "claude-haiku-5-5", true, now - 5000);
+        add(
+            "intent",
+            "claude-code",
+            "claude-haiku-5-5",
+            true,
+            now - 4000,
+        );
+        add("route", "codex", "gpt-6-luna", false, now - 1000);
+        add("chat", "claude-code", "old", true, now - 30 * 86_400_000);
         let r = m.recent("default", now - 7 * 86_400_000);
         assert_eq!(
             r["route"]["last"],

@@ -16,11 +16,12 @@
 //! - **Restart**: the callers are gone, so open attempts of an earlier process are cancelled (or
 //!   abandoned when the Node cannot tell their end) once the Hub has reconciled, and never run again.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use steve_core::gateway::{OnText, OneCall, OneModel, ThinkTools, Tried, split_static};
+use steve_core::gateway::{
+    OnText, OneCall, OneModel, OneShotError, ThinkTools, Tried, split_static,
+};
 use steve_store::jobs::{self, AttemptState};
 use tokio::sync::mpsc;
 
@@ -37,97 +38,7 @@ pub enum News {
     End(Completion),
 }
 
-/// Convert one attempt's meter reports into accounting rows. A cumulative snapshot replaces
-/// earlier figures, and a final figure replaces deltas field by field (missing is unknown,
-/// not zero). Report ids remain the replay boundary.
-pub(crate) fn normalized_usage(
-    reports: impl IntoIterator<Item = UsageReport>,
-    fallback_model: &str,
-) -> Vec<UsageReport> {
-    fn add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-        match (a, b) {
-            (Some(a), Some(b)) => Some(a.saturating_add(b)),
-            (a, b) => a.or(b),
-        }
-    }
-    let mut seen = HashSet::new();
-    let mut totals: Vec<UsageReport> = vec![];
-    for mut report in reports {
-        if !seen.insert(report.report_id.clone()) {
-            continue;
-        }
-        if report.model.as_deref().is_none_or(str::is_empty) {
-            report.model = Some(fallback_model.to_string());
-        }
-        let Some(total) = totals.iter_mut().find(|t| {
-            t.meter_epoch == report.meter_epoch
-                && t.model == report.model
-                && t.scope == report.scope
-        }) else {
-            totals.push(report);
-            continue;
-        };
-        if total.measurement == Measurement::Final && report.measurement != Measurement::Final {
-            continue;
-        }
-        let delta = report.measurement == Measurement::Delta;
-        let merge = |a, b| if delta { add(a, b) } else { b.or(a) };
-        total.tokens = Tokens {
-            input: merge(total.tokens.input, report.tokens.input),
-            output: merge(total.tokens.output, report.tokens.output),
-            cache_read: merge(total.tokens.cache_read, report.tokens.cache_read),
-            cache_write: merge(total.tokens.cache_write, report.tokens.cache_write),
-            reasoning: merge(total.tokens.reasoning, report.tokens.reasoning),
-        };
-        if let Some(cost) = report.cost {
-            total.cost = Some(if delta {
-                match total
-                    .cost
-                    .as_ref()
-                    .filter(|old| old.currency == cost.currency)
-                {
-                    Some(old) => Money {
-                        decimal: (steve_print::cost_f64(old).unwrap_or(0.0)
-                            + steve_print::cost_f64(&cost).unwrap_or(0.0))
-                        .to_string(),
-                        currency: cost.currency,
-                    },
-                    None => cost,
-                }
-            } else {
-                cost
-            });
-        }
-        total.context_used = report.context_used.or(total.context_used);
-        total.context_limit = report.context_limit.or(total.context_limit);
-        total.measurement = report.measurement;
-        total.report_id = report.report_id;
-    }
-    // `all` already includes the main loop. Keep a main-only dollar figure if no all figure
-    // reported dollars, but never count the main tokens twice.
-    let all_epochs: HashSet<_> = totals
-        .iter()
-        .filter(|r| r.scope == UsageScope::All)
-        .map(|r| r.meter_epoch.clone())
-        .collect();
-    let priced_epochs: HashSet<_> = totals
-        .iter()
-        .filter(|r| r.scope == UsageScope::All && r.cost.is_some())
-        .map(|r| r.meter_epoch.clone())
-        .collect();
-    totals.retain_mut(|r| {
-        if r.scope == UsageScope::Main && all_epochs.contains(&r.meter_epoch) {
-            r.tokens = Tokens::default();
-            if priced_epochs.contains(&r.meter_epoch) {
-                r.cost = None;
-            }
-            r.cost.is_some()
-        } else {
-            true
-        }
-    });
-    totals
-}
+pub(crate) use steve_core::gateway::merged_usage as normalized_usage;
 
 /// The callers waiting on their job attempts in this process, by attempt.
 #[derive(Default)]
@@ -183,8 +94,9 @@ pub(super) struct Think {
     head: Option<String>,
     message: String,
     tools: ThinkTools,
-    images: Vec<steve_print::Image>,
-    codex: bool,
+    images: Vec<steve_core::gateway::Image>,
+    /// The harness adapter the call runs on.
+    harness: String,
     model: String,
     effort: Option<String>,
     timeout: Duration,
@@ -293,7 +205,7 @@ impl NodeRuntime {
             run: RunSpec {
                 attempt: idv(attempt.clone())?,
                 choice: HarnessChoice {
-                    harness: if t.codex { "codex" } else { "claude-code" }.into(),
+                    harness: t.harness.clone(),
                     model: (!t.model.is_empty()).then(|| t.model.to_string()),
                     effort: t.effort.clone(),
                 },
@@ -801,10 +713,9 @@ impl Drop for Waiting {
     }
 }
 
-/// A print error as a Node's completion tells it (`stop_reason` and the harness's words), so the
-/// caller sees the very error the in-process run gives.
-fn print_error(c: &Completion, timeout: Duration) -> steve_print::PrintError {
-    use steve_print::PrintError as P;
+/// A Node's completion of a failed call as the one-shot error it was (`stop_reason` and the
+/// adapter's words), so the caller sees the very error an in-process run gives.
+fn call_error(c: &Completion, timeout: Duration) -> OneShotError {
     if c.error
         .as_ref()
         .is_some_and(|e| e.code == ErrorCode::Exhausted)
@@ -812,25 +723,26 @@ fn print_error(c: &Completion, timeout: Duration) -> steve_print::PrintError {
             .as_ref()
             .is_some_and(|e| e.safe_detail == "the output limit was reached")
     {
-        return P::OutputLimit;
+        return OneShotError::OutputLimit;
     }
     let detail = c.error.as_ref().map(super::said).unwrap_or_default();
     match (c.outcome, c.stop_reason.as_str()) {
-        (Outcome::TimedOut, _) | (_, "timeout") => P::Timeout(timeout),
-        (_, "failed") => P::Failed(detail),
-        (_, "harness") => P::Harness {
+        (Outcome::TimedOut, _) | (_, "timeout") => OneShotError::Timeout(timeout),
+        (_, "error") => OneShotError::Harness {
             text: detail,
+            code: None,
             transient: c.transient,
         },
-        (_, "codex_failed") => P::CodexFailed,
-        (_, "no_result") => P::NoResult,
-        (_, "no_output") => P::NoOutput,
-        (_, "io") => P::Io(std::io::Error::other(detail)),
-        (_, why) => P::Failed(if detail.is_empty() {
-            why.to_string()
-        } else {
-            detail
-        }),
+        // the adapter ended the turn otherwise (`max_tokens`, `refusal`, `cancelled`)
+        (_, why) => OneShotError::Harness {
+            text: if detail.is_empty() {
+                format!("the harness stopped: {why}")
+            } else {
+                detail
+            },
+            code: None,
+            transient: false,
+        },
     }
 }
 
@@ -862,7 +774,7 @@ impl OneModel for NodePrint {
             message: message.to_string(),
             tools: call.tools.clone(),
             images: call.images.to_vec(),
-            codex: call.codex,
+            harness: call.harness.to_string(),
             model: model.to_string(),
             effort: effort.map(String::from),
             timeout: call.timeout,
@@ -903,11 +815,8 @@ impl OneModel for NodePrint {
                 _ = &mut timer => {
                     // dropping `waiting` cancels the job on the Node
                     return Tried::of(
-                        steve_print::Ran {
-                            reply: Err(steve_print::PrintError::Timeout(call.timeout)),
-                            usage: normalized_usage(usage, model),
-                        },
-                        call.codex,
+                        Err(OneShotError::Timeout(call.timeout)),
+                        normalized_usage(usage, model),
                     );
                 }
             }
@@ -928,17 +837,13 @@ impl OneModel for NodePrint {
             // the run's dollars: each model's, as the harness's total was booked to them
             let costs: Vec<f64> = usage
                 .iter()
-                .filter_map(|r| r.cost.as_ref().and_then(steve_print::cost_f64))
+                .filter_map(|r| r.cost.as_ref().and_then(steve_core::gateway::cost_f64))
                 .collect();
-            let cost = (!costs.is_empty()).then(|| costs.iter().sum::<f64>());
-            Ok(steve_print::Reply {
-                text,
-                cost: cost.map(steve_print::money),
-            })
+            Ok((text, (!costs.is_empty()).then(|| costs.iter().sum::<f64>())))
         } else {
-            Err(print_error(&end, call.timeout))
+            Err(call_error(&end, call.timeout))
         };
-        Tried::of(steve_print::Ran { reply, usage }, call.codex)
+        Tried::of(reply, usage)
     }
 }
 

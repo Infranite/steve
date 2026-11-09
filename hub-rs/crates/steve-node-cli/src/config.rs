@@ -180,7 +180,6 @@ impl Home {
                 execs: if ceiling.exec { 4 } else { 0 },
             },
             storage: steve_node::Storage::default(),
-            jobs: Default::default(),
             ceiling,
         })
     }

@@ -899,7 +899,6 @@ mod on_node {
                     execs: 4,
                 },
                 storage: Storage::default(),
-                jobs: Default::default(),
             })
             .unwrap();
             node.connect(Arc::new(RecordingSink::default()), None);

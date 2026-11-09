@@ -96,6 +96,8 @@ pub enum Fact {
 #[derive(Debug)]
 struct Open {
     role: Role,
+    /// The adapter's `messageId`, when it sends one: another id is another message.
+    id: Option<String>,
     message: String,
     block: String,
     offset: u64,
@@ -112,6 +114,8 @@ pub struct Normalizer {
     reports: u64,
     open: Option<Open>,
     tools: HashMap<String, ToolFact>,
+    /// See [`Normalizer::input_includes_cache`].
+    input_includes_cache: bool,
 }
 
 impl Normalizer {
@@ -124,7 +128,15 @@ impl Normalizer {
             reports: 0,
             open: None,
             tools: HashMap::new(),
+            input_includes_cache: false,
         }
+    }
+
+    /// The adapter counts cache reads inside `inputTokens` (OpenAI's convention, declared as
+    /// `usage_input_includes_cache`): Steve's figures keep them apart, as Anthropic's do.
+    pub fn input_includes_cache(mut self, yes: bool) -> Self {
+        self.input_includes_cache = yes;
+        self
     }
 
     /// The events and facts of one `session/update` (the `update` object).
@@ -192,8 +204,20 @@ impl Normalizer {
 
     /// Final token accounting from `session/prompt`, distinct from usage_update's context meter.
     pub fn prompt_response(&mut self, response: &Value) -> Vec<Fact> {
+        let cached_inside = self.input_includes_cache;
         let tokens = |u: &Value| Tokens {
-            input: u.get("inputTokens").and_then(Value::as_u64),
+            input: u.get("inputTokens").and_then(Value::as_u64).map(|i| {
+                let cached = u
+                    .get("cachedReadTokens")
+                    .or_else(|| u.get("cachedInputTokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if cached_inside && cached <= i {
+                    i - cached
+                } else {
+                    i
+                }
+            }),
             output: u.get("outputTokens").and_then(Value::as_u64),
             cache_read: u
                 .get("cachedReadTokens")
@@ -263,8 +287,13 @@ impl Normalizer {
         if t.is_empty() {
             return vec![Fact::Nothing];
         }
+        let id = u.get("messageId").and_then(Value::as_str).map(String::from);
         let mut out = vec![];
-        if self.open.as_ref().is_some_and(|o| o.role != role) {
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.role != role || (id.is_some() && o.id.is_some() && o.id != id))
+        {
             out.extend(self.close());
         }
         if self.open.is_none() {
@@ -278,6 +307,7 @@ impl Normalizer {
             }));
             self.open = Some(Open {
                 role,
+                id,
                 message,
                 block,
                 offset: 0,
@@ -387,7 +417,7 @@ pub fn bound(s: &str, max: usize) -> String {
 }
 
 fn decimal(a: f64) -> String {
-    let s = format!("{a:.6}");
+    let s = format!("{a:.10}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s.is_empty() { "0".into() } else { s.into() }
 }
@@ -1036,6 +1066,34 @@ mod tests {
             (ToolOrigin::Steve, ToolCategory::Steve)
         );
         assert!(matches!(&tool.action, Some(Action::Tool { name, .. }) if name == "steve_deliver"));
+    }
+
+    #[test]
+    fn another_message_id_is_another_message() {
+        let mut n = n();
+        let chunk = |id: &str, t: &str| {
+            json!({"sessionUpdate": "agent_message_chunk", "messageId": id,
+                "content": {"type": "text", "text": t}})
+        };
+        let mut started = 0;
+        for u in [chunk("a", "x"), chunk("a", "y"), chunk("b", "z")] {
+            started += events(n.update(&u))
+                .iter()
+                .filter(|e| matches!(e, EventBody::MessageStarted { .. }))
+                .count();
+        }
+        assert_eq!(started, 2);
+        // without ids the chunks are one message
+        let mut n = super::tests::n();
+        let plain = json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "x"}});
+        let mut started = 0;
+        for u in [plain.clone(), plain] {
+            started += events(n.update(&u))
+                .iter()
+                .filter(|e| matches!(e, EventBody::MessageStarted { .. }))
+                .count();
+        }
+        assert_eq!(started, 1);
     }
 
     #[test]

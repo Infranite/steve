@@ -116,6 +116,23 @@ pub struct AdapterProperties {
     /// Discovery asks it `initialize` ([`probe`]). The built-in entries do not: their CLIs'
     /// `--version` says whether they are there, without starting an adapter every few minutes.
     pub probe_initialize: bool,
+    /// What `session/new|load` adds to its `_meta` to switch the harness's built-in tools off for
+    /// a call that uses none (a model call of Steve's own: cheaper, and nothing to guard).
+    pub tools_off_meta: Option<Value>,
+    /// Its `inputTokens` include the cache reads (OpenAI's convention).
+    pub usage_input_includes_cache: bool,
+    /// Where a call's tokens come from when the adapter reports none.
+    pub usage_fallback: UsageFallback,
+}
+
+/// Where a call's tokens are read when the adapter does not report them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageFallback {
+    #[default]
+    None,
+    /// Codex's rollout file of the session (`$CODEX_HOME/sessions`).
+    CodexRollout,
 }
 
 /// What an adapter nobody described gets: assume the worst (it reads the disk itself, so it runs
@@ -131,6 +148,9 @@ impl Default for AdapterProperties {
             session_meta: SessionMeta::None,
             launch_extra: LaunchExtra::None,
             probe_initialize: true,
+            tools_off_meta: None,
+            usage_input_includes_cache: false,
+            usage_fallback: UsageFallback::None,
         }
     }
 }
@@ -155,6 +175,12 @@ pub struct PropertiesPatch {
     pub launch_extra: Option<LaunchExtra>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe_initialize: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_off_meta: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_input_includes_cache: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_fallback: Option<UsageFallback>,
 }
 
 impl PropertiesPatch {
@@ -193,6 +219,15 @@ impl PropertiesPatch {
         }
         if let Some(v) = self.probe_initialize {
             p.probe_initialize = v;
+        }
+        if let Some(v) = &self.tools_off_meta {
+            p.tools_off_meta = Some(v.clone()).filter(|v| !v.is_null());
+        }
+        if let Some(v) = self.usage_input_includes_cache {
+            p.usage_input_includes_cache = v;
+        }
+        if let Some(v) = self.usage_fallback {
+            p.usage_fallback = v;
         }
     }
 }
@@ -285,6 +320,10 @@ const BUILTINS: &[Builtin] = &[
             session_meta: SessionMeta::ClaudeSettings,
             launch_extra: LaunchExtra::None,
             probe_initialize: false,
+            // claude-agent-acp: `claudeCode.options.tools` is the list of built-in tools
+            tools_off_meta: Some(json!({"claudeCode": {"options": {"tools": []}}})),
+            usage_input_includes_cache: false,
+            usage_fallback: UsageFallback::None,
         },
     },
     Builtin {
@@ -318,6 +357,10 @@ const BUILTINS: &[Builtin] = &[
             session_meta: SessionMeta::None,
             launch_extra: LaunchExtra::CodexCatalog,
             probe_initialize: false,
+            tools_off_meta: None,
+            // codex-acp reports no tokens of a turn; its rollout file has them, OpenAI's way
+            usage_input_includes_cache: true,
+            usage_fallback: UsageFallback::CodexRollout,
         },
     },
 ];
@@ -557,6 +600,21 @@ impl crate::AcpConfig {
         }
     }
 
+    /// [`Self::session_meta`], with the declared `tools_off_meta` merged in when `tools_off`.
+    pub fn session_meta_for(&self, id: &str, tools_off: bool) -> Option<Value> {
+        let base = self.session_meta(id);
+        let extra = tools_off
+            .then(|| self.adapter_properties(id).tools_off_meta)
+            .flatten();
+        match (base, extra) {
+            (Some(mut b), Some(e)) => {
+                merge(&mut b, e);
+                Some(b)
+            }
+            (b, e) => b.or(e),
+        }
+    }
+
     /// The ACP mode id `mode` is set as on `id`'s adapter.
     pub fn adapter_mode(&self, id: &str, mode: PermissionMode) -> String {
         self.adapter_properties(id).modes.id(mode).to_owned()
@@ -577,6 +635,23 @@ impl crate::AcpConfig {
             args.extend(d.args.iter().map(OsString::from));
         }
         args
+    }
+}
+
+/// `extra` merged into `into`, objects key by key.
+fn merge(into: &mut Value, extra: Value) {
+    match (into, extra) {
+        (Value::Object(a), Value::Object(b)) => {
+            for (k, v) in b {
+                match a.get_mut(&k) {
+                    Some(slot) => merge(slot, v),
+                    None => {
+                        a.insert(k, v);
+                    }
+                }
+            }
+        }
+        (slot, v) => *slot = v,
     }
 }
 
@@ -665,6 +740,11 @@ mod tests {
         );
         assert!(c.adapter_env("codex").is_empty());
         assert!(c.session_meta("claude-code").is_some());
+        // a call without tools has the built-in tools off where the adapter says how
+        let off = c.session_meta_for("claude-code", true).unwrap();
+        assert_eq!(off.pointer("/claudeCode/options/tools"), Some(&json!([])));
+        assert!(off.pointer("/claudeCode/options/settings").is_some());
+        assert!(c.session_meta_for("codex", true).is_none());
         assert!(c.session_meta("codex").is_none());
         // a declaration adds its own arguments and variables
         c.adapters.insert("mine".into(), dir.path().join("mine"));
