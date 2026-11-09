@@ -2,6 +2,32 @@
 export default {
   /* separator between the names in a short inline list: "对话回答、研究" */
   listSep: "、",
+  /* Settings · 访问与客户端 (access-settings.tsx) */
+  access: {
+    cat: { title: "访问与客户端", desc: "登录用的 token，和登录过的客户端" },
+    here: "这个页面",
+    hub: "连接的 Hub",
+    changeHub: "换一个 Hub",
+    thisClient: "这个客户端",
+    browserSession: "浏览器登录（单点登录或本机）",
+    signOut: "退出登录",
+    tokens: "访问 token",
+    tokensSub: "客户端用“用户名 + token”登录。token 只在签发时显示一次；吊销后，用它登录的客户端一起下线。",
+    shownOnce: "只显示这一次，请现在复制保存：",
+    copy: "复制",
+    copied: "已复制",
+    done: "好了",
+    tokenSub: "{{made}}签发 · 最近使用：{{used}}",
+    never: "没有",
+    revoke: "吊销",
+    tokenName: "用途，例如 iPhone",
+    newToken: "签发 token",
+    clients: "登录过的客户端",
+    current: "当前",
+    signOutClient: "让它下线",
+    noClients: "还没有客户端用 token 登录",
+    route: { loopback: "本机", lan: "局域网", tailnet: "tailnet", proxy: "经反向代理", public: "公网", unknown: "未知" },
+  },
   /* Settings · 模型 (models-settings.tsx) */
   models: {
     cat: { title: "模型", desc: "Steve 用哪个 harness 和模型做判断、新会话默认" },

@@ -100,9 +100,7 @@ impl Listen {
         for h in &self.hosts {
             let l = tokio::net::TcpListener::bind((h.as_str(), port))
                 .await
-                .map_err(|e| {
-                    std::io::Error::new(e.kind(), format!("listen on {h}:{port}: {e}"))
-                })?;
+                .map_err(|e| std::io::Error::new(e.kind(), format!("listen on {h}:{port}: {e}")))?;
             out.push(l);
         }
         Ok(out)

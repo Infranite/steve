@@ -709,7 +709,11 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         for listener in cfg.listen.bind_port(port).await? {
             let web = web.clone();
             servers.spawn(async move {
-                axum::serve(listener, web.into_make_service_with_connect_info::<SocketAddr>()).await
+                axum::serve(
+                    listener,
+                    web.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
             });
         }
         println!("steve web on port {port}");
