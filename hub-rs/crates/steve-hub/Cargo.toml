@@ -32,6 +32,7 @@ steve-node-api = { path = "../steve-node-api" }
 steve-node = { path = "../steve-node" }
 steve-print = { path = "../steve-print" }
 steve-node-wire = { path = "../steve-node-wire" }
+steve-node-cli = { path = "../steve-node-cli" }
 steve-transcript = { path = "../steve-transcript", features = ["legacy"] }
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"
@@ -68,7 +69,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "=1.54.1", features = ["test-util"] }
-steve-node-cli = { path = "../steve-node-cli" }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake"] }
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream"] }

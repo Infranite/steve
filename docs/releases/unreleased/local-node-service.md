@@ -1,0 +1,1 @@
+- 本机 Node 可以在单独的进程里运行：设置 `STEVE_NODE_MODE=service` 后，Hub 会以 `steve-hub --local-node` 启动本机 Node，并让它脱离 Hub 的进程组（在 systemd 下放在单独的 scope 里）。之后 Hub 重启或升级时，正在跑的回合继续运行，Hub 回来后接上结果，不会重复发送。Node 沿用原来的 id 和数据目录，之前的会话照常继续；Steve 自己的思考和调研任务仍在 Hub 进程里运行。升级的排空阶段不再等待这台 Node 上的回合；Node 空闲时会切换到 Hub 的新版本。默认仍是 `local`（Node 在 Hub 进程内），这个模式需要显式开启。新增 `STEVE_LOCAL_NODE_PORT`（默认 Hub 端口 + 3）。

@@ -36,7 +36,7 @@ pub const HUB_DEVICE: &str = "hub";
 /// The local Node: the Node itself (host bridges such as [`steve_node::LocalNode::set_roots`])
 /// and its coordinator.
 pub struct LocalFace {
-    pub node: Arc<steve_node::LocalNode>,
+    pub node: Arc<dyn super::host_node::HostNode>,
     pub runtime: Arc<NodeRuntime>,
 }
 
@@ -199,7 +199,7 @@ impl Workspaces {
             let l = self.local.as_ref().ok_or(PlacementError::LocalOff)?;
             return Ok(Placement {
                 node_id: l.runtime.node_id().clone(),
-                node: l.node.clone(),
+                node: l.node.node(),
                 runtime: l.runtime.clone(),
                 at,
             });

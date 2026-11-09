@@ -193,6 +193,16 @@ impl NodeFleet {
         self.entry(node, |e| e.proto.map(|p| p.0 == since.0 && p >= since))
     }
 
+    /// Gives `node` a coordinator the Hub built itself (the Hub's own Node in a process of its
+    /// own, B1): trusted as the in-process Node is, none of a remote Node's limits. Its link's
+    /// events, Steve's tools and attachments go to these; [`Self::start`] returns it.
+    pub fn adopt(&self, node: &NodeId, runtime: Arc<NodeRuntime>, tools: Arc<NodeTools>) {
+        self.entry(node, |e| {
+            e.runtime = Some(runtime);
+            e.tools = Some(tools as Arc<dyn HubTools>);
+        });
+    }
+
     /// Starts the Node's coordinator (once).
     pub fn start(&self, node: &NodeId) -> Option<Arc<NodeRuntime>> {
         let domain = self.domain.clone()?;

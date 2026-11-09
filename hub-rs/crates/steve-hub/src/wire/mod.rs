@@ -12,8 +12,10 @@ pub mod core;
 pub mod diagnostics;
 pub mod flow_cmd;
 pub mod git_push;
+pub mod host_node;
 pub mod item_git;
 pub mod item_mcp;
+pub mod local_service;
 pub mod mcp;
 pub mod mcp_extra;
 pub mod modules;
@@ -151,6 +153,13 @@ pub type Vars = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// The opt-in local host: the coordinator, and the tools port that gets its ToolService once
 /// core/modules exist.
+/// The Node the Hub's sessions run on (in this process or in one of its own).
+struct SessionHost {
+    runtime: Arc<node_runtime::NodeRuntime>,
+    node: Arc<dyn host_node::HostNode>,
+    tools: Arc<node_tools::NodeTools>,
+}
+
 struct NodeHost {
     runtime: Arc<node_runtime::NodeRuntime>,
     /// The Node itself, for the same-machine host bridge (where a bound workspace is).
@@ -179,69 +188,23 @@ fn node_runtime(
     for warning in crate::check::local_node_warnings(cfg, vars) {
         tracing::warn!("{warning}");
     }
-    let node_id = steve_node_api::NodeId::new("local").expect("constant node id");
-    let home = cfg.data_dir.join("node");
+    // with the sessions in a process of their own (B1), the jobs keep a Node, and a home, here
+    let service = node_mode(vars, cfg.no_resume)? == NodeMode::Service;
+    let (id, home) = if service {
+        ("local-jobs", cfg.data_dir.join("node-jobs"))
+    } else {
+        ("local", cfg.data_dir.join("node"))
+    };
+    let node_id = steve_node_api::NodeId::new(id).expect("constant node id");
     let tools = node_tools::NodeTools::open(store.clone(), node_id.clone(), &home)
         .map_err(|e| BackendError::msg(e.to_string()))?;
+    let roots = node_binding::roots(store, &workspaces::configured(cfg))
+        .map_err(|e| BackendError::msg(e.to_string()))?;
     let node = Arc::new(
-        steve_node::LocalNode::open(steve_node::NodeConfig {
-            ceiling: steve_node::PolicyCeiling::unlimited(),
-            node: node_id.clone(),
-            home,
-            acp: acp_config(cfg),
-            roots: node_binding::roots(store, &workspaces::configured(cfg))
-                .map_err(|e| BackendError::msg(e.to_string()))?,
-            capacity: steve_node_api::Capacity {
-                sessions: 64,
-                // think and research jobs share it
-                jobs: if kinds.think || kinds.research {
-                    LOCAL_JOB_CAPACITY
-                } else {
-                    0
-                },
-                // flow `cmd` steps (N0e-E6)
-                execs: 16,
-            },
-            // a 256 MiB journal at most, 512 MiB left free on the disk, new work again below 80%;
-            // no new item's worktree below Steve's disk floor
-            storage: steve_node::Storage {
-                worktree_floor: cfg.disk.floor,
-                ..steve_node::Storage::default()
-            },
-            // think jobs run the same CLIs the in-process gateway runs
-            jobs: if kinds.think {
-                steve_node::JobHarnesses {
-                    claude: Some(cfg.claude_executable.clone().into()),
-                    codex: Some(cfg.codex_executable.clone().into()),
-                }
-            } else {
-                steve_node::JobHarnesses::default()
-            },
-        })
-        .map_err(|e| BackendError::msg(e.to_string()))?,
+        steve_node::LocalNode::open(local_node_config(cfg, node_id.clone(), home, roots, kinds))
+            .map_err(|e| BackendError::msg(e.to_string()))?,
     );
-    if kinds.research {
-        let mut research = steve_research::ResearchConfig::new(
-            cfg.claude_executable.clone(),
-            cfg.scratch.join("research"),
-        );
-        research.codex_executable = Some(cfg.codex_executable.clone().into());
-        node.enable_research(research);
-    }
-    // the history and harnesses the Hub would read itself: its own homes and binaries
-    let homes = crate::resume::Homes::of(cfg);
-    node.set_discovery(steve_node::history::DiscoveryConfig {
-        homes: steve_node::history::Homes {
-            user_home: homes.home,
-            steve_home: cfg.home.clone(),
-            claude_dir: homes.claude_dir,
-            codex_home: homes.codex_home,
-        },
-        binaries: steve_node::history::Binaries {
-            claude: cfg.claude_executable.clone().into(),
-            codex: cfg.codex_executable.clone().into(),
-        },
-    });
+    local_node_extras(&node, cfg, kinds);
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
     runtime.set_configured_roots(workspaces::configured(cfg));
     runtime.set_principal_state(principal_state(vars));
@@ -274,6 +237,105 @@ fn node_runtime(
     }))
 }
 
+/// The Hub's own Node as the Hub configures it (in its process, or in one of its own, B1): no
+/// ceiling, the Hub's harnesses and roots, sessions, `kinds` of jobs, flow commands.
+pub(crate) fn local_node_config(
+    cfg: &Config,
+    node: steve_node_api::NodeId,
+    home: std::path::PathBuf,
+    roots: Vec<steve_node::Root>,
+    kinds: NodeJobs,
+) -> steve_node::NodeConfig {
+    steve_node::NodeConfig {
+        ceiling: steve_node::PolicyCeiling::unlimited(),
+        node,
+        home,
+        acp: acp_config(cfg),
+        roots,
+        capacity: steve_node_api::Capacity {
+            sessions: 64,
+            // think and research jobs share it
+            jobs: if kinds.think || kinds.research {
+                LOCAL_JOB_CAPACITY
+            } else {
+                0
+            },
+            // flow `cmd` steps (N0e-E6)
+            execs: 16,
+        },
+        // a 256 MiB journal at most, 512 MiB left free on the disk, new work again below 80%;
+        // no new item's worktree below Steve's disk floor
+        storage: steve_node::Storage {
+            worktree_floor: cfg.disk.floor,
+            ..steve_node::Storage::default()
+        },
+        // think jobs run the same CLIs the in-process gateway runs
+        jobs: if kinds.think {
+            steve_node::JobHarnesses {
+                claude: Some(cfg.claude_executable.clone().into()),
+                codex: Some(cfg.codex_executable.clone().into()),
+            }
+        } else {
+            steve_node::JobHarnesses::default()
+        },
+    }
+}
+
+/// Research (for `kinds.research`) and discovery: the history and harnesses the Hub would read
+/// itself, its own homes and binaries.
+pub(crate) fn local_node_extras(node: &steve_node::LocalNode, cfg: &Config, kinds: NodeJobs) {
+    if kinds.research {
+        let mut research = steve_research::ResearchConfig::new(
+            cfg.claude_executable.clone(),
+            cfg.scratch.join("research"),
+        );
+        research.codex_executable = Some(cfg.codex_executable.clone().into());
+        node.enable_research(research);
+    }
+    let homes = crate::resume::Homes::of(cfg);
+    node.set_discovery(steve_node::history::DiscoveryConfig {
+        homes: steve_node::history::Homes {
+            user_home: homes.home,
+            steve_home: cfg.home.clone(),
+            claude_dir: homes.claude_dir,
+            codex_home: homes.codex_home,
+        },
+        binaries: steve_node::history::Binaries {
+            claude: cfg.claude_executable.clone().into(),
+            codex: cfg.codex_executable.clone().into(),
+        },
+    });
+}
+
+/// Where the Hub's own Node runs sessions (`STEVE_NODE_MODE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeMode {
+    Off,
+    /// In the Hub's process (the default): its turns stop when the Hub does.
+    Local,
+    /// In a process of its own on this machine (B1): a Hub restart or upgrade leaves its turns
+    /// running.
+    Service,
+}
+
+pub(crate) fn node_mode(vars: &Vars, no_resume: bool) -> Result<NodeMode, BackendError> {
+    let service = vars("STEVE_NODE_MODE")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("service"));
+    if service {
+        if no_resume {
+            return Err(BackendError::msg(
+                "STEVE_NODE_MODE=service is disabled on STEVE_NO_RESUME copies",
+            ));
+        }
+        return Ok(NodeMode::Service);
+    }
+    Ok(if local_node_mode(vars, no_resume)? {
+        NodeMode::Local
+    } else {
+        NodeMode::Off
+    })
+}
+
 /// Whether the local Node is switched on. It is the default (B6): an unset `STEVE_NODE_MODE`
 /// means `local`, and `off` is the rollback: sessions already bound to the Node are parked then,
 /// and nothing else runs (there is no in-process runner since B7, so a new session is refused). `STEVE_NODE=local`, how 0.2.50 spelled it, still counts as
@@ -286,11 +348,11 @@ pub(crate) fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, Back
         .filter(|v| !v.is_empty())
     {
         Some(mode) => match mode.as_str() {
-            "local" => true,
+            "local" | "service" => true,
             "off" => return Ok(false),
             other => {
                 return Err(BackendError::msg(format!(
-                    "STEVE_NODE_MODE={other:?} is not a mode: use local (the default) or off"
+                    "STEVE_NODE_MODE={other:?} is not a mode: use local (the default), service or off"
                 )));
             }
         },
@@ -320,9 +382,9 @@ pub const LOCAL_JOB_CAPACITY: u32 = u32::MAX;
 /// (`STEVE_NODE_JOBS`). Unset means both, `think,research` (B6); an empty value, `off` or `none`
 /// means neither, so they run in the Hub's process as before.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct NodeJobs {
-    think: bool,
-    research: bool,
+pub(crate) struct NodeJobs {
+    pub(crate) think: bool,
+    pub(crate) research: bool,
 }
 
 fn node_jobs(vars: &Vars) -> NodeJobs {
@@ -564,8 +626,10 @@ pub fn wire_assembly(
         vars.clone()
     } else {
         let vars = vars.clone();
+        // the jobs' Node is in this process either way; `service` tells it the sessions are not
+        let service = vars("STEVE_NODE_MODE").is_some_and(|v| v.trim().eq_ignore_ascii_case("service"));
         Arc::new(move |key| match key {
-            "STEVE_NODE_MODE" => Some("local".into()),
+            "STEVE_NODE_MODE" => Some(if service { "service" } else { "local" }.into()),
             "STEVE_NODE_JOBS" => Some("think,research".into()),
             _ => vars(key),
         })
@@ -578,11 +642,7 @@ pub fn wire_assembly(
         &secrets,
         &mut node_jobs,
     )?;
-    let sessions_on_node = local_node_mode(&vars, cfg.no_resume)?;
-    let node_host = model_node.as_ref().filter(|_| sessions_on_node);
-    if let Some(h) = &node_host {
-        let _ = host.local_node.set(h.node.clone());
-    }
+    let mode = node_mode(&vars, cfg.no_resume)?;
     let models = || {
         Some(steve_core::models::Models::new(
             db.clone(),
@@ -624,6 +684,31 @@ pub fn wire_assembly(
         let _ = s.secrets.set(secrets.clone());
     }
     let fleet = nodes.as_ref().map(|s| s.fleet.clone());
+    // where the Hub's own Node runs sessions: in this process, or in one of its own (B1)
+    let node_host: Option<SessionHost> = match mode {
+        NodeMode::Off => None,
+        NodeMode::Local => model_node.as_ref().map(|h| SessionHost {
+            runtime: h.runtime.clone(),
+            node: h.node.clone(),
+            tools: h.tools.clone(),
+        }),
+        NodeMode::Service => {
+            let svc = nodes.as_ref().ok_or_else(|| {
+                BackendError::msg(
+                    "STEVE_NODE_MODE=service needs the Node listener (STEVE_NODE_LISTEN is off)",
+                )
+            })?;
+            let s = local_service::host(cfg, &vars, &db, host.clone(), svc, &mut node_jobs)?;
+            Some(SessionHost {
+                runtime: s.runtime,
+                node: s.node,
+                tools: s.tools,
+            })
+        }
+    };
+    if let Some(h) = &node_host {
+        let _ = host.local_node.set(h.node.clone());
+    }
     let workspaces = workspaces::Workspaces::new(
         db.clone(),
         node_host.as_ref().map(|h| workspaces::LocalFace {
@@ -686,7 +771,8 @@ pub fn wire_assembly(
     if let Some(h) = &model_node {
         tracing::info!("research streams through local Node jobs");
         h.node.enable_research(research);
-        let ws = if sessions_on_node {
+        // the jobs' Node follows the roots itself when the sessions' Node is another
+        let ws = if mode == NodeMode::Local {
             workspaces.clone()
         } else {
             let ws = workspaces::Workspaces::new(
@@ -796,8 +882,15 @@ pub fn wire_assembly(
     )));
     // Health's Node rollout switch describes agent-session routing, including its rollback.
     // The model-job host still participates in domain shutdown regardless of that switch.
-    let local_runtime = node_host.map(|h| h.runtime.clone());
+    let local_runtime = node_host.as_ref().map(|h| h.runtime.clone());
     if let Some(h) = &model_node {
+        h.tools
+            .install(tool_service.clone())
+            .map_err(|e| BackendError::msg(e.to_string()))?;
+    }
+    if mode == NodeMode::Service
+        && let Some(h) = &node_host
+    {
         h.tools
             .install(tool_service.clone())
             .map_err(|e| BackendError::msg(e.to_string()))?;

@@ -358,6 +358,21 @@ From **Devices → Add device → Install remotely over tailcat**, the Hub can i
 
 The new Node reaches the Hub over tailcat when [Connect over tailcat](#remote-nodes-over-tailcat) is on, else at the Hub's HTTPS `STEVE_PUBLIC_URL`. Without either, the install refuses to start. A development build has no release to install from. A Hub without access to GitHub can take the release files from a local directory with `STEVE_NODE_INSTALLERS=<dir>` (`steve-installer.json` and the installer archives of its version). Supported targets are those of the releases: Apple silicon macOS and x86_64 Linux. Without tailcat, use the paste-in command Devices shows with the pairing code.
 
+## The Hub's own Node in a process of its own
+
+By default the Hub's own Node, which runs every session on the Hub's machine, lives in the Hub's process, so a Hub restart or upgrade cuts the turns that are running. With `STEVE_NODE_MODE=service`, that Node runs as `steve-hub --local-node`, a process of its own, and a turn goes on while the Hub restarts:
+
+- The Hub starts the process when no Node is linked: in a session of its own and, when the Hub runs under systemd, in a scope of its own (`systemd-run --user --scope`). Stopping the Hub's service therefore leaves it running.
+- It keeps the Node's id (`local`) and home (`<data>/node`), so sessions from before carry on there.
+- It links to the Hub on `127.0.0.1:<STEVE_LOCAL_NODE_PORT>` (default: Hub port + 3), whatever addresses the Hub's own port listens on. It checks the Hub's signed welcome.
+- The Hub registers it as its own paired Node, with a key in the Node's home (`service-identity.key`).
+- Its roots follow the Hub's projects through `<data>/node/host-roots.json`.
+- Its log is `<data>/node/logs/local-node.log`, and its pid is in `<data>/node/service.pid`.
+- Steve's own think and research jobs stay in the Hub's process, under `<data>/node-jobs`.
+- An upgrade's drain does not wait for this Node's turns. Once the Node has no turn running, a Node from another build is restarted onto the Hub's build.
+- The remote Node listener must be on (the default; `STEVE_NODE_LISTEN=0` and `service` together refuse to start).
+- Going back to `local` is an ordinary restart with `STEVE_NODE_MODE=local`. Stop the service Node first (`kill $(cat <data>/node/service.pid)`) so that two Nodes never use one home.
+
 ## Harness setup
 
 Run `steve-hub --check-config` in the Hub service's environment before installation or an upgrade. Missing local ACP adapters and Node.js are reported as setup warnings with the setting to fix; the Hub can still start so its settings and diagnostics remain usable. Install the adapters for the harnesses you use and set `STEVE_ADAPTER_CODEX` / `STEVE_ADAPTER_CLAUDE` to their absolute entry points. For JavaScript adapters, set `STEVE_NODE` to the Node.js executable when it is absent from the service's `PATH`. A separate Node uses its own `harness.json` and installed adapters; a successful Hub preflight does not certify a remote machine's environment.

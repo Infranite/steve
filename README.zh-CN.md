@@ -324,7 +324,8 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | `STEVE_YOLO` | 设为 `off` 在整个实例上关闭 YOLO |
 | `STEVE_KB_STORE` | 设为 `openviking` 使用可选的向量后端（默认 SQLite FTS） |
 | `STEVE_VAULT_KEYSTORE` | `auto`（钥匙串 / Secret Service）、`dir`（配合 `STEVE_VAULT_KEY_DIR`），或测试用的 `file` |
-| `STEVE_NODE_MODE` | `local`（默认）在本机 Node 上运行会话；`off` 时会话只排队 |
+| `STEVE_NODE_MODE` | `local`（默认）在 Hub 进程内的本机 Node 上运行会话；`service` 让本机 Node 在单独的进程里运行，Hub 重启或升级时正在跑的回合不受影响（见 [docs/deployment.md](docs/deployment.md#the-hubs-own-node-in-a-process-of-its-own)）；`off` 时会话只排队 |
+| `STEVE_LOCAL_NODE_PORT` | `STEVE_NODE_MODE=service` 时本机 Node 连接 Hub 使用的本机回环端口（默认 Hub 端口 + 3） |
 | `STEVE_NODE_LISTEN`、`STEVE_NODE_BIND` | 实验中的多设备 Node，默认关闭 |
 | `STEVE_TAILCAT`、`STEVE_TAILCAT_PORT` | 经 tailcat 接入远程 Node（可选，在“设备”页开启）：`tailcat` 不在 `PATH` 上时指定程序位置，以及只提供 Node 接口的本机端口（默认 Hub 端口 + 2） |
 | `STEVE_NODE_INSTALLERS` | 远程安装 Node 时使用的本地目录，里面放发布的 `steve-installer.json` 和安装包，供访问不了 GitHub 的 Hub 使用 |
