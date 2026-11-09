@@ -309,6 +309,8 @@ export default {
     merged_other: "来自事项的补充 · {{count}} 条，合并送达",
     steveBrief: "Steve 交代",
     away: "这一回合回复的是下方的评论，过程显示在那里",
+    continueNew: "在新会话里继续",
+    closeSession: "关闭这个会话",
     loading: "载入会话",
     starting: "正在开始…",
     empty: "这个会话还没有内容",

@@ -1366,3 +1366,43 @@ fn a_failed_turn_is_continued_first_an_unknown_one_is_yours() {
     assert!(steve_lines(&k, &item).is_empty(), "not continued");
     assert_eq!(k.open_fails(&item), vec!["会话出错：abandoned"]);
 }
+
+/// U10: a session that cannot go on (its Node events set aside) hands its item to a new session,
+/// which opens with the conversation and the reminder; the old one ends.
+#[test]
+fn a_session_that_cannot_go_on_continues_in_a_new_one() {
+    let k = kit(1);
+    let (item, sid) = started(&k);
+    let ns = k.core.continue_in_new_session(&sid, "u").unwrap();
+    assert_ne!(ns, sid);
+    assert_eq!(k.db().session(&sid).unwrap().unwrap().status, "ended");
+    let active = k.db().sessions_of_item(&item).unwrap().pop().unwrap();
+    assert_eq!(active.id, ns);
+    let p = k.rt.prompts_of(&ns).pop().unwrap();
+    assert!(p.contains("结果未知") && p.contains("不要重做"), "{p}");
+}
+
+/// B6: a turn its Node's restart cut (given up by the Hub, the harness gone) is continued once,
+/// told to check first; within the same limit as every other continue.
+#[test]
+fn a_turn_a_node_restart_cut_is_continued() {
+    let k = kit(1);
+    let (item, sid) = started(&k);
+    k.rt.end_turn(
+        &k.core,
+        &sid,
+        steve_node_api::NODE_RESTARTED,
+        Some("abandoned"),
+    );
+    assert!(k.open_fails(&item).is_empty(), "no card");
+    let p = k.rt.prompts_of(&sid).pop().unwrap();
+    assert!(p.contains("Node 重启了"), "{p}");
+    assert!(p.contains("不要重做") && p.contains("steve_deliver"), "{p}");
+    k.rt.end_turn(
+        &k.core,
+        &sid,
+        steve_node_api::NODE_RESTARTED,
+        Some("abandoned"),
+    );
+    assert_eq!(k.open_fails(&item).len(), 1, "out of continues: yours");
+}

@@ -766,12 +766,12 @@ async fn a_node_closed_mid_turn_leaves_the_attempt_unknown_never_rerun() {
     r.open_node().await;
     // the Hub restarts too and reconciles with the Node
     r.restart_hub().await;
-    until("unknown", || r.attempts() == ["unknown"]).await;
+    // B6: the Hub gives it up on its own once the Node confirms the harness is gone
+    until("given up", || r.attempts() == ["finished"]).await;
+    until("its end", || !r.ends().is_empty()).await;
+    assert_eq!(r.ends().last().unwrap().1, steve_node_api::NODE_RESTARTED);
     assert_eq!(r.prompts("mid"), 1, "never prompted again");
     assert_eq!(r.journal_starts(), 1, "never started again");
-    // Stop gives it up; the next message is a new turn
-    assert!(r.rt.cancel(S).unwrap());
-    until("abandoned", || r.attempts() == ["finished"]).await;
     // the restarted Node let the session go: the next message opens it again
     r.rt.prompt(S, "@say next", "user", &[]).unwrap();
     until("the next turn", || r.attempts() == ["finished", "finished"]).await;
@@ -797,7 +797,8 @@ async fn an_event_the_journal_cannot_write_never_reaches_the_hub_half_done() {
     r.close_node().await;
     r.open_node().await;
     r.restart_hub().await;
-    until("unknown", || r.attempts() == ["unknown"]).await;
+    // B6: never run again; given up by the Hub once the Node confirms it
+    until("given up", || r.attempts() == ["finished"]).await;
     assert_eq!(r.prompts("unwritten"), 1, "never prompted again");
     assert_eq!(r.journal_starts(), 1);
     r.stored_once().await;
@@ -1027,13 +1028,14 @@ fn update_call() -> serde_json::Value {
         "params": {"name": "steve_update", "arguments": {"now": "x"}}})
 }
 
-/// The Node, then the Hub, restart under a turn; the attempt is unknown and never run again.
+/// The Node, then the Hub, restart under a turn; the attempt is never run again, and the Hub
+/// gives it up on its own (B6).
 async fn restart_both(r: &mut Rig, host: &ToolHost) {
     r.close_node().await;
     host.crash().await;
     r.open_node().await;
     r.restart_hub().await;
-    until("unknown", || r.attempts() == ["unknown"]).await;
+    until("given up", || r.attempts() == ["finished"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

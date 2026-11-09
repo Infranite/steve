@@ -742,6 +742,10 @@ impl Core {
     pub fn end_session(&self, session_id: &str) -> Result<()> {
         self.tx().end_session(session_id)
     }
+    /// See [`Tx::continue_in_new_session`].
+    pub fn continue_in_new_session(&self, session_id: &str, actor: &str) -> Result<String> {
+        self.tx().continue_in_new_session(session_id, actor)
+    }
     /// Ends an idle session its runtime cannot take any more, with `note` (zh-CN, stored) as its
     /// last system event, once: it is never woken again (a message to it is refused, one in its
     /// item starts a new session). False, with nothing changed: no such session, ended or retired
@@ -2060,10 +2064,17 @@ impl Tx<'_> {
                     });
                 let why = format!("会话出错：{e}");
                 /* the harness failed and the turn is known to have ended: the agent gets another go
-                 * first, told to check before redoing anything (2026-11-09). An outcome nobody knows
-                 * (abandoned) is never continued blindly: it is yours. */
+                 * first, told to check before redoing anything (2026-11-09). So does a turn its Node's
+                 * restart cut, once the Node confirmed its harness is gone (B6). Any other outcome
+                 * nobody knows (abandoned at your Stop) is never continued blindly: it is yours. */
                 if t.stop_reason == "error" {
                     match self.takeover_error(item_id, &session.id, &why, e)? {
+                        Some(why) => why,
+                        None => return Ok(()),
+                    }
+                } else if t.stop_reason == steve_node_api::NODE_RESTARTED {
+                    let why = "运行它的 Node 重启了，这一回合被打断".to_string();
+                    match self.takeover_restarted(item_id, &session.id, &why)? {
                         Some(why) => why,
                         None => return Ok(()),
                     }
@@ -3934,6 +3945,40 @@ impl Tx<'_> {
             return Err(msg(steve_i18n::t!("core.conversation.retired")));
         }
         Ok(())
+    }
+
+    /// The item of `sid` goes on in a new session (U10: one whose Node events were set aside, say,
+    /// and which nothing will bring back): `sid` ends, and the new session opens with its
+    /// conversation and a reminder that its last turn's outcome is unknown. The returned id is the
+    /// new session's.
+    pub(crate) fn continue_in_new_session(&mut self, sid: &str, actor: &str) -> Result<String> {
+        let s = self
+            .db()
+            .session(sid)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
+        let item = s
+            .item_id
+            .clone()
+            .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
+        let ctx = self.transcript_up_to(sid, i64::MAX)?;
+        self.end_and_release(sid)?;
+        self.db().event_add(
+            sid,
+            "system",
+            json!({"text": "会话已结束，事项在新会话里继续"}),
+        )?;
+        self.db().timeline_add(
+            &item,
+            actor,
+            "sys",
+            &format!("会话 #{} 无法继续，转到新会话", s.no),
+            None,
+        )?;
+        let opening = format!(
+            "这是接着上一个会话开的新会话：上一个会话不能再继续，它最后一回合的结果未知。上一个会话里的对话：\n\n{ctx}\n\n（Steve）先核对现状再动手：已经完成的推送、合并、打 tag、发布不要重做；然后接着做，做完用 steve_deliver 交付，需要用户决定时用 steve_ask。"
+        );
+        let ns = self.start_session(&item, Some(&opening), None)?;
+        Ok(ns.id)
     }
 
     pub(crate) fn end_session(&mut self, sid: &str) -> Result<()> {

@@ -244,7 +244,7 @@ export function toEv(evs: REvent[], running: boolean): { ev: Ev[]; seqs: number[
       if (had) { toolEv(had, v); continue }
       const t = toolEv([], v); tools.set(id, t); push(t, e.seq); continue
     }
-    if (e.kind === "system") { push(["sys", d.text], e.seq); continue }
+    if (e.kind === "system") { push(d.faulted ? ["sys", d.text, "faulted"] : ["sys", d.text], e.seq); continue }
     if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }
     if (e.kind === "turn_end") { push(["end", d.stopReason ?? ""], e.seq); continue }
     if (e.kind === "queued") { push(["sys", t("core:queueLine.queued", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }

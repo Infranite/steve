@@ -718,6 +718,25 @@ function FilesCard({ files }: { files: [string, number, number][] }) {
     </div>
   )
 }
+/* U10: a session whose Node events were set aside never recovers by itself; the way forward is offered right there */
+function FaultedLine({ k, text }: { k: string; text: string }) {
+  const t = useT()
+  const [busy, setBusy] = useState(false)
+  const act = (f: (api: typeof import("@/api").api) => Promise<void>) => {
+    setBusy(true)
+    void import("@/api").then(m => f(m.api)).catch((e: Error) => { void import("@/store").then(s => s.toast(e.message)) }).finally(() => setBusy(false))
+  }
+  return (
+    <div className="flex flex-col items-center gap-2 type-footnote text-muted-foreground" data-faulted>
+      <span className="max-w-[80%] text-center">{text}</span>
+      <div className="flex gap-2">
+        <Button size="xs" variant="outline" disabled={busy} data-continue-new onClick={() => act(async api => { const r = await api.continueSession(k); go("#/sessions/" + r.session) })}>{t("core:transcript.continueNew")}</Button>
+        <Button size="xs" variant="ghost" disabled={busy} data-close-session onClick={() => act(async api => { await api.endSession(k) })}>{t("core:transcript.closeSession")}</Button>
+      </div>
+    </div>
+  )
+}
+
 function ForkBtn({ k, at }: { k: string; at: number }) {
   const t = useT()
   return (
@@ -784,6 +803,7 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
   )
   if (g.t === "ask") return <TranscriptPermission e={e} />
   if (g.t === "away") return <div className="flex items-center gap-2 type-footnote text-muted-foreground" data-away><CornerDownRightIcon className="size-3.5 shrink-0" strokeWidth={1.5} />{t("core:transcript.away")}</div>
+  if (g.t === "sys" && e[2] === "faulted") return <FaultedLine k={k} text={e[1]} />
   if (g.t === "sys") return <div className="flex items-center gap-3 type-footnote text-muted-foreground"><span className="h-px flex-1 bg-border/70" /><span className="max-w-[80%] text-center">{e[1]}</span><span className="h-px flex-1 bg-border/70" /></div>
   return null
 }, (a, b) => a.k === b.k && a.live === b.live && a.g.idx === b.g.idx && a.g.t === b.g.t && a.g.t1 === b.g.t1 && a.g.end === b.g.end && a.g.files?.length === b.g.files?.length && sameEvs(a.g.evs, b.g.evs))

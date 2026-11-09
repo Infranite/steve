@@ -842,6 +842,11 @@ pub trait Domain: Send + Sync + 'static {
     async fn end_session(&self, session: &str) -> BResult<()> {
         todo_backend!("end_session")
     }
+    /// The session's item goes on in a new session; the new session's id.
+    async fn continue_in_new_session(&self, session: &str, actor: &str) -> BResult<String> {
+        let _ = (session, actor);
+        todo_backend!("continue_in_new_session")
+    }
     /// `{session: id}` or `{item: id}`.
     async fn fork(
         &self,

@@ -686,15 +686,23 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     );
     assert_eq!(attempts(&h, &sid, "unknown"), 0, "{}", dump(&h, &sid));
 
-    // the Node killed mid-turn: what it cannot tell the end of is unknown, never re-run
+    // the Node killed mid-turn: what it cannot tell the end of is never re-run; the Hub gives it
+    // up on its own once the restarted Node confirms its harness is gone (B6)
     let c = Client::login(&h).await;
     c.say(&sid, "断电验收-K7 @sleep 600000").await;
     assert!(wait(60, || n.got("断电验收-K7") == 1).await);
     p.kill();
     let _p = n.run();
     assert!(
-        wait(90, || attempts(&h, &sid, "unknown") == 1).await,
-        "the cut attempt is unknown; hub:\n{}\nnode:\n{}",
+        wait(90, || {
+            h.count(
+                "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND json_extract(a.completion,'$.stop_reason')='node_restarted'",
+                &sid,
+            ) == 1
+        })
+        .await,
+        "the cut attempt is given up; {}\nhub:\n{}\nnode:\n{}",
+        dump(&h, &sid),
         h.log(),
         n.log()
     );

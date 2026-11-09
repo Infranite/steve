@@ -360,6 +360,9 @@ fn cancelled_start_in(tx: &Tx, op: &str) -> Result<Option<(String, String)>, Sto
 }
 
 /// A command's envelope as the Node gets it, built once and stored verbatim.
+/// The reason of an abandon the Hub sends on its own for an attempt its Node's restart cut (B6).
+const RESTART_ABANDON: &str = "the Node restarted while it ran this attempt";
+
 fn command<T: serde::Serialize>(op: &str, body: T) -> Result<(Value, String), StoreError> {
     let c = Command {
         id: idv::<OperationId>(op)?,
@@ -1830,6 +1833,25 @@ impl NodeRuntime {
         target: &str,
         method: &str,
     ) -> Result<(), StoreError> {
+        self.stop_command_as_in(
+            tx,
+            attempt,
+            target,
+            method,
+            "the Hub gives up an attempt nobody can tell the end of",
+        )
+    }
+
+    /// [`Self::stop_command_in`], an abandon saying `why` (kept in the command: [`RESTART_ABANDON`]
+    /// marks one the Hub sent on its own after a Node restart).
+    fn stop_command_as_in(
+        &self,
+        tx: &Tx,
+        attempt: &str,
+        target: &str,
+        method: &str,
+        why: &str,
+    ) -> Result<(), StoreError> {
         // one retired by a recover is over too, even before its own end came
         let (n, live): (i64, bool) = tx.query_row(
             &format!("SELECT COUNT(*), COALESCE(MAX((c.state NOT IN ('finished','rejected') OR json_extract(c.receipt,'$.success')=1) AND NOT {}), 0) FROM node_commands c WHERE c.method=? AND c.target_attempt=?", recover::RETIRED),
@@ -1850,7 +1872,7 @@ impl NodeRuntime {
                 &op,
                 Abandon {
                     target,
-                    reason: "the Hub gives up an attempt nobody can tell the end of".into(),
+                    reason: why.into(),
                 },
             )?
         } else {
@@ -2261,13 +2283,25 @@ impl NodeRuntime {
                 ) {
                     Ok((attempt, rev, s)) => {
                         rt::attempt_cas_in(tx, &attempt, rev, "unknown", None, None, now())?;
-                        system_in(
-                            tx,
-                            &s,
-                            &format!(
-                                "Node 无法确定这次执行的结果（{detail}），等待对账，不会自动重跑。点停止可放弃这次执行。"
-                            ),
-                        )?;
+                        if detail == steve_node_api::RESTARTED {
+                            // the Node restarted under it (#54): its harness is gone with the old
+                            // process. Given up here, as Stop would; once the Node confirms it,
+                            // the agent is continued (NODE_RESTARTED), never the turn resent
+                            self.stop_command_as_in(tx, &attempt, op, "abandon", RESTART_ABANDON)?;
+                            system_in(
+                                tx,
+                                &s,
+                                &steve_i18n::stored(|| steve_i18n::t!("hub.node.restart_abandon")),
+                            )?;
+                        } else {
+                            system_in(
+                                tx,
+                                &s,
+                                &format!(
+                                    "Node 无法确定这次执行的结果（{detail}），等待对账，不会自动重跑。点停止可放弃这次执行。"
+                                ),
+                            )?;
+                        }
                     }
                     Err(rusqlite::Error::QueryReturnedNoRows) => {}
                     Err(e) => return Err(e.into()),
@@ -3028,10 +3062,18 @@ impl NodeRuntime {
             |r| r.get(0),
         )?;
         if ours {
-            system_in(
+            // `faulted`: the page offers the way forward (a new session, or closing this one)
+            rt::add_event_in(
                 tx,
                 &session,
-                &steve_i18n::stored(|| steve_i18n::t!("hub.node.quarantined")),
+                "system",
+                json!({
+                    "text": steve_i18n::stored(|| steve_i18n::t!("hub.node.quarantined")),
+                    "faulted": true,
+                }),
+                V1,
+                None,
+                now(),
             )?;
         }
         Ok(())
@@ -3588,6 +3630,19 @@ impl NodeRuntime {
                 if state == "finished" {
                     return Ok(None);
                 }
+                // abandoned by the Hub itself after the Node restarted, nobody having asked to stop
+                // it: the core continues the agent (B6)
+                let restarted = completion.stop_reason == "abandoned"
+                    && tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM node_commands WHERE method='abandon' AND target_attempt=?1 AND json_extract(request,'$.body.reason')=?2) AND NOT EXISTS(SELECT 1 FROM node_commands WHERE method='abandon' AND target_attempt=?1 AND json_extract(request,'$.body.reason')<>?2) AND NOT (SELECT cancel_requested FROM runtime_attempts WHERE attempt_id=?1)",
+                        [attempt, RESTART_ABANDON],
+                        |r| r.get::<_, bool>(0),
+                    )?;
+                let mut completion = completion.clone();
+                if restarted {
+                    completion.stop_reason = steve_node_api::NODE_RESTARTED.into();
+                }
+                let completion = &completion;
                 rt::attempt_cas_in(
                     tx,
                     attempt,
