@@ -18,7 +18,6 @@ serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"
 steve-acp = { path = "../steve-acp" }
 steve-node-api = { path = "../steve-node-api" }
-steve-print = { path = "../steve-print" }
 steve-research = { path = "../steve-research" }
 steve-vault = { path = "../steve-vault" }
 steve-toolchains = { path = "../steve-toolchains" }

@@ -1,54 +1,34 @@
-//! Inline read-only research for the main thread.
+//! Read-only research for the main thread: the policy of a research run (its limits, the attempts
+//! it makes and what the thread shows of its end, [`plan`], [`drive`], [`present`]), its prompt, the
+//! guard every tool call it makes is checked by, its attachments and its system sandbox. Each
+//! attempt runs on a Node as a one-shot ACP call of the chosen harness adapter. Read-only is enforced
+//! three times, each enough on its own to stop a write:
 //!
-//! A research run is one `claude -p --output-format stream-json` process that may only read the
-//! workspace's project directories, the message's attachments and (through Steve's MCP) the knowledge base
-//! and items. Read-only is enforced three times, each enough on its own to stop a write:
-//!
-//! 1. **Harness allowlist** ([`command`]): only Read/Grep/Glob exist, writing/shell/web tools are denied,
-//!    secrets are denied in `permissions.deny`, project settings and hooks are not loaded, anything not
-//!    pre-approved is refused (`dontAsk`).
-//! 2. **Hub guard** ([`guard::research_guard`]): every tool call the harness reports is checked; the first
-//!    one that isn't a read inside the run's directories kills the process (`violated`).
-//! 3. **System sandbox** ([`sandbox`]): on macOS the process runs under `sandbox-exec` with a profile that
-//!    denies file writes except the run directory and `~/.claude`.
+//! 1. **The adapter's read-only mode**: Steve's Plan mode as the adapter spells it.
+//! 2. **The guard** ([`guard`]): every tool call the adapter reports is checked by what it is (its
+//!    ACP kind and locations); the first one that isn't a read inside the run's directories ends the
+//!    run (`violated`).
+//! 3. **System sandbox** ([`sandbox`]): on macOS the adapter runs under `sandbox-exec` with a profile
+//!    that denies file writes except the run directory and the harness's own state.
 //!
 //! A run has no time, turn or tool limit unless setting `thread.research` names one; it ends when it is
 //! done, when the user stops it, or when the harness says nothing at all for [`DEFAULT_IDLE`] (the same
 //! for every harness), keeping what it wrote so far. One run per workspace.
-//!
-//! ```no_run
-//! # async fn demo() -> Result<(), steve_research::ResearchError> {
-//! use steve_research::*;
-//! let r = Researcher::new(ResearchConfig::new("/opt/homebrew/bin/claude", "/tmp/scratch/research"));
-//! let mut req = ResearchRequest::new("ws_1", "检索怎么打分？", "…prompt…");
-//! req.cwd = Some("/path/to/project".into());
-//! let mut run = r.start(req)?;
-//! while let Some(ev) = run.next_event().await {
-//!     if let ResearchEvent::Text { text } = ev { /* steve.draft */ let _ = text; }
-//! }
-//! let out = run.finish().await;
-//! // follow-up: ResearchRequest { resume: Some(Resume { claude_session: out.claude_session.unwrap(), … }), … }
-//! # Ok(()) }
-//! ```
 
 pub mod answer;
 pub mod attach;
-pub mod command;
 pub mod guard;
-mod processes;
 pub mod prompt;
 mod run;
 pub mod sandbox;
-pub mod stream;
 
 pub use answer::{Citation, Offer};
 pub use attach::Attachment;
-pub use guard::{Scope, Violation, research_guard};
+pub use guard::{Scope, Violation};
 pub use prompt::{DirInfo, PromptInput};
 pub use run::{
     AttemptPlan, AttemptRunner, Attempted, Budget, BudgetHit, DEFAULT_IDLE, DEFAULT_MODELS,
-    EXIT_WAIT, McpAccess, OneAttempt, ResearchConfig, ResearchError, ResearchEvent,
-    ResearchOutcome, ResearchRequest, ResearchRun, Researcher, Resume, RunStatus, SpawnHook,
-    StopHandle, ToolSeen, drive, models_from_env, plan, present, run_attempt,
+    EXIT_WAIT, McpAccess, ResearchConfig, ResearchError, ResearchOutcome, ResearchRequest, Resume,
+    RunStatus, drive, models_from_env, plan, present,
 };
 pub use sandbox::SandboxMode;

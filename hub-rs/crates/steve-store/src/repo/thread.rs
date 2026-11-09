@@ -98,7 +98,9 @@ pub struct ThreadRun {
     pub user_id: Option<String>,
     pub project_id: Option<String>,
     pub model: Option<String>,
-    pub claude_session: Option<String>,
+    /// The harness adapter's session id (to continue the run with) and the adapter's id.
+    pub session: Option<String>,
+    pub harness: Option<String>,
     /// queued | running | done | stopped | budget | violated | failed | interrupted
     pub status: String,
     #[serde(skip)]
@@ -123,7 +125,8 @@ impl ThreadRun {
             user_id: r.get("user_id")?,
             project_id: r.get("project_id")?,
             model: r.get("model")?,
-            claude_session: r.get("claude_session")?,
+            session: r.get("session")?,
+            harness: r.get("harness")?,
             status: r.get("status")?,
             token_hash: r.get("token_hash")?,
             tools: r.get("tools")?,
@@ -159,7 +162,8 @@ pub struct RunPatch {
     pub status: Option<String>,
     pub reply_id: Option<String>,
     pub model: Option<String>,
-    pub claude_session: Option<String>,
+    pub session: Option<String>,
+    pub harness: Option<String>,
     /// `Some(None)` clears the token (the run ended)
     pub token_hash: Option<Option<String>>,
     pub tools: Option<i64>,
@@ -317,7 +321,8 @@ impl Thread<'_> {
         s.val("status", p.status.clone())
             .val("reply_id", p.reply_id.clone())
             .val("model", p.model.clone())
-            .val("claude_session", p.claude_session.clone())
+            .val("session", p.session.clone())
+            .val("harness", p.harness.clone())
             .null("token_hash", p.token_hash.clone())
             .val("tools", p.tools)
             .val("turns", p.turns)

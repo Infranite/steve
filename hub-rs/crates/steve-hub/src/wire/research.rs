@@ -1,12 +1,9 @@
-//! The thread's research seam (`steve_core::thread::Researcher`) on the read-only executor of
-//! steve-research (thread-routing R2): the prompt is filled from what the thread collected, the run's
-//! events become drafts and tool rows, and its end becomes the thread's `RunEnd`.
-//!
-//! With `STEVE_NODE_JOBS=research` (and the local Node) each attempt of a run is a job on the
-//! local Node instead (N0d-9): the Hub keeps the policy (admission, the attempts in order, the
-//! prompt, the answer's shape, the statistics row, the audit), the Node runs one model per job with
-//! the same three read-only layers, and Steve's research tools reach the Hub through the Node's
-//! endpoint with the job's grant.
+//! The thread's research seam (`steve_core::thread::Researcher`) on the local Node's research jobs
+//! (thread-routing R2, N0d-9): the Hub keeps the policy (admission, the attempts in order, the
+//! prompt, the answer's shape, the statistics row, the audit), the Node runs each attempt as one
+//! job on the chosen harness adapter with the three read-only layers, its events become drafts and
+//! tool rows, and Steve's research tools reach the Hub through the Node's endpoint with the job's
+//! grant. Without the local Node there is no research.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,21 +27,20 @@ pub const NO_WALL_LIMIT: Duration = Duration::from_secs(365 * 24 * 3600);
 /// Research on the local Node's jobs.
 pub struct NodeResearch {
     pub runtime: Arc<NodeRuntime>,
-    /// The local Node's roots now: a run's directories are named under them. An error (the store,
-    /// the placement) is logged and the run goes in process, counted as a fallback.
+    /// The local Node's roots now: a run's directories are named under them. A directory under
+    /// none of them cannot be read: the run fails, counted.
     pub roots: Arc<dyn Fn() -> Result<Vec<steve_node::Root>, String> + Send + Sync>,
 }
 
 pub struct ResearchAdapter {
-    pub researcher: r::Researcher,
+    pub cfg: r::ResearchConfig,
     pub db: steve_core::repo::Db,
     pub data_dir: PathBuf,
     node: Option<NodeResearch>,
     admission: Admission,
 }
 
-/// The runs admitted on the Node path: one per workspace, `max_global` at once, none once closed
-/// (what [`r::Researcher::start`] enforces in process).
+/// The runs admitted: one per workspace, `max_global` at once, none once closed.
 #[derive(Default)]
 struct Admission(Mutex<Admitted>);
 
@@ -121,7 +117,7 @@ impl ResearchAdapter {
             tracing::info!("{note}");
         }
         ResearchAdapter {
-            researcher: r::Researcher::new(cfg),
+            cfg,
             db,
             data_dir,
             node: None,
@@ -129,7 +125,7 @@ impl ResearchAdapter {
         }
     }
 
-    /// Runs research as jobs on the local Node (`STEVE_NODE_JOBS=research`).
+    /// Runs research as jobs on the local Node.
     pub fn on_node(mut self, node: NodeResearch) -> Self {
         self.node = Some(node);
         self
@@ -173,7 +169,7 @@ impl ResearchAdapter {
             Some(f) => (
                 q.question.clone(),
                 Some(r::Resume {
-                    claude_session: f.claude_session.clone(),
+                    session: f.session.clone(),
                     model: f.model.clone(),
                     prior_answer: f.prior_answer.clone(),
                 }),
@@ -254,36 +250,6 @@ impl ResearchAdapter {
         }
     }
 
-    /// The tokens of an in-process run, from the harness's closing result.
-    fn usage_of_result(out: &r::ResearchOutcome) -> Vec<steve_core::gateway::ModelUsage> {
-        let model = out.model.clone().unwrap_or_default();
-        let codex = out.result.as_ref().is_some_and(|d| d["harness"] == "codex");
-        match out.result.as_ref() {
-            // Codex reports one usage object for the turn, input counting the cached part
-            Some(d) if codex => d
-                .get("usage")
-                .filter(|u| u.is_object())
-                .map(|u| {
-                    vec![steve_core::gateway::ModelUsage {
-                        model: model.clone(),
-                        tokens: steve_stats::normalize(
-                            "codex",
-                            steve_stats::RawUsage::from_json(u),
-                            true,
-                        ),
-                        cost_reported: None,
-                        detail: serde_json::json!({"scope": "main"}),
-                    }]
-                })
-                .unwrap_or_default(),
-            Some(d) => steve_print::claude_usage(d, &model)
-                .into_iter()
-                .map(steve_core::gateway::model_usage)
-                .collect(),
-            None => vec![],
-        }
-    }
-
     /// The run's end for the thread: its statistics row, the audit of a violation, and the
     /// thread's outcome.
     fn conclude(
@@ -320,58 +286,17 @@ impl ResearchAdapter {
             }),
             end,
             model: out.model,
-            claude_session: out.claude_session,
+            session: out.session,
             turns: out.turns as i64,
             first_text_ms: out.first_text_ms.map(|m| m as i64),
             error,
         }
     }
 
-    /// A run in this process ([`r::Researcher`]).
-    async fn in_process(&self, q: &ResearchRequest, sink: &dyn ResearchSink) -> ResearchOutcome {
-        let mut run = match self.researcher.start(self.request(q)) {
-            Ok(run) => run,
-            Err(e) => {
-                return ResearchOutcome {
-                    end: RunEnd::Failed,
-                    error: Some(refused(&e)),
-                    ..Default::default()
-                };
-            }
-        };
-        let stopper = run.stopper();
-        let mut stopped = false;
-        loop {
-            tokio::select! {
-                ev = run.next_event() => match ev {
-                    None => break,
-                    Some(r::ResearchEvent::Text { text }) => sink.text(&text),
-                    Some(r::ResearchEvent::ToolDone(t)) => sink.tool(&ToolSeen {
-                        name: t.name,
-                        brief: t.brief,
-                        ok: t.ok.unwrap_or(true),
-                        error: t.error.map(|e| e.code().to_string()),
-                        ms: t.ms as i64,
-                    }),
-                    Some(_) => {}
-                },
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                    if !stopped && q.stop.load(Ordering::SeqCst) {
-                        stopped = true;
-                        stopper.stop();
-                    }
-                }
-            }
-        }
-        let out = run.finish().await;
-        let usage = Self::usage_of_result(&out);
-        self.conclude(q, out, usage)
-    }
-
     /// A run as jobs on the local Node: admitted here, its attempts planned here
     /// ([`r::plan`]) and tried in order ([`r::drive`]), one job per attempt. A run whose
-    /// directories are under none of the Node's roots (or whose roots cannot be read) runs in
-    /// process, logged and counted ([`NodeRuntime::research_fallbacks`], in `/healthz`).
+    /// directories are under none of the Node's roots (or whose roots cannot be read) fails,
+    /// logged and counted ([`NodeRuntime::research_fallbacks`], in `/healthz`).
     async fn on_local_node(
         &self,
         node: &NodeResearch,
@@ -385,7 +310,7 @@ impl ResearchAdapter {
                 ..Default::default()
             };
         }
-        let cfg = self.researcher.config();
+        let cfg = &self.cfg;
         let slot = match self.admission.admit(&q.run, &q.ws, cfg.max_global) {
             Ok(s) => s,
             Err(e) => {
@@ -412,12 +337,15 @@ impl ResearchAdapter {
         if cwd.as_ref().is_some_and(Option::is_none) || readable.iter().any(Option::is_none) {
             tracing::warn!(
                 run = %q.run,
-                "research: a directory is under none of the local Node's roots; it runs in process"
+                "research: a directory is under none of the local Node's roots; it cannot be read"
             );
             node.runtime.research_fell_back();
-            let out = self.in_process(q, sink).await;
             drop(slot);
-            return out;
+            return ResearchOutcome {
+                end: RunEnd::Failed,
+                error: Some("这个项目的目录不在本机 Node 能读的范围里，研究不能读取它".into()),
+                ..Default::default()
+            };
         }
         let budget = req.budget.unwrap_or(cfg.budget);
         let deadline = steve_store::now()
@@ -733,20 +661,17 @@ impl OnNode<'_> {
             run_id: run.to_string(),
             status,
             model: self.model.clone(),
-            claude_session: c
+            session: c
                 .and_then(|c| c.continuation.as_ref())
                 .map(|h| h.to_string()),
             answer,
             offer,
             citations,
             files_read,
-            tools: vec![],
             turns: report.map_or(0, |j| j.turns),
             ms,
             first_text_ms: self.first_text_ms,
-            cost_usd: None,
             sandboxed: report.is_some_and(|j| j.sandboxed),
-            result: None,
             raw,
         }
     }
@@ -755,29 +680,25 @@ impl OnNode<'_> {
 #[async_trait]
 impl steve_core::thread::Researcher for ResearchAdapter {
     async fn shutdown(&self, grace: Duration) -> bool {
-        if self.node.is_none() {
-            return self.researcher.shutdown(grace).await;
-        }
         let deadline = tokio::time::Instant::now() + grace;
         self.admission.close();
-        let in_process = self.researcher.shutdown(grace);
-        let on_node = async {
-            // each run ends once the Node said its attempt ended (its processes are gone by then)
-            while !self.admission.is_empty() {
-                if tokio::time::Instant::now() >= deadline {
-                    return false;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+        // each run ends once the Node said its attempt ended (its processes are gone by then)
+        while !self.admission.is_empty() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
             }
-            true
-        };
-        let (a, b) = tokio::join!(in_process, on_node);
-        a && b
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        true
     }
     async fn research(&self, q: ResearchRequest, sink: &dyn ResearchSink) -> ResearchOutcome {
         match &self.node {
             Some(node) => self.on_local_node(node, &q, sink).await,
-            None => self.in_process(&q, sink).await,
+            None => ResearchOutcome {
+                end: RunEnd::Failed,
+                error: Some("研究在本机 Node 上运行，本机 Node 现在没有开启".into()),
+                ..Default::default()
+            },
         }
     }
 }
@@ -785,197 +706,3 @@ impl steve_core::thread::Researcher for ResearchAdapter {
 #[cfg(all(test, unix))]
 #[path = "research_stream_tests.rs"]
 mod stream_tests;
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Mutex};
-    use steve_core::thread::Researcher as _;
-
-    #[derive(Default)]
-    struct Seen {
-        text: Mutex<Vec<String>>,
-        tools: Mutex<Vec<ToolSeen>>,
-    }
-    impl ResearchSink for Seen {
-        fn text(&self, t: &str) {
-            self.text.lock().unwrap().push(t.into());
-        }
-        fn tool(&self, t: &ToolSeen) {
-            self.tools.lock().unwrap().push(t.clone());
-        }
-    }
-
-    fn bot() -> steve_core::repo::Bot {
-        steve_core::repo::Bot {
-            id: "steve".into(),
-            workspace_id: "default".into(),
-            name: "Steve".into(),
-            role: "r".into(),
-            main: true,
-            harness: "claude-code".into(),
-            model: None,
-            reasoning_effort: None,
-            rules: "说重点。".into(),
-            accept_mode: "inherit".into(),
-            perm_mode: "default".into(),
-            enabled: true,
-            revision: 1,
-            updated: 0,
-            persona: String::new(),
-            proactive: 1,
-            avatar: Default::default(),
-            default_project: None,
-            prompt: None,
-            device: None,
-        }
-    }
-
-    /// The thread's request reaches the executor (prompt, cwd, run id), its events come back as drafts
-    /// and tool rows, and its end and offer map onto the thread's.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_run_through_the_executor() {
-        use std::os::unix::fs::PermissionsExt;
-        let t = tempfile::tempdir().unwrap();
-        let root = t.path().canonicalize().unwrap();
-        let proj = root.join("proj");
-        std::fs::create_dir_all(proj.join("src")).unwrap();
-        std::fs::write(proj.join("src/lib.rs"), "fn add() {}\n").unwrap();
-        let lib = proj.join("src/lib.rs").display().to_string();
-        let lines = [
-            r#"{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-sonnet-5-5"}"#.to_string(),
-            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}"#.to_string(),
-            serde_json::json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path": lib}}]}}).to_string(),
-            serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"1\tfn add() {}"}]}}).to_string(),
-            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m2"}}}"#.to_string(),
-            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"add 什么都不做。"}}}).to_string(),
-            serde_json::json!({"type":"result","subtype":"success","is_error":false,"result":"add 什么都不做。\nOFFER: {\"title\":\"实现 add\",\"goal\":\"让 add 返回和\"}","session_id":"sess-1"}).to_string(),
-        ];
-        let args = root.join("args.txt");
-        let body = lines
-            .iter()
-            .map(|l| format!("printf '%s\\n' '{}'", l.replace('\'', "'\\''")))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let exe = root.join("claude.sh");
-        std::fs::write(
-            &exe,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n{body}\n",
-                args.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut cfg = r::ResearchConfig::new(&exe, root.join("scratch"));
-        cfg.models = vec!["claude-sonnet-5-5".into()];
-        cfg.home = root.join("home");
-        cfg.claude_dir = root.join("claude");
-        cfg.sandbox = r::SandboxMode::Off;
-        let store =
-            steve_store::Store::open(root.join("db.sqlite3"), steve_store::NoPublisher).unwrap();
-        let a = ResearchAdapter::new(cfg, steve_core::repo::Db::new(store), root.join("data"));
-        let project = steve_core::repo::Project {
-            id: "prj".into(),
-            workspace_id: "default".into(),
-            name: "add".into(),
-            description: "加法".into(),
-            device_id: "hub".into(),
-            path: proj.display().to_string(),
-            kind: "dir".into(),
-            worktree: false,
-            default_bot: None,
-            release: None,
-            archived: false,
-            created: 0,
-            updated: 0,
-        };
-        let seen = Seen::default();
-        let req = |run: &str, models: steve_core::models::Choice| ResearchRequest {
-            run: run.into(),
-            ws: "default".into(),
-            mid: "msg_1".into(),
-            user: None,
-            question: "add 怎么工作？".into(),
-            history: vec![],
-            main: bot(),
-            context: String::new(),
-            project: Some(project.clone()),
-            readable: vec![project.clone()],
-            files: vec![],
-            earlier_files: vec![],
-            resume: None,
-            stop: Arc::new(AtomicBool::new(false)),
-            mcp: None,
-            models,
-            ui: true,
-        };
-        let out = a.research(req("tr_1", Default::default()), &seen).await;
-        assert_eq!(out.end, RunEnd::Done, "{out:?}");
-        assert_eq!(out.text, "add 什么都不做。");
-        assert_eq!(out.offer.unwrap().title, "实现 add");
-        assert_eq!(out.claude_session.as_deref(), Some("sess-1"));
-        assert_eq!(out.model.as_deref(), Some("claude-sonnet-5-5"));
-        assert_eq!(
-            seen.text.lock().unwrap().last().unwrap(),
-            "add 什么都不做。"
-        );
-        let tools = seen.tools.lock().unwrap().clone();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "Read");
-        let argv = std::fs::read_to_string(&args).unwrap();
-        assert!(
-            argv.contains("add 怎么工作？"),
-            "the prompt carries the question"
-        );
-        assert!(argv.contains("说重点。"), "and the bot's rules");
-        let flag = |argv: &str, f: &str| {
-            let l: Vec<&str> = argv.lines().collect();
-            l.iter().position(|x| *x == f).map(|i| l[i + 1].to_string())
-        };
-        assert_eq!(flag(&argv, "--model").as_deref(), Some("claude-sonnet-5-5"));
-        assert_eq!(flag(&argv, "--effort"), None);
-
-        /* 设置 · 模型 · 就地研究: the request's models and effort reach the command line */
-        let out = a
-            .research(
-                req(
-                    "tr_2",
-                    steve_core::models::Choice {
-                        harness: "claude-code".into(),
-                        models: vec!["claude-opus-5-5".into()],
-                        effort: Some("max".into()),
-                    },
-                ),
-                &seen,
-            )
-            .await;
-        assert_eq!(out.end, RunEnd::Done, "{out:?}");
-        assert_eq!(out.model.as_deref(), Some("claude-opus-5-5"));
-        let argv = std::fs::read_to_string(&args).unwrap();
-        assert_eq!(flag(&argv, "--model").as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(flag(&argv, "--effort").as_deref(), Some("max"));
-
-        /* both runs are in the statistics as research, on the model that ran */
-        let rows: Vec<(String, String)> =
-            a.db.store()
-                .with_conn(|c| {
-                    let mut st = c.prepare(
-                    "SELECT purpose, model FROM usage_records WHERE source = 'gateway' ORDER BY id",
-                )?;
-                    let v = st
-                        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
-                    Ok(v)
-                })
-                .unwrap();
-        assert_eq!(
-            rows,
-            [
-                ("research".to_string(), "claude-sonnet-5-5".to_string()),
-                ("research".to_string(), "claude-opus-5-5".to_string())
-            ]
-        );
-    }
-}

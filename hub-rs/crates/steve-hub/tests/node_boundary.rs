@@ -80,8 +80,6 @@ impl Rule {
                 "spawn_bounded(",
                 "LocalAcp {",
                 "steve_acp::oneshot",
-                "steve_print::run",
-                "PrintRun {",
                 "Researcher::new(",
                 "researcher.start(",
                 "run_attempt(",
@@ -127,9 +125,6 @@ impl Rule {
             Rule::Harness => &[
                 ("steve_acp::Acp", Renamed),
                 ("steve_acp::rpc", Any),
-                ("steve_print::run", Any),
-                ("steve_print::run_supervised", Any),
-                ("steve_print::PrintRun", Any),
                 ("steve_acp::oneshot", Any),
                 ("steve_core::LocalAcp", Renamed),
                 ("steve_core::gateway::LocalAcp", Renamed),
@@ -229,8 +224,6 @@ use Until::{Hub, Later, Library, N0d, NoNode};
 const ALLOWED: &[Entry] = &[
     /* the harness libraries: what they start is reached only through the Harness entries */
     e(Spawn, "steve-acp/src/rpc.rs", 1, Library, "an ACP adapter process"),
-    e(Spawn, "steve-print/src/lib.rs", 1, Library, "`claude -p` / `codex exec`"),
-    e(Spawn, "steve-research/src/run.rs", 1, Library, "one research harness attempt"),
     e(Spawn, "steve-acp/src/config.rs", 1, Hub, "`npm root -g`, to find the adapters"),
     e(Spawn, "steve-vault/src/harness.rs", 1, Library, "whether seatbelt starts here (sandbox-exec on /usr/bin/true): the Node's sandbox and the pre-switch check"),
     e(Dir, "steve-vault/src/harness.rs", 1, Library, "the protected name prefixes the Node hides from a bubblewrap run"),
@@ -239,15 +232,13 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-acp/src/codex.rs", 4, Library, "CODEX_HOME config and the adapter's instructions file"),
     e(Dir, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),
     e(Fs, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),
-    e(Fs, "steve-print/src/codex.rs", 6, Library, "`codex exec` image and instructions files"),
     e(Fs, "steve-research/src/attach.rs", 4, Library, "attachments in a research run's dir"),
-    e(Fs, "steve-research/src/run.rs", 8, Library, "a research run's dir, sandbox profile and MCP config"),
     /* harness entry points outside the Node */
     e(Harness, "steve-hub/src/wire/mod.rs", 1, N0d, "LocalAcp: the in-process think gateway"),
     e(Harness, "steve-core/src/gateway.rs", 4, N0d, "LocalAcp and its one-shot ACP call"),
     e(Fs, "steve-core/src/gateway.rs", 1, N0d, "LocalAcp's scratch directory"),
-    e(Harness, "steve-hub/src/wire/research.rs", 3, N0d,
-        "in-process research runs: the steve_research import, Researcher::new and its start"),
+    e(Harness, "steve-hub/src/wire/research.rs", 1, Hub,
+        "the steve_research import: the run's policy (its attempts, its answer); the runs are Node jobs"),
     e(Spawn, "steve-hub/src/catalog.rs", 1, Later("the model catalogue from the Node"),
         "`codex debug models`, read-only in CODEX_HOME"),
     /* project directories on the Hub host */
@@ -365,7 +356,7 @@ const ALLOWED: &[Entry] = &[
 /// The crates that are the Node.
 const NODE: &[&str] = &["steve-node", "steve-node-cli"];
 /// The crates that hold harness code; [`Rule::Harness`] is about their callers.
-const LIBRARIES: &[&str] = &["steve-acp", "steve-print", "steve-research"];
+const LIBRARIES: &[&str] = &["steve-acp", "steve-research"];
 
 fn crates_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -640,7 +631,7 @@ fn a_test_only_file_is_left_out() {
 #[test]
 fn imports_and_file_operations_count() {
     let src = r#"
-use steve_print::{PrintRun, run_supervised};
+use steve_acp::oneshot::{Request, run};
 use steve_acp::{rpc::{Conn, Spawn}};
 use std::process::{Command as Cmd};
 use steve_research as r;
@@ -650,7 +641,7 @@ use steve_core::thread::Researcher as _;
 use steve_node_wire::{Conn as Link, ConnOptions};
 use std::process::Command;
 fn production(state: &State, project: &Path, worktree: &Path) {
-    let _ = run_supervised(&run, &spawned, &on_message);
+    let _ = run(req, &spawned, &on_event);
     let _ = Conn::spawn(sink, stream, generation, handler, opts);
     let _ = Cmd::new("claude");
     let _ = state.research.researcher.start(req);
@@ -671,9 +662,9 @@ fn production(state: &State, project: &Path, worktree: &Path) {
     }];
     let lines =
         |rule| -> Vec<usize> { sites(rule, "steve-x", &s).iter().map(|s| s.line).collect() };
-    // the PrintRun and run_supervised imports, the rpc Conn and Spawn imports, the steve_research
+    // the oneshot path and its Request and run imports, the rpc Conn and Spawn imports, the steve_research
     // rename, the researcher's start; not the Node link's Conn, nor the core Researcher trait
-    assert_eq!(lines(Rule::Harness), vec![2, 2, 3, 3, 5, 15]);
+    assert_eq!(lines(Rule::Harness), vec![2, 2, 2, 3, 3, 5, 15]);
     // the renamed Command, not the plain import (its `Command::new(` is what counts)
     assert_eq!(lines(Rule::Spawn), vec![4]);
     // the imported remove_dir_all (its bare call is counted there) and the renamed File, then
