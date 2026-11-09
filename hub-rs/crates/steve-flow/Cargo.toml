@@ -18,7 +18,7 @@ chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "=0.10.4"
 croner = "=4.0.2"
 regex = "=1.13.1"
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots"] }
 rquickjs = "=0.14.0"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }

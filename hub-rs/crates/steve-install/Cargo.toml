@@ -20,7 +20,7 @@ zeroize = "=1.9.1"
 libc = "0.2"
 semver = "=1.0.28"
 url = "=2.5.8"
-reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls", "rustls-tls-native-roots"] }
 rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
 regex = "=1.13.1"
 shlex = "=2.0.1"

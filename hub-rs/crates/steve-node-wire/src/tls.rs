@@ -1,6 +1,6 @@
 //! How the Node reaches the Hub. `wss://` always, verified by a pin when pairing gave one (the
-//! Hub terminates TLS itself) or by the webpki roots when it did not (a proxy with a public
-//! certificate in front). Plain `ws://` only to a literal loopback address and only when
+//! Hub terminates TLS itself) or by the bundled webpki roots plus the system's trusted roots when
+//! it did not (a proxy in front, with a public certificate or one from a CA the OS trusts). Plain `ws://` only to a literal loopback address and only when
 //! `STEVE_NODE_LOOPBACK_PLAINTEXT=1`: same machine, nothing leaves it, and the signed challenge is
 //! still required.
 //!
@@ -193,9 +193,11 @@ pub fn client_config(trust: &Trust) -> Result<Option<Arc<rustls::ClientConfig>>,
         Trust::Pin(pin) => Some(pinned(b, vec![*pin], p.signature_verification_algorithms)),
         Trust::Pins(pins) => Some(pinned(b, pins.clone(), p.signature_verification_algorithms)),
         Trust::WebPki => {
-            let roots = rustls::RootCertStore {
+            let mut roots = rustls::RootCertStore {
                 roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
             };
+            // A private CA installed in the OS trust store (keychain, /etc/ssl) counts too.
+            roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
             Some(Arc::new(
                 b.with_root_certificates(roots).with_no_client_auth(),
             ))
