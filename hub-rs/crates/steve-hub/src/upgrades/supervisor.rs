@@ -237,6 +237,43 @@ async fn healthy(cfg: &Config, client: &reqwest::Client, version: &str, id: Opti
             None => v["maintenance"] != true,
         }
 }
+/// How often the running Hub is asked whether it still answers, and how many unanswered probes in a
+/// row make it hung: it is stopped, and the service manager starts the supervisor (and it) again, as
+/// when the Hub exits. Only once it has answered since it started, and never during an upgrade.
+const LIVENESS_EVERY: Duration = Duration::from_secs(30);
+const LIVENESS_MISSES: u32 = 4;
+
+/// The Hub answers `/healthz` at all (its version and maintenance do not matter here).
+async fn answers(cfg: &Config, client: &reqwest::Client) -> bool {
+    let host = cfg.listen.local_host();
+    client
+        .get(format!("http://{host}:{}/healthz", cfg.listen.port))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
+}
+
+/// Counts unanswered liveness probes; [`Liveness::hung`] once there were too many in a row.
+#[derive(Default)]
+struct Liveness {
+    answered: bool,
+    misses: u32,
+}
+
+impl Liveness {
+    /// Takes one probe's outcome; true when the Hub is to be taken for hung.
+    fn probe(&mut self, ok: bool) -> bool {
+        if ok {
+            self.answered = true;
+            self.misses = 0;
+        } else if self.answered {
+            self.misses += 1;
+        }
+        self.misses >= LIVENESS_MISSES
+    }
+}
+
 async fn wait_health(
     cfg: &Config,
     u: &Updates,
@@ -428,6 +465,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     }
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut live = Liveness::default();
+    let mut probed = tokio::time::Instant::now();
     loop {
         tokio::select! {_ = term.recv()=>{stop(&mut child).await?;return Ok(())},_ = tokio::signal::ctrl_c()=>{stop(&mut child).await?;return Ok(())},_ = tokio::time::sleep(Duration::from_millis(500))=>{}}
         if let Some(mut op) = u.active()?
@@ -453,6 +492,17 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
         if let Some(status) = child.try_wait()? {
             bail!("Hub child exited: {status}; supervisor must be restarted by service manager")
+        }
+        /* a Hub that runs but no longer answers is as gone as one that exited (2026-11-09) */
+        if probed.elapsed() >= LIVENESS_EVERY {
+            probed = tokio::time::Instant::now();
+            if u.active()?.is_none() && live.probe(answers(&cfg, &u.client).await) {
+                tracing::error!(
+                    "Hub did not answer /healthz {LIVENESS_MISSES} times in a row; stopping it"
+                );
+                stop(&mut child).await?;
+                bail!("Hub stopped answering; supervisor must be restarted by service manager")
+            }
         }
     }
 }
@@ -693,6 +743,28 @@ Server(('127.0.0.1',int(os.environ['STEVE_PORT'])),Handler).serve_forever()
     async fn real_process_bad_candidate_restores_database_and_old_pair() {
         scenario(true).await
     }
+    #[test]
+    fn liveness_counts_misses_only_after_an_answer() {
+        let mut l = Liveness::default();
+        /* still starting: never answered, never hung */
+        for _ in 0..10 {
+            assert!(!l.probe(false));
+        }
+        assert!(!l.probe(true));
+        for _ in 1..LIVENESS_MISSES {
+            assert!(!l.probe(false));
+        }
+        /* one answer in between starts again */
+        assert!(!l.probe(true));
+        for _ in 1..LIVENESS_MISSES {
+            assert!(!l.probe(false));
+        }
+        assert!(
+            l.probe(false),
+            "hung after {LIVENESS_MISSES} misses in a row"
+        );
+    }
+
     #[test]
     fn repeated_restore_preserves_failed_databases() {
         let dir = tempfile::tempdir().unwrap();
