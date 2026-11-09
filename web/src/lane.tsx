@@ -10,6 +10,7 @@ import { Group, Meta, Row, SectionLabel } from "@/ui"
 import { TriangleAlertIcon } from "lucide-react"
 import { type ReactNode, useEffect, useState } from "react"
 import { t, useT } from "@/i18n"
+import { QueueSection } from "@/merge-queue"
 
 /* labels are functions so they follow a language change */
 const MERGE: Record<string, () => string> = { host_queue: () => t("shell:lane.merge.hostQueue"), host_pr: () => t("shell:lane.merge.hostPr"), push: () => t("shell:lane.merge.push") }
@@ -87,7 +88,9 @@ export function LaneSection({ project }: { project: string }) {
           {lane.numbered.map((n) => <Row key={n.kind + n.path} title={<span><span className="font-mono text-[13px]">{n.path}</span> · {n.evidence}</span>} sub={n.handling} data-lane-numbered={n.kind} />)}
           <Row title={t("shell:lane.days", { count: lane.pace.days })} sub={<Meta><span>{t("shell:lane.landed", { count: lane.pace.landed })}</span><span>{t("shell:lane.releases", { count: lane.pace.releases })}</span><span>{t("shell:lane.authors", { count: lane.pace.authors })}</span></Meta>} data-lane-pace />
         </Group>}
-      {lane && <div className="mt-3" data-lane-batches><Batches project={project} lane={lane.lane} onLane={(l) => setLane({ ...lane, lane: l })} /></div>}
+      {lane && (lane.queue
+        ? <div className="mt-3"><QueueSection project={project} queue={lane.queue} onQueue={(q) => setLane({ ...lane, queue: q })} /></div>
+        : <div className="mt-3" data-lane-batches><Batches project={project} lane={lane.lane} onLane={(l) => setLane({ ...lane, lane: l })} /></div>)}
     </section>
   )
 }

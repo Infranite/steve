@@ -441,5 +441,8 @@
   "core.mq.pr_merge_unknown": "PR #%{n} 的合并结果不明：%{why}",
   "core.mq.fed": "已交给托管方的合并队列（PR #%{n}，合入 %{branch}）",
   "core.mq.feed_failed": "没能交给托管方的合并队列：%{why}。这一项按项目原来的方式合并",
-  "core.mq.host_closed": "托管方关闭了 PR #%{n}，没有合入"
+  "core.mq.host_closed": "托管方关闭了 PR #%{n}，没有合入",
+  "core.mq.off": "合并队列没有开启（STEVE_MQ=1）",
+  "core.mq.policy_unknown": "合并队列没有这个设置：%{field}",
+  "core.mq.policy_bad": "合并队列的设置不对：%{why}"
 }

@@ -632,6 +632,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
             get(projects::lane).patch(projects::lane_policy),
         )
         .route("/projects/{id}/lane/now", post(projects::lane_now))
+        .route("/projects/{id}/queue", post(projects::queue_act))
         .route("/fs/dirs", get(projects::dirs))
         // tags
         .route("/tags", post(misc::tag_create))

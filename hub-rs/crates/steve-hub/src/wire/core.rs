@@ -1570,6 +1570,32 @@ impl Domain for CoreDomain {
         let (c, u, b) = (self.core.clone(), upstream.to_string(), branch.to_string());
         blocking(move || c.lane_now(&u, &b)).await
     }
+    async fn mq_view(&self, upstream: &str, branch: &str, ws: &str) -> BResult<Option<Value>> {
+        let (c, u, b, w) = (
+            self.core.clone(),
+            upstream.to_string(),
+            branch.to_string(),
+            ws.to_string(),
+        );
+        blocking(move || c.mq_view(&u, &b, &w)).await
+    }
+    async fn mq_act(
+        &self,
+        upstream: &str,
+        branch: &str,
+        ws: &str,
+        act: Value,
+        actor: &str,
+    ) -> BResult<Option<Value>> {
+        let (c, u, b, w, a) = (
+            self.core.clone(),
+            upstream.to_string(),
+            branch.to_string(),
+            ws.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.mq_act(&u, &b, &w, &act, &a)).await
+    }
     async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
         let (c, id, text) = (self.core.clone(), id.to_string(), text.to_string());
         blocking(move || c.revise_goal(&id, &text)).await
