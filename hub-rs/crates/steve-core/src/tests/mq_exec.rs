@@ -66,6 +66,8 @@ pub(super) enum Fault {
     CutLost,
     /// The release step refuses (CI red).
     CutRefused,
+    /// The Node cannot be reached.
+    Offline,
 }
 
 /// A Node doing the staging's git for real: `upstream` the host, `source` the user's repository,
@@ -183,6 +185,13 @@ impl GitNode {
 
 #[async_trait]
 impl MqNode for GitNode {
+    async fn ready(&self, _s: &Staging) -> Result<String, String> {
+        if *self.fault.lock().unwrap() == Fault::Offline {
+            return Err("offline".into());
+        }
+        Ok("local".into())
+    }
+
     async fn stage(&self, _s: &Staging, op: &str) -> Step<String> {
         if let Some(v) = self.memo(op) {
             return Step::Done(v);
@@ -346,10 +355,17 @@ impl MqNode for GitNode {
 
     async fn push_branch(&self, _s: &Staging, op: &str, tip: &str, to: &str) -> Pushed {
         if let Some(v) = self.memo(op) {
-            return if v == "done" { Pushed::Done } else { Pushed::Failed(v) };
+            return if v == "done" {
+                Pushed::Done
+            } else {
+                Pushed::Failed(v)
+            };
         }
         let up = self.upstream.to_str().unwrap();
-        match g(&self.staging, &["push", "-q", up, &format!("{tip}:refs/heads/{to}")]) {
+        match g(
+            &self.staging,
+            &["push", "-q", up, &format!("{tip}:refs/heads/{to}")],
+        ) {
             Ok(_) => {
                 self.keep(op, "done");
                 Pushed::Done

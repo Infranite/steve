@@ -82,6 +82,8 @@ pub enum Pushed {
 /// same id asked again answers what that operation did, never runs it twice.
 #[async_trait]
 pub trait MqNode: Send + Sync {
+    /// The Node the staging is on, when it can be reached now (`Err`: why not: offline, not found).
+    async fn ready(&self, s: &Staging) -> Result<String, String>;
     /// The target's upstream fetched where the project is, and the staging reset at the target's
     /// tip (build output in `keep` kept): the base commit.
     async fn stage(&self, s: &Staging, op: &str) -> Step<String>;
