@@ -56,19 +56,33 @@ fn day(store: &Store, ws: &str, ts: i64) -> String {
     steve_stats::day(ts, steve_stats::tz(Some(&tz)))
 }
 
-/// Boot: Codex turns that ended without tokens get them from Codex's rollout file. codex-acp never
-/// reports usage, so every Codex turn before the runner read the rollout itself (ST-21, 2026-11-02)
-/// was in the statistics with no tokens; the turn's rows are added once, like at its end.
-pub async fn repair_codex(store: &Store, codex_home: &std::path::Path) -> usize {
+/// Boot: turns of the adapters whose tokens come from Codex's rollout files (declared
+/// `usage_fallback: codex_rollout`, `harnesses`) that ended without tokens get them from there.
+/// codex-acp never reports usage, so every such turn before the runner read the rollout itself
+/// (ST-21, 2026-11-02) was in the statistics with no tokens; the turn's rows are added once, like
+/// at its end. The rollout counts cache reads inside the input.
+pub async fn repair_codex(
+    store: &Store,
+    codex_home: &std::path::Path,
+    harnesses: &[String],
+) -> usize {
+    if harnesses.is_empty() {
+        return 0;
+    }
+    let listed = harnesses
+        .iter()
+        .map(|h| format!("'{}'", h.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
     let turns: Vec<(String, String, i64, i64, String)> = store
         .reader(|c| -> steve_store::Result<Vec<_>> {
-            let mut st = c.prepare(
+            let mut st = c.prepare(&format!(
                 "SELECT t.id, t.session_id, t.started, t.ended, s.acp_session_id FROM agent_turns t
                  JOIN sessions s ON s.id = t.session_id
-                 WHERE t.harness = 'codex' AND t.backfill = 0 AND t.ended IS NOT NULL AND s.acp_session_id IS NOT NULL
+                 WHERE t.harness IN ({listed}) AND t.backfill = 0 AND t.ended IS NOT NULL AND s.acp_session_id IS NOT NULL
                    AND NOT EXISTS (SELECT 1 FROM usage_records u WHERE u.turn_id = t.id)
                  ORDER BY t.started",
-            )?;
+            ))?;
             let rows = st
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -110,11 +124,7 @@ pub async fn repair_codex(store: &Store, codex_home: &std::path::Path) -> usize 
             project_id: o.project.clone(),
             usage: ModelUsage {
                 model: o.model(None),
-                tokens: steve_stats::normalize(
-                    "codex",
-                    steve_stats::RawUsage::from_json(&raw),
-                    codex_cache,
-                ),
+                tokens: steve_stats::normalize(steve_stats::RawUsage::from_json(&raw), codex_cache),
                 cost_reported: None,
                 detail: json!({ "scope": "main", "from": "rollout" }),
             },
@@ -413,8 +423,9 @@ mod tests {
             tick.to_string(),
         )
         .unwrap();
-        assert_eq!(repair_codex(&t.store, &home).await, 1);
-        assert_eq!(repair_codex(&t.store, &home).await, 0);
+        let codex = ["codex".to_string()];
+        assert_eq!(repair_codex(&t.store, &home, &codex).await, 1);
+        assert_eq!(repair_codex(&t.store, &home, &codex).await, 0);
         let row: (i64, i64, Option<i64>, i64, i64) = db(&t)
             .query_row(
                 "SELECT input, cache_read, cache_write, output, reasoning FROM usage_records WHERE turn_id = ?",

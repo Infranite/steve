@@ -58,17 +58,15 @@ impl RawUsage {
     }
 }
 
-/// Converts `raw` from `harness`'s convention.
+/// Converts `raw` to Steve's convention (Anthropic's: cache reads apart from `input`).
 ///
-/// - `claude-code`, `claude-cli`: already Anthropic's, unchanged.
-/// - `codex`: OpenAI counts cache reads inside `input`, so when `cache_read` is reported and not larger
-///   than `input`, it is taken out. `reasoning` is kept as reported and not added to `output`, which
-///   already contains it. Until a real codex turn confirms the convention this is behind the setting
-///   `stats.codex_input_includes_cache` (default true), passed as `codex_input_includes_cache`.
-pub fn normalize(harness: &str, raw: RawUsage, codex_input_includes_cache: bool) -> Tokens {
+/// `input_includes_cache`: the figures count cache reads inside `input` (OpenAI's convention, an
+/// adapter's declared `usage_input_includes_cache`), so when `cache_read` is reported and not larger
+/// than `input`, it is taken out. `reasoning` is kept as reported and not added to `output`, which
+/// already contains it.
+pub fn normalize(raw: RawUsage, input_includes_cache: bool) -> Tokens {
     let mut input = raw.input;
-    if harness == "codex"
-        && codex_input_includes_cache
+    if input_includes_cache
         && let (Some(i), Some(r)) = (raw.input, raw.cache_read)
         && i >= r
     {
@@ -174,7 +172,9 @@ mod tests {
             ("claude-code", json!(null), true, Tokens::default()),
         ];
         for (i, (h, v, sw, want)) in cases.iter().enumerate() {
-            assert_eq!(normalize(h, RawUsage::from_json(v), *sw), *want, "case {i}");
+            // the cache reads are inside the input only where the adapter counts them so
+            let inside = *h == "codex" && *sw;
+            assert_eq!(normalize(RawUsage::from_json(v), inside), *want, "case {i}");
         }
     }
 }
