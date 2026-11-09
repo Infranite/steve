@@ -1,4 +1,4 @@
-//! The merge queue (058): targets, entries, batches, trains, the Node steps they took, and their
+//! The merge queue (059): targets, entries, batches, trains, the Node steps they took, and their
 //! statistics. The rules live in steve-core `mq::queue` and `mq::train`; the state is these rows.
 //! Writers take the transaction they are part of, so an event's rows change together. The converter
 //! of the 031 lanes ([`convert_031`]) is here too: it is the store's own data.
