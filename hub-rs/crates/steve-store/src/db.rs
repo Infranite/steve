@@ -128,6 +128,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/056.sql"),
     include_str!("../migrations/057.sql"),
     include_str!("../migrations/058.sql"),
+    include_str!("../migrations/059.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
