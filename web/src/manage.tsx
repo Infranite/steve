@@ -20,7 +20,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Robot, Face, AVATAR_COLORS } from "@/robot"
 import {
-  st, botName, PRO, ACC, PERM, HARNESS, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, finishOnboarding, emit,
 } from "@/store"
 import { api, type RKindReview } from "@/api"
@@ -122,15 +122,16 @@ export function DeleteBotDialog({ k }: { k: string }) {
   )
 }
 /* starter bots: [id, harness, model]; the name, role and rules come from manage:tpl in the UI language */
-const TEMPLATES = [["review", "claude-code", "claude-opus-5-5"], ["research", "claude-code", "claude-opus-5-5"], ["writing", "claude-code", "claude-opus-5-5"]] as const
-type TplId = (typeof TEMPLATES)[number][0]
+/* a template runs on the harness a new bot gets (the first that is ready) and its default model */
+const TEMPLATES = ["review", "research", "writing"] as const
+type TplId = (typeof TEMPLATES)[number]
 const tplText = (t: T, id: TplId) => ({ name: t(`manage:tpl.${id}Name`), role: t(`manage:tpl.${id}Role`), rule: t(`manage:tpl.${id}Rule`) })
 export function NewBotDialog() {
   const t = useT()
-  const [mode, setMode] = useState<"tpl" | "desc" | "blank">("tpl"), [tpl, setTpl] = useState<TplId>(TEMPLATES[0][0]), [desc, setDesc] = useState(""), [busy, setBusy] = useState(false)
+  const [mode, setMode] = useState<"tpl" | "desc" | "blank">("tpl"), [tpl, setTpl] = useState<TplId>(TEMPLATES[0]), [desc, setDesc] = useState(""), [busy, setBusy] = useState(false)
   const create = async () => {
     setBusy(true); let k: string | undefined
-    if (mode === "tpl") { const [id, h, m] = TEMPLATES.find((x) => x[0] === tpl)!, x = tplText(t, id); k = await makeBot(x.name, x.role, h, m); if (k) await saveBot(k, { rule: x.rule }, "") }
+    if (mode === "tpl") { const x = tplText(t, tpl); k = await makeBot(x.name, x.role); if (k) await saveBot(k, { rule: x.rule }, "") }
     else if (mode === "blank") k = await makeBot(t("manage:newBot.blankName"), "")
     else k = await draftBot(desc.trim())
     setBusy(false); if (k) { closeSheet(); botTab = "设置"; go("#/bots/" + k) }
@@ -140,7 +141,7 @@ export function NewBotDialog() {
       <DialogContent className="gap-4 rounded-2xl sm:max-w-[520px]">
         <DialogHeader><DialogTitle className="type-headline">{t("manage:list.newBot")}</DialogTitle><DialogDescription className="type-callout">{t("manage:newBot.desc", { ws: st.workspace?.name })}</DialogDescription></DialogHeader>
         <ChoiceCards value={mode} onChange={setMode} cols={1} options={[{ v: "tpl", t: t("manage:newBot.fromTpl"), d: t("manage:newBot.fromTplSub") }, { v: "desc", t: t("manage:newBot.fromDesc"), d: t("manage:newBot.fromDescSub") }, { v: "blank", t: t("manage:newBot.blank"), d: t("manage:newBot.blankSub") }]} />
-        {mode === "tpl" && <Group>{TEMPLATES.map(([id, h, m]) => { const x = tplText(t, id); return <Row key={id} title={x.name} sub={`${x.role} · ${HARNESS[h]} · ${m}`} onClick={() => setTpl(id)} data-tpl={id}>{tpl === id && <CheckIcon className="size-4 text-blue" />}</Row> })}</Group>}
+        {mode === "tpl" && <Group>{TEMPLATES.map((id) => { const x = tplText(t, id), h = defaultHarness(); return <Row key={id} title={x.name} sub={`${x.role} · ${runtimeName(h) ?? h}`} onClick={() => setTpl(id)} data-tpl={id}>{tpl === id && <CheckIcon className="size-4 text-blue" />}</Row> })}</Group>}
         {mode === "desc" && <Textarea autoFocus className="min-h-24 rounded-lg" placeholder={t("manage:newBot.descPlaceholder")} value={desc} onChange={(e) => setDesc(e.target.value)} data-bot-desc />}
         <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button disabled={(mode === "desc" && !desc.trim()) || busy} onClick={() => void create()} data-testid="bot-go">{busy ? <Spinner className="size-3.5" /> : mode === "desc" && <SparklesIcon />}{mode === "desc" ? t("manage:newBot.draft") : t("manage:newBot.create")}</Button></DialogFooter>
       </DialogContent>
@@ -189,6 +190,7 @@ export let botTab: "概览" | "设置" | "对外身份" | "能力" | "系统提�
 export function editBot(k: string) { botTab = "设置"; lastBot = k; go("#/bots/" + k) }
 const BOT_TABS = [["概览", "tabOverview"], ["设置", "tabSettings"], ["能力", "tabCaps"], ["系统提示词", "tabPrompt"], ["记忆", "tabMemory"], ["对外身份", "tabPersona"], ["定时与流程", "tabSchedule"]] as const
 const EFFORT_KEYS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const
+const isEffortKey = (v: string): v is (typeof EFFORT_KEYS)[number] => (EFFORT_KEYS as readonly string[]).includes(v)
 export function BotView({ k }: { k: string }) {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
@@ -261,12 +263,12 @@ export function BotView({ k }: { k: string }) {
             <div className="grid gap-4 sm:grid-cols-2">
               <F label="Harness"><div><Select value={fm.harness} onChange={(v) => set({ harness: v, model: "", reasoningEffort: "" })} options={st.runtimes.map((x) => ({ v: x.id, l: x.ok ? x.name : t("manage:form.unavailable", { name: x.name }) }))} /></div></F>
               <F label={t("manage:form.model")}><div><ModelPicker harness={fm.harness} value={fm.model ?? ""} allowDefault testId="bot-model" onChange={(m) => set({ model: m })} /></div></F>
-              <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><div><Select value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...(fm.harness === "codex" ? (["none", "minimal", "low", "medium", "high", "xhigh"] as const) : (["low", "medium", "high", "max"] as const)).map((v: (typeof EFFORT_KEYS)[number]) => ({ v, l: t(`manage:effort.${v}`) }))]} /></div></F>
+              <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><div><Select value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...harnessEfforts(fm.harness).map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v }))]} /></div></F>
             </div>
             {b.main && <SteveJudges harness={fm.harness} model={fm.model ?? ""} />}
             <F label={t("manage:form.device")} hint={t("manage:form.deviceHint")}><div><Select testId="bot-dev" value="hub" onChange={() => {}} options={st.devices.map((d) => ({ v: d.id, l: d.name }))} /></div></F>
             <F label={t("manage:form.project")} hint={t("manage:form.projectHint")}><div><Select value={fm.project} onChange={(v) => set({ project: v })} options={[{ v: "none", l: t("manage:form.projectInfer") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} /></div></F>
-            <F label={t("manage:form.perm")} hint={t("manage:form.permHint")}><div><Select value={fm.permMode} onChange={(v) => set({ permMode: v })} options={Object.keys(PERM).map((v) => ({ v, l: permLabel(t, v) }))} /></div></F>
+            <F label={t("manage:form.perm")} hint={t("manage:form.permHint")}><div><Select value={fm.permMode} onChange={(v) => set({ permMode: v })} options={permModes(fm.harness).map((v) => ({ v, l: permLabel(t, v) }))} /></div></F>
             {!b.main && <F label={t("manage:form.workspaces")} hint={t("manage:form.workspacesHint")}>
               <div className="flex flex-col gap-1.5">{st.workspaces.map((w) => <label key={w.id} className="flex items-center gap-2 type-callout"><Checkbox checked={fm.ws.includes(w.id)} disabled={fm.ws.length === 1 && fm.ws.includes(w.id)} onCheckedChange={(v) => set({ ws: v ? [...fm.ws, w.id] : fm.ws.filter((x: string) => x !== w.id) })} />{w.name}</label>)}</div></F>}
           </section>

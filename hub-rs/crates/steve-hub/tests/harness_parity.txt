@@ -3,27 +3,14 @@
 steve-acp/src/codex.rs	"codex"	1
 steve-core/src/changes.rs	"claude-code"	2
 steve-core/src/changes.rs	"codex"	1
-steve-core/src/changes.rs	CLAUDE_CODE	1
 steve-core/src/changes.rs	harness ==	1
 steve-core/src/config.rs	"claude-code"	2
-steve-core/src/models.rs	"claude-code"	2
-steve-core/src/models.rs	"codex"	2
-steve-core/src/models.rs	CLAUDE_CODE	7
-steve-core/src/models.rs	harness ==	2
 steve-core/src/orchestrator.rs	"claude-code"	2
-steve-hub/src/api/misc.rs	"claude-code"	1
 steve-hub/src/catalog.rs	"claude"	1
-steve-hub/src/catalog.rs	CLAUDE_CODE	3
-steve-hub/src/catalog.rs	harness !=	2
-steve-hub/src/catalog.rs	harness ==	2
 steve-hub/src/config.rs	"claude-code"	2
 steve-hub/src/config.rs	"codex"	1
 steve-hub/src/resume.rs	"claude-code"	1
 steve-hub/src/resume.rs	"codex"	1
-steve-hub/src/system.rs	"claude-code"	3
-steve-hub/src/system.rs	"codex"	4
-steve-hub/src/system.rs	"codex-cli"	1
-steve-hub/src/system.rs	models::CODEX	1
 steve-hub/src/wire/acp_stats.rs	"codex"	1
 steve-hub/src/wire/store.rs	"claude-code"	1
 steve-node-api/src/run.rs	harness !=	1

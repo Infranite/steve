@@ -57,7 +57,6 @@
   "hub.models.no_harness": "No such harness: %{harness}",
   "hub.models.family_other": "Other",
   "hub.models.source_builtin": "built-in list",
-  "hub.models.source_claude_picker": "Claude Code's model picker (~/.claude/settings.json)",
   "hub.models.recent_unlisted": "Used recently, not in the list",
   "hub.workspaces.owner_only": "Only the instance admin can view and reclaim workspaces",
   "hub.outbox.owner_only": "Only the instance admin can view and resend background deliveries",
@@ -113,8 +112,6 @@
   "hub.upgrade.local.rolled_back": "The deploy failed and the previous version and database were restored. See the log %{log}",
   "hub.upgrade.local.committed_failed": "Upgrade committed, but the new version didn't come up properly; it stays in place and was not rolled back. See the log %{log}",
   "hub.upgrade.local.not_recovered": "The deploy failed and the previous version didn't come back; it needs fixing by hand. See the log %{log}",
-  "hub.runtime.no_claude": "claude not found",
-  "hub.runtime.no_codex": "codex not found",
   "hub.runtime.no_adapter": "Missing ACP adapter %{adapter}",
   "hub.runtime.via_acp": "Runs through the ACP adapter",
   "hub.runtime.adapter_missing": "The adapter could not be started",
@@ -199,5 +196,13 @@
   "hub.access.wrong": "Wrong user name or token",
   "hub.access.owner_only": "Only the owner can configure single sign-on",
   "hub.access.oidc_env": "Single sign-on is configured by the environment (STEVE_OIDC_*) and can't be changed here",
-  "hub.access.oidc_bad": "The issuer must be an https address (http on this machine), and the client ID can't be empty"
+  "hub.access.oidc_bad": "The issuer must be an https address (http on this machine), and the client ID can't be empty",
+  "hub.models.source_adapter": "as the adapter reports them",
+  "hub.runtime.session_failed": "the adapter started but could not open a session (it may need you to sign in)",
+  "hub.harness.bad_id": "A harness id is lowercase letters, digits and - _ . only, not \"%{id}\"",
+  "hub.harness.bad_command": "Its command is needed",
+  "hub.harness.bad_properties": "The declared properties are wrong: %{error}",
+  "hub.harness.unknown_property": "Unknown property: %{key}",
+  "hub.harness.manifest_unreadable": "Cannot read the harness manifest: %{error}",
+  "hub.harness.manifest_unwritable": "Cannot write the harness manifest: %{error}"
 }

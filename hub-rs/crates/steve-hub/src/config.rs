@@ -161,6 +161,8 @@ pub struct Config {
     /// What the Hub's harness manifest declares about adapters beyond their command
     /// (`STEVE_HARNESS_MANIFEST`, default `<STEVE_HOME>/harness.json`; [`steve_acp::adapters`]).
     pub declared_adapters: BTreeMap<String, steve_acp::Declaration>,
+    /// Where that manifest is (the runtimes page adds adapters to it).
+    pub harness_manifest: PathBuf,
     pub models: Models,
     /// Model for bots that don't pick one, per harness.
     pub default_models: BTreeMap<String, String>,
@@ -539,6 +541,7 @@ impl Config {
             }),
             adapters,
             declared_adapters,
+            harness_manifest: manifest,
             models: Models {
                 fast: split(env(
                     "STEVE_MODELS_FAST",

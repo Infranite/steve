@@ -1063,10 +1063,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                     }
                 }
                 let text = steve_i18n::t!("hub.node.tag_unmet", tag = tag);
-                if let Err(e) = self
-                    .store
-                    .events()
-                    .add(session_id, "system", serde_json::json!({"text": text}))
+                if let Err(e) =
+                    self.store
+                        .events()
+                        .add(session_id, "system", serde_json::json!({"text": text}))
                 {
                     tracing::warn!("{session_id}: {e}");
                 }
@@ -1356,6 +1356,8 @@ impl steve_core::AgentRuntime for RoutedRuntime {
 
 pub struct CoreDomain {
     pub core: Core,
+    /// The harness adapters the Hub knows, kept fresh from the local Node.
+    pub harnesses: Arc<crate::harnesses::HubHarnesses>,
     /// The runtime the core runs sessions on: boot moves the legacy runner's sessions to its
     /// local Node ([`move_legacy`]).
     pub routed: Arc<RoutedRuntime>,
@@ -2041,6 +2043,13 @@ impl Domain for CoreDomain {
         .await
         .map_err(cerr)?;
         Ok(p.text)
+    }
+
+    async fn harnesses(&self, fresh: bool) -> BResult<Vec<steve_core::harnesses::Harness>> {
+        if fresh && let Some(n) = &self.node {
+            self.harnesses.refresh(n.as_ref(), true).await;
+        }
+        Ok(self.core.models().harnesses())
     }
 
     async fn models_view(&self, ws: &str) -> BResult<Value> {
@@ -2806,9 +2815,16 @@ mod prepared_dir_tests {
     #[test]
     fn spread_goes_only_where_it_is_clearly_lighter() {
         use super::spread_pick;
-        assert_eq!(spread_pick(1.0, [("a", 0.9), ("b", 0.5), ("c", 0.6)]), Some("b"));
+        assert_eq!(
+            spread_pick(1.0, [("a", 0.9), ("b", 0.5), ("c", 0.6)]),
+            Some("b")
+        );
         assert_eq!(spread_pick(1.0, [("a", 0.9)]), None, "not clearly lighter");
-        assert_eq!(spread_pick(0.1, [("a", 0.0)]), None, "this machine is idle enough");
+        assert_eq!(
+            spread_pick(0.1, [("a", 0.0)]),
+            None,
+            "this machine is idle enough"
+        );
         assert_eq!(spread_pick(1.0, [("a", f64::NAN)]), None);
         assert_eq!(spread_pick::<&str>(1.0, []), None);
     }

@@ -166,31 +166,21 @@ impl Runtimes {
 fn shown(mut list: Value) -> Value {
     for r in list.as_array_mut().into_iter().flatten() {
         let note = match r["note"].as_str().unwrap_or_default() {
-            "no_claude" => steve_i18n::t!("hub.runtime.no_claude"),
-            "no_codex" => steve_i18n::t!("hub.runtime.no_codex"),
             "acp" => steve_i18n::t!("hub.runtime.via_acp"),
-            "adapter_missing" => steve_i18n::t!("hub.runtime.adapter_missing"),
-            "initialize_failed" => steve_i18n::t!("hub.runtime.initialize_failed"),
-            code => match code.strip_prefix("no_adapter:") {
-                Some(adapter) => steve_i18n::t!("hub.runtime.no_adapter", adapter = adapter),
-                None => code.to_string(),
+            "adapter_missing" => match r["install_hint"].as_str().filter(|h| !h.is_empty()) {
+                Some(hint) => steve_i18n::t!("hub.runtime.no_adapter", adapter = hint),
+                None => steve_i18n::t!("hub.runtime.adapter_missing"),
             },
+            "initialize_failed" => steve_i18n::t!("hub.runtime.initialize_failed"),
+            "session_failed" => steve_i18n::t!("hub.runtime.session_failed"),
+            code => code.to_string(),
         };
         r["note"] = json!(note);
-        if r["id"] == "codex" && r["path"] == "" {
+        if r["path"] == "" {
             r["path"] = json!(steve_i18n::t!("hub.runtime.path_missing"));
         }
     }
     list
-}
-
-/// `<bin> --version` when the file exists, `""` otherwise.
-async fn version_of(bin: &str) -> String {
-    if !bin.is_empty() && Path::new(bin).exists() {
-        run(bin, &["--version"]).await
-    } else {
-        String::new()
-    }
 }
 
 /// What the local Node's probe reports about its harnesses (none when it cannot say).
@@ -207,107 +197,83 @@ async fn node_harnesses(
     }
 }
 
-/// Rows for the adapters a manifest adds (harness parity S1): what their `initialize` said through
-/// the local Node, or (without one) whether their command is there. Notes are codes ([`shown`]).
-fn declared_rows(
-    cfg: &Config,
-    harnesses: Option<&[steve_node_api::HarnessCapability]>,
-) -> Vec<Value> {
+/// One row per harness adapter the Hub knows (built-in or its manifest's), alike: its name, a
+/// status (ready, adapter missing, initialize failed, no scratch session; notes are codes, see
+/// [`shown`]), its version, the models, efforts and permission modes it offers and what it can
+/// do, as the local Node's probe said. Without a Node: whether its command is there.
+fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -> Vec<Value> {
     use steve_node_api::AdapterStatus;
-    let builtin: Vec<&str> = steve_acp::adapters::builtin_ids().collect();
     cfg.adapters
         .iter()
-        .filter(|(id, _)| !builtin.contains(&id.as_str()))
         .map(|(id, path)| {
-            let spec = steve_acp::adapters::spec(id, cfg.declared_adapters.get(id));
+            let declared = cfg.declared_adapters.get(id);
+            let spec = steve_acp::adapters::spec(id, declared);
             let reported = harnesses.and_then(|hs| hs.iter().find(|h| &h.name == id));
             let adapter = reported.and_then(|h| h.adapter.as_ref());
+            let session = adapter.and_then(|a| a.session.as_ref());
             let (ok, note) = match (adapter.map(|a| a.status), harnesses) {
-                (Some(AdapterStatus::Ready), _) => (true, "acp".to_string()),
-                (Some(AdapterStatus::AdapterMissing), _) => (false, "adapter_missing".into()),
-                (Some(AdapterStatus::InitializeFailed), _) => {
-                    (false, "initialize_failed".to_string())
-                }
+                (Some(AdapterStatus::Ready), _) if session.is_some() => (true, "acp"),
+                (Some(AdapterStatus::Ready), _) => (false, "session_failed"),
+                (Some(AdapterStatus::AdapterMissing), _) => (false, "adapter_missing"),
+                (Some(AdapterStatus::InitializeFailed), _) => (false, "initialize_failed"),
                 // without a Node to ask: there or not
-                (None, None) if Path::new(path).exists() => (true, "acp".into()),
-                (None, _) => (false, "adapter_missing".into()),
+                (None, None) if Path::new(path).exists() => (true, "acp"),
+                (None, _) => (false, "adapter_missing"),
+            };
+            // a name the manifest gave wins, then the adapter's own for one of one's own
+            let name = match (declared.and_then(|d| d.name.clone()), adapter) {
+                (Some(n), _) => n,
+                (None, Some(a)) if !spec.builtin => a.title.clone(),
+                _ => spec.name.clone(),
+            };
+            let models: Vec<String> = match session {
+                Some(o) if !o.models.is_empty() => o.models.iter().map(|m| m.id.clone()).collect(),
+                _ => spec.properties.fallback_models.clone(),
             };
             json!({
                 "id": id,
-                "name": adapter.map(|a| a.title.clone()).unwrap_or(spec.name),
+                "name": name,
+                "builtin": spec.builtin,
+                "custom": !spec.builtin,
                 "path": path,
-                "version": reported.map(|h| h.version.clone()).unwrap_or_default(),
-                "models": reported.map(|h| h.models.clone()).unwrap_or_default(),
+                "version": reported.map(|h| version_of(&h.version)).unwrap_or_default(),
+                "adapter_version": adapter.and_then(|a| a.version.clone()),
+                "models": models,
+                "default_model": session.and_then(|o| o.default_model.clone()),
+                "efforts": session.map_or_else(|| spec.properties.fallback_efforts.clone(), |o| o.efforts.clone()),
+                "modes": session.map(|o| o.modes.clone()),
+                "caps": reported.map(|h| json!({
+                    "sessions": h.sessions, "jobs": h.jobs, "images": h.images, "resume": h.resume,
+                    "history": adapter.is_some_and(|a| a.list_sessions),
+                    "mcp_http": adapter.is_some_and(|a| a.mcp_http),
+                    "system_prompt": adapter.is_some_and(|a| a.system_prompt),
+                })),
+                "auth": adapter.map(|a| a.auth.clone()).unwrap_or_default(),
                 "ok": ok,
                 "note": note,
-                "custom": true,
-                "error": adapter.and_then(|a| a.error.clone()),
+                "error": adapter.and_then(|a| a.error.clone().or_else(|| a.session_error.clone())),
                 "install_hint": spec.install_hint,
             })
         })
         .collect()
 }
 
-/// The harness list. `node`: the local Node runs the binaries (`fresh`: it probes again).
+/// The version number in what a harness says of its version (`2.1.0 (Claude Code)`,
+/// `codex-cli 0.80.0` → the number); as it is when there is none.
+fn version_of(said: &str) -> String {
+    said.split_whitespace()
+        .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or(said)
+        .to_string()
+}
+
+/// The harness list. `node`: the local Node runs the adapters (`fresh`: it asks them again).
 async fn probe(cfg: &Config, node: Option<&dyn steve_node_api::Node>, fresh: bool) -> Value {
-    let exists = |p: &str| Path::new(p).exists();
-    let codex_bin = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
-        .into_iter()
-        .find(|p| exists(p))
-        .unwrap_or("");
-    // two CLI start-ups, side by side
     let harnesses = match node {
         Some(n) => Some(node_harnesses(n, fresh).await),
         None => None,
     };
-    let (claude_v, codex_v) = match &harnesses {
-        Some(hs) => {
-            let of = |name: &str| {
-                hs.iter()
-                    .find(|h| h.name == name)
-                    .map(|h| h.version.clone())
-                    .unwrap_or_default()
-            };
-            (of("claude-code"), of("codex"))
-        }
-        None => tokio::join!(version_of(&cfg.claude_executable), version_of(codex_bin)),
-    };
-    let claude_adapter = cfg
-        .adapters
-        .get("claude-code")
-        .map(|p| exists(p))
-        .unwrap_or(false);
-    let codex_adapter = cfg
-        .adapters
-        .get("codex")
-        .map(|p| exists(p))
-        .unwrap_or(false);
-    let codex_version = codex_v
-        .strip_prefix("codex-cli")
-        .map(|s| s.trim_start().to_string())
-        .unwrap_or_else(|| codex_v.clone());
-    let mut list = json!([
-        {
-            "id": "claude-code", "name": "Claude Code", "path": cfg.claude_executable,
-            "version": claude_v.split(' ').next().unwrap_or(""),
-            "models": steve_core::models::CLAUDE_MODELS,
-            "ok": !claude_v.is_empty() && claude_adapter,
-            // a code: [`shown`] puts it in the request's language
-            "note": if claude_v.is_empty() { "no_claude" } else if !claude_adapter { "no_adapter:@agentclientprotocol/claude-agent-acp" } else { "acp" },
-        },
-        {
-            "id": "codex", "name": "Codex", "path": codex_bin,
-            "version": codex_version,
-            // ids codex-acp offers in its "model" config option (from the user's model catalog); the first is Codex's default
-            "models": steve_core::models::CODEX_MODELS,
-            "ok": !codex_v.is_empty() && codex_adapter,
-            "note": if codex_v.is_empty() { "no_codex" } else if !codex_adapter { "no_adapter:@zed-industries/codex-acp" } else { "acp" },
-        }
-    ]);
-    if let Some(rows) = list.as_array_mut() {
-        rows.extend(declared_rows(cfg, harnesses.as_deref()));
-    }
-    list
+    json!(rows(cfg, harnesses.as_deref()))
 }
 
 // ── local harness history ──
@@ -737,12 +703,14 @@ mod tests {
                 .map(|(_, v)| v.to_string())
         })
         .expect("config");
-        let rows = declared_rows(&cfg, None);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["id"], json!("mine"));
-        assert_eq!(rows[0]["name"], json!("Mine"));
-        assert_eq!(rows[0]["ok"], json!(false));
-        assert_eq!(rows[0]["note"], json!("adapter_missing"));
+        let all = rows(&cfg, None);
+        assert_eq!(all.len(), 3, "the built-in ones and the declared one alike");
+        let mine = |rows: &[Value]| rows.iter().find(|r| r["id"] == "mine").unwrap().clone();
+        let row = mine(&all);
+        assert_eq!(row["name"], json!("Mine"));
+        assert_eq!(row["custom"], json!(true));
+        assert_eq!(row["ok"], json!(false));
+        assert_eq!(row["note"], json!("adapter_missing"));
         let reported = steve_node_api::HarnessCapability {
             name: "mine".into(),
             version: "1.0".into(),
@@ -767,19 +735,40 @@ mod tests {
                 auth: vec![],
                 install_hint: None,
                 system_prompt: false,
-                session: None,
+                session: Some(steve_node_api::AdapterOffer {
+                    modes: vec![steve_node_api::PermissionMode::Ask],
+                    models: vec![steve_node_api::AdapterModel {
+                        id: "m1".into(),
+                        name: None,
+                        description: None,
+                    }],
+                    default_model: Some("m1".into()),
+                    efforts: vec![],
+                }),
                 session_error: None,
             }),
         };
-        let rows = declared_rows(&cfg, Some(&[reported]));
-        assert_eq!(rows[0]["ok"], json!(true));
-        assert_eq!(rows[0]["models"], json!(["m1"]));
-        let shown = shown(json!(rows));
+        let mut no_session = reported.clone();
+        let row = mine(&rows(&cfg, Some(&[reported])));
+        assert_eq!(row["ok"], json!(true));
+        assert_eq!(row["models"], json!(["m1"]));
+        assert_eq!(row["modes"], json!(["ask"]));
+        assert_eq!(row["caps"]["mcp_http"], json!(true));
+        let shown = shown(json!([row]));
         assert!(
             shown[0]["note"]
                 .as_str()
                 .is_some_and(|n| !n.is_empty() && n != "acp")
         );
+        // initialize answered but no scratch session: said so
+        no_session.adapter.as_mut().unwrap().session = None;
+        no_session.adapter.as_mut().unwrap().session_error = Some("sign in first".into());
+        let row = mine(&rows(&cfg, Some(&[no_session])));
+        assert_eq!(
+            (&row["ok"], &row["note"]),
+            (&json!(false), &json!("session_failed"))
+        );
+        assert_eq!(row["error"], json!("sign in first"));
         assert!(cfg.harness_ids().contains(&"mine".to_string()));
     }
 }

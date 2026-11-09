@@ -239,8 +239,6 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-core/src/gateway.rs", 1, N0d, "LocalAcp's scratch directory"),
     e(Harness, "steve-hub/src/wire/research.rs", 1, Hub,
         "the steve_research import: the run's policy (its attempts, its answer); the runs are Node jobs"),
-    e(Spawn, "steve-hub/src/catalog.rs", 1, Later("the model catalogue from the Node"),
-        "`codex debug models`, read-only in CODEX_HOME"),
     /* project directories on the Hub host */
     e(Spawn, "steve-core/src/git.rs", 1, NoNode, "git for items no Node holds"),
     e(Spawn, "steve-github/src/push.rs", 1, NoNode, "the Hub-side push when no Node holds the item"),
@@ -263,10 +261,6 @@ const ALLOWED: &[Entry] = &[
         "the write probe in a session's cwd"),
     e(Fs, "steve-knowledge/src/sources/items.rs", 1, Later("item outputs read through the Node"),
         "the text of an item's outputs in its cwd"),
-    e(Fs, "steve-hub/src/catalog.rs", 1, Later("the model catalogue from the Node"),
-        "the Claude Code model picker settings"),
-    e(Fs, "steve-core/src/models.rs", 1, Later("the model catalogue from the Node"),
-        "the default model in CODEX_HOME/config.toml"),
     e(Spawn, "steve-github/src/repos.rs", 1, Later("a project's remote from Node git facts"),
         "`git remote get-url` of a project"),
     e(Spawn, "steve-core/src/lane/exec.rs", 1, Later("E12 lanes on the Node"),
@@ -351,6 +345,7 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-modules/src/vault/keystore/dir.rs", 1, Hub, "the vault keystore"),
     e(Fs, "steve-modules/src/vault/keystore/file.rs", 7, Hub, "the vault keystore"),
     e(Fs, "steve-node-wire/src/identity.rs", 3, Hub, "the Node link identity key"),
+    e(Fs, "steve-hub/src/harnesses.rs", 4, Hub, "the Hub's own harness manifest, which the runtimes page adds adapters to"),
 ];
 
 /// The crates that are the Node.

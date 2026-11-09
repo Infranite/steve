@@ -78,7 +78,13 @@ export type RPairing = { code: string; expires: number; pin: string | null; hub_
 export type RInstall = { id: string; state: "waiting" | "running" | "done" | "failed"; command: string; steps: { at: number; text: string }[]; node_id: string | null; error: string | null }
 export type RTailcat = { available: boolean; enabled: boolean; running?: boolean; address?: string | null; hub_url?: string | null; port?: number; error?: string | null }
 /* `custom`: an adapter the Hub's harness manifest adds (harness parity S1), with `error` and `install_hint` when it has them */
-export type RRuntime = { id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; error?: string | null; install_hint?: string | null }
+/** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
+export type RRuntime = {
+  id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
+  adapter_version?: string | null; default_model?: string | null; efforts?: string[]; modes?: string[] | null
+  caps?: { sessions: boolean; jobs: boolean; images: boolean; resume: boolean; history: boolean; mcp_http: boolean; system_prompt: boolean; fork?: boolean } | null
+  auth?: { id: string; name: string; description?: string | null }[]
+}
 export type REvent = { seq: number; ts: number; kind: string; data: any }
 export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[] }
 export type LocalSession = { key: string; harness: string; title: string; cwd: string; when: number; size: number; imported: boolean }
@@ -250,7 +256,10 @@ export const api = {
   kindsBackfill: (dry = false) => post<RKindBackfill>("/tags/kinds/backfill", { dry }),
   settings: (p: Record<string, string>) => patch("/settings", p),
   draft: (target: { kind: string; id?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
-  devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),
+  devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")),
+  /** declares a harness adapter in the Hub's manifest (in force after the Hub restarts) */
+  addHarness: (p: { id: string; name?: string; command: string; args?: string[]; env?: Record<string, string>; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
+  removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),
   nodes: () => get<{ nodes: RNode[] }>("/nodes"),
   createPairing: () => post<RPairing>("/nodes/pairings"),
   vitals: () => get<{ nodes: Record<string, RVitals> }>("/vitals"),

@@ -362,7 +362,8 @@ async fn model_settings() {
         json!({"harness": "claude-code", "models": ["claude-sonnet-5-5", "claude-opus-5-5"]})
     );
     assert_eq!(v["agents"][0]["default"], "claude-opus-5-5");
-    assert_eq!(v["efforts"][4]["key"], "max");
+    assert_eq!(v["harnesses"][0]["id"], "claude-code");
+    assert_eq!(v["harnesses"][0]["efforts"][4]["key"], "max");
     assert_eq!(v["harnesses"][1]["id"], "codex");
     let (code, v) = c
         .call(
@@ -422,8 +423,9 @@ async fn model_settings() {
     );
 }
 
-/// `GET /api/system/models`: Claude Code's list is the user's model picker, read without the key
-/// helper or keys; Codex's is its catalogue. A harness without a list is refused.
+/// `GET /api/system/models`: what each harness adapter offers (with the Node off: the list its
+/// manifest declares), never anything of the harness's own settings (no key helper runs, no key is
+/// read). An adapter the Hub does not have is refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn system_models_lists_what_each_harness_offers_and_never_the_keys() {
     let home = tempfile::tempdir().expect("tmp");
@@ -443,35 +445,13 @@ async fn system_models_lists_what_each_harness_offers_and_never_the_keys() {
         json!({
             "apiKeyHelper": helper.display().to_string(),
             "env": {"ANTHROPIC_AUTH_TOKEN": "sk-ant-ENVTOKEN"},
-            "modelPicker": {"options": [
-                {"model": "claude-sonnet-5-5", "label": "claude-sonnet-5-5"},
-                {"model": "kiro/claude-opus-5-5", "label": "kiro/claude-opus-5-5"},
-                {"model": "gemini-3-flash", "label": "gemini-3-flash"},
-            ]},
         })
         .to_string(),
     )
     .unwrap();
-    std::fs::create_dir_all(h.join(".codex")).unwrap();
-    std::fs::write(h.join(".codex/config.toml"), "model = \"gpt-6-luna\"\n").unwrap();
-    std::fs::write(
-        h.join("codex-models.json"),
-        json!({"models": [{"slug": "gpt-6-luna", "display_name": "GPT-6-Luna", "visibility": "list", "priority": 1}]}).to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        h.join("codex"),
-        format!(
-            "#!/bin/sh\n[ \"$1 $2\" = 'debug models' ] && cat '{}'\n",
-            h.join("codex-models.json").display()
-        ),
-    )
-    .unwrap();
     {
         use std::os::unix::fs::PermissionsExt;
-        for f in ["codex", "key-helper.sh"] {
-            std::fs::set_permissions(h.join(f), std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let web = h.join("no-web");
     let hub = start_in(home, &web).await;
@@ -488,16 +468,13 @@ async fn system_models_lists_what_each_harness_offers_and_never_the_keys() {
         .collect();
     assert_eq!(
         ids,
-        [
-            "claude-sonnet-5-5",
-            "kiro/claude-opus-5-5",
-            "gemini-3-flash"
-        ]
+        ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
     );
     assert_eq!(
         v["families"],
-        json!(["Claude Opus", "Claude Sonnet", "Gemini"])
+        json!(["Claude Opus", "Claude Sonnet", "Claude Haiku"])
     );
+    assert!(v["efforts"].as_array().is_some_and(|e| !e.is_empty()));
     let text = v.to_string();
     for secret in ["sk-ant", "key-helper", "apiKeyHelper", "ENVTOKEN"] {
         assert!(!text.contains(secret), "{secret}: {text}");
@@ -506,8 +483,7 @@ async fn system_models_lists_what_each_harness_offers_and_never_the_keys() {
         .call("GET", "/api/system/models?harness=codex", None, None)
         .await;
     assert_eq!(code, 200, "{v}");
-    assert_eq!(v["models"][0]["id"], "gpt-6-luna");
-    assert_eq!(v["default"], "gpt-6-luna");
+    assert_eq!(v["name"], "Codex");
     assert_eq!(
         c.call("GET", "/api/system/models?harness=gemini", None, None)
             .await
