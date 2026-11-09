@@ -518,42 +518,23 @@ fn plan_of(k: &Kit, id: &str) -> Vec<(String, bool, bool)> {
         .collect()
 }
 
+/// 2026-11-09: the agent judges when it is done. Steps it did not tick off are delivered as left open,
+/// shown on the card, not a refusal.
 #[test]
-fn a_delivery_with_open_steps_is_refused_until_they_are_done_or_declared_left_open() {
+fn a_delivery_with_open_steps_shows_them_left_open() {
     let k = Kit::new();
     k.manual_acceptance();
     let x = k.delivered(false);
     let plan = vec![step("a", false), step("b", false), step("c", true)];
     k.db().item_patch(&x.id, patch![plan: plan]).unwrap();
     let s = k.db().session(&x.session).unwrap().unwrap();
-    let err = k
-        .core
-        .tool_deliver(&s, "ok", &[], &[], &["b".into()])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("Not delivered") && err.contains("a") && !err.contains("b;"),
-        "{err}"
-    );
-    assert_eq!(
-        k.open_kinds(&x.id),
-        vec!["accept"],
-        "the earlier card stays"
-    );
-    k.core
-        .tool_update(
-            &s,
-            "做完 a",
-            &[step("a", true), step("b", false), step("c", true)],
-        )
-        .unwrap();
     k.core
         .tool_deliver(&s, "ok", &[], &[], &["b".into()])
         .unwrap();
     assert_eq!(
         plan_of(&k, &x.id),
         vec![
-            ("a".into(), true, false),
+            ("a".into(), false, true),
             ("b".into(), false, true),
             ("c".into(), true, false)
         ]
@@ -565,7 +546,11 @@ fn a_delivery_with_open_steps_is_refused_until_they_are_done_or_declared_left_op
         .into_iter()
         .find(|d| d.kind == "accept" && d.status == "open")
         .unwrap();
-    assert!(card.draft.contains("没做完的计划步骤：b"), "{}", card.draft);
+    assert!(
+        card.draft.contains("没做完的计划步骤：a；b"),
+        "{}",
+        card.draft
+    );
 }
 
 #[test]

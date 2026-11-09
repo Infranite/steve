@@ -131,6 +131,7 @@
   "core.draft.value.forever": "Forever",
   "core.draft.value.no_report": "No reports",
   "core.draft.value.no_archive": "Never archive automatically",
+  "core.draft.value.no_handoff": "Never",
   "core.draft.value.one_year": "1 year",
   "core.draft.value.effort_minimal": "Minimal",
   "core.draft.value.effort_low": "Low",

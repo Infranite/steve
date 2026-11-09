@@ -131,6 +131,7 @@
   "core.draft.value.forever": "永久",
   "core.draft.value.no_report": "不汇报",
   "core.draft.value.no_archive": "不自动归档",
+  "core.draft.value.no_handoff": "不换会话",
   "core.draft.value.one_year": "1 年",
   "core.draft.value.effort_minimal": "最低",
   "core.draft.value.effort_low": "低",

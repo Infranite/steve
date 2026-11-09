@@ -249,9 +249,9 @@ impl Tx<'_> {
         let mut parts = vec![];
         if n.build {
             parts.push(if tagged {
-                "the build passes: steve_deliver needs a passed check for the build you ran, named as one (构建 or build; a delivery without it is refused); when the remote is on GitHub, the item also closes only after the Release build the tag starts succeeded (Steve follows it; don't wait for it in a turn, and fix it when Steve tells you it failed)"
+                "the build passes: list a passed check for the build you ran, named as one (构建 or build; the user sees when it is missing); when the remote is on GitHub, the item also closes only after the Release build the tag starts succeeded (Steve follows it; don't wait for it in a turn, and fix it when Steve tells you it failed)"
             } else {
-                "the build passes: steve_deliver needs a passed check for the build you ran, named as one (构建 or build; a delivery without it is refused)"
+                "the build passes: list a passed check for the build you ran, named as one (构建 or build; the user sees when it is missing)"
             });
         }
         if n.deploy {
@@ -263,7 +263,7 @@ impl Tx<'_> {
         }
         if n.operate {
             parts.push(
-                "it was actually used: steve_deliver needs at least one passed check with `operated: true` for something you did on the running thing yourself (opened the page and clicked through, ran the upgrade, called the live API), named with what you saw; builds and tests don't count",
+                "it was actually used: list at least one passed check with `operated: true` for something you did on the running thing yourself (opened the page and clicked through, ran the upgrade, called the live API), named with what you saw; builds and tests don't count",
             );
         }
         Ok(Some(format!(
@@ -274,18 +274,18 @@ impl Tx<'_> {
 
     /// Why a delivery lacks the evidence the goal asks for (an actual operation, the build it ran);
     /// `None` when it has it.
-    pub(crate) fn proof_refused(&self, i: &Item, checks: &[Check]) -> Result<Option<String>> {
+    pub(crate) fn proof_missing(&self, i: &Item, checks: &[Check]) -> Result<Option<String>> {
         let n = self.needs_of(i)?;
         let wanted = n.operate || (n.deploy && !self.deploy_checked(i)?);
         if wanted && !checks.iter().any(|c| c.operated && c.passed) {
             return Ok(Some(format!(
-                "Not delivered: this item's goal asks for {} to be shown, and none of the checks is an actual operation. Do it on the running thing yourself (open the page and click through, run the upgrade, call the live API), then deliver again with that check marked `operated: true` and named with what you saw. Builds and tests don't count. If you can't do it here, say why with steve_ask instead.",
+                "目标要求{}，交付的检查里没有一条是实际操作（operated）。",
                 n.words().join("、")
             )));
         }
         if n.build && !checks.iter().any(|c| c.passed && is_build_check(c)) {
             return Ok(Some(
-                "Not delivered: this item's goal asks for the build to pass, and none of the checks is a passed build. Run the build, then deliver again with it among the checks, named as one (for example \"构建：cargo build --release 通过\"). If it can't be built here, say why with steve_ask instead.".into(),
+                "目标要求构建通过，交付的检查里没有通过的构建。".into(),
             ));
         }
         Ok(None)

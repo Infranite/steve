@@ -32,7 +32,7 @@ async fn describe_in_english() {
         [
             ("Default acceptance", "Accepted automatically"),
             ("When prerequisites finish", "Start automatically"),
-            ("Handoff threshold", "80%"),
+            ("Handoff threshold", "Never"),
             ("Archive automatically after finishing", "30 days"),
             ("Item number prefix", "ST"),
         ]

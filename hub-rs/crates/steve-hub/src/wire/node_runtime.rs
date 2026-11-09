@@ -1466,7 +1466,9 @@ impl NodeRuntime {
                 limits: Limits {
                     deadline: Timestamp(now() + limit),
                     offline_until: Timestamp(now() + limit),
-                    max_output_bytes: 256 << 20,
+                    /* no total cap on a turn's output: a long turn is not cut for talking much; the
+                     * Node's journal budget still keeps its disk (2026-11-09) */
+                    max_output_bytes: u64::MAX,
                     max_tokens: None,
                     max_cost: None,
                 },
