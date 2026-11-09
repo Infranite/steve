@@ -1,8 +1,10 @@
-//! The extensions of the `steve-hub` binary: Feishu as the bot and as you, IMAP mailboxes,
-//! GitHub. They register the same objects the Hub created inline before the extension entry.
+//! The extensions of the `steve-hub` binary: Feishu as the bot and as you, an external channel
+//! service, IMAP mailboxes, GitHub. They register the same objects the Hub created inline before
+//! the extension entry.
 
 use std::sync::{Arc, Mutex};
 
+use steve_channels::adapters::ext_ws::{self, ExtWs, ExtWsHook};
 use steve_channels::adapters::feishu::{self, Domain, FeishuApp, FeishuEnv, FeishuUser};
 use steve_channels::ext::ChannelSide;
 use steve_modules::accounts::connections::ConnectionProvider;
@@ -97,6 +99,48 @@ impl Extension for FeishuSelf {
         Ok(Mounted::default().routes(api_routes).lifecycle(
             feishu::auth::USER_ADAPTER,
             Arc::new(feishu::SelfPollHook::new(s.channels.clone(), user)),
+        ))
+    }
+}
+
+/// `ext_ws`: you through an external channel service the Hub dials over a WebSocket (its URL and
+/// token entered on the credential form): the feed of each receiving connection, acting as you,
+/// media, history for an agent and people. Nothing runs until a connection is made.
+#[derive(Default)]
+pub(crate) struct ExternalChannel {
+    /// The views its last declaration registered, shared with its feeds.
+    ext: Mutex<Option<Arc<ExtWs>>>,
+}
+
+impl Extension for ExternalChannel {
+    fn id(&self) -> &str {
+        "ext_ws"
+    }
+
+    fn declare(&self, d: &mut Declare<'_>) -> Result<(), ExtensionError> {
+        d.system(ext_ws::SYSTEM, ext_ws::SYSTEM_LABEL)?;
+        let ext = Arc::new(ExtWs::new());
+        d.channel(
+            ChannelSide::new(ext_ws::decl(), ext.clone())
+                .act_as_user(ext.clone())
+                .media(ext.clone())
+                .history(ext.clone())
+                .profiles(ext.clone()),
+        )?;
+        *self.ext.lock().unwrap_or_else(|e| e.into_inner()) = Some(ext);
+        Ok(())
+    }
+
+    fn start(&self, s: &Started) -> Result<Mounted, ExtensionError> {
+        let ext = self
+            .ext
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or_else(|| ExtensionError::new("started without its declared provider"))?;
+        Ok(Mounted::default().lifecycle(
+            ext_ws::ADAPTER,
+            Arc::new(ExtWsHook::new(s.channels.clone(), ext)),
         ))
     }
 }

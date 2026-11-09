@@ -110,11 +110,13 @@ pub struct Assembly {
 }
 
 impl Assembly {
-    /// What the `steve-hub` binary registers: `feishu.bot`, `feishu.self`, `mail.imap`, `github`.
+    /// What the `steve-hub` binary registers: `feishu.bot`, `feishu.self`, `ext_ws`, `mail.imap`,
+    /// `github`.
     pub fn builtin() -> Self {
         let list: Vec<Arc<dyn Extension>> = vec![
             Arc::new(builtin::FeishuBot),
             Arc::new(builtin::FeishuSelf::default()),
+            Arc::new(builtin::ExternalChannel::default()),
             Arc::new(builtin::MailImap),
             Arc::new(builtin::GitHub),
         ];
