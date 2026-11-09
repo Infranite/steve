@@ -734,3 +734,98 @@ fn a_host_with_its_own_merge_queue_gets_each_change_and_says_what_merged() {
         "nothing pushed to main by Steve"
     );
 }
+
+#[test]
+fn the_project_page_shows_the_queue_its_statistics_and_sets_its_policy() {
+    let s = setup();
+    let k = &s.k;
+    let target = crate::lane::target::target_of(&s.repo, None).unwrap();
+    let view = |k: &Kit| {
+        k.core
+            .mq_view(&target.upstream, &target.branch, WS)
+            .unwrap()
+            .unwrap()
+    };
+    // before anything went in: the defaults, no target yet
+    let v = view(k);
+    assert!(v["target"].is_null());
+    assert_eq!(v["policy"]["max_batch"], 8);
+    // allowed from the page, then a change merges
+    let v = k
+        .core
+        .mq_act(
+            &target.upstream,
+            &target.branch,
+            WS,
+            &serde_json::json!({"allow": true}),
+            "me",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(v["target"]["granted"], true);
+    let (a, _, _) = accepted(&s, "a.txt", "A\n");
+    assert!(k.wait(|| entry(k, &a).is_some_and(|e| e.state == "landed")));
+    let v = view(k);
+    assert_eq!(v["batches"][0]["members"][0]["label"], a.as_str());
+    assert_eq!(v["batches"][0]["state"], "landed");
+    assert_eq!(v["stats"]["batches"], 1);
+    assert_eq!(v["stats"]["landed"], 1);
+    assert!(
+        v["stats"]["avg_wait_to_land_ms"].is_number(),
+        "{}",
+        v["stats"]
+    );
+    // every number is set per target; a field it does not have, or a bad value, is refused
+    let v = k
+        .core
+        .mq_act(
+            &target.upstream,
+            &target.branch,
+            WS,
+            &serde_json::json!({"policy": {"max_batch": 3, "release_window_s": 600}}),
+            "me",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(v["policy"]["max_batch"], 3);
+    assert_eq!(
+        v["set"],
+        serde_json::json!({"max_batch": 3, "release_window_s": 600})
+    );
+    let v = k
+        .core
+        .mq_act(
+            &target.upstream,
+            &target.branch,
+            WS,
+            &serde_json::json!({"policy": {"max_batch": null}}),
+            "me",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(v["policy"]["max_batch"], 8, "back to the default");
+    for bad in [
+        serde_json::json!({"policy": {"nope": 1}}),
+        serde_json::json!({"policy": {"max_batch": -1}}),
+    ] {
+        assert!(
+            k.core
+                .mq_act(&target.upstream, &target.branch, WS, &bad, "me")
+                .is_err(),
+            "{bad}"
+        );
+    }
+    // another workspace sees the queue but not whose changes are in it
+    let other = k
+        .core
+        .mq_view(&target.upstream, &target.branch, "other")
+        .unwrap()
+        .unwrap();
+    assert_eq!(other["batches"][0]["others"], 1);
+    assert!(
+        other["batches"][0]["members"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}

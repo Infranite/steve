@@ -199,5 +199,6 @@
   "hub.access.wrong": "Wrong user name or token",
   "hub.access.owner_only": "Only the owner can configure single sign-on",
   "hub.access.oidc_env": "Single sign-on is configured by the environment (STEVE_OIDC_*) and can't be changed here",
-  "hub.access.oidc_bad": "The issuer must be an https address (http on this machine), and the client ID can't be empty"
+  "hub.access.oidc_bad": "The issuer must be an https address (http on this machine), and the client ID can't be empty",
+  "hub.project.queue_bad": "Not a merge queue action: one of policy, allow, release_now or once"
 }
