@@ -238,7 +238,7 @@ export default {
     appearance: "外观",
     webUpdate: "前端有更新 · 查看",
     /* ST-21: this page's frontend and the Hub's backend, at a glance */
-    versions: "前端 {{web}} · 后端 {{hub}}",
+    versions: "客户端 {{web}} · 服务端 {{hub}}",
     versionUnknown: "…",
     hubUpdate: "新版本 {{version}} 可升级 · 查看",
   },
