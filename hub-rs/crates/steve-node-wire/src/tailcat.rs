@@ -39,9 +39,14 @@ pub fn program() -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .chain(
-            ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/snap/bin"]
-                .into_iter()
-                .map(PathBuf::from),
+            [
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/snap/bin",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
         )
         .map(|d| d.join("tailcat"))
         .find(|p| is_file(p))
@@ -76,7 +81,9 @@ mod tests {
         assert_eq!(parse(&format!("tailcat:{a};rm -rf:1")), None);
         assert_eq!(parse("tailcat:x:1"), None);
         assert_eq!(
-            address_in(&format!("# 🐈 Server listening with saved key \"/k/hub.private.json\": {a}")),
+            address_in(&format!(
+                "# 🐈 Server listening with saved key \"/k/hub.private.json\": {a}"
+            )),
             Some(a)
         );
         assert_eq!(address_in(a), Some(a));

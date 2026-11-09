@@ -10,6 +10,7 @@ import { st, toast, refresh, tm } from "@/store"
 import { api, type RDevice, type RNode, type RPairing } from "@/api"
 import { go, Page, Group, Row, SectionLabel, StatusDot, Meta, Empty, Status, closeSheet, openSheet } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
+import { TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
 import { hubBase } from "@/hub"
 
@@ -156,6 +157,7 @@ export function PairDialog() {
           <p>{t("shell:devices.setupCommand")}</p><code className="block break-all select-all" data-setup-command>steve setup node --hub {hubBase() || window.location.origin}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
           <p>{t("shell:devices.pairCommand")}</p><code className="block break-all select-all" data-pair-command>steve-node pair {hubBase() || window.location.origin}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
         </div>}
+        <TailcatSection />
         <Button variant="outline" disabled={busy} onClick={() => void act(reload)}><RefreshCwIcon />{t("shell:devices.refreshNodes")}</Button>
         {nodes.map(n => <div key={n.node_id} className="rounded-xl border p-4 space-y-2 type-callout">
           <p className="font-medium">{n.name} · {t(`shell:devices.nodeState.${n.state}`)} · {n.linked ? t("shell:devices.linked") : t("shell:devices.disconnected")}</p>

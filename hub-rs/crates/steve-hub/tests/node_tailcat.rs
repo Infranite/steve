@@ -65,7 +65,10 @@ async fn the_owner_puts_the_node_routes_and_only_them_behind_tailcat() {
 
     let (s, v) = call(&h, reqwest::Method::GET, "u1", None).await;
     assert_eq!(s, 200);
-    assert_eq!((v["available"].clone(), v["enabled"].clone()), (json!(true), json!(false)));
+    assert_eq!(
+        (v["available"].clone(), v["enabled"].clone()),
+        (json!(true), json!(false))
+    );
 
     // only the instance's owner turns it on
     h.owns_default("u1");
@@ -78,10 +81,22 @@ async fn the_owner_puts_the_node_routes_and_only_them_behind_tailcat() {
             Ok(())
         })
         .unwrap();
-    let (s, _) = call(&h, reqwest::Method::PUT, "u2", Some(json!({"enabled": true}))).await;
+    let (s, _) = call(
+        &h,
+        reqwest::Method::PUT,
+        "u2",
+        Some(json!({"enabled": true})),
+    )
+    .await;
     assert_eq!(s, 403);
 
-    let (s, v) = call(&h, reqwest::Method::PUT, "u1", Some(json!({"enabled": true}))).await;
+    let (s, v) = call(
+        &h,
+        reqwest::Method::PUT,
+        "u1",
+        Some(json!({"enabled": true})),
+    )
+    .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["running"], true, "{v}");
     assert_eq!(v["hub_url"], json!(format!("tailcat:{ADDR}:{port}")));
@@ -112,30 +127,49 @@ async fn the_owner_puts_the_node_routes_and_only_them_behind_tailcat() {
     let home = steve_node_cli::config::Home(node_home.path().to_path_buf());
     let code = h.code("u1").await;
     let hub = format!("tailcat:{ADDR}:{port}");
-    let p = steve_node_cli::dial::pair(&home, &hub, &code, None, "far").await.unwrap();
+    let p = steve_node_cli::dial::pair(&home, &hub, &code, None, "far")
+        .await
+        .unwrap();
     assert_eq!((p.hub_url.as_str(), p.loopback), (hub.as_str(), false));
     assert_eq!(
         steve_node_cli::dial::trust(&p).unwrap(),
         steve_node_wire::tls::Trust::LoopbackPlaintext
     );
-    let mut tunnel = steve_node_cli::tunnel::Tunnel::open(ADDR, port).await.unwrap();
+    let mut tunnel = steve_node_cli::tunnel::Tunnel::open(ADDR, port)
+        .await
+        .unwrap();
     assert_eq!(tunnel.url, local);
     assert!(tunnel.alive());
     drop(tunnel);
 
     // off: nothing listens; on again after a restart from the setting
-    let (s, v) = call(&h, reqwest::Method::PUT, "u1", Some(json!({"enabled": false}))).await;
+    let (s, v) = call(
+        &h,
+        reqwest::Method::PUT,
+        "u1",
+        Some(json!({"enabled": false})),
+    )
+    .await;
     assert_eq!((s, v["enabled"].clone()), (200, json!(false)));
     let mut closed = false;
     for _ in 0..50 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err()
+        {
             closed = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(closed, "the Node-only listener outlived the switch");
-    let (s, _) = call(&h, reqwest::Method::PUT, "u1", Some(json!({"enabled": true}))).await;
+    let (s, _) = call(
+        &h,
+        reqwest::Method::PUT,
+        "u1",
+        Some(json!({"enabled": true})),
+    )
+    .await;
     assert_eq!(s, 200);
     t.stop();
     let again = Tailcat::new(h.dir.path(), free_port(), &h.svc);
