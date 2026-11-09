@@ -2,3 +2,4 @@
 
 pub mod channel;
 pub mod feishu;
+pub mod ext_ws;
