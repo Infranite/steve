@@ -394,5 +394,6 @@
   "core.lane.no_main": "The repository has no main or master branch",
   "core.conversation.retired": "This conversation has ended for good and cannot continue; a message in its item starts a new conversation.",
   "core.conversation.retired_queue": "%{n} queued message(s) were not sent.",
-  "core.recover.moved": "The Hub restarted and cut this turn. The session now runs on the local Node and continues where it stopped."
+  "core.recover.moved": "The Hub restarted and cut this turn. The session now runs on the local Node and continues where it stopped.",
+  "core.mq.converted": "The merge lane became the merge queue: this item goes on in the new queue; its earlier batch and approval card are no longer used"
 }

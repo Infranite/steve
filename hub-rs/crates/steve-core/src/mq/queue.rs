@@ -314,7 +314,9 @@ impl Queue {
         let mut now = None;
         match ev {
             Event::Arrive { id, key, at, after } => {
+                // already there (the caller wrote its row first): only what may start now
                 if self.entry(&id).is_some() {
+                    self.start(policy, Some(at), &mut out);
                     return out;
                 }
                 // a newer request of the same item supersedes one that was returned
@@ -588,9 +590,10 @@ impl Queue {
                 return;
             }
             let settled = match (now, self.last_arrival) {
+                _ if policy.settle_s == 0 => true,
                 (_, None) => true,
                 (Some(t), Some(l)) => t - l >= policy.settle_s as i64 * 1000,
-                (None, Some(_)) => policy.settle_s == 0,
+                (None, Some(_)) => false,
             };
             if !settled {
                 return;

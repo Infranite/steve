@@ -13,6 +13,7 @@ mod items;
 pub mod jobs;
 pub mod kinds;
 pub mod lanes;
+pub mod mq;
 pub mod nodes;
 pub mod runtime;
 mod sessions;

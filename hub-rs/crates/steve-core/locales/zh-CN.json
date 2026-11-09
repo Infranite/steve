@@ -394,5 +394,6 @@
   "core.lane.no_main": "仓库没有 main 或 master 分支",
   "core.conversation.retired": "这个会话已结束，不能再继续；在事项里发消息会开始新会话。",
   "core.conversation.retired_queue": "排队的 %{n} 条消息没有发出。",
-  "core.recover.moved": "Hub 重启，这一回合被中断。这个会话已经转到本机 Node 上运行，会从中断处继续。"
+  "core.recover.moved": "Hub 重启，这一回合被中断。这个会话已经转到本机 Node 上运行，会从中断处继续。",
+  "core.mq.converted": "合并通道换成了合并队列：这一项在新的合并队列里继续，之前的批次和审批卡不再使用"
 }
