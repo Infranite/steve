@@ -548,3 +548,53 @@ async fn a_peer_cannot_pin_more_than_the_byte_budget() {
     }
     assert_eq!(refused, total - entered);
 }
+
+/// L1: a peer that stops reading while it keeps sending heartbeats (its TCP window full) no longer
+/// holds the writer forever: the write gives up after the dead-link budget, socket and task with it.
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_stops_reading_is_given_up() {
+    let fake = FakeNode::new("n1");
+    let (h, n) = pair();
+    let o = |side, dead_after| ConnOptions {
+        heartbeat: Duration::from_secs(1),
+        dead_after,
+        side,
+        ..Default::default()
+    };
+    // what the Hub writes never leaves; the Node never judges the Hub silent, and keeps beating
+    h.faults.stall(true);
+    let hub = Conn::spawn(
+        h.sink,
+        h.stream,
+        1,
+        Arc::new(Nothing),
+        o("h", Duration::from_secs(5)),
+    );
+    let _node = Conn::spawn(
+        n.sink,
+        n.stream,
+        1,
+        NodeServer::new(fake),
+        o("n", Duration::from_secs(3600)),
+    );
+    let (code, reason) = tokio::time::timeout(Duration::from_secs(60), hub.closed())
+        .await
+        .expect("given up within the budget");
+    assert_eq!(
+        (code, reason.as_str()),
+        (close::DEAD, "the peer stopped reading")
+    );
+}
+
+/// L6: what the peer chose to say is one plain, bounded line before it is logged or shown.
+#[test]
+fn a_peers_words_are_one_bounded_line() {
+    use steve_node_wire::conn::peer_text;
+    assert_eq!(
+        peer_text("ok\nFAKE 2026 INFO admin logged in\r"),
+        "ok FAKE 2026 INFO admin logged in "
+    );
+    let long = "x".repeat(2000);
+    assert_eq!(peer_text(&long).chars().count(), 501);
+    assert_eq!(peer_text("short"), "short");
+}

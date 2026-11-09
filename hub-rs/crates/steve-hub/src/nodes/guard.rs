@@ -127,10 +127,11 @@ fn foreign(
                     |_| Ok(()),
                 )
                 .optional()?,
-            ExecutionRef::Job { attempt, .. } => c
+            // a job's attempt, of that job, both on this Node (L2: not a turn's attempt table)
+            ExecutionRef::Job { job, attempt } => c
                 .query_row(
-                    "SELECT 1 FROM runtime_attempts WHERE attempt_id=? AND node_id=?",
-                    params![attempt.as_str(), node],
+                    "SELECT 1 FROM runtime_job_attempts a JOIN runtime_jobs j ON j.job_id=a.job_id WHERE a.attempt_id=?1 AND a.job_id=?2 AND a.node_id=?3 AND j.node_id=?3",
+                    params![attempt.as_str(), job.as_str(), node],
                     |_| Ok(()),
                 )
                 .optional()?,
@@ -222,6 +223,31 @@ pub(crate) fn replay_check(store: Store, node: NodeId) -> crate::wire::node_runt
     })
 }
 
+/// What one Node may commit (L1): a token bucket of event bytes, generous for any real session's
+/// stream and finite for a Node that floods. Over it the batch is refused `exhausted`: the Node
+/// keeps it in its journal and sends it again later, so nothing is lost, the Hub just isn't
+/// flooded.
+const EVENT_BURST: f64 = 64.0 * 1024.0 * 1024.0;
+const EVENT_RATE: f64 = 1024.0 * 1024.0;
+
+static EVENT_BUDGET: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn take_event_bytes(node: &str, bytes: usize) -> bool {
+    let mut all = EVENT_BUDGET.lock().unwrap();
+    let now = std::time::Instant::now();
+    let b = all.entry(node.to_string()).or_insert((EVENT_BURST, now));
+    b.0 = (b.0 + now.duration_since(b.1).as_secs_f64() * EVENT_RATE).min(EVENT_BURST);
+    b.1 = now;
+    if b.0 >= bytes as f64 {
+        b.0 -= bytes as f64;
+        true
+    } else {
+        false
+    }
+}
+
 pub struct GuardedSink(pub LinkCtx);
 
 #[async_trait]
@@ -229,6 +255,13 @@ impl EventSink for GuardedSink {
     async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
         let l = &self.0;
         l.fresh().await?;
+        let bytes = serde_json::to_vec(&batch).map(|v| v.len()).unwrap_or(0);
+        if !take_event_bytes(l.node.as_str(), bytes) {
+            return Err(ApiError::new(
+                ErrorCode::Exhausted,
+                "this node is sending events faster than the hub takes them",
+            ));
+        }
         let (store, node) = (l.store.clone(), l.node.to_string());
         let (batch, bad) = tokio::task::spawn_blocking(move || {
             let bad = store.reader(|c| foreign(c, &node, &batch));
@@ -285,6 +318,9 @@ impl HubFiles for GuardedFiles {
         max: u32,
     ) -> ApiResult<ReadChunk> {
         self.0.fresh().await?;
+        // a chunk that fits an answer frame once hex-encoded: a larger ask would only be read
+        // and encoded to be refused (L1)
+        let max = max.min((steve_node_wire::envelope::BULK_CAP / 2 - 1024) as u32);
         self.0
             .fleet
             .files_for(&self.0.node)
@@ -322,5 +358,17 @@ impl HubFiles for GuardedFiles {
             .files_for(&self.0.node)
             .abort_upload(transfer)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_flooding_node_runs_out_and_another_does_not() {
+        assert!(take_event_bytes("n_flood", EVENT_BURST as usize));
+        assert!(!take_event_bytes("n_flood", 64 * 1024));
+        assert!(take_event_bytes("n_quiet", 64 * 1024));
     }
 }

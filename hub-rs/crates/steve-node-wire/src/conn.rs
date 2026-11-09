@@ -193,7 +193,12 @@ impl Conn {
             closed: watch::channel(None).0,
             written: AtomicU64::new(0),
         });
-        tokio::spawn(writer(s.clone(), sink, [ctl_rx, events_rx, bulk_rx]));
+        tokio::spawn(writer(
+            s.clone(),
+            sink,
+            [ctl_rx, events_rx, bulk_rx],
+            opts.dead_after,
+        ));
         tokio::spawn(reader(s.clone(), stream, handler, opts.clone()));
         tokio::spawn(heartbeat(Arc::downgrade(&s), opts.heartbeat));
         Arc::new(Conn { s })
@@ -391,9 +396,17 @@ fn shut(s: &Arc<Shared>, pre: Option<String>, code: u16, reason: &str) {
 /// Writes one frame at a time: control first, then events, then bulk, except that after
 /// [`FAIR`] frames of higher lanes in a row a lower lane that has one waiting goes once (a
 /// download never holds a permission card back, and a busy control lane never stops the rest).
-async fn writer(s: Arc<Shared>, mut sink: FrameSink, mut lanes: [mpsc::Receiver<Out>; 3]) {
+/// `stuck`: how long one write may wait on a peer that does not read (its TCP window full while it
+/// still sends heartbeats) before the link is given up, socket and task with it (L1).
+async fn writer(
+    s: Arc<Shared>,
+    mut sink: FrameSink,
+    mut lanes: [mpsc::Receiver<Out>; 3],
+    stuck: Duration,
+) {
     // frames of higher lanes written since each lower lane last had its turn
     let mut since = [0u32; 3];
+    let mut stuck_out = false;
     loop {
         let mut out = None;
         // a lower lane that waited long enough (events before bulk)
@@ -434,9 +447,17 @@ async fn writer(s: Arc<Shared>, mut sink: FrameSink, mut lanes: [mpsc::Receiver<
             *lower = lower.saturating_add(1);
         }
         let Out { text, _room, .. } = out;
-        if sink.send(Frame::Text(text)).await.is_err() {
-            shut(&s, None, crate::close::GOODBYE, "write failed");
-            break;
+        match tokio::time::timeout(stuck, sink.send(Frame::Text(text))).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                shut(&s, None, crate::close::GOODBYE, "write failed");
+                break;
+            }
+            Err(_) => {
+                shut(&s, None, crate::close::DEAD, "the peer stopped reading");
+                stuck_out = true;
+                break;
+            }
         }
         drop(_room);
         s.written.fetch_add(1, Ordering::SeqCst);
@@ -444,6 +465,10 @@ async fn writer(s: Arc<Shared>, mut sink: FrameSink, mut lanes: [mpsc::Receiver<
     // whoever still waits for room hears the link is gone
     for q in [&s.ctl, &s.events, &s.bulk] {
         q.room.close();
+    }
+    if stuck_out {
+        // a close frame would wait on the same full window: the socket just goes
+        return;
     }
     let req = s.close_req.lock().unwrap().take();
     if let Some(r) = req {
@@ -484,7 +509,7 @@ async fn reader(
                 return;
             }
             Ok(Some(Ok(Frame::Close(code, reason)))) => {
-                shut(&s, None, code, &reason);
+                shut(&s, None, code, &peer_text(&reason));
                 return;
             }
             Ok(Some(Ok(Frame::Text(t)))) => t,
@@ -504,12 +529,16 @@ async fn reader(
                     continue;
                 }
                 let Some(re) = env.re else { continue };
-                let outcome = serde_json::from_value::<Outcome>(env.p).unwrap_or_else(|e| {
+                let mut outcome = serde_json::from_value::<Outcome>(env.p).unwrap_or_else(|e| {
                     Outcome::Err(ApiError::new(
                         ErrorCode::Internal,
                         format!("bad result: {e}"),
                     ))
                 });
+                // the peer's words go to logs and pages: one plain line (L6)
+                if let Outcome::Err(e) = &mut outcome {
+                    e.safe_detail = peer_text(&e.safe_detail);
+                }
                 if let Some(p) = s.pending.lock().unwrap().remove(&re) {
                     let _ = p.tx.send(outcome);
                 }
@@ -605,6 +634,20 @@ async fn heartbeat(s: std::sync::Weak<Shared>, every: Duration) {
 }
 
 /// Unknown methods answer `unsupported`; the link stays up.
+/// Text the peer chose (a close reason, an error's detail), made safe to log and show: control
+/// characters (a newline would forge a log line) become spaces, and it is cut at 500 characters.
+pub fn peer_text(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(500)
+        .collect();
+    if s.chars().count() > 500 {
+        out.push('…');
+    }
+    out
+}
+
 pub fn unsupported(method: &str) -> ApiError {
     ApiError::new(ErrorCode::Unsupported, format!("unknown method {method}"))
 }

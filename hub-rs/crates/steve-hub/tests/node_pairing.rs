@@ -231,3 +231,38 @@ async fn plain_text_is_only_for_loopback() {
         .unwrap_err();
     assert!(e.to_string().contains("https"), "{e}");
 }
+
+/// M5: links that never finish the handshake hold at most MAX_UNPROVEN places; more are turned
+/// away before the upgrade, and a place comes back when its link goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn links_in_the_handshake_are_bounded() {
+    use steve_node_wire::tls::{Trust, connect};
+    let h = Hub::start().await;
+    let mut open = vec![];
+    for _ in 0..steve_hub::nodes::MAX_UNPROVEN {
+        open.push(
+            connect(&h.ws_url(), &Trust::LoopbackPlaintext)
+                .await
+                .expect("a place"),
+        );
+    }
+    assert!(
+        connect(&h.ws_url(), &Trust::LoopbackPlaintext)
+            .await
+            .is_err(),
+        "one too many"
+    );
+    drop(open.pop());
+    let mut again = false;
+    for _ in 0..100 {
+        if connect(&h.ws_url(), &Trust::LoopbackPlaintext)
+            .await
+            .is_ok()
+        {
+            again = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(again, "the place came back");
+}

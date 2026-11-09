@@ -77,11 +77,16 @@ pub struct NodeService {
     /// Vault uses' values for the commands given to each Node (set once at boot; without it a
     /// Node's `secret.take` is `unsupported`).
     pub secrets: std::sync::OnceLock<Arc<crate::wire::node_secrets::NodeSecrets>>,
+    /// Links still in the handshake ([`MAX_UNPROVEN`] at most).
+    pub(crate) handshakes: Arc<tokio::sync::Semaphore>,
     /// Reaching the Node routes over tailcat (set once at boot).
     pub tailcat: std::sync::OnceLock<Arc<tailcat::Tailcat>>,
 }
 
 const HUB_ID_KEY: &str = "node.hub_id";
+
+/// How many Node links may be in the handshake at once (M5); more are answered 503 before upgrading.
+pub const MAX_UNPROVEN: usize = 64;
 
 /// This Hub's random id, made once and kept in the settings.
 pub fn hub_id(store: &Store) -> Result<String, StoreError> {
@@ -132,6 +137,7 @@ impl NodeService {
             limiter: pairing::Limiter::default(),
             links: tokio::sync::Mutex::new(()),
             secrets: std::sync::OnceLock::new(),
+            handshakes: Arc::new(tokio::sync::Semaphore::new(MAX_UNPROVEN)),
             tailcat: std::sync::OnceLock::new(),
         }))
     }
