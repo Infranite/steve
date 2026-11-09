@@ -240,6 +240,21 @@ fn key_of(hex_key: &str) -> Option<[u8; 32]> {
     hex::decode(hex_key).ok()?.try_into().ok()
 }
 
+/// Keeps the pins the Hub announced in its signed welcome (L4), when they changed.
+fn remember_pins(home: &Home, pins: &str) {
+    let saved = home.pairing().and_then(|mut p| {
+        if p.pin.as_deref() != Some(pins) {
+            p.pin = Some(pins.to_string());
+            home.save_pairing(&p)?;
+            tracing::info!("the hub's certificate pins are now {pins}");
+        }
+        Ok(())
+    });
+    if let Err(e) = saved {
+        tracing::warn!("keeping the hub's pins: {e:#}");
+    }
+}
+
 /// Keeps the Hub's identity key in the pairing, the first time a welcome proves one.
 fn remember(home: &Home, key: [u8; 32]) {
     let saved = home.pairing().and_then(|mut p| {
@@ -300,6 +315,9 @@ pub async fn serve_at(
     trust: &Trust,
 ) -> Result<()> {
     let known = std::sync::Mutex::new(p.hub_key.as_deref().and_then(key_of));
+    // what the next link trusts: a pinned Hub may announce new pins (L4)
+    let trust_now = std::sync::Mutex::new(trust.clone());
+    let pins_now = std::sync::Mutex::new(p.pin.clone());
     let link = HubLink::new();
     let _close_link = CloseLink(link.clone());
     node.connect(
@@ -339,12 +357,31 @@ pub async fn serve_at(
                         remember(h, k);
                     }
                 };
+                let pins_learnt = |pins: Vec<String>| {
+                    let joined = pins.join(",");
+                    if pins_now.lock().unwrap().as_deref() == Some(joined.as_str()) {
+                        return;
+                    }
+                    match tls::parse_pins(&joined) {
+                        Ok(t) => {
+                            *trust_now.lock().unwrap() = t;
+                            *pins_now.lock().unwrap() = Some(joined.clone());
+                            if let Some(h) = &home {
+                                remember_pins(h, &joined);
+                            }
+                        }
+                        Err(e) => tracing::warn!("the hub announced pins that do not parse: {e}"),
+                    }
+                };
                 let hub = HubOf {
                     id: &p.hub_id,
                     key,
                     learnt: &learnt,
+                    pinned: pins_now.lock().unwrap().is_some(),
+                    pins_learnt: &pins_learnt,
                 };
-                link_once(&node, &server, &link, &url, &node_id, hub, id, trust).await
+                let trust = trust_now.lock().unwrap().clone();
+                link_once(&node, &server, &link, &url, &node_id, hub, id, &trust).await
             }
             Err(e) => Err(Stop::Retry(format!("{e:#}"))),
         };
@@ -390,6 +427,9 @@ struct HubOf<'a> {
     id: &'a str,
     key: Option<[u8; 32]>,
     learnt: &'a (dyn Fn([u8; 32]) + Sync),
+    /// This Node pinned the Hub's certificate: it takes the pins a signed welcome announces.
+    pinned: bool,
+    pins_learnt: &'a (dyn Fn(Vec<String>) + Sync),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -430,10 +470,14 @@ async fn link_once(
     .await
     .map_err(|e| stop_for(&e))?;
     // checked by dial: a welcome's key holds; kept the first time (trust on first use)
+    let signed = key_of(&welcome.hub_key);
     if hub.key.is_none()
-        && let Some(k) = key_of(&welcome.hub_key)
+        && let Some(k) = signed
     {
         (hub.learnt)(k);
+    }
+    if hub.pinned && signed.is_some() && !welcome.pins.is_empty() {
+        (hub.pins_learnt)(welcome.pins.clone());
     }
     let conn = Conn::spawn(
         sink,
