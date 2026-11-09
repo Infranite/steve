@@ -269,19 +269,7 @@ pub async fn put(
     let Some(t) = svc.tailcat.get().cloned() else {
         return json_response(404, &json!({ "error": "not available" }));
     };
-    let store = svc.store.clone();
-    let me = caller.me.clone();
-    let owner = tokio::task::spawn_blocking(move || {
-        store.reader(|c| {
-            c.query_row("SELECT role FROM users WHERE id=?", [&me], |r| {
-                r.get::<_, String>(0)
-            })
-            .optional()
-            .map_err(steve_store::StoreError::from)
-        })
-    })
-    .await;
-    if !matches!(owner, Ok(Ok(Some(ref r))) if r == "owner") {
+    if !is_owner(&svc.store, &caller.me).await {
         return json_response(
             403,
             &json!({ "error": steve_i18n::t!("hub.nodes.tailcat_owner_only") }),
@@ -293,10 +281,36 @@ pub async fn put(
         t.stop();
         Ok(())
     };
+    finish(&svc, &t, &caller, b.enabled, result).await
+}
+
+/// The instance's owner (`users.role`).
+pub async fn is_owner(store: &steve_store::Store, me: &str) -> bool {
+    let (store, me) = (store.clone(), me.to_string());
+    let owner = tokio::task::spawn_blocking(move || {
+        store.reader(|c| {
+            c.query_row("SELECT role FROM users WHERE id=?", [&me], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(steve_store::StoreError::from)
+        })
+    })
+    .await;
+    matches!(owner, Ok(Ok(Some(ref r))) if r == "owner")
+}
+
+async fn finish(
+    svc: &NodeService,
+    t: &Arc<Tailcat>,
+    caller: &Caller,
+    enabled: bool,
+    result: Result<(), String>,
+) -> Response {
     if result.is_ok() {
         let (store, me) = (svc.store.clone(), caller.me.clone());
         let mut p = serde_json::Map::new();
-        p.insert(KEY.into(), json!(b.enabled));
+        p.insert(KEY.into(), json!(enabled));
         let saved =
             tokio::task::spawn_blocking(move || store.settings().set(steve_store::WS, &p, &me))
                 .await;
@@ -308,7 +322,7 @@ pub async fn put(
         Ok(()) => {
             // the address comes with the first line of `tailcat serve`: a moment, not a request
             for _ in 0..50 {
-                if !b.enabled || t.status()["running"] == true {
+                if !enabled || t.status()["running"] == true {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;

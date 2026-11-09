@@ -201,7 +201,7 @@ pub fn platform() -> String {
     )
 }
 /// STEVE_UPDATE_REPOSITORY (`owner/name`), the only place releases are taken from.
-fn repository() -> Result<String> {
+pub(crate) fn repository() -> Result<String> {
     let repository =
         std::env::var("STEVE_UPDATE_REPOSITORY").unwrap_or_else(|_| "Infranite/steve".into());
     let parts: Vec<_> = repository.split('/').collect();

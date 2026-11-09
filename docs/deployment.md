@@ -319,6 +319,28 @@ The Hub then:
 
 Devices shows the resulting address, `tailcat:<address>:<port>`. Use it wherever an HTTPS Hub URL goes: `steve setup node --hub tailcat:<address>:<port>`, or `steve-node pair tailcat:<address>:<port>`. The Node runs `tailcat forward` itself and dials its loopback end. The tunnel is WireGuard between the two machines, and the address names the Hub's key, so no certificate or pin is involved. Treat the address like a credential: it does not grant access by itself, because pairing still needs a one-time code and the fingerprint is still confirmed, but it is what lets a machine try. Turning it off stops the listener and the tunnel; paired Nodes reconnect when it is on again.
 
+### Installing a Node remotely over tailcat
+
+From **Devices → Add device → Install remotely over tailcat**, the Hub can install a Node on another machine itself. Both machines need `tailcat`; the Hub also needs OpenSSH's `ssh` and `ssh-keygen`.
+
+1. Devices shows one line for the target, carrying a key made for this install only:
+
+   ```sh
+   tailcat serve --ssh-authorized-keys='ssh-ed25519 AAAA… steve-install' ssh
+   ```
+
+   Run it on the target as the user the Node should run as; no root is needed. It prints an address.
+2. Paste the address into Devices. The Hub then works through steps the page shows:
+   1. reads the target's platform with `uname`;
+   2. fetches the installer archive of its own version for that platform and checks it against the release's `steve-installer.json` (size and SHA256);
+   3. sends it over the tunnel and unpacks it in `~/.steve-node-install`;
+   4. runs `steve setup node --hub <this Hub>` and `steve node start`.
+
+   The pairing code goes over stdin, never on a command line. A code made for an install is *confirmed*: the owner authorised the install, so the Node is active once it pairs, with no fingerprint to compare by hand.
+3. When it is done, stop `tailcat serve` on the target. The key is deleted on the Hub, and the unpacked archive on the target.
+
+The new Node reaches the Hub over tailcat when [Connect over tailcat](#remote-nodes-over-tailcat) is on, else at the Hub's HTTPS `STEVE_PUBLIC_URL`. Without either, the install refuses to start. A development build has no release to install from. A Hub without access to GitHub can take the release files from a local directory with `STEVE_NODE_INSTALLERS=<dir>` (`steve-installer.json` and the installer archives of its version). Supported targets are those of the releases: Apple silicon macOS and x86_64 Linux. Without tailcat, use the paste-in command Devices shows with the pairing code.
+
 ## Harness setup
 
 Run `steve-hub --check-config` in the Hub service's environment before installation or an upgrade. Missing local ACP adapters and Node.js are reported as setup warnings with the setting to fix; the Hub can still start so its settings and diagnostics remain usable. Install the adapters for the harnesses you use and set `STEVE_ADAPTER_CODEX` / `STEVE_ADAPTER_CLAUDE` to their absolute entry points. For JavaScript adapters, set `STEVE_NODE` to the Node.js executable when it is absent from the service's `PATH`. A separate Node uses its own `harness.json` and installed adapters; a successful Hub preflight does not certify a remote machine's environment.

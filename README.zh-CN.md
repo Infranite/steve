@@ -327,6 +327,7 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | `STEVE_NODE_MODE` | `local`（默认）在本机 Node 上运行会话；`off` 时会话只排队 |
 | `STEVE_NODE_LISTEN`、`STEVE_NODE_BIND` | 实验中的多设备 Node，默认关闭 |
 | `STEVE_TAILCAT`、`STEVE_TAILCAT_PORT` | 经 tailcat 接入远程 Node（可选，在“设备”页开启）：`tailcat` 不在 `PATH` 上时指定程序位置，以及只提供 Node 接口的本机端口（默认 Hub 端口 + 2） |
+| `STEVE_NODE_INSTALLERS` | 远程安装 Node 时使用的本地目录，里面放发布的 `steve-installer.json` 和安装包，供访问不了 GitHub 的 Hub 使用 |
 
 > [!IMPORTANT]
 > 把监听地址暴露到本机以外之前，请先检查认证配置。Steve 下运行的智能体拥有你本机用户的权限。

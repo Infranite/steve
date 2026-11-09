@@ -121,24 +121,50 @@ async fn blocking<T: Send + 'static>(
     }
 }
 
-pub async fn create(State(svc): State<Arc<NodeService>>, caller: Caller) -> Response {
-    let Ok(raw) = identity::random::<16>() else {
-        return err(500, "internal");
-    };
+/// A new one-time code made by `me`, and when it expires. `confirmed`: the Node it pairs is active
+/// at once (the Hub's own remote install, see `install.rs`).
+pub async fn new_code_until(
+    store: &steve_store::Store,
+    me: &str,
+    confirmed: bool,
+) -> Result<(String, i64), StoreError> {
+    let raw = identity::random::<16>().map_err(|e| StoreError::Conflict(e.to_string()))?;
     let code = format!("stv1-{}", base32(&raw));
-    let (hash, me, store) = (code_hash(&code), caller.me.clone(), svc.store.clone());
+    let (hash, me, store) = (code_hash(&code), me.to_string(), store.clone());
     let t = now();
     let expires = t + CODE_TTL_MS;
-    let r = blocking(move || {
+    let what = if confirmed {
+        "install_pairing_created"
+    } else {
+        "pairing_created"
+    };
+    tokio::task::spawn_blocking(move || {
         store.transaction(|tx| {
-            steve_store::nodes::create_pairing(tx, &hash, &me, t, expires)?;
-            steve_store::nodes::audit(tx, None, Some(&me), "pairing_created", None, t)
+            steve_store::nodes::create_pairing_as(tx, &hash, &me, t, expires, confirmed)?;
+            steve_store::nodes::audit(tx, None, Some(&me), what, None, t)
         })
     })
-    .await;
-    if let Err(r) = r {
-        return *r;
-    }
+    .await
+    .map_err(|e| StoreError::Conflict(e.to_string()))??;
+    Ok((code, expires))
+}
+
+pub async fn new_code(
+    store: &steve_store::Store,
+    me: &str,
+    confirmed: bool,
+) -> Result<String, StoreError> {
+    Ok(new_code_until(store, me, confirmed).await?.0)
+}
+
+pub async fn create(State(svc): State<Arc<NodeService>>, caller: Caller) -> Response {
+    let (code, expires) = match new_code_until(&svc.store, &caller.me, false).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("nodes: {e}");
+            return err(500, "internal");
+        }
+    };
     json_response(
         200,
         &json!({ "code": code, "expires": expires, "pin": svc.pin, "hub_id": svc.hub_id }),

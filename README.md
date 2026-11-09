@@ -353,6 +353,7 @@ For an existing Hub that completed managed setup, run `steve setup --reconfigure
 | `STEVE_NODE_LISTEN`, `STEVE_NODE_BIND` | Experimental multi-device listener defaults to `1`; explicit `0` disables it. `STEVE_NO_RESUME=1` always disables remote execution. `STEVE_NODE_BIND` has no default: set only to an operator-selected paired Node ID |
 | `STEVE_DISK_OBSERVE` | Default `on` (on a Node) records bounded asynchronous working-directory disk observations in its journal; explicit `off` disables new records. This grants no execution or cleanup permission ([budgets and retention](docs/deployment.md#node-disk-observations)) |
 | `STEVE_TAILCAT`, `STEVE_TAILCAT_PORT` | Remote Nodes over tailcat (optional, turned on in Devices): the `tailcat` program when it is not on `PATH`, and the loopback port its Node-only listener uses (default: Hub port + 2) |
+| `STEVE_NODE_INSTALLERS` | A local directory with the release's `steve-installer.json` and installer archives, for remote Node installs from a Hub without access to GitHub |
 | `STEVE_NODE_PROXY_PEERS` | Optional exact IPs of TLS-terminating proxies for remote Node ingress; default is loopback only |
 
 > [!IMPORTANT]

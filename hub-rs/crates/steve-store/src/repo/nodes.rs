@@ -52,9 +52,22 @@ pub fn create_pairing(
     now: i64,
     expires: i64,
 ) -> Result<()> {
+    create_pairing_as(tx, code_hash, created_by, now, expires, false)
+}
+
+/// `confirmed`: the Node this code pairs is active at once (the Hub's own remote install, which
+/// its owner authorised), not pending until the fingerprint is confirmed.
+pub fn create_pairing_as(
+    tx: &Tx<'_>,
+    code_hash: &str,
+    created_by: &str,
+    now: i64,
+    expires: i64,
+    confirmed: bool,
+) -> Result<()> {
     tx.execute(
-        "INSERT INTO node_pairings(code_hash,created_by,created,expires) VALUES (?,?,?,?)",
-        params![code_hash, created_by, now, expires],
+        "INSERT INTO node_pairings(code_hash,created_by,created,expires,confirmed) VALUES (?,?,?,?,?)",
+        params![code_hash, created_by, now, expires, confirmed],
     )?;
     Ok(())
 }
@@ -66,26 +79,30 @@ pub struct NewNode<'a> {
     pub fingerprint: &'a str,
 }
 
-/// Claims a code and registers the Node as `pending`, owned by whoever made the code. One atomic
-/// update: a wrong, used or expired code all give `None`, and two claims of one code never both win.
+/// Claims a code and registers the Node as `pending` (`active` for a code made `confirmed`), owned
+/// by whoever made the code. One atomic update: a wrong, used or expired code all give `None`, and
+/// two claims of one code never both win.
 pub fn claim_pairing(
     tx: &Tx<'_>,
     code_hash: &str,
     n: &NewNode<'_>,
     now: i64,
 ) -> Result<Option<String>> {
-    let owner: Option<String> = tx
+    let claimed: Option<(String, bool)> = tx
         .query_row(
             "UPDATE node_pairings SET claimed_at=?1, node_id=?2
-             WHERE code_hash=?3 AND claimed_at IS NULL AND expires>?1 RETURNING created_by",
+             WHERE code_hash=?3 AND claimed_at IS NULL AND expires>?1 RETURNING created_by, confirmed",
             params![now, n.node_id, code_hash],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some(owner) = owner else { return Ok(None) };
+    let Some((owner, confirmed)) = claimed else {
+        return Ok(None);
+    };
+    let state = if confirmed { "active" } else { "pending" };
     tx.execute(
-        "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES (?,?,?,?,?,'pending',?)",
-        params![n.node_id, owner, n.name, &n.pubkey[..], n.fingerprint, now],
+        "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES (?,?,?,?,?,?,?)",
+        params![n.node_id, owner, n.name, &n.pubkey[..], n.fingerprint, state, now],
     )?;
     Ok(Some(owner))
 }
