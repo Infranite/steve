@@ -10,6 +10,7 @@
 //! nothing.
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use steve_modules::vault::keystore::{KeyStore, signing};
@@ -263,30 +264,53 @@ pub fn present(home: &Path, store: Option<&dyn KeyStore>) -> bool {
     home.join(FILE).is_file() || store.is_some_and(|s| matches!(signing::get(s), Ok(Some(_))))
 }
 
+/// The vault's own key directory, when the vault keeps its keys in one (`STEVE_VAULT_KEYSTORE=dir`
+/// or `file`): the password goes there too, never into the login keychain, where another
+/// installation under this user keeps its own (`steve setup --vault-dir`).
+fn vault_dir_store(home: &Path) -> Option<Option<Arc<dyn KeyStore>>> {
+    let kind = std::env::var("STEVE_VAULT_KEYSTORE").ok()?;
+    if !matches!(kind.trim(), "dir" | "file") {
+        return None;
+    }
+    Some(
+        steve_modules::vault::keystore::from_env(home, |k| std::env::var(k).ok())
+            .inspect_err(|e| tracing::warn!("signing: the vault's key store: {e}"))
+            .ok(),
+    )
+}
+
 /// steve-keyhelper, when it is installed: the only key store the password goes into (its items stay
-/// readable across Hub releases, and it answers only a parent signed as the Hub).
+/// readable across Hub releases, and it answers only a parent signed as the Hub). With the vault's
+/// keys in a directory, that directory instead.
 #[cfg(target_os = "macos")]
-pub fn helper(home: &Path) -> Option<Box<dyn KeyStore>> {
+pub fn helper(home: &Path) -> Option<Arc<dyn KeyStore>> {
+    if let Some(store) = vault_dir_store(home) {
+        return store;
+    }
     let configured = std::env::var("STEVE_KEYHELPER").ok();
     steve_modules::vault::keystore::HelperStore::find(home, configured.as_deref())
-        .map(|h| Box::new(h) as Box<dyn KeyStore>)
+        .map(|h| Arc::new(h) as Arc<dyn KeyStore>)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn helper(_home: &Path) -> Option<Box<dyn KeyStore>> {
+pub fn helper(_home: &Path) -> Option<Arc<dyn KeyStore>> {
     None
 }
 
 /// steve-keyhelper of `home` itself (`bin/steve-keyhelper`), whatever `STEVE_KEYHELPER` says: the
-/// upgrade runner's, whose environment is its caller's to choose.
+/// upgrade runner's, whose environment is its caller's to choose. With the vault's keys in a
+/// directory, that directory instead.
 #[cfg(target_os = "macos")]
-pub fn installed_helper(home: &Path) -> Option<Box<dyn KeyStore>> {
+pub fn installed_helper(home: &Path) -> Option<Arc<dyn KeyStore>> {
+    if let Some(store) = vault_dir_store(home) {
+        return store;
+    }
     steve_modules::vault::keystore::HelperStore::find(home, None)
-        .map(|h| Box::new(h) as Box<dyn KeyStore>)
+        .map(|h| Arc::new(h) as Arc<dyn KeyStore>)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn installed_helper(_home: &Path) -> Option<Box<dyn KeyStore>> {
+pub fn installed_helper(_home: &Path) -> Option<Arc<dyn KeyStore>> {
     None
 }
 

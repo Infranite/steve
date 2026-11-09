@@ -415,7 +415,7 @@ The new Node reaches the Hub over tailcat when [Connect over tailcat](#remote-no
 
 The Hub's own Node, which runs every session on the Hub's machine, runs as `steve-hub --local-node`, a process of its own (`STEVE_NODE_MODE=service`, the default), so a turn goes on while the Hub restarts or upgrades. `STEVE_NODE_MODE=local` keeps it in the Hub's process instead, where a Hub restart cuts the turns that are running:
 
-- The Hub starts the process when no Node is linked: in a session of its own and, when the Hub runs under systemd, in a scope of its own (`systemd-run --user --scope`). Stopping the Hub's service therefore leaves it running.
+- The Hub starts the process when no Node is linked: in a session of its own and, when the Hub runs under systemd, in a scope of its own (`systemd-run --user --scope`). A restart or upgrade of the Hub's service therefore leaves it running. `steve hub stop` (and so the stop before `steve hub uninstall`) stops it too.
 - It keeps the Node's id (`local`) and home (`<data>/node`), so sessions from before carry on there.
 - It links to the Hub on `127.0.0.1:<STEVE_LOCAL_NODE_PORT>` (default: Hub port + 3), whatever addresses the Hub's own port listens on. It checks the Hub's signed welcome.
 - The Hub registers it as its own paired Node, with a key in the Node's home (`service-identity.key`).
@@ -424,7 +424,7 @@ The Hub's own Node, which runs every session on the Hub's machine, runs as `stev
 - Steve's own think and research jobs stay in the Hub's process, under `<data>/node-jobs`.
 - An upgrade's drain does not wait for this Node's turns. Once the Node has no turn running, a Node from another build is restarted onto the Hub's build.
 - The remote Node listener must be on (the default; `STEVE_NODE_LISTEN=0` and `service` together refuse to start).
-- Going back to `local` is an ordinary restart with `STEVE_NODE_MODE=local`. Stop the service Node first (`kill $(cat <data>/node/service.pid)`) so that two Nodes never use one home.
+- Going back to `local` is an ordinary restart with `STEVE_NODE_MODE=local`. Stop it first with `steve hub stop` (or `kill $(cat <data>/node/service.pid)` for a Hub not set up by `steve setup`) so that two Nodes never use one home.
 
 ## Harness setup
 

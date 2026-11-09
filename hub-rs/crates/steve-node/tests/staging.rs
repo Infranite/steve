@@ -130,7 +130,6 @@ impl T {
                 execs: 2,
             },
             storage: Storage::default(),
-            jobs: Default::default(),
         })
         .unwrap();
         node.connect(std::sync::Arc::new(RecordingSink::default()), None);
