@@ -1,1 +1,0 @@
-- 删除了已停用的 TypeScript 版 Hub（`hub/`）和只为它存在的切换测试脚本。npm 工作区现在只包含网页端，`npm run check` 和 `npm test` 只检查网页。Rust 版 Hub 不受影响。

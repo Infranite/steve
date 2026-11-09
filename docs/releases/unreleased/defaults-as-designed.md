@@ -1,1 +1,0 @@
-- 默认配置按设计调整到最优：本机 Node 默认在单独进程里运行（`STEVE_NODE_MODE=service`，Hub 重启或升级不会打断正在跑的回合）；运行沙箱默认 1 级（文件系统隔离），Linux 上只要装了 bubblewrap 也默认开启；新会话默认按负载分配（`STEVE_NODE_PLACEMENT=spread`）。需要旧行为时，分别设为 `local`、`0`、`local`。

@@ -1,1 +1,0 @@
-- `steve setup` 新增 `--label` 和 `--vault-dir`：同一用户下可以再装一套 Steve（自己的服务标签和签名身份，配合独立的 `--home`、`--listen`）。在 macOS 上，`--vault-dir` 把这套 Hub 的保险箱密钥放在单独的目录里，不写入登录钥匙串，因此不会碰到原有安装的密钥。

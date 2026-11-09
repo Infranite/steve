@@ -1,4 +1,0 @@
-- Node 的密钥可以更换：在 Node 上运行 `steve-node rotate`，再重启 Node 服务。新旧两把密钥共同签名，Hub 接受后新密钥才生效，旧密钥保留为 `node/identity.key.previous`，此后 Hub 拒绝旧密钥，并在审计中记录。
-- 设备指纹从 16 位加长到 32 位十六进制（128 位）。设备页对之前配对的 Node 也按新长度显示。
-- 如果一台 Node 的连接在一分钟内被反复抢占（两方持有同一把密钥的典型表现），Hub 会暂停这台设备接活，在审计中记录 `takeover_suspected`，并发出通知，提醒你更换密钥或撤销设备。
-- Hub 的 TLS 证书可以平滑更换：`STEVE_NODE_TLS_PIN` 可以同时写当前和下一张证书的 pin（用逗号分隔），Hub 在签名的 welcome 里公布这些 pin，做了 pin 的 Node 会记下来。所有 Node 都连过一次后，再换证书即可。`steve setup node --pin` 也接受用逗号分隔的多个 pin。

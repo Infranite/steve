@@ -1,1 +1,0 @@
-- Hub 现在有自己的身份密钥（`secrets/hub-identity.key`，首次启动时生成，包含在每日备份里），并用它签名每次握手的 welcome。配对时 Node 会拿到 Hub 的公钥；此前配对的 Node 在第一次收到签名的 welcome 时记下公钥。此后，即使 TLS 在代理或隧道上终止，或者走的是本机明文连接，Node 也只认这个 Hub，冒充者会被拒绝。迁移 Hub 时请连同这个文件一起迁移；丢失后需要重新配对 Node，或者在确认 Hub 可信后删除 Node 的 `node.json` 里的 `hub_key` 行，让它重新记下。旧版本的 Node 会忽略签名，照常连接。
