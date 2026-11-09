@@ -9,6 +9,7 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { modReq } from "@/api"
+import { runtimeName } from "@/store"
 import { t, useT } from "@/i18n"
 
 export type Used = { calls: number; ok_at: number | null; failed_at: number | null }
@@ -16,7 +17,7 @@ export type CatalogModel = { id: string; label: string; family: string; via: str
 export type Catalog = { harness: string; name: string; source: string; default: string | null; families: string[]; models: CatalogModel[] }
 
 export const HARNESS_NAME: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", "claude-cli": "Claude Code", "codex-cli": "Codex" }
-export const harnessName = (h: string) => HARNESS_NAME[h] ?? h
+export const harnessName = (h: string) => runtimeName(h) ?? HARNESS_NAME[h] ?? h
 
 const cache = new Map<string, Promise<Catalog>>()
 /** the harness's model list, fetched once per page load (`fresh` asks the Hub to read it again) */
