@@ -1261,3 +1261,92 @@ async fn media_cleanup_during_download_never_reaches_the_model() {
     );
     assert!(capture.0.lock().unwrap().is_empty());
 }
+
+/// 2026-11-09: a reply in the thread an item came from goes straight to that item, past the gate and
+/// the rules, when whoever raised it (or you) wrote it; anyone else's reply, or one after the item
+/// closed, takes the usual way.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thread_reply_by_the_raiser_goes_to_its_item() {
+    let h = setup().await;
+    let c = h.oncall.clone();
+    set_rules(
+        &h,
+        &c,
+        json!([
+            {"when": {"kind": "intent", "text": "需要动手操作"}, "act": "create_item", "mode": "start"},
+            {"when": {"kind": "mention_or_dm"}, "act": "reply"}
+        ]),
+    );
+    h.env.gateway.script(
+        format!("{INTENT_START}\n条件：需要动手操作"),
+        "{\"match\": true}",
+    );
+    let in_thread = |id: &str, from: &str, text: &str, at: bool| {
+        let mut m = msg("C_OPS", id, from, text, at);
+        m.thread_key = Some("t1".into());
+        m
+    };
+    let i = push(
+        &h,
+        &c,
+        in_thread("t1", "ulilei", "帮忙清理一下 db01 的日志", true),
+    )
+    .await;
+    let item = i.response.expect("response").item_id.expect("item");
+    /* the item as steve-core would have it, open */
+    exec(
+        &h,
+        &format!(
+            "INSERT OR IGNORE INTO items (id, workspace_id, no, title, status, stage, created, updated)
+             VALUES ('{item}', 'default', 901, 't', 'run', '进行中', 0, 0);
+             UPDATE items SET phase = 'active' WHERE id = '{item}'"
+        ),
+    );
+    let supplements = |h: &H| {
+        h.core
+            .calls()
+            .into_iter()
+            .filter_map(|x| match x {
+                steve_flow::testkit::CoreCall::Supplement { item, text } => Some((item, text)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // the raiser, not @-ing anyone: to the item
+    let r = push(
+        &h,
+        &c,
+        in_thread("t2", "ulilei", "日志在 /var/log/app 下面", false),
+    )
+    .await
+    .response
+    .expect("response");
+    assert_eq!(r.by, steve_channels::By::Thread { item: item.clone() });
+    let s = supplements(&h);
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].0, item);
+    assert!(s[0].1.contains("日志在 /var/log/app 下面"), "{}", s[0].1);
+    assert!(
+        s[0].1.contains(steve_modules::outbound::UNTRUSTED_OPEN),
+        "someone else's words are quoted data: {}",
+        s[0].1
+    );
+    // someone else in the thread: the usual way (not addressed: recorded)
+    let r = push(&h, &c, in_thread("t3", "uhan", "顺便把 db02 也清了", false))
+        .await
+        .response
+        .expect("response");
+    assert_ne!(r.by, steve_channels::By::Thread { item: item.clone() });
+    assert_eq!(supplements(&h).len(), 1);
+    // a closed item: the usual way
+    exec(
+        &h,
+        &format!("UPDATE items SET phase = 'closed' WHERE id = '{item}'"),
+    );
+    let r = push(&h, &c, in_thread("t4", "ulilei", "还有一个问题", false))
+        .await
+        .response
+        .expect("response");
+    assert_ne!(r.by, steve_channels::By::Thread { item });
+    assert_eq!(supplements(&h).len(), 1);
+}

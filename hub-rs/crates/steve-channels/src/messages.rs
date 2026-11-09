@@ -588,3 +588,56 @@ impl TimelineSource for MessageTimeline {
             .map_err(StoreError::from)?)
     }
 }
+
+/// The open item a message's thread came from, when its sender may add to it: whoever raised the item
+/// (the sender of the message it came from) or you (`from_owner`). The item came from a message of the
+/// same thread in the same space, by a rule (`work_item_id`) or by the conversation (its origin
+/// message's `chan.message`). Anyone else's reply, a closed item or no thread: `None`, and the message
+/// takes its usual way (decided by the user on 2026-11-09).
+pub(crate) fn thread_item(
+    c: &Connection,
+    ws: &str,
+    message_id: &str,
+    from_owner: bool,
+) -> ChannelResult<Option<String>> {
+    let Some((space, thread, sender)) = c
+        .query_row(
+            "SELECT space_id, thread_key, sender_party_id FROM chan_messages WHERE id = ? AND workspace_id = ?",
+            params![message_id, ws],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let Some(thread) = thread.filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    let found: Option<(String, Option<String>)> = c
+        .query_row(
+            "SELECT item, raiser FROM (
+               SELECT cm.work_item_id AS item, cm.sender_party_id AS raiser, cm.created AS at
+                 FROM chan_messages cm
+                WHERE cm.space_id = ?1 AND cm.thread_key = ?2 AND cm.id != ?3 AND cm.work_item_id IS NOT NULL
+               UNION ALL
+               SELECT t.item_id, cm.sender_party_id, t.created
+                 FROM thread_items t JOIN messages m ON m.id = t.origin_msg
+                 JOIN chan_messages cm ON cm.id = json_extract(m.meta, '$.chan.message')
+                WHERE t.workspace_id = ?4 AND json_valid(m.meta)
+                  AND cm.space_id = ?1 AND cm.thread_key = ?2 AND cm.id != ?3)
+              WHERE EXISTS (SELECT 1 FROM items i WHERE i.id = item AND i.workspace_id = ?4 AND i.phase != 'closed')
+              ORDER BY at DESC LIMIT 1",
+            params![space, thread, message_id, ws],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(found
+        .filter(|(_, raiser)| from_owner || (sender.is_some() && *raiser == sender))
+        .map(|(item, _)| item))
+}

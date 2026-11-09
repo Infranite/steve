@@ -1405,6 +1405,36 @@ impl Channels {
             plan.trigger = Some(instruction);
             return self.execute(&plan).await;
         }
+        // a reply in the thread an item came from, by whoever raised it or you: straight to that item,
+        // past the gate and the rules — the thread is that item's conversation (decided by the user on
+        // 2026-11-09). Anyone else's reply, and a closed item's, take the usual way below.
+        if let Some(flow) = self.flow()
+            && let Some(item) = store
+                .reader(|c| messages::thread_item(c, ws, &inbound.message_id, inbound.from_owner))?
+        {
+            /* someone else's words are quoted data for the agent, as when the item was made */
+            let said = if inbound.from_owner {
+                plan.text.clone()
+            } else {
+                steve_modules::outbound::quote_untrusted(&plan.text)
+            };
+            let text = format!(
+                "（{} 在「{}」的话题里回复）{said}",
+                plan.sender_name, plan.space_name
+            );
+            match flow.core.supplement(ws, &item, &text, "auto").await {
+                Ok(()) => {
+                    self.react_ack(&plan.message_id).await;
+                    let mut r = Response::skipped(format!("话题回复，送到事项 {item}"));
+                    r.by = respond::By::Thread { item: item.clone() };
+                    r.item_id = Some(item);
+                    return Ok(r);
+                }
+                Err(e) => {
+                    tracing::warn!(space = space.id, item, "thread reply to its item: {e}")
+                }
+            }
+        }
         if let Some(l) = label {
             return Ok(Response::skipped(l));
         }

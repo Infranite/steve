@@ -79,6 +79,9 @@ pub(crate) struct Effects {
     pub(crate) note: Option<String>,
     /// Items to finish after the commit: `(item, now)` (a PR merged, `finish_on=merged`).
     pub(crate) finish: Vec<(String, String)>,
+    /// What people with a say in the repository wrote on a PR linked to an item, for that item
+    /// (2026-11-09: a linked PR's comments and reviews reach its item).
+    pub(crate) supplements: Vec<crate::after::PrSupplement>,
     /// Processed late (a retry, the recovery after a restart): its view may be older than what is
     /// stored meanwhile, which then stays.
     pub(crate) late: bool,
@@ -726,6 +729,9 @@ impl GitHub {
             }
             "issues" => self.sync_issue(tx, repo, &p["issue"], &p["sender"], now, fx)?,
             "issue_comment" if action == "created" => self.comment(tx, repo, p, fx)?,
+            "pull_request_review_comment" if action == "created" => {
+                self.review_comment(tx, repo, p, fx)?
+            }
             _ => {}
         }
         Ok(())
@@ -1005,14 +1011,24 @@ impl GitHub {
         let (_, bot) = self.conn_login(tx, repo);
         let reviewer = s(&r["user"]["login"]);
         let watched = pr.opened_by == "steve" || pr.item_id.is_some();
+        let body = r["body"].as_str().unwrap_or_default().trim();
         let verb = match state.as_str() {
             "approved" => "批准了",
             "changes_requested" => "要求修改",
+            "commented" if !body.is_empty() => "评论了",
             _ => return Ok(()),
         };
         if watched && reviewer != bot {
-            let summary = format!("{reviewer} {verb} PR #{}", pr.number);
             let ext = format!("review:{}", r["id"].as_i64().unwrap_or_default());
+            supplement(
+                fx,
+                &pr,
+                &r["author_association"],
+                &ext,
+                format!("{reviewer} 在 PR #{} {verb}", pr.number),
+                body,
+            );
+            let summary = format!("{reviewer} {verb} PR #{}", pr.number);
             let at = ts(&r["submitted_at"]).unwrap_or(now);
             let mut ev = self.pr_signal(
                 repo,
@@ -1059,6 +1075,14 @@ impl GitHub {
             "comment:{}",
             p["comment"]["id"].as_i64().unwrap_or_default()
         );
+        supplement(
+            fx,
+            &pr,
+            &p["comment"]["author_association"],
+            &ext,
+            format!("{who} 在 PR #{} 评论", pr.number),
+            body.trim(),
+        );
         let at = ts(&p["comment"]["created_at"]).unwrap_or_else(|| self.now());
         let mut ev = self.pr_signal(
             repo,
@@ -1067,6 +1091,62 @@ impl GitHub {
             ext,
             summary,
             actor(&p["comment"]["user"]),
+            at,
+            json!([]),
+        );
+        ev.group_key = None;
+        fx.signals.push(ev);
+        Ok(())
+    }
+
+    /// `pull_request_review_comment.created` (a comment on a line) on a PR linked to an item, not by
+    /// Steve: `github.review_comment`, and the comment for the item.
+    fn review_comment(
+        &self,
+        tx: &Tx,
+        repo: &RepoRow,
+        p: &Value,
+        fx: &mut Effects,
+    ) -> Result<(), ApiError> {
+        let Some(n) = p["pull_request"]["number"].as_i64() else {
+            return Ok(());
+        };
+        let Some(pr) = repo::pr_by_number(tx, &repo.id, n)? else {
+            return Ok(());
+        };
+        let (_, bot) = self.conn_login(tx, repo);
+        let c = &p["comment"];
+        let who = s(&c["user"]["login"]);
+        if pr.item_id.is_none() || who == bot {
+            return Ok(());
+        }
+        let body = c["body"].as_str().unwrap_or_default().trim();
+        let place = match (c["path"].as_str(), c["line"].as_i64()) {
+            (Some(f), Some(l)) => format!("{f}:{l}"),
+            (Some(f), None) => f.to_string(),
+            _ => String::new(),
+        };
+        let ext = format!("review_comment:{}", c["id"].as_i64().unwrap_or_default());
+        supplement(
+            fx,
+            &pr,
+            &c["author_association"],
+            &ext,
+            format!("{who} 在 PR #{} 的 {place} 评论", pr.number),
+            body,
+        );
+        let at = ts(&c["created_at"]).unwrap_or_else(|| self.now());
+        let mut ev = self.pr_signal(
+            repo,
+            &pr,
+            "github.review_comment",
+            ext,
+            format!(
+                "{who} 在 {place} 评论了 PR #{}：{}",
+                pr.number,
+                cut(body, 60)
+            ),
+            actor(&c["user"]),
             at,
             json!([]),
         );
@@ -1292,6 +1372,40 @@ impl GitHub {
         }
         Ok(())
     }
+}
+
+/// Who may speak to an item through its PR: the repository's owner, members and collaborators.
+/// Anyone else's comment stays a signal (as an IM thread passes on only its item's raiser and you).
+const SAY_IN_REPO: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
+
+/// The longest comment passed on to an item, in characters.
+const SUPPLEMENT_MAX: usize = 4000;
+
+/// Queues `body` for the PR's item when its author has a say in the repository: quoted, as text from
+/// outside is for the agent.
+fn supplement(
+    fx: &mut Effects,
+    pr: &PrRow,
+    association: &Value,
+    ext: &str,
+    who: String,
+    body: &str,
+) {
+    let (Some(item), Some(a)) = (&pr.item_id, association.as_str()) else {
+        return;
+    };
+    if body.is_empty() || !SAY_IN_REPO.contains(&a) {
+        return;
+    }
+    fx.supplements.push(crate::after::PrSupplement {
+        item: item.clone(),
+        external_id: ext.into(),
+        text: format!(
+            "GitHub：{who}（{}）：\n{}",
+            pr.url,
+            steve_modules::outbound::quote_untrusted(&cut(body, SUPPLEMENT_MAX))
+        ),
+    });
 }
 
 #[cfg(test)]
