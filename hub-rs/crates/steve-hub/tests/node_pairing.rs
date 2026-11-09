@@ -266,3 +266,134 @@ async fn links_in_the_handshake_are_bounded() {
     }
     assert!(again, "the place came back");
 }
+
+fn rotation(h: &Hub, node: &NodeId, old: &Identity, new: &Identity) -> serde_json::Value {
+    let msg = identity::rotate_message(&h.svc.hub_id, node.as_str(), &old.public(), &new.public());
+    json!({
+        "node_id": node.as_str(),
+        "new_pubkey": hex::encode(new.public()),
+        "sig_old": hex::encode(old.sign(&msg)),
+        "sig_new": hex::encode(new.sign(&msg)),
+    })
+}
+
+/// M4: a Node replaces its key with both keys' signatures; its old link goes, the old key is
+/// refused from then on, the new one is welcome, and the change is audited. Neither a replay nor a
+/// change signed by one key only does anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_rotates_its_key() {
+    let h = Hub::start().await;
+    let (old, node) = h.paired("u1").await;
+    let l = dial(&h, &old, &node, FakeNode::new(node.as_str()), 1)
+        .await
+        .unwrap();
+    until("linked", 5, || {
+        h.svc.registry.current(node.as_str()).is_some()
+    })
+    .await;
+    let new = Identity::generate().unwrap();
+
+    // signed by the old key only: the new key is not proven held
+    let mut half = rotation(&h, &node, &old, &new);
+    half["sig_new"] = half["sig_old"].clone();
+    assert_eq!(h.post("", "/node/rotate", half).await.0, 403);
+
+    let (s, v) = h
+        .post("", "/node/rotate", rotation(&h, &node, &old, &new))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["fingerprint"], new.fingerprint());
+    until("the old key's link closed", 5, || l.conn.is_closed()).await;
+    assert!(
+        dial(&h, &old, &node, FakeNode::new(node.as_str()), 2)
+            .await
+            .is_err()
+    );
+    assert!(
+        dial(&h, &new, &node, FakeNode::new(node.as_str()), 3)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM node_audit WHERE what='key_rotated'"),
+        1
+    );
+    // the same request again: the old key is no longer this Node's
+    assert_eq!(
+        h.post("", "/node/rotate", rotation(&h, &node, &old, &new))
+            .await
+            .0,
+        403
+    );
+}
+
+/// M4: one key held by two parties shows as the Node's live link taken over again and again: the
+/// Node is paused (no new work), audited, and its owner told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_taken_over_again_and_again_pauses_the_node() {
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    let mut links = vec![];
+    for i in 0..=steve_hub::nodes::registry::TAKEOVERS as u64 {
+        let l = dial(&h, &id, &node, FakeNode::new(node.as_str()), i + 1)
+            .await
+            .unwrap();
+        until("installed", 5, || {
+            h.svc.registry.current(node.as_str()) == Some(l.generation)
+        })
+        .await;
+        links.push(l);
+    }
+    until("paused", 5, || {
+        h.q::<String>(&format!("SELECT state FROM nodes WHERE node_id='{node}'")) == "paused"
+    })
+    .await;
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM node_audit WHERE what='takeover_suspected'"),
+        1
+    );
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM messages WHERE space='notify'"),
+        1
+    );
+}
+
+/// M4, the Node's side: `steve-node rotate` puts the new key in place only once the Hub took it,
+/// keeps the old one aside, and the Hub then knows the Node by the new fingerprint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn steve_node_rotate_swaps_the_key_on_disk() {
+    // SAFETY: plain loopback for this test's Hub; set before anything reads it
+    unsafe { std::env::set_var("STEVE_NODE_LOOPBACK_PLAINTEXT", "1") };
+    let h = Hub::start().await;
+    h.owns_default("u1");
+    let dir = tempfile::tempdir().unwrap();
+    let home = steve_node_cli::config::Home(dir.path().to_path_buf());
+    let code = h.code("u1").await;
+    let p = steve_node_cli::dial::pair(&home, &h.url(), &code, None, "laptop")
+        .await
+        .unwrap();
+    // a pending Node has nothing to rotate yet: confirmed first
+    assert!(steve_node_cli::dial::rotate(&home).await.is_err());
+    assert!(!home.identity().with_extension("key.next").exists());
+    let (s, _) = h
+        .post(
+            "u1",
+            &format!("/api/nodes/{}/confirm", p.node_id),
+            json!({}),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let before = Identity::load(&home.identity()).unwrap();
+    let fp = steve_node_cli::dial::rotate(&home).await.unwrap();
+    let after = Identity::load(&home.identity()).unwrap();
+    assert_ne!(after.public(), before.public());
+    assert_eq!(fp, after.fingerprint());
+    let kept = Identity::load(&home.identity().with_extension("key.previous")).unwrap();
+    assert_eq!(kept.public(), before.public());
+    assert!(!home.identity().with_extension("key.next").exists());
+    let stored: String = h.q(&format!(
+        "SELECT fingerprint FROM nodes WHERE node_id='{}'",
+        p.node_id
+    ));
+    assert_eq!(stored, fp);
+}

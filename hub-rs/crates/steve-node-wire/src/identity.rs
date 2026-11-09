@@ -16,8 +16,21 @@ pub fn sha256(b: &[u8]) -> [u8; 32] {
 }
 
 /// What the confirm page and the CLI both show: the first 16 hex digits of sha256(pubkey).
+/// What the CLI prints and the owner compares: 128 bits of sha256(pubkey), 32 hex digits (M4: 64
+/// bits was within reach of a key made to collide).
 pub fn fingerprint(pubkey: &[u8; 32]) -> String {
-    hex::encode(sha256(pubkey))[..16].to_string()
+    hex::encode(sha256(pubkey))[..32].to_string()
+}
+
+/// The bytes a key rotation signs, with the old key and with the new one: this Hub, this Node,
+/// from this key to that one.
+pub fn rotate_message(hub_id: &str, node_id: &str, old: &[u8; 32], new: &[u8; 32]) -> Vec<u8> {
+    let mut m = b"steve-node-rotate-v1".to_vec();
+    for part in [hub_id.as_bytes(), node_id.as_bytes(), old, new] {
+        m.push(0);
+        m.extend_from_slice(part);
+    }
+    m
 }
 
 pub fn verify(pubkey: &[u8; 32], msg: &[u8], sig: &[u8]) -> bool {
@@ -126,7 +139,7 @@ mod tests {
         let msg = pair_message("stv1-x", &id.public());
         assert!(verify(&id.public(), &msg, &id.sign(&msg)));
         assert!(!verify(&id.public(), b"other", &id.sign(&msg)));
-        assert_eq!(id.fingerprint().len(), 16);
+        assert_eq!(id.fingerprint().len(), 32);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

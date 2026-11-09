@@ -11,6 +11,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt, future};
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 use steve_node_api::*;
 use steve_node_wire::envelope::{Frame, FrameSink, FrameStream, MAX_FRAME};
@@ -277,6 +278,13 @@ pub async fn install_link(
     {
         return None;
     }
+    // two parties with one key take the link from each other (M4): the Node takes no new work
+    // until its owner looks, rotates the key or revokes it
+    let paused = if !paused && svc.registry.taken_over_often(node.as_str()) {
+        suspect_takeover(svc, node).await || paused
+    } else {
+        paused
+    };
     if !svc.fleet.remote(node).attach(conn.clone(), restarted) {
         // cannot happen while both are installed under the lock; never leave the two disagreeing
         svc.registry.remove(node.as_str(), generation);
@@ -288,6 +296,61 @@ pub async fn install_link(
         rt.set_paused(paused);
     }
     Some(paused)
+}
+
+/// Pauses `node` and tells its owner; `true` once it is paused.
+async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
+    let (store, id) = (svc.store.clone(), node.to_string());
+    let r = tokio::task::spawn_blocking(move || {
+        let name = store.transaction::<_, StoreError>(|tx| {
+            let name: Option<String> = tx
+                .query_row(
+                    "UPDATE nodes SET state='paused' WHERE node_id=? AND state='active' RETURNING name",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if name.is_some() {
+                steve_store::nodes::audit(
+                    tx,
+                    Some(&id),
+                    None,
+                    "takeover_suspected",
+                    Some(&format!(
+                        "its link was taken over {} times within {}s",
+                        super::registry::TAKEOVERS,
+                        super::registry::TAKEOVER_WINDOW.as_secs()
+                    )),
+                    now(),
+                )?;
+            }
+            Ok(name)
+        })?;
+        if let Some(name) = &name {
+            let db = steve_core::repo::Db::new(store);
+            let text = steve_i18n::t!("hub.node.takeover_suspected", name = name);
+            if let Err(e) = steve_core::notify::notify(&db, steve_store::WS, "system", "fail", &text, None)
+            {
+                tracing::error!("takeover notice: {e}");
+            }
+        }
+        Ok::<_, StoreError>(name.is_some())
+    })
+    .await;
+    match r {
+        Ok(Ok(paused)) => {
+            tracing::warn!(node = %node, "node link taken over repeatedly: paused, its owner told");
+            paused
+        }
+        Ok(Err(e)) => {
+            tracing::error!(node = %node, "pausing a node taken over: {e}");
+            false
+        }
+        Err(e) => {
+            tracing::error!(node = %node, "pausing a node taken over: {e}");
+            false
+        }
+    }
 }
 
 /// After a Node restart, with its coordinator running: the coordinator reconciles with the Node
