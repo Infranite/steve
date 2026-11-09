@@ -2,9 +2,8 @@
 //!
 //! The Hub chose the model and built the prompt; this Node resolves the directories through its
 //! roots, fetches the prompt's files from the Hub, runs exactly that one attempt through its ACP
-//! adapter (read-only mode, the guard that kills on the first bad call, and the policy's sandbox).
-//! Hosts without a registered adapter retain the legacy print runner. Both report draft, tool rows, usage
-//! and end. Steve's read-only tools reach the Hub through the Node's loopback endpoint with a token
+//! adapter (read-only mode, the guard that kills on the first bad call, and the policy's sandbox)
+//! and reports draft, tool rows, usage and end. Steve's read-only tools reach the Hub through the Node's loopback endpoint with a token
 //! of this job only, gone when it ends. Off until the host enables it ([`LocalNode::enable_research`]).
 
 use std::path::PathBuf;
@@ -14,7 +13,7 @@ use std::time::Duration;
 
 use steve_node_api::*;
 use steve_research as r;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 use crate::journal::Tx;
 use crate::{Decided, LocalNode, emit_all, job, now, procs, workspace};
@@ -53,14 +52,12 @@ struct Plan {
     cfg: r::ResearchConfig,
     req: r::ResearchRequest,
     plan: r::AttemptPlan,
-    codex: bool,
-    acp: bool,
 }
 
 impl LocalNode {
-    /// Host bridge: run research jobs with this setup (the harness executables, whose home is off
-    /// limits, `~/.claude`, where attachment copies go). The job decides the rest: model, budget,
-    /// deadline and sandbox. Without it a research job is `unsupported`.
+    /// Host bridge: run research jobs with this setup (whose home is off limits, where attachment
+    /// copies go). The job decides the rest: harness, model, budget, deadline and sandbox. Without
+    /// it a research job is `unsupported`.
     pub fn enable_research(&self, cfg: r::ResearchConfig) {
         *self.0.research.cfg.lock().unwrap() = Some(Arc::new(cfg));
     }
@@ -135,31 +132,13 @@ impl LocalNode {
             return Err(ApiError::new(ErrorCode::Internal, "not a research job"));
         };
         let run = &spec.run;
-        let acp = self.0.cfg.acp.adapters.contains_key(&run.choice.harness);
-        let codex = match run.choice.harness.as_str() {
-            _ if acp => false,
-            "claude-code" => false,
-            "codex" if base.codex_executable.is_some() => true,
-            h => {
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
-                    format!("no research harness {h} on this node"),
-                ));
-            }
-        };
+        if !self.0.cfg.acp.adapters.contains_key(&run.choice.harness) {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                format!("no research harness {} on this node", run.choice.harness),
+            ));
+        }
         let model = run.choice.model.clone().unwrap_or_default();
-        if model.is_empty() && !codex && !acp {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "a research job on claude-code names its model",
-            ));
-        }
-        if codex && run.continuation.is_some() {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "codex cannot continue a research session",
-            ));
-        }
         let p = &run.policy;
         if p.permissions != PermissionMode::Plan {
             return Err(ApiError::new(
@@ -173,14 +152,10 @@ impl LocalNode {
                 "this node cannot restrict a harness's network",
             ));
         }
-        let sandbox = if acp {
-            acp::sandbox_mode(
-                &p.sandbox,
-                &self.0.cfg.acp.adapter_properties(&run.choice.harness),
-            )?
-        } else {
-            sandbox_mode(&p.sandbox, codex)?
-        };
+        let sandbox = acp::sandbox_mode(
+            &p.sandbox,
+            &self.0.cfg.acp.adapter_properties(&run.choice.harness),
+        )?;
         Self::check_limits(&run.limits)?;
         let roots = self.0.roots();
         let cwd = job
@@ -237,8 +212,6 @@ impl LocalNode {
             },
             cfg,
             req,
-            codex,
-            acp,
         })
     }
 
@@ -247,8 +220,6 @@ impl LocalNode {
             mut cfg,
             mut req,
             plan,
-            codex,
-            acp,
         } = p;
         let inner = self.0.clone();
         let dir = workspace::dir_name(exec.attempt().as_str());
@@ -326,9 +297,9 @@ impl LocalNode {
         // the harness's process group is in the journal before it reads anything
         let holder = job::group_key(exec.attempt());
         let group: Arc<Mutex<Option<Group>>> = Arc::default();
-        let on_spawn: r::SpawnHook = {
+        let on_spawn = {
             let (inner, holder, group) = (inner.clone(), holder.clone(), group.clone());
-            Arc::new(move |pid| {
+            move |pid: u32| {
                 let pgid = i64::from(pid);
                 let started = procs::start_time(pgid);
                 let ok = inner
@@ -339,52 +310,11 @@ impl LocalNode {
                     *group.lock().unwrap() = Some((pgid, started));
                 }
                 ok
-            })
-        };
-        let (outcome, why, tail) = if acp {
-            self.research_acp_attempt(&op, &exec, &spec, &cfg, &req, &plan, &*on_spawn)
-                .await
-        } else {
-            let (events_tx, mut events) = mpsc::unbounded_channel();
-            let (stop_tx, stop) = watch::channel(false);
-            let one = r::OneAttempt {
-                run_id: dir.clone(),
-                plan,
-                on_spawn: Some(on_spawn),
-            };
-            let run = r::run_attempt(&cfg, req, one, events_tx, stop);
-            tokio::pin!(run);
-            let mut draft = Draft::new(&exec);
-            let mut output = 0u64;
-            let mut why: Option<Stop> = None;
-            let outcome = loop {
-                tokio::select! {
-                    out = &mut run => break out,
-                    Some(ev) = events.recv() => {
-                        let evs = draft.on(ev);
-                        output += output_bytes(&evs);
-                        if !evs.is_empty() && self.emit(evs).is_err() {
-                            stop_tx.send_replace(true);
-                        }
-                        if why.is_none() && output > limits.max_output_bytes {
-                            why = Some(Stop::Output);
-                            stop_tx.send_replace(true);
-                        }
-                    }
-                    _ = tick.tick() => {
-                        if why.is_none() && let Some(w) = self.stop_now(&op, limits, output) {
-                            why = Some(w);
-                            stop_tx.send_replace(true);
-                        }
-                    }
-                }
-            };
-            while let Ok(ev) = events.try_recv() {
-                let evs = draft.on(ev);
-                let _ = self.emit(evs);
             }
-            (outcome, why, draft.close())
         };
+        let (outcome, why, tail) = self
+            .research_acp_attempt(&op, &exec, &spec, &cfg, &req, &plan, &on_spawn)
+            .await;
         inner.tools.revoke_job(&exec);
         let recorded = *group.lock().unwrap();
         if let Some((pgid, started)) = recorded {
@@ -401,9 +331,8 @@ impl LocalNode {
         // until the whole group is confirmed gone, so a dying child cannot recreate them.
         let _ = tokio::fs::remove_dir_all(cfg.scratch.join(&dir)).await;
         let _ = tokio::fs::remove_dir_all(cfg.files_root.join(&dir)).await;
-        let usage = usage(&exec, &outcome, codex);
         let session = outcome
-            .claude_session
+            .session
             .as_deref()
             .and_then(|s| ResumeHandle::new(s).ok());
         let c = ended(
@@ -415,9 +344,7 @@ impl LocalNode {
             &outcome.files_read,
             outcome.sandboxed,
         );
-        let mut evs = usage;
-        evs.extend(tail);
-        self.end_research(&op, &exec, c, evs).await
+        self.end_research(&op, &exec, c, tail).await
     }
 
     /// Whether the Node stops the job now, and why: a cancel, a shutdown, its deadline, the Hub
@@ -528,38 +455,6 @@ fn running_jobs(t: &Tx) -> ApiResult<u32> {
         .into_iter()
         .filter(|(_, o)| o.method == "start_job" && !o.receipt.state.is_finished())
         .count() as u32)
-}
-
-/// The sandbox a research job asks for, as steve-research's mode: `fs-readonly` required (refused
-/// when this machine has no `sandbox-exec`, or for Codex, which sandboxes itself and cannot be
-/// wrapped), preferred (when available; Codex never), or none.
-fn sandbox_mode(s: &SandboxRequirement, codex: bool) -> ApiResult<r::SandboxMode> {
-    let only_fs = |g: &[String]| g.iter().all(|g| g == FS_READONLY);
-    let unsupported = |why: &str| Err(ApiError::new(ErrorCode::Unsupported, why));
-    match s {
-        SandboxRequirement::None => Ok(r::SandboxMode::Off),
-        SandboxRequirement::Required { guarantees } if guarantees.is_empty() => {
-            Ok(r::SandboxMode::Off)
-        }
-        SandboxRequirement::Required { guarantees } if only_fs(guarantees) => {
-            if codex {
-                unsupported("sandbox-exec cannot wrap codex")
-            } else if !r::sandbox::available() {
-                unsupported("no sandbox-exec on this node")
-            } else {
-                Ok(r::SandboxMode::Required)
-            }
-        }
-        SandboxRequirement::AllowFallback {
-            preferred,
-            acceptable,
-        } if only_fs(preferred) && acceptable.is_empty() => Ok(if codex {
-            r::SandboxMode::Off
-        } else {
-            r::SandboxMode::Auto
-        }),
-        _ => unsupported("this node's research sandbox only gives fs-readonly"),
-    }
 }
 
 /// What the draft and tool rows add to a job's output.
@@ -724,172 +619,6 @@ fn completion(
     }
 }
 
-/// The attempt's tokens and dollars from the harness's closing result, booked to its model, with
-/// ids of this attempt (a resent report changes nothing).
-fn usage(exec: &ExecutionRef, out: &r::ResearchOutcome, codex: bool) -> Vec<(Subject, EventBody)> {
-    let model = out.model.clone().unwrap_or_default();
-    let reports = match &out.result {
-        Some(d) if codex => d
-            .get("usage")
-            .filter(|u| u.is_object())
-            .map(|u| vec![steve_print::codex_usage(u, &model)])
-            .unwrap_or_default(),
-        Some(d) => steve_print::claude_usage(d, &model),
-        None => vec![],
-    };
-    let attempt = exec.attempt().as_str();
-    let Ok(meter) = Epoch::new(derived_id("research", attempt)) else {
-        return vec![];
-    };
-    reports
-        .into_iter()
-        .enumerate()
-        .map(|(i, mut report)| {
-            report.report_id = derived_id("research", &format!("{attempt}.{i}"));
-            report.meter_epoch = meter.clone();
-            (
-                Subject::Execution(exec.clone()),
-                EventBody::Usage { report },
-            )
-        })
-        .collect()
-}
-
-/// Turns the run's events into Steve's: the draft as messages and deltas (a new message replaces
-/// the draft so far), tool calls as their whole current view.
-struct Draft {
-    exec: ExecutionRef,
-    n: u32,
-    /// The current message's text as sent.
-    sent: String,
-}
-
-impl Draft {
-    fn new(exec: &ExecutionRef) -> Draft {
-        Draft {
-            exec: exec.clone(),
-            n: 0,
-            sent: String::new(),
-        }
-    }
-
-    fn message(&self) -> String {
-        format!("{}.m{}", self.exec.attempt(), self.n)
-    }
-
-    fn on(&mut self, ev: r::ResearchEvent) -> Vec<(Subject, EventBody)> {
-        let subject = Subject::Execution(self.exec.clone());
-        match ev {
-            r::ResearchEvent::Text { text } => {
-                let mut out = vec![];
-                if self.n == 0 || !text.starts_with(&self.sent) {
-                    if self.n > 0 {
-                        out.push((
-                            subject.clone(),
-                            EventBody::MessageCompleted {
-                                message: self.message(),
-                            },
-                        ));
-                    }
-                    self.n += 1;
-                    self.sent.clear();
-                    out.push((
-                        subject.clone(),
-                        EventBody::MessageStarted {
-                            message: self.message(),
-                            block: "text".into(),
-                            role: Role::Assistant,
-                        },
-                    ));
-                }
-                let new = &text[self.sent.len()..];
-                if !new.is_empty() {
-                    out.push((
-                        subject,
-                        EventBody::TextDelta {
-                            message: self.message(),
-                            block: "text".into(),
-                            utf8_offset: self.sent.len() as u64,
-                            text: new.to_string(),
-                        },
-                    ));
-                }
-                self.sent = text;
-                out
-            }
-            r::ResearchEvent::ToolStarted(t) | r::ResearchEvent::ToolDone(t) => {
-                vec![(
-                    subject,
-                    EventBody::ToolChanged {
-                        tool: tool_view(&t),
-                    },
-                )]
-            }
-            // the session is in the completion; the attempt started at accept; no notice
-            r::ResearchEvent::Started { .. }
-            | r::ResearchEvent::Session { .. }
-            | r::ResearchEvent::StillReading => vec![],
-        }
-    }
-
-    /// The end of the last message, if there was one.
-    fn close(&mut self) -> Vec<(Subject, EventBody)> {
-        if self.n == 0 {
-            return vec![];
-        }
-        vec![(
-            Subject::Execution(self.exec.clone()),
-            EventBody::MessageCompleted {
-                message: self.message(),
-            },
-        )]
-    }
-}
-
-fn tool_view(t: &r::ToolSeen) -> ToolView {
-    let steve = t.name.starts_with("mcp__steve__");
-    let category = if steve {
-        ToolCategory::Steve
-    } else {
-        match t.name.as_str() {
-            "Read" => ToolCategory::Read,
-            "Grep" | "Glob" => ToolCategory::Search,
-            "Shell" => ToolCategory::Exec,
-            _ => ToolCategory::Other,
-        }
-    };
-    let id = CallId::new(t.id.clone())
-        .or_else(|_| CallId::new(derived_id("tool", &t.id)))
-        .expect("derived id");
-    ToolView {
-        id,
-        parent: None,
-        origin: if steve {
-            ToolOrigin::Steve
-        } else {
-            ToolOrigin::Harness
-        },
-        name: t.name.clone(),
-        category,
-        title: if t.brief.is_empty() {
-            t.name.clone()
-        } else {
-            t.brief.clone()
-        },
-        description: None,
-        target: (!t.brief.is_empty()).then(|| t.brief.clone()),
-        phase: match t.ok {
-            None => ToolPhase::Running,
-            Some(true) => ToolPhase::Succeeded,
-            Some(false) => ToolPhase::Failed,
-        },
-        action: None,
-        result: vec![],
-        error: t.error.map(|e| e.code().to_string()),
-        duration_ms: t.ok.map(|_| t.ms),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,81 +627,6 @@ mod tests {
         ExecutionRef::Job {
             job: JobId::new("j1").unwrap(),
             attempt: AttemptId::new("a1").unwrap(),
-        }
-    }
-
-    fn deltas(evs: &[(Subject, EventBody)]) -> Vec<String> {
-        evs.iter()
-            .map(|(_, b)| match b {
-                EventBody::MessageStarted { message, .. } => format!("start {message}"),
-                EventBody::MessageCompleted { message } => format!("end {message}"),
-                EventBody::TextDelta {
-                    message,
-                    utf8_offset,
-                    text,
-                    ..
-                } => format!("{message}@{utf8_offset}:{text}"),
-                other => format!("{other:?}"),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn a_draft_grows_by_deltas_and_a_new_message_replaces_it() {
-        let mut d = Draft::new(&exec());
-        let text = |t: &str| r::ResearchEvent::Text { text: t.into() };
-        let mut all = d.on(text("我先"));
-        all.extend(d.on(text("我先看看")));
-        all.extend(d.on(text("答案")));
-        all.extend(d.close());
-        assert_eq!(
-            deltas(&all),
-            [
-                "start a1.m1",
-                "a1.m1@0:我先",
-                "a1.m1@6:看看",
-                "end a1.m1",
-                "start a1.m2",
-                "a1.m2@0:答案",
-                "end a1.m2",
-            ]
-        );
-        assert!(d.on(r::ResearchEvent::StillReading).is_empty());
-    }
-
-    #[test]
-    fn only_fs_readonly_is_a_research_sandbox() {
-        let req = |g: &[&str]| SandboxRequirement::Required {
-            guarantees: g.iter().map(|s| s.to_string()).collect(),
-        };
-        assert_eq!(
-            sandbox_mode(&SandboxRequirement::None, false).unwrap(),
-            r::SandboxMode::Off
-        );
-        let prefer = SandboxRequirement::AllowFallback {
-            preferred: vec![FS_READONLY.into()],
-            acceptable: vec![],
-        };
-        assert_eq!(sandbox_mode(&prefer, false).unwrap(), r::SandboxMode::Auto);
-        // Codex sandboxes itself and cannot be wrapped: preferred is none, required is refused
-        assert_eq!(sandbox_mode(&prefer, true).unwrap(), r::SandboxMode::Off);
-        assert_eq!(
-            sandbox_mode(&req(&[FS_READONLY]), true).unwrap_err().code,
-            ErrorCode::Unsupported
-        );
-        assert_eq!(
-            sandbox_mode(&req(&["no-network"]), false).unwrap_err().code,
-            ErrorCode::Unsupported
-        );
-        match sandbox_mode(&req(&[FS_READONLY]), false) {
-            Ok(m) => {
-                assert!(r::sandbox::available());
-                assert_eq!(m, r::SandboxMode::Required);
-            }
-            Err(e) => {
-                assert!(!r::sandbox::available());
-                assert_eq!(e.code, ErrorCode::Unsupported);
-            }
         }
     }
 

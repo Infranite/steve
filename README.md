@@ -383,9 +383,8 @@ hub-rs/          Rust workspace: the Hub binary and its crates
   crates/steve-hub        HTTP server (axum), REST + SSE, extensions, upgrades, background jobs
   crates/steve-core       items, lifecycle, chat routing, YOLO, merge lanes, model gateway
   crates/steve-modules    module seams (hooks, panels, changesets), contacts, accounts, vault
-  crates/steve-acp        Claude Code / Codex sessions over ACP
-  crates/steve-print      one-shot harness runs for Steve's own judgments
-  crates/steve-research   read-only inline research (allowlist, guard, sandbox)
+  crates/steve-acp        harness adapters over ACP: sessions and one-shot calls, the adapter registry
+  crates/steve-research   read-only inline research (run policy, guard, sandbox)
   crates/steve-mcp        the `steve` MCP server agents talk to
   crates/steve-channels   Feishu/Lark, spaces, personas, disclosure checks
   crates/steve-mail       IMAP/SMTP accounts, sync, drafts, triage

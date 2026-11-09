@@ -1,43 +1,20 @@
-//! Layer 2 of read-only enforcement: the Hub looks at every tool call the harness reports and stops the
-//! run at the first one that is not a read inside the run's directories. Pure functions, so the rules are
-//! table-tested without a harness.
+//! Layer 2 of read-only enforcement: every tool call the adapter reports is checked by what it is
+//! (its ACP kind, its locations and the search it describes, never its harness's tool name) and the
+//! run stops at the first one that is not a read inside the run's directories. Pure functions, so
+//! the rules are table-tested without a harness.
 
 use serde_json::Value;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-/// Built-in harness tools a research run may use (`--tools`). All of them only read.
-pub const READ_TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
-
-/// Steve's read-only MCP tools, as the harness names them (`mcp__<server>__<tool>`, server `steve`).
+/// Steve's read-only MCP tools (on the `steve` server).
 pub const MCP_TOOLS: [&str; 6] = [
-    "mcp__steve__steve_knowledge_search",
-    "mcp__steve__steve_knowledge_read",
-    "mcp__steve__steve_items_search",
-    "mcp__steve__steve_item_read",
-    "mcp__steve__steve_sessions_list",
-    "mcp__steve__steve_debug",
-];
-
-/// Harness-internal tools that neither read files nor act: `ToolSearch` only loads the schemas of
-/// deferred (MCP) tools, which the harness may need before it can call the knowledge tools.
-pub const INERT_TOOLS: [&str; 1] = ["ToolSearch"];
-
-/// Tools named on `--disallowedTools` and denied in settings, so the harness refuses them even if a user
-/// or project setting allows them.
-pub const DENIED_TOOLS: [&str; 12] = [
-    "Bash",
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "NotebookEdit",
-    "WebFetch",
-    "WebSearch",
-    "Task",
-    "Agent",
-    "KillShell",
-    "TodoWrite",
-    "PowerShell",
+    "steve_knowledge_search",
+    "steve_knowledge_read",
+    "steve_items_search",
+    "steve_item_read",
+    "steve_sessions_list",
+    "steve_debug",
 ];
 
 /// Directories under the home directory that hold secrets. Relative to `Scope::home`.
@@ -118,58 +95,35 @@ impl Violation {
     }
 }
 
-/// `research_guard(name, input)`: Ok when the call is a read inside `scope`.
-pub fn research_guard(name: &str, input: &Value, scope: &Scope) -> Result<(), Violation> {
-    let tool = || name.to_string();
-    match name {
-        "Read" => {
-            let p =
-                str_arg(input, "file_path").ok_or_else(|| Violation::BadInput { tool: tool() })?;
-            check_path(name, p, scope)
-        }
-        "Grep" => {
-            if let Some(p) = str_arg(input, "path") {
-                check_path(name, p, scope)?;
-            }
-            // `glob` narrows which files Grep reads; one aimed at .env files reads secrets.
-            if let Some(g) = str_arg(input, "glob")
-                && g.split(['/', '{', ',']).any(is_env_name)
-            {
-                return Err(Violation::Sensitive {
-                    tool: tool(),
-                    path: g.to_string(),
-                });
-            }
-            Ok(())
-        }
-        "Glob" => {
-            if let Some(p) = str_arg(input, "path") {
-                check_path(name, p, scope)?;
-            }
-            // An absolute or parent-relative pattern reaches outside `path`: check its literal prefix.
-            let pat = str_arg(input, "pattern").unwrap_or("");
-            if pat.starts_with('/') || pat.starts_with('~') || pat.split('/').any(|c| c == "..") {
-                let base = str_arg(input, "path").unwrap_or(".");
-                let prefix = literal_prefix(pat);
-                let joined = if prefix.starts_with('/') || prefix.starts_with('~') {
-                    prefix
-                } else {
-                    format!("{}/{}", base.trim_end_matches('/'), prefix)
-                };
-                check_path(name, &joined, scope)?;
-            }
-            Ok(())
-        }
-        // Codex: its read-only sandbox stops writes and the network; the paths a command names must
-        // still be readable ones and no secret
-        "Shell" => {
-            let c =
-                str_arg(input, "command").ok_or_else(|| Violation::BadInput { tool: tool() })?;
-            check_shell(c, scope)
-        }
-        n if MCP_TOOLS.contains(&n) || INERT_TOOLS.contains(&n) => Ok(()),
-        _ => Err(Violation::Tool { tool: tool() }),
+/// The search a read-only tool call describes in its input (a `path` to search, a `glob` that
+/// narrows which files are read, a file `pattern`), checked by what it reaches whatever the tool is
+/// called: Ok when it stays inside `scope` and away from secrets. `tool` names the call in a violation.
+pub fn check_search(tool: &str, input: &Value, scope: &Scope) -> Result<(), Violation> {
+    if let Some(p) = str_arg(input, "path") {
+        check_path(tool, p, scope)?;
     }
+    // a glob aimed at .env files reads secrets
+    if let Some(g) = str_arg(input, "glob")
+        && g.split(['/', '{', ',']).any(is_env_name)
+    {
+        return Err(Violation::Sensitive {
+            tool: tool.to_string(),
+            path: g.to_string(),
+        });
+    }
+    // an absolute or parent-relative pattern reaches outside `path`: check its literal prefix
+    let pat = str_arg(input, "pattern").unwrap_or("");
+    if pat.starts_with('/') || pat.starts_with('~') || pat.split('/').any(|c| c == "..") {
+        let base = str_arg(input, "path").unwrap_or(".");
+        let prefix = literal_prefix(pat);
+        let joined = if prefix.starts_with('/') || prefix.starts_with('~') {
+            prefix
+        } else {
+            format!("{}/{}", base.trim_end_matches('/'), prefix)
+        };
+        check_path(tool, &joined, scope)?;
+    }
+    Ok(())
 }
 
 /// The command a shell wrapper runs (`/bin/zsh -lc 'cat a'` → `cat a`); others as they are.
@@ -250,7 +204,7 @@ pub fn check_shell(command: &str, scope: &Scope) -> Result<(), Violation> {
     let inner = shell_inner(command);
     for w in shell_words(&inner) {
         if let Some(p) = shell_path(&w) {
-            check_path("Shell", &p, scope)?;
+            check_path("shell", &p, scope)?;
         }
     }
     Ok(())
@@ -395,55 +349,6 @@ pub fn resolve(p: &Path) -> PathBuf {
     }
 }
 
-/// The short label of a tool call shown in the thread (`steve.tool.brief`): Read → relative path with line
-/// range, Grep → pattern and directory, Glob → pattern, knowledge → query, items → id.
-pub fn brief(name: &str, input: &Value, cwd: &Path) -> String {
-    let rel = |p: &str| -> String {
-        let cwd = resolve(cwd);
-        let abs = resolve(Path::new(p));
-        match abs.strip_prefix(&cwd) {
-            Ok(r) if !r.as_os_str().is_empty() => r.display().to_string(),
-            _ => p.to_string(),
-        }
-    };
-    match name {
-        "Read" => {
-            let p = rel(str_arg(input, "file_path").unwrap_or(""));
-            let off = input.get("offset").and_then(Value::as_u64);
-            let lim = input.get("limit").and_then(Value::as_u64);
-            match (off, lim) {
-                (Some(o), Some(l)) => format!("{p}:{o}-{}", o + l.saturating_sub(1)),
-                (Some(o), None) => format!("{p}:{o}-"),
-                (None, Some(l)) => format!("{p}:1-{l}"),
-                (None, None) => p,
-            }
-        }
-        "Grep" => {
-            let pat = str_arg(input, "pattern").unwrap_or("");
-            match str_arg(input, "path") {
-                Some(d) => format!("{pat} · {}", rel(d)),
-                None => pat.to_string(),
-            }
-        }
-        "Glob" => str_arg(input, "pattern").unwrap_or("").to_string(),
-        "Shell" => {
-            let c = shell_inner(str_arg(input, "command").unwrap_or(""));
-            match c.char_indices().nth(120) {
-                Some((i, _)) => format!("{}…", &c[..i]),
-                None => c,
-            }
-        }
-        _ => ["query", "id", "item", "source"]
-            .iter()
-            .find_map(|k| match input.get(*k) {
-                Some(Value::String(s)) => Some(s.clone()),
-                Some(Value::Number(n)) => Some(n.to_string()),
-                _ => None,
-            })
-            .unwrap_or_default(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,185 +405,72 @@ mod tests {
         );
         assert_eq!(shell_read("rg x src"), None);
         assert_eq!(
-            research_guard("Shell", &json!({"command": "cat ~/.aws/credentials"}), &s),
+            check_shell("cat ~/.aws/credentials", &s),
             Err(Violation::Sensitive {
-                tool: "Shell".into(),
+                tool: "shell".into(),
                 path: "~/.aws/credentials".into()
             })
         );
     }
 
+    /// Reads by their path, searches by what they reach: whatever the tool is called.
     #[test]
     fn table() {
         let (t, s) = scope();
         let home = t.path().join("home");
         let h = home.display().to_string();
-        type Case = (&'static str, Value, Option<&'static str>);
-        let cases: Vec<Case> = vec![
-            ("Read", json!({"file_path": "src/lib.rs"}), None),
-            (
-                "Read",
-                json!({"file_path": format!("{h}/proj/src/lib.rs")}),
-                None,
-            ),
-            (
-                "Read",
-                json!({"file_path": format!("{h}/other/x.md")}),
-                None,
-            ),
-            (
-                "Read",
-                json!({"file_path": format!("{h}/.ssh/id_rsa")}),
-                Some("sensitive"),
-            ),
-            (
-                "Read",
-                json!({"file_path": "~/.ssh/id_rsa"}),
-                Some("sensitive"),
-            ),
-            (
-                "Read",
-                json!({"file_path": "~/.steve/data/steve.sqlite3"}),
-                Some("sensitive"),
-            ),
-            (
-                "Read",
-                json!({"file_path": "~/.aws/credentials"}),
-                Some("sensitive"),
-            ),
-            (
-                "Read",
-                json!({"file_path": "~/.config/gh/hosts.yml"}),
-                Some("sensitive"),
-            ),
-            (
-                "Read",
-                json!({"file_path": "~/Library/Keychains/login.keychain-db"}),
-                Some("sensitive"),
-            ),
-            (
-                "Read",
-                json!({"file_path": "keys/id_rsa"}),
-                Some("sensitive"),
-            ),
-            (
-                "Read",
-                json!({"file_path": "src/../../.ssh/id_rsa"}),
-                Some("sensitive"),
-            ),
-            ("Read", json!({"file_path": ".env"}), Some("sensitive")),
-            (
-                "Read",
-                json!({"file_path": "src/.env.local"}),
-                Some("sensitive"),
-            ),
-            ("Read", json!({"file_path": "/etc/hosts"}), Some("scope")),
-            ("Read", json!({"file_path": "../secret.txt"}), Some("scope")),
-            ("Read", json!({}), Some("input")),
-            ("Grep", json!({"pattern": "fn"}), None),
-            ("Grep", json!({"pattern": "fn", "path": "src"}), None),
-            (
-                "Grep",
-                json!({"pattern": "KEY", "path": "/etc"}),
-                Some("scope"),
-            ),
-            (
-                "Grep",
-                json!({"pattern": "KEY", "glob": "**/.env*"}),
-                Some("sensitive"),
-            ),
-            (
-                "Grep",
-                json!({"pattern": "x", "path": "~/.steve"}),
-                Some("sensitive"),
-            ),
-            ("Glob", json!({"pattern": "**/*.rs"}), None),
-            ("Glob", json!({"pattern": "/etc/*"}), Some("scope")),
-            ("Glob", json!({"pattern": "../../*"}), Some("scope")),
-            ("Glob", json!({"pattern": "~/.ssh/*"}), Some("sensitive")),
-            ("Glob", json!({"pattern": "*", "path": "/"}), Some("scope")),
-            (
-                "mcp__steve__steve_knowledge_search",
-                json!({"query": "x"}),
-                None,
-            ),
-            ("mcp__steve__steve_item_read", json!({"id": "ST-1"}), None),
-            (
-                "mcp__steve__steve_debug",
-                json!({"action":"explain","item_id":"ST-1"}),
-                None,
-            ),
-            ("ToolSearch", json!({"query": "select:x"}), None),
-            ("Bash", json!({"command": "rm -rf src"}), Some("tool")),
-            (
-                "Write",
-                json!({"file_path": "src/x.rs", "content": ""}),
-                Some("tool"),
-            ),
-            ("Edit", json!({"file_path": "src/lib.rs"}), Some("tool")),
-            ("MultiEdit", json!({}), Some("tool")),
-            ("NotebookEdit", json!({}), Some("tool")),
-            ("WebFetch", json!({"url": "https://x"}), Some("tool")),
-            ("WebSearch", json!({"query": "x"}), Some("tool")),
-            ("Task", json!({}), Some("tool")),
-            ("mcp__steve__steve_deliver", json!({}), Some("tool")),
-            ("mcp__other__read", json!({}), Some("tool")),
-        ];
-        for (name, input, want) in cases {
-            let got = research_guard(name, &input, &s);
-            let kind = got.as_ref().err().map(|v| match v {
+        let read = |p: &str| check_path("read", p, &s);
+        let kind = |r: Result<(), Violation>| {
+            r.err().map(|v| match v {
                 Violation::Tool { .. } => "tool",
                 Violation::OutOfScope { .. } => "scope",
                 Violation::Sensitive { .. } => "sensitive",
                 Violation::BadInput { .. } => "input",
-            });
-            assert_eq!(kind, want, "{name} {input} → {got:?}");
+            })
+        };
+        let reads: Vec<(String, Option<&str>)> = vec![
+            ("src/lib.rs".into(), None),
+            (format!("{h}/proj/src/lib.rs"), None),
+            (format!("{h}/other/x.md"), None),
+            (format!("{h}/.ssh/id_rsa"), Some("sensitive")),
+            ("~/.ssh/id_rsa".into(), Some("sensitive")),
+            ("~/.steve/data/steve.sqlite3".into(), Some("sensitive")),
+            ("~/.aws/credentials".into(), Some("sensitive")),
+            ("~/.config/gh/hosts.yml".into(), Some("sensitive")),
+            (
+                "~/Library/Keychains/login.keychain-db".into(),
+                Some("sensitive"),
+            ),
+            ("keys/id_rsa".into(), Some("sensitive")),
+            ("src/../../.ssh/id_rsa".into(), Some("sensitive")),
+            (".env".into(), Some("sensitive")),
+            ("src/.env.local".into(), Some("sensitive")),
+            ("/etc/hosts".into(), Some("scope")),
+            ("../secret.txt".into(), Some("scope")),
+        ];
+        for (p, want) in reads {
+            assert_eq!(kind(read(&p)), want, "{p}");
         }
-    }
-
-    #[test]
-    fn briefs() {
-        let (_t, s) = scope();
-        let lib = s.cwd.join("src/lib.rs").display().to_string();
-        assert_eq!(
-            brief("Read", &json!({"file_path": lib}), &s.cwd),
-            "src/lib.rs"
-        );
-        assert_eq!(
-            brief(
-                "Read",
-                &json!({"file_path": "src/lib.rs", "offset": 10, "limit": 20}),
-                &s.cwd
+        let searches: Vec<(Value, Option<&str>)> = vec![
+            (json!({"pattern": "fn"}), None),
+            (json!({"pattern": "fn", "path": "src"}), None),
+            (json!({"pattern": "KEY", "path": "/etc"}), Some("scope")),
+            (
+                json!({"pattern": "KEY", "glob": "**/.env*"}),
+                Some("sensitive"),
             ),
-            "src/lib.rs:10-29"
-        );
-        assert_eq!(
-            brief(
-                "Grep",
-                &json!({"pattern": "retrieve", "path": "src"}),
-                &s.cwd
+            (
+                json!({"pattern": "x", "path": "~/.steve"}),
+                Some("sensitive"),
             ),
-            "retrieve · src"
-        );
-        assert_eq!(
-            brief("Glob", &json!({"pattern": "**/*.rs"}), &s.cwd),
-            "**/*.rs"
-        );
-        assert_eq!(
-            brief(
-                "mcp__steve__steve_knowledge_search",
-                &json!({"query": "知识库"}),
-                &s.cwd
-            ),
-            "知识库"
-        );
-        assert_eq!(
-            brief(
-                "mcp__steve__steve_item_read",
-                &json!({"id": "ST-20"}),
-                &s.cwd
-            ),
-            "ST-20"
-        );
+            (json!({"pattern": "**/*.rs"}), None),
+            (json!({"pattern": "/etc/*"}), Some("scope")),
+            (json!({"pattern": "../../*"}), Some("scope")),
+            (json!({"pattern": "~/.ssh/*"}), Some("sensitive")),
+            (json!({"pattern": "*", "path": "/"}), Some("scope")),
+        ];
+        for (input, want) in searches {
+            assert_eq!(kind(check_search("search", &input, &s)), want, "{input}");
+        }
     }
 }

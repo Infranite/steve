@@ -113,8 +113,10 @@ pub struct ResearchRequest {
 pub struct ResumeFrom {
     /// the earlier `thread_runs` row
     pub run: String,
-    pub claude_session: String,
-    /// `--resume` needs the same model
+    /// the harness adapter's session, and the adapter (a session continues only on its own)
+    pub session: String,
+    pub harness: String,
+    /// continuing needs the same model
     pub model: String,
     /// the earlier answer, the context of a fresh run when resuming is not possible
     pub prior_answer: String,
@@ -139,8 +141,8 @@ pub struct ResearchOutcome {
     pub offer: Option<Offer>,
     pub end: RunEnd,
     pub model: Option<String>,
-    /// the harness session id, for `--resume`
-    pub claude_session: Option<String>,
+    /// the harness adapter's session id, to continue the run with
+    pub session: Option<String>,
     pub turns: i64,
     pub first_text_ms: Option<i64>,
     pub error: Option<String>,
@@ -299,8 +301,7 @@ impl Core {
         let Some(r) = th.run_last_done(ws)? else {
             return Ok(None);
         };
-        let (Some(session), Some(model), Some(reply)) = (&r.claude_session, &r.model, &r.reply_id)
-        else {
+        let (Some(session), Some(model), Some(reply)) = (&r.session, &r.model, &r.reply_id) else {
             return Ok(None);
         };
         if r.ended.is_none_or(|t| now() - t > RESUME_WINDOW) {
@@ -315,7 +316,8 @@ impl Core {
         Ok(match last_steve {
             Some(m) if &m.id == reply => Some(ResumeFrom {
                 run: r.id.clone(),
-                claude_session: session.clone(),
+                session: session.clone(),
+                harness: r.harness.clone().unwrap_or_default(),
                 model: model.clone(),
                 prior_answer: m.text.clone(),
             }),
@@ -852,11 +854,9 @@ impl Core {
             .as_deref()
             .and_then(|id| projects.iter().find(|p| p.id == id))
             .or_else(|| {
-                projects
-                    .iter()
-                    .find(|p| {
-                        crate::config::is_steve_project(&p.path, &repo) && p.device_id == "hub"
-                    })
+                projects.iter().find(|p| {
+                    crate::config::is_steve_project(&p.path, &repo) && p.device_id == "hub"
+                })
             })
             .cloned();
         let cx = self.chat_context(ws, j.user.as_deref().filter(|_| own), &j.question);
@@ -883,6 +883,7 @@ impl Core {
         } else {
             format!("{context}\n\n{named}")
         };
+        let models = self.models().for_purpose(ws, "research");
         let req = ResearchRequest {
             run: run.clone(),
             ws: ws.into(),
@@ -896,15 +897,17 @@ impl Core {
             readable: projects,
             files: j.files.clone(),
             earlier_files: j.earlier.clone(),
-            resume: j.resume.clone(),
+            // a session continues only on the adapter it belongs to
+            resume: j.resume.clone().filter(|r| r.harness.eq(&models.harness)),
             stop: j.stop.flag(),
             mcp: Some(crate::McpEndpoint {
                 url: format!("http://127.0.0.1:{}/mcp", self.config().port),
                 token,
             }),
-            models: self.models().for_purpose(ws, "research"),
+            models: models.clone(),
             ui: j.space == super::MAIN,
         };
+        let harness = models.harness.clone();
         let steps = Mutex::new(Steps {
             route: j.route.clone(),
             ..Default::default()
@@ -975,7 +978,8 @@ impl Core {
                 status: Some(out.end.status().into()),
                 reply_id: Some(id.clone()),
                 model: out.model.clone(),
-                claude_session: out.claude_session.clone(),
+                session: out.session.clone(),
+                harness: out.session.as_ref().map(|_| harness.clone()),
                 token_hash: Some(None),
                 tools: Some(tools),
                 turns: Some(out.turns),

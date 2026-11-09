@@ -73,9 +73,8 @@ impl Test {
             storage: Storage::default(),
         };
         let node = Arc::new(LocalNode::open(cfg).unwrap());
-        let mut research = steve_research::ResearchConfig::new("unused", root.join("scratch"));
+        let mut research = steve_research::ResearchConfig::new(root.join("scratch"));
         research.home = root.clone();
-        research.claude_dir = root.join("adapter-state");
         research.files_root = root.join("files");
         node.enable_research(research.clone());
         let runtime = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Domain));
@@ -288,7 +287,8 @@ async fn expired_research_continuation_starts_fresh_with_prior_answer() {
     let mut q = t.request("run-followup", &["ready"]);
     q.resume = Some(ResumeFrom {
         run: "run-original".into(),
-        claude_session: first.claude_session.unwrap(),
+        session: first.session.unwrap(),
+        harness: "test-research".into(),
         model: "ready".into(),
         prior_answer: first.text,
     });

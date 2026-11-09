@@ -1,5 +1,5 @@
-//! LocalNode research jobs against a scripted fake harness (no model is called): one attempt per
-//! job with the read-only layers of steve-research, its facts in Steve's events.
+//! LocalNode research jobs against scripted ACP adapters (no model is called): one attempt per
+//! job with the read-only layers, its facts in Steve's events.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,19 +27,20 @@ impl T {
 
     fn acp_node_for(&self, harness: &str) -> LocalNode {
         let mut cfg = self.config(2);
-        cfg.acp.adapters.insert(
-            harness.into(),
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/research-acp.mjs"),
-        );
         // A wrapper is executable regardless of whether an adapter entry point ends in .js.
-        let wrapper = self.harness(
-            "research-acp.sh",
-            &format!("exec node '{}'", cfg.acp.adapters[harness].display()),
-        );
+        let wrapper = self.root.join("research-acp.sh");
+        let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/research-acp.mjs");
+        std::fs::write(
+            &wrapper,
+            format!("#!/bin/sh\nexec node '{}'\n", fake.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         cfg.acp.adapters.insert(harness.into(), wrapper);
         let n = LocalNode::open(cfg).unwrap();
         n.connect(self.sink.clone(), Some(Arc::new(Files::default())));
-        n.enable_research(self.research(Path::new("unused"), None));
+        n.enable_research(self.research());
         n
     }
 
@@ -104,57 +105,77 @@ impl T {
         }
     }
 
-    /// The research setup a host gives: these harnesses, this home's secrets off limits.
-    fn research(&self, claude: &Path, codex: Option<&Path>) -> steve_research::ResearchConfig {
-        let mut c = steve_research::ResearchConfig::new(claude, self.root.join("unused"));
+    /// The research setup a host gives: this home's secrets off limits.
+    fn research(&self) -> steve_research::ResearchConfig {
+        let mut c = steve_research::ResearchConfig::new(self.root.join("unused"));
         c.home = self.home.clone();
-        c.claude_dir = self.root.join("claude");
         c.files_root = self.root.join("files");
-        c.codex_executable = codex.map(Path::to_path_buf);
         c
     }
 
-    fn node(&self, claude: &Path) -> LocalNode {
-        self.node_with(claude, 2, Arc::new(Files::default()))
+    /// Where the scripted adapter logs `what` (research-script.mjs).
+    fn log(&self, what: &str) -> PathBuf {
+        self.root.join(format!("fake.{what}"))
     }
 
-    fn node_with(&self, claude: &Path, jobs: u32, files: Arc<dyn HubFiles>) -> LocalNode {
-        let n = LocalNode::open(self.config(jobs)).unwrap();
-        n.connect(self.sink.clone(), Some(files));
-        n.enable_research(self.research(claude, None));
-        n
+    fn read(&self, what: &str) -> String {
+        std::fs::read_to_string(self.log(what)).unwrap_or_default()
     }
 
-    /// A fake harness: `body` is shell run after its arguments went to `args.txt` (one run per
-    /// block) and a line to `spawns`.
-    fn harness(&self, name: &str, body: &str) -> PathBuf {
-        let p = self.root.join(name);
-        let script = format!(
-            "#!/bin/sh\necho x >> '{spawns}'\nprintf '%s\\n' \"$@\" >> '{args}'\necho @@END@@ >> '{args}'\n{body}\n",
-            spawns = self.root.join("spawns").display(),
-            args = self.root.join("args.txt").display()
-        );
-        std::fs::write(&p, script).unwrap();
+    /// The scripted adapter (`research-script.mjs`) behind a wrapper that names its log.
+    fn write_adapter(&self) -> PathBuf {
+        let p = self.root.join("scripted.sh");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/research-script.mjs");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\nexport FAKE_RESEARCH_LOG='{}'\nexec node '{}'\n",
+                self.root.join("fake").display(),
+                script.display()
+            ),
+        )
+        .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
     }
 
-    fn spawns(&self) -> usize {
-        std::fs::read_to_string(self.root.join("spawns"))
-            .unwrap_or_default()
-            .lines()
-            .count()
+    /// A Node with research on and the scripted adapter as `scripted` (nothing declared: plain
+    /// ACP), `own-sandbox` (it keeps its own read-only sandbox) and `no-nesting` (it has none and
+    /// cannot run in the Node's).
+    fn scripted_node(&self, jobs: u32, files: Arc<dyn HubFiles>) -> LocalNode {
+        let n = LocalNode::open(self.scripted_config(jobs)).unwrap();
+        n.connect(self.sink.clone(), Some(files));
+        n.enable_research(self.research());
+        n
     }
 
-    /// The arguments of each run, in order.
-    fn runs(&self) -> Vec<Vec<String>> {
-        std::fs::read_to_string(self.root.join("args.txt"))
-            .unwrap_or_default()
-            .split("@@END@@\n")
-            .filter(|r| !r.trim().is_empty())
-            .map(|r| r.lines().map(String::from).collect())
-            .collect()
+    fn scripted_config(&self, jobs: u32) -> NodeConfig {
+        let adapter = self.write_adapter();
+        let mut cfg = self.config(jobs);
+        for id in ["scripted", "own-sandbox", "no-nesting"] {
+            cfg.acp.adapters.insert(id.into(), adapter.clone());
+        }
+        let declare = |props: serde_json::Value| -> steve_acp::Declaration {
+            serde_json::from_value(json!({ "properties": props })).unwrap()
+        };
+        cfg.acp.declared.insert(
+            "own-sandbox".into(),
+            declare(json!({"self_read_only": true, "nested_sandbox": false})),
+        );
+        cfg.acp.declared.insert(
+            "no-nesting".into(),
+            declare(json!({"self_read_only": false, "nested_sandbox": false})),
+        );
+        cfg
+    }
+
+    fn node(&self) -> LocalNode {
+        self.scripted_node(2, Arc::new(Files::default()))
+    }
+
+    fn spawns(&self) -> usize {
+        self.read("spawns").lines().count()
     }
 
     fn ended(&self) -> Vec<Completion> {
@@ -276,7 +297,7 @@ fn job(attempt: &str, model: &str, text: &str) -> JobSpec {
         run: RunSpec {
             attempt: AttemptId::new(attempt).unwrap(),
             choice: HarnessChoice {
-                harness: "claude-code".into(),
+                harness: "scripted".into(),
                 model: Some(model.into()),
                 effort: None,
             },
@@ -539,36 +560,9 @@ async fn acp_research_cancellation_keeps_the_partial_reply() {
     n.shutdown().await;
 }
 
-/// Shell that prints these stream-json lines.
-fn emit(lines: &[String]) -> String {
-    lines
-        .iter()
-        .map(|l| format!("printf '%s\\n' '{}'", l.replace('\'', "'\\''")))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-fn init() -> String {
-    r#"{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-sonnet-5-5"}"#.into()
-}
-fn start(id: &str) -> String {
-    format!(
-        r#"{{"type":"stream_event","event":{{"type":"message_start","message":{{"id":"{id}"}}}}}}"#
-    )
-}
-fn text(t: &str) -> String {
-    json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":t}}}).to_string()
-}
-fn tool(msg: &str, id: &str, name: &str, input: serde_json::Value) -> String {
-    json!({"type":"assistant","message":{"id":msg,"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}}).to_string()
-}
-fn tool_result(id: &str) -> String {
-    json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"1\tfn add() {}"}]}}).to_string()
-}
-fn result(t: &str) -> String {
-    json!({"type":"result","subtype":"success","is_error":false,"result":t,"session_id":"sess-1",
-        "total_cost_usd":0.25,
-        "modelUsage":{"claude-sonnet-5-5":{"inputTokens":10,"outputTokens":5,"cacheReadInputTokens":100,"costUSD":0.25}}})
-    .to_string()
+/// The scripted adapter's job: `script` is the prompt (its `@` lines run, see research-script.mjs).
+fn scripted(attempt: &str, model: &str, script: &str) -> JobSpec {
+    job(attempt, model, script)
 }
 
 fn alive(pid: i32) -> bool {
@@ -588,22 +582,11 @@ async fn a_research_job_answers_with_its_draft_tools_usage_and_report() {
     let t = T::new();
     let lib = t.root.join("work/proj/src/lib.rs").display().to_string();
     let answer = "add 什么都不做，见 src/lib.rs:1。\nOFFER: {\"title\":\"实现 add\",\"goal\":\"让 add 返回和\"}";
-    let exe = t.harness(
-        "claude.sh",
-        &emit(&[
-            init(),
-            start("m1"),
-            text("我先看看"),
-            tool("m1", "t1", "Read", json!({"file_path": lib})),
-            tool_result("t1"),
-            start("m2"),
-            text("add 什么都不做，"),
-            text("见 src/lib.rs:1。"),
-            result(answer),
-        ]),
+    let script = format!(
+        "add 怎么工作？\n@msg m1\n@say 我先看看\n@read {lib}\n@msg m2\n@say add 什么都不做，\n@say 见 src/lib.rs:1。\\nOFFER: {{\"title\":\"实现 add\",\"goal\":\"让 add 返回和\"}}\n@usage 10 5 100 0.25"
     );
-    let n = t.node(&exe);
-    let first = now_cmd("op_j", job("a_1", "claude-sonnet-5-5", "add 怎么工作？"));
+    let n = t.node();
+    let first = now_cmd("op_j", scripted("a_1", "claude-sonnet-5-5", &script));
     let r = n.start_job(first.clone()).await.unwrap();
     assert_eq!(r.state, Observed::Running);
     let c = t.end_of(&n, "op_j").await;
@@ -621,14 +604,10 @@ async fn a_research_job_answers_with_its_draft_tools_usage_and_report() {
     assert_eq!(report.end, JobEnd::Done);
     assert_eq!(report.files_read, vec!["src/lib.rs".to_string()]);
     assert_eq!(report.turns, 2);
-    // one process, the model given, the readable root as an extra directory, no resume
+    // one adapter, the model given, a new session (nothing loaded) in Steve's plan mode
     assert_eq!(t.spawns(), 1);
-    let args = &t.runs()[0];
-    let i = args.iter().position(|a| a == "--model").unwrap();
-    assert_eq!(args[i + 1], "claude-sonnet-5-5");
-    assert!(args.contains(&format!("--add-dir={}", t.root.join("work/docs").display())));
-    assert!(!args.contains(&"--resume".to_string()));
-    assert!(args.contains(&"--tools=Read,Grep,Glob".to_string()));
+    assert_eq!(t.read("config"), "model=claude-sonnet-5-5\n");
+    assert!(t.read("load").is_empty());
     let bodies = t.bodies();
     // the draft: a new message replaces the first one
     let started: Vec<&String> = bodies
@@ -638,17 +617,19 @@ async fn a_research_job_answers_with_its_draft_tools_usage_and_report() {
             _ => None,
         })
         .collect();
-    assert_eq!(started, ["a_1.m1", "a_1.m2"]);
+    assert_eq!(started.len(), 2);
     let second: String = bodies
         .iter()
         .filter_map(|b| match b {
-            EventBody::TextDelta { message, text, .. } if message == "a_1.m2" => Some(text.clone()),
+            EventBody::TextDelta { message, text, .. } if message == started[1] => {
+                Some(text.clone())
+            }
             _ => None,
         })
         .collect();
-    assert_eq!(second, "add 什么都不做，见 src/lib.rs:1。");
-    // the tool row, running then done
-    let phases: Vec<(ToolPhase, ToolCategory, Option<String>)> = bodies
+    assert_eq!(second, answer);
+    // the tool row, its last view done
+    let tools: Vec<(ToolPhase, ToolCategory, Option<String>)> = bodies
         .iter()
         .filter_map(|b| match b {
             EventBody::ToolChanged { tool } => {
@@ -658,21 +639,14 @@ async fn a_research_job_answers_with_its_draft_tools_usage_and_report() {
         })
         .collect();
     assert_eq!(
-        phases,
-        [
-            (
-                ToolPhase::Running,
-                ToolCategory::Read,
-                Some("src/lib.rs".into())
-            ),
-            (
-                ToolPhase::Succeeded,
-                ToolCategory::Read,
-                Some("src/lib.rs".into())
-            ),
-        ]
+        tools.last().unwrap(),
+        &(
+            ToolPhase::Succeeded,
+            ToolCategory::Read,
+            Some("src/lib.rs".into())
+        )
     );
-    // the tokens and dollars of the attempt, on its model
+    // the tokens the adapter reported for the turn, and its dollars
     let usage: Vec<&UsageReport> = bodies
         .iter()
         .filter_map(|b| match b {
@@ -680,18 +654,19 @@ async fn a_research_job_answers_with_its_draft_tools_usage_and_report() {
             _ => None,
         })
         .collect();
-    assert_eq!(usage.len(), 1);
-    assert_eq!(usage[0].model.as_deref(), Some("claude-sonnet-5-5"));
-    assert_eq!(usage[0].measurement, Measurement::Final);
+    let fin = usage
+        .iter()
+        .find(|u| u.measurement == Measurement::Final)
+        .unwrap();
     assert_eq!(
-        (
-            usage[0].tokens.input,
-            usage[0].tokens.output,
-            usage[0].tokens.cache_read
-        ),
+        (fin.tokens.input, fin.tokens.output, fin.tokens.cache_read),
         (Some(10), Some(5), Some(100))
     );
-    assert_eq!(usage[0].cost.as_ref().unwrap().decimal, "0.25");
+    assert!(
+        usage
+            .iter()
+            .any(|u| u.cost.as_ref().is_some_and(|c| c.decimal == "0.25"))
+    );
     // the job's scratch directory is gone
     let jobs = t.root.join("node/jobs");
     assert!(std::fs::read_dir(&jobs).map_or(true, |mut d| d.next().is_none()));
@@ -709,40 +684,28 @@ async fn a_research_job_answers_with_its_draft_tools_usage_and_report() {
 async fn a_write_is_a_violation_and_the_harness_dies_with_it() {
     let t = T::new();
     let survived = t.root.join("survived");
-    let exe = t.harness(
-        "claude.sh",
-        &format!(
-            "{}\nsleep 3\ntouch '{}'",
-            emit(&[
-                init(),
-                start("m1"),
-                text("我先看看"),
-                tool(
-                    "m1",
-                    "t1",
-                    "Write",
-                    json!({"file_path": "keep.txt", "content": "x"})
-                ),
-            ]),
-            survived.display()
-        ),
-    );
-    let n = t.node(&exe);
+    let n = t.node();
     let t0 = Instant::now();
-    n.start_job(now_cmd("op_j", job("a_1", "claude-sonnet-5-5", "q")))
+    let script = format!(
+        "q\n@msg m1\n@say 我先看看\n@asking edit keep.txt\n@sleep 3000\n@touch {}",
+        survived.display()
+    );
+    n.start_job(now_cmd("op_j", scripted("a_1", "m", &script)))
         .await
         .unwrap();
     let c = t.end_of(&n, "op_j").await;
     assert!(t0.elapsed() < Duration::from_secs(3), "killed promptly");
     assert_eq!(c.outcome, Outcome::Failed);
     assert_eq!(c.error.as_ref().unwrap().code, ErrorCode::Denied);
-    assert_eq!(
-        c.job.unwrap().end,
-        JobEnd::Violated {
-            rule: ViolationRule::Tool,
-            tool: "Write".into(),
-            target: None
-        }
+    assert!(
+        matches!(
+            c.job.unwrap().end,
+            JobEnd::Violated {
+                rule: ViolationRule::Tool,
+                ..
+            }
+        ),
+        "an edit is no read, whatever it is called"
     );
     // what it wrote before stays
     assert_eq!(
@@ -752,7 +715,7 @@ async fn a_write_is_a_violation_and_the_harness_dies_with_it() {
         }]
     );
     tokio::time::sleep(Duration::from_secs(4)).await;
-    assert!(!survived.exists(), "the harness's process group was killed");
+    assert!(!survived.exists(), "the adapter's process group was killed");
     assert_eq!(
         std::fs::read_to_string(t.root.join("work/proj/keep.txt")).unwrap(),
         "orig"
@@ -762,24 +725,12 @@ async fn a_write_is_a_violation_and_the_harness_dies_with_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn budgets_end_a_job_with_what_it_wrote() {
     let t = T::new();
-    let lib = t.root.join("work/proj/src/lib.rs").display().to_string();
-    let read = |id: &str| tool("m1", id, "Read", json!({"file_path": lib}));
-    let exe = t.harness(
-        "claude.sh",
-        &format!(
-            "{}\nsleep 30",
-            emit(&[
-                init(),
-                start("m1"),
-                text("读了一半"),
-                read("t1"),
-                tool_result("t1"),
-                read("t2")
-            ])
-        ),
+    let n = t.node();
+    let mut tools = scripted(
+        "a_tools",
+        "m",
+        "q\n@msg m1\n@say 读了一半\n@read src/lib.rs\n@read src/lib.rs\n@sleep 30000",
     );
-    let n = t.node(&exe);
-    let mut tools = job("a_tools", "claude-sonnet-5-5", "q");
     research(&mut tools).budget.max_tools = Some(1);
     n.start_job(now_cmd("op_tools", tools)).await.unwrap();
     let c = t.end_of(&n, "op_tools").await;
@@ -796,19 +747,14 @@ async fn budgets_end_a_job_with_what_it_wrote() {
         }]
     );
 
-    let exe = t.harness(
-        "turns.sh",
-        &format!(
-            "{}\nsleep 30",
-            emit(&[init(), start("m1"), text("一"), start("m2")])
-        ),
+    let mut turns = scripted(
+        "a_turns",
+        "m",
+        "q\n@msg m1\n@say 一\n@msg m2\n@say 二\n@sleep 30000",
     );
-    n.enable_research(t.research(&exe, None));
-    let n2 = n;
-    let mut turns = job("a_turns", "claude-sonnet-5-5", "q");
     research(&mut turns).budget.max_turns = Some(1);
-    n2.start_job(now_cmd("op_turns", turns)).await.unwrap();
-    let c = t.end_of(&n2, "op_turns").await;
+    n.start_job(now_cmd("op_turns", turns)).await.unwrap();
+    let c = t.end_of(&n, "op_turns").await;
     assert_eq!(
         c.job.unwrap().end,
         JobEnd::Budget {
@@ -817,11 +763,10 @@ async fn budgets_end_a_job_with_what_it_wrote() {
     );
 
     // silent for idle_ms: stuck
-    let mut idle = job("a_idle", "claude-sonnet-5-5", "q");
+    let mut idle = scripted("a_idle", "m", "q\n@msg m1\n@say 一\n@sleep 30000");
     research(&mut idle).budget.idle_ms = 300;
-    research(&mut idle).budget.max_turns = Some(5);
-    n2.start_job(now_cmd("op_idle", idle)).await.unwrap();
-    let c = t.end_of(&n2, "op_idle").await;
+    n.start_job(now_cmd("op_idle", idle)).await.unwrap();
+    let c = t.end_of(&n, "op_idle").await;
     assert_eq!(c.outcome, Outcome::TimedOut);
     assert_eq!(
         c.job.unwrap().end,
@@ -831,11 +776,10 @@ async fn budgets_end_a_job_with_what_it_wrote() {
     );
 
     // the job's deadline
-    let mut late = job("a_late", "claude-sonnet-5-5", "q");
-    research(&mut late).budget.max_turns = Some(5);
+    let mut late = scripted("a_late", "m", "q\n@msg m1\n@say 一\n@sleep 30000");
     late.run.limits.deadline = Timestamp(wall() + 700);
-    n2.start_job(now_cmd("op_late", late)).await.unwrap();
-    let c = t.end_of(&n2, "op_late").await;
+    n.start_job(now_cmd("op_late", late)).await.unwrap();
+    let c = t.end_of(&n, "op_late").await;
     assert_eq!(c.outcome, Outcome::TimedOut);
     assert_eq!(
         c.job.unwrap().end,
@@ -846,36 +790,33 @@ async fn budgets_end_a_job_with_what_it_wrote() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_follow_up_resumes_the_session_on_the_same_model() {
+async fn a_follow_up_continues_the_session_on_the_same_model() {
     let t = T::new();
-    let exe = t.harness(
-        "claude.sh",
-        &emit(&[init(), start("m1"), text("接着说"), result("接着说")]),
-    );
-    let n = t.node(&exe);
-    let mut spec = job("a_2", "claude-opus-5-5", "再细一点");
+    let n = t.node();
+    let mut spec = scripted("a_2", "claude-opus-5-5", "再细一点\n@msg m1\n@say 接着说");
     spec.run.continuation = Some(ResumeHandle::new("sess-0").unwrap());
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::Succeeded);
-    let args = &t.runs()[0];
-    let i = args.iter().position(|a| a == "--resume").unwrap();
-    assert_eq!(args[i + 1], "sess-0");
-    let m = args.iter().position(|a| a == "--model").unwrap();
-    assert_eq!(args[m + 1], "claude-opus-5-5");
-    assert_eq!(args[1], "再细一点");
+    // the session loaded, the model set, the follow-up alone as the prompt
+    assert_eq!(t.read("load"), "sess-0");
+    assert_eq!(t.read("config"), "model=claude-opus-5-5\n");
+    let prompt: serde_json::Value = serde_json::from_str(&t.read("prompt")).unwrap();
+    assert!(prompt[0]["text"].as_str().unwrap().starts_with("再细一点"));
     // the session to continue next time
-    assert_eq!(c.continuation, Some(ResumeHandle::new("sess-1").unwrap()));
+    assert_eq!(c.continuation, Some(ResumeHandle::new("sess-0").unwrap()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_model_only_a_failure_is_the_attempts_end() {
     let t = T::new();
-    let exe = t.harness("claude.sh", "echo 'overloaded' >&2\nexit 1");
-    let n = t.node(&exe);
-    n.start_job(now_cmd("op_j", job("a_1", "claude-sonnet-5-5", "q")))
-        .await
-        .unwrap();
+    let n = t.node();
+    n.start_job(now_cmd(
+        "op_j",
+        scripted("a_1", "m", "q\n@fail API Error: 503 overloaded"),
+    ))
+    .await
+    .unwrap();
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::Failed);
     assert_eq!(c.job.unwrap().end, JobEnd::Failed);
@@ -885,21 +826,14 @@ async fn one_model_only_a_failure_is_the_attempts_end() {
     assert_eq!(t.spawns(), 1);
 }
 
+/// An adapter that declares it keeps its own read-only sandbox (and cannot be nested in another)
+/// runs as it is; one that can be nested in neither is refused a required sandbox.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn codex_is_never_wrapped_in_sandbox_exec() {
+async fn an_adapter_with_a_sandbox_of_its_own_is_not_wrapped() {
     let t = T::new();
-    let lines = [
-        json!({"type": "item.completed", "item": {"id": "i0", "type": "agent_message", "text": "看过了"}}),
-        json!({"type": "turn.completed", "usage": {"input_tokens": 1000, "cached_input_tokens": 400, "output_tokens": 50}}),
-    ]
-    .map(|v| v.to_string());
-    let codex = t.harness("codex.sh", &emit(&lines));
-    let claude = t.harness("claude.sh", "exit 1");
-    let n = LocalNode::open(t.config(2)).unwrap();
-    n.connect(t.sink.clone(), None);
-    n.enable_research(t.research(&claude, Some(&codex)));
-    let mut spec = job("a_1", "gpt-6-luna", "q");
-    spec.run.choice.harness = "codex".into();
+    let n = t.node();
+    let mut spec = scripted("a_1", "m", "q\n@msg m1\n@say 看过了");
+    spec.run.choice.harness = "own-sandbox".into();
     spec.run.policy.sandbox = SandboxRequirement::AllowFallback {
         preferred: vec!["fs-readonly".into()],
         acceptable: vec![],
@@ -907,47 +841,27 @@ async fn codex_is_never_wrapped_in_sandbox_exec() {
     n.start_job(now_cmd("op_j", spec.clone())).await.unwrap();
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::Succeeded, "{c:?}");
-    assert!(!c.job.unwrap().sandboxed);
-    assert_eq!(c.continuation, None);
-    // codex itself ran, not sandbox-exec around it
-    assert_eq!(t.runs()[0][0], "exec");
-    let usage: Vec<UsageReport> = t
-        .bodies()
-        .into_iter()
-        .filter_map(|b| match b {
-            EventBody::Usage { report } => Some(report),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        (usage[0].tokens.input, usage[0].tokens.cache_read),
-        (Some(600), Some(400))
-    );
-    // required, it is refused before anything runs; nor does codex continue a session
+    assert!(c.job.unwrap().sandboxed, "its own sandbox");
+    assert_eq!(t.spawns(), 1, "started as it is: it could log");
+    // required: its own read-only sandbox is the guarantee
     spec.run.attempt = AttemptId::new("a_2").unwrap();
     spec.run.policy.sandbox = SandboxRequirement::Required {
         guarantees: vec!["fs-readonly".into()],
     };
-    let e = n
-        .start_job(now_cmd("op_j2", spec.clone()))
-        .await
-        .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
-    spec.run.policy.sandbox = SandboxRequirement::None;
-    spec.run.continuation = Some(ResumeHandle::new("th-1").unwrap());
+    n.start_job(now_cmd("op_j2", spec.clone())).await.unwrap();
+    assert_eq!(t.end_of(&n, "op_j2").await.outcome, Outcome::Succeeded);
+    // nothing of its own and no nesting: refused before anything runs
+    spec.run.attempt = AttemptId::new("a_3").unwrap();
+    spec.run.choice.harness = "no-nesting".into();
     let e = n.start_job(now_cmd("op_j3", spec)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, ErrorCode::Unsupported);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_preferred_sandbox_is_used_where_this_machine_has_one() {
     let t = T::new();
-    let exe = t.harness(
-        "claude.sh",
-        &emit(&[init(), start("m1"), text("好"), result("好")]),
-    );
-    let n = t.node(&exe);
-    let mut spec = job("a_1", "claude-sonnet-5-5", "q");
+    let n = t.node();
+    let mut spec = scripted("a_1", "m", "q\n@msg m1\n@say 好");
     spec.run.policy.sandbox = SandboxRequirement::AllowFallback {
         preferred: vec!["fs-readonly".into()],
         acceptable: vec![],
@@ -968,20 +882,14 @@ async fn attachments_are_readable_and_secrets_are_not() {
     let notes = files.artifact("f_1", "text/plain", b"hello notes");
     let png = files.artifact("f_2", "image/png", b"\x89PNG");
     let seen = t.root.join("seen.txt");
-    // the harness reads the copy it was told about (the run's files directory)
-    let exe = t.harness(
-        "claude.sh",
-        &format!(
-            "cat '{}'/*/notes.txt > '{}'\n{}",
-            t.root.join("files").display(),
-            seen.display(),
-            emit(&[init(), start("m1"), text("看了"), result("看了")])
-        ),
+    let n = t.scripted_node(2, files.clone());
+    // the adapter reads the copy it was told about (the run's files directory)
+    let script = format!(
+        "附件说了什么？\n@cat {} {}\n@msg m1\n@say 看了",
+        t.root.join("files").display(),
+        seen.display()
     );
-    let n = LocalNode::open(t.config(2)).unwrap();
-    n.connect(t.sink.clone(), Some(files.clone()));
-    n.enable_research(t.research(&exe, None));
-    let mut spec = job("a_1", "claude-sonnet-5-5", "附件说了什么？");
+    let mut spec = scripted("a_1", "m", &script);
     spec.run.prompt.push(Part::File {
         artifact: notes,
         name: ".steve/attachments/notes.txt".into(),
@@ -991,41 +899,33 @@ async fn attachments_are_readable_and_secrets_are_not() {
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::Succeeded, "{c:?}");
     assert_eq!(std::fs::read_to_string(&seen).unwrap(), "hello notes");
-    // the image goes inline: the prompt is a stream-json message on stdin
-    let args = &t.runs()[0];
-    assert!(
-        args.windows(2)
-            .any(|w| w == ["--input-format", "stream-json"])
-    );
+    // the image goes inline, as an ACP image block
+    let prompt: serde_json::Value = serde_json::from_str(&t.read("prompt")).unwrap();
+    assert_eq!(prompt[1]["type"], "image");
+    assert_eq!(prompt[1]["mimeType"], "image/png");
     // the copies are gone with the job
     until("files removed", || {
         std::fs::read_dir(t.root.join("files")).map_or(true, |mut d| d.next().is_none())
     })
     .await;
 
-    let exe = t.harness(
-        "secret.sh",
-        &format!(
-            "{}\nsleep 5",
-            emit(&[
-                init(),
-                start("m1"),
-                tool("m1", "t1", "Read", json!({"file_path": "~/.ssh/id_rsa"}))
-            ])
-        ),
-    );
-    n.enable_research(t.research(&exe, None));
-    n.start_job(now_cmd("op_s", job("a_2", "claude-sonnet-5-5", "q")))
-        .await
-        .unwrap();
+    n.start_job(now_cmd(
+        "op_s",
+        scripted("a_2", "m", "q\n@asking read ~/.ssh/id_rsa\n@sleep 5000"),
+    ))
+    .await
+    .unwrap();
     let c = t.end_of(&n, "op_s").await;
-    assert_eq!(
-        c.job.unwrap().end,
-        JobEnd::Violated {
-            rule: ViolationRule::Sensitive,
-            tool: "Read".into(),
-            target: Some("~/.ssh/id_rsa".into())
-        }
+    assert!(
+        matches!(
+            c.job.unwrap().end,
+            JobEnd::Violated {
+                rule: ViolationRule::Sensitive,
+                target: Some(ref p),
+                ..
+            } if p == "~/.ssh/id_rsa"
+        ),
+        "a secret is not read"
     );
 }
 
@@ -1092,30 +992,26 @@ async fn mcp(url: &str, token: &str, body: serde_json::Value) -> (u16, serde_jso
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
     let t = T::new();
-    let copy = t.root.join("mcp-copy.json");
-    let pid = t.root.join("pid");
-    // keeps its MCP config, then writes a little and waits (with a child) until it is stopped
-    let exe = t.harness(
-        "claude.sh",
-        &format!(
-            "for a in \"$@\"; do case \"$a\" in --mcp-config=*) cp \"${{a#--mcp-config=}}\" '{copy}';; esac; done\n{}\nsleep 30 &\necho $! > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nwait",
-            emit(&[init(), start("m1"), text("我先看看")]),
-            copy = copy.display(),
-            pid = pid.display(),
-        ),
-    );
-    let n = t.node(&exe);
+    let n = t.node();
     let tools = Arc::new(Tools::default());
     n.connect_tools(tools.clone()).await.unwrap();
-    let mut spec = job("a_1", "claude-sonnet-5-5", "q");
+    // keeps the MCP servers it was given, writes a little and waits (with a child) until stopped
+    let mut spec = scripted("a_1", "m", "q\n@mcp\n@msg m1\n@say 我先看看\n@child\n@wait");
     research(&mut spec).steve_tools = true;
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
-    until("the harness waits", || pid.exists() && copy.exists()).await;
-    let cfg: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&copy).unwrap()).unwrap();
-    let server = &cfg["mcpServers"]["steve"];
+    until("the adapter waits", || {
+        !t.read("pid").is_empty() && !t.read("mcp").is_empty()
+    })
+    .await;
+    // Steve's /mcp over http, with the job's own token
+    let servers: serde_json::Value = serde_json::from_str(&t.read("mcp")).unwrap();
+    let server = &servers[0];
+    assert_eq!(
+        (&server["type"], &server["name"]),
+        (&json!("http"), &json!("steve"))
+    );
     let url = server["url"].as_str().unwrap().to_string();
-    let token = server["headers"]["Authorization"]
+    let token = server["headers"][0]["value"]
         .as_str()
         .unwrap()
         .strip_prefix("Bearer ")
@@ -1158,11 +1054,7 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
             .any(|b| matches!(b, EventBody::TextDelta { .. }))
     })
     .await;
-    let child: i32 = std::fs::read_to_string(&pid)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let child = pid_of(&t.log("pid"));
     assert!(alive(child));
     n.cancel(now_cmd(
         "op_c",
@@ -1183,7 +1075,7 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
             text: "我先看看".into()
         }]
     );
-    until("the harness's child is gone", || !alive(child)).await;
+    until("the adapter's child is gone", || !alive(child)).await;
     // the job's token went with it
     let (s, _) = mcp(
         &url,
@@ -1206,17 +1098,14 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Unsupported);
     let t = T::new();
-    let exe = t.harness("claude.sh", "exit 0");
-    let n = LocalNode::open(t.config(0)).unwrap();
-    n.enable_research(t.research(&exe, None));
+    let n = t.scripted_node(0, Arc::new(Files::default()));
     let e = n
         .start_job(now_cmd("op_0", job("a_0", "m", "q")))
         .await
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Unsupported);
     let t = T::new();
-    let exe = t.harness("claude.sh", "exit 0");
-    let n = t.node(&exe);
+    let n = t.node();
     let refused = |f: fn(&mut JobSpec)| {
         let mut s = job("a_x", "m", "q");
         f(&mut s);
@@ -1256,7 +1145,6 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
             refused(|s| s.run.choice.harness = "gemini".into()),
             ErrorCode::Unsupported,
         ),
-        (refused(|s| s.run.choice.model = None), ErrorCode::Invalid),
         (
             refused(|s| s.run.limits.max_tokens = Some(10)),
             ErrorCode::Unsupported,
@@ -1283,25 +1171,15 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_stops_a_running_job_and_says_so() {
     let t = T::new();
-    let pid = t.root.join("pid");
-    let exe = t.harness(
-        "claude.sh",
-        &format!(
-            "{}\nsleep 30 &\necho $! > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nwait",
-            emit(&[init(), start("m1"), text("写到一半")]),
-            pid = pid.display(),
-        ),
-    );
-    let n = t.node(&exe);
-    n.start_job(now_cmd("op_j", job("a_1", "claude-sonnet-5-5", "q")))
-        .await
-        .unwrap();
-    until("the harness waits", || pid.exists()).await;
-    let child: i32 = std::fs::read_to_string(&pid)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let n = t.node();
+    n.start_job(now_cmd(
+        "op_j",
+        scripted("a_1", "m", "q\n@msg m1\n@say 写到一半\n@child\n@wait"),
+    ))
+    .await
+    .unwrap();
+    until("the adapter waits", || !t.read("pid").is_empty()).await;
+    let child = pid_of(&t.log("pid"));
     n.shutdown().await;
     // its processes are gone, so it is over (not unknown): interrupted by this Node
     assert!(!alive(child));
@@ -1348,24 +1226,13 @@ async fn finished(n: &LocalNode, op: &str) -> Completion {
     }
 }
 
-/// A harness that writes a little, then (while `hold` exists) waits with a child whose pid goes
-/// to `pid`, then answers. Publish the PID atomically: cancellation may interrupt a redirect
-/// after it creates the file but before `echo` writes, leaving an empty file forever.
-fn holding(t: &T) -> (PathBuf, PathBuf, PathBuf) {
-    let (hold, pid) = (t.root.join("hold"), t.root.join("pid"));
-    // Cancellation may land between shell redirection and echo; publish only a complete pid.
-    let exe = t.harness(
-        "claude.sh",
-        &format!(
-            "{}\nif [ -e '{hold}' ]; then sleep 30 & echo $! > '{pid}.tmp'; mv '{pid}.tmp' '{pid}'; wait; fi\n{}",
-            emit(&[init(), start("m1"), text("写到一半")]),
-            emit(&[result("好")]),
-            hold = hold.display(),
-            pid = pid.display(),
-        ),
-    );
-    std::fs::write(&hold, "").unwrap();
-    (exe, hold, pid)
+/// A job that writes a little, then (while `<log>.hold` exists) waits with a child whose pid goes
+/// to `<log>.pid`, then answers.
+const HOLDING: &str = "q\n@msg m1\n@say 写到一半\n@hold\n@msg m2\n@say 好";
+
+fn holding(t: &T, attempt: &str) -> JobSpec {
+    std::fs::write(t.log("hold"), "").unwrap();
+    scripted(attempt, "m", HOLDING)
 }
 
 fn pid_of(path: &Path) -> i32 {
@@ -1383,11 +1250,11 @@ async fn child_research_node() {
         return;
     };
     let t = T::at(Path::new(&root));
-    let n = t.node_with(&t.root.join("claude.sh"), 1, Arc::new(Files::default()));
-    n.start_job(now_cmd("op_j", job("a_1", "claude-sonnet-5-5", "q")))
+    let n = t.scripted_node(1, Arc::new(Files::default()));
+    n.start_job(now_cmd("op_j", holding(&t, "a_1")))
         .await
         .unwrap();
-    until("the harness waits", || t.root.join("pid").exists()).await;
+    until("the adapter waits", || !t.read("pid").is_empty()).await;
     std::fs::write(t.root.join("ready"), "").unwrap();
     tokio::time::sleep(Duration::from_secs(120)).await;
 }
@@ -1395,7 +1262,7 @@ async fn child_research_node() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
     let t = T::new();
-    let (exe, hold, pid) = holding(&t);
+    t.write_adapter();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_research_node", "--nocapture"])
         .env("STEVE_RESEARCH_CHILD_ROOT", &t.root)
@@ -1409,8 +1276,8 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
     .await;
     child.kill().unwrap();
     child.wait().unwrap();
-    // the harness's group outlived the Node that ran it
-    let harness_child = pid_of(&pid);
+    // the adapter's group outlived the Node that ran it
+    let harness_child = pid_of(&t.log("pid"));
     struct Cleanup(i32);
     impl Drop for Cleanup {
         fn drop(&mut self) {
@@ -1421,8 +1288,8 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
     }
     let _cleanup = Cleanup(harness_child);
     assert!(alive(harness_child));
-    std::fs::remove_file(&hold).unwrap();
-    let n = t.node_with(&exe, 1, Arc::new(Files::default()));
+    std::fs::remove_file(t.log("hold")).unwrap();
+    let n = t.scripted_node(1, Arc::new(Files::default()));
     let r = n
         .operation(OperationId::new("op_j").unwrap())
         .await
@@ -1430,7 +1297,7 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
     assert_eq!(r.state.tag(), StateTag::Unknown);
     // the unknown job holds the one slot
     let e = n
-        .start_job(now_cmd("op_k", job("a_2", "claude-sonnet-5-5", "q")))
+        .start_job(now_cmd("op_k", scripted("a_2", "m", HOLDING)))
         .await
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Exhausted);
@@ -1475,7 +1342,7 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
     assert_eq!(c.stop_reason, "abandoned");
     assert_eq!(c.job.unwrap().end, JobEnd::Stopped);
     // the slot is free: the next job runs
-    n.start_job(now_cmd("op_k2", job("a_3", "claude-sonnet-5-5", "q")))
+    n.start_job(now_cmd("op_k2", scripted("a_3", "m", HOLDING)))
         .await
         .unwrap();
     let c = t.end_of(&n, "op_k2").await;
@@ -1486,11 +1353,10 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_job_stops_when_the_hub_is_unreachable_past_its_lease() {
     let t = T::new();
-    let (exe, _hold, pid) = holding(&t);
     // never connected: the Hub is unreachable from the start
-    let n = LocalNode::open(t.config(1)).unwrap();
-    n.enable_research(t.research(&exe, None));
-    let mut spec = job("a_1", "claude-sonnet-5-5", "q");
+    let n = LocalNode::open(t.scripted_config(1)).unwrap();
+    n.enable_research(t.research());
+    let mut spec = holding(&t, "a_1");
     spec.run.limits.offline_until = Timestamp(wall() + 1_500);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
     let c = finished(&n, "op_j").await;
@@ -1498,36 +1364,31 @@ async fn a_job_stops_when_the_hub_is_unreachable_past_its_lease() {
     assert_eq!(c.stop_reason, "offline");
     assert_eq!(c.error.unwrap().code, ErrorCode::Offline);
     assert!(c.job.unwrap().end.fits(Outcome::TimedOut));
-    assert!(!alive(pid_of(&pid)));
+    assert!(!alive(pid_of(&t.log("pid"))));
     n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_job_stops_at_its_output_cap() {
     let t = T::new();
-    let pid = t.root.join("pid");
-    // Publish the child before producing the output that triggers cancellation, so this test
-    // must verify cleanup of a known child rather than treating an unpublished PID as success.
-    let exe = t.harness(
-        "claude.sh",
-        &format!(
-            "sleep 30 &\necho $! > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\n{}\nwait",
-            emit(&[init(), start("m1"), text("写到一半")]),
-            pid = pid.display(),
-        ),
+    let n = t.node();
+    // the child is known before the output that ends the job, so its cleanup is what is checked
+    let long = "写到一半".repeat(300);
+    let mut spec = scripted(
+        "a_1",
+        "m",
+        &format!("q\n@child\n@msg m1\n@say {long}\n@wait"),
     );
-    let n = t.node(&exe);
-    let mut spec = job("a_1", "claude-sonnet-5-5", "q");
-    // "写到一半" is 12 bytes
-    spec.run.limits.max_output_bytes = 8;
+    // the handshake fits, the draft (3600 bytes) does not
+    spec.run.limits.max_output_bytes = 2_000;
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::Cancelled, "{c:?}");
     assert_eq!(c.stop_reason, "max_output");
     assert_eq!(c.error.unwrap().code, ErrorCode::Exhausted);
     assert_eq!(c.job.unwrap().end, JobEnd::Stopped);
-    let child = pid_of(&pid);
-    until("the harness's child is gone", || !alive(child)).await;
+    let child = pid_of(&t.log("pid"));
+    until("the adapter's child is gone", || !alive(child)).await;
     n.shutdown().await;
 }
 
@@ -1563,11 +1424,11 @@ impl HubFiles for Slow {
     }
 }
 
-/// A job whose prompt has one file the Hub serves after `delay`.
-fn with_file(delay: Duration) -> (Arc<Slow>, JobSpec) {
+/// A holding job whose prompt has one file the Hub serves after `delay`.
+fn with_file(t: &T, delay: Duration) -> (Arc<Slow>, JobSpec) {
     let files = Slow(delay, Files::default());
     let a = files.1.artifact("art_1", "text/plain", b"notes");
-    let mut spec = job("a_1", "claude-sonnet-5-5", "q");
+    let mut spec = holding(t, "a_1");
     spec.run.prompt.push(Part::File {
         artifact: a,
         name: ".steve/attachments/notes.txt".into(),
@@ -1578,11 +1439,10 @@ fn with_file(delay: Duration) -> (Arc<Slow>, JobSpec) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stalled_attachment_fetch_yields_to_cancel_shutdown_and_deadline() {
     let hang = Duration::from_secs(3600);
-    // a cancel during the fetch ends it at once, before any harness
+    // a cancel during the fetch ends it at once, before any adapter
     let t = T::new();
-    let (exe, _hold, _pid) = holding(&t);
-    let (files, spec) = with_file(hang);
-    let n = t.node_with(&exe, 1, files);
+    let (files, spec) = with_file(&t, hang);
+    let n = t.scripted_node(1, files);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
     n.cancel(now_cmd(
         "op_c",
@@ -1601,9 +1461,8 @@ async fn a_stalled_attachment_fetch_yields_to_cancel_shutdown_and_deadline() {
 
     // a shutdown does not wait for the Hub
     let t = T::new();
-    let (exe, _hold, _pid) = holding(&t);
-    let (files, spec) = with_file(hang);
-    let n = t.node_with(&exe, 1, files);
+    let (files, spec) = with_file(&t, hang);
+    let n = t.scripted_node(1, files);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     tokio::time::timeout(Duration::from_secs(5), n.shutdown())
@@ -1616,10 +1475,9 @@ async fn a_stalled_attachment_fetch_yields_to_cancel_shutdown_and_deadline() {
 
     // the deadline holds during the fetch
     let t = T::new();
-    let (exe, _hold, _pid) = holding(&t);
-    let (files, mut spec) = with_file(hang);
+    let (files, mut spec) = with_file(&t, hang);
     spec.run.limits.deadline = Timestamp(wall() + 800);
-    let n = t.node_with(&exe, 1, files);
+    let n = t.scripted_node(1, files);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
@@ -1636,11 +1494,10 @@ async fn a_stalled_attachment_fetch_yields_to_cancel_shutdown_and_deadline() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_slow_fetch_does_not_move_the_jobs_deadline() {
     let t = T::new();
-    let (exe, _hold, pid) = holding(&t);
-    let (files, mut spec) = with_file(Duration::from_millis(1_500));
+    let (files, mut spec) = with_file(&t, Duration::from_millis(1_500));
     let deadline = wall() + 3_000;
     spec.run.limits.deadline = Timestamp(deadline);
-    let n = t.node_with(&exe, 1, files);
+    let n = t.scripted_node(1, files);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
     let c = t.end_of(&n, "op_j").await;
     let late = wall() - deadline;
@@ -1648,6 +1505,6 @@ async fn a_slow_fetch_does_not_move_the_jobs_deadline() {
     assert_eq!(t.spawns(), 1);
     // ended at the job's deadline, not the fetch's time past it
     assert!(late < 1_000, "{late} ms past the deadline");
-    assert!(!alive(pid_of(&pid)));
+    assert!(!alive(pid_of(&t.log("pid"))));
     n.shutdown().await;
 }

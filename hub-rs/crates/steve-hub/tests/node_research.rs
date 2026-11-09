@@ -1,8 +1,8 @@
-//! Inline research as jobs on the local Node (N0d-9, `STEVE_NODE_JOBS=research`): the same run
-//! through both executors with one stand-in harness gives the same outcome, drafts, tool rows,
-//! statistics row and audit; a follow-up continues the session; admission, the stop button and
-//! shutdown behave as in process; Steve's research tools answer a research job only, and only
-//! while its run is running.
+//! Inline research as jobs on the local Node (N0d-9): a run's attempts as research jobs on a
+//! scripted ACP adapter (`steve-node`'s research-script.mjs, no model): the outcome, drafts, tool
+//! rows, statistics row and audit; a follow-up continues the session; admission, the stop button
+//! and shutdown; Steve's research tools answer a research job only, and only while its run is
+//! running; and nothing runs without the Node or outside its roots.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -12,9 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use steve_core::thread::{
-    ResearchOutcome, ResearchRequest, ResearchSink, Researcher, ResumeFrom, RunEnd, ToolSeen,
-};
+use steve_core::thread::{ResearchRequest, ResearchSink, Researcher, ResumeFrom, RunEnd, ToolSeen};
 use steve_hub::wire::node_files::NodeFiles;
 use steve_hub::wire::node_runtime::{NodeDomain, NodeRuntime, Sink};
 use steve_hub::wire::node_tools::{NodeTools, Service};
@@ -22,50 +20,8 @@ use steve_hub::wire::research::{NodeResearch, ResearchAdapter};
 use steve_node_api::*;
 use steve_store::{FnPublisher, Store, StoreError};
 
-/// The stand-in `claude -p` for research. argv to `<log>.args`, one line per process to
-/// `<log>.spawns`. `--model m-busy` fails at once; `@hang` writes a draft, its pid to `<log>.pid`
-/// and waits; `@bash` asks for a shell (a violation); a `--resume` answers the follow-up;
-/// otherwise it reads a file and answers with an offer.
-const CLAUDE: &str = r#"#!/bin/sh
-log="@@LOG@@"
-echo "$$" >> "$log.spawns"
-printf '%s\n' "$@" > "$log.args"
-model=""; prev=""
-for a in "$@"; do if [ "$prev" = "--model" ]; then model="$a"; fi; prev="$a"; done
-emit() { sed "s/@@MODEL@@/$model/g"; }
-echo '{"type":"system","subtype":"init","session_id":"sess-1","model":"'"$model"'"}'
-if [ "$model" = "m-busy" ]; then
-  echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"API Error: 503 overloaded","session_id":"sess-1"}'
-  exit 1
-fi
-case "$*" in
-*@hang*)
-  echo '{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}'
-  echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"写到一半"}}}'
-  echo "$$" > "$log.pid"
-  sleep 60 & wait
-  exit 0;;
-*@bash*)
-  echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"touch x"}}]}}'
-  sleep 5
-  exit 0;;
-*--resume*)
-  emit <<'EOF'
-{"type":"stream_event","event":{"type":"message_start","message":{"id":"m3"}}}
-{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"接着说。"}}}
-{"type":"result","subtype":"success","is_error":false,"result":"接着说。","session_id":"sess-1","total_cost_usd":0.5,"modelUsage":{"@@MODEL@@":{"inputTokens":7,"outputTokens":1,"costUSD":0.5}}}
-EOF
-  exit 0;;
-esac
-emit <<'EOF'
-{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}
-{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"@@LIB@@"}}]}}
-{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"1\tfn add() {}"}]}}
-{"type":"stream_event","event":{"type":"message_start","message":{"id":"m2"}}}
-{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"add 什么都不做。"}}}
-{"type":"result","subtype":"success","is_error":false,"result":"add 什么都不做。\nOFFER: {\"title\":\"实现 add\",\"goal\":\"让 add 返回和\"}","session_id":"sess-1","total_cost_usd":0.25,"modelUsage":{"@@MODEL@@":{"inputTokens":3,"outputTokens":2,"cacheReadInputTokens":5,"costUSD":0.25}}}
-EOF
-"#;
+/// The offer line of the scripted answers.
+const OFFER: &str = "OFFER: {\"title\":\"实现 add\",\"goal\":\"让 add 返回和\"}";
 
 struct NoDomain;
 impl NodeDomain for NoDomain {
@@ -165,13 +121,13 @@ fn rows(store: &Store) -> Vec<Value> {
         .unwrap()
 }
 
-/// The shared files: the project and the stand-in harness.
+/// The shared files: the project and the scripted adapter.
 struct World {
     _dir: tempfile::TempDir,
     root: PathBuf,
     proj: PathBuf,
     log: PathBuf,
-    claude: PathBuf,
+    adapter: PathBuf,
 }
 
 impl World {
@@ -183,22 +139,26 @@ impl World {
         std::fs::write(proj.join("src/lib.rs"), "fn add() {}\n").unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
         let log = root.join("fake");
-        let claude = root.join("claude");
+        let adapter = root.join("adapter.sh");
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../steve-node/tests/research-script.mjs");
         std::fs::write(
-            &claude,
-            CLAUDE
-                .replace("@@LOG@@", &log.display().to_string())
-                .replace("@@LIB@@", &proj.join("src/lib.rs").display().to_string()),
+            &adapter,
+            format!(
+                "#!/bin/sh\nexport FAKE_RESEARCH_LOG='{}'\nexec node '{}'\n",
+                log.display(),
+                script.display()
+            ),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
         World {
             _dir: dir,
             root,
             proj,
             log,
-            claude,
+            adapter,
         }
     }
 
@@ -211,25 +171,40 @@ impl World {
     }
 
     fn reset(&self) {
-        for what in ["spawns", "args", "pid"] {
+        for what in ["spawns", "config", "prompt", "pid", "load", "new"] {
             let _ = std::fs::remove_file(format!("{}.{what}", self.log.display()));
         }
     }
 
-    /// The value after `flag` in the last run's argv.
-    fn flag(&self, f: &str) -> Option<String> {
-        let args = self.read("args");
-        let l: Vec<&str> = args.lines().collect();
-        l.iter().position(|x| *x == f).map(|i| l[i + 1].to_string())
+    /// The text of the last prompt.
+    fn prompt(&self) -> String {
+        let v: Value = serde_json::from_str(&self.read("prompt")).unwrap_or(Value::Null);
+        v[0]["text"].as_str().unwrap_or_default().to_string()
     }
 
     async fn pid(&self) -> i32 {
-        until("the harness's pid", || !self.read("pid").trim().is_empty()).await;
+        until("the adapter's child", || {
+            !self.read("pid").trim().is_empty()
+        })
+        .await;
         self.read("pid").trim().parse().unwrap()
+    }
+
+    /// The question that answers with a read of the project and an offer, its usage reported.
+    fn answering(&self, question: &str) -> String {
+        format!(
+            "{question}\n@msg m1\n@say 我先看看\n@read {}\n@msg m2\n@say add 什么都不做。\\n{OFFER}\n@usage 3 2 5 0.25",
+            self.proj.join("src/lib.rs").display()
+        )
     }
 }
 
-/// One Hub (its own store) with research in process or on its local Node.
+/// A question whose run writes a little and then waits (with a child) until it is stopped.
+fn hanging(question: &str) -> String {
+    format!("{question}\n@msg m1\n@say 写到一半\n@child\n@wait")
+}
+
+/// One Hub (its own store) with research on its local Node, or with no Node at all.
 struct Hub {
     store: Store,
     adapter: Arc<ResearchAdapter>,
@@ -248,10 +223,9 @@ impl Hub {
         std::fs::create_dir_all(&data).unwrap();
         let store = Store::open(base.join("steve.sqlite3"), FnPublisher(|_| {})).unwrap();
         store.ensure_workspace().unwrap();
-        let mut cfg = steve_research::ResearchConfig::new(&w.claude, base.join("scratch"));
+        let mut cfg = steve_research::ResearchConfig::new(base.join("scratch"));
         cfg.models = vec!["m1".into()];
         cfg.home = w.root.join("home");
-        cfg.claude_dir = w.root.join("claude");
         cfg.files_root = base.join("files");
         cfg.sandbox = steve_research::SandboxMode::Off;
         cfg.max_global = max_global;
@@ -276,14 +250,20 @@ impl Hub {
             display: "proj".into(),
             access: RootAccess::ReadWrite,
         }];
+        // the scripted adapter as Steve's default one (research follows Steve's harness)
+        let id = steve_acp::adapters::DEFAULT_ADAPTER.0.to_string();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
                 ceiling: steve_node::PolicyCeiling::unlimited(),
                 node: NodeId::new("local").unwrap(),
                 home: base.join("node"),
                 acp: steve_acp::AcpConfig {
-                    declared: Default::default(),
-                    adapters: HashMap::new(),
+                    declared: HashMap::from([(
+                        id.clone(),
+                        serde_json::from_value(json!({"properties": {"nested_sandbox": false}}))
+                            .unwrap(),
+                    )]),
+                    adapters: HashMap::from([(id, w.adapter.clone())]),
                     node: "node".into(),
                     claude_executable: "claude".into(),
                     steve_home: base.join("steve"),
@@ -442,14 +422,6 @@ fn request(w: &World, run: &str, ws: &str, question: &str) -> ResearchRequest {
     }
 }
 
-/// What the thread keeps of an outcome (the time to the first text is the run's own).
-fn kept(o: &ResearchOutcome) -> ResearchOutcome {
-    ResearchOutcome {
-        first_text_ms: None,
-        ..o.clone()
-    }
-}
-
 fn tool_rows(s: &Seen) -> Vec<(String, String, bool, Option<String>)> {
     s.tools
         .lock()
@@ -459,54 +431,48 @@ fn tool_rows(s: &Seen) -> Vec<(String, String, bool, Option<String>)> {
         .collect()
 }
 
-/// The same question through both executors: the same outcome (answer without its offer line,
-/// the offer, end, model, session, turns), drafts, tool rows and statistics row. A busy model falls
-/// back to the next one alike, and a follow-up continues the session with its model on both. On
-/// the Node each attempt is one research job of its thread run.
+/// A question on the Node: the outcome (answer without its offer line, the offer, end, model,
+/// session, turns), drafts, tool rows and statistics row. A busy model falls back to the next one,
+/// and a follow-up continues the session with its model. Each attempt is one research job of its
+/// thread run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_run_on_the_node_matches_the_run_in_process() {
+async fn a_run_on_the_node_answers_falls_back_and_continues() {
     let w = World::new();
-    let legacy = Hub::new(&w, "legacy", false, 3).await;
     let node = Hub::new(&w, "node", true, 3).await;
-    let mut outs = vec![];
-    for h in [&legacy, &node] {
-        w.reset();
-        let seen = Seen::default();
-        let out = h
-            .adapter
-            .research(request(&w, "tr_1", "default", "add 怎么工作？"), &seen)
-            .await;
-        assert_eq!(out.end, RunEnd::Done, "{out:?}");
-        assert_eq!(w.spawns(), 1);
-        assert_eq!(w.flag("--model").as_deref(), Some("m1"));
-        assert!(w.read("args").contains("add 怎么工作？"));
-        assert!(w.read("args").contains("说重点。"));
-        assert!(out.first_text_ms.is_some());
-        outs.push((
-            kept(&out),
-            seen.text.lock().unwrap().last().cloned(),
-            tool_rows(&seen),
-        ));
-    }
-    assert_eq!(outs[0], outs[1]);
-    let (out, draft, tools) = &outs[0];
+    let seen = Seen::default();
+    let out = node
+        .adapter
+        .research(
+            request(&w, "tr_1", "default", &w.answering("add 怎么工作？")),
+            &seen,
+        )
+        .await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    assert_eq!(w.spawns(), 1);
+    assert_eq!(w.read("config"), "model=m1\n");
+    assert!(w.prompt().contains("add 怎么工作？"));
+    assert!(w.prompt().contains("说重点。"));
+    assert!(out.first_text_ms.is_some());
     assert_eq!(out.text, "add 什么都不做。");
     assert_eq!(out.offer.as_ref().unwrap().title, "实现 add");
-    assert_eq!(out.claude_session.as_deref(), Some("sess-1"));
+    assert_eq!(out.session.as_deref(), Some("sess-1"));
     assert_eq!(out.model.as_deref(), Some("m1"));
     assert_eq!(out.turns, 2);
-    assert_eq!(draft.as_deref(), Some("add 什么都不做。"));
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].0, "Read");
+    assert_eq!(
+        seen.text.lock().unwrap().last().map(String::as_str),
+        Some(format!("add 什么都不做。\n{OFFER}").as_str())
+    );
+    let tools = tool_rows(&seen);
+    assert_eq!(tools.len(), 1, "{tools:?}");
     assert!(tools[0].2);
-    let booked = rows(&legacy.store);
+    let booked = rows(&node.store);
     assert_eq!(booked.len(), 1);
-    assert_eq!(booked, rows(&node.store));
     assert_eq!(booked[0][1], "research");
+    assert_eq!(booked[0][2], "claude-code");
     assert_eq!(booked[0][3], "m1");
     assert_eq!(booked[0][4], 3);
     assert_eq!(booked[0][9], 0.25);
-    // the Node ran it as one research job of the thread run, finished
+    // one research job of the thread run, finished
     assert_eq!(
         q::<String>(
             &node.store,
@@ -514,30 +480,25 @@ async fn a_run_on_the_node_matches_the_run_in_process() {
         ),
         "research research tr_1 finished"
     );
-    assert_eq!(
-        q::<i64>(&legacy.store, "SELECT COUNT(*) FROM runtime_jobs"),
-        0
-    );
 
-    // a busy first model: the next one answers, on both
-    let mut outs = vec![];
-    for h in [&legacy, &node] {
-        w.reset();
-        let mut r = request(&w, "tr_2", "default", "add 怎么工作？");
-        r.models = steve_core::models::Choice {
-            harness: "claude-code".into(),
-            models: vec!["m-busy".into(), "m2".into()],
-            effort: Some("max".into()),
-        };
-        let out = h.adapter.research(r, &Seen::default()).await;
-        assert_eq!(out.end, RunEnd::Done, "{out:?}");
-        assert_eq!(w.spawns(), 2);
-        assert_eq!(w.flag("--effort").as_deref(), Some("max"));
-        outs.push(kept(&out));
-    }
-    assert_eq!(outs[0], outs[1]);
-    assert_eq!(outs[0].model.as_deref(), Some("m2"));
-    assert_eq!(rows(&legacy.store), rows(&node.store));
+    // a busy first model: the next one answers
+    w.reset();
+    let mut r = request(
+        &w,
+        "tr_2",
+        "default",
+        &w.answering("add 怎么工作？\n@failon m-busy API Error: 503 overloaded"),
+    );
+    r.models = steve_core::models::Choice {
+        harness: "claude-code".into(),
+        models: vec!["m-busy".into(), "m2".into()],
+        effort: Some("max".into()),
+    };
+    let out = node.adapter.research(r, &Seen::default()).await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    assert_eq!(w.spawns(), 2);
+    assert!(w.read("config").contains("effort=max"));
+    assert_eq!(out.model.as_deref(), Some("m2"));
     assert_eq!(
         q::<i64>(
             &node.store,
@@ -547,93 +508,73 @@ async fn a_run_on_the_node_matches_the_run_in_process() {
     );
 
     // a follow-up continues the session with the model that answered
-    let mut outs = vec![];
-    for h in [&legacy, &node] {
-        w.reset();
-        let mut r = request(&w, "tr_3", "default", "然后呢？");
-        r.resume = Some(ResumeFrom {
-            run: "tr_2".into(),
-            claude_session: "sess-1".into(),
-            model: "m2".into(),
-            prior_answer: "add 什么都不做。".into(),
-        });
-        let out = h.adapter.research(r, &Seen::default()).await;
-        assert_eq!(out.end, RunEnd::Done, "{out:?}");
-        assert_eq!(w.spawns(), 1);
-        assert_eq!(w.flag("--resume").as_deref(), Some("sess-1"));
-        assert_eq!(w.flag("--model").as_deref(), Some("m2"));
-        outs.push(kept(&out));
-    }
-    assert_eq!(outs[0], outs[1]);
-    assert_eq!(outs[0].text, "接着说。");
-    assert_eq!(rows(&legacy.store), rows(&node.store));
+    w.reset();
+    let mut r = request(&w, "tr_3", "default", "然后呢？\n@msg m3\n@say 接着说。");
+    r.resume = Some(ResumeFrom {
+        run: "tr_2".into(),
+        session: "sess-1".into(),
+        harness: "claude-code".into(),
+        model: "m2".into(),
+        prior_answer: "add 什么都不做。".into(),
+    });
+    let out = node.adapter.research(r, &Seen::default()).await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    assert_eq!(w.spawns(), 1);
+    assert_eq!(w.read("load"), "sess-1");
+    assert!(w.read("config").contains("model=m2"));
+    assert_eq!(out.text, "接着说。");
 }
 
-/// A shell call ends the run as a violation on both, with the same end, answer and audit row.
+/// A call that is no read ends the run as a violation, audited.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_violation_ends_and_is_audited_alike() {
+async fn a_violation_ends_and_is_audited() {
     let w = World::new();
-    let legacy = Hub::new(&w, "legacy", false, 3).await;
     let node = Hub::new(&w, "node", true, 3).await;
-    let mut outs = vec![];
-    for h in [&legacy, &node] {
-        let out = h
-            .adapter
-            .research(
-                request(&w, "tr_v", "default", "@bash 跑一下"),
-                &Seen::default(),
-            )
-            .await;
-        assert_eq!(out.end, RunEnd::Violated, "{out:?}");
-        outs.push(kept(&out));
-    }
-    assert_eq!(outs[0], outs[1]);
-    let audit = |s: &Store| {
-        q::<String>(
-            s,
-            "SELECT action||' '||target||' '||detail FROM audit WHERE action='thread.research_violation'",
+    let out = node
+        .adapter
+        .research(
+            request(
+                &w,
+                "tr_v",
+                "default",
+                "跑一下\n@asking execute touch x\n@sleep 5000",
+            ),
+            &Seen::default(),
         )
-    };
-    assert_eq!(audit(&legacy.store), audit(&node.store));
-    assert!(
-        audit(&node.store).contains("Bash"),
-        "{}",
-        audit(&node.store)
+        .await;
+    assert_eq!(out.end, RunEnd::Violated, "{out:?}");
+    let audit = q::<String>(
+        &node.store,
+        "SELECT action||' '||target||' '||detail FROM audit WHERE action='thread.research_violation'",
     );
+    assert!(audit.contains("execute"), "{audit}");
 }
 
-/// The stop button ends the job on the Node with what it wrote, its harness gone, as in process;
-/// shutdown says the processes are gone only once they are, and admits nothing after.
+/// The stop button ends the job on the Node with what it wrote, its processes gone; shutdown says
+/// the processes are gone only once they are, and admits nothing after.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_and_shutdown_end_the_harness() {
     let w = World::new();
-    let legacy = Hub::new(&w, "legacy", false, 3).await;
     let node = Hub::new(&w, "node", true, 3).await;
-    let mut outs = vec![];
-    for h in [&legacy, &node] {
-        w.reset();
-        let r = request(&w, "tr_s", "default", "@hang 慢慢读");
-        let stop = r.stop.clone();
-        let a = h.adapter.clone();
-        let run = tokio::spawn(async move { a.research(r, &Seen::default()).await });
-        let pid = w.pid().await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        stop.store(true, Ordering::SeqCst);
-        let out = tokio::time::timeout(Duration::from_secs(20), run)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(out.end, RunEnd::Stopped, "{out:?}");
-        assert!(!alive(pid), "the harness is gone");
-        outs.push(kept(&out));
-    }
-    assert_eq!(outs[0], outs[1]);
-    assert!(outs[0].text.starts_with("写到一半"), "{:?}", outs[0].text);
+    let r = request(&w, "tr_s", "default", &hanging("慢慢读"));
+    let stop = r.stop.clone();
+    let a = node.adapter.clone();
+    let run = tokio::spawn(async move { a.research(r, &Seen::default()).await });
+    let pid = w.pid().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    stop.store(true, Ordering::SeqCst);
+    let out = tokio::time::timeout(Duration::from_secs(20), run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.end, RunEnd::Stopped, "{out:?}");
+    assert!(!alive(pid), "the adapter's child is gone");
+    assert!(out.text.starts_with("写到一半"), "{:?}", out.text);
 
-    // shutdown: the running harness is stopped and gone before it says true
+    // shutdown: the running adapter is stopped and gone before it says true
     w.reset();
     let a = node.adapter.clone();
-    let r = request(&w, "tr_d", "default", "@hang 再读");
+    let r = request(&w, "tr_d", "default", &hanging("再读"));
     let run = tokio::spawn(async move { a.research(r, &Seen::default()).await });
     let pid = w.pid().await;
     assert!(node.adapter.shutdown(Duration::from_secs(20)).await);
@@ -655,12 +596,12 @@ async fn stop_and_shutdown_end_the_harness() {
     );
 }
 
-/// One run per workspace and `max_global` at once on the Node path too, with today's words.
+/// One run per workspace and `max_global` at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn busy_and_full_are_refused_with_the_same_words() {
+async fn busy_and_full_are_refused() {
     let w = World::new();
     let node = Hub::new(&w, "node", true, 1).await;
-    let r = request(&w, "tr_a", "default", "@hang 读");
+    let r = request(&w, "tr_a", "default", &hanging("读"));
     let stop = r.stop.clone();
     let a = node.adapter.clone();
     let run = tokio::spawn(async move { a.research(r, &Seen::default()).await });
@@ -683,48 +624,44 @@ async fn busy_and_full_are_refused_with_the_same_words() {
     // the slot is free again
     let out = node
         .adapter
-        .research(request(&w, "tr_f", "default", "现在呢"), &Seen::default())
+        .research(
+            request(&w, "tr_f", "default", &w.answering("现在呢")),
+            &Seen::default(),
+        )
         .await;
     assert_eq!(out.end, RunEnd::Done, "{out:?}");
 }
 
-/// The question's attachments and those of the message it follows up on reach the run on the
-/// Node as they do in process: copied where it may read them and named in the prompt, the earlier
-/// ones marked so.
+/// The question's attachments and those of the message it follows up on reach the run: copied
+/// where it may read them and named in the prompt, the earlier ones marked so.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn attachments_reach_the_run_with_their_marks() {
     let w = World::new();
-    let legacy = Hub::new(&w, "legacy", false, 3).await;
     let node = Hub::new(&w, "node", true, 3).await;
-    let mut notes = vec![];
-    for h in [&legacy, &node] {
-        w.reset();
-        let mut r = request(&w, "tr_f", "default", "看看附件");
-        r.files = vec![h.file("fil_a", "notes.md", "# 笔记")];
-        r.earlier_files = vec![h.file("fil_b", "old.md", "# 旧的")];
-        let out = h.adapter.research(r, &Seen::default()).await;
-        assert_eq!(out.end, RunEnd::Done, "{out:?}");
-        let args = w.read("args");
-        let note: Vec<String> = args
-            .lines()
-            .filter(|l| l.starts_with("- ") && l.contains("text/markdown"))
-            .map(|l| {
-                // the copy's directory is the run's own
-                let path = l.split("（text").next().unwrap_or(l);
-                let file = path.rsplit('/').next().unwrap_or(path);
-                let mark = if l.contains("（前面消息里的）") {
-                    "earlier "
-                } else {
-                    ""
-                };
-                format!("{mark}{file}")
-            })
-            .collect();
-        assert_eq!(note.len(), 2, "{args}");
-        notes.push(note);
-    }
-    assert_eq!(notes[0], notes[1]);
-    assert!(notes[1][1].starts_with("earlier old.md"), "{:?}", notes[1]);
+    let mut r = request(&w, "tr_f", "default", &w.answering("看看附件"));
+    r.files = vec![node.file("fil_a", "notes.md", "# 笔记")];
+    r.earlier_files = vec![node.file("fil_b", "old.md", "# 旧的")];
+    let out = node.adapter.research(r, &Seen::default()).await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    let prompt = w.prompt();
+    let notes: Vec<String> = prompt
+        .lines()
+        .filter(|l| l.starts_with("- ") && l.contains("text/markdown"))
+        .map(|l| {
+            // the copy's directory is the run's own
+            let path = l.split("（text").next().unwrap_or(l);
+            let file = path.rsplit('/').next().unwrap_or(path);
+            let mark = if l.contains("（前面消息里的）") {
+                "earlier "
+            } else {
+                ""
+            };
+            format!("{mark}{file}")
+        })
+        .collect();
+    assert_eq!(notes.len(), 2, "{prompt}");
+    assert!(notes[0].starts_with("notes.md"), "{notes:?}");
+    assert!(notes[1].starts_with("earlier old.md"), "{notes:?}");
 }
 
 /// Steve's tools through the Node answer a research job with the research catalog only, every
@@ -735,7 +672,7 @@ async fn research_tools_answer_only_a_running_research_job() {
     let w = World::new();
     let node = Hub::new(&w, "node", true, 3).await;
     node.thread_run("tr_t", "default");
-    let mut r = request(&w, "tr_t", "default", "@hang 用工具");
+    let mut r = request(&w, "tr_t", "default", &hanging("用工具"));
     r.mcp = Some(steve_core::McpEndpoint {
         url: "http://127.0.0.1:9/mcp".into(),
         token: "unused".into(),
@@ -744,9 +681,15 @@ async fn research_tools_answer_only_a_running_research_job() {
     let a = node.adapter.clone();
     let run = tokio::spawn(async move { a.research(r, &Seen::default()).await });
     w.pid().await;
-    // the harness was given the Node's own endpoint, never the Hub's /mcp
+    // the adapter was given the Node's own endpoint, never the Hub's /mcp
     let mcp = q::<String>(&node.store, "SELECT spec FROM runtime_job_attempts");
     assert!(mcp.contains("\"steve_tools\":true"), "{mcp}");
+    let new: Value = serde_json::from_str(&w.read("new")).unwrap();
+    let url = new["mcpServers"][0]["url"].as_str().unwrap_or_default();
+    assert!(
+        url.starts_with("http://127.0.0.1:") && !url.contains(":9/"),
+        "{new}"
+    );
     let exec: ExecutionRef = serde_json::from_str(&q::<String>(
         &node.store,
         "SELECT execution FROM runtime_job_attempts",
@@ -802,8 +745,8 @@ async fn research_tools_answer_only_a_running_research_job() {
     assert_eq!(run.await.unwrap().end, RunEnd::Stopped);
 }
 
-/// A setting without a wall time gives the job a deadline that never ends a live run (in process
-/// such a run has no wall limit): not the old 6 h backstop the Node reported as the time budget.
+/// A setting without a wall time gives the job a deadline that never ends a live run: not the
+/// old 6 h backstop the Node reported as the time budget.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn no_wall_time_is_no_deadline_on_the_node() {
     let w = World::new();
@@ -812,7 +755,7 @@ async fn no_wall_time_is_no_deadline_on_the_node() {
     let out = node
         .adapter
         .research(
-            request(&w, "tr_w", "default", "add 怎么工作？"),
+            request(&w, "tr_w", "default", &w.answering("add 怎么工作？")),
             &Seen::default(),
         )
         .await;
@@ -829,10 +772,10 @@ async fn no_wall_time_is_no_deadline_on_the_node() {
     );
 }
 
-/// A run whose project is under none of the Node's roots, or whose roots cannot be read, goes in
-/// process (it still answers), counted where `/healthz` shows it; a run under the roots is not.
+/// A run whose project is under none of the Node's roots, or whose roots cannot be read, fails
+/// with a reason, counted where `/healthz` shows it; a Hub without its Node has no research.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_fallback_in_process_is_counted() {
+async fn what_the_node_cannot_read_fails_and_is_counted() {
     let w = World::new();
     let node = Hub::new(&w, "node", true, 3).await;
     let rt = node.rt.clone().unwrap();
@@ -843,28 +786,23 @@ async fn a_fallback_in_process_is_counted() {
     let out = node
         .adapter
         .research(
-            request(&w, "tr_1", "default", "add 怎么工作？"),
+            request(&w, "tr_1", "default", &w.answering("add 怎么工作？")),
             &Seen::default(),
         )
         .await;
     assert_eq!(out.end, RunEnd::Done, "{out:?}");
     assert_eq!(rt.research_fallbacks(), 0);
 
-    // a project outside every root: in process, counted (a follow-up: the stand-in reads nothing)
+    // a project outside every root: refused, counted, no job
     let outside = w.root.join("elsewhere");
     std::fs::create_dir_all(&outside).unwrap();
     let mut r = request(&w, "tr_2", "default", "然后呢？");
     for p in r.project.iter_mut().chain(r.readable.iter_mut()) {
         p.path = outside.display().to_string();
     }
-    r.resume = Some(ResumeFrom {
-        run: "tr_1".into(),
-        claude_session: "sess-1".into(),
-        model: "m1".into(),
-        prior_answer: "add 什么都不做。".into(),
-    });
     let out = node.adapter.research(r, &Seen::default()).await;
-    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    assert_eq!(out.end, RunEnd::Failed, "{out:?}");
+    assert!(out.error.is_some());
     assert_eq!(rt.research_fallbacks(), 1);
     assert_eq!(
         q::<i64>(
@@ -874,7 +812,7 @@ async fn a_fallback_in_process_is_counted() {
         0
     );
 
-    // the roots cannot be read: in process too, counted, not hidden as "no roots"
+    // the roots cannot be read: refused too, counted, not hidden as "no roots"
     *node.roots.lock().unwrap() = Err("store: locked".into());
     let out = node
         .adapter
@@ -883,7 +821,16 @@ async fn a_fallback_in_process_is_counted() {
             &Seen::default(),
         )
         .await;
-    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    assert_eq!(out.end, RunEnd::Failed, "{out:?}");
     assert_eq!(rt.research_fallbacks(), 2);
     assert_eq!(health()["research_fallbacks"], 2);
+
+    // no local Node: no research, said so
+    let off = Hub::new(&w, "off", false, 3).await;
+    let out = off
+        .adapter
+        .research(request(&w, "tr_4", "default", "问"), &Seen::default())
+        .await;
+    assert_eq!(out.end, RunEnd::Failed);
+    assert!(out.error.is_some());
 }

@@ -284,12 +284,7 @@ pub(crate) fn local_node_config(
 /// itself, its own homes and binaries.
 pub(crate) fn local_node_extras(node: &steve_node::LocalNode, cfg: &Config, kinds: NodeJobs) {
     if kinds.research {
-        let mut research = steve_research::ResearchConfig::new(
-            cfg.claude_executable.clone(),
-            cfg.scratch.join("research"),
-        );
-        research.codex_executable = Some(cfg.codex_executable.clone().into());
-        node.enable_research(research);
+        node.enable_research(steve_research::ResearchConfig::new(cfg.scratch.join("research")));
     }
     let homes = crate::resume::Homes::of(cfg);
     node.set_discovery(steve_node::history::DiscoveryConfig {
@@ -769,14 +764,10 @@ pub fn wire_assembly(
     if let Some(n) = &mq_nodes {
         core.set_mq_node(n.clone());
     }
-    /* inline research (thread-routing R2): read-only claude runs; each run's models come from
-    设置 · 模型 (default STEVE_MODELS_RESEARCH) with the request */
-    let mut research = steve_research::ResearchConfig::new(
-        cfg.claude_executable.clone(),
-        cfg.scratch.join("research"),
-    );
+    /* inline research (thread-routing R2): read-only runs on the local Node; each run's harness and
+    models come from 设置 · 模型 (default STEVE_MODELS_RESEARCH) with the request */
+    let mut research = steve_research::ResearchConfig::new(cfg.scratch.join("research"));
     research.models = core.config().models_research.clone();
-    research.codex_executable = Some(cfg.codex_executable.clone().into());
     let mut adapter = research::ResearchAdapter::new(
         research.clone(),
         steve_core::repo::Db::new(db.clone()),
