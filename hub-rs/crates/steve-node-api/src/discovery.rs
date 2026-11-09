@@ -61,6 +61,40 @@ pub struct AdapterInfo {
     /// How to install it, for people.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<String>,
+    /// `sessionCapabilities.systemPrompt`: it takes a system prompt of Steve's.
+    #[serde(default)]
+    pub system_prompt: bool,
+    /// What a scratch session offered (no prompt: nothing is asked of a model); `None` when the
+    /// Node could not open one (`session_error`) or is older.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<AdapterOffer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_error: Option<String>,
+}
+
+/// The permission modes, models and efforts an adapter offers (harness parity S4, S8).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterOffer {
+    /// Steve's permission modes it can be set to.
+    #[serde(default)]
+    pub modes: Vec<crate::PermissionMode>,
+    #[serde(default)]
+    pub models: Vec<AdapterModel>,
+    /// What it runs when no model is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// The reasoning efforts it takes.
+    #[serde(default)]
+    pub efforts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

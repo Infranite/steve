@@ -2265,7 +2265,7 @@ async fn open_harness(
         inner
             .cfg
             .acp
-            .adapter_mode(&harness, row.open.policy.permissions),
+            .mode_choice(&harness, row.open.policy.permissions),
     );
     let meta = inner.cfg.acp.session_meta(&harness);
     let handshake = acp_session::open_with_meta(
