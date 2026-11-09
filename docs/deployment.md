@@ -104,7 +104,13 @@ On a Hub nobody has signed in to yet, `token create` makes `--user` (default: yo
 
 ## A web client apart from the Hub
 
-The web page can run on its own origin, for example its own port, instead of being served by the Hub. Opened somewhere no Hub answers, it asks for the Hub's address once, checks it with `/auth/hello`, keeps it in the browser, and then shows the sign-in.
+The web page can run on its own origin instead of the Hub's port.
+
+- **New installations** set `STEVE_WEB_PORT` to the Hub's port plus one. The Hub then serves the pages on that port, on the same hosts, and its own port answers the API only.
+- **Without `STEVE_WEB_PORT`**, pages and API share the Hub's port as before.
+- **On another machine or a static host:** `steve-hub --serve-web --listen <address:port>` serves only `STEVE_WEB_DIR`. Any static host also works, because the built pages are plain files.
+
+ Opened somewhere no Hub answers, it asks for the Hub's address once, checks it with `/auth/hello`, keeps it in the browser, and then shows the sign-in.
 
 - **Cross-origin access.** The Hub answers cross-origin calls with credentials only from the origins of web clients that signed in there, and from those listed in `STEVE_CLIENT_ORIGINS` (comma-separated). The sign-in paths and a `401` are readable from any origin.
 - **Same machine.** A Hub on the same host as the page (another port) is the same site, so its sign-in cookie works over plain HTTP.

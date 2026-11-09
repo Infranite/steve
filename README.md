@@ -337,6 +337,8 @@ For an existing Hub that completed managed setup, run `steve setup --reconfigure
 | `STEVE_HOME` | Data directory (default `~/.steve`) |
 | `STEVE_HOST`, `STEVE_PORT` | Listen addresses, comma-separated, on one port (bare-binary default `127.0.0.1:8440`; `steve setup` writes `0.0.0.0:8440` and enables wildcard listening); for a proxy on another machine add the address it reaches, e.g. `127.0.0.1,100.64.0.2`. `0.0.0.0`/`::` is refused unless `STEVE_ALLOW_ANY_HOST=1` |
 | `STEVE_WEB_DIR` | The built web UI the Hub serves |
+| `STEVE_WEB_PORT` | Serve the web UI on this port of its own; the Hub's port then answers the API only (new installations: Hub port + 1) |
+| `STEVE_CLIENT_ORIGINS` | Extra web origins that may call the Hub across origins (signed-in web clients are allowed already) |
 | `STEVE_PUBLIC_URL` | A URL your integrations can reach, only needed for callbacks. No shared hosted endpoint is provided. |
 | `STEVE_OIDC_ISSUER`, `STEVE_OIDC_CLIENT_ID`, `STEVE_OIDC_CLIENT_SECRET_FILE` | Optional single sign-on through your OIDC provider |
 | `STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB`, `STEVE_WORKTREE_IDLE_HOURS` | Disk guards for item worktrees |

@@ -1,0 +1,1 @@
+新安装的 Hub 把网页放在单独的端口上（Hub 端口 + 1，配置项 `STEVE_WEB_PORT`），Hub 自己的端口只提供 API。第一次打开网页时，页面会预填这台 Hub 的地址，确认后连接并登录。也可以用 `steve-hub --serve-web --listen <地址:端口>` 在别处只提供网页。没有设置 `STEVE_WEB_PORT` 的已有安装不变，网页和 API 仍在同一个端口。

@@ -678,8 +678,9 @@ pub async fn cors(
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let own = st.cfg.public_urls.contains(&origin)
-        || origin
+    /* the page came from this very address (scheme aside): no cross-origin call. Only the request's own
+     * Host decides; the configured browser URL may be the web client's port (A3), another origin */
+    let own = origin
             .split("://")
             .nth(1)
             .is_some_and(|h| h.eq_ignore_ascii_case(host));

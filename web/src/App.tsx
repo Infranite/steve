@@ -154,6 +154,11 @@ function ConnectHub() {
   const [url, setUrl] = useState(hubBase())
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  /* served on its own port by a Hub: that Hub's address, as a suggestion to confirm */
+  useEffect(() => {
+    if (hubBase()) return
+    fetch("/hub.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((j) => { if (typeof j?.hub === "string") setUrl((u) => u || j.hub) }, () => {})
+  }, [])
   const go = async (e: React.FormEvent) => {
     e.preventDefault()
     const base = normalize(url)

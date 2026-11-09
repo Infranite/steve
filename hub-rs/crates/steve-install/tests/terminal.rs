@@ -219,9 +219,9 @@ fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
         .process_group(0);
     let mut process = Process(command.spawn().unwrap());
     // an address a browser can't use is asked again; then the person gives up (end of input)
-    pty.wait_prompt(&mut process.0, "浏览器访问地址 [http://127.0.0.1:8440]: ");
+    pty.wait_prompt(&mut process.0, "浏览器访问地址 [http://127.0.0.1:8441]: ");
     pty.master.write_all(b"http://0.0.0.0:8440\n").unwrap();
-    pty.wait_prompt(&mut process.0, "浏览器访问地址 [http://127.0.0.1:8440]: ");
+    pty.wait_prompt(&mut process.0, "浏览器访问地址 [http://127.0.0.1:8441]: ");
     pty.master.write_all(&[4]).unwrap();
     let status = pty.wait_exit(&mut process.0);
     assert_eq!(status.code(), Some(1), "end of input is handled as cancellation");
@@ -230,7 +230,7 @@ fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
     assert_eq!(after.c_cc, before.c_cc, "terminal input controls are unchanged");
     let output = String::from_utf8_lossy(&pty.output);
     assert_eq!(
-        output.matches("浏览器访问地址 [http://127.0.0.1:8440]: ").count(),
+        output.matches("浏览器访问地址 [http://127.0.0.1:8441]: ").count(),
         2,
         "{output}"
     );

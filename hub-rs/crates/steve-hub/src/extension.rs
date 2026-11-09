@@ -559,6 +559,25 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string(&report)?);
         std::process::exit(if report.ok { 0 } else { 2 });
     }
+    // the web client alone (A3): `--serve-web --listen <address:port>` serves STEVE_WEB_DIR and nothing else
+    if std::env::args().nth(1).as_deref() == Some("--serve-web") {
+        let args: Vec<String> = std::env::args().collect();
+        let listen = args
+            .iter()
+            .position(|a| a == "--listen")
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1:8441".into());
+        let cfg = Arc::new(Config::from_env()?);
+        let listener = tokio::net::TcpListener::bind(&listen).await?;
+        println!("steve web (only) on http://{listen}");
+        axum::serve(
+            listener,
+            crate::web::web_only(cfg).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
+        return Ok(());
+    }
     // tokens and clients on this machine (access.rs); needs the configuration, not the running Hub
     if std::env::args().nth(1).as_deref() == Some("--access") {
         let args: Vec<String> = std::env::args().skip(2).collect();
@@ -683,6 +702,17 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
             )
             .await
         });
+    }
+    // the web client on its own port (A3): its pages only; it calls the Hub's port like any client
+    if let Some(port) = cfg.web_port {
+        let web = crate::web::web_only(cfg.clone());
+        for listener in cfg.listen.bind_port(port).await? {
+            let web = web.clone();
+            servers.spawn(async move {
+                axum::serve(listener, web.into_make_service_with_connect_info::<SocketAddr>()).await
+            });
+        }
+        println!("steve web on port {port}");
     }
     while let Some(r) = servers.join_next().await {
         r??;
