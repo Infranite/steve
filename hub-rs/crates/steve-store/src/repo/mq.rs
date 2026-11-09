@@ -47,6 +47,8 @@ pub struct MqEntry {
     pub landed_commit: Option<String>,
     pub landed_at: Option<i64>,
     pub release_now: bool,
+    /// Its pull request, when it went to the host's merge queue.
+    pub pr: Option<i64>,
     pub reason: Option<String>,
     pub legacy_id: Option<String>,
     pub arrived: i64,
@@ -152,6 +154,7 @@ fn entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<MqEntry> {
         landed_commit: r.get("landed_commit")?,
         landed_at: r.get("landed_at")?,
         release_now: r.get::<_, i64>("release_now")? != 0,
+        pr: r.get("pr")?,
         reason: r.get("reason")?,
         legacy_id: r.get("legacy_id")?,
         arrived: r.get("arrived")?,
@@ -432,6 +435,15 @@ pub fn entry_head_set(c: &Connection, id: &str, head: &str, consent: Option<&str
     c.execute(
         "UPDATE mq_entries SET head = ?, consent = coalesce(?, consent), updated = ? WHERE id = ?",
         params![head, consent, now(), id],
+    )?;
+    Ok(())
+}
+
+/// The entry went to the host's merge queue as pull request `pr`.
+pub fn entry_pr_set(c: &Connection, id: &str, pr: i64) -> Result<()> {
+    c.execute(
+        "UPDATE mq_entries SET pr = ?, state = 'batched', updated = ? WHERE id = ?",
+        params![pr, now(), id],
     )?;
     Ok(())
 }

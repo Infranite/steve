@@ -95,6 +95,8 @@ pub(crate) struct Inner {
     node_git: OnceLock<Arc<dyn node_git::NodeGit>>,
     /// The Node the merge queue's staging is on, once wired (`mq::drive`).
     mq_node: OnceLock<Arc<dyn mq::exec::MqNode>>,
+    /// The host of targets that take changes through pull requests, once wired (`mq::host`).
+    mq_host: OnceLock<Arc<dyn mq::host::MqHost>>,
 }
 
 /// What a session's last Steve tool call left behind, consumed at its turn end.
@@ -195,6 +197,7 @@ impl Core {
             reclaiming: Default::default(),
             node_git: OnceLock::new(),
             mq_node: OnceLock::new(),
+            mq_host: OnceLock::new(),
         }))
     }
 

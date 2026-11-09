@@ -94,6 +94,7 @@ fn push(w: WorkspaceRef, expected: &GitFacts, auth: Option<SecretRef>) -> GitApp
             origin_must_be: Some("acme/app".into()),
             expected_local: expected.head.clone(),
             auth,
+            remote_branch: None,
         },
     }
 }

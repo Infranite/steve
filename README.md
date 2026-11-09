@@ -158,6 +158,8 @@ No setting can widen these limits, and they are property-tested: money, high-sen
 
 Each target branch has a merge lane. Requests that arrive while a merge is in flight are batched, and you approve one card per batch; a request that arrives before you answer joins that batch and its card. The project page sets the batch window and size and has a *merge and release now* button. Conflicting members are backed out one at a time. Pushes are fast-forward only, a branch whose host requires a pull request or a merge queue is never pushed to directly, and after a restart nothing merges or releases twice. The project page also shows the lane profile Steve found (merge queue, required checks, release method) and the evidence for each.
 
+The merge queue (`STEVE_MQ=1`, needs the Hub's own Node) takes over from the lanes and separates merging from releasing. An accepted change goes into its target's queue by itself; you allow each target once. An idle target starts at once and a busy one batches what arrives meanwhile. Integration, checks and the push happen on the Node, in Steve's own mirror of the repository, with build output kept warm between batches. A failing batch is bisected and the passing half merges first; a conflict or a taken migration number goes back to the agent, and a plain rebase needs no new acceptance. A target that requires pull requests gets one per batch, merged with a merge commit once the host's checks pass; a target with its own merge queue gets each change handed to it. What merged waits in a release train with one card per train (2 hours or 10 changes by default, or *release now*), and a release whose outcome was lost is checked against the target's tags before anything runs again. Every number is set per target.
+
 On GitHub, Steve asks before opening a PR after you accept, and again before merging. For a private repository you can let accepting the item open a draft PR from its own branch without asking, once its commits pass a leak check. Effects go through a durable queue that reconciles with GitHub before retrying. Projects on the Hub's own machine, Steve included, can be released by script: build, drain running work, restart, and report the outcome once it's back. Rollback is refused when the old version can't read the current database.
 
 ### 🔌 Connections
@@ -359,6 +361,7 @@ For an existing Hub that completed managed setup, run `steve setup --reconfigure
 | `STEVE_NODE_PLACEMENT` | `local` (default) keeps new sessions on the Hub's machine unless `STEVE_NODE_BIND` names a Node; `spread` sends a project-less item's new session to a linked remote Node that is clearly less loaded |
 | `STEVE_NODE_HANDOFF_MIN` | Minutes a device may be offline while messages wait for its session before Steve continues the item in a new session elsewhere (default 30; `0` never) |
 | `STEVE_NODE_PROXY_PEERS` | Optional exact IPs of TLS-terminating proxies for remote Node ingress; default is loopback only |
+| `STEVE_MQ` | `1` merges accepted changes through the merge queue instead of the merge lanes (needs the Hub's own Node); the lanes are converted the first time |
 
 > [!IMPORTANT]
 > Review authentication before you expose the listener beyond localhost. Agents running under Steve act with your local user's permissions; the Node's sandbox keeps only Steve's own control files out of their reach so far.

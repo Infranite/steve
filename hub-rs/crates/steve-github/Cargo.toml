@@ -68,6 +68,10 @@ name = "fake_api"
 required-features = ["fake"]
 
 [[test]]
+name = "mq"
+required-features = ["fake"]
+
+[[test]]
 name = "g1"
 required-features = ["fake"]
 

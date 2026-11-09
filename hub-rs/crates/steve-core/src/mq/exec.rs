@@ -23,6 +23,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Serialize;
 
+use super::host::Land;
 use super::policy::Policy;
 use super::queue::Outcome;
 
@@ -84,6 +85,9 @@ pub trait MqNode: Send + Sync {
     /// The target's upstream fetched where the project is, and the staging reset at the target's
     /// tip (build output in `keep` kept): the base commit.
     async fn stage(&self, s: &Staging, op: &str) -> Step<String>;
+    /// The staging reset at `to` (a commit the mirror has once refreshed): what is fed to a host's
+    /// merge queue is pushed from there.
+    async fn reset(&self, s: &Staging, op: &str, to: &str) -> Step<String>;
     /// `commit` merged into the staging as a merge commit (`message`), a conflict backed out.
     async fn merge(&self, s: &Staging, op: &str, commit: &str, message: &str) -> Merged;
     /// The paths that differ between two commits in the staging.
@@ -94,6 +98,9 @@ pub trait MqNode: Send + Sync {
     async fn check(&self, s: &Staging, op: &str, command: &str, deadline: Duration) -> Checked;
     /// The staging's HEAD (`tip`) pushed to the target's branch, only over `base`.
     async fn push(&self, s: &Staging, op: &str, base: &str, tip: &str) -> Pushed;
+    /// The staging's HEAD (`tip`) pushed to a new branch `to` of the target's repository (a
+    /// batch's pull request).
+    async fn push_branch(&self, s: &Staging, op: &str, tip: &str, to: &str) -> Pushed;
     /// Where the target's branch is on its host, read now (`None`: it cannot be told).
     async fn remote(&self, s: &Staging) -> Option<String>;
     /// Whether `ancestor` is in `of`, as last read (`None`: it cannot be told).
@@ -193,6 +200,23 @@ pub async fn run_batch(
     members: &[Member],
     policy: &Policy,
     checks: bool,
+    record: &(dyn Fn(Record) + Send + Sync),
+) -> Ran {
+    run_batch_on(node, s, batch, run, members, policy, checks, &Land::Push, record).await
+}
+
+/// [`run_batch`], landing the way `land` says: pushed to the target, or through a pull request of
+/// its own (the host's checks then stand for the target's: no Node checks run).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_batch_on(
+    node: &dyn MqNode,
+    s: &Staging,
+    batch: u64,
+    run: u32,
+    members: &[Member],
+    policy: &Policy,
+    checks: bool,
+    land: &Land<'_>,
     record: &(dyn Fn(Record) + Send + Sync),
 ) -> Ran {
     let mut ran = Ran {
@@ -300,7 +324,8 @@ pub async fn run_batch(
         // the target's own checks, unless this is a verified head fast-forwarded on its own base
         let verified =
             merged.len() == 1 && merged[0].verified_base.as_deref() == Some(base.as_str());
-        if checks && !verified && !policy.checks.is_empty() {
+        let host = matches!(land, Land::Pr(_));
+        if checks && !verified && !host && !policy.checks.is_empty() {
             let deadline = Duration::from_secs(policy.check_deadline_s.max(1));
             for (n, cmd) in policy.checks.iter().enumerate() {
                 let o = op("check", n);
@@ -331,6 +356,29 @@ pub async fn run_batch(
                         });
                         return ran;
                     }
+                }
+            }
+        }
+        // through a pull request: the host's checks, its merge
+        if let Land::Pr(l) = land {
+            let titles: Vec<String> = merged.iter().map(|m| m.label.clone()).collect();
+            let at = attempt;
+            let opf = |kind: &str, n: usize| op_id(&s.target_id, batch, run, at, kind, n);
+            match super::host::land_pr(node, s, l, batch, attempt, &opf, &tip, &titles, record).await {
+                super::host::PrOutcome::Done(o) => {
+                    ran.outcome = Some(o);
+                    return ran;
+                }
+                super::host::PrOutcome::Moved => {
+                    if attempt >= policy.moved_retries + local_redo {
+                        ran.outcome = Some(Outcome::Unknown {
+                            why: steve_i18n::t!("core.mq.target_moving", n = ran.moved),
+                        });
+                        return ran;
+                    }
+                    ran.moved += 1;
+                    attempt += 1;
+                    continue 'attempts;
                 }
             }
         }

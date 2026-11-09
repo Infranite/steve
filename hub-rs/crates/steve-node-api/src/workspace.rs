@@ -329,6 +329,11 @@ pub enum GitAction {
         /// git as an HTTP header ([`SecretDelivery::Header`]); never on argv, never on disk.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth: Option<SecretRef>,
+        /// The branch at `url` it goes to, when not `branch` itself (the merge queue's batch
+        /// branch for a pull request); `expected_remote` is that branch's. Only on the Hub's own
+        /// Node for now.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote_branch: Option<String>,
     },
 }
 

@@ -223,6 +223,7 @@ async fn push(n: &LocalNode, w: &WorkspaceRef, url: &str, auth: bool) -> GitAppl
                     name: "AUTHORIZATION".into(),
                 },
             }),
+            remote_branch: None,
         },
     }
 }
@@ -533,6 +534,7 @@ async fn a_push_whose_preconditions_do_not_hold_is_refused_before_it_is_taken() 
             id: "github".into(),
             how,
         }),
+        remote_branch: None,
     };
     let header = || SecretDelivery::Header {
         name: "AUTHORIZATION".into(),

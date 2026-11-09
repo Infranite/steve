@@ -209,6 +209,21 @@ impl MqNode for GitNode {
         Step::Done(base)
     }
 
+    async fn reset(&self, s: &Staging, op: &str, to: &str) -> Step<String> {
+        if let Some(v) = self.memo(op) {
+            return Step::Done(v);
+        }
+        if let Step::Done(_) = self.stage(s, &format!("{op}/stage")).await {}
+        match g(&self.staging, &["checkout", "-qfB", "main", to]) {
+            Ok(_) => {
+                let h = ok(&self.staging, &["rev-parse", "HEAD"]);
+                self.keep(op, &h);
+                Step::Done(h)
+            }
+            Err(e) => Step::Failed(e),
+        }
+    }
+
     async fn merge(&self, _s: &Staging, op: &str, commit: &str, message: &str) -> Merged {
         if let Some(v) = self.memo(op) {
             return Merged::Done(v);
@@ -326,6 +341,20 @@ impl MqNode for GitNode {
             "done" => Pushed::Done,
             "moved" => Pushed::Moved,
             w => Pushed::Unknown(w.into()),
+        }
+    }
+
+    async fn push_branch(&self, _s: &Staging, op: &str, tip: &str, to: &str) -> Pushed {
+        if let Some(v) = self.memo(op) {
+            return if v == "done" { Pushed::Done } else { Pushed::Failed(v) };
+        }
+        let up = self.upstream.to_str().unwrap();
+        match g(&self.staging, &["push", "-q", up, &format!("{tip}:refs/heads/{to}")]) {
+            Ok(_) => {
+                self.keep(op, "done");
+                Pushed::Done
+            }
+            Err(e) => Pushed::Failed(e),
         }
     }
 
