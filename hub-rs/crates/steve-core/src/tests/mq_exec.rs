@@ -50,7 +50,7 @@ fn commit(dir: &Path, file: &str, body: &str) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fault {
+pub(super) enum Fault {
     None,
     /// The push lands, its answer is lost.
     LostAfter,
@@ -64,17 +64,17 @@ enum Fault {
 
 /// A Node doing the staging's git for real: `upstream` the host, `source` the user's repository,
 /// `staging` the Node's own copy. Every operation answers the same when asked again by its id.
-struct GitNode {
-    _t: tempfile::TempDir,
+pub(super) struct GitNode {
+    _t: Option<tempfile::TempDir>,
     upstream: PathBuf,
     source: PathBuf,
     staging: PathBuf,
     other: PathBuf,
-    fault: Mutex<Fault>,
+    pub(super) fault: Mutex<Fault>,
     /// Someone else pushes to the target before each of our next `n` pushes.
     moves: AtomicUsize,
-    pushes: AtomicUsize,
-    checks: AtomicUsize,
+    pub(super) pushes: AtomicUsize,
+    pub(super) checks: AtomicUsize,
     done: Mutex<HashMap<String, String>>,
 }
 
@@ -95,30 +95,27 @@ impl GitNode {
             &["remote", "add", "origin", upstream.to_str().unwrap()],
         );
         ok(&source, &["push", "-q", "origin", "main"]);
+        let mut n = GitNode::over(&root, &source, &upstream);
+        n._t = Some(t);
+        n
+    }
+
+    /// A Node staging the repository `source` (whose `origin` is `upstream`), its files under `root`.
+    pub(super) fn over(root: &Path, source: &Path, upstream: &Path) -> GitNode {
         let staging = root.join("staging");
-        ok(
-            &root,
-            &[
-                "clone",
-                "-q",
-                source.to_str().unwrap(),
-                staging.to_str().unwrap(),
-            ],
-        );
+        ok(root, &["clone", "-q", source.to_str().unwrap(), staging.to_str().unwrap()]);
+        for (k, v) in [("user.name", "steve"), ("user.email", "steve@example.invalid")] {
+            ok(&staging, &["config", k, v]);
+        }
         let other = root.join("other");
-        ok(
-            &root,
-            &[
-                "clone",
-                "-q",
-                upstream.to_str().unwrap(),
-                other.to_str().unwrap(),
-            ],
-        );
+        ok(root, &["clone", "-q", upstream.to_str().unwrap(), other.to_str().unwrap()]);
+        for (k, v) in [("user.name", "o"), ("user.email", "o@example.invalid")] {
+            ok(&other, &["config", k, v]);
+        }
         GitNode {
-            _t: t,
-            upstream,
-            source,
+            _t: None,
+            upstream: upstream.to_path_buf(),
+            source: source.to_path_buf(),
             staging,
             other,
             fault: Mutex::new(Fault::None),
@@ -137,12 +134,12 @@ impl GitNode {
         h
     }
 
-    fn remote_main(&self) -> String {
+    pub(super) fn remote_main(&self) -> String {
         ok(&self.upstream, &["rev-parse", "main"])
     }
 
     /// Someone else lands a change on the target.
-    fn someone_pushes(&self, n: usize) {
+    pub(super) fn someone_pushes(&self, n: usize) {
         ok(&self.other, &["pull", "-q", "--ff-only"]);
         commit(&self.other, &format!("other{n}.txt"), "o\n");
         ok(&self.other, &["push", "-q", "origin", "main"]);

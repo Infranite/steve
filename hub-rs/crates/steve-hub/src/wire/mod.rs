@@ -117,6 +117,7 @@ fn core_config(cfg: &Config) -> steve_core::CoreConfig {
     c.debug_route = cfg.debug_route;
     c.disk = cfg.disk;
     c.version = cfg.version.clone();
+    c.mq = steve_core::config::mq_from_env();
     c.commit = crate::build_identity().map(|(_, commit)| commit.to_owned());
     if let Some(n) = cfg.takeover_continues {
         c.takeover_continues = n;
@@ -769,6 +770,14 @@ pub fn wire_assembly(
     /* an item bound to a Node has its git read there (N0e-E11b); without any Node, nothing changes */
     if node_host.is_some() || fleet.is_some() {
         core.set_node_git(Arc::new(item_git::ItemGit::new(workspaces.clone())));
+    }
+    /* the merge queue's staging is on the Hub's own Node (STEVE_MQ=1 turns the queue on) */
+    if node_host.is_some() {
+        core.set_mq_node(mq_node::MqNodes::new(
+            workspaces.clone(),
+            secrets.clone(),
+            Arc::new(|_: &str| None),
+        ));
     }
     /* inline research (thread-routing R2): read-only claude runs; each run's models come from
     设置 · 模型 (default STEVE_MODELS_RESEARCH) with the request */

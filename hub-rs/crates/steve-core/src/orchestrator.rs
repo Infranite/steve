@@ -30,6 +30,9 @@ const INTERRUPTED: &str = "Hub 重启时这个会话正在运行，这一回合�
 /// The `text` of an acceptance's `pass` that also starts the release (验收并发布); `no-release`
 /// accepts it without one (验收，先不发布).
 pub const ACCEPT_AND_RELEASE: &str = "release";
+/// The `text` of an acceptance's `pass` that keeps the result out of the merge queue for now
+/// (验收，先不合并); `steve_publish` puts it in later.
+pub const NO_MERGE: &str = "no-merge";
 
 /// Put before a message the agent had already been given when the Hub stopped (its dispatch was
 /// submitted): it may be done or half done, so it comes back to be checked, never redone blindly.
@@ -704,8 +707,11 @@ impl Core {
             t.workflow_tick()?;
             n
         };
-        /* the merge lanes' windows close on time too (outside the core's lock) */
-        if let Err(e) = self.lane_tick() {
+        /* the merge lanes' windows close on time too (outside the core's lock); with the merge
+         * queue on, its queues instead */
+        if self.mq_on() {
+            self.mq_tick();
+        } else if let Err(e) = self.lane_tick() {
             tracing::warn!("lane tick: {e}");
         }
         Ok(n)
@@ -811,9 +817,14 @@ impl Core {
         if let Err(e) = self.lifecycle_tick() {
             tracing::warn!("closing check after boot: {e}");
         }
-        /* merges and releases a restart cut off */
+        /* merges and releases a restart cut off; with the merge queue on, the lanes become its
+         * queues first */
         if !self.store().store().maintenance() {
-            self.lane_recover();
+            if self.mq_on() {
+                self.mq_boot();
+            } else {
+                self.lane_recover();
+            }
         }
     }
     /// What a session moved to a Node after boot (B7's later pass) has queued goes now, as
@@ -1817,6 +1828,17 @@ impl Tx<'_> {
         /* a project finished by its completion rule merges through its target's lane (one card per batch
          * there, not one release card per item here), when the lane can release it that way */
         let lane_can = lane_releases(&p);
+        /* with the merge queue on, an accepted result is in it already (or goes in now) */
+        if lane_can && self.c.mq_on() {
+            let said = match self.mq_publish(&item)? {
+                Some(said) => said,
+                /* the queue does not take it (not allowed, the host's rules): the project's own way */
+                None => "合并队列不合入这一项（见时间线）。按这个项目的约定完成合并：推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准。".into(),
+            };
+            self.db()
+                .event_add(&s.id, "system", json!({"text": said}))?;
+            return settle(self.db(), item_id);
+        }
         if lane_can {
             let req = self.c.lane_enqueue_item(&item, &p.path)?;
             let where_ = req
@@ -2566,6 +2588,7 @@ impl Tx<'_> {
                      * 验收并发布: the release starts here, without a round of the agent. A project
                      * done by its rule (merged, tagged) has no release to choose: that rule is the
                      * completion, never waived or started from an acceptance */
+                    let raw_text = text;
                     let text = if self.done_rule(&before)?.is_some() {
                         ""
                     } else {
@@ -2573,6 +2596,13 @@ impl Tx<'_> {
                     };
                     if text == ACCEPT_AND_RELEASE {
                         self.st.release_with_accept = Some((i.clone(), actor.to_string()));
+                    }
+                    /* 验收，先不合并: the merge queue leaves it out until steve_publish asks */
+                    if raw_text == NO_MERGE {
+                        self.db()
+                            .store()
+                            .decisions()
+                            .merge_result(id, &json!({"merge": "held"}))?;
                     }
                     let accepted =
                         self.lc_accept(&i, crate::cycle::Policy::Human, Some("你验收通过"));
@@ -3008,6 +3038,17 @@ impl Tx<'_> {
             }
         };
         match (d.kind.as_str(), d.subject_type.as_str()) {
+            (_, crate::mq::drive::SUBJECT_TARGET | crate::mq::drive::SUBJECT_BATCH) => {
+                db.decision_resolve(id, json!({"choice": choice}), "resolved", None)?;
+                let (c, st, sub, choice, actor) = (
+                    self.c.clone(),
+                    d.subject_type.clone(),
+                    d.subject_id.clone(),
+                    choice.to_string(),
+                    actor.to_string(),
+                );
+                crate::detach(move || c.mq_answered(&st, &sub, &choice, &actor));
+            }
             ("approve", "delivery_batch")
                 if crate::lane::drive::parse_subject(&d.subject_id).is_some() =>
             {

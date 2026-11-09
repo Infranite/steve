@@ -100,7 +100,8 @@ pub struct Build {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LaneStatus {
     pub item_id: Option<String>,
-    /// lane (the merge lane) | release (the project's own release script); none when nothing was asked.
+    /// lane (the merge lane) | queue (the merge queue) | release (the project's own release script);
+    /// none when nothing was asked.
     pub path: Option<&'static str>,
     /// not_requested | queued | collecting | checking | waiting_for_approval | merging |
     /// merged_waiting_release | releasing | release_failed | left | released | declined | not_released |
@@ -173,6 +174,10 @@ impl Core {
             return Err(crate::error::msg(format!("没有这个事项：{item_id}")));
         };
         let store = self.store().store();
+        // the merge queue's, when it has the item
+        if let Some(e) = store.reader(|c| steve_store::mq::entry_last_of_item(c, item_id))? {
+            return self.mq_status(&item, e);
+        }
         let req = store.reader(|c| lanes::request_last_of_item(c, item_id))?;
         let card = self
             .store()
@@ -194,6 +199,84 @@ impl Core {
                 st.advice = "事项验收通过、用户要上线时，用 steve_publish 请求发布。".into();
             }
         }
+        Ok(st)
+    }
+
+    /// The status of an item the merge queue has (`entry`, its newest).
+    fn mq_status(&self, item: &Item, e: steve_store::mq::MqEntry) -> Result<LaneStatus> {
+        let store = self.store().store();
+        let t = store.reader(|c| steve_store::mq::target_get(c, &e.target_id))?;
+        let target = t
+            .as_ref()
+            .map(|t| format!("{} {}", t.upstream, t.branch))
+            .unwrap_or_default();
+        let into = t.as_ref().map(|t| t.branch.clone()).unwrap_or_default();
+        let mut st = LaneStatus::new(Some(item));
+        st.path = Some("queue");
+        st.build = self.last_build(item)?;
+        st.request = Some(Request {
+            id: e.id.clone(),
+            branch: e.branch.clone().unwrap_or_default(),
+            head: e.head.clone(),
+            state: e.state.clone(),
+            arrived: e.arrived,
+        });
+        let batch = e.batch_no.map(|n| format!("MQ-{n}"));
+        let (state, next, summary, advice): (&'static str, Next, String, String) = match e.state.as_str() {
+            "queued" => (
+                "queued",
+                Next::Wait,
+                format!("在合并队列里排队（{target}）：目标空闲就开始合入，同一目标忙时和其他改动一起成批。"),
+                WAIT.into(),
+            ),
+            "batched" => (
+                "merging",
+                Next::Wait,
+                format!("{} 正在合入 {into}：在 Node 上集成、按目标的检查验证后推送。", batch.clone().unwrap_or_default()),
+                WAIT.into(),
+            ),
+            "landed" => {
+                st.merged = Some(Merged {
+                    into: into.clone(),
+                    commit: e.landed_commit.clone(),
+                    version: None,
+                });
+                (
+                    "merged_waiting_release",
+                    Next::Wait,
+                    format!("已合入 {into}（{}），按项目约定核对完成条件。", batch.clone().unwrap_or_default()),
+                    WAIT.into(),
+                )
+            }
+            "released" => (
+                "released",
+                Next::Nothing,
+                format!("已合入 {into} 并发布。"),
+                "不需要再做什么。".into(),
+            ),
+            "returned" => {
+                st.failure = Some(Failure {
+                    reason: e.reason.clone().unwrap_or_default(),
+                    log: None,
+                });
+                (
+                    "left",
+                    Next::Fix,
+                    format!("合并队列退回了这一项：{}", e.reason.clone().unwrap_or_default()),
+                    "冲突的话在最新的目标分支上 rebase（只是 rebase 不用重新验收，结束回合即可）；检查没通过就修好后用 steve_deliver 重新交付。".into(),
+                )
+            }
+            _ => (
+                "left",
+                Next::Nothing,
+                "这一项不在合并队列里了（见时间线），按项目原来的方式合并。".into(),
+                "推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准。".into(),
+            ),
+        };
+        st.state = state;
+        st.next = next;
+        st.summary = summary;
+        st.advice = advice;
         Ok(st)
     }
 
