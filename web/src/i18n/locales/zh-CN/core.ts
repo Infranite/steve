@@ -18,7 +18,7 @@ export default {
     line: "{{kind}}：{{q}}",
   },
   acc: { inherit: "跟随全局", manual: "需要你验收", auto: "自动验收" },
-  perm: { plan: "只读：只出方案，不改文件", default: "每次改文件或运行命令都问你", acceptEdits: "可以改项目目录里的文件，运行命令要问你", auto: "可以改文件、运行命令；对外操作仍需你批准" },
+  perm: { plan: "只读：只出方案，不改文件", default: "每次改文件或运行命令都问你", acceptEdits: "可以改项目目录里的文件，运行命令要问你", auto: "可以改文件、运行命令；对外操作仍需你批准", bypassPermissions: "不再询问：工具直接运行，由系统沙箱兜底" },
   avatarColor: { mist: "雾蓝", lavender: "薰衣草", teal: "青绿", amber: "琥珀", coral: "珊瑚", slate: "石板灰", navy: "深蓝灰", walnut: "胡桃" },
   kind: { bug: "修复", feat: "功能", doc: "文档", refactor: "重构", ops: "运维", chore: "杂项" },
   /* the tag categories the Hub knows (the stored value stays Chinese; this is how it reads) */

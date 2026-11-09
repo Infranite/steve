@@ -259,10 +259,10 @@ async fn the_default_acceptance_and_retention_still_show_a_preview() {
         } else if p.starts_with("Which Steve configuration") {
             Ok(r#"{"target":"settings:items"}"#.into())
         } else {
-            Ok(r#"{"changes":[{"key":"accDefault","value":"auto"},{"key":"archDays","value":"7"}]}"#.into())
+            Ok(r#"{"changes":[{"key":"accDefault","value":"manual"},{"key":"archDays","value":"7"}]}"#.into())
         }
     });
-    k.core.say(WS, "以后自动验收，7 天归档", &[]).unwrap();
+    k.core.say(WS, "以后都要我验收，7 天归档", &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(
         ms[1].text,

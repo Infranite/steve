@@ -928,7 +928,7 @@ impl Tx<'_> {
         {
             return Ok(b.accept_mode);
         }
-        self.db().setting(&i.workspace_id, "accDefault", "manual")
+        self.db().setting(&i.workspace_id, "accDefault", "auto")
     }
 
     pub(crate) fn bot_prompt(&self, b: &Bot, ws: &str) -> Result<String> {
@@ -1057,13 +1057,13 @@ impl Tx<'_> {
         if yolo {
             use crate::yolo::agent as y;
             lines.extend([y::ON, y::ASK, y::APPROVAL, y::DELIVER].map(String::from));
-            /* 完全放开: the harness asks nothing, so the agent hears the brakes itself */
-            lines.extend(self.c.yolo_full_lines(item));
         } else {
             lines.push("- steve_ask: when you need a decision from the user. Never ask questions in plain text. After calling it, end your turn.".into());
             lines.push("- steve_request_approval: before anything with outside effects (deploy, release, push, send, pay, delete). After calling it, end your turn.".into());
             lines.push("- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open. A delivery with other open steps is refused. Then end your turn.".into());
         }
+        /* the harness asks nothing (完全放开, or the bot bypasses prompts): the agent hears the brakes itself */
+        lines.extend(self.c.yolo_full_lines(item));
         let proof = self.proof_line(item)?;
         if !self.workflow_child(item)?
             && p.as_ref().is_some_and(|p| p.release.is_some())
@@ -1703,14 +1703,13 @@ impl Tx<'_> {
         };
         self.db()
             .timeline_add(item_id, &Self::by(s), "sys", "交付，等你验收", Some(&s.id))?;
-        /* the acceptance policy: automatic needs evidence (checks, all passed) and nothing left open;
-         * without it a human decides. Waived records that nobody confirmed. */
+        /* the acceptance policy: automatic takes the agent's delivery as it is — its checks, failed ones
+         * and steps it left open are on the card, and you can send it back (decided by the user on
+         * 2026-11-09: trust the agent's judgment). Waived records that nobody confirmed. */
         let evidence: Vec<String> = checks.iter().map(crate::proof::check_line).collect();
         let policy = match self.accept_of(&item)?.as_str() {
             "waived" => crate::cycle::Policy::Waived,
-            "auto" if !checks.is_empty() && checks.iter().all(|c| c.passed) && left.is_empty() => {
-                crate::cycle::Policy::Automatic
-            }
+            "auto" => crate::cycle::Policy::Automatic,
             _ => crate::cycle::Policy::Human,
         };
         self.mark(&s.id, Mark::Delivered);
@@ -1727,8 +1726,11 @@ impl Tx<'_> {
                 },
             );
             self.mark_deliver(&item.workspace_id, item_id, &Self::by(s), None); // stats (ST3)
-            let line = if policy == crate::cycle::Policy::Automatic {
+            let clean = !checks.is_empty() && checks.iter().all(|c| c.passed) && left.is_empty();
+            let line = if policy == crate::cycle::Policy::Automatic && clean {
                 "自检全部通过，自动验收"
+            } else if policy == crate::cycle::Policy::Automatic {
+                "自动验收：有没通过的检查或没做完的步骤，见交付"
             } else {
                 "免确认：不需要验收"
             };
@@ -2152,8 +2154,9 @@ impl Tx<'_> {
     }
 
     /// The agent's turn ended and the accepted result still waits only for its release, which nobody
-    /// requested (no release card, no release running, nothing queued for the agent): nothing would ever
-    /// move it, so a card asks you whether it is still needed instead of the item waiting in silence.
+    /// requested (no release card, no release running, nothing queued for the agent): the agent judged
+    /// it done without one, so the item completes on its acceptance and the release is waived — no card
+    /// (decided by the user on 2026-11-09). Releasing is still yours to ask for, as a new round.
     pub(crate) fn release_not_requested(&mut self, item_id: &str) -> Result<()> {
         let i = self.item(item_id)?;
         let Some(c) = crate::cycle::closing_of(&i)
@@ -2179,24 +2182,26 @@ impl Tx<'_> {
         {
             return Ok(());
         }
-        self.db().decision_create(NewDecision {
-            workspace_id: i.workspace_id.clone(),
-            kind: "fail".into(),
-            subject_type: "item".into(),
-            subject_id: item_id.into(),
-            item_id: Some(item_id.into()),
-            question: "验收已经通过，只差发布，但 Agent 结束了这一回合也没有请求发布：还要发布吗？"
-                .into(),
-            options: Some(vec![
-                "release_waive".into(),
-                "continue".into(),
-                "look".into(),
-            ]),
-            requested_by: "steve".into(),
-            ..Default::default()
-        })?;
+        /* a project whose completion rule is the release (merged, or merged and tagged): the rule decides,
+        checked on the remote (takeover), never waived for not being asked */
+        if self.done_rule(&i)?.is_some() {
+            return Ok(());
+        }
+        let line = "验收已经通过，Agent 没有请求发布：不发布，按验收完成";
         self.db()
-            .item_patch(item_id, patch![now: "只差发布，等你决定是否还要发布"])?;
+            .timeline_add(item_id, "steve", "sys", line, None)?;
+        self.lc_reconcile(
+            item_id,
+            crate::cycle::OP_RELEASE,
+            "waived",
+            line,
+            Some(&op.id),
+        )?;
+        self.lc_op_set(
+            &op.id,
+            "waived",
+            json!({"note": "Agent 没有请求发布，不发布"}),
+        )?;
         Ok(())
     }
 

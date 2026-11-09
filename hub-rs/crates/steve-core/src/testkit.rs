@@ -527,6 +527,20 @@ impl Kit {
         }
         false
     }
+    /// Deliveries wait for your acceptance (the default before 2026-11-09), for tests of that path.
+    pub fn manual_acceptance(&self) {
+        self.db()
+            .settings_set(
+                crate::repo::WS,
+                &serde_json::json!({"accDefault": "manual"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                "me",
+            )
+            .unwrap();
+    }
+
     pub fn open_kinds(&self, item: &str) -> Vec<String> {
         self.db()
             .decisions_of_item(item)

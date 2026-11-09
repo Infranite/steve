@@ -111,6 +111,7 @@ export default {
     default: "每次改文件或运行命令都问你",
     acceptEdits: "可以改项目目录里的文件，运行命令要问你",
     auto: "可以改文件、运行命令；对外操作仍需你批准",
+    bypassPermissions: "不再询问：工具直接运行，由系统沙箱兜底",
   },
   effort: {
     default: "跟随模型默认",
@@ -249,7 +250,7 @@ export default {
   items: {
     acc: "验收",
     accDefault: "默认验收方式",
-    accDefaultSub: "可在 Bot 或单个事项上覆盖。自动验收只在 Bot 的自检全部通过时生效",
+    accDefaultSub: "可在 Bot 或单个事项上覆盖。自动验收时交付即完成，检查结果和没做完的步骤写在卡片上，随时可以打回",
     numbering: "编号与依赖",
     prefix: "事项编号前缀",
     prefixSub: "在 设置 · 工作空间 里改",

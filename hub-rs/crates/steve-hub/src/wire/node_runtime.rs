@@ -250,7 +250,7 @@ pub struct NodeRuntime {
     /// Why this Node cannot run anything (its host failed to start): its sessions then refuse
     /// work instead of queueing commands nobody sends.
     stopped: Mutex<Option<String>>,
-    /// How long an attempt (and so a permission it asks) may take, in ms. 6 h unless the host
+    /// How long an attempt (and so a permission it asks) may take, in ms. No limit in practice unless the host
     /// sets it ([`Self::set_turn_limit`]).
     turn_limit: std::sync::atomic::AtomicI64,
     /// How long an open session may sit idle before its harness is let go, in ms
@@ -290,8 +290,11 @@ const AFTER_TURN: i64 = i64::MAX;
 /// The `retry_at` of the first prepare and open of a session adopted idle: never leased until a
 /// message reopens it ([`NodeRuntime::adopt_idle`]).
 const UNTIL_NEEDED: i64 = i64::MAX - 1;
-/// An attempt's deadline by default.
-const TURN_LIMIT_MS: i64 = 6 * 3_600_000;
+/// An attempt's deadline by default: none in practice, like research's ([`super::research::NO_WALL_LIMIT`]).
+/// A Worker's turn is not cut off for running long, nor its permission cards for waiting on you (they
+/// expire with it); it ends when the agent ends it or you stop it (decided by the user on 2026-11-09:
+/// Steve coordinates, it does not limit the agent). The Node needs a deadline, so it is far away.
+const TURN_LIMIT_MS: i64 = super::research::NO_WALL_LIMIT.as_millis() as i64;
 /// How long a session stays open with nothing to do, by default (legacy's idle kill).
 const IDLE_RELEASE_MS: i64 = 600_000;
 /// How often the apply worker looks for idle sessions.

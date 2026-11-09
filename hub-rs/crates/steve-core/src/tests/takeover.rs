@@ -128,9 +128,10 @@ fn a_question_in_plain_words_is_for_you() {
     assert!(steve_lines(&k, &item).is_empty());
 }
 
-/// ST-49: the agent stopped to lay out a plan for you (a heading says so), far above its last words.
+/// ST-49, changed 2026-11-09: the agent stopped to lay out a plan (a heading says so), far above its
+/// last words. It is reminded first that it can deliver, or ask with steve_ask, instead of a card.
 #[test]
-fn a_plan_it_stopped_to_report_is_for_you() {
+fn a_plan_it_stopped_to_report_is_reminded_first() {
     let k = kit(2);
     let (item, sid) = started(&k);
     let filler = "这一段是背景说明。".repeat(80);
@@ -139,8 +140,12 @@ fn a_plan_it_stopped_to_report_is_for_you() {
         &sid,
         &format!("## 方案\n1. 先把分支推到 GitHub\n2. 开 PR 等 CI\n\n{filler}\n以上。"),
     );
-    assert_eq!(k.open_fails(&item).len(), 1);
-    assert!(steve_lines(&k, &item).is_empty(), "not continued");
+    assert!(k.open_fails(&item).is_empty(), "no card yet");
+    assert_eq!(steve_lines(&k, &item).len(), 1, "reminded");
+    let p = k.rt.prompts_of(&sid).pop().unwrap();
+    assert!(p.contains("steve_ask、steve_deliver 仍然可用"), "{p}");
+    assert!(p.contains("用 steve_deliver 交付"), "{p}");
+    assert!(p.contains("等用户确认的内容"), "{p}");
 }
 
 /// ST-54: the agent stopped with a list of things for you to confirm.
@@ -177,16 +182,15 @@ fn an_answer_to_what_you_asked_from_the_conversation_is_not_continued() {
     assert_eq!(k.open_fails(&item).len(), 1);
 }
 
-/// A plan from an earlier turn, already answered, does not make a later silent stop a report.
+/// A plan left in plain text is reminded, and so is the silent stop after it: each within the limit.
 #[test]
-fn a_plan_of_an_earlier_turn_does_not_hold_a_later_stop() {
+fn a_plan_and_a_later_silent_stop_are_each_reminded() {
     let k = kit(2);
     let (item, sid) = started(&k);
     stop(&k, &sid, "## 方案\n1. 先改接口\n2. 再补测试");
-    let d = k.db().decisions_of_item(&item).unwrap().pop().unwrap();
-    k.core.resolve(&d.id, "continue", "", "me").unwrap();
+    assert_eq!(steve_lines(&k, &item).len(), 1);
     stop(&k, &sid, "还在改。");
-    assert_eq!(steve_lines(&k, &item).len(), 1, "continued");
+    assert_eq!(steve_lines(&k, &item).len(), 2, "continued");
     assert!(k.open_fails(&item).is_empty());
 }
 
@@ -1005,6 +1009,7 @@ fn another_project_is_not_checked_against_this_instance() {
 #[test]
 fn a_goal_that_asks_for_an_actual_operation_needs_one_in_the_delivery() {
     let k = kit(2);
+    k.manual_acceptance();
     let x = remote_for(
         &k,
         upstream::DONE_TAG,

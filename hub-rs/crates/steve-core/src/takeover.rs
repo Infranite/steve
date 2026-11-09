@@ -140,17 +140,14 @@ impl Tx<'_> {
         stop: Stop,
     ) -> Result<Option<String>> {
         let i = self.item(item_id)?;
-        /* it stopped on purpose — a question, an answer to what you asked it from the
-         * conversation, a plan or something for you to confirm — so it is yours, not continued */
+        /* it stopped on purpose — a question, or an answer to what you asked it from the conversation —
+         * so it is yours, not continued. A report, a plan or something to confirm left in plain text is
+         * reminded first: the agent may have lost Steve's tools after a compaction or in a long context
+         * (decided by the user on 2026-11-09), and it decides then whether to deliver or ask */
         if let Stop::Stopped {
-            last,
-            whole,
-            answered_you,
-            ..
+            last, answered_you, ..
         } = &stop
-            && (crate::yolo::answer::looks_like_question(last).is_some()
-                || *answered_you
-                || stopped_to_report(whole))
+            && (crate::yolo::answer::looks_like_question(last).is_some() || *answered_you)
         {
             return Ok(Some(stop.why().into()));
         }
@@ -806,10 +803,21 @@ fn continue_text(
     i: &Item,
 ) -> String {
     let mut s = match stop {
-        Stop::Stopped { .. } => "（Steve）你这一回合结束了，但没有交付也没有提问。".to_string(),
+        Stop::Stopped { .. } => {
+            "（Steve）你这一回合结束了，但没有用 steve_deliver 交付，也没有用 steve_ask 提问。"
+                .to_string()
+        }
         Stop::Idle { .. } => "（Steve）会话停了一会儿，没有在运行，也没有交付或提问。".to_string(),
     };
-    s.push_str("如果你是有意停下来汇报、出方案或等用户决定，用 steve_ask 提问，不要直接结束回合。");
+    s.push_str(
+        "如果上下文压缩过，提醒你：Steve 的工具 steve_update、steve_ask、steve_deliver 仍然可用。",
+    );
+    s.push_str("如果工作已经完成，现在就用 steve_deliver 交付，可以直接用你刚才的汇报做摘要，列出实际跑过的检查；如果有需要用户决定的事，用 steve_ask 提问并给出 recommended；否则接着做完。");
+    if let Stop::Stopped { whole, .. } = stop
+        && stopped_to_report(whole)
+    {
+        s.push_str("你刚才的回复里有等用户确认的内容：请用 steve_ask 提出来，只写在回复里用户看不到要回答。");
+    }
     if let (Some(rule), Some(p)) = (rule, p) {
         s.push_str(&format!(
             "按这个项目的约定，{}就算完成，{}；Steve 刚核对过远端：{}。",
@@ -828,7 +836,7 @@ fn continue_text(
         let shown: Vec<&str> = open.iter().take(3).copied().collect();
         s.push_str(&format!("计划里还没完成的：{}。", shown.join("；")));
     }
-    s.push_str("先核对现状再动手：已经完成的推送、合并、打 tag、发布不要重做。做完用 steve_deliver 交付；确实需要用户决定时用 steve_ask（给出 recommended）。");
+    s.push_str("先核对现状再动手：已经完成的推送、合并、打 tag、发布不要重做。");
     s
 }
 

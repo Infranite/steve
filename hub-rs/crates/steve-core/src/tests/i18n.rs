@@ -30,7 +30,7 @@ async fn describe_in_english() {
     assert_eq!(
         now,
         [
-            ("Default acceptance", "You accept it"),
+            ("Default acceptance", "Accepted automatically"),
             ("When prerequisites finish", "Start automatically"),
             ("Handoff threshold", "80%"),
             ("Archive automatically after finishing", "30 days"),

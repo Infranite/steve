@@ -112,6 +112,7 @@ export default {
     default: "Asks you before every file change or command",
     acceptEdits: "Can edit files in the project folder; asks before running commands",
     auto: "Can edit files and run commands; external actions still need your approval",
+    bypassPermissions: "Never asks: tools run directly, contained by the OS sandbox",
   },
   effort: {
     default: "Model default",
@@ -249,7 +250,7 @@ export default {
   items: {
     acc: "Acceptance",
     accDefault: "Default acceptance",
-    accDefaultSub: "Can be overridden per bot or per item. Auto-accept only applies when all of the bot's self-checks pass",
+    accDefaultSub: "Can be overridden per bot or per item. With auto-accept a delivery completes the item; its checks and any unfinished steps are on the card, and you can send it back",
     numbering: "Numbering and dependencies",
     prefix: "Item number prefix",
     prefixSub: "Change it under Settings · Workspace",

@@ -659,6 +659,7 @@ fn a_permission_answer_follows_the_runtime_outcome() {
 #[test]
 fn deliver_records_outputs_and_rework_goes_back() {
     let k = Kit::new();
+    k.manual_acceptance();
     let i = new_item(&k, "g");
     let s = only_session(&k, &i.id);
     k.core
@@ -1353,6 +1354,7 @@ fn fork_into_an_item_or_a_session_with_the_transcript() {
 #[test]
 fn dependencies_block_and_start_when_done() {
     let k = Kit::new();
+    k.manual_acceptance();
     let a = new_item(&k, "先做");
     let b = k
         .core

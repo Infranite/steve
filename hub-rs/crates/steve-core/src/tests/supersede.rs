@@ -134,6 +134,7 @@ fn tidy_expires_questions_older_than_a_delivery_and_keeps_the_delivery() {
 #[test]
 fn bot_tools_supersede_what_they_move_past() {
     let k = Kit::new();
+    k.manual_acceptance();
     let i = k.item("run", "执行", None);
     let sid = k.session(&i, "running");
     let s = k.db().session(&sid).unwrap().unwrap();

@@ -139,7 +139,7 @@ fn release_declined_with_a_reason_goes_back_to_the_agent() {
     let k = Kit::new();
     let x = k.delivered(true);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    /* the agent asks for the release in its turn, then ends it */
     let r = k.decision(
         &x.id,
         Some(&x.session),
@@ -147,6 +147,7 @@ fn release_declined_with_a_reason_goes_back_to_the_agent() {
         "release",
         &["yes", "no"],
     );
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     k.core
         .resolve(&r, "no", "走 PR 合进去就行，不用发布", "me")
         .unwrap();
@@ -253,7 +254,7 @@ fn an_approval_after_the_no_takes_it_back() {
     let k = Kit::new();
     let x = k.delivered(true);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    /* the agent asks for the release in its turn, then ends it */
     let no = k.decision(
         &x.id,
         Some(&x.session),
@@ -261,6 +262,7 @@ fn an_approval_after_the_no_takes_it_back() {
         "release",
         &["yes", "no"],
     );
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     k.db()
         .decision_resolve(
             &no,
@@ -292,8 +294,8 @@ fn an_approval_after_the_no_takes_it_back() {
 }
 
 /// The agent asked about the release after the acceptance (instead of publishing); the answer is handled
-/// first, then the close is judged again: only the release is left and nobody requested it, so you are
-/// asked instead of the item waiting in silence.
+/// first, then the close is judged again: only the release is left and nobody requested it, so the item
+/// completes without one (2026-11-09: the agent's judgment stands, no card).
 #[test]
 fn a_question_after_the_acceptance_is_answered_before_the_close_is_judged_again() {
     let k = Kit::new();
@@ -317,40 +319,31 @@ fn a_question_after_the_acceptance_is_answered_before_the_close_is_judged_again(
         .unwrap();
     assert_eq!(k.status(&x.id).2, "收到回答，继续");
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    let (status, _, now) = k.status(&x.id);
-    assert_ne!(status, "done");
-    assert_eq!(now, "只差发布，等你决定是否还要发布");
-    let card = k
-        .db()
-        .decisions_of_item(&x.id)
-        .unwrap()
-        .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
-        .expect("a card asks");
-    assert_eq!(card.options, ["release_waive", "continue", "look"]);
-    k.core.resolve(&card.id, "release_waive", "", "me").unwrap();
     assert_eq!(k.status(&x.id).0, "done");
+    assert!(k.open_fails(&x.id).is_empty(), "no card asks");
 }
 
 #[test]
-fn continuing_when_only_the_release_is_left_asks_the_agent_to_publish() {
+fn only_the_release_left_and_not_requested_completes_without_it() {
     let k = Kit::new();
     let x = k.delivered(true);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    let card = k
-        .db()
-        .decisions_of_item(&x.id)
-        .unwrap()
-        .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
-        .expect("a card asks");
-    k.core.resolve(&card.id, "continue", "", "me").unwrap();
-    assert_eq!(
-        k.rt.prompts_of(&x.session).last().unwrap(),
-        "验收已经通过，只差发布。确认改动都已提交到 steve/x 后，用 steve_publish 请求发布。"
+    assert_eq!(k.status(&x.id).0, "done");
+    assert!(k.open_fails(&x.id).is_empty());
+    assert!(
+        k.db()
+            .store()
+            .items()
+            .operations(&x.id, k.db().item(&x.id).unwrap().unwrap().cycle)
+            .unwrap()
+            .iter()
+            .any(|o| o.kind == "release" && o.status == "waived")
     );
-    assert_eq!(k.phase(&x.id), "closing");
+    assert!(
+        k.timeline_texts(&x.id)
+            .contains(&"验收已经通过，Agent 没有请求发布：不发布，按验收完成".to_string())
+    );
 }
 
 #[test]
@@ -467,8 +460,10 @@ fn auto_accepted_with_a_release_pending_is_not_done_either() {
     assert_eq!(now, "等待发布");
 }
 
+/// 2026-11-09: automatic acceptance takes the agent's delivery as it is. A failed check or no checks
+/// at all is on the card and the timeline, not a reason to stop for you.
 #[test]
-fn auto_accept_without_release_finishes_and_failed_checks_ask() {
+fn auto_accept_takes_the_delivery_as_it_is() {
     let k = Kit::new();
     let x = k.delivered(false);
     k.db()
@@ -495,51 +490,13 @@ fn auto_accept_without_release_finishes_and_failed_checks_ask() {
             &[],
         )
         .unwrap();
-    assert_eq!(k.open_kinds(&x.id), vec!["accept"]);
-    let d = k
-        .db()
-        .decisions_of_item(&x.id)
-        .unwrap()
-        .into_iter()
-        .find(|d| d.status == "open")
-        .unwrap();
-    assert_eq!(d.draft, "ok\n\n检查：✗ tests");
-    assert_eq!(
-        k.status(&x.id),
-        (
-            "wait".into(),
-            "交付与验收".into(),
-            "交付了，等你验收".into()
-        )
-    );
-    // no checks at all is no evidence: a human decides
-    k.core.tool_deliver(&s, "ok2", &[], &[], &[]).unwrap();
-    assert_eq!(
-        k.open_kinds(&x.id),
-        vec!["accept"],
-        "the older delivery was superseded"
-    );
-    assert_eq!(k.phase(&x.id), "closing");
-    let pass = Check {
-        name: "tests".into(),
-        passed: true,
-        operated: false,
-    };
-    k.core.tool_deliver(&s, "ok3", &[], &[pass], &[]).unwrap();
+    assert!(k.open_kinds(&x.id).is_empty(), "nothing waits for you");
     assert_eq!(k.status(&x.id).0, "done");
     let i = k.db().item(&x.id).unwrap().unwrap();
-    assert_eq!(
-        (i.acceptance.as_deref(), i.revision),
-        (Some("automatic"), 4),
-        "one revision per delivery"
-    );
+    assert_eq!(i.acceptance.as_deref(), Some("automatic"));
     assert!(
         k.timeline_texts(&x.id)
-            .contains(&"自检全部通过，自动验收".to_string())
-    );
-    assert!(
-        k.open_kinds(&x.id).is_empty(),
-        "the older delivery was superseded"
+            .contains(&"自动验收：有没通过的检查或没做完的步骤，见交付".to_string())
     );
 }
 
@@ -564,6 +521,7 @@ fn plan_of(k: &Kit, id: &str) -> Vec<(String, bool, bool)> {
 #[test]
 fn a_delivery_with_open_steps_is_refused_until_they_are_done_or_declared_left_open() {
     let k = Kit::new();
+    k.manual_acceptance();
     let x = k.delivered(false);
     let plan = vec![step("a", false), step("b", false), step("c", true)];
     k.db().item_patch(&x.id, patch![plan: plan]).unwrap();
