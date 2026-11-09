@@ -888,6 +888,7 @@ pub fn wire_assembly(
             .clone()
             .map(|n| n as Arc<dyn steve_node_api::Node>),
         nodes.clone(),
+        cfg.disk.low,
     )));
     // Health's Node rollout switch describes agent-session routing, including its rollback.
     // The model-job host still participates in domain shutdown regardless of that switch.
