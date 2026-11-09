@@ -3989,6 +3989,62 @@ fn queue_in(
     Ok(())
 }
 
+/// Messages said to a session while its turn runs, handed to that turn through a Steve tool call's
+/// result instead of waiting for the turn to end or cutting it (2026-11-09: the agent hears you while
+/// it works). Only while `attempt` is the running, uncancelled attempt of `turn`; each message leaves
+/// the queue as the turn's dispatch and shows as the user's message in the session. Their texts.
+pub(crate) fn deliver_mid_turn(
+    store: &Store,
+    node_session: &str,
+    turn: &str,
+    attempt: &str,
+) -> Result<Vec<String>, StoreError> {
+    store.transaction(|tx| {
+        /* the Hub's session of the Node's, while that attempt is the turn's running one */
+        let session: Option<String> = tx
+            .query_row(
+                "SELECT s.session_id FROM runtime_sessions s
+                   JOIN runtime_turns t ON t.session_id=s.session_id
+                   JOIN runtime_attempts a ON a.turn_id=t.turn_id
+                  WHERE s.node_session_id=?1 AND t.turn_id=?2 AND t.state<>'finished'
+                    AND t.active_attempt=?3 AND a.attempt_id=?3 AND a.cancel_requested=0",
+                rusqlite::params![node_session, turn, attempt],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(session) = session else {
+            return Ok(vec![]);
+        };
+        let session = session.as_str();
+        let xs = rt::deliver_into_turn_in(tx, session, turn, now())?;
+        for m in &xs {
+            let mut ev = message_event(&m.text, &m.via, &[]);
+            ev["mid_turn"] = json!(true);
+            rt::add_event_in(tx, session, "user", ev, V1, None, now())?;
+        }
+        if !xs.is_empty() {
+            tx.publish(steve_store::ChangeEvent::Session {
+                id: session.into(),
+                item_id: None,
+            });
+        }
+        Ok(xs.into_iter().map(|m| m.text).collect())
+    })
+}
+
+/// What the agent reads at the end of a Steve tool's result when messages came while it worked.
+pub(crate) fn mid_turn_note(texts: &[String]) -> String {
+    let list = texts
+        .iter()
+        .enumerate()
+        .map(|(n, t)| format!("{}. {t}", n + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\n——\n（Steve）你工作时用户发来了新消息，已经送到这里，不会再单独发给你：\n{list}\n按这些消息调整当前的工作；要你停下或换方向，就照做。"
+    )
+}
+
 /// A message as the session's events show it (the same shape on every backend).
 fn message_event(text: &str, via: &str, files: &[FileRef]) -> Value {
     let mut v = json!({ "text": text, "via": via });

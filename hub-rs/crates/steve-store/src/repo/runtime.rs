@@ -146,6 +146,28 @@ pub fn claim_in(tx: &Tx<'_>, session: &str, turn: &str, now: i64) -> Result<Vec<
     Ok(xs)
 }
 
+/// Hands the session's waiting messages (those without attachments) to its running `turn`: they leave
+/// the queue as the turn's own dispatch, already submitted, so they end with it (completed,
+/// interrupted…) and are never sent again as a turn of their own. The caller checks the turn runs.
+pub fn deliver_into_turn_in(
+    tx: &Tx<'_>,
+    session: &str,
+    turn: &str,
+    now: i64,
+) -> Result<Vec<Queued>> {
+    let xs = all(
+        tx,
+        "SELECT * FROM queued WHERE session_id=? AND (files IS NULL OR files='' OR files='[]') ORDER BY created,rowid",
+        [session],
+        Queued::from_row,
+    )?;
+    for q in &xs {
+        tx.execute("INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated,turn_id,backend) SELECT id,session_id,text,via,created,files,'submitted',?,?,'node' FROM queued WHERE id=?",params![now,turn,q.id])?;
+        tx.execute("DELETE FROM queued WHERE id=?", [&q.id])?;
+    }
+    Ok(xs)
+}
+
 /// Immutable attempt identity and frozen request. A retry is a new attempt, never a rewritten spec.
 pub struct NewAttempt<'a> {
     pub id: &'a str,
