@@ -500,6 +500,7 @@ impl HubTools for NodeTools {
         // ToolService: it exposes no cancellation proof and may already have an outside effect.
         let ledger = self.ledger.clone();
         let store = self.store.clone();
+        let store2 = self.store.clone();
         let node = self.node.clone();
         let wait_ms = (q.deadline.0 - steve_store::now()).clamp(0, 60_000) as u64;
         let op = operation.clone();
@@ -561,11 +562,42 @@ impl HubTools for NodeTools {
                 )
                 .await
                 {
-                    Ok(text) => ToolResult::Completed {
-                        end_turn: text.ends_with(steve_mcp::tools::END),
-                        parts: vec![Part::Text { text }],
-                        structured: None,
-                    },
+                    Ok(mut text) => {
+                        let end_turn = text.ends_with(steve_mcp::tools::END);
+                        /* what you said while it works reaches it here, unless it is ending the turn
+                         * anyway (then the next turn takes it, as before) */
+                        if !end_turn
+                            && let ExecutionRef::Turn {
+                                session,
+                                turn,
+                                attempt,
+                            } = &q.execution
+                        {
+                            let (st, s, t, a) = (
+                                store2.clone(),
+                                session.as_str().to_string(),
+                                turn.as_str().to_string(),
+                                attempt.as_str().to_string(),
+                            );
+                            match blocking(move || {
+                                super::node_runtime::deliver_mid_turn(&st, &s, &t, &a)
+                                    .map_err(internal)
+                            })
+                            .await
+                            {
+                                Ok(said) if !said.is_empty() => {
+                                    text.push_str(&super::node_runtime::mid_turn_note(&said))
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::warn!("messages into the running turn: {e:?}"),
+                            }
+                        }
+                        ToolResult::Completed {
+                            end_turn,
+                            parts: vec![Part::Text { text }],
+                            structured: None,
+                        }
+                    }
                     Err(text) => ToolResult::Failed {
                         error: ApiError::new(
                             ErrorCode::Invalid,
@@ -819,6 +851,94 @@ pub(crate) mod tests {
             tools.call_status(q.key()).await.unwrap_err().code,
             ErrorCode::Denied
         );
+    }
+    /// A Steve tool that does not end the turn (`steve_update`, say).
+    struct Plain;
+    #[async_trait]
+    impl Service for Plain {
+        fn catalog(&self) -> Vec<ToolDescriptor> {
+            vec![ToolDescriptor {
+                name: "test".into(),
+                description: "test".into(),
+                input_schema: json!({"type":"object"}),
+                read_only: false,
+            }]
+        }
+        async fn call(&self, _: Session, _: &str, _: serde_json::Value) -> Result<String, String> {
+            Ok("ok".into())
+        }
+    }
+    fn count(store: &Store, sql: &str) -> i64 {
+        store
+            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
+            .unwrap()
+    }
+    /// 2026-11-09: what you say while the agent works reaches it in its next Steve tool's result,
+    /// once, as the running turn's own message; it is not queued for a turn of its own.
+    #[tokio::test]
+    async fn a_message_said_mid_turn_reaches_the_agent_through_a_tool() {
+        let h = fixture(vec![]).await;
+        let tools =
+            NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
+        tools.install(Arc::new(Plain)).unwrap();
+        h._rt
+            .prompt("s1", "顺便把 README 也改了", "me", &[])
+            .unwrap();
+        assert_eq!(
+            count(
+                &h.store,
+                "SELECT count(*) FROM queued WHERE session_id='s1'"
+            ),
+            1
+        );
+        let q = request(&tools, h.exec.clone()).await;
+        let ToolResult::Completed {
+            parts, end_turn, ..
+        } = tools.call(q.clone()).await.unwrap()
+        else {
+            panic!("completed")
+        };
+        assert!(!end_turn);
+        let Part::Text { text } = &parts[0] else {
+            panic!("text")
+        };
+        assert!(text.starts_with("ok"), "{text}");
+        assert!(text.contains("1. 顺便把 README 也改了"), "{text}");
+        assert_eq!(
+            count(
+                &h.store,
+                "SELECT count(*) FROM queued WHERE session_id='s1'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &h.store,
+                "SELECT count(*) FROM session_dispatch WHERE session_id='s1' AND state='submitted'
+                   AND text='顺便把 README 也改了'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &h.store,
+                "SELECT count(*) FROM events WHERE session_id='s1' AND kind='user'
+                   AND json_extract(data,'$.mid_turn')=1"
+            ),
+            1
+        );
+        // the same call again gives the same result; another call has nothing new
+        let ToolResult::Completed { parts: again, .. } = tools.call(q.clone()).await.unwrap()
+        else {
+            panic!("completed")
+        };
+        assert_eq!(again, parts);
+        let mut next = q.clone();
+        next.id = CallId::new("call2").unwrap();
+        let ToolResult::Completed { parts, .. } = tools.call(next).await.unwrap() else {
+            panic!("completed")
+        };
+        assert_eq!(parts, vec![Part::Text { text: "ok".into() }]);
     }
     #[tokio::test]
     async fn workflow_gate_stops_new_tools_but_keeps_known_results_readable() {
