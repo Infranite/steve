@@ -188,9 +188,9 @@ async fn a_project_draft() {
 async fn a_settings_draft_with_the_item_prefix() {
     let k = Kit::new();
     k.gw.set(|p, _| {
-        assert!(p.contains("  accDefault · 默认验收方式（值：manual=需要你验收，auto=自动验收） · enum · manual|auto · \"manual\""));
+        assert!(p.contains("  accDefault · 默认验收方式（值：manual=需要你验收，auto=自动验收） · enum · manual|auto · \"auto\""));
         assert!(p.contains("  item_prefix · 事项编号前缀（大写字母） · text · \"ST\""));
-        Ok(r#"{"changes":[{"key":"accDefault","value":"auto"},{"key":"item_prefix","value":"ab-c1defgh"},{"key":"depsAfter","value":"随便"}]}"#.into())
+        Ok(r#"{"changes":[{"key":"accDefault","value":"manual"},{"key":"item_prefix","value":"ab-c1defgh"},{"key":"depsAfter","value":"随便"}]}"#.into())
     });
     let p = k
         .core
@@ -199,20 +199,20 @@ async fn a_settings_draft_with_the_item_prefix() {
         .unwrap();
     assert_eq!(
         p.patch,
-        json!({"accDefault": "auto", "item_prefix": "ABCDEF"})
+        json!({"accDefault": "manual", "item_prefix": "ABCDEF"})
             .as_object()
             .unwrap()
             .clone()
     );
     assert_eq!(
         serde_json::to_value(&p.changes).unwrap(),
-        json!([{"label": "默认验收方式", "from": "需要你验收", "to": "自动验收"}, {"label": "事项编号前缀（大写字母）", "from": "ST", "to": "ABCDEF"}])
+        json!([{"label": "默认验收方式", "from": "自动验收", "to": "需要你验收"}, {"label": "事项编号前缀（大写字母）", "from": "ST", "to": "ABCDEF"}])
     );
     k.core.apply(&p.id, "me", WS).unwrap();
-    assert_eq!(k.db().setting(WS, "accDefault", "manual").unwrap(), "auto");
+    assert_eq!(k.db().setting(WS, "accDefault", "auto").unwrap(), "manual");
     assert_eq!(k.db().workspace(WS).unwrap().unwrap().item_prefix, "ABCDEF");
     k.core.undo(&p.id, "me", WS).unwrap();
-    assert_eq!(k.db().setting(WS, "accDefault", "x").unwrap(), "manual");
+    assert_eq!(k.db().setting(WS, "accDefault", "x").unwrap(), "auto");
     assert_eq!(k.db().workspace(WS).unwrap().unwrap().item_prefix, "ST");
 }
 
@@ -441,7 +441,7 @@ async fn describe_shows_settings_as_the_user_sees_them() {
     assert_eq!(
         now,
         [
-            ("默认验收方式", "需要你验收"),
+            ("默认验收方式", "自动验收"),
             ("前置完成后", "自动开始"),
             ("交接阈值", "80%"),
             ("完成后自动归档", "30 天"),

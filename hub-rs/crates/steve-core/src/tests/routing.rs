@@ -736,6 +736,7 @@ async fn hub_restart_interrupts_research() {
 #[tokio::test]
 async fn r4_an_item_from_the_conversation_reports_back() {
     let k = Kit::new();
+    k.manual_acceptance();
     router(&k, |m| {
         if m.contains("改成") {
             json!({"kind": "item", "confidence": 0.95, "signals": ["change"], "title": "改发送按钮", "goal": "把发送按钮文字改成“发送给 Steve”", "bot": "steve"})
@@ -1107,6 +1108,7 @@ async fn a_follow_up_resumes_the_research_session() {
 #[tokio::test]
 async fn an_explanation_is_posted_back_once() {
     let k = Kit::new();
+    k.manual_acceptance();
     router(
         &k,
         |_| json!({"kind": "item", "confidence": 0.95, "signals": ["explicit"], "title": "讲解", "bot": "steve"}),

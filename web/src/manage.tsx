@@ -45,7 +45,7 @@ const proLabel = (t: T, i: number) => (PRO_KEYS[i] ? t(`manage:pro.${PRO_KEYS[i]
 const ACC_KEYS = ["inherit", "manual", "auto"] as const
 /** an accept mode by backend key as shown; unknown keys fall back to the store's label */
 const accLabel = (t: T, k: string) => ((ACC_KEYS as readonly string[]).includes(k) ? t(`manage:acc.${k as (typeof ACC_KEYS)[number]}`) : ACC[k] ?? k)
-const PERM_KEYS = ["plan", "default", "acceptEdits", "auto"] as const
+const PERM_KEYS = ["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const
 const permLabel = (t: T, k: string) => ((PERM_KEYS as readonly string[]).includes(k) ? t(`manage:perm.${k as (typeof PERM_KEYS)[number]}`) : PERM[k] ?? k)
 /* tag categories are stored as Chinese words (store TAG_CATS); only the label is translated */
 const TAG_CAT_KEYS: Record<string, "all" | "project" | "kind" | "domain" | "client" | "topic"> = { 全部: "all", 项目: "project", 类型: "kind", 领域: "domain", 客户: "client", 主题: "topic" }
@@ -356,7 +356,7 @@ function Pane({ id }: { id: string }) {
   </div>
   if (id === "items") return <div className="flex flex-col gap-8">
     <section><SectionLabel>{t("manage:items.acc")}</SectionLabel><Group>
-      <Row title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "auto" ? "auto" : "manual"} onChange={(v) => setSetting({ accDefault: v })} options={[["manual", t("manage:acc.manual")], ["auto", t("manage:acc.auto")]] as const} /></Row></Group></section>
+      <Row title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : "auto"} onChange={(v) => setSetting({ accDefault: v })} options={[["manual", t("manage:acc.manual")], ["auto", t("manage:acc.auto")]] as const} /></Row></Group></section>
     <section><SectionLabel>{t("manage:items.numbering")}</SectionLabel><Group>
       <Row title={t("manage:items.prefix")} sub={t("manage:items.prefixSub")}><span className="font-mono type-callout">{st.prefix}-{st.noSeq + 1}</span></Row>
       <Row title={t("manage:items.depsAfter")}><Sel v={c.depsAfter} o={[["自动开始", t("manage:items.depsAuto")], ["提醒我开始", t("manage:items.depsRemind")]]} on={(v) => setSetting({ depsAfter: v })} /></Row></Group></section>

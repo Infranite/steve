@@ -16,7 +16,13 @@ use crate::validate::{Check, Num, Str};
 
 const HARNESSES: &[&str] = &["claude-code", "codex"];
 const ACCEPT: &[&str] = &["inherit", "manual", "auto"];
-const PERM: &[&str] = &["default", "acceptEdits", "auto", "plan"];
+const PERM: &[&str] = &[
+    "default",
+    "acceptEdits",
+    "auto",
+    "plan",
+    "bypassPermissions",
+];
 
 /// `BotPatch` (or the create variant: `name` required, `harness` defaulting to `claude-code`), as the
 /// parsed object with only the present keys, in schema order.

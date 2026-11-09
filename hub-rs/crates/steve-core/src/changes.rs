@@ -22,7 +22,7 @@ pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
         { "key": "tz", "label": "时区", "values": ["Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"], "def": "Asia/Taipei", "live": true },
       ],
       "items": [
-        { "key": "accDefault", "label": "默认验收方式", "values": ["manual", "auto"], "def": "manual", "live": true, "labels": { "manual": "需要你验收", "auto": "自动验收" } },
+        { "key": "accDefault", "label": "默认验收方式", "values": ["manual", "auto"], "def": "auto", "live": true, "labels": { "manual": "需要你验收", "auto": "自动验收" } },
         { "key": "depsAfter", "label": "前置完成后", "values": ["自动开始", "提醒我开始"], "def": "自动开始", "live": true },
         { "key": "handoff", "label": "交接阈值", "values": ["70", "80", "90"], "def": "80", "live": true, "labels": { "70": "70%", "80": "80%", "90": "90%" } },
         { "key": "archDays", "label": "完成后自动归档", "values": ["7", "30", "90", "0"], "def": "30", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天", "0": "不自动归档" } },
@@ -81,11 +81,15 @@ const ACC: [(&str, &str); 3] = [
     ("auto", "自动验收"),
 ];
 /// Permission modes and their labels.
-pub const PERM: [(&str, &str); 4] = [
+pub const PERM: [(&str, &str); 5] = [
     ("plan", "只读：只出方案，不改文件"),
     ("default", "每次改文件或运行命令都问你"),
     ("acceptEdits", "可以改项目目录里的文件，运行命令要问你"),
     ("auto", "可以改文件、运行命令；对外操作仍需你批准"),
+    (
+        "bypassPermissions",
+        "不再询问：工具直接运行，由系统沙箱兜底",
+    ),
 ];
 const PRO: [&str; 3] = ["只在必要时", "适中", "积极"];
 
@@ -2106,7 +2110,7 @@ mod tests {
     #[test]
     fn schema_and_defaults() {
         let d = setting_defaults();
-        assert_eq!(d["accDefault"], "manual");
+        assert_eq!(d["accDefault"], "auto");
         assert_eq!(d["archDays"], "30");
         assert_eq!(d.len(), 15);
         assert_eq!(d["tz"], "Asia/Taipei");

@@ -20,7 +20,7 @@ pub const UPDATE: &str = "- steve_update: call it first with a short plan, and a
 pub const ON: &str = "- YOLO mode is on: the user is away and wants as little interruption as possible. Decide yourself whenever a reasonable choice exists; write the assumptions you made into steve_update and into the delivery summary.";
 pub const ASK: &str = "- steve_ask: only when you are blocked by something only the user knows. Always give options and set `recommended` with `why`; Steve may answer for the user. After calling it, end your turn.";
 pub const APPROVAL: &str = "- Work inside your working directory freely; do not ask for approval for that. Never push, publish, send messages or email, pay, or delete anything outside your working directory — these still wait for the user and will not happen while they are away; use steve_request_approval for them and continue with other work if you can. After calling it, end your turn.";
-pub const DELIVER: &str = "- steve_deliver: when the goal is met and your checks pass. Run the real checks (build, type check, tests) and list them; a delivery without checks, or with a failed one, is sent back to you instead of being accepted. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open. Then end your turn.";
+pub const DELIVER: &str = "- steve_deliver: when the goal is met and your checks pass. Run the real checks (build, type check, tests) and list them, failed ones too: they are shown to the user with your delivery. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open. Then end your turn.";
 /// Appended to the `steve_publish` line for the user's own Steve deployment.
 pub const PUBLISH: &str = " In YOLO mode Steve approves releases of this project by itself and rolls back if the health check fails.";
 
@@ -68,8 +68,8 @@ impl Level {
 }
 
 /// The mode a session's harness runs in: `bot` = the bot's `perm_mode`, `own_dir` = the item has its
-/// own directory (edits there are the item's own). Never `bypassPermissions`: that is
-/// [`harness_mode`]'s answer for full access only.
+/// own directory (edits there are the item's own). Never `bypassPermissions`: a read-only session
+/// asks whatever the bot says; [`harness_mode`] decides when prompts are bypassed.
 pub fn perm_mode(bot: Option<&str>, own_dir: bool) -> Option<String> {
     // a bot cannot carry full access around by itself: its bypass counts as `default`
     let m = bot.map(|m| if m == BYPASS { "default" } else { m })?;
@@ -80,11 +80,13 @@ pub fn perm_mode(bot: Option<&str>, own_dir: bool) -> Option<String> {
     })
 }
 
-/// The harness mode for a session at `level`: full access bypasses every prompt whatever the bot says;
-/// otherwise [`perm_mode`], the same with YOLO on or off (switching full access off restores it).
+/// The harness mode for a session at `level`: full access bypasses every prompt whatever the bot says,
+/// and so does a bot set to bypass them: its owner chose that, and Steve does not second-guess it
+/// (decided by the user on 2026-11-09). Otherwise [`perm_mode`], the same with YOLO on or off.
 pub fn harness_mode(bot: Option<&str>, level: Level, own_dir: bool) -> Option<String> {
     match level {
         Level::Full => Some(BYPASS.into()),
+        Level::On | Level::Off if bot == Some(BYPASS) => Some(BYPASS.into()),
         Level::On | Level::Off => perm_mode(bot, own_dir),
     }
 }
@@ -172,9 +174,17 @@ impl Core {
     }
 
     /// The protocol lines for full access (empty when it does not apply).
+    /// The harness asks nothing for this item (完全放开, or a bot set to bypass prompts): what the agent
+    /// is told to mind.
     pub(crate) fn yolo_full_lines(&self, item: &Item) -> Vec<String> {
+        let bypass = || {
+            item.bot_id
+                .as_deref()
+                .and_then(|b| self.store().bot(b).ok().flatten())
+                .is_some_and(|b| b.perm_mode == BYPASS)
+        };
         match self.yolo() {
-            Some(y) if self.yolo_level(item) == Level::Full => {
+            Some(y) if self.yolo_level(item) == Level::Full || bypass() => {
                 full_lines(&y.env().steve_home.to_string_lossy())
             }
             _ => Vec::new(),
@@ -285,7 +295,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn modes_never_widen_past_accept_edits() {
+    fn modes_widen_only_for_full_access_or_a_bypassing_bot() {
         assert_eq!(
             perm_mode(Some("default"), true).as_deref(),
             Some("acceptEdits")
@@ -301,7 +311,17 @@ mod tests {
         );
         assert_eq!(perm_mode(Some("auto"), true).as_deref(), Some("auto"));
         assert_eq!(perm_mode(None, true), None);
-        for m in ["default", "plan", "acceptEdits", "auto", "", BYPASS] {
+        for on in [true, false] {
+            /* a bot set to bypass prompts is taken at its word (2026-11-09); a read-only session still asks */
+            assert_eq!(perm_mode(Some(BYPASS), on), perm_mode(Some("default"), on));
+            for level in [Level::On, Level::Off] {
+                assert_eq!(
+                    harness_mode(Some(BYPASS), level, on).as_deref(),
+                    Some(BYPASS)
+                );
+            }
+        }
+        for m in ["default", "plan", "acceptEdits", "auto", ""] {
             for on in [true, false] {
                 assert_ne!(perm_mode(Some(m), on).as_deref(), Some("bypassPermissions"));
                 assert_ne!(

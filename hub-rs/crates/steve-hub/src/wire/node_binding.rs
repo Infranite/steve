@@ -801,14 +801,14 @@ mod bot_tests {
                 }
             }
         }
-        // the cases this used to get wrong or must keep: a bypass bot is not full access by itself
+        // the cases this must keep: a bot set to bypass prompts is taken at its word (2026-11-09)
         let mode = |sid: &str, m: Option<String>| {
             binding_for(&store, sid, m.as_deref(), &|_| true).map(|b| b.policy.permissions)
         };
         let bypass = Some("bypassPermissions");
         assert_eq!(
             mode("s4_0", harness_mode(bypass, Level::Off, false)),
-            Some(PermissionMode::Ask)
+            Some(PermissionMode::FullAccess)
         );
         assert_eq!(
             mode("s4_0", harness_mode(bypass, Level::Full, false)),

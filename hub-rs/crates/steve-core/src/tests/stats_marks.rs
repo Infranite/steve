@@ -96,6 +96,7 @@ fn every_status_change_leaves_one_mark() {
 #[test]
 fn manual_delivery_marks_its_accept_card() {
     let k = Kit::new();
+    k.manual_acceptance();
     let x = k.delivered(false);
     k.db()
         .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)

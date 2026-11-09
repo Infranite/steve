@@ -113,7 +113,7 @@ export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "
 export const HARNESS: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex" }
 /** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
 export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
-export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto"] as const, (k) => t(`core:perm.${k}`))
+export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const, (k) => t(`core:perm.${k}`))
 /* a label in the current language, or the Hub value itself */
 export const accKey = (label: string) => Object.keys(ACC).find((k) => ACC[k] === label) ?? (label in ACC ? label : "inherit")
 
@@ -499,7 +499,7 @@ function build() {
   st.done = s.recent.filter((d) => d.item_id).map((d) => ({ id: d.item_id!, type: d.kind, q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), decision: d.id, canUndo: !!d.undo && !!d.resolved && Date.now() - d.resolved < 86400_000, rel: relOf(d),
     how: d.result?.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: d.result?.decided_by === "yolo" ? String(d.result?.yolo_reason ?? "") : undefined }))
   st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
-  st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.manual, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
+  st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
   if (st.onboard < 0 && !s.thread.length && !s.items.length && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
   st.ready = true
 }

@@ -364,7 +364,7 @@ fn move_every(vars: &Vars) -> std::time::Duration {
         .map_or(core::MOVE_EVERY, std::time::Duration::from_millis)
 }
 
-/// An attempt's deadline when set (`STEVE_NODE_TURN_LIMIT_MS`, for tests); default 6 h.
+/// An attempt's deadline when set (`STEVE_NODE_TURN_LIMIT_MS`, for tests); by default none in practice.
 fn turn_limit(vars: &Vars) -> Option<i64> {
     vars("STEVE_NODE_TURN_LIMIT_MS").and_then(|v| v.trim().parse::<i64>().ok())
 }
