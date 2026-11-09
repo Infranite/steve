@@ -1203,13 +1203,13 @@ impl Core {
     pub(crate) fn route_ctx_in(&self, ws: &str, guest: bool) -> Result<RouteCtx> {
         let db = self.store();
         let projects = db.projects(ws)?;
-        let repo = self.config().steve_repo.to_string_lossy().to_string();
+        let repo = self.config().steve_repo.clone();
         let items = db.items(ws)?;
         Ok(RouteCtx {
             bots: db.bots(ws)?.into_iter().filter(|b| b.enabled).collect(),
             steve_project: projects
                 .iter()
-                .find(|p| p.path == repo)
+                .find(|p| crate::config::is_steve_project(&p.path, &repo))
                 .map(|p| p.id.clone()),
             projects: projects.into_iter().filter(|p| !p.archived).collect(),
             tags: db.tags(ws)?,

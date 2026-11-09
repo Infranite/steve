@@ -121,7 +121,9 @@ impl CoreConfig {
         );
         c.steve_repo = std::env::var("STEVE_REPO")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| Path::new(&home_dir).join("Agents/steve"));
+            .ok()
+            .or_else(steve_checkout_of_exe)
+            .unwrap_or_default();
         c.no_resume = std::env::var("STEVE_NO_RESUME").is_ok_and(|v| v == "1");
         c.debug_route = std::env::var("STEVE_DEBUG_ROUTE").is_ok_and(|v| !v.is_empty());
         c.disk = crate::workspace::DiskPolicy::from_env();
@@ -162,5 +164,54 @@ impl CoreConfig {
 
     pub fn releases_last(&self) -> PathBuf {
         self.home.join("releases/last.json")
+    }
+}
+
+/// Whether `dir` is a checkout of Steve's own repository (its Hub's manifest is where Steve keeps it).
+pub fn is_steve_checkout(dir: &Path) -> bool {
+    !dir.as_os_str().is_empty() && dir.join("hub-rs/crates/steve-hub/Cargo.toml").is_file()
+}
+
+/// The checkout of Steve's own repository the running program was built in (a source installation,
+/// or a development run); `None` for a released bundle. What `STEVE_REPO` means when it is not set:
+/// derived from the installation, never a directory assumed on someone's machine.
+pub fn steve_checkout_of_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    exe.ancestors().find(|d| is_steve_checkout(d)).map(Path::to_path_buf)
+}
+
+/// Whether project directory `path` is Steve's own repository: the configured one (`repo`), or, when
+/// none is known, any checkout of it.
+pub fn is_steve_project(path: &str, repo: &Path) -> bool {
+    let canon = |s: &Path| std::fs::canonicalize(s).unwrap_or_else(|_| s.to_path_buf());
+    let p = Path::new(path);
+    if repo.as_os_str().is_empty() {
+        is_steve_checkout(p)
+    } else {
+        p == repo || canon(p) == canon(repo)
+    }
+}
+
+#[cfg(test)]
+mod steve_repo_tests {
+    use super::*;
+
+    #[test]
+    fn a_steve_project_is_the_configured_repository_or_any_checkout_of_it() {
+        let d = tempfile::tempdir().unwrap();
+        let checkout = d.path().join("steve");
+        std::fs::create_dir_all(checkout.join("hub-rs/crates/steve-hub")).unwrap();
+        std::fs::write(checkout.join("hub-rs/crates/steve-hub/Cargo.toml"), "").unwrap();
+        let other = d.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let path = |p: &Path| p.to_string_lossy().to_string();
+        // nothing configured: any checkout of Steve, nothing else
+        assert!(is_steve_project(&path(&checkout), Path::new("")));
+        assert!(!is_steve_project(&path(&other), Path::new("")));
+        assert!(!is_steve_project("", Path::new("")));
+        // configured: that one only
+        assert!(is_steve_project(&path(&other), &other));
+        assert!(!is_steve_project(&path(&checkout), &other));
     }
 }

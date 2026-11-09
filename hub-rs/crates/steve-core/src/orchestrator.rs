@@ -281,7 +281,9 @@ impl Core {
         )?;
         let repo = t.cfg().steve_repo.to_string_lossy().to_string();
         let mut steve_project = db.project_by_path(WS, &repo)?;
-        if steve_project.is_none() && Path::new(&repo).join(".git").exists() {
+        /* no repository known (a released bundle without STEVE_REPO): nothing to register; never a
+         * path relative to wherever the Hub happens to run */
+        if steve_project.is_none() && !repo.is_empty() && Path::new(&repo).join(".git").exists() {
             // A managed bundle is upgraded through steve_upgrade. A source checkout releases the way the
             // repository does: through the merge lane, which runs its own ops/cut-release.py (merged, then
             // a pushed tag is done); no command of the project's own (ops/release.sh is not run).
