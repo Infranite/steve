@@ -583,6 +583,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/sessions/{id}/messages", post(sessions::message))
         .route("/sessions/{id}/cancel", post(sessions::cancel))
         .route("/sessions/{id}/end", post(sessions::end))
+        .route("/sessions/{id}/continue", post(sessions::continue_new))
         .route("/sessions/{id}/fork", post(sessions::fork))
         .route("/sessions/{id}/link", post(sessions::link))
         .route("/sessions/{id}/queued", get(sessions::queued_list))

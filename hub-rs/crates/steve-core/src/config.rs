@@ -178,7 +178,9 @@ pub fn is_steve_checkout(dir: &Path) -> bool {
 pub fn steve_checkout_of_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-    exe.ancestors().find(|d| is_steve_checkout(d)).map(Path::to_path_buf)
+    exe.ancestors()
+        .find(|d| is_steve_checkout(d))
+        .map(Path::to_path_buf)
 }
 
 /// Whether project directory `path` is Steve's own repository: the configured one (`repo`), or, when

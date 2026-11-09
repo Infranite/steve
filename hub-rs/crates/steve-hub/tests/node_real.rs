@@ -1236,14 +1236,20 @@ async fn a_hub_killed_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
         .expect("the open turn");
     r.hub.kill();
     r.restart().await;
+    // B6: never re-run; the Hub gives the cut attempt up once the Node confirms its harness is
+    // gone, and the agent is continued
     assert!(
-        wait(60, || r.attempts(&sid, "unknown") == 1).await,
-        "the cut attempt is unknown; log:\n{}",
+        wait(60, || r.h.count(
+            "SELECT COUNT(*) FROM runtime_attempts WHERE turn_id=? AND json_extract(completion,'$.stop_reason')='node_restarted'",
+            &[&turn],
+        ) == 1)
+        .await,
+        "the cut attempt is given up; log:\n{}",
         hub_log(&r.h)
     );
     assert!(
-        wait(30, || r.said(&sid, 0, "等待对账") > 0).await,
-        "the session says it awaits reconciliation"
+        wait(30, || r.said(&sid, 0, "Node 重启了") > 0).await,
+        "the session says why"
     );
     tokio::time::sleep(Duration::from_secs(10)).await;
     let of_turn = || {
@@ -1258,15 +1264,6 @@ async fn a_hub_killed_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
         "the unanswered command never ran"
     );
 
-    let (st, v) =
-        r.c.call("POST", &format!("/api/sessions/{sid}/cancel"), None)
-            .await;
-    assert_eq!(st, 200, "stop: {v}");
-    assert!(
-        wait(60, || r.done(&sid, 1)).await,
-        "Stop abandons the unknown turn; log:\n{}",
-        hub_log(&r.h)
-    );
     assert_eq!(of_turn(), 1, "still never re-run");
 
     let seq = r.seq(&sid);

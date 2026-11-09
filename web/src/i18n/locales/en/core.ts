@@ -314,6 +314,8 @@ export default {
     merged_other: "Added from the item · {{count}} messages, delivered together",
     steveBrief: "Steve's brief",
     away: "This turn replied to a comment below; the work is shown there",
+    continueNew: "Continue in a new session",
+    closeSession: "Close this session",
     loading: "Loading conversation",
     starting: "Starting…",
     empty: "Nothing in this conversation yet",

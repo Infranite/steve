@@ -326,7 +326,7 @@ impl Tx<'_> {
                 continue;
             }
             r.state = Observed::Unknown {
-                reason: "the node restarted while it ran".into(),
+                reason: steve_node_api::RESTARTED.into(),
             };
             self.c()
                 .execute(
