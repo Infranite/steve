@@ -939,11 +939,12 @@ pub fn wire_assembly(
     // (jobs already holds the module jobs and the YOLO loops)
     let stats_db = db.clone();
     let codex_home = cfg.codex_home.clone();
+    let rollout_usage = harnesses.rollout_usage();
     jobs.push(Box::pin(async move {
         if let Err(e) = steve_stats::backfill::spawn(stats_db.clone()).await {
             tracing::error!("stats backfill task: {e}");
         }
-        acp_stats::repair_codex(&stats_db, &codex_home).await;
+        acp_stats::repair_codex(&stats_db, &codex_home, &rollout_usage).await;
     }));
     jobs.push(Box::pin(steve_stats::Refresher::new().run(db.clone())));
     let price_url = crate::price_sync::url(vars("STEVE_PRICE_CATALOG_URL").as_deref());
