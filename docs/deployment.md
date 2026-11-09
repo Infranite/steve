@@ -57,6 +57,17 @@ Use `node` instead of `hub` on a separate Node and verify its sessions in Device
 
 Without Homebrew, use the verified installer archive from the same [Release](https://github.com/Infranite/steve/releases), then run `<installer>/bin/steve setup`. The separate runtime archives and `steve-release.json` remain compatible with existing upgrade clients; Homebrew uses `steve-installer.json` and the installer archives.
 
+### A second installation under the same user
+
+`--label <label>` gives an installation its own service label (launchd job or systemd unit) and, for a Hub, its own signing identity, so it can sit next to the usual one. Use it together with its own `--home` and `--listen`. On macOS, `--vault-dir <directory>` keeps that Hub's vault keys in a directory of their own (`0700`, outside the data directory) instead of the login keychain, where the usual installation's keys live. For example:
+
+```sh
+steve setup hub --home ~/steve-trial --listen 127.0.0.1:18440 \
+  --label io.github.infranite.steve-trial.hub --vault-dir ~/steve-trial-keys
+```
+
+Manage it with the same `--home` and `--label`, as in `steve hub status --home ~/steve-trial --label io.github.infranite.steve-trial.hub`.
+
 ## Reconfiguring an installed Hub
 
 Run the interactive maintenance wizard as the OS user who owns the Hub:

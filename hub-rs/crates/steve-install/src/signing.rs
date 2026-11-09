@@ -180,7 +180,7 @@ pub(crate) fn verify_signature(binary: &Path, expected: &str, tools: &Tools) -> 
     );
     Ok(())
 }
-fn valid_identity(value: &str) -> bool {
+pub(crate) fn valid_identity(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 201
         && value.as_bytes()[0].is_ascii_alphanumeric()
