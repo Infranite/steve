@@ -413,7 +413,7 @@ The new Node reaches the Hub over tailcat when [Connect over tailcat](#remote-no
 
 ## The Hub's own Node in a process of its own
 
-By default the Hub's own Node, which runs every session on the Hub's machine, lives in the Hub's process, so a Hub restart or upgrade cuts the turns that are running. With `STEVE_NODE_MODE=service`, that Node runs as `steve-hub --local-node`, a process of its own, and a turn goes on while the Hub restarts:
+The Hub's own Node, which runs every session on the Hub's machine, runs as `steve-hub --local-node`, a process of its own (`STEVE_NODE_MODE=service`, the default), so a turn goes on while the Hub restarts or upgrades. `STEVE_NODE_MODE=local` keeps it in the Hub's process instead, where a Hub restart cuts the turns that are running:
 
 - The Hub starts the process when no Node is linked: in a session of its own and, when the Hub runs under systemd, in a scope of its own (`systemd-run --user --scope`). Stopping the Hub's service therefore leaves it running.
 - It keeps the Node's id (`local`) and home (`<data>/node`), so sessions from before carry on there.
@@ -445,7 +445,7 @@ This is an internal-schema lookup, not a stable public setup API or a normal end
 
 On that Node, authenticate the intended principal with the harness's normal login command and this directory. For Codex, run `CODEX_HOME="<absolute recorded harness directory>" codex login` as the Node service account, using that principal's own authentication, then verify authentication before retrying the paused session. Do not copy another installation's `auth.json` or refresh tokens. If the operator cannot complete this procedure, authentication setup remains a blocker; this release does not replace it with an automatic login import. `STEVE_PRINCIPAL_STATE=off` remains an explicit shared-state configuration for new sessions only; it does not migrate existing session state.
 
-`STEVE_TOOLCHAINS` defaults to `on` on each Node. Detected build outputs go into the item's `.steve/build/` and cache-only directories go into the known principal's Node cache; the first build after relocation may be cold. A session without a principal receives no invented cache or identity. Set `STEVE_TOOLCHAINS=off` on that Node to retain the original toolchain locations. Toolchain relocation and separate harness directories are not claims of complete principal isolation: Codex retains its own sandbox and approval controls, Linux outer confinement remains opt-in, and the existing single-owner and workflow execution guards still apply.
+`STEVE_TOOLCHAINS` defaults to `on` on each Node. Detected build outputs go into the item's `.steve/build/` and cache-only directories go into the known principal's Node cache; the first build after relocation may be cold. A session without a principal receives no invented cache or identity. Set `STEVE_TOOLCHAINS=off` on that Node to retain the original toolchain locations. Toolchain relocation and separate harness directories are not claims of complete principal isolation: Codex retains its own sandbox and approval controls, Linux outer confinement is on by default where bubblewrap is installed, and the existing single-owner and workflow execution guards still apply.
 
 ## Node disk observations
 
