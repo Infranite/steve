@@ -18,6 +18,12 @@ pub struct Options {
     pub pin: Option<String>,
     pub listen: Option<String>,
     pub reconfigure: bool,
+    /// The service label (`--label`): another installation next to the usual one, under the same
+    /// user (its own launchd job or systemd unit and signing identity).
+    pub label: Option<String>,
+    /// The Hub's vault keys in this directory (`--vault-dir`), on macOS too, instead of the login
+    /// keychain.
+    pub vault_dir: Option<PathBuf>,
 }
 
 trait Prompts {
@@ -140,6 +146,9 @@ fn validate_options(options: &Options) -> Result<()> {
     }
     if let Some(hub) = &options.hub {
         node_hub_url(hub)?;
+    }
+    if let Some(label) = &options.label {
+        anyhow::ensure!(crate::signing::valid_identity(label), "--label 只能包含字母、数字和 . _ -");
     }
     // one pin, or several comma-separated while the Hub's certificate is being changed
     if options.pin.as_ref().is_some_and(|v| {
@@ -638,6 +647,10 @@ impl<'a> Wizard<'a> {
     }
 
     fn hub_config(&mut self, listen: Option<&str>) -> Result<Value> {
+        self.hub_config_with(listen, None)
+    }
+
+    fn hub_config_with(&mut self, listen: Option<&str>, vault_dir: Option<&Path>) -> Result<Value> {
         if self.record["environment"].is_object() {
             let env = self.record["environment"].clone();
             if let Some(listen) = listen {
@@ -699,10 +712,11 @@ impl<'a> Wizard<'a> {
         if bind.ip().is_unspecified() {
             env["STEVE_ALLOW_ANY_HOST"] = "1".into();
         }
-        if cfg!(target_os = "linux") {
-            let selected = match self.record["key_directory"].as_str() {
-                Some(value) => value.to_string(),
-                None => {
+        if cfg!(target_os = "linux") || vault_dir.is_some() {
+            let selected = match (vault_dir, self.record["key_directory"].as_str()) {
+                (Some(dir), _) => dir.to_string_lossy().into_owned(),
+                (None, Some(value)) => value.to_string(),
+                (None, None) => {
                     self.input
                         .line("Vault 密钥目录（数据目录之外，权限 0700）", None, false)?
                 }
@@ -765,7 +779,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
     println!("正在准备运行目录…");
     let candidate = wizard.copy_bundle(&expected)?;
     if role == "hub" {
-        let env = wizard.hub_config(options.listen.as_deref())?;
+        let env = wizard.hub_config_with(options.listen.as_deref(), options.vault_dir.as_deref())?;
         if cfg!(target_os = "macos") {
             if !wizard.record["steps"]
                 .as_array()
@@ -775,7 +789,11 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             {
                 wizard.record["keychain_started"] = true.into();
                 wizard.save()?;
-                crate::signing::setup_keychain(&home, &candidate, "io.github.infranite.steve.hub")?;
+                crate::signing::setup_keychain(
+                    &home,
+                    &candidate,
+                    options.label.as_deref().unwrap_or("io.github.infranite.steve.hub"),
+                )?;
                 wizard.record["signed_hub_sha256"] =
                     digest(&candidate.join("bin/steve-hub"))?.into();
                 wizard.record["helper_sha256"] = digest(&home.join("bin/steve-keyhelper"))?.into();
@@ -913,7 +931,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             }
         }
     }
-    let mut service = crate::service::Service::new(&role, &home, None)?;
+    let mut service = crate::service::Service::new(&role, &home, options.label.as_deref())?;
     println!("正在注册 {role} 服务…");
     service.dispatch("install", Some(&candidate), 30)?;
     if !wizard.record["steps"]
