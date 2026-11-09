@@ -1969,7 +1969,7 @@ impl Actor {
 fn harness_state(
     inner: &Inner,
     s: &HarnessState,
-    sd: steve_acp::StateDir,
+    sd: &steve_acp::StateDir,
 ) -> ApiResult<std::path::PathBuf> {
     if !s.valid() {
         return Err(ApiError::new(
@@ -1988,11 +1988,11 @@ fn harness_state(
             .map_err(|e| internal(format!("harness state: {e}")))?;
     }
     if s.import_owner {
-        let own = std::env::var_os(sd.env)
+        let own = std::env::var_os(&sd.env)
             .filter(|v| !v.is_empty())
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| inner.cfg.acp.user_home.join(sd.default));
-        for f in sd.import {
+            .unwrap_or_else(|| inner.cfg.acp.user_home.join(&sd.default));
+        for f in &sd.import {
             let (from, to) = (own.join(f), dir.join(f));
             if !from.is_file() || std::fs::symlink_metadata(&to).is_ok() {
                 continue;
@@ -2007,11 +2007,10 @@ fn harness_state(
 }
 
 /// The environment a session's harness gets over the Node's: the principal's own variables
-/// (`node_env`; a key the Node refuses is dropped, `PATH_PREPEND` goes in front of `PATH`), then
-/// what Steve sets itself.
+/// (`node_env`; a key the Node refuses is dropped, `PATH_PREPEND` goes in front of `PATH`). What
+/// Steve sets itself comes after them.
 fn harness_env(
     user: &[(String, String)],
-    claude_executable: std::ffi::OsString,
     path: Option<&std::ffi::OsStr>,
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     use steve_node_api::env::{PATH_PREPEND, user_env_refusal};
@@ -2036,7 +2035,6 @@ fn harness_env(
             env.push((k.into(), v.into()));
         }
     }
-    env.push(("CLAUDE_CODE_EXECUTABLE".into(), claude_executable));
     env
 }
 
@@ -2070,7 +2068,7 @@ async fn open_harness(
         &row.open.state,
         inner.cfg.acp.adapter_properties(&harness).state,
     ) {
-        (Some(s), Some(sd)) => Some((sd.env, harness_state(inner, s, sd)?)),
+        (Some(s), Some(sd)) => Some((sd.env.clone(), harness_state(inner, s, &sd)?)),
         _ => None,
     };
     // its toolchains' outputs and caches in the item's and the person's own places
@@ -2130,16 +2128,13 @@ async fn open_harness(
                 let base_path = fresh
                     .as_ref()
                     .and_then(|f| f.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone()));
-                let mut env = harness_env(
-                    &row.open.env,
-                    inner.cfg.acp.claude_executable.clone().into_os_string(),
-                    base_path.as_deref(),
-                );
-                // the toolchains', then Steve's own last: nothing before overrides them
-                let at = env.len().saturating_sub(1);
-                env.splice(at..at, tools.env);
+                let mut env = harness_env(&row.open.env, base_path.as_deref());
+                // the toolchains', then Steve's own for the adapter last: nothing before overrides
+                // them
+                env.extend(tools.env);
+                env.extend(inner.cfg.acp.adapter_env(&harness));
                 if let Some((var, dir)) = &state {
-                    env.push(((*var).into(), dir.clone().into_os_string()));
+                    env.push((var.into(), dir.clone().into_os_string()));
                 }
                 // level 2: the login environment first, everything above over it
                 if let Some(f) = &fresh {
@@ -2259,8 +2254,14 @@ async fn open_harness(
         }
     }
     let seen = Seen::default();
-    let mode = crate::mode(&harness, row.open.policy.permissions);
-    let meta = crate::harness_meta(&harness, &inner.cfg.acp.steve_home);
+    // Ask is set explicitly too, so what the adapter remembered never stays
+    let mode = Some(
+        inner
+            .cfg
+            .acp
+            .adapter_mode(&harness, row.open.policy.permissions),
+    );
+    let meta = inner.cfg.acp.session_meta(&harness);
     let handshake = acp_session::open_with_meta(
         &conn,
         OpenConfig {

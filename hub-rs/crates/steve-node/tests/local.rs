@@ -65,6 +65,7 @@ impl T {
             node: NodeId::new("hub").unwrap(),
             home: self.home.clone(),
             acp: AcpConfig {
+                declared: Default::default(),
                 adapters: HashMap::from([("claude-code".to_string(), self.adapter.clone())]),
                 node: "node".into(),
                 claude_executable: "claude".into(),
@@ -4638,4 +4639,56 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
     .unwrap();
     assert!(!ok(&finished(&n, "op_open_s_4").await));
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+/// Harness parity S1: an adapter of one's own, declared with nothing but a command and a name,
+/// is in discovery with what its `initialize` said; one that cannot start is reported, not
+/// refused, and the built-in entry keeps its record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declared_adapter_is_discovered_with_what_it_reports() {
+    let t = T::new(&[("FAKE_ACP_IMAGE", "1")]);
+    let mut cfg = t.config();
+    // the same fake as the built-in entry, under an id of its own
+    cfg.acp.adapters.insert("fake".into(), t.adapter.clone());
+    cfg.acp.declared.insert(
+        "fake".into(),
+        steve_acp::Declaration {
+            name: Some("Fake Agent".into()),
+            ..Default::default()
+        },
+    );
+    cfg.acp
+        .adapters
+        .insert("gone".into(), t.root.join("no/such/adapter"));
+    let n = LocalNode::open(cfg).unwrap();
+    let caps = n.probe(true).await.unwrap();
+    let h = |id: &str| {
+        caps.harnesses
+            .iter()
+            .find(|h| h.name == id)
+            .unwrap()
+            .clone()
+    };
+    let fake = h("fake");
+    let a = fake.adapter.as_ref().unwrap();
+    assert_eq!(a.status, AdapterStatus::Ready, "{:?}", a.error);
+    assert_eq!(a.title, "Fake Agent");
+    assert!(!a.builtin);
+    assert!(a.load_session);
+    assert!(fake.images && fake.resume && fake.sessions);
+    let gone = h("gone");
+    let a = gone.adapter.as_ref().unwrap();
+    assert_eq!(a.status, AdapterStatus::AdapterMissing);
+    assert!(
+        gone.sessions,
+        "a missing adapter is reported, its record kept"
+    );
+    // a built-in adapter is not started to be asked: its record is as it was
+    let cc = h("claude-code");
+    assert_eq!(cc.adapter, None);
+    assert!(cc.images && cc.resume);
+    // only the declared one was asked, once: a second probe within the window starts nothing
+    assert_eq!(t.sent("initialize"), 1);
+    n.probe(false).await.unwrap();
+    assert_eq!(t.sent("initialize"), 1);
 }

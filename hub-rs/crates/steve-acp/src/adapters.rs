@@ -1,0 +1,718 @@
+//! The harness adapter registry (harness parity S1): what Steve knows about each ACP adapter, keyed
+//! by its id (any string). Everything Steve needs to run sessions, jobs and judgments over plain
+//! ACP is an id, a name and a launch command; what an adapter needs beyond that is a **declared
+//! property** here, never a comparison with its name elsewhere.
+//!
+//! Sources, later over earlier:
+//! 1. the built-in entries below (Claude Code via claude-agent-acp, Codex via codex-acp), as data;
+//! 2. the manifest a Node or the Hub reads (`harness.json`): `{"adapters": {"<id>": "/path"}}` as
+//!    before, or `{"adapters": {"<id>": {"command": "/path", "name": "My Agent", "args": [],
+//!    "env": {}, "properties": {…}}}}` for an adapter of one's own or to change a built-in one.
+//!
+//! [`probe`] asks an adapter what it is (`initialize`): its title and version, whether it takes
+//! images, loads and lists sessions, and how one signs in. Nothing here refuses to start: an
+//! adapter that cannot be started or initialized is reported as such.
+
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use steve_node_api::PermissionMode;
+
+use crate::rpc::{Conn, Spawn};
+use crate::util::truthy;
+
+/// The ACP mode ids Steve's permission modes are set as. Without a declaration an adapter gets the
+/// ids most ACP adapters use (`default`, `plan`, `acceptEdits`, `auto`, `bypassPermissions`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModeMap {
+    pub plan: String,
+    pub ask: String,
+    pub accept_edits: String,
+    pub auto: String,
+    pub full_access: String,
+}
+
+impl Default for ModeMap {
+    fn default() -> Self {
+        Self {
+            plan: "plan".into(),
+            ask: "default".into(),
+            accept_edits: "acceptEdits".into(),
+            auto: "auto".into(),
+            full_access: "bypassPermissions".into(),
+        }
+    }
+}
+
+impl ModeMap {
+    /// The adapter's mode id for `mode`.
+    pub fn id(&self, mode: PermissionMode) -> &str {
+        match mode {
+            PermissionMode::Plan => &self.plan,
+            PermissionMode::Ask => &self.ask,
+            PermissionMode::AcceptEdits => &self.accept_edits,
+            PermissionMode::Auto => &self.auto,
+            PermissionMode::FullAccess => &self.full_access,
+        }
+    }
+}
+
+/// A harness's own directory (path model §4.5.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateDir {
+    /// The variable that moves it.
+    pub env: String,
+    /// Where it is under the user's home when the variable is not set.
+    pub default: String,
+    /// What of the Node owner's own directory the owner's state starts with (their own settings,
+    /// never anyone else's; a login only where a copy cannot sign the original out).
+    #[serde(default)]
+    pub import: Vec<String>,
+}
+
+/// What `session/new|load` carries in `_meta` for the adapter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMeta {
+    #[default]
+    None,
+    /// claude-agent-acp's `claudeCode.options.settings`: its file tools denied Steve's secret
+    /// files in every permission mode.
+    ClaudeSettings,
+}
+
+/// Arguments the adapter is started with beyond its declared `args`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchExtra {
+    #[default]
+    None,
+    /// codex-acp: a sanitized copy of the user's model catalog (`-c model_catalog_json=…`).
+    CodexCatalog,
+}
+
+/// Host integration properties of an adapter. Callers select policy by these, never by a harness
+/// name. `self_read_only` applies only after selecting its ACP read-only mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterProperties {
+    /// Its read-only mode is enforced by the harness's own sandbox.
+    pub self_read_only: bool,
+    /// It runs inside the Node's OS sandbox (macOS cannot nest a harness's own one in it).
+    pub nested_sandbox: bool,
+    /// Where the harness keeps its configuration, logins and history, when it can be moved: what
+    /// gives each principal its own (`None`: it cannot, and every run uses the Node's).
+    pub state: Option<StateDir>,
+    pub modes: ModeMap,
+    /// The variable that receives the configured harness executable (`claude_executable`).
+    pub executable_env: Option<String>,
+    pub session_meta: SessionMeta,
+    pub launch_extra: LaunchExtra,
+    /// Discovery asks it `initialize` ([`probe`]). The built-in entries do not: their CLIs'
+    /// `--version` says whether they are there, without starting an adapter every few minutes.
+    pub probe_initialize: bool,
+}
+
+/// What an adapter nobody described gets: assume the worst (it reads the disk itself, so it runs
+/// in the Node's sandbox), plain ACP for everything else.
+impl Default for AdapterProperties {
+    fn default() -> Self {
+        Self {
+            self_read_only: false,
+            nested_sandbox: true,
+            state: None,
+            modes: ModeMap::default(),
+            executable_env: None,
+            session_meta: SessionMeta::None,
+            launch_extra: LaunchExtra::None,
+            probe_initialize: true,
+        }
+    }
+}
+
+/// Declared properties, each optional: what is given replaces the built-in (or default) value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PropertiesPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_read_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_sandbox: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<StateDir>,
+    /// Some of Steve's modes (`plan`, `ask`, `accept_edits`, `auto`, `full_access`) → mode ids.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modes: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_meta: Option<SessionMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_extra: Option<LaunchExtra>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_initialize: Option<bool>,
+}
+
+impl PropertiesPatch {
+    fn apply(&self, p: &mut AdapterProperties) {
+        if let Some(v) = self.self_read_only {
+            p.self_read_only = v;
+        }
+        if let Some(v) = self.nested_sandbox {
+            p.nested_sandbox = v;
+        }
+        if let Some(v) = &self.state {
+            p.state = Some(v.clone());
+        }
+        for (k, v) in &self.modes {
+            let slot = match k.as_str() {
+                "plan" => &mut p.modes.plan,
+                "ask" => &mut p.modes.ask,
+                "accept_edits" => &mut p.modes.accept_edits,
+                "auto" => &mut p.modes.auto,
+                "full_access" => &mut p.modes.full_access,
+                other => {
+                    tracing::warn!("harness adapter: unknown mode {other} in its declared modes");
+                    continue;
+                }
+            };
+            *slot = v.clone();
+        }
+        if let Some(v) = &self.executable_env {
+            p.executable_env = Some(v.clone()).filter(|v| !v.is_empty());
+        }
+        if let Some(v) = self.session_meta {
+            p.session_meta = v;
+        }
+        if let Some(v) = self.launch_extra {
+            p.launch_extra = v;
+        }
+        if let Some(v) = self.probe_initialize {
+            p.probe_initialize = v;
+        }
+    }
+}
+
+/// What a manifest declares about an adapter besides its command.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Declaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub properties: PropertiesPatch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<String>,
+}
+
+/// One manifest entry: a command (as `harness.json` always had it) or a declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+#[allow(clippy::large_enum_variant)] // a configuration value, read once
+pub enum AdapterEntry {
+    Command(PathBuf),
+    Declared {
+        command: PathBuf,
+        #[serde(flatten)]
+        declaration: Declaration,
+    },
+}
+
+/// A manifest's `adapters` as commands and declarations.
+pub fn split_entries(
+    entries: impl IntoIterator<Item = (String, AdapterEntry)>,
+) -> (HashMap<String, PathBuf>, HashMap<String, Declaration>) {
+    let mut commands = HashMap::new();
+    let mut declared = HashMap::new();
+    for (id, e) in entries {
+        match e {
+            AdapterEntry::Command(c) => {
+                commands.insert(id, c);
+            }
+            AdapterEntry::Declared {
+                command,
+                declaration,
+            } => {
+                commands.insert(id.clone(), command);
+                declared.insert(id, declaration);
+            }
+        }
+    }
+    (commands, declared)
+}
+
+/// Everything known about one adapter: its built-in data, then what was declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterSpec {
+    pub id: String,
+    pub name: String,
+    /// One of Steve's built-in entries.
+    pub builtin: bool,
+    pub properties: AdapterProperties,
+    /// How to install it, for people.
+    pub install_hint: Option<String>,
+}
+
+struct Builtin {
+    id: &'static str,
+    name: &'static str,
+    install_hint: &'static str,
+    properties: fn() -> AdapterProperties,
+}
+
+const BUILTINS: &[Builtin] = &[
+    Builtin {
+        id: "claude-code",
+        name: "Claude Code",
+        install_hint: "@agentclientprotocol/claude-agent-acp",
+        properties: || AdapterProperties {
+            self_read_only: false,
+            nested_sandbox: true,
+            state: Some(StateDir {
+                env: "CLAUDE_CONFIG_DIR".into(),
+                default: ".claude".into(),
+                import: vec!["settings.json".into()],
+            }),
+            modes: ModeMap::default(),
+            executable_env: Some("CLAUDE_CODE_EXECUTABLE".into()),
+            session_meta: SessionMeta::ClaudeSettings,
+            launch_extra: LaunchExtra::None,
+            probe_initialize: false,
+        },
+    },
+    Builtin {
+        id: "codex",
+        name: "Codex",
+        install_hint: "@zed-industries/codex-acp",
+        // Codex has no plan mode and its own default may be full access, so the mode is always
+        // set: read-only asks before every edit or command, auto works inside the workspace and
+        // asks before network access or writes outside it; full-access only for FullAccess.
+        properties: || AdapterProperties {
+            self_read_only: true,
+            nested_sandbox: false,
+            state: Some(StateDir {
+                env: "CODEX_HOME".into(),
+                default: ".codex".into(),
+                // not its login: copies refreshing on their own would sign the owner's out
+                import: vec!["config.toml".into()],
+            }),
+            modes: ModeMap {
+                plan: "read-only".into(),
+                ask: "read-only".into(),
+                accept_edits: "auto".into(),
+                auto: "auto".into(),
+                full_access: "full-access".into(),
+            },
+            executable_env: None,
+            // none yet: codex-acp's `session/set_mode` replaces the permission profile with the
+            // mode's built-in one, so deny entries do not survive it; and once a profile has
+            // deny-read entries, codex-core keeps a command the user approved to run outside the
+            // sandbox inside it, so Ask mode could no longer write anything
+            session_meta: SessionMeta::None,
+            launch_extra: LaunchExtra::CodexCatalog,
+            probe_initialize: false,
+        },
+    },
+];
+
+/// The id of the adapter Steve uses where nothing chose one, and the command a Node looks it up
+/// by on its `PATH` when its manifest does not name one.
+pub const DEFAULT_ADAPTER: (&str, &str) = ("claude-code", "claude-code-acp");
+
+/// The ids of the built-in entries.
+pub fn builtin_ids() -> impl Iterator<Item = &'static str> {
+    BUILTINS.iter().map(|b| b.id)
+}
+
+/// The spec of `id`: its built-in data (if any) with `declared` over it.
+pub fn spec(id: &str, declared: Option<&Declaration>) -> AdapterSpec {
+    let builtin = BUILTINS.iter().find(|b| b.id == id);
+    let mut properties = builtin.map(|b| (b.properties)()).unwrap_or_default();
+    let mut name = builtin
+        .map(|b| b.name.to_owned())
+        .unwrap_or_else(|| id.to_owned());
+    let mut install_hint = builtin.map(|b| b.install_hint.to_owned());
+    if let Some(d) = declared {
+        d.properties.apply(&mut properties);
+        if let Some(n) = d.name.as_ref().filter(|n| !n.trim().is_empty()) {
+            name = n.clone();
+        }
+        if d.install_hint.is_some() {
+            install_hint = d.install_hint.clone();
+        }
+    }
+    AdapterSpec {
+        id: id.to_owned(),
+        name,
+        builtin: builtin.is_some(),
+        properties,
+        install_hint,
+    }
+}
+
+// ── probe ──
+
+/// How an adapter answered [`probe`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeStatus {
+    /// `initialize` succeeded.
+    Ready,
+    /// Its command could not be started.
+    AdapterMissing,
+    /// It started, but `initialize` failed or did not answer in time.
+    InitializeFailed,
+}
+
+/// A way to sign in the adapter offers (`authMethods`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthMethod {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// What `initialize` said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Probe {
+    pub status: ProbeStatus,
+    /// What went wrong, when not ready (no stderr, no arguments).
+    pub error: Option<String>,
+    /// `agentInfo.title` (else `name`).
+    pub title: Option<String>,
+    /// `agentInfo.version`.
+    pub version: Option<String>,
+    pub image: bool,
+    pub embedded_context: bool,
+    pub load_session: bool,
+    pub list_sessions: bool,
+    pub mcp_http: bool,
+    pub auth: Vec<AuthMethod>,
+}
+
+impl Probe {
+    fn failed(status: ProbeStatus, error: impl Into<String>) -> Self {
+        Self {
+            status,
+            error: Some(error.into()),
+            title: None,
+            version: None,
+            image: false,
+            embedded_context: false,
+            load_session: false,
+            list_sessions: false,
+            mcp_http: false,
+            auth: vec![],
+        }
+    }
+
+    /// Reads an `initialize` result.
+    pub fn from_initialize(r: &Value) -> Self {
+        let caps = r.get("agentCapabilities").cloned().unwrap_or(Value::Null);
+        let flag = |p: &str| caps.pointer(p).is_some_and(truthy);
+        let text = |p: &str| {
+            r.pointer(p)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        };
+        let auth = r
+            .get("authMethods")
+            .and_then(Value::as_array)
+            .map(|ms| {
+                ms.iter()
+                    .filter_map(|m| {
+                        Some(AuthMethod {
+                            id: m.get("id")?.as_str()?.to_owned(),
+                            name: m
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                            description: m
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .map(String::from),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            status: ProbeStatus::Ready,
+            error: None,
+            title: text("/agentInfo/title").or_else(|| text("/agentInfo/name")),
+            version: text("/agentInfo/version"),
+            image: flag("/promptCapabilities/image"),
+            embedded_context: flag("/promptCapabilities/embeddedContext"),
+            load_session: flag("/loadSession"),
+            // `sessionCapabilities.list` is an object when offered
+            list_sessions: caps
+                .pointer("/sessionCapabilities/list")
+                .is_some_and(|v| !v.is_null() && v != &Value::Bool(false)),
+            mcp_http: flag("/mcpCapabilities/http"),
+            auth,
+        }
+    }
+}
+
+/// Starts `id`'s adapter in `cwd`, asks `initialize` (within `timeout`) and stops it again.
+pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Duration) -> Probe {
+    let (program, args) = match cfg.adapter_command(id) {
+        Ok(c) => c,
+        Err(e) => return Probe::failed(ProbeStatus::AdapterMissing, e),
+    };
+    // a bare name is looked up on PATH by the spawn; a path must exist
+    if program.components().count() > 1 && !program.exists() {
+        return Probe::failed(
+            ProbeStatus::AdapterMissing,
+            "the adapter's command is missing",
+        );
+    }
+    let cwd = if cwd.is_dir() {
+        cwd.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    };
+    let conn: Arc<Conn> = match Conn::spawn(
+        Spawn {
+            program,
+            args,
+            cwd,
+            env: cfg.adapter_env(id),
+            log_tag: format!("[probe {id}]"),
+            clean_env: false,
+        },
+        |c, i| {
+            // nothing is asked of a client before a session; refuse whatever is
+            if let crate::rpc::Incoming::Request { id, .. } = i {
+                c.respond_error(id, -32601, "not supported while probing");
+            }
+        },
+        || {},
+    ) {
+        Ok(c) => c,
+        Err(e) => return Probe::failed(ProbeStatus::AdapterMissing, e.message),
+    };
+    let init = json!({
+        "protocolVersion": 1,
+        "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+        "clientInfo": { "name": "steve", "version": cfg.version },
+    });
+    let r = conn.request("initialize", init, Some(timeout)).await;
+    conn.kill();
+    match r {
+        Ok(r) => Probe::from_initialize(&r),
+        Err(e) => Probe::failed(ProbeStatus::InitializeFailed, e.message),
+    }
+}
+
+impl crate::AcpConfig {
+    /// The ids of the adapters this configuration can start, sorted.
+    pub fn adapter_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.adapters.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Everything known about `id` (built-in data and what the manifest declared).
+    pub fn adapter_spec(&self, id: &str) -> AdapterSpec {
+        spec(id, self.declared.get(id))
+    }
+
+    pub fn adapter_properties(&self, id: &str) -> AdapterProperties {
+        self.adapter_spec(id).properties
+    }
+
+    /// The environment Steve gives `id`'s adapter over the inherited one: the harness executable
+    /// where it takes one, then the declared variables.
+    pub fn adapter_env(&self, id: &str) -> Vec<(OsString, OsString)> {
+        let spec = self.adapter_spec(id);
+        let mut env: Vec<(OsString, OsString)> = vec![];
+        if let Some(var) = &spec.properties.executable_env {
+            env.push((var.into(), self.claude_executable.clone().into_os_string()));
+        }
+        if let Some(d) = self.declared.get(id) {
+            env.extend(d.env.iter().map(|(k, v)| (k.into(), v.into())));
+        }
+        env
+    }
+
+    /// The `_meta` of `session/new|load` for `id`'s adapter.
+    pub fn session_meta(&self, id: &str) -> Option<Value> {
+        match self.adapter_properties(id).session_meta {
+            SessionMeta::None => None,
+            SessionMeta::ClaudeSettings => Some(json!({ "claudeCode": { "options": {
+                "settings": steve_vault::harness::claude_settings(&self.steve_home),
+            } } })),
+        }
+    }
+
+    /// The ACP mode id `mode` is set as on `id`'s adapter.
+    pub fn adapter_mode(&self, id: &str, mode: PermissionMode) -> String {
+        self.adapter_properties(id).modes.id(mode).to_owned()
+    }
+
+    pub(crate) fn launch_args(&self, id: &str) -> Vec<OsString> {
+        let spec = self.adapter_spec(id);
+        let mut args: Vec<OsString> = match spec.properties.launch_extra {
+            LaunchExtra::None => vec![],
+            LaunchExtra::CodexCatalog => {
+                crate::codex::codex_args(&self.codex_home, &self.steve_home, &self.user_home)
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect()
+            }
+        };
+        if let Some(d) = self.declared.get(id) {
+            args.extend(d.args.iter().map(OsString::from));
+        }
+        args
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(dir: &Path) -> crate::AcpConfig {
+        crate::AcpConfig {
+            adapters: HashMap::new(),
+            declared: HashMap::new(),
+            node: "node".into(),
+            claude_executable: "/bin/claude-x".into(),
+            steve_home: dir.join("steve"),
+            codex_home: dir.join("codex"),
+            user_home: dir.to_path_buf(),
+            version: "t".into(),
+            idle_release: Duration::from_secs(1),
+            retry_delays: vec![],
+        }
+    }
+
+    #[test]
+    fn a_manifest_takes_commands_and_declarations() {
+        let m: HashMap<String, AdapterEntry> = serde_json::from_value(json!({
+            "claude-code": "/a/claude.js",
+            "mine": {"command": "/b/mine", "name": "Mine", "args": ["--acp"], "env": {"K": "v"},
+                     "properties": {"nested_sandbox": false, "modes": {"ask": "ask-me"}}}
+        }))
+        .unwrap();
+        let (commands, declared) = split_entries(m);
+        assert_eq!(commands["claude-code"], PathBuf::from("/a/claude.js"));
+        assert_eq!(commands["mine"], PathBuf::from("/b/mine"));
+        assert!(!declared.contains_key("claude-code"));
+        let d = &declared["mine"];
+        assert_eq!(d.args, ["--acp"]);
+        let s = spec("mine", Some(d));
+        assert_eq!(s.name, "Mine");
+        assert!(!s.builtin);
+        assert!(!s.properties.nested_sandbox);
+        assert_eq!(s.properties.modes.ask, "ask-me");
+        assert_eq!(s.properties.modes.plan, "plan");
+    }
+
+    #[test]
+    fn an_undeclared_adapter_gets_plain_acp() {
+        let s = spec("someone-else", None);
+        assert_eq!(s.name, "someone-else");
+        assert_eq!(s.properties, AdapterProperties::default());
+        assert!(s.properties.nested_sandbox && !s.properties.self_read_only);
+        assert_eq!(
+            s.properties.modes.id(PermissionMode::FullAccess),
+            "bypassPermissions"
+        );
+    }
+
+    #[test]
+    fn built_in_modes_and_launch_are_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg(dir.path());
+        for id in builtin_ids() {
+            c.adapters.insert(id.into(), dir.path().join(id));
+        }
+        let codex = c.adapter_spec("codex");
+        assert!(codex.builtin && codex.properties.self_read_only);
+        for (m, want) in [
+            (PermissionMode::Plan, "read-only"),
+            (PermissionMode::Ask, "read-only"),
+            (PermissionMode::AcceptEdits, "auto"),
+            (PermissionMode::Auto, "auto"),
+            (PermissionMode::FullAccess, "full-access"),
+        ] {
+            assert_eq!(c.adapter_mode("codex", m), want);
+        }
+        assert_eq!(
+            c.adapter_mode("claude-code", PermissionMode::Ask),
+            "default"
+        );
+        // the harness executable goes only to the adapter that takes one
+        assert_eq!(
+            c.adapter_env("claude-code"),
+            vec![(
+                OsString::from("CLAUDE_CODE_EXECUTABLE"),
+                OsString::from("/bin/claude-x")
+            )]
+        );
+        assert!(c.adapter_env("codex").is_empty());
+        assert!(c.session_meta("claude-code").is_some());
+        assert!(c.session_meta("codex").is_none());
+        // a declaration adds its own arguments and variables
+        c.adapters.insert("mine".into(), dir.path().join("mine"));
+        c.declared.insert(
+            "mine".into(),
+            Declaration {
+                args: vec!["--acp".into()],
+                env: BTreeMap::from([("K".into(), "v".into())]),
+                ..Default::default()
+            },
+        );
+        let (_, args) = c.adapter_command("mine").unwrap();
+        assert_eq!(args, vec![OsString::from("--acp")]);
+        assert_eq!(c.adapter_env("mine"), vec![("K".into(), "v".into())]);
+        assert!(c.session_meta("mine").is_none());
+    }
+
+    #[test]
+    fn initialize_is_read_as_capabilities() {
+        let p = Probe::from_initialize(&json!({
+            "protocolVersion": 1,
+            "agentInfo": {"name": "my-agent", "title": "My Agent", "version": "1.2.3"},
+            "agentCapabilities": {"loadSession": true,
+                "promptCapabilities": {"image": true, "embeddedContext": false},
+                "mcpCapabilities": {"http": true},
+                "sessionCapabilities": {"list": {}}},
+            "authMethods": [{"id": "login", "name": "Log in", "description": "run my-agent login"}]
+        }));
+        assert_eq!(p.status, ProbeStatus::Ready);
+        assert_eq!(p.title.as_deref(), Some("My Agent"));
+        assert_eq!(p.version.as_deref(), Some("1.2.3"));
+        assert!(p.image && p.load_session && p.list_sessions && p.mcp_http);
+        assert!(!p.embedded_context);
+        assert_eq!(p.auth.len(), 1);
+        let bare = Probe::from_initialize(&json!({"protocolVersion": 1}));
+        assert!(!bare.image && !bare.load_session && !bare.list_sessions);
+        assert_eq!(bare.title, None);
+    }
+
+    #[tokio::test]
+    async fn probe_reports_a_missing_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg(dir.path());
+        c.adapters
+            .insert("gone".into(), dir.path().join("nope/agent"));
+        let p = probe(&c, "gone", dir.path(), Duration::from_secs(5)).await;
+        assert_eq!(p.status, ProbeStatus::AdapterMissing);
+        let p = probe(&c, "unknown", dir.path(), Duration::from_secs(5)).await;
+        assert_eq!(p.status, ProbeStatus::AdapterMissing);
+    }
+}

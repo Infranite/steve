@@ -3,7 +3,9 @@
 //! - `node/identity.key`: the Ed25519 seed, 0600 (the Node refuses to start when it is wider)
 //! - `node/node.json`: the pairing (hub url, node id, hub id, the pin or `loopback`)
 //! - `roots.json`: the directories this Node lets the Hub work in (`[{id, path, display}]`)
-//! - `harness.json`: optional, the ACP adapters (`{"adapters": {"claude-code": "/path"}, "node": "node"}`)
+//! - `harness.json`: optional, the ACP adapters (`{"adapters": {"claude-code": "/path"}, "node": "node"}`);
+//!   an adapter of one's own is declared as `{"adapters": {"my-agent": {"command": "/path",
+//!   "name": "My Agent", "args": [], "env": {}, "properties": {}}}}` ([`steve_acp::adapters`])
 //! - `policy.json`: optional, the most any Hub may ask of this Node
 //!   (`{"max_permissions": "auto", "full_network": true, "exec": false, "jobs": false}`, the
 //!   defaults). Sessions here run with this machine's own home and logins until runs are
@@ -45,7 +47,7 @@ pub struct Pairing {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Harness {
     #[serde(default)]
-    pub adapters: HashMap<String, PathBuf>,
+    pub adapters: HashMap<String, steve_acp::AdapterEntry>,
     #[serde(default)]
     pub node: Option<PathBuf>,
     #[serde(default)]
@@ -144,11 +146,11 @@ impl Home {
     pub fn acp(&self) -> Result<steve_acp::AcpConfig> {
         let h = self.harness()?;
         let user_home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-        let mut adapters = h.adapters;
-        adapters
-            .entry("claude-code".into())
-            .or_insert_with(|| "claude-code-acp".into());
+        let (mut adapters, declared) = steve_acp::adapters::split_entries(h.adapters);
+        let (id, command) = steve_acp::adapters::DEFAULT_ADAPTER;
+        adapters.entry(id.into()).or_insert_with(|| command.into());
         Ok(steve_acp::AcpConfig {
+            declared,
             adapters,
             node: h.node.unwrap_or_else(|| "node".into()),
             claude_executable: h.claude_executable.unwrap_or_else(|| "claude".into()),
@@ -238,5 +240,44 @@ mod tests {
             assert!(home.ceiling().is_err(), "{bad}");
         }
         assert!(home.node_config(NodeId::new("n1").unwrap()).is_err());
+    }
+
+    /// A `harness.json` written for an older Node still reads; an adapter of one's own is declared
+    /// next to the built-in ones and keeps its arguments, variables and properties.
+    #[test]
+    fn harness_json_takes_paths_and_declared_adapters() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home(dir.path().to_path_buf());
+        std::fs::write(
+            dir.path().join("harness.json"),
+            r#"{"adapters": {"codex": "/opt/codex-acp"}, "node": "/opt/node"}"#,
+        )
+        .unwrap();
+        let acp = home.acp().unwrap();
+        assert_eq!(acp.adapters["codex"], PathBuf::from("/opt/codex-acp"));
+        // the default adapter is still looked up on PATH
+        assert!(
+            acp.adapters
+                .contains_key(steve_acp::adapters::DEFAULT_ADAPTER.0)
+        );
+        assert!(acp.declared.is_empty());
+        std::fs::write(
+            dir.path().join("harness.json"),
+            r#"{"adapters": {"mine": {"command": "/opt/mine", "name": "Mine", "args": ["acp"],
+                "env": {"MINE_MODE": "acp"}, "properties": {"modes": {"ask": "ask"}}}}}"#,
+        )
+        .unwrap();
+        let acp = home.acp().unwrap();
+        assert_eq!(acp.adapters["mine"], PathBuf::from("/opt/mine"));
+        let spec = acp.adapter_spec("mine");
+        assert_eq!(spec.name, "Mine");
+        assert!(!spec.builtin);
+        assert_eq!(acp.adapter_mode("mine", PermissionMode::Ask), "ask");
+        let (_, args) = acp.adapter_command("mine").unwrap();
+        assert_eq!(args, vec![std::ffi::OsString::from("acp")]);
+        assert_eq!(
+            acp.adapter_env("mine"),
+            vec![("MINE_MODE".into(), "acp".into())]
+        );
     }
 }

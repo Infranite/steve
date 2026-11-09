@@ -128,6 +128,11 @@ fn core_config(cfg: &Config) -> steve_core::CoreConfig {
 
 fn acp_config(cfg: &Config) -> steve_acp::AcpConfig {
     steve_acp::AcpConfig {
+        declared: cfg
+            .declared_adapters
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         adapters: cfg
             .adapters
             .iter()
@@ -319,8 +324,7 @@ pub(crate) enum NodeMode {
 }
 
 pub(crate) fn node_mode(vars: &Vars, no_resume: bool) -> Result<NodeMode, BackendError> {
-    let service = vars("STEVE_NODE_MODE")
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("service"));
+    let service = vars("STEVE_NODE_MODE").is_some_and(|v| v.trim().eq_ignore_ascii_case("service"));
     if service {
         if no_resume {
             return Err(BackendError::msg(
@@ -627,7 +631,8 @@ pub fn wire_assembly(
     } else {
         let vars = vars.clone();
         // the jobs' Node is in this process either way; `service` tells it the sessions are not
-        let service = vars("STEVE_NODE_MODE").is_some_and(|v| v.trim().eq_ignore_ascii_case("service"));
+        let service =
+            vars("STEVE_NODE_MODE").is_some_and(|v| v.trim().eq_ignore_ascii_case("service"));
         Arc::new(move |key| match key {
             "STEVE_NODE_MODE" => Some(if service { "service" } else { "local" }.into()),
             "STEVE_NODE_JOBS" => Some("think,research".into()),

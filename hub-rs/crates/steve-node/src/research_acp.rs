@@ -14,7 +14,7 @@ use crate::acp_job;
 
 pub(super) fn sandbox_mode(
     requirement: &SandboxRequirement,
-    properties: steve_acp::AdapterProperties,
+    properties: &steve_acp::AdapterProperties,
 ) -> ApiResult<r::SandboxMode> {
     let only_fs = |guarantees: &[String]| guarantees.iter().all(|g| g == FS_READONLY);
     if properties.self_read_only {
@@ -629,7 +629,7 @@ mod tests {
         let own = steve_acp::AdapterProperties {
             self_read_only: true,
             nested_sandbox: false,
-            state: Default::default(),
+            ..Default::default()
         };
         let required = SandboxRequirement::Required {
             guarantees: vec![FS_READONLY.into()],
@@ -638,15 +638,15 @@ mod tests {
             preferred: vec![FS_READONLY.into()],
             acceptable: vec![],
         };
-        assert_eq!(sandbox_mode(&required, own).unwrap(), r::SandboxMode::Off);
-        assert_eq!(sandbox_mode(&preferred, own).unwrap(), r::SandboxMode::Off);
+        assert_eq!(sandbox_mode(&required, &own).unwrap(), r::SandboxMode::Off);
+        assert_eq!(sandbox_mode(&preferred, &own).unwrap(), r::SandboxMode::Off);
         let plain = steve_acp::AdapterProperties {
             self_read_only: false,
             nested_sandbox: true,
-            state: Default::default(),
+            ..Default::default()
         };
         assert_eq!(
-            sandbox_mode(&preferred, plain).unwrap(),
+            sandbox_mode(&preferred, &plain).unwrap(),
             r::SandboxMode::Auto
         );
         assert_eq!(
@@ -654,7 +654,7 @@ mod tests {
                 &SandboxRequirement::Required {
                     guarantees: vec!["no-network".into()]
                 },
-                own
+                &own
             )
             .unwrap_err()
             .code,

@@ -42,6 +42,7 @@ impl Test {
             node: NodeId::new("hub").unwrap(),
             home: root.join("node"),
             acp: steve_acp::AcpConfig {
+                declared: Default::default(),
                 adapters: [(
                     "test-research".into(),
                     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

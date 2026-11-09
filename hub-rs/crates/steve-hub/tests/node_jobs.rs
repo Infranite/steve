@@ -176,6 +176,7 @@ impl Local {
                 node: NodeId::new("local").unwrap(),
                 home: root.join("node"),
                 acp: steve_acp::AcpConfig {
+                    declared: Default::default(),
                     adapters: HashMap::new(),
                     node: "node".into(),
                     claude_executable: "claude".into(),

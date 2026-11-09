@@ -599,6 +599,7 @@ mod tests {
                 node: NodeId::new("local").unwrap(),
                 home: root.join("node"),
                 acp: steve_acp::AcpConfig {
+                    declared: Default::default(),
                     adapters: Default::default(),
                     node: "node".into(),
                     claude_executable: "/usr/bin/false".into(),

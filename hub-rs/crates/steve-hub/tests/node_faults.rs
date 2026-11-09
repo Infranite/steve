@@ -433,6 +433,7 @@ impl Rig {
             node: NodeId::new(NODE).unwrap(),
             home: self.home(),
             acp: steve_acp::AcpConfig {
+                declared: Default::default(),
                 adapters: HashMap::from([("claude-code".to_string(), root.join("adapter.sh"))]),
                 node: "node".into(),
                 claude_executable: "claude".into(),

@@ -256,11 +256,7 @@ impl super::node_runtime::NodeDomain for HubHost {
         // where a worktree the local Node made is on this machine (a remote Node's never is)
         let dir = match &fact {
             WorkspaceFact::Prepared { view, .. } if view.branch.is_some() => {
-                match self
-                    .local_node
-                    .get()
-                    .and_then(|n| n.local_dir(view))
-                {
+                match self.local_node.get().and_then(|n| n.local_dir(view)) {
                     Some(d) => Some(d.path),
                     None => return,
                 }
@@ -2726,6 +2722,7 @@ mod prepared_dir_tests {
             node: NodeId::new("local").unwrap(),
             home: dir.path().join("node"),
             acp: steve_acp::AcpConfig {
+                declared: Default::default(),
                 adapters: Default::default(),
                 node: "node".into(),
                 claude_executable: "/usr/bin/false".into(),
