@@ -285,7 +285,7 @@ async fn acp_think(
     spawned: &(dyn Fn(u32) -> bool + Send + Sync),
     on_message: &(dyn Fn(u32, &str) + Send + Sync),
 ) -> Ran {
-    use base64::Engine;
+    use crate::acp_job::OneShotError;
     use serde_json::json;
     use steve_acp::normalize::ToolFact;
 
@@ -324,8 +324,11 @@ async fn acp_think(
     };
     let mut prompt = vec![json!({"type": "text", "text": text})];
     prompt.extend(images.iter().map(|image| {
-        json!({"type": "image", "mimeType": image.mime,
-            "data": base64::engine::general_purpose::STANDARD.encode(&image.bytes)})
+        steve_acp::oneshot::Image {
+            mime: image.mime.clone(),
+            bytes: image.bytes.clone(),
+        }
+        .block()
     }));
     let properties = inner.cfg.acp.adapter_properties(&spec.run.choice.harness);
     // Keep the existing Auto sandbox policy: use the adapter's own read-only sandbox where
@@ -381,6 +384,11 @@ async fn acp_think(
             _ => {}
         }
     };
+    let wrap = crate::acp_job::wrap(
+        sandbox.as_deref(),
+        properties.nested_sandbox.then_some(&inner.confine),
+        dir,
+    );
     let req = crate::acp_job::Request {
         cfg: &inner.cfg.acp,
         harness: &spec.run.choice.harness,
@@ -390,8 +398,7 @@ async fn acp_think(
         resume: None,
         prompt,
         mcp_servers: json!([]),
-        sandbox: sandbox.as_deref(),
-        confine: properties.nested_sandbox.then_some(&inner.confine),
+        wrap: Some(&wrap),
         timeout: Duration::from_millis((spec.run.limits.deadline.0 - now()).max(0) as u64),
         prefix: spec.run.attempt.as_str(),
         on_session: None,
@@ -415,7 +422,16 @@ async fn acp_think(
             usage: out.usage,
         },
         Err(e) => Ran {
-            reply: Err(e),
+            reply: Err(match e {
+                OneShotError::OutputLimit => PrintError::OutputLimit,
+                OneShotError::Timeout(t) => PrintError::Timeout(t),
+                OneShotError::Failed(e) => PrintError::Failed(e),
+                OneShotError::Harness {
+                    text, transient, ..
+                } => PrintError::Harness { text, transient },
+                e @ OneShotError::Unsupported(_) => PrintError::Failed(e.to_string()),
+                OneShotError::Io(e) => PrintError::Io(e),
+            }),
             usage: usage.lock().unwrap().clone(),
         },
     }

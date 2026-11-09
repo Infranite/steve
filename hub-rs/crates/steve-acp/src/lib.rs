@@ -1,7 +1,7 @@
 //! The ACP driver Steve's Node runs harness adapters with (Claude Code via claude-agent-acp, Codex
 //! via codex-acp, or any adapter a manifest declares): child processes spoken to in JSON-RPC over
 //! their stdio ([`rpc`]), a session's handshake ([`session`]), its updates read into Steve's events
-//! ([`normalize`]) and permission requests ([`permission`]), plus the adapter registry
+//! ([`normalize`]) and permission requests ([`permission`]), one-shot calls ([`oneshot`]), plus the adapter registry
 //! ([`adapters`]) and the adapter resolution of `config.ts`.
 //!
 //! Independent of the database and of the Hub: the Node (`steve-node`) holds the sessions and
@@ -17,6 +17,7 @@ mod codex;
 mod config;
 mod errors;
 pub mod normalize;
+pub mod oneshot;
 pub mod permission;
 mod rollout;
 pub mod rpc;
