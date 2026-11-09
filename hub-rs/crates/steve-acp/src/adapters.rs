@@ -51,6 +51,31 @@ impl Default for ModeMap {
 }
 
 impl ModeMap {
+    /// What is asked of the adapter for `mode`: its id, and for Plan the Ask id as a stand-in.
+    pub fn choice(&self, mode: PermissionMode) -> crate::session::ModeChoice {
+        let narrow = matches!(mode, PermissionMode::Plan | PermissionMode::Ask);
+        crate::session::ModeChoice {
+            id: self.id(mode).to_owned(),
+            fallback: (mode == PermissionMode::Plan).then(|| self.ask.clone()),
+            narrow,
+        }
+    }
+
+    /// Steve's modes an adapter offering `ids` can be set to (as [`Self::choice`] resolves them);
+    /// `None` (it reports no modes): Plan and Ask only.
+    pub fn offered(&self, ids: Option<&[String]>) -> Vec<PermissionMode> {
+        [
+            PermissionMode::Plan,
+            PermissionMode::Ask,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Auto,
+            PermissionMode::FullAccess,
+        ]
+        .into_iter()
+        .filter(|m| self.choice(*m).resolve(ids).is_ok())
+        .collect()
+    }
+
     /// The adapter's mode id for `mode`.
     pub fn id(&self, mode: PermissionMode) -> &str {
         match mode {
@@ -113,8 +138,8 @@ pub struct AdapterProperties {
     pub executable_env: Option<String>,
     pub session_meta: SessionMeta,
     pub launch_extra: LaunchExtra,
-    /// Discovery asks it `initialize` ([`probe`]). The built-in entries do not: their CLIs'
-    /// `--version` says whether they are there, without starting an adapter every few minutes.
+    /// Discovery asks it `initialize` and opens a scratch session ([`probe`]), at most every half
+    /// hour.
     pub probe_initialize: bool,
     /// What `session/new|load` adds to its `_meta` to switch the harness's built-in tools off for
     /// a call that uses none (a model call of Steve's own: cheaper, and nothing to guard).
@@ -319,7 +344,7 @@ const BUILTINS: &[Builtin] = &[
             executable_env: Some("CLAUDE_CODE_EXECUTABLE".into()),
             session_meta: SessionMeta::ClaudeSettings,
             launch_extra: LaunchExtra::None,
-            probe_initialize: false,
+            probe_initialize: true,
             // claude-agent-acp: `claudeCode.options.tools` is the list of built-in tools
             tools_off_meta: Some(json!({"claudeCode": {"options": {"tools": []}}})),
             usage_input_includes_cache: false,
@@ -356,7 +381,7 @@ const BUILTINS: &[Builtin] = &[
             // sandbox inside it, so Ask mode could no longer write anything
             session_meta: SessionMeta::None,
             launch_extra: LaunchExtra::CodexCatalog,
-            probe_initialize: false,
+            probe_initialize: true,
             tools_off_meta: None,
             // codex-acp reports no tokens of a turn; its rollout file has them, OpenAI's way
             usage_input_includes_cache: true,
@@ -423,7 +448,92 @@ pub struct AuthMethod {
     pub description: Option<String>,
 }
 
-/// What `initialize` said.
+/// A model an adapter offers (`configOptions` category `model`, or `models.availableModels`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOption {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// What a scratch `session/new` said: the modes, models and efforts on offer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionOffer {
+    /// Steve's permission modes it can be set to ([`ModeMap::offered`]).
+    pub modes: Vec<PermissionMode>,
+    pub models: Vec<ModelOption>,
+    /// The model it runs when none is set.
+    pub default_model: Option<String>,
+    /// The reasoning efforts it takes (`thought_level`).
+    pub efforts: Vec<String>,
+}
+
+impl SessionOffer {
+    /// Reads a `session/new` result with `modes`, the adapter's mode map.
+    pub fn from_session(r: &Value, modes: &ModeMap) -> Self {
+        let options = r.get("configOptions").and_then(Value::as_array);
+        let option = |category: &str| {
+            options.and_then(|os| {
+                os.iter().find(|o| {
+                    o.get("category").and_then(Value::as_str) == Some(category)
+                        || o.get("id").and_then(Value::as_str) == Some(category)
+                })
+            })
+        };
+        // a select's options, flattened out of their groups
+        fn values(v: &Value, out: &mut Vec<ModelOption>) {
+            for o in v.as_array().into_iter().flatten() {
+                if let Some(group) = o.get("options") {
+                    values(group, out);
+                } else if let Some(id) = o.get("value").and_then(Value::as_str) {
+                    let text = |k: &str| o.get(k).and_then(Value::as_str).map(String::from);
+                    out.push(ModelOption {
+                        id: id.into(),
+                        name: text("name"),
+                        description: text("description"),
+                    });
+                }
+            }
+        }
+        let mut models = vec![];
+        let mut default_model = None;
+        if let Some(o) = option("model") {
+            values(&o["options"], &mut models);
+            default_model = o["currentValue"].as_str().map(String::from);
+        } else if let Some(m) = r.get("models").filter(|m| m.is_object()) {
+            for a in m["availableModels"].as_array().into_iter().flatten() {
+                if let Some(id) = a.get("modelId").and_then(Value::as_str) {
+                    let text = |k: &str| a.get(k).and_then(Value::as_str).map(String::from);
+                    models.push(ModelOption {
+                        id: id.into(),
+                        name: text("name"),
+                        description: text("description"),
+                    });
+                }
+            }
+            default_model = m["currentModelId"].as_str().map(String::from);
+        }
+        let mut efforts = vec![];
+        if let Some(o) = crate::session::effort_option(r) {
+            values(&o["options"], &mut efforts);
+        }
+        Self {
+            modes: modes.offered(crate::session::offered_modes(r).as_deref()),
+            models,
+            default_model: default_model.filter(|m| !m.is_empty()),
+            // `default` is no effort of its own: what runs when none is set
+            efforts: efforts
+                .into_iter()
+                .map(|e| e.id)
+                .filter(|e| e != "default")
+                .collect(),
+        }
+    }
+}
+
+/// What `initialize` (and a scratch `session/new`) said.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
     pub status: ProbeStatus,
@@ -438,7 +548,12 @@ pub struct Probe {
     pub load_session: bool,
     pub list_sessions: bool,
     pub mcp_http: bool,
+    /// It takes a system prompt of the client's own (`sessionCapabilities.systemPrompt`).
+    pub system_prompt: bool,
     pub auth: Vec<AuthMethod>,
+    /// What a scratch session offered; `None` when it could not be opened (`session_error`).
+    pub session: Option<SessionOffer>,
+    pub session_error: Option<String>,
 }
 
 impl Probe {
@@ -453,7 +568,10 @@ impl Probe {
             load_session: false,
             list_sessions: false,
             mcp_http: false,
+            system_prompt: false,
             auth: vec![],
+            session: None,
+            session_error: None,
         }
     }
 
@@ -503,12 +621,18 @@ impl Probe {
                 .pointer("/sessionCapabilities/list")
                 .is_some_and(|v| !v.is_null() && v != &Value::Bool(false)),
             mcp_http: flag("/mcpCapabilities/http"),
+            system_prompt: caps
+                .pointer("/sessionCapabilities/systemPrompt")
+                .is_some_and(|v| !v.is_null() && v != &Value::Bool(false)),
             auth,
+            session: None,
+            session_error: None,
         }
     }
 }
 
-/// Starts `id`'s adapter in `cwd`, asks `initialize` (within `timeout`) and stops it again.
+/// Starts `id`'s adapter in `cwd`, asks `initialize` and opens a scratch session (each within
+/// `timeout`, no prompt: no model is asked anything) and stops it again.
 pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Duration) -> Probe {
     let (program, args) = match cfg.adapter_command(id) {
         Ok(c) => c,
@@ -530,7 +654,7 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
         Spawn {
             program,
             args,
-            cwd,
+            cwd: cwd.clone(),
             env: cfg.adapter_env(id),
             log_tag: format!("[probe {id}]"),
             clean_env: false,
@@ -552,11 +676,26 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
         "clientInfo": { "name": "steve", "version": cfg.version },
     });
     let r = conn.request("initialize", init, Some(timeout)).await;
-    conn.kill();
-    match r {
+    let mut p = match r {
         Ok(r) => Probe::from_initialize(&r),
-        Err(e) => Probe::failed(ProbeStatus::InitializeFailed, e.message),
+        Err(e) => {
+            conn.kill();
+            return Probe::failed(ProbeStatus::InitializeFailed, e.message);
+        }
+    };
+    let mut params = json!({ "cwd": cwd, "mcpServers": [] });
+    if let Some(meta) = cfg.session_meta(id) {
+        params["_meta"] = meta;
     }
+    match conn.request("session/new", params, Some(timeout)).await {
+        Ok(r) => {
+            let modes = cfg.adapter_properties(id).modes;
+            p.session = Some(SessionOffer::from_session(&r, &modes));
+        }
+        Err(e) => p.session_error = Some(e.message),
+    }
+    conn.kill();
+    p
 }
 
 impl crate::AcpConfig {
@@ -618,6 +757,11 @@ impl crate::AcpConfig {
     /// The ACP mode id `mode` is set as on `id`'s adapter.
     pub fn adapter_mode(&self, id: &str, mode: PermissionMode) -> String {
         self.adapter_properties(id).modes.id(mode).to_owned()
+    }
+
+    /// What `session/set_mode` asks of `id`'s adapter for `mode` ([`ModeMap::choice`]).
+    pub fn mode_choice(&self, id: &str, mode: PermissionMode) -> crate::session::ModeChoice {
+        self.adapter_properties(id).modes.choice(mode)
     }
 
     pub(crate) fn launch_args(&self, id: &str) -> Vec<OsString> {
@@ -763,6 +907,47 @@ mod tests {
     }
 
     #[test]
+    fn a_mode_the_adapter_does_not_offer_is_stood_in_for_or_refused() {
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let claude = ModeMap::default();
+        let all = ids(&[
+            "default",
+            "acceptEdits",
+            "plan",
+            "auto",
+            "bypassPermissions",
+        ]);
+        assert_eq!(claude.offered(Some(&all)).len(), 5);
+        // Codex's three modes cover every Steve mode through its map
+        let codex = spec("codex", None).properties.modes;
+        assert_eq!(
+            codex
+                .offered(Some(&ids(&["read-only", "auto", "full-access"])))
+                .len(),
+            5
+        );
+        // no plan mode: Plan asks instead; no auto: refused
+        let some = ids(&["default", "acceptEdits"]);
+        assert_eq!(
+            claude.choice(PermissionMode::Plan).resolve(Some(&some)),
+            Ok(Some("default".into()))
+        );
+        assert!(
+            claude
+                .choice(PermissionMode::Auto)
+                .resolve(Some(&some))
+                .unwrap_err()
+                .starts_with("unsupported: permission mode auto")
+        );
+        // no modes at all: the adapter asks for everything, so only Plan and Ask can be had
+        assert_eq!(
+            claude.offered(None),
+            [PermissionMode::Plan, PermissionMode::Ask]
+        );
+        assert_eq!(claude.choice(PermissionMode::Ask).resolve(None), Ok(None));
+    }
+
+    #[test]
     fn initialize_is_read_as_capabilities() {
         let p = Probe::from_initialize(&json!({
             "protocolVersion": 1,
@@ -782,6 +967,64 @@ mod tests {
         let bare = Probe::from_initialize(&json!({"protocolVersion": 1}));
         assert!(!bare.image && !bare.load_session && !bare.list_sessions);
         assert_eq!(bare.title, None);
+    }
+
+    #[test]
+    fn a_scratch_session_says_what_it_offers() {
+        // claude-agent-acp 0.99.1's shape (models as a config option, efforts grouped or not)
+        let r = json!({"sessionId": "s",
+            "modes": {"currentModeId": "default", "availableModes": [
+                {"id": "default"}, {"id": "acceptEdits"}, {"id": "plan"}, {"id": "auto"}, {"id": "bypassPermissions"}]},
+            "configOptions": [
+                {"id": "model", "category": "model", "currentValue": "m-2",
+                 "options": [{"value": "m-1", "name": "One"}, {"group": "g", "options": [{"value": "m-2"}]}]},
+                {"id": "effort", "category": "thought_level", "currentValue": "low",
+                 "options": [{"value": "low"}, {"value": "high"}]}]});
+        let o = SessionOffer::from_session(&r, &ModeMap::default());
+        assert_eq!(o.modes.len(), 5);
+        assert_eq!(
+            o.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["m-1", "m-2"]
+        );
+        assert_eq!(o.models[0].name.as_deref(), Some("One"));
+        assert_eq!(o.default_model.as_deref(), Some("m-2"));
+        assert_eq!(o.efforts, ["low", "high"]);
+        // the older `models` shape, no modes, no efforts
+        let r = json!({"sessionId": "s", "models": {"currentModelId": "x",
+            "availableModels": [{"modelId": "x", "name": "X"}]}});
+        let o = SessionOffer::from_session(&r, &ModeMap::default());
+        assert_eq!(o.modes, [PermissionMode::Plan, PermissionMode::Ask]);
+        assert_eq!(o.default_model.as_deref(), Some("x"));
+        assert!(o.efforts.is_empty());
+    }
+
+    /// The built-in adapters installed here, as discovery sees them (no prompt: no model is asked
+    /// anything). Run with the harnesses' state somewhere of its own; `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "starts the real adapters"]
+    async fn real_adapters_offer_every_mode_and_their_models() {
+        let cfg = crate::AcpConfig::from_env();
+        let dir = tempfile::tempdir().unwrap();
+        for id in builtin_ids() {
+            let p = probe(&cfg, id, dir.path(), Duration::from_secs(60)).await;
+            let o = p.session.clone().unwrap_or_else(|| panic!("{id}: {p:?}"));
+            eprintln!(
+                "{id}: {:?} {:?} modes {:?} default {:?} efforts {:?} models {}",
+                p.title,
+                p.version,
+                o.modes,
+                o.default_model,
+                o.efforts,
+                o.models.len()
+            );
+            assert_eq!(p.status, ProbeStatus::Ready);
+            assert_eq!(
+                o.modes.len(),
+                5,
+                "{id}: every Steve mode maps to one it offers"
+            );
+            assert!(!o.models.is_empty() && !o.efforts.is_empty(), "{id}");
+        }
     }
 
     #[tokio::test]

@@ -1,8 +1,8 @@
-//! What each configured harness adapter says about itself (`initialize`), for discovery (harness
-//! parity S1). Asked side by side, at most every five minutes unless the Hub asks for a fresh probe;
-//! an adapter that cannot start or answer is reported so, and nothing is refused because of it.
-//! Only adapters that declare `probe_initialize` are asked (every adapter of one's own; the
-//! built-in ones are known by their CLIs' versions).
+//! What each configured harness adapter says about itself (`initialize`, and the modes, models
+//! and efforts of a scratch `session/new`: no prompt, no model is asked anything), for discovery
+//! (harness parity S1, S4, S8). Asked side by side, at most every half hour unless the Hub asks for
+//! a fresh probe; an adapter that cannot start or answer is reported so, and nothing is refused
+//! because of it. Adapters that declare `probe_initialize: false` are not asked.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -12,8 +12,8 @@ use steve_acp::AcpConfig;
 use steve_acp::adapters::{Probe, ProbeStatus};
 use steve_node_api::{AdapterAuth, AdapterInfo, AdapterStatus, HarnessCapability};
 
-const TTL: Duration = Duration::from_secs(300);
-const INITIALIZE: Duration = Duration::from_secs(10);
+const TTL: Duration = Duration::from_secs(1800);
+const INITIALIZE: Duration = Duration::from_secs(20);
 
 #[derive(Default)]
 pub(crate) struct AdapterProbes(tokio::sync::Mutex<Option<(Instant, HashMap<String, Probe>)>>);
@@ -37,10 +37,13 @@ impl AdapterProbes {
             .into_iter()
             .filter(|id| cfg.adapter_properties(id).probe_initialize)
             .collect();
+        // the scratch sessions' directory: one of the Node's own, the same every time
+        let cwd = cwd.join("probe");
+        let _ = std::fs::create_dir_all(&cwd);
         let mut set = tokio::task::JoinSet::new();
         for id in ids {
             let cfg = cfg.clone();
-            let cwd = cwd.to_path_buf();
+            let cwd = cwd.clone();
             set.spawn(async move {
                 let p = steve_acp::adapters::probe(&cfg, &id, &cwd, INITIALIZE).await;
                 (id, p)
@@ -93,6 +96,22 @@ pub(crate) fn info(cfg: &AcpConfig, id: &str, p: &Probe) -> AdapterInfo {
             })
             .collect(),
         install_hint: spec.install_hint,
+        system_prompt: p.system_prompt,
+        session: p.session.as_ref().map(|o| steve_node_api::AdapterOffer {
+            modes: o.modes.clone(),
+            models: o
+                .models
+                .iter()
+                .map(|m| steve_node_api::AdapterModel {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    description: m.description.clone(),
+                })
+                .collect(),
+            default_model: o.default_model.clone(),
+            efforts: o.efforts.clone(),
+        }),
+        session_error: p.session_error.clone(),
     }
 }
 
@@ -105,6 +124,11 @@ pub(crate) fn apply(cfg: &AcpConfig, h: &mut HarnessCapability, p: Option<&Probe
         h.resume = p.load_session;
         if h.version.is_empty() {
             h.version = p.version.clone().unwrap_or_default();
+        }
+        if let Some(o) = &p.session
+            && h.models.is_empty()
+        {
+            h.models = o.models.iter().map(|m| m.id.clone()).collect();
         }
     }
     h.adapter = Some(info(cfg, &h.name, p));

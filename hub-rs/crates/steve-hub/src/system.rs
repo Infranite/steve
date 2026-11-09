@@ -766,6 +766,9 @@ mod tests {
                 embedded_context: false,
                 auth: vec![],
                 install_hint: None,
+                system_prompt: false,
+                session: None,
+                session_error: None,
             }),
         };
         let rows = declared_rows(&cfg, Some(&[reported]));

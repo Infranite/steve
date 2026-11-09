@@ -4641,11 +4641,11 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
 }
 
 /// Harness parity S1: an adapter of one's own, declared with nothing but a command and a name,
-/// is in discovery with what its `initialize` said; one that cannot start is reported, not
-/// refused, and the built-in entry keeps its record.
+/// is in discovery with what its `initialize` and a scratch session said; one that cannot start is
+/// reported, not refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declared_adapter_is_discovered_with_what_it_reports() {
-    let t = T::new(&[("FAKE_ACP_IMAGE", "1")]);
+    let t = T::new(&[("FAKE_ACP_IMAGE", "1"), ("FAKE_ACP_PROBES", "1")]);
     let mut cfg = t.config();
     // the same fake as the built-in entry, under an id of its own
     cfg.acp.adapters.insert("fake".into(), t.adapter.clone());
@@ -4682,12 +4682,17 @@ async fn a_declared_adapter_is_discovered_with_what_it_reports() {
         gone.sessions,
         "a missing adapter is reported, its record kept"
     );
-    // a built-in adapter is not started to be asked: its record is as it was
+    // a scratch session says what it offers (no prompt is sent)
+    let offer = fake.adapter.as_ref().unwrap().session.clone().unwrap();
+    assert_eq!(offer.modes.len(), 5, "{offer:?}");
+    assert_eq!(offer.default_model.as_deref(), Some("fake-model"));
+    assert_eq!(t.sent("session/prompt"), 0);
+    // the built-in adapter is asked the same way
     let cc = h("claude-code");
-    assert_eq!(cc.adapter, None);
+    assert!(cc.adapter.is_some());
     assert!(cc.images && cc.resume);
-    // only the declared one was asked, once: a second probe within the window starts nothing
-    assert_eq!(t.sent("initialize"), 1);
+    // each was asked once: a second probe within the window starts nothing
+    assert_eq!(t.sent("initialize"), 2);
     n.probe(false).await.unwrap();
-    assert_eq!(t.sent("initialize"), 1);
+    assert_eq!(t.sent("initialize"), 2);
 }
