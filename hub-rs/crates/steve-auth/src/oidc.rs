@@ -61,7 +61,7 @@ impl Oidc {
                 let issuer = IssuerUrl::new(issuer.clone()).map_err(|e| e.to_string())?;
                 CoreProviderMetadata::discover_async(issuer, &self.http)
                     .await
-                    .map_err(|e| format!("discovery: {e}"))
+                    .map_err(|e| format!("discovery: {}", describe(&e)))
             })
             .await
             .cloned()
@@ -140,7 +140,7 @@ impl Oidc {
         // Keys are re-read on every login so a key rotation at the IdP needs no restart.
         let jwks = CoreJsonWebKeySet::fetch_async(provider.jwks_uri(), &self.http)
             .await
-            .map_err(|e| format!("jwks: {e}"))?;
+            .map_err(|e| format!("jwks: {}", describe(&e)))?;
         let client = self.client(provider.clone().set_jwks(jwks), origin)?;
         let token = client
             .exchange_code(AuthorizationCode::new(code))

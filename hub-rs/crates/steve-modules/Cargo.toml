@@ -22,7 +22,7 @@ chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 axum = { version = "=0.8.9", default-features = false, features = ["json", "query"] }
 regex = "=1.13.1"
 # Connections (A2): token endpoints of OAuth providers.
-reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
 url = "=2.5.8"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }
