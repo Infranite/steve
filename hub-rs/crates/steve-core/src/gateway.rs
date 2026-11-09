@@ -856,6 +856,12 @@ pub const ROUTE_RULES: &str = include_str!("thread/route_prompt.txt");
 /// come first and are the same for every message of the workspace; after [`STATIC_END`] come the
 /// conversation's open items, the recent conversation and the message.
 pub fn route_prompt(c: &RouteCtx, text: &str, history: &[Said], promote: bool) -> String {
+    route_prompt_for(c, &[text.to_string()], history, promote)
+}
+
+/// The router prompt for several messages the user sent in a row, decided in one call ([`route_many`]);
+/// one message gives exactly [`route_prompt`].
+pub fn route_prompt_for(c: &RouteCtx, texts: &[String], history: &[Said], promote: bool) -> String {
     let skip = history.len().saturating_sub(6);
     let recent: Vec<String> = history[skip..]
         .iter()
@@ -949,13 +955,31 @@ pub fn route_prompt(c: &RouteCtx, text: &str, history: &[Said], promote: bool) -
         lines.push("Recent conversation, oldest first:".into());
         lines.extend(recent);
     }
-    lines.push(format!("User message: {}", js_json(text)));
+    match texts {
+        [text] => lines.push(format!("User message: {}", js_json(text))),
+        _ => {
+            lines.push("The user sent these messages in a row, oldest first. Decide each one on its own; a later one may build on an earlier one:".into());
+            lines.extend(
+                texts
+                    .iter()
+                    .enumerate()
+                    .map(|(n, t)| format!("  {}: {}", n + 1, js_json(t))),
+            );
+        }
+    }
     lines.push(if promote {
         "The user pressed “做成事项” on Steve's last answer: kind is \"item\"; goal is the work this conversation is about, drawn from the question and Steve's answer.".into()
     } else {
         "If the message only confirms or picks up something Steve proposed in its last reply (e.g. “按建议”, “就这么办”, “好，做吧”, “改吧”, “可以”, “第二个”), it is about that proposal: when the proposal is work, kind is \"item\" with signal \"explicit\" and goal restates the proposed work completely from Steve's reply; when it is a change of Steve's own settings or bots (new bots, their roles and rules), kind is \"config\".".into()
     });
-    lines.push("Reply with ONLY the JSON object described in the instructions.".into());
+    lines.push(if texts.len() == 1 {
+        "Reply with ONLY the JSON object described in the instructions.".into()
+    } else {
+        format!(
+            "Reply with ONLY a JSON array of {} objects, one per message in the same order, each the JSON object described in the instructions.",
+            texts.len()
+        )
+    });
     head.retain(|l| !l.is_empty());
     lines.retain(|l| !l.is_empty());
     with_static(&head.join("\n"), &lines.join("\n"))
@@ -1007,7 +1031,25 @@ pub fn split_offer(text: &str) -> (String, Option<Offer>) {
 
 /// Validate a router reply against what exists; `None` when it is unusable (the caller falls back).
 pub fn parse_route(c: &RouteCtx, text: &str, raw: &str, promote: bool) -> Option<Route> {
-    let r = first_json(raw).ok()??;
+    parse_route_value(c, text, &first_json(raw).ok()??, promote)
+}
+
+/// The routes of several messages from one reply ([`route_prompt_for`]): a JSON array with one usable
+/// object per message, in order; `None` when any is missing or unusable (each is then routed alone).
+pub fn parse_routes(c: &RouteCtx, texts: &[String], raw: &str) -> Option<Vec<Route>> {
+    let (from, to) = (raw.find('[')?, raw.rfind(']')?);
+    let a: Vec<Value> = serde_json::from_str(raw.get(from..=to)?).ok()?;
+    if a.len() != texts.len() {
+        return None;
+    }
+    texts
+        .iter()
+        .zip(&a)
+        .map(|(t, r)| parse_route_value(c, t, r, false))
+        .collect()
+}
+
+fn parse_route_value(c: &RouteCtx, text: &str, r: &Value, promote: bool) -> Option<Route> {
     let kind = match r.get("kind").and_then(Value::as_str)? {
         "chat" => "answer",
         k if KINDS.contains(&k) => k,
@@ -1154,6 +1196,45 @@ pub fn parse_route(c: &RouteCtx, text: &str, raw: &str, promote: bool) -> Option
             .and_then(Value::as_bool)
             .unwrap_or(!c.pending.is_empty()),
     })
+}
+
+/// Route several messages the user sent in a row in one call (`route` purpose, fast tier). `None` when
+/// the call or its reply fails: the caller routes each alone, as before.
+pub async fn route_many(
+    gw: &dyn ModelGateway,
+    c: &RouteCtx,
+    texts: &[String],
+    history: &[Said],
+) -> Option<Vec<Route>> {
+    let prompt = route_prompt_for(c, texts, history, false);
+    match gw
+        .call(&prompt, Tier::Fast, ROUTE_TIMEOUT, &ThinkTools::None)
+        .await
+    {
+        Ok(Printed {
+            text: raw, model, ..
+        }) => {
+            if c.debug {
+                tracing::info!("route batch raw: {raw}");
+            }
+            let rs = parse_routes(c, texts, &raw);
+            if rs.is_none() {
+                tracing::warn!("route batch unusable: {}", js_head(&raw, 200));
+            }
+            rs.map(|rs| {
+                rs.into_iter()
+                    .map(|r| Route {
+                        model: Some(model.clone()),
+                        ..r
+                    })
+                    .collect()
+            })
+        }
+        Err(e) => {
+            tracing::error!("route batch failed {e}");
+            None
+        }
+    }
 }
 
 /// Route a message; any failure gives [`Route::fallback`], which never creates an item.
@@ -1965,6 +2046,28 @@ mod tests {
         assert_eq!((t.as_str(), o), ("说到 OFFER: 这个词", None));
         let (t, o) = split_offer("答\nOFFER: 不是 JSON");
         assert_eq!((t.as_str(), o), ("答\nOFFER: 不是 JSON", None));
+    }
+
+    #[test]
+    fn a_burst_is_one_prompt_and_one_array() {
+        let c = ctx();
+        let one = route_prompt(&c, "修登录页", &[], false);
+        assert_eq!(one, route_prompt_for(&c, &["修登录页".into()], &[], false));
+        let texts: Vec<String> = vec!["修登录页".into(), "加一个叫财务的标签".into()];
+        let p = route_prompt_for(&c, &texts, &[], false);
+        assert!(p.contains("  1: \"修登录页\"\n  2: \"加一个叫财务的标签\""));
+        assert!(p.contains("a JSON array of 2 objects"));
+        assert!(!p.contains("User message:"));
+        let raw = r#"[{"kind":"item","confidence":0.9,"signals":["change"]},{"kind":"config","confidence":0.9}]"#;
+        let rs = parse_routes(&c, &texts, &format!("好的：\n{raw}")).unwrap();
+        assert_eq!(
+            rs.iter().map(|r| r.kind.as_str()).collect::<Vec<_>>(),
+            ["item", "config"]
+        );
+        /* one missing or unusable: none, each is routed alone */
+        assert!(parse_routes(&c, &texts, r#"[{"kind":"item"}]"#).is_none());
+        assert!(parse_routes(&c, &texts, r#"[{"kind":"item"},{"kind":"nope"}]"#).is_none());
+        assert!(parse_routes(&c, &texts, r#"{"kind":"item"}"#).is_none());
     }
 
     #[test]
