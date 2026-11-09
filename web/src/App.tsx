@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
 import { api, signIn } from "@/api"
+import { API, hello, hubBase, hubUrl, normalize, setHub } from "@/hub"
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command"
 import { BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, Building2Icon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LockIcon, UsersRoundIcon, WorkflowIcon, InboxIcon, ListTodoIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, PlugIcon, PlusIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon } from "lucide-react"
 import { st, useStore, start } from "@/store"
@@ -147,6 +148,33 @@ function TokenSignIn() {
   )
 }
 
+/** a web client served on its own: which Hub it talks to (A3) */
+function ConnectHub() {
+  const t = useT()
+  const [url, setUrl] = useState(hubBase())
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const go = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const base = normalize(url)
+    if (!base) { setError(t("shell:app.badAddress")); return }
+    setBusy(true); setError("")
+    try {
+      const h = await hello(base)
+      if (h.api !== API) { setError(t("shell:app.apiMismatch", { version: h.version })); setBusy(false); return }
+      setHub(base === location.origin ? null : base); location.reload()
+    } catch { setError(t("shell:app.notSteve")); setBusy(false) }
+  }
+  return (
+    <form onSubmit={go} className="flex w-full max-w-xs flex-col gap-2 text-left" data-connect-hub>
+      <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={t("shell:app.hubAddress")} autoFocus inputMode="url" />
+      {error && <div className="type-footnote text-destructive">{error}</div>}
+      <Button type="submit" disabled={busy || !url.trim()}>{busy ? <Spinner className="size-4" /> : t("shell:app.connect")}</Button>
+      <div className="type-footnote text-muted-foreground">{t("shell:app.connectHint")}</div>
+    </form>
+  )
+}
+
 function Splash({ children }: { children: React.ReactNode }) {
   return <div className="flex h-[100dvh] flex-col items-center justify-center gap-4 bg-background px-6 text-center text-foreground">{children}</div>
 }
@@ -155,16 +183,22 @@ const UNWIRED = ["plugins"]
 export default function App() {
   useStore()
   const t = useT()
-  useEffect(() => start(), [])
+  /* whether this page has a Hub to talk to: the one that served it, or the one it was pointed at */
+  const [hub, setHubState] = useState<"checking" | "ok" | "missing">("checking")
+  useEffect(() => { hello(hubBase()).then(() => setHubState("ok"), () => setHubState("missing")) }, [])
+  useEffect(() => { if (hub === "ok") return start() }, [hub])
   const [a = "", b, c] = useRoute()
   /* an “撤销” toast belongs to the page it was raised on */
   useEffect(() => { sonnerToast.dismiss() }, [a, b, c])
+  if (hub === "missing") return (
+    <Splash><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{t("shell:app.connectTitle")}</div></div><ConnectHub /></Splash>
+  )
   if (st.login) return (
     <Splash><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{t("shell:app.signInToContinue")}</div></div>
       {signIn.token && <TokenSignIn />}
-      {(signIn.link || !signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => { location.href = (signIn.link ?? st.login) + "?back=" + encodeURIComponent(location.pathname + location.hash) }} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}</Splash>
+      {(signIn.link || !signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => { location.href = hubUrl(signIn.link ?? st.login ?? "/auth/login") + "?back=" + encodeURIComponent(location.pathname + location.hash) }} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}</Splash>
   )
-  if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><div className="type-callout text-muted-foreground">{st.error}</div></> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
+  if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><div className="type-callout text-muted-foreground">{st.error}</div>{hubBase() && <Button variant="ghost" onClick={() => { setHub(null); setHubState("missing") }}>{t("shell:app.changeHub")}</Button>}</> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
   const view =
     a === "inbox" ? <InboxView /> :
     a === "items" ? (b ? <ItemView key={b} id={b} /> : <ItemsView />) :

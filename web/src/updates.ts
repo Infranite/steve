@@ -1,3 +1,4 @@
+import { hubUrl } from "@/hub"
 import { modReq } from "@/api"
 import type { Health, Install } from "@/upgrade-guide"
 import { t } from "@/i18n"
@@ -29,7 +30,7 @@ export const updates = {
   approve: (id: string) => modReq<UpdateOperation>("POST", `/updates/${encodeURIComponent(id)}/approve`, {}, AbortSignal.timeout(30_000)),
   /** The public liveness answer, read directly: it is what a release script waits for after a restart. */
   health: async (): Promise<Health> => {
-    const r = await fetch("/healthz", { cache: "no-store", credentials: "same-origin", signal: AbortSignal.timeout(5000) })
+    const r = await fetch(hubUrl("/healthz"), { cache: "no-store", credentials: "include", signal: AbortSignal.timeout(5000) })
     if (!r.ok) throw new Error(`healthz ${r.status}`)
     return r.json()
   },

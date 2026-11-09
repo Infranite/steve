@@ -131,6 +131,9 @@ pub struct Config {
     pub public_url: String,
     /// Every origin Steve is served on; OIDC login returns to the one the browser used.
     pub public_urls: Vec<String>,
+    /// Web origins a client may call this Hub from besides those of signed-in web clients
+    /// (`STEVE_CLIENT_ORIGINS`, comma-separated), e.g. a web client served on its own port.
+    pub client_origins: Vec<String>,
     pub web_dir: PathBuf,
     pub oidc: Oidc,
     /// `/auth/dev` from loopback, for local development only.
@@ -430,6 +433,12 @@ impl Config {
             )?,
             public_url,
             public_urls,
+            client_origins: get("STEVE_CLIENT_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|u| strip_slash(u.trim()))
+                .filter(|u| !u.is_empty())
+                .collect(),
             web_dir: get("STEVE_WEB_DIR").map(PathBuf::from).unwrap_or_else(|| {
                 // TS resolves ../../web/dist from hub/src; the Rust crate sits two levels deeper
                 resolve(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../web/dist"))

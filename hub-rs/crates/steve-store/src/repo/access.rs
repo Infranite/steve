@@ -285,6 +285,23 @@ impl Access<'_> {
         Ok(user.map(|u| (u, client)))
     }
 
+    /// Whether a live web client signed in from `origin` (its page may call the Hub from there).
+    pub fn origin_signed_in(&self, origin: &str) -> Result<bool> {
+        self.0.read(|c| {
+            Ok(one(
+                c,
+                &format!(
+                    "SELECT 1 FROM clients cl LEFT JOIN access_tokens t ON t.id = cl.token_id
+                      WHERE cl.origin = ? AND cl.revoked IS NULL AND (cl.token_id IS NULL OR ({LIVE_TOKEN}))
+                      LIMIT 1"
+                ),
+                params![origin, now()],
+                |r| r.get::<_, i64>(0),
+            )?
+            .is_some())
+        })
+    }
+
     /// Notes that the client came now by `route` from `ip`.
     pub fn client_seen(&self, id: &str, route: &str, ip: Option<&str>) -> Result<()> {
         self.0.write(|w| {

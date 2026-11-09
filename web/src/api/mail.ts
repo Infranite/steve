@@ -1,3 +1,4 @@
+import { hubUrl } from "@/hub"
 /* Mail (email.md §9): the Rust Hub's /api/mail/…. The TS Hub doesn't have it; `NotWired` (from modReq) tells a page to
  * fall back to its Unwired placeholder. Shapes follow steve-mail's api.rs / drafts.rs. Sending only ever happens through
  * a `mail_draft` decision: `POST /mail/drafts/:id/send` opens it and approves it as you, or the approval card's `send`. */
@@ -59,8 +60,8 @@ export const mailApi = {
   checkDraft: (id: string) => post<Draft>(`/mail/drafts/${e(id)}/check`),
   landAttachment: (id: string) => post<RFile>(`/mail/attachments/${e(id)}/file`),
   /** the sandboxed original HTML (CSP: no scripts; remote images only with images=1) */
-  htmlUrl: (id: string, images = false) => `/api/mail/messages/${e(id)}/html${images ? "?images=1" : ""}`,
-  rawUrl: (id: string) => `/api/mail/messages/${e(id)}/raw`,
+  htmlUrl: (id: string, images = false) => hubUrl(`/api/mail/messages/${e(id)}/html${images ? "?images=1" : ""}`),
+  rawUrl: (id: string) => hubUrl(`/api/mail/messages/${e(id)}/raw`),
 }
 
 /** the mail adapters (accounts page: AccountDetail's mailbox section) */

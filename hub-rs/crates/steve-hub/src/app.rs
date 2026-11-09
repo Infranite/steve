@@ -192,6 +192,7 @@ pub fn app(
     let maintenance_state = st.clone();
     let version = st.cfg.version.clone();
     let fallback_state = st.clone();
+    let cors_state = st.clone();
     let root = root.layer(middleware::from_fn_with_state(
         st.clone(),
         api::optional_user,
@@ -257,6 +258,8 @@ pub fn app(
         .layer(middleware::from_fn(vary_encoding))
         .layer(middleware::from_fn(slow_requests))
         .layer(middleware::from_fn(locale))
+        // outermost: a cross-origin web client's preflight is answered before anything asks for a login
+        .layer(middleware::from_fn_with_state(cors_state, crate::access::cors))
 }
 
 /// The language of the text this request answers with (steve-i18n): `?lang=` (the SSE stream, which can't set

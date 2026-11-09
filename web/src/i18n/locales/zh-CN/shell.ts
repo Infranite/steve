@@ -430,6 +430,14 @@ export default {
     accessToken: "访问 token",
     tokenHint: "token 由 Hub 签发：在 Hub 所在的机器上运行 steve-hub --access token create 获取。",
     cantConnect: "连不上 Steve",
+    connectTitle: "连接到你的 Hub",
+    hubAddress: "Hub 地址",
+    connect: "连接",
+    connectHint: "输入 Hub 的地址，例如 http://192.168.1.10:8440。Hub 不在这台机器上时需要 HTTPS。",
+    badAddress: "这不是一个有效的地址",
+    notSteve: "这个地址上没有找到 Steve Hub",
+    apiMismatch: "这个 Hub（{{version}}）与当前网页的版本不兼容",
+    changeHub: "换一个 Hub",
   },
   /* office.tsx: docx/xlsx/pptx read in the page */
   office: {

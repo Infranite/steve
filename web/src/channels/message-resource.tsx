@@ -1,3 +1,4 @@
+import { hubUrl } from "@/hub"
 import { useEffect, useRef, useState } from "react"
 import { DownloadIcon, FileIcon, ImageIcon, RefreshCwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -25,7 +26,7 @@ const REASONS = {
 } as const
 
 async function readResource(url: string, signal: AbortSignal, image: boolean): Promise<Blob> {
-  const r = await fetch(url, { headers: wsHeaders(), credentials: "same-origin", cache: "no-store", signal })
+  const r = await fetch(hubUrl(url), { headers: wsHeaders(), credentials: "include", cache: "no-store", signal })
   if (!r.ok) {
     const message = t(r.status === 401 ? "channels:resource.signedOut" : r.status === 403 ? "channels:resource.forbidden" : r.status === 404 || r.status === 410 ? "channels:resource.notFound" : "channels:resource.failed")
     const body = await r.json().catch(() => ({}))

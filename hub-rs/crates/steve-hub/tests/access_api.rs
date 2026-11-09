@@ -232,3 +232,69 @@ async fn a_page_signs_in_with_a_token_into_a_cookie_and_out_again() {
     let (s, _) = me(cookie).await;
     assert_eq!(s, 401, "the client is revoked, not only its cookie cleared");
 }
+
+/// A3: a web client served on its own origin calls the Hub across origins once it signed in there.
+#[tokio::test]
+async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
+    let e = start().await;
+    let web = "http://127.0.0.1:1"; // the separate web client's origin
+    let preflight = |path: &str| {
+        let (http, url) = (e.http.clone(), format!("{}{path}", e.base));
+        async move {
+            let r = http
+                .request(reqwest::Method::OPTIONS, url)
+                .header("origin", web)
+                .header("access-control-request-method", "GET")
+                .header("access-control-request-headers", "x-steve-ws")
+                .send()
+                .await
+                .unwrap();
+            (
+                r.status().as_u16(),
+                r.headers()
+                    .get("access-control-allow-origin")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+            )
+        }
+    };
+    // signing in is open to any origin; the API is not, yet
+    assert_eq!(preflight("/auth/token").await, (204, Some(web.into())));
+    assert_eq!(preflight("/api/state").await.0, 403);
+    // a 401 is readable from there, or the page could not tell it must sign in
+    let r = e
+        .http
+        .get(format!("{}/api/me", e.base))
+        .header("origin", web)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    assert_eq!(r.headers().get("access-control-allow-origin").unwrap(), web);
+    // signed in from that origin: the API answers it
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (_, token) = st.access().token_create(&owner.id, "web", None).unwrap();
+    let r = e
+        .http
+        .post(format!("{}/auth/token", e.base))
+        .header("origin", web)
+        .json(
+            &json!({"user": owner.name, "token": token, "cookie": true, "client": {"kind": "web"}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(preflight("/api/state").await, (204, Some(web.into())));
+    // another origin still is not
+    let r = e
+        .http
+        .request(reqwest::Method::OPTIONS, format!("{}/api/state", e.base))
+        .header("origin", "http://evil.example")
+        .header("access-control-request-method", "GET")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+}
