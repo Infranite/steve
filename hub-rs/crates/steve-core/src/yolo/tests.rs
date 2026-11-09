@@ -1040,6 +1040,48 @@ fn every_row_of_the_table() {
             facts("fail", "delivery_batch", &["look"], Subject::BatchFailed),
             "batch.failed",
         ),
+        (
+            "queue batch no result",
+            facts(
+                "fail",
+                "mq_batch",
+                &["rerun", "return", "skip"],
+                Subject::QueueBatch {
+                    no_result: true,
+                    reruns: 0,
+                    limit: 1,
+                },
+            ),
+            "rerun",
+        ),
+        (
+            "queue batch rerun used",
+            facts(
+                "fail",
+                "mq_batch",
+                &["rerun", "return", "skip"],
+                Subject::QueueBatch {
+                    no_result: true,
+                    reruns: 1,
+                    limit: 1,
+                },
+            ),
+            "mq.rerun_used",
+        ),
+        (
+            "queue batch over its limit",
+            facts(
+                "fail",
+                "mq_batch",
+                &["return", "rerun"],
+                Subject::QueueBatch {
+                    no_result: false,
+                    reruns: 0,
+                    limit: 1,
+                },
+            ),
+            "mq.limit",
+        ),
         ("stall", stall(StallCause::Stopped, 0), "continue"),
         (
             "stall stuck",
