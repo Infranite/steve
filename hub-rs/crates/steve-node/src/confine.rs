@@ -103,7 +103,7 @@ impl Confine {
                 return off(format!("STEVE_CONFINE={other} is not 0, 1, 2, on or off"));
             }
         };
-        let sandbox = Self::sandbox(steve_home, node_home, mode.as_deref());
+        let sandbox = Self::sandbox(steve_home, node_home);
         if matches!(sandbox, Sandbox::Off(_)) {
             return Confine {
                 sandbox,
@@ -118,8 +118,7 @@ impl Confine {
         }
     }
 
-    fn sandbox(steve_home: &Path, node_home: &Path, mode: Option<&str>) -> Sandbox {
-        let mode: Option<String> = mode.map(str::to_string);
+    fn sandbox(steve_home: &Path, node_home: &Path) -> Sandbox {
         let c = if cfg!(target_os = "macos") {
             if !Path::new(SANDBOX_EXEC).exists() {
                 return Sandbox::Off(format!("{SANDBOX_EXEC} is missing"));

@@ -931,6 +931,7 @@ mod tests {
                 home: root.join("node"),
                 acp: steve_acp::AcpConfig {
                     adapters: Default::default(),
+                    declared: Default::default(),
                     node: "node".into(),
                     claude_executable: "/usr/bin/false".into(),
                     steve_home: root.join("steve"),

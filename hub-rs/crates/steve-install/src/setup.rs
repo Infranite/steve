@@ -646,6 +646,7 @@ impl<'a> Wizard<'a> {
         Ok(candidate)
     }
 
+    #[cfg(test)]
     fn hub_config(&mut self, listen: Option<&str>) -> Result<Value> {
         self.hub_config_with(listen, None)
     }
