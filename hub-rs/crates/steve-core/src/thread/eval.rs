@@ -12,9 +12,17 @@
 //! ```
 //!
 //! The bar: at least 90% of the cases hit, and no question becomes an item.
+//!
+//! The ahead eval (`tests/ahead_cases.json`, outputs in `tests/ahead_outputs.json`): messages said while
+//! Steve is still answering, each marked whether it may go ahead of the answer. Its bar: no message that
+//! needs the answer goes ahead. `ahead_eval_real_model` (ignored) asks the real fast tier:
+//!
+//! ```text
+//! STEVE_ROUTE_EVAL_SAVE=1 cargo test -p steve-core ahead_eval_real_model -- --ignored --nocapture
+//! ```
 
-use super::decide::{DecideCtx, decide};
-use crate::gateway::{self, ClaudeCli, ModelGateway, RouteCtx, Said, Tier};
+use super::decide::{DecideCtx, decide, for_main, now_while_answering, without_router};
+use crate::gateway::{self, ClaudeCli, FocusItem, ModelGateway, RouteCtx, Said, Tier};
 use crate::repo::{Bot, Project, Tag};
 use serde::Deserialize;
 use serde_json::Value;
@@ -23,6 +31,8 @@ use std::time::Duration;
 
 const CASES: &str = include_str!("tests/route_cases.json");
 const OUTPUTS: &str = include_str!("tests/route_outputs.json");
+const AHEAD: &str = include_str!("tests/ahead_cases.json");
+const AHEAD_OUTPUTS: &str = include_str!("tests/ahead_outputs.json");
 
 #[derive(Deserialize)]
 struct Cases {
@@ -260,12 +270,112 @@ fn an_item_happy_router_is_held_back_by_the_guards() {
     assert_eq!((d.kind.as_str(), d.guard), ("research", Some("4")));
 }
 
-/// The real fast tier on every case. Writes `tests/route_outputs.json` with STEVE_ROUTE_EVAL_SAVE=1.
-#[tokio::test]
-#[ignore = "calls the real model"]
-async fn route_eval_real_model() {
+#[derive(Deserialize)]
+struct Ahead {
+    focus: Vec<Value>,
+    cases: Vec<AheadCase>,
+}
+
+#[derive(Deserialize, Clone)]
+struct AheadCase {
+    id: String,
+    pending: Vec<String>,
+    text: String,
+    now: bool,
+}
+
+/// The router's context for an ahead case: route_cases' workspace, the open items, what is being answered.
+fn ahead_ctx(a: &Ahead, x: &AheadCase) -> RouteCtx {
     let c: Cases = serde_json::from_str(CASES).unwrap();
-    let ctx = route_ctx(&c.ctx);
+    RouteCtx {
+        focus: a
+            .focus
+            .iter()
+            .map(|f| FocusItem {
+                id: s(f, "id"),
+                title: s(f, "title"),
+                status: s(f, "status"),
+                origin: s(f, "origin"),
+            })
+            .collect(),
+        pending: x.pending.clone(),
+        ..route_ctx(&c.ctx)
+    }
+}
+
+/// The conversation before an ahead case: the questions being answered, no answers yet.
+fn ahead_history(x: &AheadCase) -> Vec<Said> {
+    x.pending
+        .iter()
+        .map(|q| Said {
+            author: "me".into(),
+            text: q.clone(),
+        })
+        .collect()
+}
+
+/// Whether an ahead case goes ahead with this router reply, as the lane decides it ([`Core::ahead`]):
+/// a plain question waits without the router.
+fn goes_ahead(ctx: &RouteCtx, x: &AheadCase, raw: Option<&str>) -> bool {
+    if without_router(&x.text, false, false, &[]).is_some() {
+        return false;
+    }
+    let Some(r) = raw.and_then(|raw| gateway::parse_route(ctx, &x.text, raw, false)) else {
+        return false;
+    };
+    let d = decide(
+        &r,
+        &x.text,
+        DecideCtx {
+            named_bot: x.text.starts_with("@dev"),
+        },
+    );
+    now_while_answering(&r, &for_main(d, &r))
+}
+
+/// Scores the ahead cases: (messages that needed the answer but went ahead, share of standalone ones
+/// that went ahead).
+fn ahead_report(a: &Ahead, out: &BTreeMap<String, Value>) -> (usize, f64) {
+    let (mut wrong, mut now, mut standalone) = (0, 0, 0);
+    for x in &a.cases {
+        let raw = out.get(&x.id).and_then(|v| v["raw"].as_str());
+        let went = goes_ahead(&ahead_ctx(a, x), x, raw);
+        wrong += usize::from(went && !x.now);
+        standalone += usize::from(x.now);
+        now += usize::from(went && x.now);
+        println!(
+            "{} {:<18} {} {}",
+            if went == x.now { "✓" } else { "✗" },
+            x.id,
+            if went { "now " } else { "wait" },
+            raw.map(|r| crate::util::js_head(r, 90).to_string())
+                .unwrap_or_default()
+        );
+    }
+    let rate = now as f64 / standalone.max(1) as f64;
+    println!(
+        "went ahead wrongly: {wrong}; standalone that went ahead: {now}/{standalone} = {:.0}%",
+        rate * 100.0
+    );
+    (wrong, rate)
+}
+
+#[test]
+fn recorded_ahead_outputs_never_go_ahead_of_an_answer_they_need() {
+    let a: Ahead = serde_json::from_str(AHEAD).unwrap();
+    let out: BTreeMap<String, Value> = serde_json::from_str(AHEAD_OUTPUTS).unwrap();
+    assert_eq!(out.len(), a.cases.len());
+    let (wrong, rate) = ahead_report(&a, &out);
+    assert_eq!(wrong, 0, "a message went ahead of the answer it needs");
+    assert!(rate >= AHEAD_BAR, "standalone ahead {rate}");
+}
+
+/// The share of standalone messages that must go ahead of the answer.
+const AHEAD_BAR: f64 = 0.7;
+
+/// The real fast tier as the Hub calls it: models from STEVE_ROUTE_EVAL_MODELS through 设置 · 模型 (purpose
+/// `route`), `claude` from CLAUDE_CODE_EXECUTABLE. The directory lives as long as the gateway is used.
+fn real_gateway() -> (std::sync::Arc<ClaudeCli>, tempfile::TempDir) {
     let models: Vec<String> = std::env::var("STEVE_ROUTE_EVAL_MODELS")
         .unwrap_or_else(|_| "claude-haiku-5-5,claude-sonnet-5-5".into())
         .split(',')
@@ -304,6 +414,61 @@ async fn route_eval_real_model() {
         smart: models,
         models: Some(resolver),
     });
+    (gw, dir)
+}
+
+/// The real fast tier on every ahead case. Writes `tests/ahead_outputs.json` with STEVE_ROUTE_EVAL_SAVE=1.
+#[tokio::test]
+#[ignore = "calls the real model"]
+async fn ahead_eval_real_model() {
+    let a: Ahead = serde_json::from_str(AHEAD).unwrap();
+    let gw = real_gateway();
+    let mut tasks = vec![];
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(6));
+    for x in a.cases.clone() {
+        let (gw, ctx, sem) = (gw.0.clone(), ahead_ctx(&a, &x), sem.clone());
+        tasks.push(tokio::spawn(async move {
+            let _p = sem.acquire().await.unwrap();
+            if without_router(&x.text, false, false, &[]).is_some() {
+                return (x.id.clone(), None);
+            }
+            let prompt = gateway::route_prompt(&ctx, &x.text, &ahead_history(&x), false);
+            let r = gw
+                .call(
+                    &prompt,
+                    Tier::Fast,
+                    Duration::from_secs(60),
+                    &gateway::ThinkTools::None,
+                )
+                .await;
+            (x.id.clone(), r.ok().map(|p| (p.text, p.model)))
+        }));
+    }
+    let mut out = BTreeMap::new();
+    for t in tasks {
+        let (id, r) = t.await.unwrap();
+        out.insert(
+            id,
+            serde_json::json!({"raw": r.as_ref().map(|x| x.0.clone()), "model": r.map(|x| x.1)}),
+        );
+    }
+    let (wrong, rate) = ahead_report(&a, &out);
+    if std::env::var_os("STEVE_ROUTE_EVAL_SAVE").is_some() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/thread/tests/ahead_outputs.json");
+        std::fs::write(p, serde_json::to_string_pretty(&out).unwrap() + "\n").unwrap();
+    }
+    assert_eq!(wrong, 0, "a message went ahead of the answer it needs");
+    assert!(rate >= AHEAD_BAR, "standalone ahead {rate}");
+}
+
+/// The real fast tier on every case. Writes `tests/route_outputs.json` with STEVE_ROUTE_EVAL_SAVE=1.
+#[tokio::test]
+#[ignore = "calls the real model"]
+async fn route_eval_real_model() {
+    let c: Cases = serde_json::from_str(CASES).unwrap();
+    let ctx = route_ctx(&c.ctx);
+    let (gw, _dir) = real_gateway();
     // STEVE_ROUTE_EVAL_PARALLEL=1 runs the cases one after another, as a conversation does (cache measurements)
     let parallel = std::env::var("STEVE_ROUTE_EVAL_PARALLEL")
         .ok()

@@ -73,11 +73,58 @@ struct Job {
     /// its own lane and does not wait for the turn in progress. Worked out again whenever it is queued.
     #[serde(skip)]
     direct: bool,
+    /// Said while Steve was still answering, and it needs those answers: it waits for them on the
+    /// conversation's [`after_lane`], so the messages behind it are not held up.
+    #[serde(skip)]
+    after: bool,
+    /// Routed while Steve was still answering, and sure to stand on its own
+    /// ([`decide::now_while_answering`]): handled with this route (and how long it took) at once.
+    #[serde(skip)]
+    ahead: Option<(Route, i64)>,
 }
 
 /// The lane of a conversation's messages whose way is fixed ([`Job::direct`]).
 pub(crate) fn direct_lane(ws: &str, space: &str) -> String {
     format!("{}\u{1f}direct", lane_key(ws, space))
+}
+
+/// A message taken off the [`after_lane`]: no longer waiting once this goes ([`Core::undefer`]).
+struct Deferred {
+    core: Core,
+    ws: String,
+    mid: String,
+}
+
+impl Drop for Deferred {
+    fn drop(&mut self) {
+        self.core.undefer(&self.ws, &self.mid);
+    }
+}
+
+/// Why a waiting message could not be taken off its lane's queue ([`Core::claim`]).
+enum Claim {
+    /// edited after it was routed ahead: its text now
+    Changed(String),
+    Failed(crate::error::CoreError),
+}
+
+/// The lane of a conversation's messages that wait for the answers Steve is still giving ([`Job::after`]).
+pub(crate) fn after_lane(ws: &str, space: &str) -> String {
+    format!("{}\u{1f}after", lane_key(ws, space))
+}
+
+/// A message as the router reads it: it only sees that there are attachments; the bot that does the
+/// work gets the files themselves.
+fn routed_text(text: &str, files: &[FileRef]) -> String {
+    if files.is_empty() {
+        return text.to_string();
+    }
+    let list = files
+        .iter()
+        .map(|f| format!("{} · {}", f.name, f.mime.split(';').next().unwrap_or("")))
+        .collect::<Vec<_>>()
+        .join("、");
+    format!("{text}\n（附带 {} 个附件：{list}）", files.len())
 }
 
 /// The web conversation's `messages.space`.
@@ -295,6 +342,8 @@ pub(crate) struct Lanes {
     admitted: Mutex<HashSet<String>>,
     /// the message being routed, per [`lane_key`]; its flag stops it
     inflight: Mutex<HashMap<String, Stop>>,
+    /// per workspace, the main conversation's messages on the [`after_lane`] (id, text), in order
+    deferred: Mutex<HashMap<String, Vec<(String, String)>>>,
     promoting: Mutex<HashMap<String, Promotion>>,
     /// answers and research runs, one at a time per workspace
     inline: Mutex<HashMap<String, research::InlineLane>>,
@@ -362,6 +411,8 @@ impl Core {
                 to: SayTo::default(),
                 conv,
                 direct: false,
+                after: false,
+                ahead: None,
             },
         );
         Ok(mid)
@@ -475,6 +526,8 @@ impl Core {
                 to,
                 conv: Conv::main(),
                 direct: false,
+                after: false,
+                ahead: None,
             },
         );
         Ok(mid)
@@ -483,7 +536,7 @@ impl Core {
     /// Whether the main conversation is on a turn: a message being routed, an answer or research
     /// running or waiting, or messages still waiting their turn on the lane.
     pub fn main_busy(&self, ws: &str) -> Result<bool> {
-        if lock(&self.0.thread.inflight).contains_key(ws) || self.inline_busy(ws) {
+        if self.main_busy_besides(ws) {
             return Ok(true);
         }
         /* a key range rather than `LIKE`, which is case-insensitive and so can't seek the settings key */
@@ -500,7 +553,131 @@ impl Core {
     /// The main conversation's turn is on (a message being routed on its lane, an answer or research) —
     /// what a message with a fixed way passes without waiting.
     pub(crate) fn main_busy_besides(&self, ws: &str) -> bool {
-        lock(&self.0.thread.inflight).contains_key(ws) || self.inline_busy(ws)
+        {
+            let inflight = lock(&self.0.thread.inflight);
+            if inflight.contains_key(ws) || inflight.contains_key(&after_lane(ws, MAIN)) {
+                return true;
+            }
+        }
+        self.answering(ws)
+    }
+
+    /// Steve is still answering in the main conversation: an answer or research running or waiting,
+    /// or messages waiting for them on the [`after_lane`].
+    fn answering(&self, ws: &str) -> bool {
+        self.inline_busy(ws)
+            || lock(&self.0.thread.deferred)
+                .get(ws)
+                .is_some_and(|d| !d.is_empty())
+    }
+
+    /// While Steve is still answering: routes a message of the main conversation ahead of its turn,
+    /// the router told what is being answered. The route when the message is handled at once
+    /// ([`decide::now_while_answering`]); `None` when it waits for the answers, as do a plain question
+    /// (research, no router asked) and a message the router failed on.
+    async fn ahead(
+        &self,
+        ws: &str,
+        mid: &str,
+        text: &str,
+        files: &[FileRef],
+    ) -> Option<(Route, i64)> {
+        if decide::without_router(text, !files.is_empty(), false, &[]).is_some() {
+            return None;
+        }
+        let history = self.history_before(ws, mid).ok()?;
+        let mut c = self.route_ctx_in(ws, false).ok()?;
+        c.pending = self.inline_questions(ws);
+        if let Some(d) = lock(&self.0.thread.deferred).get(ws) {
+            c.pending.extend(d.iter().map(|(_, t)| t.clone()));
+        }
+        if c.pending.is_empty() {
+            /* the answers came out meanwhile: it is routed in its turn, with them */
+            return None;
+        }
+        let r0 = now();
+        let r = crate::stats::tagged(
+            "route",
+            ws,
+            gateway::route(self.gw(), &c, &routed_text(text, files), &history, false),
+        )
+        .await;
+        let ms = now() - r0;
+        let named = self.named_bot(ws, text).ok()?;
+        let d = decide::decide(
+            &r,
+            text,
+            decide::DecideCtx {
+                named_bot: named.is_some(),
+            },
+        );
+        let d = decide::for_main(d, &r);
+        decide::now_while_answering(&r, &d).then_some((r, ms))
+    }
+
+    /// The enabled bot a message's “@名字 …” names.
+    pub(super) fn named_bot(&self, ws: &str, text: &str) -> Result<Option<crate::repo::Bot>> {
+        let Some(a) = AT.captures(text).map(|c| c[1].to_string()) else {
+            return Ok(None);
+        };
+        Ok(self
+            .store()
+            .bots(ws)?
+            .into_iter()
+            .find(|b| b.enabled && names_bot(&b.name, &a)))
+    }
+
+    /// Moves a message of the main conversation to its [`after_lane`]: it waits for the answers Steve is
+    /// still giving and is routed after them, with them in the history.
+    fn defer(&self, ws: &str, mut job: Job) {
+        lock(&self.0.thread.deferred)
+            .entry(ws.to_string())
+            .or_default()
+            .push((job.mid.clone(), job.text.clone()));
+        job.after = true;
+        job.ahead = None;
+        let key = after_lane(ws, &job.conv.space);
+        let mut lanes = lock(&self.0.thread.lanes);
+        let tx = lanes
+            .entry(key.clone())
+            .or_insert_with(|| self.routing_lane(ws, &key));
+        if let Err(mpsc::error::SendError(job)) = tx.send(job) {
+            tracing::error!("after lane of {ws} was gone; starting it again");
+            let tx = self.routing_lane(ws, &key);
+            let _ = tx.send(job);
+            lanes.insert(key, tx);
+        }
+    }
+
+    /// A message off the [`after_lane`]: Steve no longer waits on it.
+    fn undefer(&self, ws: &str, mid: &str) {
+        let mut d = lock(&self.0.thread.deferred);
+        if let Some(v) = d.get_mut(ws) {
+            v.retain(|(m, _)| m != mid);
+            if v.is_empty() {
+                d.remove(ws);
+            }
+        }
+    }
+
+    /// The text of a message still waiting on its lane, as it is now (edited while it waited); `None`
+    /// once it was withdrawn or taken.
+    fn waiting_text(&self, ws: &str, mid: &str) -> Result<Option<String>> {
+        let key = format!("thread.pending.{mid}");
+        let raw: Option<String> =
+            self.store()
+                .store()
+                .reader::<_, steve_store::StoreError>(|c| {
+                    Ok(c.query_row(
+                        "SELECT value FROM settings WHERE workspace_id=? AND key=?",
+                        rusqlite::params![ws, key],
+                        |r| r.get(0),
+                    )
+                    .optional()?)
+                })?;
+        Ok(raw
+            .and_then(|r| serde_json::from_str::<Job>(&r).ok())
+            .map(|j| j.text))
     }
 
     /// How many routing and inline lanes are running.
@@ -532,43 +709,64 @@ impl Core {
 
     /// Takes a waiting message off the lane's durable queue, as it is now (edited while it waited);
     /// `None` when it was withdrawn. A held message moves to now: it comes after the turn it waited on.
-    fn claim(&self, ws: &str, mid: &str) -> Result<Option<Job>> {
+    /// With `routed_as`, the text it was routed ahead as: edited since, it stays on the queue
+    /// ([`Claim::Changed`]).
+    fn claim(
+        &self,
+        ws: &str,
+        mid: &str,
+        routed_as: Option<&str>,
+    ) -> std::result::Result<Option<Job>, Claim> {
         let key = format!("thread.pending.{mid}");
-        let job = self.store().store().with_conn(|c| {
-            let tx = c.unchecked_transaction()?;
-            let raw: Option<String> = tx
-                .query_row(
-                    "SELECT value FROM settings WHERE workspace_id=? AND key=?",
+        let job = self
+            .store()
+            .store()
+            .with_conn(|c| {
+                let tx = c.unchecked_transaction()?;
+                let raw: Option<String> = tx
+                    .query_row(
+                        "SELECT value FROM settings WHERE workspace_id=? AND key=?",
+                        rusqlite::params![ws, key],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let Some(raw) = raw else { return Ok(None) };
+                if let Some(was) = routed_as
+                    && let Ok(now) = serde_json::from_str::<Job>(&raw)
+                    && now.text != was
+                {
+                    return Ok(Some(Err(now.text)));
+                }
+                tx.execute(
+                    "DELETE FROM settings WHERE workspace_id=? AND key=?",
                     rusqlite::params![ws, key],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let Some(raw) = raw else { return Ok(None) };
-            tx.execute(
-                "DELETE FROM settings WHERE workspace_id=? AND key=?",
-                rusqlite::params![ws, key],
-            )?;
-            // strictly after the last message of its conversation: the turn's last word (a stop note)
-            // can be written in the same millisecond, and a tie would list them in either order
-            let released = tx.execute(
-                "UPDATE messages SET created=MAX(?1, (SELECT MAX(m.created) + 1 FROM messages m
+                )?;
+                // strictly after the last message of its conversation: the turn's last word (a stop note)
+                // can be written in the same millisecond, and a tie would list them in either order
+                let released = tx.execute(
+                    "UPDATE messages SET created=MAX(?1, (SELECT MAX(m.created) + 1 FROM messages m
                    WHERE m.workspace_id=messages.workspace_id AND m.space=messages.space)),
                    meta=json_remove(meta,'$.held')
                   WHERE id=?2 AND json_valid(meta) AND json_extract(meta,'$.held')=1",
-                rusqlite::params![now(), mid],
-            )?;
-            tx.commit()?;
-            Ok(Some((raw, released > 0)))
-        })?;
-        let Some((raw, released)) = job else {
-            return Ok(None);
+                    rusqlite::params![now(), mid],
+                )?;
+                tx.commit()?;
+                Ok(Some(Ok((raw, released > 0))))
+            })
+            .map_err(|e| Claim::Failed(e.into()))?;
+        let (raw, released) = match job {
+            None => return Ok(None),
+            Some(Err(text)) => return Err(Claim::Changed(text)),
+            Some(Ok(j)) => j,
         };
         if released {
             self.store()
                 .store()
                 .publish(steve_store::ChangeEvent::Message { id: mid.into() });
         }
-        Ok(Some(serde_json::from_str(&raw)?))
+        serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|e| Claim::Failed(e.into()))
     }
 
     /// Rewrites a message still waiting its turn (`PATCH /api/thread/queued/:id`); `false` once it is
@@ -753,20 +951,60 @@ impl Core {
                         return;
                     }
                 };
-                if !j.conv.guest() && !j.direct {
+                let mut ahead = None;
+                /* a message off the after lane counts as waiting until it is handled, so one said
+                meanwhile is still asked whether it needs this one's answer */
+                let _waited = j.after.then(|| Deferred {
+                    core: core.clone(),
+                    ws: w.clone(),
+                    mid: j.mid.clone(),
+                });
+                if j.after {
                     core.turn_done(&w).await;
+                } else if !j.conv.guest() && !j.direct && core.answering(&w) {
+                    /* Steve is still answering: what stands on its own goes now, the rest waits for the
+                    answers on the after lane, so it does not hold up the messages behind it */
+                    let text = match core.waiting_text(&w, &j.mid) {
+                        Ok(Some(t)) => t,
+                        Ok(None) => {
+                            lock(&core.0.thread.admitted).remove(&j.mid);
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!("thread queue peek: {e}");
+                            j.text.clone()
+                        }
+                    };
+                    match core.ahead(&w, &j.mid, &text, &j.files).await {
+                        Some(r) => ahead = Some((text, r)),
+                        None => {
+                            core.defer(&w, Job { text, ..j });
+                            continue;
+                        }
+                    }
                 }
                 let _activity = core.store().store().activity("thread_router").await;
-                let direct = j.direct;
-                let j = match core.claim(&w, &j.mid) {
-                    Ok(Some(job)) => Job { direct, ..job },
-                    Ok(None) => {
-                        /* withdrawn while it waited */
+                let (direct, after) = (j.direct, j.after);
+                let routed_as = ahead.as_ref().map(|(t, _)| t.as_str());
+                let j = match core.claim(&w, &j.mid, routed_as) {
+                    /* edited after it was routed ahead: the route was for other words, so it waits */
+                    Err(Claim::Changed(text)) => {
+                        core.defer(&w, Job { text, ..j });
+                        continue;
+                    }
+                    Err(Claim::Failed(e)) => {
+                        tracing::error!("thread queue claim: {e}");
                         lock(&core.0.thread.admitted).remove(&j.mid);
                         continue;
                     }
-                    Err(e) => {
-                        tracing::error!("thread queue claim: {e}");
+                    Ok(Some(job)) => Job {
+                        direct,
+                        after,
+                        ahead: ahead.map(|(_, r)| r),
+                        ..job
+                    },
+                    Ok(None) => {
+                        /* withdrawn while it waited */
                         lock(&core.0.thread.admitted).remove(&j.mid);
                         continue;
                     }
@@ -869,6 +1107,7 @@ impl Core {
             },
             items: items.into_iter().map(|i| i.id).collect(),
             researching: self.researching(ws),
+            pending: vec![],
             debug: self.config().debug_route,
         })
     }
@@ -1100,7 +1339,14 @@ impl Core {
     /// Stop what Steve is preparing in this workspace: the reply being routed and the answer or research
     /// being written (its partial text is kept). Messages waiting their turn stay, and go next.
     pub fn stop(&self, ws: &str) -> Result<bool> {
-        let routing = lock(&self.0.thread.inflight).get(ws).cloned();
+        /* the message being routed in its turn: on the lane, or after the answers it waited for */
+        let routing = {
+            let inflight = lock(&self.0.thread.inflight);
+            inflight
+                .get(ws)
+                .or_else(|| inflight.get(&after_lane(ws, MAIN)))
+                .cloned()
+        };
         let inline = self.stop_inline(ws);
         if let Some(f) = &routing {
             f.stop();

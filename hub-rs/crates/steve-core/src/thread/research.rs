@@ -203,6 +203,8 @@ struct Active {
     run: Option<String>,
     kind: Inline,
     stop: super::Stop,
+    /// the user message it answers
+    question: String,
 }
 
 #[derive(Default)]
@@ -331,6 +333,22 @@ impl Core {
         })
     }
 
+    /// The messages the main conversation's answers and research runs are for: the running one first,
+    /// then those waiting.
+    pub(crate) fn inline_questions(&self, ws: &str) -> Vec<String> {
+        lock(&self.0.thread.inline)
+            .get(ws)
+            .map(|l| {
+                let st = lock(&l.st);
+                st.running
+                    .iter()
+                    .chain(st.waiting.iter())
+                    .map(|a| a.question.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Whether the main conversation has an answer or research running or waiting.
     pub(crate) fn inline_busy(&self, ws: &str) -> bool {
         lock(&self.0.thread.inline).get(ws).is_some_and(|l| {
@@ -428,6 +446,7 @@ impl Core {
                 run: None,
                 kind: job.kind,
                 stop: job.stop.clone(),
+                question: job.question.clone(),
             });
             busy
         };
@@ -525,6 +544,7 @@ impl Core {
                         run: j.run.clone(),
                         kind: j.kind,
                         stop: j.stop.clone(),
+                        question: j.question.clone(),
                     });
                 }
                 let (c, w2) = (core.clone(), w.clone());

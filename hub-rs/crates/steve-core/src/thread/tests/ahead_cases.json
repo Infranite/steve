@@ -1,0 +1,46 @@
+{
+ "note": "Messages said while Steve is still answering an earlier one (2026-11-09). now = it may be handled at once, ahead of the answer; false = it needs the answer and must wait. The bar: no waiting case goes ahead. focus are the conversation's open items; the bots, projects and tags are those of route_cases.json.",
+ "focus": [
+  {
+   "id": "ST-12",
+   "title": "登录页改版",
+   "status": "run",
+   "origin": "把登录页改成新设计稿的样式，按钮和输入框都换"
+  },
+  {
+   "id": "ST-15",
+   "title": "统计页加缓存命中率图表",
+   "status": "run",
+   "origin": "统计页加一张缓存命中率的折线图"
+  }
+ ],
+ "cases": [
+  {"id": "w_follow_do", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "就按你说的改", "now": false},
+  {"id": "w_more", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "再详细点", "now": false},
+  {"id": "w_second", "pending": ["对话页的消息排队有哪几种做法？各有什么取舍"], "text": "第二个方案吧", "now": false},
+  {"id": "w_widen", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "那冲突回退那块呢", "now": false},
+  {"id": "w_also", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "顺便也看看超时是怎么处理的", "now": false},
+  {"id": "w_ok", "pending": ["对话页的消息排队有哪几种做法？各有什么取舍"], "text": "好，改吧", "now": false},
+  {"id": "w_fix_it", "pending": ["为什么事项卡片有时候不更新？"], "text": "对，就是这个问题，修一下", "now": false},
+  {"id": "w_change_it", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "把它改成指数退避", "now": false},
+  {"id": "w_item_of_answer", "pending": ["为什么事项卡片有时候不更新？"], "text": "你说的那个 bug 建个事项", "now": false},
+  {"id": "w_after_reading", "pending": ["发布脚本现在怎么处理回滚？"], "text": "等你看完了顺手把部署文档也更新下", "now": false},
+  {"id": "w_hm", "pending": ["发布脚本现在怎么处理回滚？"], "text": "嗯", "now": false},
+  {"id": "w_english", "pending": ["发布脚本现在怎么处理回滚？"], "text": "用英文回答", "now": false},
+  {"id": "w_item_then", "pending": ["ST-12 为什么一直没交付？"], "text": "那就让登录页改版重新跑一遍", "now": false},
+  {"id": "w_same_topic", "pending": ["统计页的缓存命中率是怎么算的？"], "text": "如果算错了就直接修掉", "now": false},
+  {"id": "w_question", "pending": ["发布脚本现在怎么处理回滚？"], "text": "回滚的时候数据库会怎么样？", "now": false},
+  {"id": "n_item_button", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "帮我把对话页发送按钮的文字改成‘发送给 Steve’", "now": true},
+  {"id": "n_item_delete", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "把你的菜单里的视觉规范页面删掉", "now": true},
+  {"id": "n_item_bug", "pending": ["发布脚本现在怎么处理回滚？"], "text": "已经生成过的事项可以反复触发事项，得修", "now": true},
+  {"id": "n_item_plan", "pending": ["发布脚本现在怎么处理回滚？"], "text": "交付队列这个过程应该怎么设计和实现，先给我一个方案吧", "now": true},
+  {"id": "n_item_bot", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "@dev 修一下 README 里的错别字", "now": true},
+  {"id": "n_supplement", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "登录页改版那个，按钮颜色统一用品牌蓝 #3B6FD8", "now": true},
+  {"id": "n_supplement2", "pending": ["发布脚本现在怎么处理回滚？"], "text": "统计页那张缓存命中率的图，纵轴用百分比", "now": true},
+  {"id": "n_status", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "登录页改版现在到哪一步了", "now": true},
+  {"id": "n_config_accept", "pending": ["发布脚本现在怎么处理回滚？"], "text": "以后默认自动验收", "now": true},
+  {"id": "n_config_model", "pending": ["发布脚本现在怎么处理回滚？"], "text": "把开发 Bot 改用 opus", "now": true},
+  {"id": "n_config_tag", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "加一个叫财务的标签", "now": true},
+  {"id": "n_config_quiet", "pending": ["合并队列失败后的重试逻辑是怎么写的？"], "text": "免打扰改成 22 点到 9 点", "now": true}
+ ]
+}

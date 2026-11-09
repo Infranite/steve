@@ -212,6 +212,22 @@ pub fn without_router(
     (text.trim().chars().count() <= GUEST_SHORT).then_some("answer")
 }
 
+/// The least confidence of a message handled while Steve is still answering earlier ones ([`now_while_answering`]).
+pub const AHEAD_MIN: f64 = 0.8;
+
+/// While the main conversation is still answering earlier messages: whether this one is handled now,
+/// ahead of those answers, rather than after them. Only what stands on its own and has a clear object —
+/// an instruction for an item, new work, a status question, a setting — the router sure of it and
+/// saying it does not need the answers ([`Route::after`]). Anything else waits, as every message did
+/// before: waiting only delays, while going ahead without an answer it refers to would act on a guess.
+/// Decided by the user on 2026-11-09.
+pub fn now_while_answering(r: &Route, d: &Decision) -> bool {
+    !r.fallback
+        && !r.after
+        && r.confidence >= AHEAD_MIN
+        && matches!(d.kind.as_str(), "item" | "supplement" | "status" | "config")
+}
+
 /// Apply the guards in order. Rule 6, the router failing, is already in `route.fallback`.
 pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
     let model = r.kind.as_str();
@@ -271,6 +287,35 @@ pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_sure_standalone_messages_go_ahead_of_an_answer() {
+        let r = |kind: &str, confidence: f64, after: bool| Route {
+            kind: kind.into(),
+            confidence,
+            after,
+            signals: vec!["change".into()],
+            item: Some("ST-1".into()),
+            ..Route::default()
+        };
+        let go = |r: &Route| {
+            let d = decide(r, "x", DecideCtx { named_bot: false });
+            now_while_answering(r, &for_main(d, r))
+        };
+        for k in ["item", "supplement", "status", "config"] {
+            assert!(go(&r(k, 0.9, false)), "{k}");
+            assert!(!go(&r(k, 0.9, true)), "{k} needs the answer");
+            assert!(!go(&r(k, 0.7, false)), "{k} not sure");
+        }
+        for k in ["answer", "research", "suggest", "ask", "reroute"] {
+            assert!(!go(&r(k, 1.0, false)), "{k}");
+        }
+        let failed = Route {
+            fallback: true,
+            ..r("item", 1.0, false)
+        };
+        assert!(!go(&failed));
+    }
 
     #[test]
     fn plain_questions_skip_the_router() {
