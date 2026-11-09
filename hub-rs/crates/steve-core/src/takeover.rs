@@ -587,6 +587,9 @@ impl Tx<'_> {
             self.track_build(i, &p, required)?;
             return Ok(());
         }
+        /* not there yet: with the merge queue on, an accepted result goes into it by itself (the
+         * acceptance is the consent); what it lands, the next look finds */
+        let queued = self.mq_applies(i)? && self.mq_requirement(i)?;
         /* not there yet: the agent hears once what is missing; Steve keeps looking while it waits */
         if op.evidence.get("asked").is_none() {
             self.db().store().transaction(|tx| {
@@ -596,6 +599,17 @@ impl Tx<'_> {
                 &i.id,
                 patch![stage: "收尾", now: format!("等{}", rule_text(rule))],
             )?;
+            /* the queue merges it: no round of the agent's for that, its session only notes it */
+            if queued {
+                if let Some(s) = self.active_session(&i.id)? {
+                    self.db().event_add(
+                        &s.id,
+                        "system",
+                        json!({"text": "验收通过，已进入合并队列：Steve 会把它和同一目标的其他改动一起合入并按约定发布，不用推送、开 PR 或打 tag。想知道进展用 steve_lane_status。"}),
+                    )?;
+                }
+                return Ok(());
+            }
             let to = match self.active_session(&i.id)? {
                 Some(s) => To::Session(s.id),
                 None => To::Decision {
@@ -609,7 +623,7 @@ impl Tx<'_> {
                 .db()
                 .project(i.project_id.as_deref())?
                 .is_some_and(|p| crate::orchestrator::lane_releases(&p));
-            let how = if lane {
+            let how = if lane && !self.c.mq_on() {
                 /* the lane merges, checks and tags: the agent only hands the branch over */
                 crate::orchestrator::publish_text(true, i.branch.as_deref().unwrap_or_default())
             } else {

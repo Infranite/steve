@@ -93,6 +93,8 @@ pub(crate) struct Inner {
     reclaiming: std::sync::atomic::AtomicBool,
     /// The way to items' Nodes, once wired (`node_git`); unset: the Hub's own git everywhere.
     node_git: OnceLock<Arc<dyn node_git::NodeGit>>,
+    /// The Node the merge queue's staging is on, once wired (`mq::drive`).
+    mq_node: OnceLock<Arc<dyn mq::exec::MqNode>>,
 }
 
 /// What a session's last Steve tool call left behind, consumed at its turn end.
@@ -192,6 +194,7 @@ impl Core {
             steve_notes: Default::default(),
             reclaiming: Default::default(),
             node_git: OnceLock::new(),
+            mq_node: OnceLock::new(),
         }))
     }
 

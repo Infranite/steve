@@ -583,6 +583,35 @@ impl Tx<'_> {
         Ok(())
     }
 
+    /// The accepted result as it is now in its worktree, when it is the same result as the one
+    /// frozen (a plain rebase: the same own change): frozen again on it, the acceptance kept. What
+    /// the merge queue does when a result it sent back comes in rebased, so that what it then lands
+    /// is compared with what it landed. `false`: nothing to freeze, or not the same result.
+    pub(crate) fn lc_refreeze(&mut self, item_id: &str) -> Result<bool> {
+        let i = self.item(item_id)?;
+        let Some(mut c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE) else {
+            return Ok(false);
+        };
+        let now = if self.git_on_node(item_id) {
+            self.git_seen(item_id).map(|s| s.print.clone())
+        } else {
+            fingerprint(i.cwd.as_deref())
+        };
+        let (Some(now), Some(frozen)) = (now, c.fingerprint.as_deref()) else {
+            return Ok(false);
+        };
+        if now == frozen || !same_result(frozen, &now) {
+            return Ok(false);
+        }
+        c.fingerprint = Some(now);
+        let mut w = Self::base(&i);
+        w.closing = Some(serde_json::to_value(&c)?);
+        self.db()
+            .store()
+            .transaction(|tx| steve_store::lifecycle_write_in(tx, item_id, &w))?;
+        Ok(true)
+    }
+
     /// Records an operation of the item's current cycle and revision.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn lc_op_add(
