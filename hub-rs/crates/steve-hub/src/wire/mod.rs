@@ -318,22 +318,28 @@ pub(crate) enum NodeMode {
     Service,
 }
 
+/// `STEVE_NODE_MODE`: `service` (the default, B1), `local`, or `off`. A `STEVE_NO_RESUME` copy
+/// defaults to off and refuses `service` and `local`.
 pub(crate) fn node_mode(vars: &Vars, no_resume: bool) -> Result<NodeMode, BackendError> {
-    let service = vars("STEVE_NODE_MODE")
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("service"));
-    if service {
-        if no_resume {
-            return Err(BackendError::msg(
-                "STEVE_NODE_MODE=service is disabled on STEVE_NO_RESUME copies",
-            ));
+    let mode = vars("STEVE_NODE_MODE")
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty());
+    match mode.as_deref() {
+        None if no_resume => Ok(NodeMode::Off),
+        None | Some("service") => {
+            if no_resume {
+                return Err(BackendError::msg(
+                    "STEVE_NODE_MODE=service is disabled on STEVE_NO_RESUME copies",
+                ));
+            }
+            Ok(NodeMode::Service)
         }
-        return Ok(NodeMode::Service);
+        _ => Ok(if local_node_mode(vars, no_resume)? {
+            NodeMode::Local
+        } else {
+            NodeMode::Off
+        }),
     }
-    Ok(if local_node_mode(vars, no_resume)? {
-        NodeMode::Local
-    } else {
-        NodeMode::Off
-    })
 }
 
 /// Whether the local Node is switched on. It is the default (B6): an unset `STEVE_NODE_MODE`
@@ -627,7 +633,10 @@ pub fn wire_assembly(
     } else {
         let vars = vars.clone();
         // the jobs' Node is in this process either way; `service` tells it the sessions are not
-        let service = vars("STEVE_NODE_MODE").is_some_and(|v| v.trim().eq_ignore_ascii_case("service"));
+        let service = !vars("STEVE_NODE_MODE").is_some_and(|v| {
+            let v = v.trim();
+            !v.is_empty() && !v.eq_ignore_ascii_case("service")
+        });
         Arc::new(move |key| match key {
             "STEVE_NODE_MODE" => Some(if service { "service" } else { "local" }.into()),
             "STEVE_NODE_JOBS" => Some("think,research".into()),
@@ -728,7 +737,8 @@ pub fn wire_assembly(
         node: node_host.as_ref().map(|h| h.runtime.clone()),
         fleet: fleet.clone(),
         bind_remote,
-        spread: vars("STEVE_NODE_PLACEMENT").is_some_and(|v| v.trim().eq_ignore_ascii_case("spread")),
+        // `spread` is the default; `local` keeps new sessions on this machine
+        spread: !vars("STEVE_NODE_PLACEMENT").is_some_and(|v| v.trim().eq_ignore_ascii_case("local")),
         store: db.clone(),
         host: host.clone(),
         workspaces: workspaces.clone(),

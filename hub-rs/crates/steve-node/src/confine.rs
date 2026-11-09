@@ -16,7 +16,7 @@
 //!
 //! Levels (`STEVE_CONFINE`, C1):
 //! - `0` (`off`): no sandbox.
-//! - `1` (`on`, the default on macOS; opt-in on Linux): the above, and the file system isolated for
+//! - `1` (`on`, the default): the above, and the file system isolated for
 //!   a run in a workspace: it writes only there (and the repository a worktree belongs to), in its
 //!   harness and toolchain directories, the temporary directories, the usual tool caches and the
 //!   harnesses' own homes, plus `STEVE_CONFINE_WRITABLE` (`:`-separated). Reads stay open but for
@@ -129,12 +129,7 @@ impl Confine {
                 None => return Sandbox::Off("a Steve path cannot be written in a profile".into()),
             }
         } else if cfg!(target_os = "linux") {
-            // not yet tried on real Linux Nodes: only when asked for
-            if !matches!(mode.as_deref().map(str::trim), Some("on" | "1" | "2")) {
-                return Sandbox::Off(
-                    "on Linux the sandbox is opt-in for now (STEVE_CONFINE=on, 1 or 2)".into(),
-                );
-            }
+            // bubblewrap, when installed (level 1 by default, as on macOS)
             let Some(bwrap) = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"]
                 .iter()
                 .map(PathBuf::from)
