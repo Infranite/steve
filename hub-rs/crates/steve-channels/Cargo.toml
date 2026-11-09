@@ -43,6 +43,8 @@ steve-store = { path = "../steve-store" }
 async-trait = "=0.1.92"
 url = "=2.5.8"
 zeroize = "=1.9.1"
+# The external channel (`ext_ws`): the dialer's URL parser, TLS pins and webpki trust.
+steve-node-wire = { path = "../steve-node-wire" }
 axum = "=0.8.9"
 
 # C1 spaces and messages: the inbound pipeline writes its own tables and hands events to S1.
