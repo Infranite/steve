@@ -999,6 +999,8 @@ pub(crate) fn target_allowed(forbid: bool, url: &str) -> bool {
 pub(crate) struct PushPlan {
     pub url: String,
     pub branch: String,
+    /// The branch at `url` it goes to.
+    pub to: String,
     pub sha: String,
     pub lease: Option<String>,
     pub objects: PathBuf,
@@ -1016,6 +1018,7 @@ pub(crate) fn check_push_shape(a: &GitAction) -> ApiResult<()> {
         origin_must_be,
         expected_local,
         auth,
+        remote_branch,
     } = a
     else {
         return Err(ApiError::new(
@@ -1023,7 +1026,7 @@ pub(crate) fn check_push_shape(a: &GitAction) -> ApiResult<()> {
             "this node applies no merge yet",
         ));
     };
-    if !branch_ok(branch) {
+    if !branch_ok(branch) || remote_branch.as_deref().is_some_and(|b| !branch_ok(b)) {
         return Err(invalid("not a branch Steve pushes"));
     }
     if !remote_ok(remote) {
@@ -1080,6 +1083,7 @@ pub(crate) fn check_push(c: &Commands, dir: &Path, apply: &GitApply) -> ApiResul
         origin_must_be,
         expected_local,
         auth,
+        remote_branch,
     } = &apply.action
     else {
         unreachable!("checked above");
@@ -1109,13 +1113,15 @@ pub(crate) fn check_push(c: &Commands, dir: &Path, apply: &GitApply) -> ApiResul
     } else {
         dir.join(common)
     };
+    let to = remote_branch.clone().unwrap_or_else(|| branch.clone());
     Ok(PushPlan {
         url: url.clone(),
         branch: branch.clone(),
+        to: to.clone(),
         sha: expected_local.clone(),
         lease: expected_remote
             .as_ref()
-            .map(|s| format!("refs/heads/{branch}:{s}")),
+            .map(|s| format!("refs/heads/{to}:{s}")),
         objects: common.join("objects"),
         header: auth.as_ref().map(|a| match &a.how {
             SecretDelivery::Header { name } => name.clone(),
@@ -1196,7 +1202,7 @@ pub(crate) fn push_run(
         ("STEVE_PUSH_URL".into(), plan.url.clone()),
         (
             "STEVE_PUSH_REFSPEC".into(),
-            format!("refs/heads/{0}:refs/heads/{0}", plan.branch),
+            format!("refs/heads/{}:refs/heads/{}", plan.branch, plan.to),
         ),
     ];
     if let Some(l) = &plan.lease {

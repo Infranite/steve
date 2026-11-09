@@ -5,6 +5,7 @@
 
 pub mod drive;
 pub mod exec;
+pub mod host;
 pub mod policy;
 pub mod queue;
 pub mod store;

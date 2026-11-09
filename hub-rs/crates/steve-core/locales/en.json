@@ -434,5 +434,12 @@
   "core.mq.tags_unread": "The target's tags could not be read, so nothing was released",
   "core.mq.cut_not_released": "The release's outcome was not known, but the target's highest tag did not change: not released. %{why}",
   "core.mq.cut_ci_failed": "CI did not pass: for a flaky failure rerun the failed jobs with the gh run rerun below and retry once it passes; otherwise fix the main branch first.\n",
-  "core.mq.cut_ci_running": "CI is still running: retry once it has passed.\n"
+  "core.mq.cut_ci_running": "CI is still running: retry once it has passed.\n",
+  "core.mq.pr_title": "Merge queue MQ-%{batch} (%{n} items)",
+  "core.mq.pr_failed": "The batch's pull request could not be opened: %{why}",
+  "core.mq.host_checks_late": "The host's checks on PR #%{n} gave no result within their deadline",
+  "core.mq.pr_merge_unknown": "Whether PR #%{n} merged is not known: %{why}",
+  "core.mq.fed": "Handed to the host's merge queue (PR #%{n}, into %{branch})",
+  "core.mq.feed_failed": "Could not hand it to the host's merge queue: %{why}. This item is merged the project's usual way",
+  "core.mq.host_closed": "The host closed PR #%{n} without merging it"
 }

@@ -434,5 +434,12 @@
   "core.mq.tags_unread": "读不到目标的 tag，没有发布",
   "core.mq.cut_not_released": "发布结果不明，但远端最高的 tag 没有变，确定没有发布：%{why}",
   "core.mq.cut_ci_failed": "CI 没有通过：偶发失败就先用下面的 gh run rerun 重跑失败的任务，等它通过后再重试；否则先在主分支上修好。\n",
-  "core.mq.cut_ci_running": "CI 还在跑：等它通过后再重试。\n"
+  "core.mq.cut_ci_running": "CI 还在跑：等它通过后再重试。\n",
+  "core.mq.pr_title": "合并队列 MQ-%{batch}（%{n} 项）",
+  "core.mq.pr_failed": "开不了这一批的 PR：%{why}",
+  "core.mq.host_checks_late": "PR #%{n} 上托管方的检查超过期限还没有结果",
+  "core.mq.pr_merge_unknown": "PR #%{n} 的合并结果不明：%{why}",
+  "core.mq.fed": "已交给托管方的合并队列（PR #%{n}，合入 %{branch}）",
+  "core.mq.feed_failed": "没能交给托管方的合并队列：%{why}。这一项按项目原来的方式合并",
+  "core.mq.host_closed": "托管方关闭了 PR #%{n}，没有合入"
 }

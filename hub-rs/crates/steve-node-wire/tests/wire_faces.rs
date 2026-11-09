@@ -205,6 +205,7 @@ async fn faces(n: Arc<dyn Node>) -> Vec<String> {
                     name: "Authorization".into(),
                 },
             }),
+            remote_branch: None,
         },
     };
     out.push(show(&n.git_apply(cmd("op_push", push.clone())).await));
@@ -727,6 +728,7 @@ async fn an_older_peer_is_never_sent_what_it_would_ignore() {
             origin_must_be: Some("acme/app".into()),
             expected_local: f.head.clone(),
             auth: None,
+            remote_branch: None,
         },
     };
     refused(remote.git_apply(cmd("op_p", push)).await.unwrap_err());

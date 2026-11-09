@@ -287,6 +287,7 @@ pub fn router(state: AppState) -> Router {
         .route("/repos/{o}/{r}/pulls", get(list_pulls).post(create_pull))
         .route("/repos/{o}/{r}/pulls/{n}", get(get_pull))
         .route("/repos/{o}/{r}/pulls/{n}/merge", put(merge_pull))
+        .route("/graphql", post(graphql))
         .route("/repos/{o}/{r}/git/refs/heads/{*b}", delete(delete_ref))
         .route("/repos/{o}/{r}/git/ref/heads/{*b}", get(get_ref))
         .route("/repos/{o}/{r}/issues", get(list_issues))
@@ -1140,4 +1141,33 @@ pub fn new_issue(
         updated: t,
     });
     Some(number)
+}
+
+/// The one GraphQL mutation Steve sends: `enqueuePullRequest` (a pull request into its repository's
+/// merge queue), recorded in [`super::model::World::merge_queue`].
+async fn graphql(State(s): State<AppState>, h: HeaderMap, axum::Json(body): axum::Json<Value>) -> R {
+    let mut w = s.lock();
+    principal(&s, &w, &h)?;
+    let q = body["query"].as_str().unwrap_or_default();
+    if !q.contains("enqueuePullRequest") {
+        return ok(200, json!({"errors": [{"message": "unsupported query"}]}));
+    }
+    let id = body["variables"]["id"].as_str().unwrap_or_default();
+    let found = w
+        .pulls
+        .iter()
+        .find(|p| format!("PR_{}", p.id) == id && p.state == "open")
+        .map(|p| (p.repo.clone(), p.number, p.id));
+    match found {
+        Some((repo, number, pid)) => {
+            if !w.merge_queue.iter().any(|(r, n)| *r == repo && *n == number) {
+                w.merge_queue.push((repo, number));
+            }
+            ok(
+                200,
+                json!({"data": {"enqueuePullRequest": {"mergeQueueEntry": {"id": format!("MQE_{pid}")}}}}),
+            )
+        }
+        None => ok(200, json!({"errors": [{"message": "Could not resolve to a PullRequest"}]})),
+    }
 }

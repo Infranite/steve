@@ -244,6 +244,16 @@ impl WorkspaceExecutor for RemoteNode {
             GitAction::Rebase { .. } => {}
             // a merge's message and back-out, a push's url, origin and local guards: 0.2
             GitAction::Merge { .. } => self.needs(2, "merge")?,
+            // a push to another branch is the merge queue's, on the Hub's own Node for now
+            GitAction::Push {
+                remote_branch: Some(_),
+                ..
+            } => {
+                return Err(ApiError::new(
+                    ErrorCode::Unsupported,
+                    "a push to another branch is not on a remote node yet",
+                ));
+            }
             GitAction::Push { .. } => self.needs(2, "push")?,
             GitAction::Reset { .. } => {
                 return Err(ApiError::new(

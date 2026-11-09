@@ -18,6 +18,8 @@ pub struct Policy {
     pub check_deadline_s: u64,
     /// How long the host's required checks may stay without a change before they count as no result.
     pub host_deadline_s: u64,
+    /// How often the host's checks and pull requests are looked at.
+    pub host_poll_s: u64,
     /// A release train closes this long after its first change landed.
     pub release_window_s: u64,
     /// A release train closes once it has this many changes.
@@ -51,6 +53,7 @@ impl Default for Policy {
             checks: vec![],
             check_deadline_s: 45 * 60,
             host_deadline_s: 60 * 60,
+            host_poll_s: 30,
             release_window_s: 2 * 3600,
             release_max: 10,
             release_idle_s: None,

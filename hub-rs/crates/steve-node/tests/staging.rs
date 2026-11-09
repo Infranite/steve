@@ -322,6 +322,7 @@ async fn staging_is_the_nodes_own_mirror_reset_merged_and_pushed() {
         origin_must_be: None,
         expected_local: after2.clone(),
         auth: None,
+        remote_branch: None,
     };
     let wrong = "0".repeat(40);
     let refused = t.apply("op_p0", &w, push(&wrong)).await;
