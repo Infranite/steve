@@ -623,13 +623,6 @@ fn completion(
 mod tests {
     use super::*;
 
-    fn exec() -> ExecutionRef {
-        ExecutionRef::Job {
-            job: JobId::new("j1").unwrap(),
-            attempt: AttemptId::new("a1").unwrap(),
-        }
-    }
-
     #[test]
     fn every_end_fits_its_outcome() {
         let ends = [

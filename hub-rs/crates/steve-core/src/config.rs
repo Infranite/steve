@@ -17,12 +17,6 @@ pub struct CoreConfig {
     pub scratch: PathBuf,
     /// `STEVE_PORT`, for the MCP URL handed to adapters (always 127.0.0.1).
     pub port: u16,
-    /// `CLAUDE_CODE_EXECUTABLE`, used by the model gateway.
-    pub claude_executable: PathBuf,
-    /// `CODEX_EXECUTABLE`: `codex exec` for Steve's judgments when Steve's harness is Codex.
-    pub codex_executable: PathBuf,
-    /// The top-level `model` of `$CODEX_HOME/config.toml` (what `codex exec` uses without `-m`).
-    pub codex_model: Option<String>,
     /// `STEVE_MODELS_FAST`, tried in order.
     pub models_fast: Vec<String>,
     /// `STEVE_MODELS_SMART`, tried in order.
@@ -103,12 +97,6 @@ impl CoreConfig {
         let home = std::path::absolute(&home).unwrap_or(home);
         let mut c = CoreConfig::for_home(&home);
         c.port = env("STEVE_PORT", "8440").parse().unwrap_or(8440);
-        c.claude_executable = env("CLAUDE_CODE_EXECUTABLE", "/opt/homebrew/bin/claude").into();
-        c.codex_executable = env("CODEX_EXECUTABLE", "/opt/homebrew/bin/codex").into();
-        let codex_home = std::env::var("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| Path::new(&home_dir).join(".codex"));
-        c.codex_model = crate::models::codex_config_model(&codex_home);
         c.models_fast = list(&env(
             "STEVE_MODELS_FAST",
             "claude-haiku-5-5,claude-sonnet-5-5",
@@ -147,9 +135,6 @@ impl CoreConfig {
             worktrees: home.join("worktrees"),
             scratch: home.join("scratch"),
             port: 8440,
-            claude_executable: "/opt/homebrew/bin/claude".into(),
-            codex_executable: "/opt/homebrew/bin/codex".into(),
-            codex_model: None,
             models_fast: list("claude-haiku-5-5,claude-sonnet-5-5"),
             models_smart: list("claude-sonnet-5-5,claude-opus-5-5"),
             models_research: list("claude-sonnet-5-5,claude-opus-5-5"),

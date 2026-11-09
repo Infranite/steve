@@ -234,7 +234,7 @@ async fn hub_texts_follow_accept_language() {
                 .to_string()
         }
     };
-    assert_eq!(state("zh-CN").await, "没有找到 claude");
-    assert_eq!(state("en").await, "claude not found");
-    assert_eq!(state("zh-CN").await, "没有找到 claude");
+    assert_eq!(state("zh-CN").await, "通过 ACP 适配器运行");
+    assert_eq!(state("en").await, "Runs through the ACP adapter");
+    assert_eq!(state("zh-CN").await, "通过 ACP 适配器运行");
 }

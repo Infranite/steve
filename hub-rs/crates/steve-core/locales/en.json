@@ -76,11 +76,6 @@
   "core.effort.xhigh": "Very high",
   "core.effort.max": "Maximum",
   "core.models.default_model": "Default model",
-  "core.models.codex_note.chat": "Codex does not stream: the answer appears once it is complete",
-  "core.models.codex_note.research": "Codex researches in a read-only sandbox (no writes, no network) and the Hub checks every command; there is no sandbox-exec layer, and it cannot follow up on the previous round's conversation",
-  "core.models.note.harness_cannot_judge": "Steve's harness “%{harness}” cannot make judgments yet, so Claude Code is used for now",
-  "core.models.note.codex_own": "Codex's own default model",
-  "core.models.note.codex_config": "The default from the Codex configuration",
   "core.models.note.bot_default": "The bot names no model, so the judgment default is used",
   "core.models.invalid.not_object": "Expected an object",
   "core.models.invalid.unknown_field": "Unknown field: %{field}",
@@ -445,5 +440,7 @@
   "core.mq.off": "The merge queue is off (STEVE_MQ=1)",
   "core.mq.policy_unknown": "The merge queue has no setting %{field}",
   "core.mq.policy_bad": "The merge queue's settings are not valid: %{why}",
-  "core.mq.node_gone": "This batch's Node has been unreachable for %{minutes} min: %{why}. Wait for it (run again) or send the batch back"
+  "core.mq.node_gone": "This batch's Node has been unreachable for %{minutes} min: %{why}. Wait for it (run again) or send the batch back",
+  "core.models.note.harness_missing": "Steve's harness \"%{harness}\" has no adapter available now: judgments fail until it is installed or another harness is chosen",
+  "core.models.note.adapter_default": "the harness's own default model"
 }

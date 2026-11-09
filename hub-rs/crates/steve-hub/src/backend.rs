@@ -1023,6 +1023,11 @@ pub trait Domain: Send + Sync + 'static {
     }
 
     // ── 设置 · 模型 ──
+    /// The harness adapters the Hub knows, with what its Node said of them (`fresh`: asks again).
+    async fn harnesses(&self, fresh: bool) -> BResult<Vec<steve_core::harnesses::Harness>> {
+        let _ = fresh;
+        Ok(steve_core::harnesses::builtin())
+    }
     /// Every decision purpose with its default and chosen models, the agent defaults, the known models.
     async fn models_view(&self, ws: &str) -> BResult<Value> {
         todo_backend!("models_view")

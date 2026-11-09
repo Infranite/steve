@@ -107,9 +107,6 @@ pub fn tune_sqlite() {
 fn core_config(cfg: &Config) -> steve_core::CoreConfig {
     let mut c = steve_core::CoreConfig::for_home(&cfg.home);
     c.port = cfg.listen.port;
-    c.claude_executable = cfg.claude_executable.clone().into();
-    c.codex_executable = cfg.codex_executable.clone().into();
-    c.codex_model = steve_core::models::codex_config_model(&cfg.codex_home);
     c.models_fast = cfg.models.fast.clone();
     c.models_smart = cfg.models.smart.clone();
     c.default_models = cfg.default_models.clone().into_iter().collect();
@@ -646,11 +643,22 @@ pub fn wire_assembly(
         &mut node_jobs,
     )?;
     let mode = node_mode(&vars, cfg.no_resume)?;
+    // the harness adapters this Hub knows, with what the local Node says of them (kept fresh)
+    let harnesses = crate::harnesses::HubHarnesses::of(cfg);
+    if let Some(h) = &model_node {
+        node_jobs.push(Box::pin(
+            harnesses
+                .clone()
+                .follow(h.node.clone() as Arc<dyn steve_node_api::Node>),
+        ));
+    }
     let models = || {
-        Some(steve_core::models::Models::new(
+        let m = steve_core::models::Models::new(
             db.clone(),
             steve_core::models::Defaults::of(&core_cfg),
-        ))
+        );
+        m.set_harnesses(harnesses.source());
+        Some(m)
     };
     // One Node job per model tried; the fallback stays on the Hub. Only an inert NO_RESUME
     // copy retains the legacy gateway, without opening a copied Node journal.
@@ -743,6 +751,7 @@ pub fn wire_assembly(
         gateway,
         core_cfg,
     );
+    core.models().set_harnesses(harnesses.source());
     let _ = host.core.set(core.clone());
     if node_host.is_some() {
         // sessions from before this boot that boot could not move to the local Node yet (B7)
@@ -957,6 +966,7 @@ pub fn wire_assembly(
         domain: Arc::new(core::CoreDomain {
             core,
             routed,
+            harnesses: harnesses.clone(),
             node: local_node,
             lifecycle: built.lifecycle.clone(),
         }),

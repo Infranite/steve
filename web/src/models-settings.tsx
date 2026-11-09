@@ -28,7 +28,7 @@ export const MODELS_CAT = Object.defineProperties(["models", "", CpuIcon, ""], {
 type Choice = { harness: string; models: string[]; effort?: string | null }
 type UsedRow = { harness: string; model: string; calls: number; failed: number; at: number }
 type Recent = { last: { harness: string; model: string; at: number } | null; used: UsedRow[] }
-type Purpose = { key: string; label: string; desc: string; value: Choice | null; follows: boolean; effective: Choice; recommended: Choice | null; codex_note: string | null; recent: Recent | null }
+type Purpose = { key: string; label: string; desc: string; value: Choice | null; follows: boolean; effective: Choice; recommended: Choice | null; recent: Recent | null }
 type Steve = { bot_id: string | null; name: string; harness: string; model: string | null; bot_effort: string | null; runs_on: string; models: string[]; effort: string | null; note: string | null; model_note: string | null }
 type Harness = { id: string; name: string; efforts: { key: string; label: string }[]; default_models: string[] }
 type Agent = { harness: string; name: string; models: string[]; default: string | null; value: string | null }
@@ -243,7 +243,6 @@ function Editor({ p, v, steve, startOwn, onSave, onCancel }: { p: Purpose; v: Vi
           </div>
         ) : <>
           <Field id="Harness" label="Harness"><Select className="w-full" value={harness} testId={`harness-${p.key}`} onChange={switchHarness} options={v.harnesses.map((x) => ({ v: x.id, l: x.name }))} /></Field>
-          {harness === "codex" && p.codex_note && <div className="-mt-3 flex items-start gap-1.5 type-footnote text-muted-foreground" data-codex-note><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />{p.codex_note}</div>}
           <Field id="model" label={t("pages:models.editor.model")}><ModelPicker harness={harness} value={primary} allowDefault defaultLabel={inherited} testId={`model-${p.key}`} onChange={setPrimary} /></Field>
           <Field id="effort" label={t("pages:models.editor.effort")}><Select className="w-full" value={effort || "default"} testId={`effort-${p.key}`} onChange={(x) => setEffort(x === "default" ? "" : x)}
             options={[{ v: "default", l: onSteve && steve.effort ? t("pages:models.editor.followDefaultEffort", { effort: effortName(steve.effort) }) : t("pages:models.followModel") }, ...(h?.efforts ?? []).map((e) => ({ v: e.key, l: e.label }))]} /></Field>
@@ -304,7 +303,6 @@ export function SteveJudges({ harness, model }: { harness: string; model: string
         {changed ? <Trans t={t} i18nKey="pages:models.judges.afterSave" values={{ harness: harnessName(harness), model: model || defaultModel() }} components={{ h: <span className="font-medium text-foreground" />, m: <span className="font-mono text-[12.5px] text-foreground/85" /> }} />
           : <>{t("pages:models.judges.now")}<ChoiceLine c={{ harness: v.steve.runs_on, models: v.steve.models, effort: v.steve.effort }} className="inline" />{v.steve.model_note && t("pages:models.judges.noteParen", { note: v.steve.model_note })}</>}
       </div>}
-      {harness === "codex" && <div className="mt-1.5 type-footnote text-muted-foreground">{t("pages:models.judges.codex")}</div>}
       {v && <div className="mt-1.5 type-footnote text-muted-foreground">
         {own.length ? t("pages:models.judges.someOwn", { list: listOf(own.map((p) => p.label)) }) : t("pages:models.judges.allFollow")}
         <a href="#/settings/models" className="ml-1 text-blue hover:underline" data-goto-advanced>{t("pages:models.judges.link")}</a>

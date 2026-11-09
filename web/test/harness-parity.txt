@@ -1,7 +1,2 @@
 # Places in web/src that still tell harnesses apart by name (harness-parity.test.mjs). Only shrinks.
-src/manage.tsx	"claude-code"	3
-src/manage.tsx	"codex"	1
-src/model-picker.tsx	"claude-code"	1
-src/models-settings.tsx	"codex"	2
 src/resume.tsx	"claude-code"	1
-src/store.ts	"claude-code"	2

@@ -57,7 +57,6 @@
   "hub.models.no_harness": "没有这个 harness：%{harness}",
   "hub.models.family_other": "其他",
   "hub.models.source_builtin": "内置列表",
-  "hub.models.source_claude_picker": "Claude Code 的模型选择器（~/.claude/settings.json）",
   "hub.models.recent_unlisted": "最近用过，不在列表里",
   "hub.workspaces.owner_only": "仅实例管理员可查看和回收工作区",
   "hub.outbox.owner_only": "仅实例管理员可查看和重新投递后台事件",
@@ -113,8 +112,6 @@
   "hub.upgrade.local.rolled_back": "部署失败，已恢复到升级前的版本和数据库。详情见日志 %{log}",
   "hub.upgrade.local.committed_failed": "升级已提交，但新版本没有正常起来；没有回滚，新版本保留。详情见日志 %{log}",
   "hub.upgrade.local.not_recovered": "部署失败，旧版本没有恢复，需要手动处理。详情见日志 %{log}",
-  "hub.runtime.no_claude": "没有找到 claude",
-  "hub.runtime.no_codex": "没有找到 codex",
   "hub.runtime.no_adapter": "缺少 ACP 适配器 %{adapter}",
   "hub.runtime.via_acp": "通过 ACP 适配器运行",
   "hub.runtime.adapter_missing": "无法启动该适配器",
@@ -200,5 +197,13 @@
   "hub.access.owner_only": "只有 owner 能配置单点登录",
   "hub.access.oidc_env": "单点登录由环境变量（STEVE_OIDC_*）配置，这里不能修改",
   "hub.access.oidc_bad": "issuer 必须是 https 地址（本机可以用 http），client ID 不能为空",
-  "hub.project.queue_bad": "合并队列的操作不对：只能是 policy、allow、release_now 或 once 之一"
+  "hub.project.queue_bad": "合并队列的操作不对：只能是 policy、allow、release_now 或 once 之一",
+  "hub.models.source_adapter": "适配器报告的模型",
+  "hub.runtime.session_failed": "适配器启动了，但开不了会话（可能需要先登录）",
+  "hub.harness.bad_id": "harness 的 id 只能用小写字母、数字和 - _ .，不能是「%{id}」",
+  "hub.harness.bad_command": "需要它的启动命令",
+  "hub.harness.bad_properties": "声明的属性不对：%{error}",
+  "hub.harness.unknown_property": "不认识的属性：%{key}",
+  "hub.harness.manifest_unreadable": "读不了 harness 清单：%{error}",
+  "hub.harness.manifest_unwritable": "写不了 harness 清单：%{error}"
 }

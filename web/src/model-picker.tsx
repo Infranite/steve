@@ -16,8 +16,8 @@ export type Used = { calls: number; ok_at: number | null; failed_at: number | nu
 export type CatalogModel = { id: string; label: string; family: string; via: string | null; note: string | null; efforts: string[]; used?: Used }
 export type Catalog = { harness: string; name: string; source: string; default: string | null; families: string[]; models: CatalogModel[] }
 
-export const HARNESS_NAME: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", "claude-cli": "Claude Code", "codex-cli": "Codex" }
-export const harnessName = (h: string) => runtimeName(h) ?? HARNESS_NAME[h] ?? h
+/** a harness adapter's name as the Hub reports it (its id when the Hub has not listed it) */
+export const harnessName = (h: string) => runtimeName(h) ?? h
 
 const cache = new Map<string, Promise<Catalog>>()
 /** the harness's model list, fetched once per page load (`fresh` asks the Hub to read it again) */

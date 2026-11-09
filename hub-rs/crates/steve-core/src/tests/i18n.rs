@@ -56,7 +56,11 @@ async fn errors_and_labels_in_english() {
             "This item has ended; start a new cycle if you need to"
         );
         assert_eq!(
-            crate::models::validate(&json!({"purposes": {"nope": null}})).unwrap_err(),
+            crate::models::validate(
+                &json!({"purposes": {"nope": null}}),
+                &crate::harnesses::builtin()
+            )
+            .unwrap_err(),
             "No such purpose: nope"
         );
         assert_eq!(crate::models::purpose_label("route"), "Routing");

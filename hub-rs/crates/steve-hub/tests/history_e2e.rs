@@ -386,20 +386,11 @@ async fn history_through_the_local_node_matches_the_hubs_own_import() {
     assert_eq!(old["transcript"]["updated"], r["transcript"]["updated"]);
 
     // the harnesses as the Node's probe reports them
-    let models = node
-        .ok("GET", "/api/system/models?harness=codex&fresh=1", None)
-        .await;
-    let ids: Vec<&str> = models["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|m| m["id"].as_str())
-        .collect();
-    assert_eq!(ids, vec!["gpt-node-a", "gpt-node-b"], "{models}");
     let devices = node.ok("GET", "/api/devices?fresh=1", None).await;
     let runtimes = devices["runtimes"].as_array().unwrap();
     assert_eq!(runtimes[0]["version"], "2.1.0");
     assert_eq!(runtimes[1]["version"], "0.80.0");
+    // the Hub without a Node starts no harness to ask it: no version
     let old = legacy.ok("GET", "/api/devices?fresh=1", None).await;
-    assert_eq!(old["runtimes"][0]["version"], "2.1.0");
+    assert_eq!(old["runtimes"][0]["version"], "");
 }
