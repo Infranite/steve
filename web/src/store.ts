@@ -112,10 +112,17 @@ export const WT: Record<string, string> = live(WAIT_TYPES, (k) => t(`core:waitTy
 export const WACT: Record<string, string> = live(WAIT_TYPES, (k) => t(`core:waitAction.${k}`))
 /** what a card asks of you, in a line: `审批：推送到 main` */
 export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : WT[w.type] ?? t("core:wait.other"), q: w.q })
-export const HARNESS: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex" }
 /* the name a harness's runtime reports (an adapter of one's own included), when the Hub listed it */
 export const runtimeName = (h: string): string | undefined => raw.state?.runtimes?.find((r) => r.id === h)?.name
-const harnessLabel = (h: string) => runtimeName(h) ?? HARNESS[h] ?? h
+const harnessLabel = (h: string) => runtimeName(h) ?? h
+/** the harness adapter a new bot runs on unless one is chosen: the first that is ready */
+export const defaultHarness = (): string => { const rs = raw.state?.runtimes ?? []; return (rs.find((r) => r.ok) ?? rs[0])?.id ?? "" }
+/** Steve's permission mode (`plan`, `ask`, …) of a stored bot mode */
+const PERM_MODE: Record<string, string> = { plan: "plan", default: "ask", acceptEdits: "accept_edits", auto: "auto", bypassPermissions: "full_access" }
+/** the bot modes `harness` can be set to (all while the Hub does not know) */
+export const permModes = (harness: string): string[] => { const m = raw.state?.runtimes?.find((r) => r.id === harness)?.modes; return Object.keys(PERM).filter((k) => !m || m.includes(PERM_MODE[k])) }
+/** the reasoning efforts `harness` takes, as its adapter reported them */
+export const harnessEfforts = (harness: string): string[] => raw.state?.runtimes?.find((r) => r.id === harness)?.efforts ?? []
 /** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
 export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
 export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const, (k) => t(`core:perm.${k}`))
@@ -1043,7 +1050,7 @@ export async function saveBot(k: string, p: { n?: string; role?: string; pers?: 
   if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
   await call(api.patchBot(k, q), msg)
 }
-export async function makeBot(n: string, role: string, harness = "claude-code", model: string | null = null) { const r = await call(api.newBot({ name: n, role, harness, model }), t("core:toast.botCreated")); return r?.id }
+export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null) { const r = await call(api.newBot({ name: n, role, harness, model }), t("core:toast.botCreated")); return r?.id }
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
 export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
   const b = st.bots[k]; const r = await call(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return

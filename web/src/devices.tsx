@@ -7,7 +7,9 @@ import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { st, toast, refresh, tm } from "@/store"
-import { api, type RDevice, type RNode, type RPairing } from "@/api"
+import { api, type RDevice, type RNode, type RPairing, type RRuntime } from "@/api"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { go, Page, Group, Row, SectionLabel, StatusDot, Meta, Empty, Status, closeSheet, openSheet } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
 import { VitalsSection } from "@/devices-vitals"
@@ -120,8 +122,10 @@ export function DeviceView({ id }: { id: string }) {
           {ss.length ? <Group>{ss.map((k) => { const s = st.S[k]; return <Row key={k} title={s.title} sub={s.item ? t("shell:devices.sessionSub", { item: s.item, n: s.n, up: s.up }) : t("shell:devices.noItem")} onClick={() => go("#/sessions/" + k)}><Status s={s.st} sess /></Row> })}</Group> : <Empty title={t("shell:devices.noSessions")} />}</section>
         <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>{t("shell:devices.runtimes")}</SectionLabel>
           {st.runtimes.length ? <Group>{st.runtimes.map((r) => <Row key={r.id} icon={<span className="flex size-8 items-center justify-center rounded-lg bg-muted text-muted-foreground"><CpuIcon className="size-4" strokeWidth={1.5} /></span>}
-            title={<span className="inline-flex items-center gap-1.5">{r.name}<span className="type-footnote text-muted-foreground">{r.version}</span></span>} sub={<span>{r.note} · <span className="font-mono">{r.path.replace(/^\/Users\/[^/]+/, "~")}</span></span>}>
-            <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={r.ok ? "done" : "wait"} />{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</span></Row>)}</Group> : <Empty title={t("shell:devices.noRuntimes")} />}</section>
+            title={<span className="inline-flex items-center gap-1.5">{r.name}<Badge variant="outline" className="type-footnote">{r.custom ? t("shell:devices.harness.custom") : t("shell:devices.harness.builtin")}</Badge><span className="type-footnote text-muted-foreground">{r.version || r.adapter_version}</span></span>}
+            sub={<span className="flex flex-col gap-0.5"><span>{r.note} · <span className="font-mono">{r.path.replace(/^\/Users\/[^/]+/, "~")}</span></span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}<RuntimeChips r={r} /></span>}>
+            <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={r.ok ? "done" : "wait"} />{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</span></Row>)}</Group> : <Empty title={t("shell:devices.noRuntimes")} />}
+          {isHub && <AddHarness />}</section>
         <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/projects")}>{t("shell:devices.manageProjects")}</Button>}>{t("shell:devices.projectsHere", { count: dirs.length })}</SectionLabel>
           {dirs.length ? <Group>{dirs.map((p) => <Row key={p.id} icon={<FolderIcon className="size-4 text-muted-foreground" strokeWidth={1.5} />} title={p.name} sub={<span className="font-mono">{p.path.replace(/^\/Users\/[^/]+/, "~")}</span>} onClick={() => go("#/projects/" + p.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
             : <Empty title={t("shell:devices.noProjects")} />}</section>
@@ -129,6 +133,48 @@ export function DeviceView({ id }: { id: string }) {
       </div>
     </Page>
   )
+}
+
+/** what a harness adapter can do and the permission modes it offers, as its probe said */
+function RuntimeChips({ r }: { r: RRuntime }) {
+  const t = useT()
+  const caps = r.caps
+  if (!caps) return null
+  const chips = ([["sessions", caps.sessions], ["judge", caps.jobs], ["images", caps.images], ["resume", caps.resume], ["history", caps.history]] as const).filter(([, on]) => on).map(([k]) => t(`shell:devices.harness.cap.${k}`))
+  const modes = (r.modes ?? []).map((m) => t(`shell:devices.harness.mode.${m}`, { defaultValue: m }))
+  return <span className="flex flex-wrap gap-1 pt-0.5" data-runtime-caps>{[...chips, ...modes].map((c) => <Badge key={c} variant="secondary" className="type-footnote">{c}</Badge>)}</span>
+}
+
+/** declares a harness adapter of one's own in the Hub's manifest: an id, a name, its command, its arguments and variables, and
+ * (advanced) its declared properties as JSON. It is used once the Hub restarts. */
+function AddHarness() {
+  const t = useT()
+  const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("")
+  const [id, setId] = useState(""), [name, setName] = useState(""), [command, setCommand] = useState(""), [args, setArgs] = useState(""), [env, setEnv] = useState(""), [props, setProps] = useState("")
+  if (!open) return <Button size="sm" variant="outline" className="mt-2" onClick={() => setOpen(true)} data-add-harness><PlusIcon />{t("shell:devices.harness.add")}</Button>
+  const save = async () => {
+    setBusy(true); setError("")
+    try {
+      const envMap: Record<string, string> = {}
+      for (const l of env.split("\n").map((x) => x.trim()).filter(Boolean)) { const i = l.indexOf("="); if (i <= 0) throw new Error(t("shell:devices.harness.badEnv", { line: l })); envMap[l.slice(0, i)] = l.slice(i + 1) }
+      let properties: Record<string, unknown> | undefined
+      if (props.trim()) { try { properties = JSON.parse(props) } catch { throw new Error(t("shell:devices.harness.badJson")) } }
+      await api.addHarness({ id: id.trim(), name: name.trim() || undefined, command: command.trim(), args: args.split(/\s+/).filter(Boolean), env: envMap, properties })
+      toast(t("shell:devices.harness.saved")); setOpen(false); await refresh()
+    } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+  return <div className="mt-2 flex flex-col gap-2 rounded-lg border p-3" data-harness-form>
+    <div className="type-footnote text-muted-foreground">{t("shell:devices.harness.intro")}</div>
+    <Input placeholder={t("shell:devices.harness.id")} value={id} onChange={(e) => setId(e.target.value)} data-harness-id />
+    <Input placeholder={t("shell:devices.harness.name")} value={name} onChange={(e) => setName(e.target.value)} />
+    <Input placeholder={t("shell:devices.harness.command")} value={command} onChange={(e) => setCommand(e.target.value)} className="font-mono" data-harness-command />
+    <Input placeholder={t("shell:devices.harness.args")} value={args} onChange={(e) => setArgs(e.target.value)} className="font-mono" />
+    <Textarea placeholder={t("shell:devices.harness.env")} value={env} onChange={(e) => setEnv(e.target.value)} className="min-h-14 font-mono" />
+    <details><summary className="type-footnote text-muted-foreground">{t("shell:devices.harness.advanced")}</summary>
+      <Textarea placeholder='{"modes": {"ask": "default"}, "nested_sandbox": true}' value={props} onChange={(e) => setProps(e.target.value)} className="mt-1 min-h-20 font-mono" /></details>
+    {error && <div className="type-footnote text-attention" role="alert">{error}</div>}
+    <div className="flex gap-2"><Button size="sm" disabled={busy || !id.trim() || !command.trim()} onClick={() => void save()} data-harness-save>{busy && <Spinner className="size-3" />}{t("common:action.save")}</Button><Button size="sm" variant="ghost" onClick={() => setOpen(false)}>{t("common:action.cancel")}</Button></div>
+  </div>
 }
 
 export function PairDialog() {

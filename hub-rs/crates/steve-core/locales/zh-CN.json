@@ -76,11 +76,6 @@
   "core.effort.xhigh": "很高",
   "core.effort.max": "最高",
   "core.models.default_model": "默认模型",
-  "core.models.codex_note.chat": "Codex 不逐字输出：回答写完后一次显示",
-  "core.models.codex_note.research": "Codex 在只读沙箱里研究（不能写、不能联网），Hub 检查每条命令；没有 sandbox-exec 这一层，也不能接着上一轮的会话追问",
-  "core.models.note.harness_cannot_judge": "Steve 的 harness「%{harness}」还不能做判断，先用 Claude Code",
-  "core.models.note.codex_own": "Codex 自己的默认模型",
-  "core.models.note.codex_config": "来自 Codex 配置的默认",
   "core.models.note.bot_default": "Bot 没选模型，判断用的默认",
   "core.models.invalid.not_object": "要一个对象",
   "core.models.invalid.unknown_field": "不认识的字段：%{field}",
@@ -445,5 +440,7 @@
   "core.mq.off": "合并队列没有开启（STEVE_MQ=1）",
   "core.mq.policy_unknown": "合并队列没有这个设置：%{field}",
   "core.mq.policy_bad": "合并队列的设置不对：%{why}",
-  "core.mq.node_gone": "这一批的 Node 已经 %{minutes} 分钟连不上了：%{why}。可以继续等（重跑）或退回"
+  "core.mq.node_gone": "这一批的 Node 已经 %{minutes} 分钟连不上了：%{why}。可以继续等（重跑）或退回",
+  "core.models.note.harness_missing": "Steve 的 harness「%{harness}」现在没有可用的适配器：判断会失败，直到它装好或换一个 harness",
+  "core.models.note.adapter_default": "该 harness 自己的默认模型"
 }

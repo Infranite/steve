@@ -148,6 +148,13 @@ pub struct AdapterProperties {
     pub usage_input_includes_cache: bool,
     /// Where a call's tokens come from when the adapter reports none.
     pub usage_fallback: UsageFallback,
+    /// The models to offer before (or without) a probe of the adapter.
+    pub fallback_models: Vec<String>,
+    /// The reasoning efforts to offer before (or without) a probe of the adapter.
+    pub fallback_efforts: Vec<String>,
+    /// Steve's judgments fall back down Steve's model lists (`STEVE_MODELS_SMART`) after the bot's
+    /// model; without it they try the bot's model, else the adapter's own default.
+    pub model_fallback: bool,
 }
 
 /// Where a call's tokens are read when the adapter does not report them.
@@ -176,9 +183,30 @@ impl Default for AdapterProperties {
             tools_off_meta: None,
             usage_input_includes_cache: false,
             usage_fallback: UsageFallback::None,
+            fallback_models: vec![],
+            fallback_efforts: vec![],
+            model_fallback: false,
         }
     }
 }
+
+/// The keys of [`PropertiesPatch`] (what a manifest's `properties` may hold).
+pub const PROPERTY_KEYS: [&str; 14] = [
+    "self_read_only",
+    "nested_sandbox",
+    "state",
+    "modes",
+    "executable_env",
+    "session_meta",
+    "launch_extra",
+    "probe_initialize",
+    "tools_off_meta",
+    "usage_input_includes_cache",
+    "usage_fallback",
+    "fallback_models",
+    "fallback_efforts",
+    "model_fallback",
+];
 
 /// Declared properties, each optional: what is given replaces the built-in (or default) value.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +234,12 @@ pub struct PropertiesPatch {
     pub usage_input_includes_cache: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_fallback: Option<UsageFallback>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_models: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_efforts: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fallback: Option<bool>,
 }
 
 impl PropertiesPatch {
@@ -253,6 +287,15 @@ impl PropertiesPatch {
         }
         if let Some(v) = self.usage_fallback {
             p.usage_fallback = v;
+        }
+        if let Some(v) = &self.fallback_models {
+            p.fallback_models = v.clone();
+        }
+        if let Some(v) = &self.fallback_efforts {
+            p.fallback_efforts = v.clone();
+        }
+        if let Some(v) = self.model_fallback {
+            p.model_fallback = v;
         }
     }
 }
@@ -349,6 +392,9 @@ const BUILTINS: &[Builtin] = &[
             tools_off_meta: Some(json!({"claudeCode": {"options": {"tools": []}}})),
             usage_input_includes_cache: false,
             usage_fallback: UsageFallback::None,
+            fallback_models: strings(&["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]),
+            fallback_efforts: strings(&["low", "medium", "high", "xhigh", "max"]),
+            model_fallback: true,
         },
     },
     Builtin {
@@ -386,9 +432,16 @@ const BUILTINS: &[Builtin] = &[
             // codex-acp reports no tokens of a turn; its rollout file has them, OpenAI's way
             usage_input_includes_cache: true,
             usage_fallback: UsageFallback::CodexRollout,
+            fallback_models: vec![],
+            fallback_efforts: strings(&["none", "minimal", "low", "medium", "high", "xhigh"]),
+            model_fallback: false,
         },
     },
 ];
+
+fn strings(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
 
 /// The id of the adapter Steve uses where nothing chose one, and the command a Node looks it up
 /// by on its `PATH` when its manifest does not name one.

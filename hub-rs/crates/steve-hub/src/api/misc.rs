@@ -914,7 +914,8 @@ pub async fn models_patch(
     b: Bytes,
 ) -> ApiResult {
     let v = body(&b)?;
-    let values = steve_core::models::validate(&v).map_err(ApiError::bad_request)?;
+    let harnesses = st.domain.harnesses(false).await?;
+    let values = steve_core::models::validate(&v, &harnesses).map_err(ApiError::bad_request)?;
     st.domain.models_write(&c.ws, &values, &c.me).await?;
     ok(st.domain.models_view(&c.ws).await?)
 }
@@ -1080,19 +1081,22 @@ pub struct ModelsQuery {
     fresh: Option<String>,
 }
 
-/// `GET /api/system/models?harness=claude-code|codex[&fresh=1]`: the models the harness offers
-/// (Claude Code's model picker, Codex's catalogue), grouped by family, with what each ran on this
+/// `GET /api/system/models?harness=<adapter>[&fresh=1]`: the models the harness adapter offers
+/// (what it reported, else its declared list), grouped by family, with what each ran on this
 /// week. Never reads keys.
 pub async fn system_models(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     Query(q): Query<ModelsQuery>,
 ) -> ApiResult {
-    let h = q.harness.unwrap_or_else(|| "claude-code".into());
-    let list = st
-        .catalog
-        .get(&h, q.fresh.as_deref() == Some("1"))
-        .await
+    let h = q
+        .harness
+        .unwrap_or_else(|| steve_acp::adapters::DEFAULT_ADAPTER.0.into());
+    let harnesses = st.domain.harnesses(q.fresh.as_deref() == Some("1")).await?;
+    let list = harnesses
+        .iter()
+        .find(|x| x.id == h)
+        .map(|x| st.catalog.list(x))
         .ok_or_else(|| {
             ApiError::bad_request(steve_i18n::t!("hub.models.no_harness", harness = h))
         })?;
@@ -1102,6 +1106,41 @@ pub async fn system_models(
         .await
         .unwrap_or_else(|_| json!({}));
     ok(crate::catalog::with_usage(list, &used))
+}
+
+/// `POST /api/system/harnesses` `{id, name?, command, args?, env?, properties?}`: declares a
+/// harness adapter in the Hub's manifest (the instance's owner only); in force once the Hub
+/// restarts, when its Node asks the adapter what it supports.
+pub async fn system_harness_add(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    b: Bytes,
+) -> ApiResult {
+    instance_owner(&c)?;
+    let h: crate::harnesses::NewHarness =
+        serde_json::from_value(body(&b)?).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let path = st.cfg.harness_manifest.clone();
+    tokio::task::spawn_blocking(move || crate::harnesses::declare(&path, h))
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
+        .map_err(ApiError::bad_request)?;
+    ok(json!({"saved": true, "restart": true}))
+}
+
+/// `DELETE /api/system/harnesses/:id`: removes an adapter from the Hub's manifest (the
+/// instance's owner only); in force once the Hub restarts.
+pub async fn system_harness_remove(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    instance_owner(&c)?;
+    let path = st.cfg.harness_manifest.clone();
+    let removed = tokio::task::spawn_blocking(move || crate::harnesses::undeclare(&path, &id))
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
+        .map_err(ApiError::bad_request)?;
+    ok(json!({"removed": removed, "restart": true}))
 }
 
 // ── task workspaces (ST-45) ──

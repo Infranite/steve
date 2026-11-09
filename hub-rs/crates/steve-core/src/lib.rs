@@ -21,6 +21,7 @@ mod diagnostics;
 pub mod error;
 pub mod gateway;
 pub mod git;
+pub mod harnesses;
 pub mod housekeeping;
 pub mod kinds;
 pub mod lane;

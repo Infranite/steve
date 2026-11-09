@@ -475,12 +475,11 @@ fn setting_label_shown(key: &str) -> Option<String> {
 
 /// The `models` target's field names as a card lists them.
 fn models_field_shown(key: &str) -> Option<String> {
-    use crate::models::{HARNESSES, PURPOSES, purpose_label};
+    use crate::models::{PURPOSES, purpose_label};
     if let Some(h) = key.strip_prefix("agent.") {
-        let (_, name, _) = HARNESSES.iter().find(|(x, ..)| *x == h)?;
         return Some(steve_i18n::t!(
             "core.draft.models.agent_default_listed",
-            harness = name
+            harness = crate::models::harness_name(h)
         ));
     }
     if let Some(p) = key.strip_suffix(".effort") {
@@ -605,16 +604,13 @@ fn cat_title(cat: &str) -> String {
 /// harness), its list (`route`) and effort (`route.effort`), per harness the agent default
 /// (`agent.codex`). Empty means the default.
 fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
-    use crate::models::{CODEX_EFFORTS, EFFORTS, HARNESSES, JUDGE_HARNESSES, PURPOSES};
+    use crate::models::PURPOSES;
     let mut fs = vec![];
     let steve = m.steve();
+    let harnesses = m.harnesses();
+    let label = |e: &String| crate::models::effort_label(e).map_or_else(|| e.clone(), String::from);
     let effort_labels: Vec<String> = std::iter::once("默认".to_string())
-        .chain(
-            EFFORTS
-                .iter()
-                .chain(CODEX_EFFORTS.iter())
-                .map(|(_, l)| l.to_string()),
-        )
+        .chain(harnesses.iter().flat_map(|h| h.efforts.iter().map(label)))
         .fold(vec![], |mut v, l| {
             if !v.contains(&l) {
                 v.push(l);
@@ -639,12 +635,12 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
             ty: "enum",
             values: Some(
                 std::iter::once(FOLLOW.to_string())
-                    .chain(JUDGE_HARNESSES.iter().map(|(_, n)| n.to_string()))
+                    .chain(harnesses.iter().map(|h| h.name.clone()))
                     .collect(),
             ),
             current: json!(
                 c.as_ref()
-                    .map_or(FOLLOW, |c| crate::models::harness_name(&c.harness))
+                    .map_or(FOLLOW.to_string(), |c| m.harness_name(&c.harness))
             ),
         });
         let c = c.unwrap_or_default();
@@ -663,24 +659,20 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
             label: format!("{} · 推理强度", p.label),
             ty: "enum",
             values: Some(effort_labels.clone()),
-            current: json!(
-                c.effort
-                    .as_deref()
-                    .and_then(crate::models::effort_label)
-                    .unwrap_or("默认")
-            ),
+            current: json!(c.effort.as_ref().map_or_else(|| "默认".to_string(), label)),
         });
     }
-    for (h, name, known) in &HARNESSES {
+    for h in &harnesses {
         fs.push(FieldSpec {
-            key: format!("agent.{h}"),
+            key: format!("agent.{}", h.id),
             label: format!(
-                "{name} 新会话的默认模型（可选 {}，留空为默认）",
-                known.join("、")
+                "{} 新会话的默认模型（可选 {}，留空为默认）",
+                h.name,
+                h.model_ids().join("、")
             ),
             ty: "text",
             values: None,
-            current: json!(m.agent_model(ws, h).unwrap_or_default()),
+            current: json!(m.agent_model(ws, &h.id).unwrap_or_default()),
         });
     }
     fs
@@ -693,8 +685,9 @@ fn model_patch(
     ws: &str,
     said: &[(String, Value)],
 ) -> (Vec<Change>, Map<String, Value>) {
-    use crate::models::{HARNESSES, JUDGE_HARNESSES, PURPOSES, efforts, validate};
+    use crate::models::{PURPOSES, validate};
     let (mut changes, mut patch) = (vec![], Map::new());
+    let harnesses = m.harnesses();
     let get = |k: &str| said.iter().find(|(x, _)| x == k).map(|(_, v)| v);
     for p in &PURPOSES {
         let stored = m.custom(ws, p.key);
@@ -705,10 +698,10 @@ fn model_patch(
         let harness: Option<String> = match get(&hk).map(jstr) {
             None => stored.as_ref().map(|c| c.harness.clone()),
             Some(h) if h.trim().is_empty() || h.trim() == FOLLOW => None,
-            Some(h) => JUDGE_HARNESSES
+            Some(h) => harnesses
                 .iter()
-                .find(|(k, n)| *k == h.trim() || *n == h.trim())
-                .map(|(k, _)| k.to_string()),
+                .find(|x| x.id == h.trim() || x.name == h.trim())
+                .map(|x| x.id.clone()),
         };
         let models: Vec<String> = match get(p.key) {
             Some(v) => jstr(v)
@@ -721,12 +714,18 @@ fn model_patch(
         };
         let h = harness
             .clone()
-            .unwrap_or_else(|| crate::models::CLAUDE_CODE.into());
+            .unwrap_or_else(|| steve_acp::adapters::DEFAULT_ADAPTER.0.into());
         let effort = match get(&ek) {
-            Some(v) => efforts(&h)
+            Some(v) => harnesses
                 .iter()
-                .find(|(_, l)| *l == jstr(v))
-                .map(|(k, _)| k.to_string()),
+                .find(|x| x.id == h)
+                .and_then(|x| {
+                    x.efforts.iter().find(|e| {
+                        crate::models::effort_label(e).unwrap_or(e.as_str()) == jstr(v)
+                            || **e == jstr(v)
+                    })
+                })
+                .cloned(),
             None => cur.effort.clone(),
         };
         let follows = harness.is_none() && models.is_empty() && effort.is_none();
@@ -744,7 +743,9 @@ fn model_patch(
         } else {
             json!({"purposes": {p.key: {"harness": h, "models": models, "effort": effort}}})
         };
-        let Ok(v) = validate(&body) else { continue };
+        let Ok(v) = validate(&body, &harnesses) else {
+            continue;
+        };
         let show_choice = |c: Option<&crate::models::Choice>| match c {
             None => steve_i18n::t!("core.draft.value.follow"),
             Some(c) => match c.effort.as_deref().and_then(crate::models::effort_shown) {
@@ -771,7 +772,8 @@ fn model_patch(
         });
         patch.extend(v);
     }
-    for (h, name, _) in &HARNESSES {
+    for x in &harnesses {
+        let (h, name) = (&x.id, &x.name);
         let Some(v) = get(&format!("agent.{h}")) else {
             continue;
         };
@@ -780,7 +782,7 @@ fn model_patch(
         if to == cur {
             continue;
         }
-        let Ok(v) = validate(&json!({"agents": {*h: to}})) else {
+        let Ok(v) = validate(&json!({"agents": {h.as_str(): to}}), &harnesses) else {
             continue;
         };
         let shown = |s: &str| {

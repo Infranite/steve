@@ -604,7 +604,7 @@ impl<M: OneModel> Fallback<M> {
                 let tag = crate::stats::current_tag();
                 m.for_call(&tag.workspace_id, tag.purpose, tier)
             }
-            None => crate::models::Choice::claude(match tier {
+            None => crate::models::Choice::default_adapter(match tier {
                 Tier::Fast => self.fast.clone(),
                 Tier::Smart => self.smart.clone(),
             }),

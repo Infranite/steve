@@ -141,10 +141,9 @@ impl AppState {
     pub fn with_node(self, node: Option<Arc<crate::wire::node_runtime::NodeRuntime>>) -> Self {
         match Arc::try_unwrap(self.0) {
             Ok(mut inner) => {
-                // the local Node runs the harness binaries for the harness list and Codex's models
+                // the local Node runs the harness adapters: the runtimes list asks it
                 if let Some(n) = &node {
                     inner.runtimes.set_node(n.node());
-                    inner.catalog.set_node(n.node());
                 }
                 inner.node = node;
                 AppState(Arc::new(inner))
@@ -677,6 +676,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/vitals", get(crate::nodes::vitals::get))
         .route("/devices/{id}", patch(misc::device_patch))
         .route("/system/models", get(misc::system_models))
+        .route("/system/harnesses", post(misc::system_harness_add))
+        .route("/system/harnesses/{id}", delete(misc::system_harness_remove))
         .route("/system/workspaces", get(misc::system_workspaces))
         .route(
             "/system/workspaces/reclaim",

@@ -108,7 +108,6 @@ export default {
       afterSave: "After saving, judgments use <h>{{harness}}</h> · <m>{{model}}</m>",
       now: "Now: ",
       noteParen: " ({{note}})",
-      codex: "Codex judges through codex exec: answers appear once they're complete, and research runs in a read-only sandbox.",
       someOwn: "{{list}} have their own settings and don't follow this.",
       allFollow: "All judgments follow this.",
       link: "Settings · Models",

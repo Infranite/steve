@@ -105,7 +105,6 @@ export default {
       afterSave: "保存后，判断改用 <h>{{harness}}</h> · <m>{{model}}</m>",
       now: "现在：",
       noteParen: "（{{note}}）",
-      codex: "Codex 通过 codex exec 做判断：回答写完后一次显示；研究在只读沙箱里进行。",
       someOwn: "{{list}}单独配置了，不跟随这里。",
       allFollow: "所有判断都跟随这里。",
       link: "设置 · 模型",
