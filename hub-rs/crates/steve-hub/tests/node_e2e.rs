@@ -1005,7 +1005,8 @@ async fn the_node_is_the_default() {
     let mut hub = spawn_mode(&h, None, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    let n = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    // the default runs the Node in a process of its own (B1): it starts and links first
+    let n = node_health_until(&h, 90, |n| n["reconciled"] == true).await;
     assert_eq!(
         (&n["enabled"], &n["reconciled"]),
         (&json!(true), &json!(true)),
