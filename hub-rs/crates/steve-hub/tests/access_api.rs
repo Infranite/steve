@@ -298,3 +298,82 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 403);
 }
+
+/// A4: 设置 · 访问与客户端 — your own tokens and clients, and only yours.
+#[tokio::test]
+async fn the_settings_list_and_revoke_your_own_tokens_and_clients() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (_, token) = st.access().token_create(&owner.id, "first", None).unwrap();
+    let (_, ok) = e
+        .call("POST", "/auth/token", None, Some(json!({"user": owner.name, "token": token, "client": {"kind": "mac", "name": "MacBook"}})))
+        .await;
+    let cred = ok["credential"].as_str().unwrap().to_string();
+    let (s, v) = e.call("GET", "/api/access", Some(&cred), None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["current"], ok["client_id"]);
+    assert_eq!(v["clients"][0]["kind"], "mac");
+    assert_eq!(v["tokens"].as_array().unwrap().len(), 1);
+    assert!(
+        v["tokens"][0].get("hash").is_none(),
+        "no token material listed"
+    );
+    // a new token is shown once
+    let (s, made) = e
+        .call(
+            "POST",
+            "/api/access/tokens",
+            Some(&cred),
+            Some(json!({"name": "iPhone"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{made}");
+    assert!(made["token"].as_str().unwrap().starts_with("stt_"));
+    let id = made["item"]["id"].as_str().unwrap().to_string();
+    // someone else's token or client is not yours to revoke
+    let other = st
+        .users()
+        .create("local:other", "Other", None, "member")
+        .unwrap();
+    let (theirs, _) = st.access().token_create(&other, "theirs", None).unwrap();
+    let (s, _) = e
+        .call(
+            "DELETE",
+            &format!("/api/access/tokens/{}", theirs.id),
+            Some(&cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 404);
+    assert!(
+        st.access()
+            .token(&theirs.id)
+            .unwrap()
+            .unwrap()
+            .revoked
+            .is_none()
+    );
+    // yours: revoked; and revoking the token this client signed in with signs it out
+    let (s, _) = e
+        .call(
+            "DELETE",
+            &format!("/api/access/tokens/{id}"),
+            Some(&cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200);
+    let first = v["tokens"][0]["id"].as_str().unwrap().to_string();
+    let (s, _) = e
+        .call(
+            "DELETE",
+            &format!("/api/access/tokens/{first}"),
+            Some(&cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (s, _) = e.call("GET", "/api/access", Some(&cred), None).await;
+    assert_eq!(s, 401);
+}

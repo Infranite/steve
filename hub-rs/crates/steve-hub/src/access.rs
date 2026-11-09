@@ -681,9 +681,9 @@ pub async fn cors(
     /* the page came from this very address (scheme aside): no cross-origin call. Only the request's own
      * Host decides; the configured browser URL may be the web client's port (A3), another origin */
     let own = origin
-            .split("://")
-            .nth(1)
-            .is_some_and(|h| h.eq_ignore_ascii_case(host));
+        .split("://")
+        .nth(1)
+        .is_some_and(|h| h.eq_ignore_ascii_case(host));
     if own {
         return next.run(req).await;
     }
@@ -753,4 +753,139 @@ mod cors_tests {
         assert_eq!(host_of("http://[::1]:8441").as_deref(), Some("::1"));
         assert!(open_path("/auth/token") && !open_path("/api/me"));
     }
+}
+
+/* ───────── 设置 · 访问与客户端 (A4): the signed-in user's own tokens and clients ───────── */
+
+fn store_of(st: &AppState) -> Result<Store, crate::error::ApiError> {
+    st.modules
+        .as_ref()
+        .map(|m| m.store.clone())
+        .ok_or_else(|| crate::error::ApiError::Json(503, "unavailable".into()))
+}
+
+fn internal(e: impl std::fmt::Display) -> crate::error::ApiError {
+    crate::error::ApiError::Json(500, e.to_string())
+}
+
+/// `GET /api/access`: the caller's tokens and clients, and which client asks.
+pub async fn overview(
+    State(st): State<AppState>,
+    axum::Extension(c): axum::Extension<crate::api::Ctx>,
+) -> Result<axum::response::Response, crate::error::ApiError> {
+    let store = store_of(&st)?;
+    let me = c.me.clone();
+    let (tokens, clients) = tokio::task::spawn_blocking(move || {
+        Ok::<_, steve_store::StoreError>((
+            store.access().tokens(Some(&me))?,
+            store.access().clients(Some(&me))?,
+        ))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+    Ok(reply(
+        StatusCode::OK,
+        json!({
+            "tokens": tokens,
+            "clients": clients,
+            "current": c.client.as_ref().map(|x| x.id.clone()),
+            "route": c.client.as_ref().map(|x| x.route.clone()),
+            "hub": {"version": st.cfg.version, "api": API_VERSION},
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct NewToken {
+    #[serde(default)]
+    name: String,
+    /// expires after this many days; none: never
+    #[serde(default)]
+    days: Option<i64>,
+}
+
+/// `POST /api/access/tokens {name, days?}`: a new token for the caller, its text returned once.
+pub async fn token_create(
+    State(st): State<AppState>,
+    axum::Extension(c): axum::Extension<crate::api::Ctx>,
+    Json(b): Json<NewToken>,
+) -> Result<axum::response::Response, crate::error::ApiError> {
+    let store = store_of(&st)?;
+    let name = match cut(&b.name, 60) {
+        n if n.is_empty() => "web".to_string(),
+        n => n,
+    };
+    if b.days.is_some_and(|d| !(1..=3650).contains(&d)) {
+        return Err(crate::error::ApiError::bad_request("days 1–3650"));
+    }
+    let expires = b.days.map(|d| steve_store::now() + d * 86_400_000);
+    let me = c.me.clone();
+    let (t, token) = tokio::task::spawn_blocking(move || {
+        let r = store.access().token_create(&me, &name, expires)?;
+        store.audit(
+            &me,
+            "token.create",
+            &r.0.id,
+            &json!({"name": name}),
+            steve_store::WS,
+        )?;
+        Ok::<_, steve_store::StoreError>(r)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+    Ok(reply(StatusCode::OK, json!({"token": token, "item": t})))
+}
+
+/// `DELETE /api/access/tokens/{id}`: revokes one of the caller's tokens and the clients it signed in.
+pub async fn token_revoke(
+    State(st): State<AppState>,
+    axum::Extension(c): axum::Extension<crate::api::Ctx>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, crate::error::ApiError> {
+    let store = store_of(&st)?;
+    let me = c.me.clone();
+    let done = tokio::task::spawn_blocking(move || {
+        let Some(t) = store.access().token(&id)?.filter(|t| t.user_id == me) else {
+            return Ok::<_, steve_store::StoreError>(false);
+        };
+        let ok = store.access().token_revoke(&t.id)?;
+        store.audit(&me, "token.revoke", &t.id, &json!({}), steve_store::WS)?;
+        Ok(ok)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+    if !done {
+        return Err(crate::error::ApiError::not_found("token"));
+    }
+    ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    Ok(reply(StatusCode::OK, json!({"ok": true})))
+}
+
+/// `DELETE /api/access/clients/{id}`: signs one of the caller's clients out.
+pub async fn client_revoke(
+    State(st): State<AppState>,
+    axum::Extension(c): axum::Extension<crate::api::Ctx>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, crate::error::ApiError> {
+    let store = store_of(&st)?;
+    let me = c.me.clone();
+    let done = tokio::task::spawn_blocking(move || {
+        let Some(cl) = store.access().client(&id)?.filter(|x| x.user_id == me) else {
+            return Ok::<_, steve_store::StoreError>(false);
+        };
+        let ok = store.access().client_revoke(&cl.id)?;
+        store.audit(&me, "client.revoke", &cl.id, &json!({}), steve_store::WS)?;
+        Ok(ok)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+    if !done {
+        return Err(crate::error::ApiError::not_found("client"));
+    }
+    ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    Ok(reply(StatusCode::OK, json!({"ok": true})))
 }

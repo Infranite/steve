@@ -218,7 +218,11 @@ pub fn web_only(cfg: std::sync::Arc<Config>) -> axum::Router {
                         .and_then(|h| reqwest::Url::parse(&format!("http://{h}")).ok())
                         .and_then(|u| u.host_str().map(str::to_string))
                         .unwrap_or_else(|| "127.0.0.1".into());
-                    let host = if host.contains(':') { format!("[{host}]") } else { host };
+                    let host = if host.contains(':') {
+                        format!("[{host}]")
+                    } else {
+                        host
+                    };
                     axum::Json(serde_json::json!({ "hub": format!("http://{host}:{port}") }))
                 }
             }),

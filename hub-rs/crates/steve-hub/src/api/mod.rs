@@ -622,6 +622,11 @@ pub fn router(st: AppState, modules: Router) -> Router {
             "/tags/kinds/review",
             get(misc::kinds_review).post(misc::kinds_reviewed),
         )
+        // settings · access and clients (A4)
+        .route("/access", get(crate::access::overview))
+        .route("/access/tokens", post(crate::access::token_create))
+        .route("/access/tokens/{id}", delete(crate::access::token_revoke))
+        .route("/access/clients/{id}", delete(crate::access::client_revoke))
         // settings and conversational configuration
         .route("/settings/schema", get(misc::settings_schema))
         .route(
