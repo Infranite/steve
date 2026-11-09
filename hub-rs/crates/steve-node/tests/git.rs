@@ -558,7 +558,8 @@ async fn a_push_whose_preconditions_do_not_hold_is_refused_before_it_is_taken() 
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::Invalid, "{i}: {e}");
     }
-    let e = n
+    // a merge is the Node's own now (the merge queue's staging): taken, not refused as unknown
+    let r = n
         .git_apply(now_cmd(
             "op_merge",
             base(GitAction::Merge {
@@ -567,9 +568,11 @@ async fn a_push_whose_preconditions_do_not_hold_is_refused_before_it_is_taken() 
                 back_out_on_conflict: true,
             }),
         ))
-        .await
-        .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+        .await;
+    assert!(
+        r.as_ref().map_or_else(|e| e.code != ErrorCode::Unsupported, |_| true),
+        "{r:?}"
+    );
     n.shutdown().await;
 }
 

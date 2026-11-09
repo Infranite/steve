@@ -18,6 +18,7 @@ mod models;
 mod module_undo;
 mod modules;
 mod moved;
+mod mq_exec;
 mod new_cycle;
 mod node_git;
 mod outbox;
