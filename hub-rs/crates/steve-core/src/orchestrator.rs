@@ -3038,7 +3038,12 @@ impl Tx<'_> {
             }
         };
         match (d.kind.as_str(), d.subject_type.as_str()) {
-            (_, crate::mq::drive::SUBJECT_TARGET | crate::mq::drive::SUBJECT_BATCH) => {
+            (
+                _,
+                crate::mq::drive::SUBJECT_TARGET
+                | crate::mq::drive::SUBJECT_BATCH
+                | crate::mq::drive::SUBJECT_TRAIN,
+            ) => {
                 db.decision_resolve(id, json!({"choice": choice}), "resolved", None)?;
                 let (c, st, sub, choice, actor) = (
                     self.c.clone(),

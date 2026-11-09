@@ -421,5 +421,18 @@
   "core.mq.split": "MQ-%{batch} failed its checks and was split into MQ-%{a} and MQ-%{b} to find why; the passing half merges first",
   "core.mq.why_failed": "The checks failed:\n%{tail}",
   "core.mq.why_failed_with": "The checks failed together with %{with}, merged already:\n%{tail}",
-  "core.mq.why_returned": "You sent the batch back"
+  "core.mq.why_returned": "You sent the batch back",
+  "core.mq.cutting": "RT-%{train} is being released",
+  "core.mq.carried": "RT-%{from} was not released; this item goes with RT-%{into}",
+  "core.mq.train_question": "Release RT-%{train} (%{upstream}, %{n} items)",
+  "core.mq.train_draft": "Released together:\n%{list}\n\nWhat merges while you answer joins this release, and the card is updated.",
+  "core.mq.cut_failed": "RT-%{train} failed to release",
+  "core.mq.cut_unknown": "Whether RT-%{train} was released is not known",
+  "core.mq.red": "%{branch} failed its checks before RT-%{train} was released",
+  "core.mq.released": "RT-%{train} released as v%{version}",
+  "core.mq.released_unnamed": "RT-%{train} released",
+  "core.mq.tags_unread": "The target's tags could not be read, so nothing was released",
+  "core.mq.cut_not_released": "The release's outcome was not known, but the target's highest tag did not change: not released. %{why}",
+  "core.mq.cut_ci_failed": "CI did not pass: for a flaky failure rerun the failed jobs with the gh run rerun below and retry once it passes; otherwise fix the main branch first.\n",
+  "core.mq.cut_ci_running": "CI is still running: retry once it has passed.\n"
 }

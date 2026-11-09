@@ -98,6 +98,24 @@ pub trait MqNode: Send + Sync {
     async fn remote(&self, s: &Staging) -> Option<String>;
     /// Whether `ancestor` is in `of`, as last read (`None`: it cannot be told).
     async fn contains(&self, s: &Staging, ancestor: &str, of: &str) -> Option<bool>;
+    /// The repository's own release step (`ops/cut-release.py cut`), run in the staging reset at
+    /// the target's tip: it picks the version and pushes the branch and its tag itself, waiting
+    /// at most `ci_wait` for CI, stopped at `deadline`.
+    async fn cut(&self, s: &Staging, op: &str, ci_wait: Duration, deadline: Duration) -> Cut;
+    /// The target's tags (name, commit) as its host has them now, fetched where they can be compared
+    /// (`None`: it cannot be told).
+    async fn tags(&self, s: &Staging) -> Option<Vec<(String, String)>>;
+}
+
+/// How a release step ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cut {
+    /// It ran to its end: its output (`released vX.Y.Z` names the version).
+    Done(String),
+    /// It refused or failed: its output.
+    Failed(String),
+    /// Not known whether it released.
+    Unknown(String),
 }
 
 /// One member of a batch.
@@ -474,6 +492,137 @@ async fn clash(node: &dyn MqNode, s: &Staging, tip: &str, head: &str) -> Option<
         }
     }
     None
+}
+
+/// The version a release of `heads` went out as: the oldest `vX.Y.Z` of `tags` whose commit
+/// contains every one of them (asked of the Node). `None` when no single tag does.
+async fn released_as(
+    node: &dyn MqNode,
+    s: &Staging,
+    heads: &[String],
+    tags: &[(String, String)],
+) -> Option<String> {
+    let mut versions: Vec<(Vec<u64>, String, String)> = tags
+        .iter()
+        .filter_map(|(name, sha)| {
+            let v = name.strip_prefix('v')?;
+            let parts: Option<Vec<u64>> = v.split('.').map(|p| p.parse().ok()).collect();
+            parts
+                .filter(|p| p.len() == 3)
+                .map(|p| (p, v.to_string(), sha.clone()))
+        })
+        .collect();
+    versions.sort();
+    for (_, v, sha) in versions {
+        let mut all = true;
+        for h in heads {
+            if node.contains(s, h, &sha).await != Some(true) {
+                all = false;
+                break;
+            }
+        }
+        if all {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// The highest `vX.Y.Z` of `tags`.
+fn highest(tags: &[(String, String)]) -> Option<Vec<u64>> {
+    tags.iter()
+        .filter_map(|(name, _)| {
+            let parts: Option<Vec<u64>> = name
+                .strip_prefix('v')?
+                .split('.')
+                .map(|p| p.parse().ok())
+                .collect();
+            parts.filter(|p| p.len() == 3)
+        })
+        .max()
+}
+
+/// The release script's output for a card: what refused first (`✗ …`, with what to do before
+/// retrying when it is about CI), then the rest, cut.
+pub fn refusal(output: &str) -> String {
+    let (why, rest): (Vec<&str>, Vec<&str>) = output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .partition(|l| l.trim_start().starts_with('✗'));
+    let what = why.join("\n");
+    let lead = if what.contains("gh run rerun") {
+        steve_i18n::t!("core.mq.cut_ci_failed")
+    } else if what.contains("CI") && what.contains("is still") {
+        steve_i18n::t!("core.mq.cut_ci_running")
+    } else {
+        String::new()
+    };
+    let all = format!("{lead}{}", [what, rest.join("\n")].join("\n"));
+    crate::util::js_head(all.trim(), 600).to_string()
+}
+
+/// Releases train `train` (`heads`: its changes' commits) on `node`, once: a release of these
+/// commits that went out already (a restart between the release and its record) is found first and
+/// not cut again; a cut whose end is unknown is reconciled by the target's tags: one containing
+/// every change is that release, the highest tag unchanged is no release, anything else is unknown.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_cut(
+    node: &dyn MqNode,
+    s: &Staging,
+    train: u64,
+    run: u32,
+    heads: &[String],
+    ci_wait: Duration,
+    deadline: Duration,
+    record: &(dyn Fn(Record) + Send + Sync),
+) -> super::train::CutResult {
+    use super::train::CutResult;
+    let op = steve_node_api::derived_id("op_mqcut", &format!("{}/{train}/{run}", s.target_id));
+    let Some(before) = node.tags(s).await else {
+        return CutResult::Unknown {
+            why: steve_i18n::t!("core.mq.tags_unread"),
+        };
+    };
+    if let Some(v) = released_as(node, s, heads, &before).await {
+        record(Record {
+            op: op.clone(),
+            kind: "cut",
+            state: "released_before",
+            detail: Some(v.clone()),
+        });
+        return CutResult::Released { version: Some(v) };
+    }
+    let r = node.cut(s, &op, ci_wait, deadline).await;
+    let (state, detail) = match &r {
+        Cut::Done(o) => ("finished", o.clone()),
+        Cut::Failed(o) => ("failed", o.clone()),
+        Cut::Unknown(w) => ("unknown", w.clone()),
+    };
+    record(Record {
+        op: op.clone(),
+        kind: "cut",
+        state,
+        detail: Some(tail(&detail, 40)),
+    });
+    match r {
+        Cut::Done(out) => CutResult::Released {
+            version: out
+                .lines()
+                .rev()
+                .find_map(|l| l.trim().strip_prefix("released v").map(str::to_string)),
+        },
+        Cut::Failed(out) => CutResult::Failed { why: refusal(&out) },
+        Cut::Unknown(why) => match node.tags(s).await {
+            Some(after) => match released_as(node, s, heads, &after).await {
+                Some(v) => CutResult::Released { version: Some(v) },
+                None if highest(&after) == highest(&before) => CutResult::Failed {
+                    why: steve_i18n::t!("core.mq.cut_not_released", why = why),
+                },
+                None => CutResult::Unknown { why },
+            },
+            None => CutResult::Unknown { why },
+        },
+    }
 }
 
 #[cfg(test)]

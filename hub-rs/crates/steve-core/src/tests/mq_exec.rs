@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::mq::exec::{Checked, Member, Merged, MqNode, Pushed, Record, Staging, Step, run_batch};
+use crate::mq::exec::{
+    Checked, Cut, Member, Merged, MqNode, Pushed, Record, Staging, Step, run_batch,
+};
 use crate::mq::policy::Policy;
 use crate::mq::queue::Outcome;
 
@@ -60,6 +62,10 @@ pub(super) enum Fault {
     Blind,
     /// Checks are killed.
     Killed,
+    /// The release step tags and pushes, its answer is lost.
+    CutLost,
+    /// The release step refuses (CI red).
+    CutRefused,
 }
 
 /// A Node doing the staging's git for real: `upstream` the host, `source` the user's repository,
@@ -75,6 +81,7 @@ pub(super) struct GitNode {
     moves: AtomicUsize,
     pub(super) pushes: AtomicUsize,
     pub(super) checks: AtomicUsize,
+    pub(super) cuts: AtomicUsize,
     done: Mutex<HashMap<String, String>>,
 }
 
@@ -103,12 +110,31 @@ impl GitNode {
     /// A Node staging the repository `source` (whose `origin` is `upstream`), its files under `root`.
     pub(super) fn over(root: &Path, source: &Path, upstream: &Path) -> GitNode {
         let staging = root.join("staging");
-        ok(root, &["clone", "-q", source.to_str().unwrap(), staging.to_str().unwrap()]);
-        for (k, v) in [("user.name", "steve"), ("user.email", "steve@example.invalid")] {
+        ok(
+            root,
+            &[
+                "clone",
+                "-q",
+                source.to_str().unwrap(),
+                staging.to_str().unwrap(),
+            ],
+        );
+        for (k, v) in [
+            ("user.name", "steve"),
+            ("user.email", "steve@example.invalid"),
+        ] {
             ok(&staging, &["config", k, v]);
         }
         let other = root.join("other");
-        ok(root, &["clone", "-q", upstream.to_str().unwrap(), other.to_str().unwrap()]);
+        ok(
+            root,
+            &[
+                "clone",
+                "-q",
+                upstream.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
         for (k, v) in [("user.name", "o"), ("user.email", "o@example.invalid")] {
             ok(&other, &["config", k, v]);
         }
@@ -122,6 +148,7 @@ impl GitNode {
             moves: AtomicUsize::new(0),
             pushes: AtomicUsize::new(0),
             checks: AtomicUsize::new(0),
+            cuts: AtomicUsize::new(0),
             done: Mutex::new(HashMap::new()),
         }
     }
@@ -310,6 +337,86 @@ impl MqNode for GitNode {
         g(&self.staging, &["ls-remote", up, "refs/heads/main"])
             .ok()
             .and_then(|o| o.split_whitespace().next().map(String::from))
+    }
+
+    async fn cut(&self, _s: &Staging, op: &str, _ci: Duration, _d: Duration) -> Cut {
+        if let Some(v) = self.memo(op) {
+            return match v.strip_prefix("lost:") {
+                Some(w) => Cut::Unknown(w.into()),
+                None => Cut::Done(v),
+            };
+        }
+        self.cuts.fetch_add(1, Ordering::SeqCst);
+        let fault = *self.fault.lock().unwrap();
+        if fault == Fault::CutRefused {
+            let out = "✗ CI failed on main: gh run rerun 42 --failed".to_string();
+            return Cut::Failed(out);
+        }
+        // what cut-release does: the next version on the target's tip, tagged and pushed
+        let up = self.upstream.to_str().unwrap();
+        ok(
+            &self.staging,
+            &[
+                "fetch",
+                "-q",
+                up,
+                "+refs/heads/main:refs/up/main",
+                "+refs/tags/*:refs/tags/*",
+            ],
+        );
+        let tags = ok(&self.staging, &["tag", "-l", "v*"]);
+        let next = tags
+            .lines()
+            .filter_map(|t| t.strip_prefix("v0.1."))
+            .filter_map(|n| n.parse::<u32>().ok())
+            .max()
+            .map_or(0, |n| n + 1);
+        let v = format!("0.1.{next}");
+        ok(
+            &self.staging,
+            &["tag", "-a", &format!("v{v}"), "-m", &v, "refs/up/main"],
+        );
+        ok(&self.staging, &["push", "-q", up, &format!("v{v}")]);
+        let out = format!("released v{v}");
+        if fault == Fault::CutLost {
+            self.keep(op, "lost:cut");
+            return Cut::Unknown("cut".into());
+        }
+        self.keep(op, &out);
+        Cut::Done(out)
+    }
+
+    async fn tags(&self, _s: &Staging) -> Option<Vec<(String, String)>> {
+        let up = self.upstream.to_str().unwrap();
+        g(
+            &self.staging,
+            &[
+                "fetch",
+                "-q",
+                up,
+                "+refs/heads/*:refs/up/*",
+                "+refs/tags/*:refs/tags/*",
+            ],
+        )
+        .ok()?;
+        let out = g(&self.staging, &["ls-remote", "--tags", up]).ok()?;
+        let mut v: Vec<(String, String)> = vec![];
+        for l in out.lines() {
+            let mut it = l.split_whitespace();
+            let (Some(sha), Some(r)) = (it.next(), it.next()) else {
+                continue;
+            };
+            let name = r.trim_start_matches("refs/tags/");
+            match name.strip_suffix("^{}") {
+                Some(n) => {
+                    v.retain(|(x, _)| x != n);
+                    v.push((n.into(), sha.into()));
+                }
+                None if !v.iter().any(|(x, _)| x == name) => v.push((name.into(), sha.into())),
+                None => {}
+            }
+        }
+        Some(v)
     }
 
     async fn contains(&self, _s: &Staging, ancestor: &str, of: &str) -> Option<bool> {
