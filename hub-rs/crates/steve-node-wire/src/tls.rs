@@ -5,7 +5,9 @@
 //! still required.
 //!
 //! The pin is sha256 of the Hub's leaf certificate (DER), `sha256:<hex>`: a rotated certificate
-//! needs a new pin, which is what a pin is for.
+//! needs a new pin, which is what a pin is for. Several pins, comma-separated, are each accepted
+//! (L4): the current certificate's and the next one's while it is being changed. The Hub announces
+//! its pins in its signed welcome, so a Node that pinned it learns the next one before the switch.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -21,8 +23,25 @@ use crate::envelope::{FrameSink, FrameStream};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trust {
     Pin([u8; 32]),
+    /// Any of these (a certificate being changed).
+    Pins(Vec<[u8; 32]>),
     WebPki,
     LoopbackPlaintext,
+}
+
+/// `sha256:<hex>[,sha256:<hex>…]` → the trust it asks for.
+pub fn parse_pins(s: &str) -> Result<Trust, String> {
+    let pins = s
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(parse_pin)
+        .collect::<Result<Vec<_>, _>>()?;
+    match pins.as_slice() {
+        [] => Err("a pin is sha256:<64 hex digits>".into()),
+        [one] => Ok(Trust::Pin(*one)),
+        _ => Ok(Trust::Pins(pins)),
+    }
 }
 
 pub fn parse_pin(s: &str) -> Result<[u8; 32], String> {
@@ -80,7 +99,7 @@ pub fn policy(url: &str, pin: Option<&str>, allow_plaintext: bool) -> Result<Tru
     let host = host_of(url)?;
     if !plain {
         return match pin {
-            Some(p) => Ok(Trust::Pin(parse_pin(p)?)),
+            Some(p) => parse_pins(p),
             None => Ok(Trust::WebPki),
         };
     }
@@ -100,7 +119,7 @@ fn provider() -> Arc<CryptoProvider> {
 
 #[derive(Debug)]
 struct Pinned {
-    pin: [u8; 32],
+    pins: Vec<[u8; 32]>,
     algs: WebPkiSupportedAlgorithms,
 }
 
@@ -114,7 +133,9 @@ impl ServerCertVerifier for Pinned {
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         use subtle_eq::ct_eq;
-        if ct_eq(&crate::identity::sha256(end_entity.as_ref()), &self.pin) {
+        let got = crate::identity::sha256(end_entity.as_ref());
+        // every pin compared, in constant time each
+        if self.pins.iter().fold(false, |any, p| ct_eq(&got, p) | any) {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::General(
@@ -150,6 +171,18 @@ mod subtle_eq {
     }
 }
 
+fn pinned(
+    b: rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>,
+    pins: Vec<[u8; 32]>,
+    algs: WebPkiSupportedAlgorithms,
+) -> Arc<rustls::ClientConfig> {
+    Arc::new(
+        b.dangerous()
+            .with_custom_certificate_verifier(Arc::new(Pinned { pins, algs }))
+            .with_no_client_auth(),
+    )
+}
+
 pub fn client_config(trust: &Trust) -> Result<Option<Arc<rustls::ClientConfig>>, String> {
     let p = provider();
     let b = rustls::ClientConfig::builder_with_provider(p.clone())
@@ -157,14 +190,8 @@ pub fn client_config(trust: &Trust) -> Result<Option<Arc<rustls::ClientConfig>>,
         .map_err(|e| e.to_string())?;
     Ok(match trust {
         Trust::LoopbackPlaintext => None,
-        Trust::Pin(pin) => Some(Arc::new(
-            b.dangerous()
-                .with_custom_certificate_verifier(Arc::new(Pinned {
-                    pin: *pin,
-                    algs: p.signature_verification_algorithms,
-                }))
-                .with_no_client_auth(),
-        )),
+        Trust::Pin(pin) => Some(pinned(b, vec![*pin], p.signature_verification_algorithms)),
+        Trust::Pins(pins) => Some(pinned(b, pins.clone(), p.signature_verification_algorithms)),
         Trust::WebPki => {
             let roots = rustls::RootCertStore {
                 roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
@@ -242,6 +269,19 @@ mod tests {
             Ok(Trust::Pin([0xab; 32]))
         );
         assert!(policy("wss://hub.example/", Some("sha256:zz"), false).is_err());
+        let next = format!("sha256:{}", "cd".repeat(32));
+        assert_eq!(
+            policy("wss://hub.example/", Some(&format!("{pin},{next}")), false),
+            Ok(Trust::Pins(vec![[0xab; 32], [0xcd; 32]]))
+        );
+        assert!(
+            policy(
+                "wss://hub.example/",
+                Some(&format!("{pin},sha256:zz")),
+                false
+            )
+            .is_err()
+        );
     }
 
     /// M2: the guard reads the host the connection dials, and what parsers disagree on is refused.

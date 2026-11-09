@@ -259,6 +259,14 @@ async fn run_signed(
     hub: Option<Identity>,
     known: Option<[u8; 32]>,
 ) -> Result<(handshake::Challenge, handshake::Welcome), handshake::Refused> {
+    run_pinned(hub, known, vec![]).await
+}
+
+async fn run_pinned(
+    hub: Option<Identity>,
+    known: Option<[u8; 32]>,
+    pins: Vec<String>,
+) -> Result<(handshake::Challenge, handshake::Welcome), handshake::Refused> {
     let adm = Arc::new(Mem::default());
     let id = Identity::generate().unwrap();
     adm.keys.lock().unwrap().insert("n1".into(), id.public());
@@ -270,6 +278,7 @@ async fn run_signed(
             "hub_1",
             adm.as_ref(),
             hub.as_ref(),
+            &pins,
         )
         .await;
         h
@@ -353,6 +362,7 @@ fn a_changed_welcome_no_longer_holds() {
         paused: false,
         heartbeat_ms: 10_000,
         hub_key: hex::encode(hub.public()),
+        pins: vec!["sha256:ab".into()],
         sig: String::new(),
     };
     w.sig = hex::encode(hub.sign(&welcome_message(&c, &h, &w)));
@@ -360,7 +370,29 @@ fn a_changed_welcome_no_longer_holds() {
     let mut paused = w.clone();
     paused.paused = true;
     assert!(welcome_key(&c, &h, &paused).is_err());
+    let mut pins = w.clone();
+    pins.pins = vec!["sha256:ee".into()];
+    assert!(
+        welcome_key(&c, &h, &pins).is_err(),
+        "the pins are signed too"
+    );
     let mut other_conn = c.clone();
     other_conn.conn_id = "dd".into();
     assert!(welcome_key(&other_conn, &h, &w).is_err());
+}
+
+/// L4: the Hub announces its certificate pins in the welcome it signs; an unsigned welcome
+/// announces none (no one's word).
+#[tokio::test]
+async fn pins_come_only_in_a_signed_welcome() {
+    let pins = vec![
+        format!("sha256:{}", "ab".repeat(32)),
+        format!("sha256:{}", "cd".repeat(32)),
+    ];
+    let (_, w) = run_pinned(Some(Identity::generate().unwrap()), None, pins.clone())
+        .await
+        .unwrap();
+    assert_eq!(w.pins, pins);
+    let (_, w) = run_pinned(None, None, pins).await.unwrap();
+    assert!(w.pins.is_empty());
 }

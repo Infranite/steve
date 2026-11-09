@@ -189,6 +189,15 @@ Fingerprints are 32 hex digits (128 bits of the key's SHA-256). Devices shows No
 
 To change a Node's key, for example after its machine or a backup of `node/identity.key` may have been exposed, run `steve-node rotate` on that Node, with its `STEVE_HOME`, then restart its service (`steve node restart`). The new key is kept aside until the Hub has accepted the change, which both keys sign. The old key is kept as `node/identity.key.previous`, and the Hub refuses it from then on and audits the change. A Node must be confirmed (active or paused) to rotate. A Node whose key is lost cannot rotate: revoke it and pair it again.
 
+A Hub that terminates TLS with its own certificate and gives Nodes a pin (`STEVE_NODE_TLS_PIN`) can change that certificate without editing each Node:
+
+1. Set `STEVE_NODE_TLS_PIN` to both the current pin and the next one, comma-separated.
+2. Wait until every Node has linked once. The Hub announces its pins in the welcome it signs, and each pinned Node keeps them in its `node.json`.
+3. Switch the certificate.
+4. Remove the old pin.
+
+`steve setup node --pin` also accepts a comma-separated list.
+
 If a Node's live link is taken over again and again (six times within a minute), two parties are holding the same key. The Hub pauses that Node so that it takes no new work, records `takeover_suspected` in its audit, and posts a notice. Check the machine: if only your own Node runs with that key, rotate it and resume the Node; otherwise revoke it.
 
 The Hub has an identity key, `<hub-home>/secrets/hub-identity.key`, made on first start and included in the daily backup. It signs every welcome a Node receives, so a Node knows its own Hub even when TLS ends at a proxy or a tunnel, or the link is plain loopback. Pairing gives the Node the public half (`hub_key` in its `node.json`). A Node paired before the Hub had one remembers it from the first signed welcome. From then on, a Node refuses a Hub that cannot sign with that key, and logs `not the hub this node paired with`. When you move a Hub to another machine, take `secrets/hub-identity.key` with it. If the key is lost, the Hub makes a new one, and each Node must either be paired again or have the `hub_key` line removed from its `node.json` so that it learns the new key; remove the line only after you have made sure the Hub is genuine.
