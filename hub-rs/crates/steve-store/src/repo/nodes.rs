@@ -228,3 +228,40 @@ pub fn audit(
     )?;
     Ok(())
 }
+
+/// How long a Node's vitals are kept (B3).
+pub const VITALS_KEEP_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// One sample of a Node's vitals (`data`: the Node's own JSON), and what is older than a day goes.
+pub fn vitals_put(
+    tx: &Tx<'_>,
+    node_id: &str,
+    at: i64,
+    rtt_ms: Option<i64>,
+    data: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO node_vitals(node_id,at,rtt_ms,data) VALUES (?,?,?,?)",
+        params![node_id, at, rtt_ms, data],
+    )?;
+    tx.execute(
+        "DELETE FROM node_vitals WHERE node_id=? AND at<?",
+        params![node_id, at - VITALS_KEEP_MS],
+    )?;
+    Ok(())
+}
+
+/// A Node's samples since `since`, oldest first: (at, rtt_ms, data).
+pub fn vitals_since(
+    c: &rusqlite::Connection,
+    node_id: &str,
+    since: i64,
+) -> Result<Vec<(i64, Option<i64>, String)>> {
+    let mut st = c.prepare(
+        "SELECT at, rtt_ms, data FROM node_vitals WHERE node_id=? AND at>=? ORDER BY at",
+    )?;
+    let rows = st
+        .query_map(params![node_id, since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}

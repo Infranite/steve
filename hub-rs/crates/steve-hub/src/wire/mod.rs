@@ -786,6 +786,14 @@ pub fn wire_assembly(
         jobs.push(Box::pin(start_fleet(f.clone(), db.clone())));
     }
     let local_node = model_node.as_ref().map(|h| h.node.clone());
+    // how each machine is doing, for the devices page (B3)
+    jobs.push(Box::pin(crate::nodes::vitals::sample(
+        db.clone(),
+        local_node
+            .clone()
+            .map(|n| n as Arc<dyn steve_node_api::Node>),
+        nodes.clone(),
+    )));
     // Health's Node rollout switch describes agent-session routing, including its rollback.
     // The model-job host still participates in domain shutdown regardless of that switch.
     let local_runtime = node_host.map(|h| h.runtime.clone());

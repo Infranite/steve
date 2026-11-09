@@ -64,6 +64,43 @@ pub struct Capabilities {
     pub features: Vec<String>,
 }
 
+/// How a Node's machine is doing now (B3): what the Hub samples to show on the devices page and,
+/// later, to choose where work goes. Every figure is optional: a platform that cannot say leaves it
+/// out rather than guessing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeVitals {
+    pub at: Timestamp,
+    /// Logical CPUs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<u32>,
+    /// Load average over 1, 5 and 15 minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_total: Option<u64>,
+    /// What can be had without swapping (Linux `MemAvailable`; free, inactive and purgeable pages
+    /// on macOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_available: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<RootVitals>,
+    /// Sessions this Node is running now.
+    #[serde(default)]
+    pub sessions: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootVitals {
+    pub root: RootId,
+    /// How the root is shown (`~/code`).
+    #[serde(default)]
+    pub display: String,
+    pub free: u64,
+    pub total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inodes_free: Option<u64>,
+}
+
 /// The Node writes a secret to a temporary file for a command ([`crate::SecretDelivery::File`]).
 /// Only the Hub's own machine offers it; a remote Node's claim is dropped.
 pub const FEATURE_SECRET_FILE: &str = "secret-file";

@@ -668,6 +668,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/config/{id}/drop", post(misc::config_drop))
         // devices
         .route("/devices", get(misc::devices))
+        .route("/vitals", get(crate::nodes::vitals::get))
         .route("/devices/{id}", patch(misc::device_patch))
         .route("/system/models", get(misc::system_models))
         .route("/system/workspaces", get(misc::system_workspaces))

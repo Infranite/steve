@@ -32,6 +32,7 @@ mod scan;
 mod secrets;
 mod toolchain;
 mod tools;
+mod vitals;
 pub mod workspace;
 
 use std::collections::HashMap;
@@ -3676,6 +3677,14 @@ fn root_of(at: &RootPath) -> RootPath {
 
 #[async_trait]
 impl Discovery for LocalNode {
+    async fn vitals(&self) -> ApiResult<NodeVitals> {
+        let roots = self.0.roots();
+        let sessions = self.0.actors.lock().unwrap().len() as u32;
+        // statvfs and vm_stat may block for a moment on a slow disk
+        tokio::task::spawn_blocking(move || vitals::measure(&roots, sessions))
+            .await
+            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+    }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {
         let probed = match self.discovery() {
             Ok(d) => self.0.probes.get(&d, fresh).await,
