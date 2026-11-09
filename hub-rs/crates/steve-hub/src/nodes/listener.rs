@@ -160,7 +160,16 @@ async fn serve_after(
         previous: Mutex::new(None),
     };
     let hub = svc.identity.get().map(|k| k.as_ref());
-    let accepted = handshake::accept_as(&mut sink, &mut stream, &svc.hub_id, &admit, hub).await;
+    // the pins of this Hub's certificate (STEVE_NODE_TLS_PIN, the next one's too while changing it)
+    let pins: Vec<String> = svc
+        .pin
+        .iter()
+        .flat_map(|p| p.split(','))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let accepted =
+        handshake::accept_as(&mut sink, &mut stream, &svc.hub_id, &admit, hub, &pins).await;
     drop(unproven);
     let (hello, admitted) = match accepted {
         Ok(x) => x,

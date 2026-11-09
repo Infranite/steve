@@ -70,6 +70,10 @@ pub struct Welcome {
     /// The Hub's public identity key (hex); empty from a Hub without one.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hub_key: String,
+    /// The pins of the Hub's certificate now (`sha256:…`), when it terminates TLS itself: a Node
+    /// that pinned it takes these (L4), signed as the rest of the welcome.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<String>,
     /// [`welcome_message`] signed by that key (hex).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sig: String,
@@ -215,16 +219,17 @@ pub async fn accept(
     hub_id: &str,
     admission: &dyn Admission,
 ) -> Result<(Hello, Admitted), Refused> {
-    accept_as(sink, stream, hub_id, admission, None).await
+    accept_as(sink, stream, hub_id, admission, None, &[]).await
 }
 
-/// [`accept`], the welcome signed with `hub`, the Hub's identity (M1).
+/// [`accept`], the welcome signed with `hub`, the Hub's identity (M1), announcing `pins`.
 pub async fn accept_as(
     sink: &mut FrameSink,
     stream: &mut FrameStream,
     hub_id: &str,
     admission: &dyn Admission,
     hub: Option<&Identity>,
+    pins: &[String],
 ) -> Result<(Hello, Admitted), Refused> {
     let run = async {
         let challenge = Challenge {
@@ -279,6 +284,8 @@ pub async fn accept_as(
             paused: admitted.paused,
             heartbeat_ms: 10_000,
             hub_key: hub.map(|k| hex::encode(k.public())).unwrap_or_default(),
+            // announced only when signed: an unsigned list is no one's word
+            pins: if hub.is_some() { pins.to_vec() } else { vec![] },
             sig: String::new(),
         };
         if let Some(k) = hub {

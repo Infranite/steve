@@ -141,10 +141,13 @@ fn validate_options(options: &Options) -> Result<()> {
     if let Some(hub) = &options.hub {
         node_hub_url(hub)?;
     }
+    // one pin, or several comma-separated while the Hub's certificate is being changed
     if options.pin.as_ref().is_some_and(|v| {
-        !v.starts_with("sha256:") || v.len() != 71 || !v[7..].bytes().all(|b| b.is_ascii_hexdigit())
+        v.split(',').any(|p| {
+            !p.starts_with("sha256:") || p.len() != 71 || !p[7..].bytes().all(|b| b.is_ascii_hexdigit())
+        })
     }) {
-        bail!("--pin 需要 sha256: 加 64 位证书指纹");
+        bail!("--pin 需要 sha256: 加 64 位证书指纹（多个用逗号分隔）");
     }
     Ok(())
 }
