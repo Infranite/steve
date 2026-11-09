@@ -5,7 +5,7 @@ use super::decide::{self, DecideCtx};
 use super::offer::{ThreadItem, confirms};
 use super::research::{Inline, InlineJob, QUEUE_FULL};
 use super::suggest;
-use super::{AT, Job, REF, Steps, lock, names_bot, route_step};
+use super::{AT, Job, REF, Steps, lock, route_step};
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{Route, Said};
@@ -61,7 +61,9 @@ impl Core {
             j.user.as_deref(),
         );
         let space = j.conv.space.as_str();
-        let lane = if j.direct {
+        let lane = if j.after {
+            super::after_lane(ws, space)
+        } else if j.direct {
             super::direct_lane(ws, space)
         } else {
             super::lane_key(ws, space)
@@ -70,7 +72,9 @@ impl Core {
         lock(&self.0.thread.inflight).insert(lane.clone(), flag.clone());
         /* the web's “thinking” line is about your conversation only, and stays with the turn in progress
         while a message with a fixed way passes it */
-        let quiet = j.conv.guest() || (j.direct && self.main_busy_besides(ws));
+        let quiet = j.conv.guest()
+            || (j.direct && self.main_busy_besides(ws))
+            || (j.ahead.is_some() && self.answering(ws));
         if !quiet {
             self.store().publish(HubEvent::SteveThinking {
                 on: true,
@@ -122,6 +126,7 @@ impl Core {
                 &j.mentions,
                 &j.to,
                 &j.conv,
+                j.ahead.clone(),
                 &flag,
                 &reply,
                 &steps,
@@ -178,6 +183,7 @@ impl Core {
         mentions: &[Mention],
         j_to: &super::SayTo,
         conv: &super::Conv,
+        ahead: Option<(Route, i64)>,
         flag: &super::Stop,
         reply: Reply<'_>,
         steps: &Mutex<Steps>,
@@ -267,19 +273,11 @@ impl Core {
             tracing::warn!("expire suggestion cards in {ws}: {e}");
         }
         let history = self.history_before(ws, mid)?;
-        /* the router only sees that there are attachments; the bot that does the work gets the files themselves */
-        let routed = if files.is_empty() {
-            text.to_string()
-        } else {
-            let list = files
-                .iter()
-                .map(|f| format!("{} · {}", f.name, f.mime.split(';').next().unwrap_or("")))
-                .collect::<Vec<_>>()
-                .join("、");
-            format!("{text}\n（附带 {} 个附件：{list}）", files.len())
-        };
-        /* a plain question needs no router: its kind is known (#52) */
-        let plain = match decide::without_router(text, !files.is_empty(), guest, &[]) {
+        let routed = super::routed_text(text, files);
+        /* a plain question needs no router: its kind is known (#52); one routed ahead of an answer is not plain */
+        let plain = match decide::without_router(text, !files.is_empty(), guest, &[])
+            .filter(|_| ahead.is_none())
+        {
             Some(_) => {
                 let c = self.route_ctx_in(ws, guest)?;
                 decide::without_router(text, !files.is_empty(), guest, &c.focus).map(|kind| {
@@ -300,30 +298,30 @@ impl Core {
             }
             None => None,
         };
-        if !guest && plain.is_none() {
+        if !guest && plain.is_none() && ahead.is_none() {
             self.phase(ws, "route");
         }
         let r0 = now();
         /* stopping does not wait for the router: nothing has happened yet */
-        let r = match plain.clone() {
-            Some(r) => r,
-            None => tokio::select! {
-                r = self.route_in(ws, &routed, &history, false, guest) => r?,
-                _ = flag.stopped() => return Ok(()),
-            },
+        let (r, ms) = match (plain.clone(), ahead) {
+            (_, Some(a)) => a,
+            (Some(r), None) => (r, now() - r0),
+            (None, None) => {
+                let r = tokio::select! {
+                    r = self.route_in(ws, &routed, &history, false, guest) => r?,
+                    _ = flag.stopped() => return Ok(()),
+                };
+                (r, now() - r0)
+            }
         };
-        let ms = now() - r0;
         if flag.is_stopped() {
             return Ok(());
         }
         /* “@名字 …” picks the bot explicitly */
-        let at = AT.captures(text).map(|c| c[1].to_string());
-        let named = match at.as_ref().filter(|_| !guest || conv.items) {
-            Some(a) => db
-                .bots(ws)?
-                .into_iter()
-                .find(|b| b.enabled && names_bot(&b.name, a)),
-            None => None,
+        let named = if !guest || conv.items {
+            self.named_bot(ws, text)?
+        } else {
+            None
         };
         let mut d = decide::decide(
             &r,

@@ -747,6 +747,9 @@ pub struct Route {
     pub model: Option<String>,
     /// the router failed and this is the default
     pub fallback: bool,
+    /// Asked only while Steve is still answering earlier messages ([`RouteCtx::pending`]): the message
+    /// needs that answer first (“就按你说的改”, “再详细点”).
+    pub after: bool,
 }
 
 impl Default for Route {
@@ -769,6 +772,7 @@ impl Default for Route {
             why: String::new(),
             model: None,
             fallback: false,
+            after: false,
         }
     }
 }
@@ -833,6 +837,9 @@ pub struct RouteCtx {
     pub items: Vec<String>,
     /// an inline research run is reading right now
     pub researching: bool,
+    /// The main conversation's messages Steve is still answering (running first, then waiting): the
+    /// router says whether this message needs those answers first ([`Route::after`]).
+    pub pending: Vec<String>,
     pub debug: bool,
 }
 
@@ -928,6 +935,15 @@ pub fn route_prompt(c: &RouteCtx, text: &str, history: &[Said], promote: bool) -
     }
     if c.researching {
         lines.push("Steve is reading for an earlier question right now. What the user says meanwhile does not become an item unless they explicitly ask for one.".into());
+    }
+    if !c.pending.is_empty() {
+        lines.push("Steve is still answering these earlier messages of the user (their answers are not in the conversation yet):".into());
+        lines.extend(
+            c.pending
+                .iter()
+                .map(|q| format!("  {}", js_json(js_head(q, 200)))),
+        );
+        lines.push("Add \"after\": true or false to the JSON. true when the message only makes sense once those answers are out: it refers to them (“就按你说的改”, “再详细点”, “第二个方案”, “那退款那块呢”), follows them up or widens them, or you are not sure. false only when it stands on its own: an instruction for one of the open items, new work with a clear object, a status question, a setting.".into());
     }
     if !recent.is_empty() {
         lines.push("Recent conversation, oldest first:".into());
@@ -1132,6 +1148,11 @@ pub fn parse_route(c: &RouteCtx, text: &str, raw: &str, promote: bool) -> Option
         },
         model: None,
         fallback: false,
+        /* asked and not said: it waits, the safe side */
+        after: r
+            .get("after")
+            .and_then(Value::as_bool)
+            .unwrap_or(!c.pending.is_empty()),
     })
 }
 

@@ -474,27 +474,81 @@ async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
                 .is_none()
         );
     }
-    let routed: Vec<String> =
+    let calls: Vec<String> =
         k.gw.calls
             .lock()
             .unwrap()
             .iter()
             .filter(|p| p.starts_with("You are the router"))
-            .filter_map(|p| {
-                p.lines()
-                    .rfind(|l| l.starts_with("User message: "))
-                    .map(String::from)
-            })
+            .cloned()
             .collect();
+    let routed: Vec<String> = calls
+        .iter()
+        .filter_map(|p| {
+            p.lines()
+                .rfind(|l| l.starts_with("User message: "))
+                .map(String::from)
+        })
+        .collect();
     /* a plain question needs no router (#52, guard q) */
     assert_eq!(route_log(&k, &q1).guard.as_deref(), Some("q"));
+    /* the work was asked ahead whether it needs the answer; the router did not say it doesn't, so it
+    waited and was routed again in its turn; a plain question waits without asking */
     assert_eq!(
         routed,
         vec![
             "User message: \"修登录页\"",
+            "User message: \"修登录页\"",
             "User message: \"问题二改过了？\"",
         ],
-        "each once, as changed, the withdrawn one never"
+        "as changed, the withdrawn one never"
+    );
+    assert!(calls[0].contains("Steve is still answering these earlier messages"));
+    assert!(calls[0].contains("  \"问题一是什么？\""));
+    assert!(!calls[1].contains("Steve is still answering"));
+}
+
+/// 2026-11-09: while Steve is still answering, work that stands on its own and an instruction for an
+/// item go at once; what needs the answer waits for it, without holding up the messages behind it.
+#[tokio::test(flavor = "multi_thread")]
+async fn while_research_runs_standalone_work_goes_ahead() {
+    let k = Kit::new();
+    let fr = FakeResearch::new(vec![Step::Text("部分"), Step::Gate, Step::Text("回答")]);
+    k.core.set_researcher(fr.clone());
+    router(&k, |m| match m {
+        "修登录页" => {
+            json!({"kind": "item", "confidence": 0.9, "signals": ["change"], "title": m, "after": false})
+        }
+        "就按你说的改" => {
+            json!({"kind": "item", "confidence": 0.9, "signals": ["explicit"], "title": "改", "after": true})
+        }
+        _ => json!({"kind": "research", "confidence": 0.9, "signals": ["question"]}),
+    });
+    let q1 = k.core.say(WS, "问题一是什么？", &[]).unwrap();
+    until(|| k.core.researching(WS)).await;
+    let before = items(&k);
+    let follow = k.core.say(WS, "就按你说的改", &[]).unwrap();
+    let fix = k.core.say(WS, "修登录页", &[]).unwrap();
+    /* the work behind the follow-up is not held up by it */
+    until(|| items(&k) == before + 1).await;
+    assert!(
+        k.core.researching(WS),
+        "while the answer is still being read"
+    );
+    assert_eq!(route_log(&k, &fix).kind, "item");
+    let m = k.db().message(&fix).unwrap().unwrap();
+    assert!(m.meta.get("held").is_none(), "no longer waiting");
+    assert_eq!(k.db().message(&follow).unwrap().unwrap().meta["held"], true);
+    assert!(route_opt(&k, &follow).is_none(), "waits for the answer");
+    fr.open(10);
+    until(|| route_opt(&k, &follow).is_some()).await;
+    let r1 = route_log(&k, &q1).reply_id.unwrap();
+    let ms = k.db().messages(WS).unwrap();
+    let at = |id: &str| ms.iter().position(|m| m.id == id).unwrap();
+    assert!(at(&fix) < at(&r1), "the work went before the answer");
+    assert!(
+        at(&r1) < at(&follow),
+        "the follow-up after the answer it needs"
     );
 }
 
