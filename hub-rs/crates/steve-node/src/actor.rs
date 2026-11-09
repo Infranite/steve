@@ -1228,8 +1228,7 @@ impl Actor {
                 .spec
                 .run
                 .limits
-                .max_output_bytes
-                .min(self.inner.cfg.storage.quota / 4),
+                .max_output_bytes,
             Ordering::SeqCst,
         );
         self.gate.2.store(false, Ordering::SeqCst);

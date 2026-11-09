@@ -56,7 +56,7 @@ Approvals, acceptances and agents' questions come to one Inbox. If you turn on Y
 
 #### ⚖️ The model proposes, code decides
 
-Routing guards stop a question from quietly turning into an item. A delivery is refused while plan steps are still open. "Done" can require proof of a build, a deploy or a real check.
+Routing guards stop a question from quietly turning into an item. Steve coordinates the agents and does not second-guess them: a delivery with open plan steps or missing evidence is shown to you as such, never refused, and the harness's own permissions are respected.
 
 </td>
 <td width="33%" valign="top">
@@ -115,7 +115,7 @@ Each message is sorted into one of nine routes: answer, research, item, suggest,
 
 An item moves from ready to active to closing to closed. Closing is a gate: it freezes the result, waits for running turns and external operations to finish, and commits only if nothing changed in between. Another round opens a new cycle and keeps the earlier ones. A small edit to the goal goes to the running session; a rewrite starts a fresh session with a handoff summary, and the replaced plan stays visible.
 
-Acceptance is manual, auto or waived. Auto only accepts when every check passed and no plan step is open. What counts as done is read from the goal: if it says "deploy", the item closes only once the running Hub contains the commit. When an agent stops without delivering, Steve checks the remote against the completion rule (merged, or merged and tagged) and has the agent continue a few times before it asks you. An idle session gets a single *continue / I'll look / give up* card.
+Acceptance is auto by default, or manual or waived. Auto takes the delivery as it is, with failed checks and open steps on the card, and you can send it back. What counts as done is read from the goal: if it says "deploy", the item closes only once the running Hub contains the commit. When an agent stops without delivering, Steve checks the remote against the completion rule (merged, or merged and tagged) and reminds the agent that its tools still work, so it delivers or asks. A turn the harness failed is continued too. Only after that does a card come to you.
 
 - **Dependencies** are checked for cycles. A blocked item starts by itself when its dependencies finish, with a summary of what they did. Any point of a session can be **forked** into a new session or a child item, and the relation graph shows runs, handoffs, dependencies and forks.
 - **Outputs** are versioned and open in their own viewers: rendered documents, highlighted code, CSV tables, PDFs, media, folders and branch diffs. Annotate a region, a passage or a whole file, then send all the notes as one message.

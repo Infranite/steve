@@ -1060,7 +1060,7 @@ impl Tx<'_> {
         } else {
             lines.push("- steve_ask: when you need a decision from the user. Never ask questions in plain text. After calling it, end your turn.".into());
             lines.push("- steve_request_approval: before anything with outside effects (deploy, release, push, send, pay, delete). After calling it, end your turn.".into());
-            lines.push("- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open. A delivery with other open steps is refused. Then end your turn.".into());
+            lines.push("- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open; any step not ticked off is shown to the user as left open. Then end your turn.".into());
         }
         /* the harness asks nothing (完全放开, or the bot bypasses prompts): the agent hears the brakes itself */
         lines.extend(self.c.yolo_full_lines(item));
@@ -1623,24 +1623,13 @@ impl Tx<'_> {
         let Some(item_id) = s.item_id.as_deref() else {
             return Ok(());
         };
-        /* every plan step is ticked off or declared left open before anything is delivered */
+        /* the agent judges when it is done (decided by the user on 2026-11-09): what looks unfinished —
+         * open plan steps, prerequisites, evidence the goal asks for — is noted on the delivery for you,
+         * not a refusal. A workflow unit still hands only finished work downstream. */
         let item = self.item(item_id)?;
+        let mut notes = String::new();
         if !deps_open(self.db(), item_id)?.is_empty() || self.dependency_waiting(item_id)? {
-            return Err(crate::cycle::conflict(
-                "前置事项尚未完成或仍在等待续跑，不能交付",
-            ));
-        }
-        let open: Vec<&str> = item
-            .plan
-            .iter()
-            .filter(|p| !p.done && !unfinished.contains(&p.step))
-            .map(|p| p.step.as_str())
-            .collect();
-        if !open.is_empty() {
-            return Err(msg(format!(
-                "Not delivered: these plan steps are not done yet: {}. Finish them and tick them off with steve_update, or list the steps you deliberately leave open in `unfinished`.",
-                open.join("; ")
-            )));
+            notes.push_str("\n\n注意：前置事项还没完成，或还在等待续跑。");
         }
         if self.workflow_child(&item)? {
             if !unfinished.is_empty() || item.plan.iter().any(|p| !p.done) {
@@ -1657,10 +1646,11 @@ impl Tx<'_> {
                 blockers.join("；")
             )));
         }
-        /* the goal asks for an actual operation: a delivery shows one (ST-57) */
-        if let Some(why) = self.proof_refused(&item, checks)? {
-            return Err(msg(why));
+        /* the goal asks for an actual operation: the delivery says when it shows none (ST-57) */
+        if let Some(why) = self.proof_missing(&item, checks)? {
+            notes.push_str(&format!("\n\n注意：{why}"));
         }
+        let summary = &format!("{summary}{notes}");
         /* a new delivery also replaces an older one still waiting for acceptance */
         supersede(
             self.db(),
@@ -2066,7 +2056,18 @@ impl Tx<'_> {
                         },
                         ..Default::default()
                     });
-                format!("会话出错：{e}")
+                let why = format!("会话出错：{e}");
+                /* the harness failed and the turn is known to have ended: the agent gets another go
+                 * first, told to check before redoing anything (2026-11-09). An outcome nobody knows
+                 * (abandoned) is never continued blindly: it is yours. */
+                if t.stop_reason == "error" {
+                    match self.takeover_error(item_id, &session.id, &why, e)? {
+                        Some(why) => why,
+                        None => return Ok(()),
+                    }
+                } else {
+                    why
+                }
             }
             None => {
                 let last = self.last_agent_text(&session.id)?;
@@ -3373,12 +3374,16 @@ impl Tx<'_> {
                 return Ok(());
             }
         };
-        /* past the handoff threshold the next message starts a fresh session with a handoff summary */
+        /* past the handoff threshold, when the workspace set one, the next message starts a fresh session
+         * with a handoff summary. By default none: the harness compacts its own context, and Steve does
+         * not replace a working session (decided by the user on 2026-11-09). */
         let ws = self.item(item_id)?.workspace_id;
         let limit: f64 = self
             .db()
-            .setting(&ws, "handoff", "80")?
-            .parse()
+            .setting(&ws, "handoff", "0")?
+            .parse::<f64>()
+            .ok()
+            .filter(|l| *l > 0.0)
             .unwrap_or(f64::NAN);
         if let (Some(used), Some(size)) = (s.used.filter(|u| *u != 0), s.size.filter(|z| *z != 0)) {
             let ratio = used as f64 / size as f64 * 100.0;
@@ -3607,34 +3612,19 @@ impl Tx<'_> {
 
     pub(crate) fn revise_goal(&mut self, id: &str, text: &str) -> Result<()> {
         self.lc_guard_open(id)?;
-        let prev = self.db().goal(id)?;
         let v = self.db().add_goal(id, text)?;
         self.db()
             .timeline_add(id, "me", "sys", &format!("目标更新为 v{v}"), None)?;
         let Some(s) = self.active_session(id)? else {
             return Ok(());
         };
-        /* a much bigger goal starts over with a handoff, a small change is told to the running session */
-        if js_len(text) as f64 > js_len(&prev) as f64 * 1.6 {
-            self.hand_off(id, &s.id)?;
-            let last = self.last_agent_text(&s.id)?;
-            self.start_or_fail(
-                id,
-                Some(&format!(
-                    "目标改动较大（v{v}）：{text}\n上一个会话的最后进展：{}",
-                    js_head(&last, 600)
-                )),
-                None,
-            )?;
-            self.db()
-                .timeline_add(id, "steve", "sys", "目标改动较大：开新会话", None)?;
-        } else {
-            self.prompt(
-                &s.id,
-                &format!("目标更新了（v{v}）：{text}\n按新目标调整计划，并用 steve_update 更新。"),
-                "me",
-            );
-        }
+        /* the running session hears the new goal, however much it changed: it knows what it has done and
+         * judges what to redo (2026-11-09: no session replaced behind the agent's back) */
+        self.prompt(
+            &s.id,
+            &format!("目标更新了（v{v}）：{text}\n按新目标调整计划，并用 steve_update 更新。"),
+            "me",
+        );
         Ok(())
     }
 

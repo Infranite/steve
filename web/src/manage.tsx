@@ -361,7 +361,7 @@ function Pane({ id }: { id: string }) {
       <Row title={t("manage:items.prefix")} sub={t("manage:items.prefixSub")}><span className="font-mono type-callout">{st.prefix}-{st.noSeq + 1}</span></Row>
       <Row title={t("manage:items.depsAfter")}><Sel v={c.depsAfter} o={[["自动开始", t("manage:items.depsAuto")], ["提醒我开始", t("manage:items.depsRemind")]]} on={(v) => setSetting({ depsAfter: v })} /></Row></Group></section>
     <section><SectionLabel>{t("manage:items.sessions")}</SectionLabel><Group>
-      <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel v={c.handoff} o={[["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Group></section>
+      <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel v={c.handoff ?? "0"} o={[["0", t("manage:items.handoffOff")], ["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Group></section>
     <section><SectionLabel>{t("manage:items.archive")}</SectionLabel><Group>
       <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel testId="arch-days" v={c.archDays} o={[...[7, 30, 90].map((d): [string, string] => [String(d), t("common:dur.days", { count: d })]), ["0", t("manage:items.archNever")]]} on={(v) => setSetting({ archDays: v })} /></Row></Group></section>
   </div>

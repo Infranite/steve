@@ -1007,7 +1007,7 @@ fn another_project_is_not_checked_against_this_instance() {
 }
 
 #[test]
-fn a_goal_that_asks_for_an_actual_operation_needs_one_in_the_delivery() {
+fn a_goal_that_asks_for_an_actual_operation_is_noted_when_the_delivery_lacks_one() {
     let k = kit(2);
     k.manual_acceptance();
     let x = remote_for(
@@ -1022,15 +1022,19 @@ fn a_goal_that_asks_for_an_actual_operation_needs_one_in_the_delivery() {
         passed: true,
         operated,
     };
-    let e = k
-        .core
+    /* 2026-11-09: not refused; the card tells you what the goal asked for and is missing */
+    k.core
         .tool_deliver(&s, "ok", &[], &[check("cargo test", false)], &[])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        e.contains("Not delivered") && e.contains("operated: true"),
-        "{e}"
-    );
+        .unwrap();
+    let d = k
+        .db()
+        .decisions_of_item(&x.item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.kind == "accept")
+        .unwrap();
+    assert!(d.draft.contains("注意：目标要求"), "{}", d.draft);
+    assert!(d.draft.contains("没有一条是实际操作"), "{}", d.draft);
     k.core
         .tool_deliver(
             &s,
@@ -1056,6 +1060,7 @@ fn a_goal_that_asks_for_an_actual_operation_needs_one_in_the_delivery() {
         "{}",
         d.draft
     );
+    assert!(!d.draft.contains("注意："), "{}", d.draft);
     // the protocol says what the goal asks for
     let i = k.db().item(&x.item).unwrap().unwrap();
     let line = k.core.tx().proof_line(&i).unwrap().unwrap();
@@ -1104,8 +1109,9 @@ fn stopped_after_merging(rule: &str, url: &str, tag: Option<&str>) -> (Kit, Remo
 }
 
 #[test]
-fn a_goal_that_asks_for_the_build_to_pass_needs_a_build_in_the_delivery() {
+fn a_goal_that_asks_for_the_build_to_pass_is_noted_when_the_delivery_lacks_a_build() {
     let k = kit(2);
+    k.manual_acceptance();
     let x = remote_for(&k, upstream::DONE_MERGE, false, Some("确认构建通过"));
     let s = k.db().session(&x.session).unwrap().unwrap();
     let check = |name: &str, passed: bool| crate::Check {
@@ -1118,12 +1124,15 @@ fn a_goal_that_asks_for_the_build_to_pass_needs_a_build_in_the_delivery() {
         vec![check("cargo test", true)],
         vec![check("构建：cargo build", false)],
     ] {
-        let e = k
-            .core
-            .tool_deliver(&s, "ok", &[], &checks, &[])
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("Not delivered") && e.contains("build"), "{e}");
+        k.core.tool_deliver(&s, "ok", &[], &checks, &[]).unwrap();
+        let d = k
+            .db()
+            .decisions_of_item(&x.item)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.status == "open" && d.kind == "accept")
+            .unwrap();
+        assert!(d.draft.contains("目标要求构建通过"), "{}", d.draft);
     }
     k.core
         .tool_deliver(
@@ -1335,4 +1344,25 @@ fn a_lane_entered_while_the_remote_probe_runs_owns_the_wait() {
     assert_eq!(k.rt.prompts_of(&x.session).len(), before);
     assert!(steve_lines(&k, &x.item).is_empty());
     assert!(k.open_fails(&x.item).is_empty());
+}
+
+/// 2026-11-09: a turn the harness failed is continued (within the same limit) before it is yours,
+/// told to check before redoing anything; one whose outcome nobody knows is never continued.
+#[test]
+fn a_failed_turn_is_continued_first_an_unknown_one_is_yours() {
+    let k = kit(1);
+    let (item, sid) = started(&k);
+    k.rt.end_turn(&k.core, &sid, "error", Some("adapter exited"));
+    assert!(k.open_fails(&item).is_empty(), "no card yet");
+    assert_eq!(steve_lines(&k, &item).len(), 1);
+    let p = k.rt.prompts_of(&sid).pop().unwrap();
+    assert!(p.contains("上一回合出错中断了：adapter exited"), "{p}");
+    assert!(p.contains("不要重做"), "{p}");
+    k.rt.end_turn(&k.core, &sid, "error", Some("adapter exited"));
+    assert_eq!(k.open_fails(&item).len(), 1, "out of continues: yours");
+
+    let (item, sid) = started(&k);
+    k.rt.end_turn(&k.core, &sid, "abandoned", Some("abandoned"));
+    assert!(steve_lines(&k, &item).is_empty(), "not continued");
+    assert_eq!(k.open_fails(&item), vec!["会话出错：abandoned"]);
 }

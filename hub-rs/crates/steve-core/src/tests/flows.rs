@@ -862,6 +862,17 @@ fn detached_decisions_go_straight_to_their_session() {
 #[test]
 fn supplement_modes_and_the_handoff_threshold() {
     let k = Kit::new();
+    /* a workspace that set a threshold (by default there is none) */
+    k.db()
+        .settings_set(
+            crate::repo::WS,
+            &serde_json::json!({"handoff": "80"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            "me",
+        )
+        .unwrap();
     let i = new_item(&k, "g");
     let s = only_session(&k, &i.id);
     /* steer interrupts a running turn */
@@ -1154,26 +1165,18 @@ fn goals_small_and_big_changes() {
         k.rt.prompts_of(&s.id).last().unwrap(),
         "目标更新了（v2）：写一个脚本吧\n按新目标调整计划，并用 steve_update 更新。"
     );
+    /* a much bigger goal goes to the same session too: it judges what to redo (2026-11-09) */
+    k.rt.end_turn(&k.core, &s.id, "cancelled", None);
     k.core
         .revise_goal(&i.id, "写一个脚本，并且部署到三台机器上")
         .unwrap();
-    assert_eq!(k.db().session(&s.id).unwrap().unwrap().status, "ended");
-    let ns = last_session(&k, &i.id);
-    assert!(
-        k.rt.prompts_of(&ns.id)[0].contains(
-            "目标改动较大（v3）：写一个脚本，并且部署到三台机器上\n上一个会话的最后进展："
-        )
-    );
-    assert!(
-        k.rt.prompts_of(&ns.id)[0]
-            .contains("Goal (from the user): 写一个脚本，并且部署到三台机器上")
+    assert_ne!(k.db().session(&s.id).unwrap().unwrap().status, "ended");
+    assert_eq!(last_session(&k, &i.id).id, s.id);
+    assert_eq!(
+        k.rt.prompts_of(&s.id).last().unwrap(),
+        "目标更新了（v3）：写一个脚本，并且部署到三台机器上\n按新目标调整计划，并用 steve_update 更新。"
     );
     assert_eq!(k.db().goals(&i.id).unwrap().len(), 3);
-    assert!(k.timeline_texts(&i.id).ends_with(&[
-        "目标更新为 v3".to_string(),
-        "开始会话 #2".to_string(),
-        "目标改动较大：开新会话".to_string()
-    ]));
 }
 
 /// B4: a handoff whose old harness is still being let go (a Node's release on its way) names that
@@ -1188,8 +1191,21 @@ fn a_handoff_names_the_release_its_successor_waits_for() {
         s.id.clone(),
         crate::Released::Pending("op_release_1".into()),
     );
+    k.db()
+        .settings_set(
+            crate::repo::WS,
+            &serde_json::json!({"handoff": "80"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            "me",
+        )
+        .unwrap();
+    k.db()
+        .session_patch(&s.id, patch![used: 85, size: 100])
+        .unwrap();
     k.core
-        .revise_goal(&i.id, "写一个脚本，并且部署到三台机器上")
+        .supplement(&i.id, "继续", SupplementMode::Auto, &[])
         .unwrap();
     let s2 = last_session(&k, &i.id);
     assert_ne!(s2.id, s.id);
