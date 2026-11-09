@@ -623,6 +623,14 @@ impl RoutedRuntime {
         self.bind_remote_to(session_id, after, &target)
     }
 
+    /// The tag the item of `session_id` asks of a Node (B7).
+    fn required_tag(&self, session_id: &str) -> Option<String> {
+        let item = self.store.sessions().get(session_id).ok()??.item_id?;
+        self.store
+            .reader(|c| steve_store::nodes::item_tag(c, &item))
+            .ok()?
+    }
+
     /// The linked remote Node clearly less loaded than this machine (load per CPU, from the
     /// vitals of the last few minutes, B3), if any: the least loaded of them.
     fn spread_target(&self) -> Option<steve_node_api::NodeId> {
@@ -1041,7 +1049,34 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             tracing::warn!(session_id, "协作运行未就绪：{e}");
             return;
         }
-        if self.bind_remote(session_id, after) {
+        // the tag its item asks of a Node (B7): a Node with it, the Hub's own first
+        let mut here = false;
+        if let Some(tag) = self.required_tag(session_id) {
+            let nodes = self
+                .store
+                .reader(|c| steve_store::nodes::with_tag(c, &tag))
+                .unwrap_or_default();
+            if self.node.is_some() && nodes.iter().any(|n| n == "local") {
+                here = true;
+            } else {
+                for n in nodes.iter().filter(|n| n.as_str() != "local") {
+                    if let Ok(id) = steve_node_api::NodeId::new(n.clone())
+                        && self.bind_remote_to(session_id, after, &id)
+                    {
+                        return;
+                    }
+                }
+                let text = steve_i18n::t!("hub.node.tag_unmet", tag = tag);
+                if let Err(e) = self
+                    .store
+                    .events()
+                    .add(session_id, "system", serde_json::json!({"text": text}))
+                {
+                    tracing::warn!("{session_id}: {e}");
+                }
+            }
+        }
+        if !here && self.bind_remote(session_id, after) {
             return;
         }
         let Some(n) = &self.node else { return };

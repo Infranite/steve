@@ -27,6 +27,7 @@ pub struct Extra {
 /// Which module answers a tool name.
 #[derive(Clone, Copy)]
 enum Owner {
+    Devices,
     Diagnostics,
     Items,
     Workflow,
@@ -40,6 +41,79 @@ enum Owner {
     Flow,
     ReplySource,
     Im,
+}
+
+/// `steve_devices` (B7): the Nodes work can run on, with their tags; `require` sends this item's
+/// next sessions to a Node with a tag.
+pub const DEVICES: &str = "steve_devices";
+
+fn devices_tool() -> Value {
+    json!({
+        "name": DEVICES,
+        "description": "List the devices (Nodes) Steve can run work on, with their tags and whether they are online; the Hub's own machine is `local`. With action `require` and a tag, this item's next sessions go to a device with that tag (a continuation in a new session, a handed-over item); `require` with no tag clears it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "require"]},
+                "tag": {"type": "string"}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }
+    })
+}
+
+/// `steve_devices`: list, or require a tag for the item of `cx`.
+fn devices(store: &Store, cx: &mcp::McpCx, args: &Value) -> Result<String, String> {
+    match args["action"].as_str() {
+        Some("require") => {
+            let item = cx.item_id.as_deref().ok_or("这个会话不属于任何事项")?;
+            let tag = args["tag"].as_str().filter(|t| !t.trim().is_empty());
+            let ok = store
+                .transaction(|tx| steve_store::nodes::set_item_tag(tx, item, tag))
+                .map_err(|e| e.to_string())?;
+            if !ok {
+                return Err(steve_i18n::t!("hub.node.tag_bad"));
+            }
+            Ok(match tag {
+                Some(t) => format!("{item} 之后的会话会安排到带标签「{t}」的设备上"),
+                None => format!("{item} 不再要求设备标签"),
+            })
+        }
+        _ => {
+            let since = crate::nodes::now() - 3 * 60 * 1000;
+            let v = store
+                .reader(|c| {
+                    let tags = steve_store::nodes::all_tags(c)?;
+                    let online = |id: &str| -> Result<bool, steve_store::StoreError> {
+                        Ok(c.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM node_vitals WHERE node_id=? AND at>=?)",
+                            rusqlite::params![id, since],
+                            |r| r.get(0),
+                        )?)
+                    };
+                    let mut out = vec![json!({
+                        "node": "local", "name": "Hub", "tags": tags.get("local").cloned().unwrap_or_default(),
+                        "online": true
+                    })];
+                    let mut st = c.prepare(
+                        "SELECT node_id, name, state FROM nodes WHERE local = 0 AND state IN ('active','paused') ORDER BY name",
+                    )?;
+                    let rows = st
+                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for (id, name, state) in rows {
+                        out.push(json!({
+                            "node": id, "name": name, "tags": tags.get(&id).cloned().unwrap_or_default(),
+                            "online": online(&id)?, "paused": state == "paused"
+                        }));
+                    }
+                    Ok::<_, steve_store::StoreError>(out)
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_string(&json!({ "devices": v })).unwrap_or_default())
+        }
+    }
 }
 
 /// `steve_reply_source` (channels-personas.md §6): an update back to the chat an item came from.
@@ -60,7 +134,9 @@ fn reply_source_tool() -> Value {
 }
 
 fn owner_of(name: &str) -> Option<Owner> {
-    if name == super::diagnostics::TOOL {
+    if name == DEVICES {
+        Some(Owner::Devices)
+    } else if name == super::diagnostics::TOOL {
         Some(Owner::Diagnostics)
     } else if super::item_mcp::handles(name) {
         Some(Owner::Items)
@@ -104,6 +180,7 @@ fn extra_tools() -> Vec<Value> {
     v.extend(steve_mail::mcp::tools().iter().cloned());
     v.extend(steve_flow::mcp::tools().iter().cloned());
     v.push(reply_source_tool());
+    v.push(devices_tool());
     v.extend(steve_channels::im_mcp::tools());
     v.push(json!({"name":"steve_upgrade","description":"Check Steve GitHub releases, inspect an upgrade, or request an instance upgrade. A request requires instance owner approval in Settings / Versions before execution. Never grants approval through an agent token.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["check","status","request"]},"version":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["action"]}}));
     v
@@ -419,6 +496,12 @@ async fn call_owned_inner(
         Owner::Mail => steve_mail::mcp::call(&x.tools.mail, &cx, name, &args).await,
         Owner::Flow => steve_flow::mcp::call(&x.tools.flow, &cx, name, &args).await,
         Owner::Im => steve_channels::im_mcp::call(&x.tools.channels, &cx, name, &args).await,
+        Owner::Devices => {
+            let (store, cx2, args2) = (x.store.clone(), cx.clone(), args.clone());
+            tokio::task::spawn_blocking(move || devices(&store, &cx2, &args2))
+                .await
+                .map_err(|e| e.to_string())?
+        }
         Owner::ReplySource => match (
             args.get("text").and_then(Value::as_str),
             cx.item_id.as_deref(),

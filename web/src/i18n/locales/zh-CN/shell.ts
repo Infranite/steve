@@ -139,6 +139,12 @@ export default {
     createCode: "生成配对码",
     codeExpires: "配对码有效至 {{time}}；只交给你要接入的设备。",
     codeExpired: "配对码已过期，请重新生成。",
+    tags: {
+      title: "标签",
+      sub: "agent 和流程可以按标签把工作派到这台设备，例如 gpu、macos",
+      add: "添加标签，回车确认",
+      remove: "去掉标签 {{tag}}",
+    },
     vitals: {
       title: "运行状态",
       none: "还没有数据（这台设备的 Node 版本较旧，或者刚连上）",

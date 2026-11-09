@@ -265,3 +265,79 @@ pub fn vitals_since(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
+
+/// A tag as stored: trimmed, lower case, letters, digits, `-`, `_`, `.` and `:` only, at most 40
+/// characters; `None` for anything else.
+pub fn tag_of(raw: &str) -> Option<String> {
+    let t = raw.trim().to_lowercase();
+    (!t.is_empty()
+        && t.chars().count() <= 40
+        && t
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')))
+    .then_some(t)
+}
+
+/// Every Node's tags, by Node.
+pub fn all_tags(c: &Connection) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+    let mut st = c.prepare("SELECT node_id, tag FROM node_tags ORDER BY node_id, tag")?;
+    let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for r in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+        let (n, t) = r?;
+        out.entry(n).or_default().push(t);
+    }
+    Ok(out)
+}
+
+/// Replaces `node_id`'s tags (the valid ones of `tags`); returns what is stored now.
+pub fn set_tags(tx: &Tx<'_>, node_id: &str, tags: &[String]) -> Result<Vec<String>> {
+    tx.execute("DELETE FROM node_tags WHERE node_id = ?", [node_id])?;
+    let mut kept: Vec<String> = tags.iter().filter_map(|t| tag_of(t)).collect();
+    kept.sort();
+    kept.dedup();
+    for t in &kept {
+        tx.execute(
+            "INSERT INTO node_tags(node_id, tag) VALUES (?, ?)",
+            params![node_id, t],
+        )?;
+    }
+    Ok(kept)
+}
+
+/// The Nodes that carry `tag`.
+pub fn with_tag(c: &Connection, tag: &str) -> Result<Vec<String>> {
+    let mut st = c.prepare("SELECT node_id FROM node_tags WHERE tag = ? ORDER BY node_id")?;
+    let v = st
+        .query_map([tag], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(v)
+}
+
+/// The tag `item_id` asks of the Node its sessions run on.
+pub fn item_tag(c: &Connection, item_id: &str) -> Result<Option<String>> {
+    Ok(c
+        .query_row(
+            "SELECT tag FROM item_node_tags WHERE item_id = ?",
+            [item_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// Sets (`Some`) or clears (`None`) the tag `item_id` asks for; `false` for an invalid tag.
+pub fn set_item_tag(tx: &Tx<'_>, item_id: &str, tag: Option<&str>) -> Result<bool> {
+    match tag {
+        None => {
+            tx.execute("DELETE FROM item_node_tags WHERE item_id = ?", [item_id])?;
+            Ok(true)
+        }
+        Some(raw) => {
+            let Some(t) = tag_of(raw) else { return Ok(false) };
+            tx.execute(
+                "INSERT INTO item_node_tags(item_id, tag) VALUES (?, ?) ON CONFLICT(item_id) DO UPDATE SET tag = excluded.tag",
+                params![item_id, t],
+            )?;
+            Ok(true)
+        }
+    }
+}

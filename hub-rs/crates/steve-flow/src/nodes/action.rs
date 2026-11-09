@@ -664,6 +664,16 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
         Ok(id) => id,
         Err(e) => return NodeOutcome::Fail(format!("建事项失败：{e}")),
     };
+    // the tag its sessions ask of a Node (B7)
+    if let Some(tag) = cfg["node_tag"].as_str().filter(|t| !t.trim().is_empty()) {
+        let set = cx
+            .flow
+            .store()
+            .transaction(|tx| steve_store::nodes::set_item_tag(tx, &item_id, Some(tag)));
+        if !matches!(set, Ok(true)) {
+            tracing::warn!(item = %item_id, "node_tag {tag} not set: {set:?}");
+        }
+    }
     let evt = ev["id"].as_str().map(String::from);
     let party = ev["actor_party_id"].as_str().map(String::from);
     let run_id = cx.run.id.clone();
