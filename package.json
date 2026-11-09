@@ -2,15 +2,15 @@
   "name": "steve",
   "private": true,
   "type": "module",
-  "workspaces": ["hub", "web"],
+  "workspaces": [
+    "web"
+  ],
   "scripts": {
-    "dev:hub": "npm -w hub run dev",
     "dev:web": "npm -w web run dev",
-    "build": "npm -w web run build && npm -w hub run build",
-    "build:hub": "npm -w hub run build",
+    "build": "npm -w web run build",
     "build:web": "npm -w web run build",
-    "check": "npm -w hub run check && npm -w web run check",
-    "test": "npm -w hub run test && npm run test:web",
+    "check": "npm -w web run check",
+    "test": "npm run test:web",
     "test:web": "node --test web/test/*.test.mjs"
   }
 }
