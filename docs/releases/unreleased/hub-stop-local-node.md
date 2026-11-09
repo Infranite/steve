@@ -1,1 +1,0 @@
-- `steve hub stop` 现在会把 Hub 自己的 Node 进程（`steve-hub --local-node`）一起停掉；以前 Hub 停了它还留着，卸载之后成了没人管的进程。Hub 重启和升级时它照旧继续运行，进行中的会话不会中断。

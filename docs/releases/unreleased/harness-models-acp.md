@@ -1,6 +1,0 @@
-- 设置 · 模型、Bot 的模型选择器和"运行环境"列表里的模型、默认模型和思考强度，都来自各 harness 适配器自己报告的（Node 探测时开的临时会话里的 `model` 和 `thought_level` 选项）；还没探测到时用该适配器声明的备用列表。不再读取 `~/.claude/settings.json` 的模型选择器，也不再运行 `codex debug models` 或读取 Codex 的 `config.toml`。自定义适配器和内置的一样出现在这些选择里。
-- Steve 的 harness 没有可用的适配器时，判断不再悄悄改用 Claude Code，而是按原 harness 去跑并在设置 · 模型里说明它现在不可用。没有指定模型时用该适配器自己的默认模型；只有声明了 `model_fallback` 的适配器（内置的 Claude Code）才会在 Bot 的模型之后接着试 `STEVE_MODELS_SMART` 的列表。
-- 去掉了只对 Codex 的两条提示（逐字输出、研究不能接着追问），这两点在 ACP 下已不成立。
-- "运行环境"里每个适配器一行：内置或自定义、是否可用（适配器缺失、`initialize` 失败、开不了会话时会写明原因）、版本，以及它支持的能力（会话、判断、图片、恢复、历史）和权限模式。Bot 设置里的权限模式和思考强度只列出该 harness 支持的。
-- 在"运行环境"下可以直接接入自己的 ACP harness：填写 id、名称、启动命令、参数和环境变量，高级里可以用 JSON 写声明的属性（会逐项检查）；保存到 Hub 的 harness 清单（`$STEVE_HOME/harness.json`，只有所有者可写，文件权限 600），重启 Hub 后生效。
-- 新建 Bot 的模板和"空白 Bot"默认用第一个可用的 harness。

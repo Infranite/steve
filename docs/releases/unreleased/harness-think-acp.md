@@ -1,7 +1,0 @@
-- Steve 自己的模型调用（路由、对话回答、草稿、标题等）一律以 ACP 单次调用跑在所选 harness 的适配器上，Hub 自带的 Node 和不带 Node 的 Hub 走同一条路；不再调用 `claude -p` 或 `codex exec`。任何在清单里声明的适配器都可以承担这些调用。
-- 适配器在 `initialize` 里声明支持会话系统提示（`sessionCapabilities.systemPrompt`）时，调用的固定前缀作为会话的系统提示发送；不需要工具的调用会替换 harness 自带的系统提示，Claude Code 还会关掉内置工具。实测一次最短的 Claude Code 调用从约 2.3 万 token 降到约 2 千 token。不支持的适配器把前缀放在消息最前面。
-- 没有指定模型时，任何 harness 都用适配器自己的默认模型（以前只有 Codex 如此，Claude Code 会报"没有可用的模型"）。
-- 适配器在一轮中途停下（例如 `max_tokens`、`refusal`）时，这次调用按失败处理并带上它给出的原因；适配器回复的错误按其内容判断是否可重试，不再区分 Claude 或 Codex 的报错格式。
-- Codex 适配器不报告用量时，从 Codex 的 rollout 文件读取这次调用的 token 数；Codex 的输入 token 不再把缓存部分重复计算（声明为适配器属性 `usage_input_includes_cache`）。
-- 统计里 Steve 自己的调用记在实际使用的 harness 适配器下（`claude-code`、`codex` 或自定义适配器的 id），原来的 `claude-cli`、`codex-cli` 记录随升级改名合并。
-- 适配器在同一轮里换了 `messageId` 时，草稿从新的一条消息开始显示。
