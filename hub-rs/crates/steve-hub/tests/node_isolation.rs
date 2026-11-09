@@ -88,6 +88,35 @@ async fn a_node_cannot_speak_for_another() {
         1
     );
 
+    // L2: A itself, naming its own turn's attempt as a job's: no such job attempt, refused
+    let job = ExecutionRef::Job {
+        job: JobId::new("j_forged").unwrap(),
+        attempt: exec.attempt().clone(),
+    };
+    let e = RemoteSink(la.link.clone())
+        .commit(EventBatch {
+            events: vec![NodeEvent {
+                schema: 1,
+                id: EventId::new("forged_job_1").unwrap(),
+                at: Timestamp(1),
+                cursor: Watermark {
+                    stream: StreamId::new("st_forged_job").unwrap(),
+                    epoch: Epoch::new("e1").unwrap(),
+                    seq: 1,
+                },
+                subject: Subject::Execution(job),
+                body: EventBody::TextDelta {
+                    message: "m".into(),
+                    block: "b".into(),
+                    utf8_offset: 0,
+                    text: "a job".into(),
+                },
+            }],
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied);
+
     // B calls Steve's tools as A's attempt: refused, the service never sees it
     let r = RemoteTools(lb.link.clone())
         .call(ToolCall {

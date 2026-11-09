@@ -70,7 +70,15 @@ impl Limiter {
         }
         let mut b = self.buckets.lock().unwrap();
         if b.len() > 10_000 {
-            b.clear();
+            // a full bucket is the same as none: dropping those forgets nothing, while a code
+            // being hammered keeps its count (M5: clearing all reset it too)
+            let now = Instant::now();
+            b.retain(|_, (tokens, at)| {
+                *tokens + now.duration_since(*at).as_secs_f64() * PER_CODE.1 < PER_CODE.0
+            });
+            if b.len() > 10_000 {
+                b.clear();
+            }
         }
         let e = b
             .entry(code_hash.to_string())
@@ -339,5 +347,30 @@ pub async fn act(
             }
             json_response(200, &json!({ "ok": true }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M5: many garbage codes no longer reset the count of the one being hammered.
+    #[test]
+    fn garbage_codes_do_not_reset_a_hammered_one() {
+        let l = Limiter::default();
+        for _ in 0..PER_CODE.0 as usize {
+            assert!(l.take("target"));
+        }
+        assert!(!l.take("target"));
+        {
+            let mut b = l.buckets.lock().unwrap();
+            let now = Instant::now();
+            for i in 0..10_001 {
+                b.insert(format!("junk{i}"), (PER_CODE.0, now));
+            }
+        }
+        *l.global.lock().unwrap() = (GLOBAL.0, Instant::now());
+        assert!(l.take("junk-new"));
+        assert!(!l.take("target"), "still out of tries");
     }
 }

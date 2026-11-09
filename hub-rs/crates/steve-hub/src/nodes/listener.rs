@@ -31,11 +31,16 @@ pub async fn upgrade(
     if !svc.ingress.allows(peer, &headers) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
+    // links not yet through the handshake are bounded (M5): many half-sent hellos cost memory
+    // and the store's blocking pool, and a Node that is turned away dials again shortly
+    let Ok(unproven) = svc.handshakes.clone().try_acquire_owned() else {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     ws.max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
         .on_upgrade(move |socket| async move {
             let (sink, stream) = split(socket);
-            serve(svc, sink, stream).await;
+            serve_after(svc, sink, stream, Some(unproven)).await;
         })
 }
 
@@ -138,19 +143,30 @@ impl Handler for LinkHandler {
 }
 
 /// Runs one link from the handshake to its close.
-pub async fn serve(svc: Arc<NodeService>, mut sink: FrameSink, mut stream: FrameStream) {
+pub async fn serve(svc: Arc<NodeService>, sink: FrameSink, stream: FrameStream) {
+    serve_after(svc, sink, stream, None).await
+}
+
+/// `unproven`: this link's place among those still in the handshake, given back once it is done.
+async fn serve_after(
+    svc: Arc<NodeService>,
+    mut sink: FrameSink,
+    mut stream: FrameStream,
+    unproven: Option<tokio::sync::OwnedSemaphorePermit>,
+) {
     let admit = Admit {
         svc: svc.clone(),
         previous: Mutex::new(None),
     };
-    let (hello, admitted) =
-        match handshake::accept(&mut sink, &mut stream, &svc.hub_id, &admit).await {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::info!("node link refused: {e}");
-                return;
-            }
-        };
+    let accepted = handshake::accept(&mut sink, &mut stream, &svc.hub_id, &admit).await;
+    drop(unproven);
+    let (hello, admitted) = match accepted {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::info!("node link refused: {e}");
+            return;
+        }
+    };
     let node = hello.node_id.clone();
     let generation = admitted.generation;
     let ctx = LinkCtx {
