@@ -517,6 +517,10 @@ pub(crate) fn remove(
             }
             Ok(None)
         }
+        PrepareKind::Staging { .. } => {
+            let mirror = repo.ok_or("no mirror")?;
+            crate::staging::remove(commands, mirror, path).map(|_| None)
+        }
         PrepareKind::Worktree { .. } => {
             let repo = repo.ok_or("no repository")?;
             if path.exists() {

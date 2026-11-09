@@ -58,10 +58,10 @@ impl GitPush {
 }
 
 /// The header's value for a token, as GitHub takes it over HTTPS.
-struct HeaderValue(Zeroizing<Vec<u8>>);
+pub(super) struct HeaderValue(Zeroizing<Vec<u8>>);
 
 impl HeaderValue {
-    fn of(token: &str) -> HeaderValue {
+    pub(super) fn of(token: &str) -> HeaderValue {
         let pair = Zeroizing::new(format!("x-access-token:{token}"));
         let b64 = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(pair.as_bytes()));
         let mut v = Zeroizing::new(Vec::with_capacity(6 + b64.len()));

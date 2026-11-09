@@ -218,6 +218,13 @@ impl ExecutionControl for RemoteNode {
 #[async_trait]
 impl WorkspaceExecutor for RemoteNode {
     async fn prepare_workspace(&self, c: Command<Prepare>) -> ApiResult<Receipt> {
+        // the merge queue's staging is on the Hub's own Node for now: nothing is sent
+        if matches!(c.body.kind, PrepareKind::Staging { .. }) {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "merge-queue staging is not on a remote node yet",
+            ));
+        }
         self.cmd(WORKSPACE_PREPARE, &c, false).await
     }
     async fn workspace(&self, w: WorkspaceRef) -> ApiResult<WorkspaceView> {
@@ -238,6 +245,12 @@ impl WorkspaceExecutor for RemoteNode {
             // a merge's message and back-out, a push's url, origin and local guards: 0.2
             GitAction::Merge { .. } => self.needs(2, "merge")?,
             GitAction::Push { .. } => self.needs(2, "push")?,
+            GitAction::Reset { .. } => {
+                return Err(ApiError::new(
+                    ErrorCode::Unsupported,
+                    "merge-queue staging is not on a remote node yet",
+                ));
+            }
         }
         self.cmd(GIT_APPLY, &c, false).await
     }

@@ -1784,6 +1784,7 @@ impl WorkspaceExecutor for FakeNode {
             let root = match &c.body.kind {
                 PrepareKind::Existing { dir } => Some(dir.root.clone()),
                 PrepareKind::Worktree { repository, .. } => Some(repository.root.clone()),
+                PrepareKind::Staging { source, .. } => Some(source.root.clone()),
                 PrepareKind::Scratch => None,
             };
             if let Some(r) = &root
@@ -1810,7 +1811,8 @@ impl WorkspaceExecutor for FakeNode {
                 }
                 None => {
                     let branch = match &c.body.kind {
-                        PrepareKind::Worktree { branch, .. } => Some(branch.clone()),
+                        PrepareKind::Worktree { branch, .. }
+                        | PrepareKind::Staging { branch, .. } => Some(branch.clone()),
                         _ => None,
                     };
                     let incarnation = Self::next(st);
@@ -1957,7 +1959,7 @@ impl WorkspaceExecutor for FakeNode {
             let mut next = st.git[&w.id].clone();
             if matches!(
                 c.body.action,
-                GitAction::Rebase { .. } | GitAction::Merge { .. }
+                GitAction::Rebase { .. } | GitAction::Merge { .. } | GitAction::Reset { .. }
             ) {
                 next.head = format!("c{}", Self::next(st));
             }
