@@ -13,6 +13,7 @@
 
 mod acp_job;
 mod actor;
+mod adapter_probe;
 mod artifact;
 mod attachments;
 mod confine;
@@ -338,6 +339,8 @@ pub(crate) struct Inner {
     /// no harness binary.
     discovery: std::sync::RwLock<Option<Arc<history::DiscoveryConfig>>>,
     probes: history::Probes,
+    /// What each adapter said to `initialize` ([`adapter_probe`]).
+    adapter_probes: adapter_probe::AdapterProbes,
     imports: history::Imports,
     research: research::Research,
     /// The OS sandbox around what this Node starts for runs ([`confine`]).
@@ -591,37 +594,6 @@ pub(crate) fn workspace_dir(inner: &Inner, w: &WorkspaceRef) -> ApiResult<PathBu
         &inner.roots(),
         matches!(row.kind, PrepareKind::Existing { .. }),
     )
-}
-
-/// The ACP mode for a permission mode (Steve's names; Codex maps them to its sandbox modes). Ask is
-/// set explicitly, so what the adapter remembered never stays.
-pub(crate) fn mode(harness: &str, p: PermissionMode) -> Option<String> {
-    let legacy = match p {
-        PermissionMode::Plan => "plan",
-        PermissionMode::Ask => "default",
-        PermissionMode::AcceptEdits => "acceptEdits",
-        PermissionMode::Auto => "auto",
-        PermissionMode::FullAccess => "bypassPermissions",
-    };
-    if harness == "codex" {
-        Some(steve_acp::codex_mode(Some(legacy)).to_string())
-    } else {
-        Some(legacy.to_string())
-    }
-}
-
-/// The `_meta` of `session/new|load` for `harness`: Claude Code is told to deny its file tools the
-/// Hub's secret files under `steve_home` in every permission mode (a program its Bash runs is not
-/// bound by that). Codex gets none yet: codex-acp's `session/set_mode` replaces the permission
-/// profile with the mode's built-in one, so deny entries do not survive it; and once a profile has
-/// deny-read entries, codex-core keeps a command the user approved to run outside the sandbox inside
-/// it (`sandbox_permissions_preserving_denied_reads`), so Ask mode could no longer write anything.
-pub(crate) fn harness_meta(harness: &str, steve_home: &Path) -> Option<Value> {
-    (harness == "claude-code").then(|| {
-        json!({ "claudeCode": { "options": {
-            "settings": steve_vault::harness::claude_settings(steve_home),
-        } } })
-    })
 }
 
 /// Steve's tool server for a new adapter process of `session` (a fresh token; the old ones go).
@@ -1359,6 +1331,7 @@ impl LocalNode {
             roots_file: Mutex::new(None),
             discovery: std::sync::RwLock::new(None),
             probes: Default::default(),
+            adapter_probes: Default::default(),
             imports: Default::default(),
             cfg,
             j,
@@ -3712,10 +3685,17 @@ impl Discovery for LocalNode {
             .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
     }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {
-        let probed = match self.discovery() {
-            Ok(d) => self.0.probes.get(&d, fresh).await,
-            Err(_) => Default::default(),
+        let binaries = async {
+            match self.discovery() {
+                Ok(d) => self.0.probes.get(&d, fresh).await,
+                Err(_) => Default::default(),
+            }
         };
+        let adapters = self
+            .0
+            .adapter_probes
+            .get(&self.0.cfg.acp, &self.0.cfg.home, fresh);
+        let (probed, adapters) = tokio::join!(binaries, adapters);
         let mut harnesses: Vec<HarnessCapability> = self
             .0
             .cfg
@@ -3724,7 +3704,7 @@ impl Discovery for LocalNode {
             .keys()
             .map(|h| {
                 let p = probed.get(h).cloned().unwrap_or_default();
-                HarnessCapability {
+                let mut c = HarnessCapability {
                     name: h.clone(),
                     version: p.version,
                     sessions: true,
@@ -3735,7 +3715,10 @@ impl Discovery for LocalNode {
                     permissions: true,
                     images: true,
                     enforcement: vec![],
-                }
+                    adapter: None,
+                };
+                adapter_probe::apply(&self.0.cfg.acp, &mut c, adapters.get(h));
+                c
             })
             .collect();
         // Legacy CLI-only hosts may also run think jobs.
@@ -3754,6 +3737,7 @@ impl Discovery for LocalNode {
                         permissions: false,
                         images: true,
                         enforcement: vec![],
+                        adapter: None,
                     }),
                 }
             }

@@ -3,7 +3,7 @@
 //! still names one is listed in `tests/harness_parity.txt` (file, pattern, count); a new one fails
 //! the test, and so does a listed one that is gone, so the list only shrinks. The adapter layer,
 //! where the built-in adapters are described as data, is the one place names belong
-//! (`steve-acp/src/config.rs`).
+//! (`steve-acp/src/config.rs`, `steve-acp/src/adapters.rs`).
 //!
 //! It reads every workspace crate's production sources (the module tree from `src/lib.rs` and
 //! `src/main.rs`, without comments and test-only items) with the Node boundary guard's reader.
@@ -37,7 +37,7 @@ const CODE: &[&str] = &[
 ];
 
 /// Where the built-in adapters are described as data.
-const ADAPTER_LAYER: &[&str] = &["steve-acp/src/config.rs"];
+const ADAPTER_LAYER: &[&str] = &["steve-acp/src/config.rs", "steve-acp/src/adapters.rs"];
 
 const LIST: &str = "tests/harness_parity.txt";
 

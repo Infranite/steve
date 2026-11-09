@@ -176,7 +176,7 @@ impl LocalNode {
         let sandbox = if acp {
             acp::sandbox_mode(
                 &p.sandbox,
-                self.0.cfg.acp.adapter_properties(&run.choice.harness),
+                &self.0.cfg.acp.adapter_properties(&run.choice.harness),
             )?
         } else {
             sandbox_mode(&p.sandbox, codex)?

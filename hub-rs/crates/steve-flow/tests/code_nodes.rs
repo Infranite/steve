@@ -876,6 +876,7 @@ mod on_node {
                 node: NodeId::new("local").unwrap(),
                 home: home.path().join("node"),
                 acp: steve_acp::AcpConfig {
+                    declared: Default::default(),
                     adapters: HashMap::new(),
                     node: "node".into(),
                     claude_executable: "/usr/bin/false".into(),

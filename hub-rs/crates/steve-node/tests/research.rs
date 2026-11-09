@@ -78,6 +78,7 @@ impl T {
             node: NodeId::new("hub").unwrap(),
             home: root.join("node"),
             acp: AcpConfig {
+                declared: Default::default(),
                 adapters: HashMap::new(),
                 node: "node".into(),
                 claude_executable: "claude".into(),

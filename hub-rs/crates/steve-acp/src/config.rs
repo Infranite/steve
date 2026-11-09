@@ -6,67 +6,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// Host integration properties of the bundled adapters. Callers select policy by capabilities,
-/// never by a harness name. `self_read_only` applies only after selecting its ACP read-only mode.
-#[derive(Debug, Clone, Copy)]
-pub struct AdapterProperties {
-    pub self_read_only: bool,
-    pub nested_sandbox: bool,
-    /// Where the harness keeps its configuration, logins and history, when it can be moved: what
-    /// gives each principal its own (`None`: it cannot, and every run uses the Node's).
-    pub state: Option<StateDir>,
-}
-
-/// A harness's own directory (path model §4.5.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StateDir {
-    /// The variable that moves it.
-    pub env: &'static str,
-    /// Where it is under the user's home when the variable is not set.
-    pub default: &'static str,
-    /// What of the Node owner's own directory the owner's state starts with (their own settings,
-    /// never anyone else's; a login only where a copy cannot sign the original out).
-    pub import: &'static [&'static str],
-}
-
-const CLAUDE_STATE: StateDir = StateDir {
-    env: "CLAUDE_CONFIG_DIR",
-    default: ".claude",
-    import: &["settings.json"],
-};
-
-const BUNDLED_PROPERTIES: &[(&str, AdapterProperties)] = &[
-    (
-        "claude-code",
-        AdapterProperties {
-            self_read_only: false,
-            nested_sandbox: true,
-            state: Some(CLAUDE_STATE),
-        },
-    ),
-    (
-        "codex",
-        AdapterProperties {
-            self_read_only: true,
-            nested_sandbox: false,
-            state: Some(StateDir {
-                env: "CODEX_HOME",
-                default: ".codex",
-                // not its login: copies refreshing on their own would sign the owner's out
-                import: &["config.toml"],
-            }),
-        },
-    ),
-];
-
 /// Everything the ACP driver needs from the configuration (the Node's, built from the Hub's).
 #[derive(Debug, Clone)]
 pub struct AcpConfig {
     /// Adapter entry point per harness (`claude-code`, `codex`). A `.js` path runs with [`Self::node`].
     pub adapters: HashMap<String, PathBuf>,
+    /// What the manifest declares about adapters beyond their command ([`crate::adapters`]).
+    pub declared: HashMap<String, crate::adapters::Declaration>,
     /// Node used for `.js` adapters (TS used its own `process.execPath`). `STEVE_NODE`, else `node` on PATH.
     pub node: PathBuf,
-    /// Passed to adapters as `CLAUDE_CODE_EXECUTABLE`.
+    /// The harness executable, passed to an adapter that declares a variable for it
+    /// (`executable_env`).
     pub claude_executable: PathBuf,
     /// `STEVE_HOME`; the sanitized Codex catalog goes to `<home>/codex/models.json`.
     pub steve_home: PathBuf,
@@ -145,18 +95,6 @@ fn home_dir() -> PathBuf {
 }
 
 impl AcpConfig {
-    pub fn adapter_properties(&self, harness: &str) -> AdapterProperties {
-        BUNDLED_PROPERTIES
-            .iter()
-            .find(|(name, _)| *name == harness)
-            .map(|(_, properties)| *properties)
-            .unwrap_or(AdapterProperties {
-                self_read_only: false,
-                nested_sandbox: true,
-                state: None,
-            })
-    }
-
     /// Reads the same environment variables as config.ts. `npm root -g` only runs when an adapter
     /// path is not given explicitly.
     pub fn from_env() -> Self {
@@ -173,6 +111,7 @@ impl AcpConfig {
                 ("claude-code".to_owned(), claude),
                 ("codex".to_owned(), codex),
             ]),
+            declared: HashMap::new(),
             // `STEVE_NODE=local` is the deprecated 0.2.50 spelling of STEVE_NODE_MODE=local (the
             // Steve Node switch), not a Node.js binary
             node: var("STEVE_NODE")
@@ -198,7 +137,7 @@ impl AcpConfig {
 
 impl AcpConfig {
     /// The program and arguments that start `harness`'s adapter (a `.js` adapter runs through node;
-    /// Codex gets its catalog and home).
+    /// then the declared extras and arguments, [`crate::adapters`]).
     pub fn adapter_command(
         &self,
         harness: &str,
@@ -207,14 +146,7 @@ impl AcpConfig {
             .adapters
             .get(harness)
             .ok_or_else(|| format!("no adapter for harness {harness}"))?;
-        let extra: Vec<std::ffi::OsString> = if harness == "codex" {
-            crate::codex::codex_args(&self.codex_home, &self.steve_home, &self.user_home)
-                .into_iter()
-                .map(std::ffi::OsString::from)
-                .collect()
-        } else {
-            vec![]
-        };
+        let extra = self.launch_args(harness);
         Ok(if cmd.extension().is_some_and(|e| e == "js") {
             (
                 self.node.clone(),

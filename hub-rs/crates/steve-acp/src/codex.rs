@@ -15,20 +15,6 @@ use serde_json::Value;
 
 const EFFORTS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
-/// Steve's permission modes in Codex terms. Codex has no plan mode and its own default may be full
-/// access, so the mode is always set: read-only asks before every edit or command, auto works inside
-/// the workspace and asks before network access or writes outside it. full-access (codex-acp's preset:
-/// sandbox `danger-full-access`, approval policy `never`) only for `bypassPermissions`, which Steve
-/// sets only while the user has switched on 完全放开 for the item.
-pub fn codex_mode(perm_mode: Option<&str>) -> &'static str {
-    match perm_mode.unwrap_or("default") {
-        "plan" | "default" => "read-only",
-        "acceptEdits" | "auto" => "auto",
-        "bypassPermissions" => "full-access",
-        _ => "read-only",
-    }
-}
-
 struct Cached {
     src: PathBuf,
     mtime: Option<SystemTime>,
@@ -155,16 +141,6 @@ pub fn codex_args(codex_home: &Path, steve_home: &Path, home: &Path) -> Vec<Stri
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn modes() {
-        assert_eq!(codex_mode(None), "read-only");
-        assert_eq!(codex_mode(Some("plan")), "read-only");
-        assert_eq!(codex_mode(Some("acceptEdits")), "auto");
-        assert_eq!(codex_mode(Some("auto")), "auto");
-        assert_eq!(codex_mode(Some("weird")), "read-only");
-        assert_eq!(codex_mode(Some("bypassPermissions")), "full-access");
-    }
 
     #[test]
     fn sanitizes_models() {

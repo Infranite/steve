@@ -7,7 +7,7 @@ use crate::ids::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessCapability {
-    /// `claude-code`, `codex`.
+    /// The harness adapter's id (`claude-code`, `codex`, or any id a manifest declares).
     pub name: String,
     /// What the harness itself reports (`claude --version`), filled by a probe; empty when unknown.
     pub version: String,
@@ -22,6 +22,64 @@ pub struct HarnessCapability {
     pub images: bool,
     /// Guarantees it can enforce (`fs-readonly`, `no-network`…), Steve's names.
     pub enforcement: Vec<String>,
+    /// What its adapter is and said about itself (`initialize`), when the Node asked it. Older
+    /// Nodes send none: their two built-in harnesses as they always were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<AdapterInfo>,
+}
+
+/// A harness adapter as its Node knows it (harness parity S1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterInfo {
+    /// For people: the declared name, or what the adapter calls itself.
+    pub title: String,
+    /// One of Steve's built-in entries, not one the Node's manifest added.
+    #[serde(default)]
+    pub builtin: bool,
+    pub status: AdapterStatus,
+    /// Why it is not ready (no stderr, no arguments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// `agentInfo.version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// `loadSession`: a session can be continued.
+    #[serde(default)]
+    pub load_session: bool,
+    /// `sessionCapabilities.list`: its sessions can be listed.
+    #[serde(default)]
+    pub list_sessions: bool,
+    /// `mcpCapabilities.http`: Steve's tools reach it over HTTP.
+    #[serde(default)]
+    pub mcp_http: bool,
+    /// `promptCapabilities.embeddedContext`.
+    #[serde(default)]
+    pub embedded_context: bool,
+    /// The ways it offers to sign in (`authMethods`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth: Vec<AdapterAuth>,
+    /// How to install it, for people.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterStatus {
+    /// `initialize` succeeded.
+    Ready,
+    /// Its command could not be started.
+    AdapterMissing,
+    /// It started, but `initialize` failed or did not answer in time.
+    InitializeFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterAuth {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

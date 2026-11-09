@@ -158,6 +158,9 @@ pub struct Config {
     pub codex_executable: String,
     /// Adapter entry point per harness id; a `.js` path runs with `node`.
     pub adapters: BTreeMap<String, String>,
+    /// What the Hub's harness manifest declares about adapters beyond their command
+    /// (`STEVE_HARNESS_MANIFEST`, default `<STEVE_HOME>/harness.json`; [`steve_acp::adapters`]).
+    pub declared_adapters: BTreeMap<String, steve_acp::Declaration>,
     pub models: Models,
     /// Model for bots that don't pick one, per harness.
     pub default_models: BTreeMap<String, String>,
@@ -305,6 +308,40 @@ fn npm_root() -> String {
 
 /// codex-acp's bin is a Node wrapper that spawnSyncs a native binary; killing the wrapper would orphan it,
 /// so Steve runs the platform binary directly when it is installed.
+/// The adapters a harness manifest (`{"adapters": {…}}`, as a Node's `harness.json`) lists. A file
+/// that is missing lists none; one that does not read is logged and ignored, never a reason not to
+/// start.
+fn harness_manifest(
+    path: &Path,
+) -> (
+    std::collections::HashMap<String, PathBuf>,
+    BTreeMap<String, steve_acp::Declaration>,
+) {
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        #[serde(default)]
+        adapters: std::collections::HashMap<String, steve_acp::AdapterEntry>,
+    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Default::default(),
+        Err(e) => {
+            tracing::warn!("harness manifest {}: {e}; ignored", path.display());
+            return Default::default();
+        }
+    };
+    match serde_json::from_str::<Manifest>(&text) {
+        Ok(m) => {
+            let (commands, declared) = steve_acp::adapters::split_entries(m.adapters);
+            (commands, declared.into_iter().collect())
+        }
+        Err(e) => {
+            tracing::warn!("harness manifest {}: {e}; ignored", path.display());
+            Default::default()
+        }
+    }
+}
+
 fn codex_adapter(root: &str) -> String {
     let pkg = Path::new(root).join("@zed-industries/codex-acp");
     let (os, arch) = npm_platform();
@@ -421,20 +458,40 @@ impl Config {
             }
         };
 
+        // the harness manifest: adapters of one's own, and commands for the built-in ones where no
+        // STEVE_ADAPTER_* names one
+        let manifest = get("STEVE_HARNESS_MANIFEST")
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("harness.json"));
+        let (mut commands, declared_adapters) = harness_manifest(&manifest);
         // npm root -g only when an adapter default is actually needed
         let mut root: Option<String> = None;
         let mut npm = || root.get_or_insert_with(npm_root).clone();
-        let claude_adapter = get("STEVE_ADAPTER_CLAUDE").unwrap_or_else(|| {
-            Path::new(&npm())
+        let claude_default = |root: &str| {
+            Path::new(root)
                 .join("@agentclientprotocol/claude-agent-acp/dist/index.js")
                 .to_string_lossy()
                 .into_owned()
-        });
-        let codex = get("STEVE_ADAPTER_CODEX").unwrap_or_else(|| codex_adapter(&npm()));
-        let adapters = BTreeMap::from([
-            ("claude-code".to_string(), claude_adapter),
-            ("codex".to_string(), codex),
-        ]);
+        };
+        type Fallback<'a> = &'a dyn Fn(&str) -> String;
+        let builtin: [(&str, &str, Fallback); 2] = [
+            ("claude-code", "STEVE_ADAPTER_CLAUDE", &claude_default),
+            ("codex", "STEVE_ADAPTER_CODEX", &codex_adapter),
+        ];
+        let mut adapters = BTreeMap::new();
+        for (id, var, default) in builtin {
+            let declared = commands
+                .remove(id)
+                .map(|c| c.to_string_lossy().into_owned());
+            let command = get(var).or(declared).unwrap_or_else(|| default(&npm()));
+            adapters.insert(id.to_string(), command);
+        }
+        adapters.extend(
+            commands
+                .into_iter()
+                .map(|(id, c)| (id, c.to_string_lossy().into_owned())),
+        );
 
         let split = |s: String| s.split(',').map(str::to_string).collect::<Vec<_>>();
         let idle_raw = env("STEVE_IDLE_RELEASE_MS", "600000");
@@ -481,6 +538,7 @@ impl Config {
                     .to_string()
             }),
             adapters,
+            declared_adapters,
             models: Models {
                 fast: split(env(
                     "STEVE_MODELS_FAST",
@@ -530,6 +588,12 @@ impl Config {
 
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("steve.sqlite3")
+    }
+
+    /// The harness adapters the Hub knows (built-in, and its manifest's), sorted: what a bot may
+    /// run on.
+    pub fn harness_ids(&self) -> Vec<String> {
+        self.adapters.keys().cloned().collect()
     }
 
     /// The `last.json` the release script writes (ops/release.sh).
@@ -679,6 +743,30 @@ mod tests {
                 .as_deref(),
             Some("env")
         );
+    }
+
+    /// Harness parity S1: the Hub's own manifest adds adapters and declarations; an explicit
+    /// STEVE_ADAPTER_* still wins, and a manifest that does not read is ignored, not fatal.
+    #[test]
+    fn the_harness_manifest_adds_adapters() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_str().unwrap();
+        std::fs::write(
+            dir.path().join("harness.json"),
+            r#"{"adapters": {"claude-code": "/m/claude.js", "codex": "/m/codex",
+                "mine": {"command": "/m/mine", "name": "Mine"}}}"#,
+        )
+        .unwrap();
+        let c = cfg(&[("STEVE_HOME", home)]);
+        assert_eq!(c.adapters["mine"], "/m/mine");
+        assert_eq!(c.declared_adapters["mine"].name.as_deref(), Some("Mine"));
+        // the test's explicit STEVE_ADAPTER_* stay
+        assert_eq!(c.adapters["claude-code"], "/x/claude.js");
+        assert_eq!(c.adapters["codex"], "/x/codex");
+        std::fs::write(dir.path().join("harness.json"), "not json").unwrap();
+        let c = cfg(&[("STEVE_HOME", home)]);
+        assert!(!c.adapters.contains_key("mine"));
+        assert!(c.declared_adapters.is_empty());
     }
 
     #[test]

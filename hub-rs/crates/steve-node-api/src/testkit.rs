@@ -2208,6 +2208,7 @@ impl Discovery for FakeNode {
                 permissions: true,
                 images: true,
                 enforcement: vec![],
+                adapter: None,
             }],
             roots: st.roots.clone(),
             capacity,

@@ -50,6 +50,7 @@ fn setup(codex: &str) -> T {
         node: NodeId::new("local").unwrap(),
         home: root.join("node"),
         acp: AcpConfig {
+            declared: Default::default(),
             adapters: HashMap::from([
                 ("claude-code".to_string(), PathBuf::from("/usr/bin/false")),
                 ("codex".to_string(), PathBuf::from("/usr/bin/false")),

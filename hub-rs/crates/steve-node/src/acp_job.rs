@@ -214,10 +214,7 @@ pub(crate) async fn run(
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bytes = AtomicU64::new(0);
         let max_output_bytes = req.max_output_bytes;
-        let mut env = vec![(
-            "CLAUDE_CODE_EXECUTABLE".into(),
-            req.cfg.claude_executable.clone().into_os_string(),
-        )];
+        let mut env = req.cfg.adapter_env(req.harness);
         if let Some(profile) = req.sandbox
             && let Some(parent) = profile.parent()
         {
@@ -280,7 +277,7 @@ pub(crate) async fn run(
                 model: req.model,
                 effort: req.effort,
             },
-            crate::harness_meta(req.harness, &req.cfg.steve_home),
+            req.cfg.session_meta(req.harness),
             &reports,
         );
         tokio::pin!(opening);
@@ -398,6 +395,7 @@ for line in sys.stdin:
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         AcpConfig {
+            declared: Default::default(),
             adapters: HashMap::from([("neutral-test".into(), path)]),
             node: "node".into(),
             claude_executable: "unused".into(),
@@ -479,10 +477,7 @@ for line in sys.stdin:
             req.resume = resume;
             let out = run(req, &|_| true, &|_| {}).await.unwrap();
             let meta: Value = serde_json::from_str(&out.text).unwrap();
-            assert_eq!(
-                Some(meta),
-                crate::harness_meta("claude-code", &cfg.steve_home)
-            );
+            assert_eq!(Some(meta), cfg.session_meta("claude-code"));
         }
     }
 

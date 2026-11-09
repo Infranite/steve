@@ -103,6 +103,7 @@ fn local_config(root: &Path, node: &NodeId) -> (NodeConfig, PathBuf) {
             node: node.clone(),
             home: root.join("node"),
             acp: AcpConfig {
+                declared: Default::default(),
                 adapters: HashMap::from([("claude-code".to_string(), adapter)]),
                 node: "node".into(),
                 claude_executable: "claude".into(),
