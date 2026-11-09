@@ -295,6 +295,9 @@ pub(crate) struct Inner {
     cfg: NodeConfig,
     /// The roots allowed now (set at open, replaced by the host).
     roots: std::sync::RwLock<Arc<Vec<Root>>>,
+    /// A file the Hub on this machine writes the roots to, and when it was read last
+    /// ([`LocalNode::follow_roots_file`]).
+    roots_file: Mutex<Option<(PathBuf, Option<std::time::SystemTime>)>>,
     j: Journal,
     incarnation: u64,
     _lock: HomeLock,
@@ -344,6 +347,22 @@ pub(crate) struct Inner {
 
 impl Inner {
     pub(crate) fn roots(&self) -> Arc<Vec<Root>> {
+        if let Some((path, seen)) = self.roots_file.lock().unwrap().as_mut() {
+            let changed = std::fs::metadata(&*path).and_then(|m| m.modified()).ok();
+            if changed.is_some() && changed != *seen {
+                match std::fs::read(&*path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| serde_json::from_slice::<Vec<Root>>(&b).map_err(|e| e.to_string()))
+                {
+                    Ok(roots) => {
+                        *self.roots.write().unwrap() = Arc::new(roots);
+                        *seen = changed;
+                    }
+                    // half written, say: the roots before stay, read again next time
+                    Err(e) => tracing::warn!("roots file {}: {e}", path.display()),
+                }
+            }
+        }
         self.roots.read().unwrap().clone()
     }
     pub(crate) fn fault(&self) {
@@ -1337,6 +1356,7 @@ impl LocalNode {
             confine,
             disk,
             roots: std::sync::RwLock::new(Arc::new(cfg.roots.clone())),
+            roots_file: Mutex::new(None),
             discovery: std::sync::RwLock::new(None),
             probes: Default::default(),
             imports: Default::default(),
@@ -1511,6 +1531,12 @@ impl LocalNode {
     /// command; a workspace prepared under a root that is gone now is refused when it is used.
     pub fn set_roots(&self, roots: Vec<Root>) {
         *self.0.roots.write().unwrap() = Arc::new(roots);
+    }
+
+    /// Host bridge for a Node in its own process on the Hub's machine (B1): the roots are what the
+    /// Hub last wrote to `path` (a JSON list of [`Root`]), read again whenever the file changed.
+    pub fn follow_roots_file(&self, path: PathBuf) {
+        *self.0.roots_file.lock().unwrap() = Some((path, None));
     }
 
     /// Host bridge, like [`Self::set_roots`]: where this machine's harnesses keep their history and

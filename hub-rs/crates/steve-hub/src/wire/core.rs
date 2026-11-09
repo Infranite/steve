@@ -97,7 +97,7 @@ pub struct HubHost {
     pub yolo: OnceLock<steve_core::yolo::Engine>,
     /// The local Node (`STEVE_NODE_MODE=local`): YOLO judges its requests against the directory
     /// its prepare reported ([`prepared_dir`]). Unset (a remote Node, or none): YOLO asks.
-    pub local_node: OnceLock<std::sync::Arc<steve_node::LocalNode>>,
+    pub local_node: OnceLock<std::sync::Arc<dyn super::host_node::HostNode>>,
 }
 
 impl HubHost {
@@ -125,11 +125,11 @@ impl HubHost {
 /// whose root was taken away). A store read and the local Node's own journal: never a command.
 pub(crate) fn prepared_dir(
     store: &Store,
-    local: Option<&steve_node::LocalNode>,
+    local: Option<&dyn super::host_node::HostNode>,
     w: &steve_node_api::WorkspaceRef,
 ) -> Option<steve_node::LocalDir> {
     use steve_node_api::{Command, Observed, OperationResult, Prepare, PrepareKind, Receipt};
-    let local = local.filter(|n| steve_node_api::Node::id(*n) == &w.node)?;
+    let local = local.filter(|n| n.id() == &w.node)?;
     let rows: Vec<(String, String)> = store
         .reader(|c| {
             let mut st = c.prepare_cached(
@@ -162,23 +162,14 @@ pub(crate) fn prepared_dir(
     })?;
     let home = std::env::var("HOME").ok();
     let path = std::fs::canonicalize(display_path(&view.display, home.as_deref())?).ok()?;
-    (path.is_dir() && local.holds(w, &path)).then_some(steve_node::LocalDir {
+    let adopted = matches!(kind, PrepareKind::Existing { .. });
+    (path.is_dir() && local.holds(w, &path, adopted)).then_some(steve_node::LocalDir {
         path,
         owned: !matches!(kind, PrepareKind::Existing { .. }),
     })
 }
 
-/// The absolute path a local Node's display stands for (`~` is `home`, as the Node writes it).
-fn display_path(display: &str, home: Option<&str>) -> Option<PathBuf> {
-    let path = match display.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            PathBuf::from(format!("{}{rest}", home.filter(|h| !h.is_empty())?))
-        }
-        Some(_) => return None,
-        None => PathBuf::from(display),
-    };
-    path.is_absolute().then_some(path)
-}
+use super::host_node::display_path;
 
 /// What YOLO's tool guard reads of a Node's permission request: the action as Steve states it,
 /// its paths under the bound workspace's real directory on this machine (`dir`, from the local
@@ -268,7 +259,7 @@ impl super::node_runtime::NodeDomain for HubHost {
                 match self
                     .local_node
                     .get()
-                    .and_then(|n| n.local_dir(&view.workspace))
+                    .and_then(|n| n.local_dir(view))
                 {
                     Some(d) => Some(d.path),
                     None => return,
@@ -378,7 +369,7 @@ impl super::node_runtime::NodeDomain for HubHost {
             .flatten()
             .and_then(|w| serde_json::from_str::<steve_node_api::WorkspaceRef>(&w).ok());
         // where the Node said it prepared it (N0e-E11c): a directory here only on the local Node
-        let local = self.local_node.get().map(|n| &**n);
+        let local = self.local_node.get().map(|n| n.as_ref());
         let dir = bound
             .as_ref()
             .and_then(|w| prepared_dir(&self.store, local, w));
@@ -1165,7 +1156,12 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node.as_ref().map_or(0, |n| n.running_turns())
             + self.fleet.as_ref().map_or(0, |f| f.running_turns())
     }
+    /// What a release waits for: the Hub's own Node's work, unless that Node runs in a process
+    /// of its own (B1), whose turns go on through the Hub's restart.
     fn node_working(&self) -> usize {
+        if self.host.local_node.get().is_some_and(|n| !n.in_process()) {
+            return 0;
+        }
         self.node.as_ref().map_or(0, |n| n.working())
     }
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {

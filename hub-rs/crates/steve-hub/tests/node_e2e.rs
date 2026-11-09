@@ -1967,3 +1967,143 @@ fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
     }
     out
 }
+
+/// Stops the local Node a service-mode Hub started (its pid file), when the test ends either way.
+struct ServiceNodeGuard(PathBuf);
+
+impl Drop for ServiceNodeGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = std::fs::read_to_string(&self.0)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+        {
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// B1: with `STEVE_NODE_MODE=service` the Hub's own Node runs in a process of its own. A turn
+/// running there goes on while the Hub is killed (its process group only, as a service manager
+/// stops it) and started again; the restarted Hub catches up, and the turn is never sent twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_service_node_turn_outlives_the_hub() {
+    let h = Home::new();
+    let port = free_port().to_string();
+    let extra = [("STEVE_LOCAL_NODE_PORT", port.as_str())];
+    let _guard = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
+    let hub = spawn_mode(&h, Some("service"), &extra);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    assert!(
+        wait(60, || h.count(
+            "SELECT COUNT(*) FROM nodes WHERE node_id=? AND local=1 AND generation>0",
+            "local"
+        ) == 1)
+        .await,
+        "the local Node linked from its own process; log:\n{}",
+        hub_log(&h)
+    );
+    let sid = c.item(&h, "服务验收 @say hello-service-3S").await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "hello-service-3S") > 0).await,
+        "a turn on the service Node; log:\n{}",
+        hub_log(&h)
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
+            &sid
+        ),
+        1
+    );
+
+    // the Hub goes away mid-turn, the way a service manager stops it
+    let states = |h: &Home| -> String {
+        let db = h.db();
+        let mut st = db.prepare("SELECT a.state FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?").unwrap();
+        st.query_map([&sid], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let logs = |h: &Home| {
+        let tail = |p: PathBuf| {
+            let s = std::fs::read_to_string(p).unwrap_or_default();
+            let l: Vec<&str> = s.lines().collect();
+            l[l.len().saturating_sub(40)..].join("\n")
+        };
+        format!(
+            "hub:\n{}\nnode:\n{}",
+            tail(h.dir.path().join("hub.log")),
+            tail(h.steve().join("data/node/logs/local-node.log"))
+        )
+    };
+    // the item's turns so far are done
+    assert!(
+        wait(10, || attempts(&h, &sid, "finished") >= 1
+            && states(&h).split(',').all(|s| s == "finished"))
+        .await,
+        "states {}; {}",
+        states(&h),
+        logs(&h)
+    );
+    c.say(&sid, "存活验收-V6 @sleep 12000 @say survived-V6")
+        .await;
+    assert!(wait(30, || h.got("存活验收-V6") == 1).await);
+    let started = std::time::Instant::now();
+    let pid = hub.0.id() as i32;
+    unsafe { libc::killpg(pid, libc::SIGKILL) };
+    let mut hub = hub;
+    let _ = hub.0.wait();
+    std::mem::forget(hub);
+    let node_pid: i32 = std::fs::read_to_string(h.steve().join("data/node/service.pid"))
+        .expect("the Node's pid")
+        .trim()
+        .parse()
+        .expect("pid");
+    assert_eq!(
+        unsafe { libc::kill(node_pid, 0) },
+        0,
+        "the Node outlived the Hub"
+    );
+
+    let _hub = spawn_mode(&h, Some("service"), &extra);
+    serving(&h).await;
+    let tail = |p: PathBuf| {
+        let s = std::fs::read_to_string(p).unwrap_or_default();
+        let l: Vec<&str> = s.lines().collect();
+        l[l.len().saturating_sub(60)..].join("\n")
+    };
+    assert!(
+        wait(60, || h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind NOT IN ('user','queued') AND instr(data,'survived-V6')>0",
+            &sid
+        ) > 0)
+        .await,
+        "the turn finished through the Hub's restart; states {}; hub:\n{}\nnode:\n{}",
+        states(&h),
+        tail(h.dir.path().join("hub.log")),
+        tail(h.steve().join("data/node/logs/local-node.log"))
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(10),
+        "it ran its 12 s (seen from here a little later than it began), not cut short"
+    );
+    assert_eq!(attempts(&h, &sid, "unknown"), 0, "nothing left unknown");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        h.got("存活验收-V6"),
+        1,
+        "never sent again: {:?}",
+        h.prompts()
+    );
+    assert_eq!(
+        unsafe { libc::kill(node_pid, 0) },
+        0,
+        "the same Node process went on"
+    );
+}

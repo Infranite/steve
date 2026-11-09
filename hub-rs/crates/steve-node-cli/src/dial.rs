@@ -236,6 +236,29 @@ pub async fn run(home: &Home) -> Result<()> {
     .await
 }
 
+/// [`run`] for a Node whose pairing and trust its host gives (the Hub's own Node in a process of
+/// its own, B1): linked until Ctrl-C or SIGTERM, then shut down as a `steve-node` is.
+pub async fn serve_until_stopped(
+    node: LocalNode,
+    p: &Pairing,
+    id: &Identity,
+    trust: &Trust,
+) -> Result<()> {
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("installing the termination signal handler")?;
+    let stopping = async {
+        #[cfg(unix)]
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r.context("waiting for Ctrl-C"),
+            _ = terminate.recv() => Ok(()),
+        }
+        #[cfg(not(unix))]
+        tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")
+    };
+    run_until(&node, serve_at(node.clone(), None, p, id, trust), stopping).await
+}
+
 fn key_of(hex_key: &str) -> Option<[u8; 32]> {
     hex::decode(hex_key).ok()?.try_into().ok()
 }

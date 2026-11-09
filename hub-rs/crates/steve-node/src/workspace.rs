@@ -8,7 +8,7 @@ use sha2::Digest as _;
 use steve_node_api::*;
 
 /// A directory the Node lets the Hub use, by logical id.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Root {
     pub id: RootId,
     pub path: PathBuf,
@@ -37,7 +37,7 @@ pub(crate) fn dir_name(resource: &str) -> String {
 
 /// `root` joined with `rel`, resolved, and still inside `root` (symlinks included). `write`: the
 /// root must allow workspaces (a read-only root is `denied`).
-pub(crate) fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<PathBuf> {
+pub fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<PathBuf> {
     let root = roots
         .iter()
         .find(|r| r.id == at.root)
@@ -535,7 +535,7 @@ pub(crate) fn remove(
 
 /// A recorded workspace path is still a directory, and (for one under a root) still inside a root
 /// that allows workspaces.
-pub(crate) fn still_valid(path: &Path, roots: &[Root], under_root: bool) -> ApiResult<PathBuf> {
+pub fn still_valid(path: &Path, roots: &[Root], under_root: bool) -> ApiResult<PathBuf> {
     let real = path
         .canonicalize()
         .map_err(|_| ApiError::new(ErrorCode::Invalid, "the workspace directory is gone"))?;
