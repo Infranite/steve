@@ -230,6 +230,7 @@ pub(crate) async fn run(
                 cwd: req.cwd.into(),
                 env,
                 log_tag: format!("[job {}]", req.prefix),
+                clean_env: false,
             },
             1 << 20,
             move |n| {

@@ -13,6 +13,16 @@
 //! Node says so once at open: starting a run never fails because of this stage. A harness that runs
 //! its own seatbelt sandbox (an adapter declaring `nested_sandbox: false`) is not wrapped, because
 //! macOS refuses a sandbox inside a sandbox; it keeps its own.
+//!
+//! Levels (`STEVE_CONFINE`, C1):
+//! - `0` (`off`): no sandbox.
+//! - `1` (`on`, the default on macOS; opt-in on Linux): the above, and the file system isolated for
+//!   a run in a workspace: it writes only there (and the repository a worktree belongs to), in its
+//!   harness and toolchain directories, the temporary directories, the usual tool caches and the
+//!   harnesses' own homes, plus `STEVE_CONFINE_WRITABLE` (`:`-separated). Reads stay open but for
+//!   Steve's own. The environment is left as it is: what the user's system sets, the run gets.
+//! - `2`: level 1, and a fresh environment: what a new login shell of the user starts with (asked
+//!   once of `$SHELL -l`), plus what Steve sets for the run, nothing inherited from the Node.
 
 use std::ffi::OsString;
 use std::os::unix::fs::DirBuilderExt;
@@ -20,8 +30,19 @@ use std::path::{Path, PathBuf};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// The sandbox of this Node's runs: which one, how far it isolates files, and the environment
+/// runs start from at level 2.
 #[derive(Debug, Clone)]
-pub(crate) enum Confine {
+pub(crate) struct Confine {
+    sandbox: Sandbox,
+    /// Writes of a run in a workspace are kept to its own places (level 1 and up).
+    files: bool,
+    /// Level 2: the user's fresh login environment.
+    env: Option<std::sync::Arc<Vec<(OsString, OsString)>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Sandbox {
     /// Runs go unconfined: why.
     Off(String),
     /// macOS: the rules to append to a profile.
@@ -39,12 +60,27 @@ impl Confine {
     /// The sandbox for runs of a Node with these homes, tried once on `/usr/bin/true`.
     pub(crate) fn open(steve_home: &Path, node_home: &Path) -> Confine {
         let c = Self::from_env(steve_home, node_home);
-        match &c {
-            Confine::Off(why) => tracing::warn!("node: runs are not confined: {why}"),
-            Confine::Seatbelt(_) => tracing::info!("node: runs are confined (seatbelt)"),
-            Confine::Bwrap { .. } => tracing::info!("node: runs are confined (bubblewrap)"),
+        let level = match (&c.sandbox, c.files, c.env.is_some()) {
+            (Sandbox::Off(_), ..) => 0,
+            (_, _, true) => 2,
+            (_, true, _) => 1,
+            _ => 0,
+        };
+        match &c.sandbox {
+            Sandbox::Off(why) => tracing::warn!("node: runs are not confined: {why}"),
+            Sandbox::Seatbelt(_) => {
+                tracing::info!("node: runs are confined (seatbelt, level {level})")
+            }
+            Sandbox::Bwrap { .. } => {
+                tracing::info!("node: runs are confined (bubblewrap, level {level})")
+            }
         }
         c
+    }
+
+    /// Level 2: the environment a run starts from (then what Steve sets for it).
+    pub(crate) fn fresh_env(&self) -> Option<&[(OsString, OsString)]> {
+        self.env.as_deref().map(Vec::as_slice)
     }
 
     fn from_env(steve_home: &Path, node_home: &Path) -> Confine {
@@ -52,26 +88,51 @@ impl Confine {
     }
 
     pub(crate) fn choose(steve_home: &Path, node_home: &Path, mode: Option<String>) -> Confine {
-        match mode.as_deref().map(str::trim) {
-            Some("off") => return Confine::Off("STEVE_CONFINE=off".into()),
-            None | Some("") | Some("on") => {}
-            Some(other) => {
-                return Confine::Off(format!("STEVE_CONFINE={other} is not on or off"));
+        let off = |why: String| Confine {
+            sandbox: Sandbox::Off(why),
+            files: false,
+            env: None,
+        };
+        let level = match mode.as_deref().map(str::trim) {
+            Some("off") | Some("0") => {
+                return off(format!("STEVE_CONFINE={}", mode.unwrap_or_default().trim()));
             }
+            None | Some("") | Some("on") | Some("1") => 1,
+            Some("2") => 2,
+            Some(other) => {
+                return off(format!("STEVE_CONFINE={other} is not 0, 1, 2, on or off"));
+            }
+        };
+        let sandbox = Self::sandbox(steve_home, node_home, mode.as_deref());
+        if matches!(sandbox, Sandbox::Off(_)) {
+            return Confine {
+                sandbox,
+                files: false,
+                env: None,
+            };
         }
+        Confine {
+            sandbox,
+            files: level >= 1,
+            env: (level >= 2).then(|| std::sync::Arc::new(login_env())),
+        }
+    }
+
+    fn sandbox(steve_home: &Path, node_home: &Path, mode: Option<&str>) -> Sandbox {
+        let mode: Option<String> = mode.map(str::to_string);
         let c = if cfg!(target_os = "macos") {
             if !Path::new(SANDBOX_EXEC).exists() {
-                return Confine::Off(format!("{SANDBOX_EXEC} is missing"));
+                return Sandbox::Off(format!("{SANDBOX_EXEC} is missing"));
             }
             match steve_vault::harness::seatbelt_rules(steve_home, node_home) {
-                Some(rules) => Confine::Seatbelt(rules),
-                None => return Confine::Off("a Steve path cannot be written in a profile".into()),
+                Some(rules) => Sandbox::Seatbelt(rules),
+                None => return Sandbox::Off("a Steve path cannot be written in a profile".into()),
             }
         } else if cfg!(target_os = "linux") {
             // not yet tried on real Linux Nodes: only when asked for
-            if mode.as_deref().map(str::trim) != Some("on") {
-                return Confine::Off(
-                    "on Linux the sandbox is opt-in for now (STEVE_CONFINE=on)".into(),
+            if !matches!(mode.as_deref().map(str::trim), Some("on" | "1" | "2")) {
+                return Sandbox::Off(
+                    "on Linux the sandbox is opt-in for now (STEVE_CONFINE=on, 1 or 2)".into(),
                 );
             }
             let Some(bwrap) = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"]
@@ -79,17 +140,22 @@ impl Confine {
                 .map(PathBuf::from)
                 .find(|p| p.exists())
             else {
-                return Confine::Off("bwrap (bubblewrap) is not installed".into());
+                return Sandbox::Off("bwrap (bubblewrap) is not installed".into());
             };
-            Confine::Bwrap {
+            Sandbox::Bwrap {
                 bwrap,
                 steve_home: steve_home.to_path_buf(),
                 node_home: node_home.to_path_buf(),
             }
         } else {
-            return Confine::Off("no sandbox on this platform".into());
+            return Sandbox::Off("no sandbox on this platform".into());
         };
-        let (program, args) = c.wrap("/usr/bin/true".into(), vec![], &[]);
+        let probe = Confine {
+            sandbox: c.clone(),
+            files: false,
+            env: None,
+        };
+        let (program, args) = probe.wrap("/usr/bin/true".into(), vec![], &[]);
         match std::process::Command::new(&program)
             .args(&args)
             .stdin(std::process::Stdio::null())
@@ -98,34 +164,34 @@ impl Confine {
             .output()
         {
             Ok(o) if o.status.success() => c,
-            Ok(o) => Confine::Off(format!(
+            Ok(o) => Sandbox::Off(format!(
                 "the sandbox does not start here ({}: {})",
                 o.status,
                 String::from_utf8_lossy(&o.stderr).trim()
             )),
-            Err(e) => Confine::Off(format!("the sandbox does not start here ({e})")),
+            Err(e) => Sandbox::Off(format!("the sandbox does not start here ({e})")),
         }
     }
 
     /// Whether runs are confined.
     #[cfg(test)]
     pub(crate) fn on(&self) -> bool {
-        !matches!(self, Confine::Off(_))
+        !matches!(self.sandbox, Sandbox::Off(_))
     }
 
     /// The sandbox runs get (`seatbelt`, `bubblewrap`), or why they get none.
     pub(crate) fn state(&self) -> Result<&'static str, String> {
-        match self {
-            Confine::Off(why) => Err(why.clone()),
-            Confine::Seatbelt(_) => Ok("seatbelt"),
-            Confine::Bwrap { .. } => Ok("bubblewrap"),
+        match &self.sandbox {
+            Sandbox::Off(why) => Err(why.clone()),
+            Sandbox::Seatbelt(_) => Ok("seatbelt"),
+            Sandbox::Bwrap { .. } => Ok("bubblewrap"),
         }
     }
 
     /// The seatbelt rules, to append to a profile a run already has (a job's or research's own).
     pub(crate) fn seatbelt_rules(&self) -> Option<&str> {
-        match self {
-            Confine::Seatbelt(r) => Some(r),
+        match &self.sandbox {
+            Sandbox::Seatbelt(r) => Some(r),
             _ => None,
         }
     }
@@ -153,10 +219,19 @@ impl Confine {
         writable: &[PathBuf],
         cwd: Option<&Path>,
     ) -> (PathBuf, Vec<OsString>) {
-        match self {
-            Confine::Off(_) => (program, args),
-            Confine::Seatbelt(rules) => {
-                let mut profile = format!("(version 1)\n(allow default)\n{rules}");
+        // the places a run in a workspace writes, level 1 and up
+        let writes = match cwd {
+            Some(cwd) if self.files => Some(writable_places(cwd, writable)),
+            _ => None,
+        };
+        match &self.sandbox {
+            Sandbox::Off(_) => (program, args),
+            Sandbox::Seatbelt(rules) => {
+                let mut profile = String::from("(version 1)\n(allow default)\n");
+                if let Some(places) = &writes {
+                    profile.push_str(&seatbelt_writes(places));
+                }
+                profile.push_str(rules);
                 let opened = readable
                     .iter()
                     .map(|r| (r, "file-read*"))
@@ -174,7 +249,7 @@ impl Confine {
                 a.extend(args);
                 (SANDBOX_EXEC.into(), a)
             }
-            Confine::Bwrap {
+            Sandbox::Bwrap {
                 bwrap,
                 steve_home,
                 node_home,
@@ -196,7 +271,28 @@ impl Confine {
                     }
                 }
                 let p = steve_vault::harness::bwrap_plan(steve_home, node_home);
-                let mut a: Vec<OsString> = vec!["--dev-bind".into(), "/".into(), "/".into()];
+                let mut a: Vec<OsString> = match &writes {
+                    // read-only but for the run's own places
+                    Some(places) => {
+                        let mut a: Vec<OsString> = vec![
+                            "--ro-bind".into(),
+                            "/".into(),
+                            "/".into(),
+                            "--dev".into(),
+                            "/dev".into(),
+                            "--proc".into(),
+                            "/proc".into(),
+                        ];
+                        for w in places.dirs.iter().filter(|d| d.is_dir()) {
+                            a.extend(["--bind".into(), w.into(), w.into()]);
+                        }
+                        for f in places.files.iter().filter(|f| f.is_file()) {
+                            a.extend(["--bind".into(), f.into(), f.into()]);
+                        }
+                        a
+                    }
+                    None => vec!["--dev-bind".into(), "/".into(), "/".into()],
+                };
                 for d in &p.masked {
                     a.extend(["--tmpfs".into(), d.into()]);
                 }
@@ -232,6 +328,175 @@ impl Confine {
     }
 }
 
+/// Where a run in a workspace may write (level 1 and up).
+#[derive(Debug, Default)]
+pub(crate) struct Places {
+    pub dirs: Vec<PathBuf>,
+    /// Single files (the harness's own settings file in the home).
+    pub files: Vec<PathBuf>,
+}
+
+/// The caches and harness homes under the user's home a run may write: what tools write as a
+/// matter of course, so isolating files does not break them.
+const HOME_WRITABLE: &[&str] = &[
+    ".cache",
+    "Library/Caches",
+    ".npm",
+    ".pnpm-store",
+    "Library/pnpm",
+    ".local/share/pnpm",
+    ".yarn",
+    ".bun",
+    ".deno",
+    ".cargo",
+    ".rustup",
+    "go",
+    ".gradle",
+    ".m2",
+    ".nuget",
+    ".gem",
+    ".cocoapods",
+    ".local/state",
+    ".config",
+    ".claude",
+    ".codex",
+];
+
+fn writable_places(cwd: &Path, writable: &[PathBuf]) -> Places {
+    let mut dirs: Vec<PathBuf> = vec![cwd.to_path_buf()];
+    // a worktree's commits go into the repository it belongs to
+    if let Some(common) = git_common_dir(cwd) {
+        dirs.push(common);
+    }
+    dirs.extend(writable.iter().cloned());
+    for t in ["/tmp", "/private/tmp", "/var/tmp", "/private/var/folders"] {
+        dirs.push(PathBuf::from(t));
+    }
+    if let Some(t) = std::env::var_os("TMPDIR") {
+        dirs.push(PathBuf::from(t));
+    }
+    let mut files = vec![];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.extend(HOME_WRITABLE.iter().map(|d| home.join(d)));
+        files.push(home.join(".claude.json"));
+    }
+    if let Some(extra) = std::env::var_os("STEVE_CONFINE_WRITABLE") {
+        dirs.extend(std::env::split_paths(&extra).filter(|p| p.is_absolute()));
+    }
+    Places { dirs, files }
+}
+
+/// The `.git` directory a worktree's `.git` file points into (`gitdir: <repo>/.git/worktrees/x`).
+fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(cwd.join(".git")).ok()?;
+    let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+    let gitdir = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        cwd.join(gitdir)
+    };
+    let common = match std::fs::read_to_string(gitdir.join("commondir")) {
+        Ok(c) => gitdir.join(c.trim()),
+        Err(_) => gitdir.parent()?.parent()?.to_path_buf(),
+    };
+    std::fs::canonicalize(&common).ok().or(Some(common))
+}
+
+/// Seatbelt rules for [`Places`]: no write anywhere, then each place again (both as named and
+/// resolved, `/tmp` being `/private/tmp`). Rules that come after (Steve's own denials, a run's
+/// own openings) still apply over these.
+fn seatbelt_writes(places: &Places) -> String {
+    let mut s = String::from(
+        "(deny file-write*)\n(allow file-write* (literal \"/dev/null\") (subpath \"/dev\"))\n",
+    );
+    let mut seen = std::collections::HashSet::new();
+    for (p, kind) in places
+        .dirs
+        .iter()
+        .map(|d| (d, "subpath"))
+        .chain(places.files.iter().map(|f| (f, "file")))
+    {
+        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        for p in [p.clone(), real] {
+            let p = p.to_string_lossy().into_owned();
+            if p.contains(['"', '\\']) || !seen.insert((p.clone(), kind)) {
+                continue;
+            }
+            if kind == "subpath" {
+                s.push_str(&format!("(allow file-write* (subpath \"{p}\"))\n"));
+            } else {
+                // the file, and the temporary siblings it is written through
+                s.push_str(&format!(
+                    "(allow file-write* (regex #\"^{}\"))\n",
+                    regex_escape(&p)
+                ));
+            }
+        }
+    }
+    s
+}
+
+fn regex_escape(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            let special = ".^$*+?()[]{}|\\/".contains(c);
+            special
+                .then_some('\\')
+                .into_iter()
+                .chain(std::iter::once(c))
+        })
+        .collect()
+}
+
+/// What a new login shell of this user starts with (level 2): `$SHELL -l` from an empty
+/// environment but for who the user is. A shell that cannot say gives a plain one.
+fn login_env() -> Vec<(OsString, OsString)> {
+    let keep = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR"];
+    let base: Vec<(String, OsString)> = keep
+        .iter()
+        .filter_map(|k| std::env::var_os(k).map(|v| (k.to_string(), v)))
+        .collect();
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
+    let out = std::process::Command::new(&shell)
+        .args(["-l", "-c", "env -0"])
+        .env_clear()
+        .envs(base.iter().map(|(k, v)| (k, v)))
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("TERM", "xterm-256color")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let mut env: Vec<(OsString, OsString)> = match out {
+        Ok(o) if o.status.success() => o
+            .stdout
+            .split(|b| *b == 0)
+            .filter_map(|kv| {
+                let kv = std::str::from_utf8(kv).ok()?;
+                let (k, v) = kv.split_once('=')?;
+                // the shell's own bookkeeping is not the user's environment
+                (!k.is_empty() && !matches!(k, "_" | "SHLVL" | "PWD" | "OLDPWD"))
+                    .then(|| (OsString::from(k), OsString::from(v)))
+            })
+            .collect(),
+        _ => vec![],
+    };
+    for (k, v) in base {
+        if !env.iter().any(|(e, _)| e == k.as_str()) {
+            env.push((k.into(), v));
+        }
+    }
+    if !env.iter().any(|(k, _)| k == "PATH") {
+        env.push((
+            "PATH".into(),
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into(),
+        ));
+    }
+    if !env.iter().any(|(k, _)| k == "LANG") {
+        env.push(("LANG".into(), "en_US.UTF-8".into()));
+    }
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,7 +507,7 @@ mod tests {
         assert!(!Confine::choose(h, h, Some("off".into())).on());
         let c = Confine::choose(h, h, Some("maybe".into()));
         assert!(
-            matches!(&c, Confine::Off(why) if why.contains("maybe")),
+            matches!(&c.sandbox, Sandbox::Off(why) if why.contains("maybe")),
             "{c:?}"
         );
         let (p, a) = c.wrap("/bin/echo".into(), vec!["x".into()], &[]);
@@ -258,10 +523,14 @@ mod tests {
         let home = t.path().join("home");
         std::fs::create_dir_all(home.join("signing")).unwrap();
         std::fs::write(home.join("steve.env"), "").unwrap();
-        let c = Confine::Bwrap {
-            bwrap: "/usr/bin/bwrap".into(),
-            steve_home: home.clone(),
-            node_home: home.join("data/node"),
+        let c = Confine {
+            sandbox: Sandbox::Bwrap {
+                bwrap: "/usr/bin/bwrap".into(),
+                steve_home: home.clone(),
+                node_home: home.join("data/node"),
+            },
+            files: false,
+            env: None,
         };
         let real = std::fs::canonicalize(&home).unwrap();
         let (p, a) = c.wrap_in(
@@ -410,5 +679,91 @@ mod tests {
         std::fs::write(home.join("steve.env.new"), "late").unwrap();
         let o = child.wait_with_output().unwrap();
         assert!(!o.status.success(), "a late file was readable: {o:?}");
+    }
+
+    /// Level 1 on this Mac: a run writes in its own places and nowhere else; reads stay open.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn level_one_keeps_writes_to_the_runs_places() {
+        if !steve_vault::harness::seatbelt_works() {
+            eprintln!("skipped: no seatbelt here (inside a sandbox already?)");
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let (ws, other) = (root.join("ws"), root.join("other"));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("r"), "readable").unwrap();
+        // only the workspace here (the real list opens the temporary directories too)
+        let profile = format!(
+            "(version 1)\n(allow default)\n{}",
+            seatbelt_writes(&Places {
+                dirs: vec![ws.clone()],
+                files: vec![]
+            })
+        );
+        let sh = |cmd: String| {
+            std::process::Command::new(SANDBOX_EXEC)
+                .args(["-p", &profile, "/bin/sh", "-c", &cmd])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(sh(format!("echo x > {}/f", ws.display())));
+        assert!(!sh(format!("echo x > {}/f", other.display())));
+        assert!(sh(format!("cat {}/r > /dev/null", other.display())));
+        assert!(!other.join("f").exists());
+    }
+
+    /// A worktree's commits go into its repository's `.git`, which level 1 lets it write.
+    #[test]
+    fn a_worktree_finds_its_repository() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir)
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "x"]);
+        git(&repo, &["worktree", "add", "-q", "../wt"]);
+        assert_eq!(git_common_dir(&root.join("wt")), Some(repo.join(".git")));
+        assert_eq!(
+            git_common_dir(&repo),
+            None,
+            "a repository itself needs nothing more"
+        );
+    }
+
+    /// Level 2: runs start from what a login shell gives the user, not from the Node's process.
+    #[test]
+    fn level_two_is_a_fresh_login_environment() {
+        // SAFETY: a variable only this test sets and reads
+        unsafe { std::env::set_var("STEVE_CONFINE_TEST_ONLY_HERE", "1") };
+        let env = login_env();
+        let has = |k: &str| env.iter().any(|(e, _)| e == k);
+        assert!(has("HOME") && has("PATH") && has("LANG"), "{env:?}");
+        assert!(!has("STEVE_CONFINE_TEST_ONLY_HERE"), "inherited: {env:?}");
+        let h = Path::new("/nonexistent-steve-home");
+        let c = Confine::choose(h, h, Some("2".into()));
+        assert_eq!(c.fresh_env().is_some(), c.on(), "{c:?}");
+        let c = Confine::choose(h, h, Some("1".into()));
+        assert!(c.fresh_env().is_none());
+        assert!(!Confine::choose(h, h, Some("0".into())).on());
     }
 }

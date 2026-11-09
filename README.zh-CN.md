@@ -326,6 +326,8 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | `STEVE_VAULT_KEYSTORE` | `auto`（钥匙串 / Secret Service）、`dir`（配合 `STEVE_VAULT_KEY_DIR`），或测试用的 `file` |
 | `STEVE_NODE_MODE` | `local`（默认）在 Hub 进程内的本机 Node 上运行会话；`service` 让本机 Node 在单独的进程里运行，Hub 重启或升级时正在跑的回合不受影响（见 [docs/deployment.md](docs/deployment.md#the-hubs-own-node-in-a-process-of-its-own)）；`off` 时会话只排队 |
 | `STEVE_LOCAL_NODE_PORT` | `STEVE_NODE_MODE=service` 时本机 Node 连接 Hub 使用的本机回环端口（默认 Hub 端口 + 3） |
+| `STEVE_CONFINE` | Node 启动的运行进程所在的系统沙箱（macOS 用 seatbelt；Linux 用 bubblewrap，需显式开启）。分级：<br>`0`/`off`：不隔离。<br>`1`/`on`（macOS 默认）：Steve 的密钥、数据库和程序不可访问；在工作目录里运行的进程只能写自己的工作目录及其所属仓库、harness 和工具链目录、临时目录、常用的工具缓存和 harness 自己的主目录；读取不受限制，环境变量保持用户系统原样。<br>`2`：在 1 的基础上，运行进程从用户全新的登录环境启动，再加上 Steve 为它设置的变量。<br>Codex 等自带 seatbelt 沙箱的 harness 继续使用自己的沙箱 |
+| `STEVE_CONFINE_WRITABLE` | 1、2 级下额外允许写入的位置（绝对路径，用 `:` 分隔） |
 | `STEVE_NODE_LISTEN`、`STEVE_NODE_BIND` | 实验中的多设备 Node，默认关闭 |
 | `STEVE_TAILCAT`、`STEVE_TAILCAT_PORT` | 经 tailcat 接入远程 Node（可选，在“设备”页开启）：`tailcat` 不在 `PATH` 上时指定程序位置，以及只提供 Node 接口的本机端口（默认 Hub 端口 + 2） |
 | `STEVE_NODE_INSTALLERS` | 远程安装 Node 时使用的本地目录，里面放发布的 `steve-installer.json` 和安装包，供访问不了 GitHub 的 Hub 使用 |

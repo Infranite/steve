@@ -2012,6 +2012,7 @@ fn harness_state(
 fn harness_env(
     user: &[(String, String)],
     claude_executable: std::ffi::OsString,
+    path: Option<&std::ffi::OsStr>,
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     use steve_node_api::env::{PATH_PREPEND, user_env_refusal};
     let mut env: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
@@ -2021,7 +2022,10 @@ fn harness_env(
             continue;
         }
         if k == PATH_PREPEND {
-            let path = std::env::var_os("PATH").unwrap_or_default();
+            let path = path
+                .map(std::ffi::OsStr::to_os_string)
+                .or_else(|| std::env::var_os("PATH"))
+                .unwrap_or_default();
             let mut joined = std::ffi::OsString::from(v);
             if !path.is_empty() {
                 joined.push(":");
@@ -2075,6 +2079,14 @@ async fn open_harness(
         std::path::Path::new(&cwd),
         row.open.state.as_ref(),
     );
+    // level 2 of the sandbox: a fresh login environment, then Steve's own for the run
+    let fresh: Option<Vec<(std::ffi::OsString, std::ffi::OsString)>> = inner
+        .cfg
+        .acp
+        .adapter_properties(&harness)
+        .nested_sandbox
+        .then(|| inner.confine.fresh_env().map(<[_]>::to_vec))
+        .flatten();
     // in the OS sandbox, unless the harness sandboxes its own shell (macOS nests none)
     let (program, args) = if inner.cfg.acp.adapter_properties(&harness).nested_sandbox {
         inner.confine.wrap_in(
@@ -2115,9 +2127,13 @@ async fn open_harness(
             args,
             cwd: cwd.clone().into(),
             env: {
+                let base_path = fresh
+                    .as_ref()
+                    .and_then(|f| f.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone()));
                 let mut env = harness_env(
                     &row.open.env,
                     inner.cfg.acp.claude_executable.clone().into_os_string(),
+                    base_path.as_deref(),
                 );
                 // the toolchains', then Steve's own last: nothing before overrides them
                 let at = env.len().saturating_sub(1);
@@ -2125,9 +2141,16 @@ async fn open_harness(
                 if let Some((var, dir)) = &state {
                     env.push(((*var).into(), dir.clone().into_os_string()));
                 }
+                // level 2: the login environment first, everything above over it
+                if let Some(f) = &fresh {
+                    let mut all = f.clone();
+                    all.extend(env);
+                    env = all;
+                }
                 env
             },
             log_tag: format!("[node {session}]"),
+            clean_env: fresh.is_some(),
         },
         1 << 20,
         move |bytes| {
