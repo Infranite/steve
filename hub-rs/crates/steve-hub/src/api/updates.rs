@@ -119,6 +119,7 @@ mod tests {
             user: serde_json::from_value(json!({"id":"u","role":"member"})).unwrap(),
             me: "u".into(),
             ws: "owned-workspace".into(),
+            client: None,
         };
         assert!(owner(&cx).is_err());
         cx.user.insert("role".into(), json!("owner"));

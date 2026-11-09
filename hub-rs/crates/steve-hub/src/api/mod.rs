@@ -178,6 +178,9 @@ pub struct Ctx {
     pub user: Obj,
     pub me: String,
     pub ws: String,
+    /// The client signed in with an access token, and the route of this request; `None` for a
+    /// browser session (OIDC, development login).
+    pub client: Option<crate::access::ClientRef>,
 }
 
 /// Value of the first cookie called `name` (Hono `getCookie`).
@@ -225,7 +228,7 @@ fn percent_decode(s: &str) -> String {
 /// Who a request is from, and in which workspace.
 enum Who {
     Anonymous,
-    User(Ctx),
+    User(Box<Ctx>),
     /// Signed in, but the workspace it is for can't be told or isn't theirs: refused with this status
     /// and message, never quietly run in another workspace.
     Refused(u16, Refusal),
@@ -272,8 +275,35 @@ async fn lookup_user(
     headers: &HeaderMap,
     query: Option<&str>,
     write: bool,
+    peer: Option<std::net::IpAddr>,
 ) -> Result<Who, ApiError> {
     let token = cookie(headers, "steve_session");
+    // a client signed in with an access token says who it is with every request (A1)
+    let signed = match (crate::access::bearer(headers), st.modules.as_ref()) {
+        (Some(cred), Some(m)) => {
+            let store = m.store.clone();
+            let found = blocking(move || {
+                store
+                    .access()
+                    .client_user(&cred)
+                    .map_err(|e| ApiError::Json(500, e.to_string()))
+            })
+            .await?;
+            let Some((u, c)) = found else {
+                return Ok(Who::Anonymous);
+            };
+            let (route, ip) = crate::access::route_of(peer, headers);
+            crate::access::seen(&m.store, &c, &route, ip);
+            Some((
+                serde_json::to_value(&u)
+                    .ok()
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default(),
+                crate::access::ClientRef::of(&c, &route),
+            ))
+        }
+        _ => None,
+    };
     // what can't carry a header (an EventSource, an <img>, a download link) names it as `?ws=`
     let named = headers
         .get("x-steve-ws")
@@ -284,11 +314,17 @@ async fn lookup_user(
     let browser = headers.contains_key("sec-fetch-site");
     let remembered = cookie(headers, "steve_ws");
     st.read(move |r| {
-        let Some(t) = token else {
-            return Ok(Who::Anonymous);
-        };
-        let Some(user) = r.user_by_session(&t)? else {
-            return Ok(Who::Anonymous);
+        let (user, client) = match signed {
+            Some((u, c)) => (u, Some(c)),
+            None => {
+                let Some(t) = token else {
+                    return Ok(Who::Anonymous);
+                };
+                let Some(user) = r.user_by_session(&t)? else {
+                    return Ok(Who::Anonymous);
+                };
+                (user, None)
+            }
         };
         let me = str_of(&user, "id");
         let mine = r.workspaces_of_user(&me)?;
@@ -308,7 +344,12 @@ async fn lookup_user(
                 },
             },
         };
-        Ok(Who::User(Ctx { user, me, ws }))
+        Ok(Who::User(Box::new(Ctx {
+            user,
+            me,
+            ws,
+            client,
+        })))
     })
     .await
 }
@@ -320,7 +361,17 @@ fn writes(req: &Request) -> bool {
     )
 }
 
+/// The address the request came from (the server is run with connect info).
+fn peer(req: &Request) -> Option<std::net::IpAddr> {
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip())
+}
+
 fn insert_caller(req: &mut Request, ctx: Ctx) {
+    if let Some(c) = &ctx.client {
+        req.extensions_mut().insert(c.clone());
+    }
     // the module routers read the caller from here (steve-modules B0)
     req.extensions_mut().insert(steve_modules::Caller {
         ws: ctx.ws.clone(),
@@ -340,8 +391,16 @@ fn session_optional(req: &Request) -> bool {
 /// Inserts the caller when signed in, and lets the request through either way (routes that answer a
 /// missing login themselves, like `/auth/connect/callback`).
 pub async fn optional_user(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
-    match lookup_user(&st, req.headers(), req.uri().query(), writes(&req)).await {
-        Ok(Who::User(ctx)) => insert_caller(&mut req, ctx),
+    match lookup_user(
+        &st,
+        req.headers(),
+        req.uri().query(),
+        writes(&req),
+        peer(&req),
+    )
+    .await
+    {
+        Ok(Who::User(ctx)) => insert_caller(&mut req, *ctx),
         Ok(Who::Anonymous | Who::Refused(..)) => {}
         Err(e) => tracing::warn!("optional_user: {e}"),
     }
@@ -350,9 +409,17 @@ pub async fn optional_user(State(st): State<AppState>, mut req: Request, next: N
 
 /// `requireUser` + the workspace middleware: 401 without a live session (except [`session_optional`]).
 async fn require_user(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
-    match lookup_user(&st, req.headers(), req.uri().query(), writes(&req)).await {
+    match lookup_user(
+        &st,
+        req.headers(),
+        req.uri().query(),
+        writes(&req),
+        peer(&req),
+    )
+    .await
+    {
         Ok(Who::User(ctx)) => {
-            insert_caller(&mut req, ctx);
+            insert_caller(&mut req, *ctx);
             next.run(req).await
         }
         Ok(Who::Refused(status, why)) => json_response(status, &json!({ "error": why.message() })),

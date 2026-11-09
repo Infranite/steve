@@ -32,7 +32,7 @@ pub async fn me(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> Api
     let web_version = crate::web::web_version(&st.cfg);
     st.read(move |r| {
         let ws = r.workspaces_of_user(&c.me)?;
-        ok(json!({ "user": c.user, "version": version, "web_version": web_version, "workspaces": objs(ws), "workspace": c.ws }))
+        ok(json!({ "user": c.user, "version": version, "web_version": web_version, "workspaces": objs(ws), "workspace": c.ws, "client": c.client }))
     })
     .await
 }

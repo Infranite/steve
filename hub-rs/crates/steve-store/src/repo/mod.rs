@@ -1,6 +1,7 @@
 //! Repositories (hub/src/repo.ts). Lists are scoped to one workspace; single objects are fetched by global id.
 //! Each `store.x()` returns a borrowed view named like the TS object (`items`, `bots`, …).
 
+pub mod access;
 mod annotations;
 mod bots;
 mod catalog;
