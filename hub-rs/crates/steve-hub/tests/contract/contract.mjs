@@ -2,7 +2,7 @@
 // Contract test: run the same request script against two Hubs side by side (default: the TS Hub and the Rust
 // Hub), normalize ids/timestamps/paths, and diff every response (status, key headers, JSON shape and values)
 // plus the SSE event sequence. No agents: the ACP adapter is /usr/bin/false (sessions fail to start the same
-// way on both sides) and `claude -p` is fake-claude.mjs (canned router/draft/describe replies).
+// way on both sides) and every harness adapter is fake-claude.mjs (canned router/draft/describe replies).
 //
 // Usage: node contract.mjs [--a ts|rust|<cmd>] [--b ts|rust|<cmd>] [--only <regex>] [--keep] [--verbose] [--json <file>] [--preseed]
 //   ts   = node --import tsx hub/src/main.ts in $STEVE_TS_REPO (default ~/Agents/steve, i.e. current main)
@@ -81,9 +81,9 @@ async function startSide(name, kind, seedFirst = false) {
   const env = {
     ...process.env, HOME: fake, STEVE_HOME: home, STEVE_PORT: String(port), STEVE_HOST: "127.0.0.1", STEVE_PUBLIC_URL: `http://127.0.0.1:${port}`,
     STEVE_DEV_LOGIN: "1", STEVE_REPO: "/nonexistent", STEVE_VERSION: "contract", STEVE_VAULT_KEYSTORE: "file", STEVE_FORBID_REAL_HOSTS: "1", STEVE_WEB_DIR: web, CODEX_HOME: join(fake, ".codex"),
-    CLAUDE_CODE_EXECUTABLE: join(here, "fake-claude.mjs"), STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false",
+    CLAUDE_CODE_EXECUTABLE: join(here, "fake-claude.mjs"), STEVE_ADAPTER_CLAUDE: join(here, "fake-claude.mjs"), STEVE_ADAPTER_CODEX: join(here, "fake-claude.mjs"),
     STEVE_MODELS_FAST: "fake-fast", STEVE_MODELS_SMART: "fake-smart", STEVE_IDLE_RELEASE_MS: "600000",
-    // no harness runs on either side (the adapters are /usr/bin/false); the Rust Hub with its Node off
+    // the stand-in adapter answers Steve's own calls; the Rust Hub with its Node off
     STEVE_NODE_MODE: "off",
   }
   for (const k of ["STEVE_PUBLIC_URLS", "STEVE_OIDC_ISSUER", "STEVE_OIDC_CLIENT_ID", "STEVE_OIDC_CLIENT_SECRET", "STEVE_OIDC_CLIENT_SECRET_FILE", "STEVE_DEBUG_ROUTE"]) delete env[k]

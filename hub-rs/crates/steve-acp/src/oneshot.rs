@@ -24,6 +24,13 @@ use steve_node_api::{
 };
 use tokio::sync::mpsc;
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Why a one-shot call failed. The words a user sees are the caller's.
 #[derive(Debug, thiserror::Error)]
 pub enum OneShotError {
@@ -125,6 +132,12 @@ pub struct Request<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub resume: Option<&'a str>,
+    /// The call's stable instructions: the session's system prompt where the adapter takes one
+    /// (`sessionCapabilities.systemPrompt`), else the start of the prompt.
+    pub head: Option<&'a str>,
+    /// The call uses no tool of the harness's: the head replaces the harness's own system prompt,
+    /// and an adapter that declares how its built-in tools are switched off has them off.
+    pub tools_off: bool,
     pub prompt: Vec<Value>,
     pub mcp_servers: Value,
     /// Wraps the adapter's command (the caller's sandbox); `None`: it runs as it is.
@@ -341,11 +354,10 @@ pub async fn run(
         )
         .map_err(failed)?;
         let owned = Owned(conn.clone());
-        let mut norm = Normalizer::new(
-            req.cwd,
-            req.prefix,
-            Epoch::new(format!("{}.acp", req.prefix)).map_err(failed)?,
-        );
+        let properties = req.cfg.adapter_properties(req.harness);
+        let meter = Epoch::new(format!("{}.acp", req.prefix)).map_err(failed)?;
+        let mut norm = Normalizer::new(req.cwd, req.prefix, meter.clone())
+            .input_includes_cache(properties.usage_input_includes_cache);
         let mut out = Output::default();
         let cwd = req.cwd.to_string_lossy();
         let reports = SessionReports(req.on_session);
@@ -359,8 +371,12 @@ pub async fn run(
                 mode: None,
                 model: req.model,
                 effort: req.effort,
+                system_prompt: req.head.map(|text| session::SystemPrompt {
+                    text,
+                    replace: req.tools_off,
+                }),
             },
-            req.cfg.session_meta(req.harness),
+            req.cfg.session_meta_for(req.harness, req.tools_off),
             &reports,
         );
         tokio::pin!(opening);
@@ -385,9 +401,14 @@ pub async fn run(
         if !opened.image && req.prompt.iter().any(|p| p["type"] == "image") {
             return Err(OneShotError::Unsupported("images"));
         }
+        let mut prompt = req.prompt.clone();
+        if let Some(head) = req.head.filter(|_| !opened.system_prompt) {
+            prompt.insert(0, json!({"type": "text", "text": head}));
+        }
+        let started = now_ms();
         let prompting = conn.request(
             "session/prompt",
-            json!({"sessionId": opened.acp_id, "prompt": req.prompt}),
+            json!({"sessionId": opened.acp_id, "prompt": prompt}),
             None,
         );
         tokio::pin!(prompting);
@@ -403,6 +424,43 @@ pub async fn run(
         }
         out.events(norm.finish(), on_event);
         out.events(norm.prompt_response(&end), on_event);
+        let reported = out
+            .usage
+            .iter()
+            .any(|u| u.measurement == steve_node_api::Measurement::Final);
+        if !reported
+            && properties.usage_fallback == crate::UsageFallback::CodexRollout
+            && let Some(raw) = crate::rollout::turn_usage(
+                &req.cfg.codex_home,
+                &opened.acp_id,
+                started,
+                now_ms(),
+                Duration::from_secs(3),
+            )
+            .await
+        {
+            let n = |k: &str| raw.get(k).and_then(Value::as_u64);
+            let cached = n("cached_input_tokens");
+            let report = UsageReport {
+                report_id: format!("{}.rollout", req.prefix),
+                model: None,
+                meter_epoch: meter,
+                scope: steve_node_api::UsageScope::Main,
+                measurement: steve_node_api::Measurement::Final,
+                tokens: steve_node_api::Tokens {
+                    // the rollout counts the cache reads inside the input
+                    input: n("input_tokens").map(|i| i.saturating_sub(cached.unwrap_or(0))),
+                    output: n("output_tokens"),
+                    cache_read: cached,
+                    cache_write: None,
+                    reasoning: n("reasoning_output_tokens"),
+                },
+                context_used: None,
+                context_limit: None,
+                cost: None,
+            };
+            out.events(vec![Fact::Event(EventBody::Usage { report })], on_event);
+        }
         owned.0.kill();
         if tokio::time::timeout(Duration::from_millis(500), conn.wait_exit())
             .await
@@ -456,7 +514,9 @@ for line in sys.stdin:
     msg=json.loads(line)
     method=msg.get("method")
     if method=="initialize":
-        result={{"protocolVersion":1,"agentCapabilities":{{}}}}
+        import os
+        caps={{"sessionCapabilities":{{"systemPrompt":{{"mode":{{"override":{{}},"append":{{}}}}}}}}}} if os.path.exists(os.path.join(os.path.dirname(__file__),"system-prompt")) else {{}}
+        result={{"protocolVersion":1,"agentCapabilities":caps}}
     elif method in ("session/new","session/load"):
         opened_params=msg["params"]
         if method=="session/load":
@@ -503,6 +563,8 @@ for line in sys.stdin:
             model: None,
             effort: None,
             resume: None,
+            head: None,
+            tools_off: true,
             prompt: vec![json!({"type":"text","text":"answer"})],
             mcp_servers: json!([]),
             wrap: None,
@@ -559,7 +621,7 @@ for line in sys.stdin:
             req.resume = resume;
             let out = run(req, &|_| true, &|_| {}).await.unwrap();
             let meta: Value = serde_json::from_str(&out.text).unwrap();
-            assert_eq!(Some(meta), cfg.session_meta("claude-code"));
+            assert_eq!(Some(meta), cfg.session_meta_for("claude-code", true));
         }
     }
 
@@ -800,6 +862,33 @@ for line in sys.stdin:
             .unwrap();
         assert_eq!(out.stop_reason, "max_tokens");
         assert_eq!(out.text, "cut");
+    }
+
+    #[tokio::test]
+    async fn the_head_is_the_system_prompt_where_the_adapter_takes_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = adapter(
+            temp.path(),
+            "        chunk(json.dumps([opened_params.get('systemPrompt'), msg['params']['prompt'][0]['text']]))",
+            true,
+        );
+        let root = temp.path();
+        let said = async |tools_off| {
+            let mut req = request(&cfg, root, &|_| false);
+            req.head = Some("rules");
+            req.tools_off = tools_off;
+            let out = run(req, &|_| true, &|_| {}).await.unwrap();
+            serde_json::from_str::<Value>(&out.text).unwrap()
+        };
+        // plain ACP: the head is the prompt's first block
+        assert_eq!(said(true).await, json!([null, "rules"]));
+        std::fs::write(root.join("system-prompt"), "").unwrap();
+        // advertised: in place of the harness's own without tools, after it with them
+        assert_eq!(
+            said(true).await,
+            json!([{"mode": "override", "content": [{"type": "text", "text": "rules"}]}, "answer"])
+        );
+        assert_eq!(said(false).await[0]["mode"], "append");
     }
 
     #[tokio::test]

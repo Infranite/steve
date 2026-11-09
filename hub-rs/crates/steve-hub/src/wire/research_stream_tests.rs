@@ -71,7 +71,6 @@ impl Test {
                 execs: 0,
             },
             storage: Storage::default(),
-            jobs: Default::default(),
         };
         let node = Arc::new(LocalNode::open(cfg).unwrap());
         let mut research = steve_research::ResearchConfig::new("unused", root.join("scratch"));

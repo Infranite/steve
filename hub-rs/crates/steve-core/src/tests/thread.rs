@@ -747,14 +747,12 @@ fn notifications_and_the_read_cursor() {
     assert!(k.core.mark_notifications_seen(WS, Some(i64::MAX)).unwrap() <= crate::util::now());
 }
 
-/// Real model calls through the Claude CLI (claude-haiku-5-5; the kiro route has no upstream); `cargo test -- --ignored`.
-fn real_gateway(home: &std::path::Path) -> crate::ClaudeCli {
-    crate::ClaudeCli {
-        one: crate::LocalPrint {
-            codex: None,
-            executable: std::env::var("CLAUDE_CODE_EXECUTABLE")
-                .unwrap_or_else(|_| "/opt/homebrew/bin/claude".into())
-                .into(),
+/// Real model calls through the Claude Code adapter (claude-haiku-5-5; the kiro route has no
+/// upstream); `cargo test -- --ignored`.
+fn real_gateway(home: &std::path::Path) -> crate::InProcess {
+    crate::InProcess {
+        one: crate::LocalAcp {
+            acp: steve_acp::AcpConfig::from_env(),
             cwd: home.to_path_buf(),
         },
         fast: vec!["claude-haiku-5-5".into()],
@@ -808,6 +806,40 @@ async fn real_model_print_and_route() {
     )
     .await;
     assert!(!a.failed && a.text.contains('2'), "{a:?}");
+}
+
+/// Each built-in harness adapter answers one of Steve's calls without tools, on its default
+/// model, and its tokens are booked (Codex's from its rollout). Run with the harnesses' state
+/// somewhere of its own (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`); `cargo test -- --ignored`.
+#[tokio::test]
+#[ignore = "calls real models"]
+async fn real_adapters_answer_a_call_without_tools() {
+    use crate::gateway::{OneCall, OneModel};
+    let dir = tempfile::tempdir().unwrap();
+    let one = crate::LocalAcp {
+        acp: steve_acp::AcpConfig::from_env(),
+        cwd: dir.path().to_path_buf(),
+    };
+    for harness in steve_acp::adapters::builtin_ids() {
+        let call = OneCall {
+            prompt: &crate::gateway::with_static(
+                "Reply with only the word the user message asks for.",
+                "The word: ok",
+            ),
+            timeout: std::time::Duration::from_secs(120),
+            tools: &crate::gateway::ThinkTools::None,
+            harness,
+            images: &[],
+        };
+        let t = one.once(&call, "", None, None).await;
+        let (text, cost) = t.reply.unwrap_or_else(|e| panic!("{harness}: {e}"));
+        eprintln!("{harness}: {text:?} cost {cost:?} usage {:?}", t.usage);
+        assert!(text.to_lowercase().contains("ok"), "{harness}: {text}");
+        assert!(
+            t.usage.iter().any(|u| u.tokens.output.is_some()),
+            "{harness}: its tokens are booked"
+        );
+    }
 }
 
 /// ST-46: a button of an interface in Steve's reply is said as the user's A2UI action, once per surface.

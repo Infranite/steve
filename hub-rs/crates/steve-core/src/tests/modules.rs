@@ -2,8 +2,9 @@
 //! `Takeover` wins), prompt context in the session protocol and in chat answers, `before_undo` of a
 //! module decision, and steve-core's gateway shared as the modules' `Gateway`.
 
+use crate::InProcess;
 use crate::error::msg;
-use crate::gateway::{ClaudeCli, ModelGateway, Printed, SharedGateway};
+use crate::gateway::{ModelGateway, Printed, SharedGateway};
 use crate::repo::{Item, WS};
 use crate::runtime::Check;
 use crate::testkit::Kit;
@@ -621,24 +622,12 @@ async fn the_shared_gateway_maps_tiers_and_reports_model_and_cost() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn claude_cli_falls_back_down_the_tier_and_reports_total_cost() {
-    use std::os::unix::fs::PermissionsExt;
+async fn the_gateway_falls_back_down_the_tier_and_reports_total_cost() {
     let dir = tempfile::tempdir().unwrap();
-    let exe = dir.path().join("claude");
-    /* args: -p <prompt> --output-format json --model <m> */
-    std::fs::write(
-        &exe,
-        "#!/bin/sh\nif [ \"$6\" = bad ]; then echo nope >&2; exit 1; fi\nprintf '{\"result\":\"ok %s\",\"total_cost_usd\":0.0123}' \"$6\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let cli: Arc<dyn ModelGateway> = Arc::new(ClaudeCli {
-        one: crate::LocalPrint {
-            codex: None,
-            executable: exe,
-            cwd: dir.path().into(),
-        },
-        fast: vec!["bad".into(), "good".into()],
+    let acp = crate::testkit::FakeAcp::new(dir.path(), "ok");
+    let cli: Arc<dyn ModelGateway> = Arc::new(InProcess {
+        one: acp.one(),
+        fast: vec!["broken".into(), "good".into()],
         smart: vec![],
         models: None,
     });
@@ -648,13 +637,14 @@ async fn claude_cli_falls_back_down_the_tier_and_reports_total_cost() {
         .unwrap();
     assert_eq!(
         (o.text.as_str(), o.model.as_str(), o.cost_usd),
-        ("ok good", "good", Some(0.0123))
+        ("ok", "good", Some(0.000829045))
     );
-    let e = SharedGateway(cli)
+    // no model named: the adapter's own default answers
+    let o = SharedGateway(cli)
         .run(steve_modules::Tier::Smart, "hi", Duration::from_secs(10))
         .await
-        .unwrap_err();
-    assert_eq!(e, "没有可用的模型");
+        .unwrap();
+    assert_eq!((o.text.as_str(), o.model.as_str()), ("ok", ""));
 }
 
 struct Boom {

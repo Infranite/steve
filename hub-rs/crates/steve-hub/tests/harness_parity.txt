@@ -6,20 +6,11 @@ steve-core/src/changes.rs	"codex"	1
 steve-core/src/changes.rs	CLAUDE_CODE	1
 steve-core/src/changes.rs	harness ==	1
 steve-core/src/config.rs	"claude-code"	2
-steve-core/src/gateway.rs	"codex-cli"	1
-steve-core/src/gateway.rs	Harness::Claude	1
-steve-core/src/gateway.rs	Harness::Codex	1
-steve-core/src/gateway.rs	codex: bool	3
-steve-core/src/gateway.rs	harness ==	1
-steve-core/src/gateway.rs	models::CODEX	1
-steve-core/src/models.rs	"claude-cli"	2
 steve-core/src/models.rs	"claude-code"	2
 steve-core/src/models.rs	"codex"	2
-steve-core/src/models.rs	"codex-cli"	2
-steve-core/src/models.rs	CLAUDE_CODE	9
+steve-core/src/models.rs	CLAUDE_CODE	7
 steve-core/src/models.rs	harness ==	2
 steve-core/src/orchestrator.rs	"claude-code"	2
-steve-core/src/stats.rs	"claude-cli"	1
 steve-hub/src/api/misc.rs	"claude-code"	1
 steve-hub/src/catalog.rs	"claude"	1
 steve-hub/src/catalog.rs	CLAUDE_CODE	3
@@ -34,12 +25,7 @@ steve-hub/src/system.rs	"codex"	4
 steve-hub/src/system.rs	"codex-cli"	1
 steve-hub/src/system.rs	models::CODEX	1
 steve-hub/src/wire/acp_stats.rs	"codex"	1
-steve-hub/src/wire/node_jobs.rs	"claude-code"	1
-steve-hub/src/wire/node_jobs.rs	"codex"	1
-steve-hub/src/wire/node_jobs.rs	codex: bool	1
-steve-hub/src/wire/research.rs	"codex"	3
-steve-hub/src/wire/research.rs	codex: bool	2
-steve-hub/src/wire/research.rs	harness ==	1
+steve-hub/src/wire/research.rs	"codex"	2
 steve-hub/src/wire/store.rs	"claude-code"	1
 steve-node-api/src/run.rs	harness !=	1
 steve-node-cli/src/config.rs	"claude"	1
@@ -47,10 +33,6 @@ steve-node/src/history.rs	"claude-code"	1
 steve-node/src/history.rs	"codex"	1
 steve-node/src/history.rs	CLAUDE_CODE	7
 steve-node/src/history.rs	harness ==	1
-steve-node/src/job.rs	"claude-code"	2
-steve-node/src/job.rs	"codex"	2
-steve-node/src/job.rs	Harness::Claude	1
-steve-node/src/job.rs	Harness::Codex	1
 steve-node/src/lib.rs	CLAUDE_CODE	1
 steve-node/src/lib.rs	harness !=	2
 steve-node/src/research.rs	"claude-code"	1
@@ -66,7 +48,5 @@ steve-research/src/run.rs	harness ==	2
 steve-research/src/stream.rs	"codex"	2
 steve-stats/src/normalize.rs	"codex"	1
 steve-stats/src/normalize.rs	harness ==	1
-steve-stats/src/views.rs	"claude-cli"	1
 steve-stats/src/views.rs	"claude-code"	1
 steve-stats/src/views.rs	"codex"	1
-steve-stats/src/views.rs	"codex-cli"	1

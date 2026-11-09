@@ -51,7 +51,6 @@ use steve_node_api::*;
 use tokio::sync::mpsc;
 
 use actor::{Actor, Msg};
-pub use job::JobHarnesses;
 use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
 pub use workspace::Root;
 
@@ -75,8 +74,6 @@ pub struct NodeConfig {
     pub roots: Vec<Root>,
     pub capacity: Capacity,
     pub storage: Storage,
-    /// The CLIs think jobs run with (none: no harness runs jobs, whatever `capacity.jobs` says).
-    pub jobs: JobHarnesses,
     /// The most any Hub may ask of this Node, whatever it sends ([`PolicyCeiling`]).
     pub ceiling: PolicyCeiling,
 }
@@ -2376,9 +2373,7 @@ impl JobExecutor for LocalNode {
         if let JobWork::Research(_) = &c.body.work {
             return self.start_research(c).await;
         }
-        if self.0.cfg.capacity.jobs == 0
-            || (self.0.cfg.jobs.names().is_empty() && self.0.cfg.acp.adapters.is_empty())
-        {
+        if self.0.cfg.capacity.jobs == 0 || self.0.cfg.acp.adapters.is_empty() {
             return Err(ApiError::new(
                 ErrorCode::Unsupported,
                 "this node runs no jobs",
@@ -2391,9 +2386,7 @@ impl JobExecutor for LocalNode {
         let (r, fresh) = self.accept("start_job", &c, |t| {
             let j = &c.body;
             j.check()?;
-            if !self.0.cfg.acp.adapters.contains_key(&j.run.choice.harness)
-                && self.0.cfg.jobs.executable(&j.run.choice.harness).is_none()
-            {
+            if !self.0.cfg.acp.adapters.contains_key(&j.run.choice.harness) {
                 return Err(ApiError::new(
                     ErrorCode::Unsupported,
                     format!("no harness {} runs jobs on this node", j.run.choice.harness),
@@ -3793,27 +3786,6 @@ impl Discovery for LocalNode {
                 c
             })
             .collect();
-        // Legacy CLI-only hosts may also run think jobs.
-        if self.0.cfg.capacity.jobs > 0 {
-            for name in self.0.cfg.jobs.names() {
-                match harnesses.iter_mut().find(|h| h.name == name) {
-                    Some(h) => h.jobs = true,
-                    None => harnesses.push(HarnessCapability {
-                        name: name.into(),
-                        version: String::new(),
-                        sessions: false,
-                        jobs: true,
-                        models: vec![],
-                        resume: false,
-                        cancel: true,
-                        permissions: false,
-                        images: true,
-                        enforcement: vec![],
-                        adapter: None,
-                    }),
-                }
-            }
-        }
         harnesses.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Capabilities {
             node: self.0.cfg.node.clone(),

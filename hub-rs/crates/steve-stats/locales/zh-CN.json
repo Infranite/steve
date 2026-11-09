@@ -20,8 +20,6 @@
   "stats.label.other": "其他",
   "stats.label.claude_code": "Claude Code",
   "stats.label.codex": "Codex",
-  "stats.label.claude_cli": "claude -p",
-  "stats.label.codex_cli": "codex exec",
   "stats.label.stall": "停滞",
   "stats.label.error": "会话出错",
   "stats.label.restart": "Hub 重启",

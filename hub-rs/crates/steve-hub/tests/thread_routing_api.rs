@@ -1,6 +1,6 @@
 //! Thread routing over HTTP on the wired Hub (thread-routing R3): a clear change becomes an item,
 //! “改成在这里回答” takes it back, an answer's offer is taken once (then 409), and the new endpoints check
-//! their input. The model is a stand-in `claude` script; no agent runs (adapters are `/usr/bin/false`).
+//! their input. The model is a stand-in harness adapter that only answers Steve's own calls.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -58,28 +58,27 @@ impl Env {
     }
 }
 
-/// A `claude` that routes by the message and answers with an offer.
-fn fake_claude(dir: &Path) -> std::path::PathBuf {
+/// A harness adapter that routes by the message and answers with an offer.
+fn fake_adapter(dir: &Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let p = dir.join("claude");
-    let item = r#"{\"kind\":\"item\",\"confidence\":0.95,\"signals\":[\"change\"],\"title\":\"改按钮\",\"goal\":\"把 X 改成 Y\",\"bot\":\"steve\"}"#;
-    let answer = r#"{\"kind\":\"answer\",\"confidence\":0.9}"#;
-    let reply = r#"{\"thought\":\"\",\"answer\":\"评论是纯文本。\",\"offer\":{\"title\":\"修评论\",\"goal\":\"让评论支持 markdown\"}}"#;
+    let p = dir.join("adapter.mjs");
+    let stub = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/contract/acp-stub.mjs");
     let body = format!(
-        r#"#!/bin/sh
-# the router's rules come as --system-prompt, the message with -p
-all="$*"
-case "$all" in
-  *"You are the router"*'User message: "帮我把'*|*'User message: "帮我把'*"You are the router"*) r='{item}' ;;
-  *"You are the router"*) r='{answer}' ;;
-  *"排队"*) r='{reply}' ;;
-  *"慢慢说"*) sleep 20; r='{reply}' ;;
-  *) r='{reply}' ;;
-esac
-printf '{{"type":"result","is_error":false,"result":"%s"}}\n' "$r"
+        r#"#!/usr/bin/env node
+// the router's rules come as the session's system prompt, the message as the prompt
+import {{ serve }} from "{stub}"
+const item = {{kind: "item", confidence: 0.95, signals: ["change"], title: "改按钮", goal: "把 X 改成 Y", bot: "steve"}}
+const answer = {{kind: "answer", confidence: 0.9}}
+const reply = {{thought: "", answer: "评论是纯文本。", offer: {{title: "修评论", goal: "让评论支持 markdown"}}}}
+serve((head, rest) => {{
+  const all = head + "\n" + rest
+  if (all.includes("You are the router")) return JSON.stringify(all.includes('User message: "帮我把') ? item : answer)
+  if (!all.includes("排队") && all.includes("慢慢说")) {{ const t = Date.now(); while (Date.now() - t < 20000) {{}} }}
+  return JSON.stringify(reply)
+}})
 "#
     );
-    std::fs::write(&p, body).expect("write claude");
+    std::fs::write(&p, body).expect("write adapter");
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     p
 }
@@ -93,7 +92,7 @@ async fn start() -> Env {
         .expect("bind");
     let port = listener.local_addr().expect("addr").port();
     assert_ne!(port, 8440);
-    let claude = fake_claude(&h);
+    let adapter = fake_adapter(&h).display().to_string();
     let mut vars: HashMap<String, String> = HashMap::new();
     for (k, v) in [
         ("HOME", h.display().to_string()),
@@ -106,11 +105,11 @@ async fn start() -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_NO_RESUME", "1".into()),
-        ("CLAUDE_CODE_EXECUTABLE", claude.display().to_string()),
+        ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_MODELS_FAST", "claude-haiku-5-5".into()),
         ("STEVE_MODELS_SMART", "claude-sonnet-5-5".into()),
-        ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
-        ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
+        ("STEVE_ADAPTER_CLAUDE", adapter.clone()),
+        ("STEVE_ADAPTER_CODEX", adapter),
         ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
     ] {
         vars.insert(k.into(), v);

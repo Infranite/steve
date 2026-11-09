@@ -24,10 +24,13 @@ pub mod rpc;
 pub mod session;
 mod util;
 
-pub use adapters::{AdapterEntry, AdapterProperties, AdapterSpec, Declaration, ModeMap, StateDir};
+pub use adapters::{
+    AdapterEntry, AdapterProperties, AdapterSpec, Declaration, ModeMap, StateDir, UsageFallback,
+};
 pub use codex::{codex_args, sanitize_catalog};
 pub use config::{AcpConfig, default_claude_adapter, default_codex_adapter, npm_root};
 pub use errors::{is_dead_agent, is_transient};
+pub use oneshot::{Image, OneShotError};
 pub use rollout::find as codex_rollout;
 pub use rollout::turn_usage as codex_turn_usage;
 pub use rpc::RpcError;

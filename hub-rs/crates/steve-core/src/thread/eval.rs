@@ -25,7 +25,7 @@
 //! ([`gateway::route_many`]), outputs in `tests/batch_outputs.json`. Same bar as one at a time.
 
 use super::decide::{DecideCtx, decide, for_main, now_while_answering, without_router};
-use crate::gateway::{self, ClaudeCli, FocusItem, ModelGateway, RouteCtx, Said, Tier};
+use crate::gateway::{self, FocusItem, ModelGateway, RouteCtx, Said, Tier};
 use crate::repo::{Bot, Project, Tag};
 use serde::Deserialize;
 use serde_json::Value;
@@ -378,8 +378,8 @@ fn recorded_ahead_outputs_never_go_ahead_of_an_answer_they_need() {
 const AHEAD_BAR: f64 = 0.7;
 
 /// The real fast tier as the Hub calls it: models from STEVE_ROUTE_EVAL_MODELS through 设置 · 模型 (purpose
-/// `route`), `claude` from CLAUDE_CODE_EXECUTABLE. The directory lives as long as the gateway is used.
-fn real_gateway() -> (std::sync::Arc<ClaudeCli>, tempfile::TempDir) {
+/// `route`), the adapters as the environment names them. The directory lives as long as the gateway is used.
+fn real_gateway() -> (std::sync::Arc<crate::InProcess>, tempfile::TempDir) {
     let models: Vec<String> = std::env::var("STEVE_ROUTE_EVAL_MODELS")
         .unwrap_or_else(|_| "claude-haiku-5-5,claude-sonnet-5-5".into())
         .split(',')
@@ -406,12 +406,9 @@ fn real_gateway() -> (std::sync::Arc<ClaudeCli>, tempfile::TempDir) {
             ..Default::default()
         },
     );
-    let gw = std::sync::Arc::new(ClaudeCli {
-        one: crate::LocalPrint {
-            codex: None,
-            executable: std::env::var("CLAUDE_CODE_EXECUTABLE")
-                .unwrap_or_else(|_| "/opt/homebrew/bin/claude".into())
-                .into(),
+    let gw = std::sync::Arc::new(crate::InProcess {
+        one: crate::LocalAcp {
+            acp: steve_acp::AcpConfig::from_env(),
             cwd: dir.path().to_path_buf(),
         },
         fast: models.clone(),

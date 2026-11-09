@@ -642,7 +642,6 @@ mod tests {
                     execs: 4,
                 },
                 storage: Default::default(),
-                jobs: Default::default(),
             })
             .unwrap(),
         );
