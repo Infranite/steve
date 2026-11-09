@@ -3912,8 +3912,20 @@ async fn an_unknown_attempt_keeps_the_session_running_until_it_is_abandoned() {
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
     until("running", || h.session_status() == "running").await;
+    // the Hub's own abandon (B6) is refused here, so the attempt stays unknown for this check
+    h.node.refuse_next(
+        "abandon",
+        ApiError::new(
+            ErrorCode::Conflict,
+            "this execution is being abandoned already",
+        ),
+    );
     h.node.restart();
     h.restart_hub().await;
+    until("the Hub's abandon refused", || {
+        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='abandon' AND state IN ('finished','rejected')") == 1
+    })
+    .await;
     assert_eq!(
         h.q::<String>("SELECT state FROM runtime_attempts"),
         "unknown"
