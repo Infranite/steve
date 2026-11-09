@@ -1,7 +1,7 @@
 /* 经 tailcat 接入远程 Node（A6）：所有者开关；Hub 只把 Node 接口放进隧道。 */
 import { useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { api, type RTailcat } from "@/api"
+import { api, type RInstall, type RTailcat } from "@/api"
 import { useT } from "@/i18n"
 
 export function TailcatSection() {
@@ -32,6 +32,44 @@ export function TailcatSection() {
         <p className="text-muted-foreground">{t("shell:devices.tailcat.secret")}</p>
       </>}
       {(s.available || s.enabled) && <Button variant="outline" disabled={busy} onClick={() => void toggle()}>{s.enabled ? t("shell:devices.tailcat.off") : t("shell:devices.tailcat.on")}</Button>}
+      {s.available && <RemoteInstall />}
+    </div>
+  )
+}
+
+/* 远程安装（A6b）：目标机器上运行一行 tailcat serve，把地址贴回来，其余由 Hub 完成。 */
+function RemoteInstall() {
+  const t = useT()
+  const [op, setOp] = useState<RInstall | null>(null)
+  const [address, setAddress] = useState("")
+  const [busy, setBusy] = useState(false), [error, setError] = useState("")
+  const act = async (f: () => Promise<void>) => {
+    setBusy(true); setError("")
+    try { await f() } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
+  }
+  useEffect(() => {
+    if (op?.state !== "running") return
+    const timer = setInterval(() => { void api.install(op.id).then(setOp).catch(() => {}) }, 1000)
+    return () => clearInterval(timer)
+  }, [op?.id, op?.state])
+  if (!op) return <div className="pt-2 space-y-2" data-remote-install>
+    {error && <p role="alert" className="text-destructive">{error}</p>}
+    <Button variant="outline" disabled={busy} onClick={() => void act(async () => { setOp(await api.createInstall()) })}>{t("shell:devices.install.start")}</Button>
+  </div>
+  return (
+    <div className="border-t pt-3 space-y-2" data-remote-install>
+      <p className="font-medium">{t("shell:devices.install.title")}</p>
+      {op.state === "waiting" || op.state === "failed" ? <>
+        <p>{t("shell:devices.install.step1")}</p>
+        <code className="block break-all select-all" data-install-command>{op.command}</code>
+        <label className="block" htmlFor="install-address">{t("shell:devices.install.step2")}</label>
+        <input id="install-address" className="w-full rounded-md border bg-background px-3 py-2 font-mono" value={address} onChange={e => setAddress(e.target.value)} placeholder="tc…" autoComplete="off" spellCheck={false} data-install-address />
+        <Button disabled={busy || !address.trim()} onClick={() => void act(async () => { setOp(await api.runInstall(op.id, address)) })}>{op.state === "failed" ? t("shell:devices.install.retry") : t("shell:devices.install.run")}</Button>
+      </> : null}
+      {op.steps.length > 0 && <ol className="list-decimal pl-5 space-y-1" data-install-steps>{op.steps.map((s, i) => <li key={i} className={i === op.steps.length - 1 && op.state === "running" ? "font-medium" : "text-muted-foreground"}>{s.text}</li>)}</ol>}
+      {op.state === "done" && <p data-install-done>{t("shell:devices.install.done", { id: op.node_id ?? "" })}</p>}
+      {op.state === "failed" && op.error && <p role="alert" className="text-destructive whitespace-pre-wrap">{op.error}</p>}
+      {error && <p role="alert" className="text-destructive">{error}</p>}
     </div>
   )
 }

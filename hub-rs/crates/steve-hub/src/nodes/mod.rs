@@ -8,6 +8,7 @@
 pub mod fleet;
 pub mod guard;
 mod ingress;
+pub mod install;
 pub mod listener;
 pub mod pairing;
 pub mod registry;
@@ -79,6 +80,8 @@ pub struct NodeService {
     pub secrets: std::sync::OnceLock<Arc<crate::wire::node_secrets::NodeSecrets>>,
     /// Reaching the Node routes over tailcat (set once at boot).
     pub tailcat: std::sync::OnceLock<Arc<tailcat::Tailcat>>,
+    /// Installing Nodes on other machines over tailcat's SSH (set once at boot).
+    pub installs: std::sync::OnceLock<Arc<install::Installs>>,
 }
 
 const HUB_ID_KEY: &str = "node.hub_id";
@@ -133,6 +136,7 @@ impl NodeService {
             links: tokio::sync::Mutex::new(()),
             secrets: std::sync::OnceLock::new(),
             tailcat: std::sync::OnceLock::new(),
+            installs: std::sync::OnceLock::new(),
         }))
     }
 }
@@ -178,6 +182,9 @@ pub fn api_router(svc: Arc<NodeService>) -> Router {
         .route("/nodes", get(pairing::list))
         .route("/nodes/pairings", post(pairing::create))
         .route("/nodes/tailcat", get(tailcat::get).put(tailcat::put))
+        .route("/nodes/installs", post(install::create))
+        .route("/nodes/installs/{id}", get(install::get))
+        .route("/nodes/installs/{id}/run", post(install::run))
         .route("/nodes/{id}/{action}", post(pairing::act))
         .with_state(svc)
 }

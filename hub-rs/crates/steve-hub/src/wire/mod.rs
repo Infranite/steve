@@ -426,6 +426,11 @@ fn remote_nodes(
             .unwrap_or(cfg.listen.port.saturating_add(2));
         let t = crate::nodes::tailcat::Tailcat::new(&cfg.home, port, svc);
         let _ = svc.tailcat.set(t.clone());
+        let _ = svc.installs.set(crate::nodes::install::Installs::new(
+            &cfg.home,
+            &cfg.version,
+            &cfg.public_url,
+        ));
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(crate::nodes::tailcat::restore(t, store.clone()));
         }

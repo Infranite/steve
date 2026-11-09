@@ -72,6 +72,8 @@ export type RDevice = { id: string; name: string; roles: string[]; os: string; v
 export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null }
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
 /** remote Nodes over tailcat (A6): `hub_url` is `tailcat:<address>:<port>` once it runs */
+/** a remote install over tailcat's SSH (A6b): the command for the target, then its steps */
+export type RInstall = { id: string; state: "waiting" | "running" | "done" | "failed"; command: string; steps: { at: number; text: string }[]; node_id: string | null; error: string | null }
 export type RTailcat = { available: boolean; enabled: boolean; running?: boolean; address?: string | null; hub_url?: string | null; port?: number; error?: string | null }
 export type RRuntime = { id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string }
 export type REvent = { seq: number; ts: number; kind: string; data: any }
@@ -250,6 +252,9 @@ export const api = {
   createPairing: () => post<RPairing>("/nodes/pairings"),
   nodesTailcat: () => get<RTailcat>("/nodes/tailcat"),
   setNodesTailcat: (enabled: boolean) => req<RTailcat>("PUT", "/nodes/tailcat", { enabled }),
+  createInstall: () => post<RInstall>("/nodes/installs"),
+  install: (id: string) => get<RInstall>(`/nodes/installs/${encodeURIComponent(id)}`),
+  runInstall: (id: string, address: string) => post<RInstall>(`/nodes/installs/${encodeURIComponent(id)}/run`, { address }),
   confirmNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/confirm`),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
