@@ -42,6 +42,32 @@ impl Env {
         )
     }
 
+    /// The ACP sessions that received a prompt so far, and how many prompts they had in all. Steve's
+    /// own one-shot model calls go to the same fake agent in sessions of their own.
+    fn prompts_in(
+        &self,
+        sessions: Option<&std::collections::BTreeSet<String>>,
+    ) -> (std::collections::BTreeSet<String>, usize) {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut n = 0;
+        for m in std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|m| m["method"] == "session/prompt")
+        {
+            let sid = m["params"]["sessionId"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if sessions.is_none_or(|s| s.contains(&sid)) {
+                n += 1;
+            }
+            seen.insert(sid);
+        }
+        (seen, n)
+    }
+
     /// Prompt texts the fake agent received, in order.
     fn prompts(&self) -> Vec<String> {
         std::fs::read_to_string(&self.log)
@@ -319,7 +345,7 @@ async fn pause_finish_drop_and_new_cycles() {
     let (s, v) = command(&e, &iid, json!({"command": "new_cycle"})).await;
     assert_eq!(s, 400, "versions are required: {v}");
     let rev = l["revision"].as_i64().unwrap();
-    let n = e.prompts().len();
+    let (agent, n) = e.prompts_in(None);
     let (s, v) = command(
         &e,
         &iid,
@@ -339,7 +365,7 @@ async fn pause_finish_drop_and_new_cycles() {
     );
     // without a goal it waits for you: nothing is sent to the agent
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(e.prompts().len(), n);
+    assert_eq!(e.prompts_in(Some(&agent)).1, n);
 
     // pause and resume keep the phase
     let (s, v) = act(&e, &iid, "pause").await;
