@@ -212,20 +212,26 @@ pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -
         None => Some(ws_url(&p.hub_url)?),
         Some(_) => None,
     };
-    let mut tunnel = None;
     let node_id = NodeId::new(p.node_id.clone()).map_err(|_| anyhow!("bad node id"))?;
     let server = NodeServer::new(Arc::new(node.clone()));
     let mut backoff = Duration::from_millis(200);
     loop {
+        // over tailcat, a new tunnel for every link: one whose far end went away (a Hub restart)
+        // can stay up and lead nowhere
+        let mut tunnel = None;
         let url = match (&fixed, &over) {
             (Some(url), _) => Ok(url.clone()),
-            (None, Some((addr, port))) => tunnel_url(&mut tunnel, addr, *port).await,
+            (None, Some((addr, port))) => match Tunnel::open(addr, *port).await {
+                Ok(t) => ws_url(&tunnel.insert(t).url),
+                Err(e) => Err(e),
+            },
             (None, None) => unreachable!(),
         };
         let linked = match url {
             Ok(url) => link_once(&node, &server, &link, &url, &node_id, &p.hub_id, id, trust).await,
             Err(e) => Err(Stop::Retry(format!("{e:#}"))),
         };
+        drop(tunnel);
         match linked {
             Ok(()) => backoff = Duration::from_millis(200),
             Err(Stop::Refused(e)) => {
@@ -241,14 +247,8 @@ pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -
     }
 }
 
-/// The tunnel's `ws://` URL, the tunnel opened again when its program has exited.
-async fn tunnel_url(tunnel: &mut Option<Tunnel>, addr: &str, port: u16) -> Result<String> {
-    if !tunnel.as_mut().is_some_and(Tunnel::alive) {
-        *tunnel = None;
-        *tunnel = Some(Tunnel::open(addr, port).await?);
-    }
-    ws_url(&tunnel.as_ref().expect("opened").url)
-}
+/// Connecting and upgrading one link.
+const CONNECT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, PartialEq)]
 enum Stop {
@@ -278,8 +278,15 @@ async fn link_once(
     id: &Identity,
     trust: &Trust,
 ) -> Result<(), Stop> {
-    let (mut sink, mut stream) = tls::connect(url, trust)
+    // the TCP connect alone proves little (a tunnel's local end, a proxy): the upgrade is bounded too
+    let (mut sink, mut stream) = tokio::time::timeout(CONNECT, tls::connect(url, trust))
         .await
+        .map_err(|_| {
+            Stop::Retry(format!(
+                "no answer from the hub within {}s",
+                CONNECT.as_secs()
+            ))
+        })?
         .map_err(|e| Stop::Retry(e.to_string()))?;
     let heads = node.streams().await.unwrap_or_default();
     let (_, welcome) = handshake::dial(

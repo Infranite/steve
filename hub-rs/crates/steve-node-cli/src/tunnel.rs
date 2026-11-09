@@ -42,7 +42,12 @@ impl Tunnel {
             bail!("tailcat exited before forwarding")
         })
         .await
-        .map_err(|_| anyhow!("tailcat did not start forwarding within {}s", READY.as_secs()))??;
+        .map_err(|_| {
+            anyhow!(
+                "tailcat did not start forwarding within {}s",
+                READY.as_secs()
+            )
+        })??;
         // keep draining, or a full pipe would stall it
         tokio::spawn(async move {
             while let Ok(Some(line)) = lines.next_line().await {

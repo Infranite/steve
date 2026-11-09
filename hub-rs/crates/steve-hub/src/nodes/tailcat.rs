@@ -108,8 +108,8 @@ impl Tailcat {
             .await
             .map_err(|e| format!("127.0.0.1:{}: {e}", self.port))?;
         use axum::serve::ListenerExt as _;
-        let listener =
-            listener.tap_io(|tcp: &mut tokio::net::TcpStream| steve_node_wire::sock::low_water(tcp));
+        let listener = listener
+            .tap_io(|tcp: &mut tokio::net::TcpStream| steve_node_wire::sock::low_water(tcp));
         let app = super::node_router(svc);
         let serve = tokio::spawn(async move {
             let _ = axum::serve(
@@ -139,7 +139,8 @@ impl Tailcat {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = tokio::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700)).await;
+            let _ =
+                tokio::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700)).await;
         }
         let out = tokio::process::Command::new(program)
             .arg("genkey")
@@ -199,7 +200,10 @@ async fn tunnel(me: Weak<Tailcat>, program: PathBuf, key: PathBuf, port: u16) {
                                 s.up = true;
                                 s.error = None;
                             });
-                            tracing::info!("remote Nodes reach this Hub at {}", tailcat::hub_url(a, port));
+                            tracing::info!(
+                                "remote Nodes reach this Hub at {}",
+                                tailcat::hub_url(a, port)
+                            );
                             backoff = Duration::from_secs(1);
                         } else {
                             tracing::debug!("tailcat: {line}");
@@ -208,7 +212,10 @@ async fn tunnel(me: Weak<Tailcat>, program: PathBuf, key: PathBuf, port: u16) {
                     }
                 }
                 let status = child.wait().await;
-                last = format!("tailcat serve exited ({}): {last}", status.map(|s| s.to_string()).unwrap_or_default());
+                last = format!(
+                    "tailcat serve exited ({}): {last}",
+                    status.map(|s| s.to_string()).unwrap_or_default()
+                );
             }
         }
         tracing::warn!("{last}");
@@ -266,20 +273,23 @@ pub async fn put(
     let me = caller.me.clone();
     let owner = tokio::task::spawn_blocking(move || {
         store.reader(|c| {
-            c.query_row(
-                "SELECT role FROM users WHERE id=?",
-                [&me],
-                |r| r.get::<_, String>(0),
-            )
+            c.query_row("SELECT role FROM users WHERE id=?", [&me], |r| {
+                r.get::<_, String>(0)
+            })
             .optional()
             .map_err(steve_store::StoreError::from)
         })
     })
     .await;
     if !matches!(owner, Ok(Ok(Some(ref r))) if r == "owner") {
-        return json_response(403, &json!({ "error": steve_i18n::t!("hub.nodes.tailcat_owner_only") }));
+        return json_response(
+            403,
+            &json!({ "error": steve_i18n::t!("hub.nodes.tailcat_owner_only") }),
+        );
     }
-    let result = if b.enabled { t.start().await } else {
+    let result = if b.enabled {
+        t.start().await
+    } else {
         t.stop();
         Ok(())
     };
@@ -287,7 +297,9 @@ pub async fn put(
         let (store, me) = (svc.store.clone(), caller.me.clone());
         let mut p = serde_json::Map::new();
         p.insert(KEY.into(), json!(b.enabled));
-        let saved = tokio::task::spawn_blocking(move || store.settings().set(steve_store::WS, &p, &me)).await;
+        let saved =
+            tokio::task::spawn_blocking(move || store.settings().set(steve_store::WS, &p, &me))
+                .await;
         if !matches!(saved, Ok(Ok(()))) {
             tracing::error!("saving {KEY}: {saved:?}");
         }

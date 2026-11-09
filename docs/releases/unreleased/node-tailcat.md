@@ -1,0 +1,2 @@
+- 远程 Node 可以经 [tailcat](https://github.com/tailscale/tailcat) 连到 Hub，不需要公网地址、HTTPS 证书或 VPN。在“设备 · 添加设备”里开启“经 tailcat 连接”后，Hub 用自己的固定密钥运行 `tailcat serve`，只把 Node 接口（配对和连接）放进隧道，API 和网页不在其中；页面给出 `steve setup node --hub tailcat:<地址>:<端口>`。Node 端自己运行 `tailcat forward`，Hub 重启后自动重连。两台机器都需要安装 tailcat；没有安装时这个功能不可用，其他连接方式不受影响。相关配置：`STEVE_TAILCAT`（程序位置）、`STEVE_TAILCAT_PORT`（默认 Hub 端口 + 2）。
+- Node 连接 Hub 时，建立连接和升级 WebSocket 的总时长不超过 30 秒。之前遇到不回应的代理或隧道会一直卡住，不再重试。

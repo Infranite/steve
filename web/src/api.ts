@@ -71,6 +71,8 @@ export type RMessage = { id: string; author: "me" | "steve"; text: string; item_
 export type RDevice = { id: string; name: string; roles: string[]; os: string; version: string; status: string; max_sessions: number; seen: number; created: number }
 export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null }
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
+/** remote Nodes over tailcat (A6): `hub_url` is `tailcat:<address>:<port>` once it runs */
+export type RTailcat = { available: boolean; enabled: boolean; running?: boolean; address?: string | null; hub_url?: string | null; port?: number; error?: string | null }
 export type RRuntime = { id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string }
 export type REvent = { seq: number; ts: number; kind: string; data: any }
 export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[] }
@@ -246,6 +248,8 @@ export const api = {
   devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),
   nodes: () => get<{ nodes: RNode[] }>("/nodes"),
   createPairing: () => post<RPairing>("/nodes/pairings"),
+  nodesTailcat: () => get<RTailcat>("/nodes/tailcat"),
+  setNodesTailcat: (enabled: boolean) => req<RTailcat>("PUT", "/nodes/tailcat", { enabled }),
   confirmNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/confirm`),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
