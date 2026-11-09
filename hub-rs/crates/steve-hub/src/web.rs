@@ -227,6 +227,34 @@ pub fn web_only(cfg: std::sync::Arc<Config>) -> axum::Router {
                 }
             }),
         )
+        // sign-in belongs to the Hub: a provider's callback registered on this address goes on there
+        .route(
+            "/auth/{*rest}",
+            axum::routing::get({
+                let cfg = cfg.clone();
+                move |headers: axum::http::HeaderMap, uri: axum::http::Uri| {
+                    let port = cfg.listen.port;
+                    async move {
+                        let host = headers
+                            .get(header::HOST)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|h| reqwest::Url::parse(&format!("http://{h}")).ok())
+                            .and_then(|u| u.host_str().map(str::to_string))
+                            .unwrap_or_else(|| "127.0.0.1".into());
+                        let host = if host.contains(':') {
+                            format!("[{host}]")
+                        } else {
+                            host
+                        };
+                        let to = format!(
+                            "http://{host}:{port}{}",
+                            uri.path_and_query().map(|p| p.as_str()).unwrap_or("/")
+                        );
+                        axum::response::Redirect::temporary(&to)
+                    }
+                }
+            }),
+        )
         .fallback(move |req: Request| {
             let cfg = cfg.clone();
             async move { pages(&cfg, req).await }

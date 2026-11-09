@@ -95,7 +95,10 @@ struct PendingLogin {
 struct Inner<St> {
     store: St,
     config: AuthConfig,
-    oidc: oidc::Oidc,
+    /// The OIDC client of the configuration in force; replaced whole when single sign-on is set up or
+    /// changed in the settings (A4b), never mutated in place.
+    oidc: std::sync::RwLock<Arc<oidc::Oidc>>,
+    oidc_config: std::sync::RwLock<OidcConfig>,
     logins: Mutex<HashMap<String, PendingLogin>>,
 }
 
@@ -140,6 +143,17 @@ fn query_param(parts: &Parts, key: &str) -> Option<String> {
 
 /// A `back` target that stays on this site: one leading `/`, not followed by `/` or `\\`
 /// (browsers read both `//host` and `/\\host` as another host), and no control characters.
+/// [`Auth::back_ok`] over the configured origins.
+fn back_allowed(origins: &[String], back: &str) -> bool {
+    is_local_path(back)
+        || origins.iter().any(|o| {
+            back == o
+                || back
+                    .strip_prefix(o.as_str())
+                    .is_some_and(|rest| rest.starts_with('/') && !rest.starts_with("//"))
+        })
+}
+
 fn is_local_path(back: &str) -> bool {
     let mut c = back.chars();
     c.next() == Some('/')
@@ -194,8 +208,9 @@ impl<St: UserStore> Auth<St> {
         Ok(Self {
             inner: Arc::new(Inner {
                 store,
+                oidc_config: std::sync::RwLock::new(config.oidc.clone()),
                 config,
-                oidc,
+                oidc: std::sync::RwLock::new(Arc::new(oidc)),
                 logins: Mutex::default(),
             }),
         })
@@ -207,6 +222,43 @@ impl<St: UserStore> Auth<St> {
 
     pub fn config(&self) -> &AuthConfig {
         &self.inner.config
+    }
+
+    fn oidc(&self) -> Arc<oidc::Oidc> {
+        self.inner
+            .oidc
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Puts `c` in force for logins from now on (a login under way finishes with the client it began with).
+    pub fn set_oidc(&self, c: OidcConfig) -> Result<(), AuthError> {
+        let next = Arc::new(oidc::Oidc::new(c.clone())?);
+        *self.inner.oidc.write().unwrap_or_else(|e| e.into_inner()) = next;
+        *self
+            .inner
+            .oidc_config
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = c;
+        Ok(())
+    }
+
+    /// Single sign-on is configured (an issuer and a client).
+    pub fn oidc_enabled(&self) -> bool {
+        let c = self
+            .inner
+            .oidc_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        c.issuer.as_deref().is_some_and(|s| !s.is_empty())
+            && c.client_id.as_deref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// Where a finished login may return: a path of this site, or a page on one of its configured
+    /// origins (a web client on a port of its own, A3).
+    fn back_ok(&self, back: &str) -> bool {
+        back_allowed(&self.inner.config.public_urls, back)
     }
 
     /// `/login`, `/callback`, `/logout`, `/dev`; nest it under `/auth`. No session required.
@@ -230,7 +282,7 @@ impl<St: UserStore> Auth<St> {
     /// `{"error":"unauthenticated","login": …}` with status 401.
     pub fn unauthenticated(&self) -> Response {
         let c = &self.inner.config;
-        let login = if c.oidc.issuer.is_some() {
+        let login = if self.oidc_enabled() {
             Some("/auth/login")
         } else if c.dev_login {
             Some("/auth/dev")
@@ -311,12 +363,13 @@ fn url_host(u: &str) -> Option<String> {
 
 async fn login<St: UserStore>(State(a): State<Auth<St>>, req: Request) -> Response {
     let (parts, _) = req.into_parts();
-    let provider = match a.inner.oidc.provider().await {
+    let oidc = a.oidc();
+    let provider = match oidc.provider().await {
         Ok(p) => p,
         Err(e) => return internal_error("oidc login", e),
     };
     let origin = a.origin_of(&parts.headers);
-    let start = match a.inner.oidc.start(&provider, &origin) {
+    let start = match oidc.start(&provider, &origin) {
         Ok(s) => s,
         Err(e) => return internal_error("oidc login", e),
     };
@@ -391,11 +444,10 @@ async fn finish<St: UserStore>(
     parts: &Parts,
     l: &PendingLogin,
 ) -> Result<Option<(String, String)>, String> {
-    let provider = a.inner.oidc.provider().await.map_err(|e| e.to_string())?;
+    let oidc = a.oidc();
+    let provider = oidc.provider().await.map_err(|e| e.to_string())?;
     let q = |k| query_param(parts, k);
-    let claims = a
-        .inner
-        .oidc
+    let claims = oidc
         .finish(
             &provider,
             &l.origin,
@@ -416,7 +468,7 @@ async fn finish<St: UserStore>(
         return Ok(None);
     };
     let cookie = a.start_session(&id).map_err(|e| e.to_string())?;
-    let back = if is_local_path(&l.back) {
+    let back = if a.back_ok(&l.back) {
         l.back.clone()
     } else {
         "/".into()
@@ -558,6 +610,17 @@ mod tests {
         ] {
             assert_eq!(is_local_path(b), ok, "{b:?}");
         }
+    }
+
+    #[test]
+    fn back_may_be_a_page_of_a_configured_origin() {
+        let o = vec!["http://127.0.0.1:8441".to_string()];
+        assert!(back_allowed(&o, "/items"));
+        assert!(back_allowed(&o, "http://127.0.0.1:8441/#/items"));
+        assert!(back_allowed(&o, "http://127.0.0.1:8441"));
+        assert!(!back_allowed(&o, "http://127.0.0.1:8441.evil.test/"));
+        assert!(!back_allowed(&o, "http://127.0.0.1:8441//evil.test"));
+        assert!(!back_allowed(&o, "https://evil.test/"));
     }
 
     #[test]

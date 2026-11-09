@@ -58,6 +58,8 @@ pub struct Inner {
     pub node: Option<Arc<crate::wire::node_runtime::NodeRuntime>>,
     /// Where projects' and items' files are (which Node); `None` reads the Hub's own disk.
     pub workspaces: Option<Arc<crate::wire::workspaces::Workspaces>>,
+    /// Single sign-on as configured now (A4b): set up or changed in the settings without a restart.
+    pub oidc: Option<Arc<dyn crate::access::OidcSwitch>>,
 }
 
 impl std::ops::Deref for AppState {
@@ -89,6 +91,7 @@ impl AppState {
             nodes: None,
             node: None,
             workspaces: None,
+            oidc: None,
         }))
     }
 
@@ -100,6 +103,25 @@ impl AppState {
                 AppState(Arc::new(inner))
             }
             Err(shared) => AppState(shared),
+        }
+    }
+
+    /// The same state with single sign-on's switch attached (as wired).
+    pub fn with_oidc(self, oidc: Option<Arc<dyn crate::access::OidcSwitch>>) -> Self {
+        match Arc::try_unwrap(self.0) {
+            Ok(mut inner) => {
+                inner.oidc = oidc;
+                AppState(Arc::new(inner))
+            }
+            Err(shared) => AppState(shared),
+        }
+    }
+
+    /// Single sign-on is configured now.
+    pub fn oidc_enabled(&self) -> bool {
+        match &self.oidc {
+            Some(o) => o.enabled(),
+            None => self.cfg.oidc.issuer.is_some(),
         }
     }
 
@@ -425,7 +447,7 @@ async fn require_user(State(st): State<AppState>, mut req: Request, next: Next) 
         Ok(Who::Refused(status, why)) => json_response(status, &json!({ "error": why.message() })),
         Ok(Who::Anonymous) if session_optional(&req) => next.run(req).await,
         Ok(Who::Anonymous) => {
-            let login = if st.cfg.oidc.issuer.is_some() {
+            let login = if st.oidc_enabled() {
                 json!("/auth/login")
             } else if st.cfg.dev_login {
                 json!("/auth/dev")
@@ -624,6 +646,12 @@ pub fn router(st: AppState, modules: Router) -> Router {
         )
         // settings · access and clients (A4)
         .route("/access", get(crate::access::overview))
+        .route(
+            "/access/oidc",
+            get(crate::access::oidc_get)
+                .put(crate::access::oidc_put)
+                .delete(crate::access::oidc_delete),
+        )
         .route("/access/tokens", post(crate::access::token_create))
         .route("/access/tokens/{id}", delete(crate::access::token_revoke))
         .route("/access/clients/{id}", delete(crate::access::client_revoke))

@@ -91,7 +91,7 @@ export function InboxView() {
         <Group>{st.done.map((d, n) => (
           <Row key={n} title={<><ItemNo id={d.id} className="mr-2" />{d.q}</>} sub={d.rel ? <span className="flex min-w-0 flex-wrap items-center gap-x-1">{WT[d.type]} · <RelNote rel={d.rel} className="inline-flex" /> · {d.tm}</span>
             : d.yolo !== undefined ? <span className="flex min-w-0 flex-wrap items-center gap-x-1">{WT[d.type]} · <YoloMark /> {d.yolo ? t("views:inbox.yoloChoseWhy", { choice: choiceText(d.choice), reason: d.yolo }) : t("views:inbox.yoloChose", { choice: choiceText(d.choice) })} · {d.tm}{d.undone ? ` · ${t("views:inbox.undone")}` : ""}</span>
-            : `${WT[d.type]} · ${d.how === "dismissed" ? t("views:inbox.dismissed") : d.how === "expired" ? t("views:inbox.expired", { choice: d.choice }) : t("views:inbox.chose", { choice: d.choice })} · ${d.tm}${d.undone ? ` · ${t("views:inbox.undone")}` : ""}`} data-done-row={d.id}>
+            : `${WT[d.type]} · ${d.how === "dismissed" ? t("views:inbox.dismissed") : d.how === "expired" ? t("views:inbox.expired", { choice: d.choice }) : t("views:inbox.chose", { choice: d.choice })}${d.via ? ` · ${t("views:inbox.via", { client: d.via })}` : ""} · ${d.tm}${d.undone ? ` · ${t("views:inbox.undone")}` : ""}`} data-done-row={d.id}>
             {d.canUndo && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => undoDecision(n)} data-undo-decision><RotateCcwIcon />{t("views:inbox.undo")}</Button>}
           </Row>))}</Group>
         <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("views:inbox.doneNote")}</div>

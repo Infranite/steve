@@ -643,6 +643,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     *supervised_domain.lock().unwrap_or_else(|e| e.into_inner()) = Some(w.domain.clone());
     let st = crate::api::AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)
+        .with_oidc(w.oidc.clone())
         .with_nodes(w.nodes)
         .with_node(w.node)
         .with_workspaces(Some(w.workspaces));

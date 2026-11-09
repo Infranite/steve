@@ -213,7 +213,7 @@ async fn hello(State(st): State<AppState>) -> axum::response::Response {
             "api": API_VERSION,
             "login": {
                 "token": st.modules.is_some(),
-                "oidc": st.cfg.oidc.issuer.is_some(),
+                "oidc": st.oidc_enabled(),
             },
         }),
     )
@@ -888,4 +888,271 @@ pub async fn client_revoke(
     }
     ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     Ok(reply(StatusCode::OK, json!({"ok": true})))
+}
+
+/* ───────── single sign-on in the settings (A4b) ───────── */
+
+/// Puts an OIDC configuration in force without a restart (steve-auth's `Auth`).
+pub trait OidcSwitch: Send + Sync {
+    fn set(
+        &self,
+        issuer: Option<String>,
+        client_id: Option<String>,
+        secret: Option<String>,
+    ) -> Result<(), String>;
+    fn enabled(&self) -> bool;
+}
+
+impl<St: steve_auth::UserStore> OidcSwitch for steve_auth::Auth<St> {
+    fn set(
+        &self,
+        issuer: Option<String>,
+        client_id: Option<String>,
+        secret: Option<String>,
+    ) -> Result<(), String> {
+        self.set_oidc(steve_auth::OidcConfig {
+            issuer,
+            client_id,
+            client_secret: secret,
+        })
+        .map_err(|e| e.to_string())
+    }
+    fn enabled(&self) -> bool {
+        self.oidc_enabled()
+    }
+}
+
+/// The settings key of single sign-on (`{issuer, client_id}`; the secret is a private file).
+const OIDC_KEY: &str = "access.oidc";
+/// Where the Hub keeps the client secret set in the settings (mode 0600).
+const OIDC_SECRET: &str = "secrets/oidc-client-secret";
+
+fn read_secret(home: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(home.join(OIDC_SECRET))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn write_secret(home: &std::path::Path, secret: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = home.join(OIDC_SECRET);
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(secret.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(tmp, path)
+}
+
+/// At start: single sign-on as the settings left it, when the environment configures none.
+pub fn restore_oidc(
+    store: &Store,
+    home: &std::path::Path,
+    auth: &dyn OidcSwitch,
+) -> Result<(), String> {
+    let v: Option<Value> = store
+        .settings()
+        .get(steve_store::WS, OIDC_KEY, None)
+        .map_err(|e| e.to_string())?;
+    let Some(v) = v.filter(|v| v["issuer"].is_string()) else {
+        return Ok(());
+    };
+    auth.set(
+        v["issuer"].as_str().map(str::to_string),
+        v["client_id"].as_str().map(str::to_string),
+        read_secret(home),
+    )
+}
+
+fn owner_only(c: &crate::api::Ctx) -> Result<(), crate::error::ApiError> {
+    if c.user.get("role").and_then(Value::as_str) == Some("owner") {
+        Ok(())
+    } else {
+        Err(crate::error::ApiError::Json(
+            403,
+            steve_i18n::t!("hub.access.owner_only"),
+        ))
+    }
+}
+
+/// What the settings show: where the configuration comes from (`env` is read-only), the issuer and
+/// client, whether a secret is kept, and the callback to register with the provider.
+fn oidc_view(st: &AppState, store: &Store) -> Value {
+    let callback = format!("{}/auth/callback", st.cfg.public_url);
+    if st.cfg.oidc.issuer.is_some() {
+        return json!({
+            "source": "env", "issuer": st.cfg.oidc.issuer, "client_id": st.cfg.oidc.client_id,
+            "has_secret": st.cfg.oidc.client_secret.is_some(), "callback": callback,
+            "enabled": st.oidc_enabled(),
+        });
+    }
+    let v: Value = store
+        .settings()
+        .get(steve_store::WS, OIDC_KEY, Value::Null)
+        .unwrap_or(Value::Null);
+    json!({
+        "source": if v["issuer"].is_string() { "settings" } else { "none" },
+        "issuer": v["issuer"], "client_id": v["client_id"],
+        "has_secret": read_secret(&st.cfg.home).is_some(), "callback": callback,
+        "enabled": st.oidc_enabled(),
+    })
+}
+
+/// `GET /api/access/oidc`
+pub async fn oidc_get(
+    State(st): State<AppState>,
+    axum::Extension(c): axum::Extension<crate::api::Ctx>,
+) -> Result<axum::response::Response, crate::error::ApiError> {
+    owner_only(&c)?;
+    let store = store_of(&st)?;
+    Ok(reply(StatusCode::OK, oidc_view(&st, &store)))
+}
+
+#[derive(Deserialize)]
+pub struct OidcIn {
+    issuer: String,
+    client_id: String,
+    /// left out: the one kept stays
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+/// `PUT /api/access/oidc {issuer, client_id, secret?}`: single sign-on from now on (owner only; not
+/// while the environment configures it).
+pub async fn oidc_put(
+    State(st): State<AppState>,
+    axum::Extension(c): axum::Extension<crate::api::Ctx>,
+    Json(b): Json<OidcIn>,
+) -> Result<axum::response::Response, crate::error::ApiError> {
+    owner_only(&c)?;
+    if st.cfg.oidc.issuer.is_some() {
+        return Err(crate::error::ApiError::Json(
+            409,
+            steve_i18n::t!("hub.access.oidc_env"),
+        ));
+    }
+    let issuer = b.issuer.trim().trim_end_matches('/').to_string();
+    let client_id = b.client_id.trim().to_string();
+    let ok_issuer = reqwest::Url::parse(&issuer).is_ok_and(|u| {
+        u.scheme() == "https"
+            || (u.scheme() == "http"
+                && matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")))
+    });
+    if !ok_issuer || client_id.is_empty() {
+        return Err(crate::error::ApiError::bad_request(steve_i18n::t!(
+            "hub.access.oidc_bad"
+        )));
+    }
+    let Some(switch) = st.oidc.clone() else {
+        return Err(crate::error::ApiError::Json(503, "unavailable".into()));
+    };
+    let store = store_of(&st)?;
+    let home = st.cfg.home.clone();
+    let (st2, me) = (st.clone(), c.me.clone());
+    let view = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        if let Some(s) = b.secret.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            write_secret(&home, s).map_err(|e| e.to_string())?;
+        }
+        let mut m = serde_json::Map::new();
+        m.insert(
+            OIDC_KEY.into(),
+            json!({"issuer": issuer, "client_id": client_id}),
+        );
+        store
+            .settings()
+            .set(steve_store::WS, &m, &me)
+            .map_err(|e| e.to_string())?;
+        switch.set(
+            Some(issuer.clone()),
+            Some(client_id.clone()),
+            read_secret(&home),
+        )?;
+        store
+            .audit(
+                &me,
+                "oidc.set",
+                "oidc",
+                &json!({"issuer": issuer}),
+                steve_store::WS,
+            )
+            .ok();
+        Ok(oidc_view(&st2, &store))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+    Ok(reply(StatusCode::OK, view))
+}
+
+/// `DELETE /api/access/oidc`: single sign-on off (sign-in by token stays).
+pub async fn oidc_delete(
+    State(st): State<AppState>,
+    axum::Extension(c): axum::Extension<crate::api::Ctx>,
+) -> Result<axum::response::Response, crate::error::ApiError> {
+    owner_only(&c)?;
+    if st.cfg.oidc.issuer.is_some() {
+        return Err(crate::error::ApiError::Json(
+            409,
+            steve_i18n::t!("hub.access.oidc_env"),
+        ));
+    }
+    let Some(switch) = st.oidc.clone() else {
+        return Err(crate::error::ApiError::Json(503, "unavailable".into()));
+    };
+    let store = store_of(&st)?;
+    let home = st.cfg.home.clone();
+    let (st2, me) = (st.clone(), c.me.clone());
+    let view = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let mut m = serde_json::Map::new();
+        m.insert(OIDC_KEY.into(), Value::Null);
+        store
+            .settings()
+            .set(steve_store::WS, &m, &me)
+            .map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(home.join(OIDC_SECRET));
+        switch.set(None, None, None)?;
+        store
+            .audit(&me, "oidc.off", "oidc", &json!({}), steve_store::WS)
+            .ok();
+        Ok(oidc_view(&st2, &store))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+    Ok(reply(StatusCode::OK, view))
+}
+
+/// Notes which client a decision was answered from (A4c): `result.via` on the decision, and the audit.
+/// Off the request; a browser session (no client) notes nothing.
+pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
+    let (Some(client), Some(store)) = (c.client.clone(), st.modules.as_ref().map(|m| m.store.clone()))
+    else {
+        return;
+    };
+    let (id, me) = (decision.to_string(), c.me.clone());
+    tokio::task::spawn_blocking(move || {
+        let via = json!({"client": client.id, "kind": client.kind, "name": client.name, "route": client.route});
+        let r = store.with_conn(|db| {
+            db.execute(
+                "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.via', json(?)) WHERE id = ? AND status <> 'open'",
+                rusqlite::params![via.to_string(), id],
+            )?;
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("decision {id} via: {e}");
+        }
+        store
+            .audit(&me, "decision.resolve", &id, &json!({"via": via}), steve_store::WS)
+            .ok();
+    });
 }

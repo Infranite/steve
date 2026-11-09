@@ -27,6 +27,16 @@ export default {
     signOutClient: "让它下线",
     noClients: "还没有客户端用 token 登录",
     route: { loopback: "本机", lan: "局域网", tailnet: "tailnet", proxy: "经反向代理", public: "公网", unknown: "未知" },
+    oidc: "单点登录（OIDC）",
+    oidcSub: "可选。配置后，登录页会多一个单点登录的入口；用户名 + token 的登录照常可用。保存后立即生效，不用重启。",
+    oidcCallback: "在服务方登记的回调地址",
+    oidcFromEnv: "由环境变量 STEVE_OIDC_* 配置，这里只能查看",
+    oidcClient: "Client ID",
+    oidcSecret: "Client secret",
+    oidcSecretKept: "Client secret（已保存，留空不变）",
+    oidcSave: "保存",
+    oidcOff: "关闭单点登录",
+    oidcSaved: "单点登录已生效",
   },
   /* Settings · 模型 (models-settings.tsx) */
   models: {

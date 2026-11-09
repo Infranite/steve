@@ -20,12 +20,48 @@ export const ACCESS_CAT = Object.defineProperties(["access", "", KeyRoundIcon, "
 type Token = { id: string; name: string; created: number; expires: number | null; last_used: number | null; revoked: number | null }
 type Client = { id: string; kind: string; name: string; platform: string; version: string; origin: string | null; created: number; last_seen: number | null; last_route: string | null; last_ip: string | null; revoked: number | null }
 type View = { tokens: Token[]; clients: Client[]; current: string | null; route: string | null; hub: { version: string } }
+type Oidc = { source: "env" | "settings" | "none"; issuer: string | null; client_id: string | null; has_secret: boolean; callback: string; enabled: boolean }
 
 const access = {
   get: () => modReq<View>("GET", "/access"),
   create: (name: string) => modReq<{ token: string; item: Token }>("POST", "/access/tokens", { name }),
   revokeToken: (id: string) => modReq("DELETE", `/access/tokens/${encodeURIComponent(id)}`),
   revokeClient: (id: string) => modReq("DELETE", `/access/clients/${encodeURIComponent(id)}`),
+  oidc: () => modReq<Oidc>("GET", "/access/oidc"),
+  saveOidc: (b: { issuer: string; client_id: string; secret?: string }) => modReq<Oidc>("PUT", "/access/oidc", b),
+  dropOidc: () => modReq<Oidc>("DELETE", "/access/oidc"),
+}
+
+/** single sign-on (owner only): from the environment it is shown, from the settings it can be set and turned off */
+function OidcSection() {
+  const t = useT()
+  const [o, setO] = useState<Oidc | null>(null)
+  const [denied, setDenied] = useState(false)
+  const [f, setF] = useState({ issuer: "", client_id: "", secret: "" })
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { access.oidc().then((x) => { setO(x); setF({ issuer: x.issuer ?? "", client_id: x.client_id ?? "", secret: "" }) }, () => setDenied(true)) }, [])
+  if (denied || !o) return null
+  const save = async () => {
+    setBusy(true)
+    try { const x = await access.saveOidc({ issuer: f.issuer.trim(), client_id: f.client_id.trim(), ...(f.secret.trim() ? { secret: f.secret.trim() } : {}) }); setO(x); setF((v) => ({ ...v, secret: "" })); toast(t("pages:access.oidcSaved")) }
+    catch (e) { toast((e as Error).message) }
+    setBusy(false)
+  }
+  const off = async () => { try { const x = await access.dropOidc(); setO(x); setF({ issuer: "", client_id: "", secret: "" }) } catch (e) { toast((e as Error).message) } }
+  return <section data-oidc><SectionLabel>{t("pages:access.oidc")}</SectionLabel>
+    <p className="mb-3 type-footnote text-muted-foreground">{t("pages:access.oidcSub")}</p>
+    <Group>
+      <Row title={t("pages:access.oidcCallback")} sub={o.callback} />
+      {o.source === "env" ? <Row title={o.issuer ?? ""} sub={t("pages:access.oidcFromEnv")} /> : <>
+        <Row title={<Input value={f.issuer} onChange={(e) => setF({ ...f, issuer: e.target.value })} placeholder="https://id.example.com/application/o/steve/" data-oidc-issuer />} />
+        <Row title={<Input value={f.client_id} onChange={(e) => setF({ ...f, client_id: e.target.value })} placeholder={t("pages:access.oidcClient")} data-oidc-client />} />
+        <Row title={<Input type="password" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} placeholder={o.has_secret ? t("pages:access.oidcSecretKept") : t("pages:access.oidcSecret")} autoComplete="new-password" data-oidc-secret />}>
+          <div className="flex gap-2">{o.source === "settings" && <Button size="sm" variant="ghost" onClick={() => void off()} data-oidc-off>{t("pages:access.oidcOff")}</Button>}
+            <Button size="sm" onClick={() => void save()} disabled={busy || !f.issuer.trim() || !f.client_id.trim()} data-oidc-save>{busy ? <Spinner className="size-4" /> : t("pages:access.oidcSave")}</Button></div>
+        </Row>
+      </>}
+    </Group>
+  </section>
 }
 
 /** a route as words: “局域网 · TLS” */
@@ -78,6 +114,8 @@ export function AccessSettingsPane() {
           <Button size="sm" onClick={() => void create()} disabled={busy} data-new-token>{busy ? <Spinner className="size-4" /> : t("pages:access.newToken")}</Button></Row>
       </Group>
     </section>
+
+    <OidcSection />
 
     <section><SectionLabel>{t("pages:access.clients")}</SectionLabel><Group>
       {v.clients.filter(live).map((c) => <Row key={c.id} title={<span className="flex items-center gap-2">{c.name}<span className="type-footnote text-muted-foreground">{c.kind}{c.platform ? ` · ${c.platform}` : ""}</span>{c.id === v.current && <span className="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground">{t("pages:access.current")}</span>}</span>}
