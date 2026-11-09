@@ -10,3 +10,16 @@ failure-output = "immediate-final"
 [profile.ci.junit]
 # hub-rs/target/nextest/ci/junit.xml
 path = "junit.xml"
+
+# The end-to-end tests start real Hub processes (and, since B1, a Node process of their own each):
+# a few at a time, so that a busy runner does not turn "the Hub did not answer within 60 s" red.
+[test-groups]
+hub-processes = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = 'binary(node_e2e) | binary(recovery_ready) | binary(n2_acceptance) | binary(history_e2e) | binary(yolo_e2e)'
+test-group = 'hub-processes'
+
+[[profile.ci.overrides]]
+filter = 'binary(node_e2e) | binary(recovery_ready) | binary(n2_acceptance) | binary(history_e2e) | binary(yolo_e2e)'
+test-group = 'hub-processes'
