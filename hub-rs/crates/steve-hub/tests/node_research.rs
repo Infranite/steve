@@ -282,6 +282,7 @@ impl Hub {
                 node: NodeId::new("local").unwrap(),
                 home: base.join("node"),
                 acp: steve_acp::AcpConfig {
+                    declared: Default::default(),
                     adapters: HashMap::new(),
                     node: "node".into(),
                     claude_executable: "claude".into(),

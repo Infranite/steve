@@ -465,6 +465,7 @@ mod tests {
             node: steve_node_api::NodeId::new("local").unwrap(),
             home: dir.join("node"),
             acp: steve_acp::AcpConfig {
+                declared: Default::default(),
                 adapters: HashMap::from([(CODEX.to_string(), dir.join("adapter"))]),
                 node: "node".into(),
                 claude_executable: dir.join("no-claude"),

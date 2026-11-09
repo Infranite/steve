@@ -128,6 +128,11 @@ fn core_config(cfg: &Config) -> steve_core::CoreConfig {
 
 fn acp_config(cfg: &Config) -> steve_acp::AcpConfig {
     steve_acp::AcpConfig {
+        declared: cfg
+            .declared_adapters
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         adapters: cfg
             .adapters
             .iter()
