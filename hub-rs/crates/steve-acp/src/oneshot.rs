@@ -20,7 +20,8 @@ use crate::rpc::{Conn, Incoming, RpcError, Spawn};
 use crate::session::{self, OpenConfig, Reports};
 use serde_json::{Value, json};
 use steve_node_api::{
-    Epoch, EventBody, PermissionDecision, Role, ToolCategory, ToolOrigin, ToolPhase, UsageReport,
+    Epoch, EventBody, PermissionDecision, PermissionMode, Role, ToolCategory, ToolOrigin,
+    ToolPhase, UsageReport,
 };
 use tokio::sync::mpsc;
 
@@ -361,14 +362,16 @@ pub async fn run(
         let mut out = Output::default();
         let cwd = req.cwd.to_string_lossy();
         let reports = SessionReports(req.on_session);
-        let opening = session::open_read_only_with_meta(
+        // a call only reads: Steve's Plan mode as the adapter spells it (asking before anything
+        // else where it has none), never what the adapter would do by default
+        let opening = session::open_with_meta(
             &conn,
             OpenConfig {
                 client_version: &req.cfg.version,
                 cwd: &cwd,
                 resume: req.resume,
                 mcp_servers: req.mcp_servers.clone(),
-                mode: None,
+                mode: Some(req.cfg.mode_choice(req.harness, PermissionMode::Plan)),
                 model: req.model,
                 effort: req.effort,
                 system_prompt: req.head.map(|text| session::SystemPrompt {
@@ -378,6 +381,7 @@ pub async fn run(
             },
             req.cfg.session_meta_for(req.harness, req.tools_off),
             &reports,
+            session::Strictness::Strict,
         );
         tokio::pin!(opening);
         let opened = loop {
@@ -497,9 +501,9 @@ mod tests {
     fn adapter(root: &Path, body: &str, modes: bool) -> AcpConfig {
         let path = root.join("adapter.py");
         let mode = if modes {
-            r#"{"availableModes":[{"id":"read-only","name":"Read only"}],"currentModeId":"full-access"}"#
+            r#"{"availableModes":[{"id":"plan","name":"Plan"},{"id":"full-access","name":"Full"}],"currentModeId":"full-access"}"#
         } else {
-            "{}"
+            r#"{"availableModes":[{"id":"full-access","name":"Full"}],"currentModeId":"full-access"}"#
         };
         let script = format!(
             r#"#!/usr/bin/env python3
@@ -524,7 +528,7 @@ for line in sys.stdin:
                 chunk("old-history-marker")
         result={{"sessionId":"acp-session","modes":{mode}}}
     elif method=="session/set_mode":
-        assert msg["params"]["modeId"]=="read-only"
+        assert msg["params"]["modeId"]=="plan"
         result={{}}
     elif method=="session/prompt":
 {body}
@@ -727,7 +731,9 @@ for line in sys.stdin:
         let temp = tempfile::tempdir().unwrap();
         let cfg = adapter(temp.path(), "        chunk('must not appear')", false);
         let out = run(request(&cfg, temp.path(), &|_| false), &|_| true, &|_| {}).await;
-        assert!(matches!(out, Err(OneShotError::Failed(e)) if e.contains("只读权限模式")));
+        assert!(
+            matches!(out, Err(OneShotError::Failed(e)) if e.contains("unsupported: permission mode plan"))
+        );
     }
 
     #[tokio::test]

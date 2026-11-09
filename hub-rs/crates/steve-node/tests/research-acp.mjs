@@ -14,7 +14,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     reply(req.id, { protocolVersion: 1, agentCapabilities: {} });
   } else if (req.method === "session/new" || req.method === "session/load") {
     reply(req.id, { sessionId: "research-session", modes: {
-      currentModeId: "read-only", availableModes: [{ id: "read-only", name: "Read only" }],
+      currentModeId: "read-only", availableModes: [{ id: "read-only", name: "Read only" }, { id: "plan", name: "Plan" }],
     } });
   } else if (req.method === "session/prompt") {
     const prompt = req.params.prompt.filter(p => p.type === "text").map(p => p.text).join("\n");

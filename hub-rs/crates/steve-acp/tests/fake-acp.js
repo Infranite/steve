@@ -23,7 +23,7 @@
 //                          and says "perm:bypassed:"
 // $FAKE_ACP_IMAGE=1 advertises promptCapabilities.image.
 //   @fsread                asks the client for fs/read_text_file; says the error it got
-// $FAKE_ACP_CODEX=1 reports the model as a config option instead of `models`.
+// $FAKE_ACP_CODEX=1 reports the model as a config option instead of `models`, and Codex's three modes.
 // $FAKE_ACP_GRANDCHILD=<file> starts `sleep 300` (same process group) and writes its pid there.
 // $FAKE_ACP_STUBBORN=<file> does the same with a `sleep 300` that ignores SIGTERM.
 // $FAKE_ACP_FLOOD_GATE=<file>: @flood sends chunk i only once the number in <file> is above i (the
@@ -32,18 +32,21 @@
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
 import { spawn } from "node:child_process"
 
-const log = (o) => { if (process.env.FAKE_ACP_LOG) appendFileSync(process.env.FAKE_ACP_LOG, JSON.stringify(o) + "\n") }
+// a Node's discovery probe (its scratch sessions run in `<node home>/probe`) is none of the test's
+// runs: it logs nothing and starts nothing unless $FAKE_ACP_PROBES is set
+const probing = process.cwd().split("/").pop() === "probe" && !process.env.FAKE_ACP_PROBES
+const log = (o) => { if (process.env.FAKE_ACP_LOG && !probing) appendFileSync(process.env.FAKE_ACP_LOG, JSON.stringify(o) + "\n") }
 if (process.env.FAKE_ACP_STDOUT_CLOSED) process.stdout.on("error", (error) => {
   writeFileSync(process.env.FAKE_ACP_STDOUT_CLOSED, error.code ?? error.message)
   process.exit(1)
 })
 log({ spawn: { argv: process.argv.slice(2), cwd: process.cwd(), claude: process.env.CLAUDE_CODE_EXECUTABLE ?? null, pid: process.pid,
   env: { NPM_TOKEN: process.env.NPM_TOKEN ?? null, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? null, HOME: process.env.HOME ?? null, PATH0: (process.env.PATH ?? "").split(":")[0] } } })
-if (process.env.FAKE_ACP_GRANDCHILD) {
+if (process.env.FAKE_ACP_GRANDCHILD && !probing) {
   const c = spawn("sleep", ["300"], { stdio: "ignore" })
   writeFileSync(process.env.FAKE_ACP_GRANDCHILD, String(c.pid))
 }
-if (process.env.FAKE_ACP_STUBBORN) {
+if (process.env.FAKE_ACP_STUBBORN && !probing) {
   const c = spawn("sh", ["-c", "trap '' TERM; exec sleep 300"], { stdio: "ignore" })
   writeFileSync(process.env.FAKE_ACP_STUBBORN, String(c.pid))
 }
@@ -127,11 +130,13 @@ let model = process.env.FAKE_ACP_CODEX ? "gpt-fake" : "kiro/claude-opus-5-5"
 let effort = "medium"
 const effortOpts = () => process.env.FAKE_ACP_EFFORT ? [{ id: "thought_level", category: "thought_level", type: "select", currentValue: effort, options: [{ group: "levels", options: [{ value: "low" }, { value: "medium" }, { value: "high" }] }] }] : []
 const modelOpt = () => ({ id: "model", type: "select", currentValue: model, options: [{ value: "kiro/claude-opus-5-5" }, { value: "kiro/claude-sonnet-5-5" }, { value: "claude-haiku-5-5" }] })
+// the modes most adapters offer (claude-agent-acp 0.99.1's five); $FAKE_ACP_MODES=a,b,… offers those
+const modes = () => ({ currentModeId: "default", availableModes: (process.env.FAKE_ACP_MODES ?? "default,acceptEdits,plan,auto,bypassPermissions").split(",").filter(Boolean).map((id) => ({ id, name: id })) })
 const session = () => process.env.FAKE_ACP_CODEX
-  ? { configOptions: [{ id: "model", currentValue: model, options: [] }, ...effortOpts()] }
+  ? { modes: { currentModeId: "read-only", availableModes: ["read-only", "auto", "full-access"].map((id) => ({ id, name: id })) }, configOptions: [{ id: "model", currentValue: model, options: [] }, ...effortOpts()] }
   : process.env.FAKE_ACP_SHAPE === "claude099"
-    ? { modes: { currentModeId: "default", availableModes: [] }, configOptions: [modelOpt(), ...effortOpts()] }
-    : { models: { currentModelId: "fake-model", availableModels: [] } }
+    ? { modes: modes(), configOptions: [modelOpt(), ...effortOpts()] }
+    : { modes: modes(), models: { currentModelId: "fake-model", availableModels: [] } }
 process.stdin.on("data", (d) => {
   buf += d
   let n

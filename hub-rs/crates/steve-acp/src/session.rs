@@ -14,7 +14,7 @@ use crate::rpc::{Conn, RpcError};
 use crate::util::{coalesce, js_str, truthy};
 
 /// The configuration option of the reasoning effort, if the adapter reports one.
-pub(crate) fn effort_option(config: &Value) -> Option<&Value> {
+pub fn effort_option(config: &Value) -> Option<&Value> {
     config.get("configOptions")?.as_array()?.iter().find(|o| {
         o.get("id")
             .and_then(Value::as_str)
@@ -40,13 +40,69 @@ pub struct OpenConfig<'a> {
     pub resume: Option<&'a str>,
     /// The `mcpServers` of `session/new|load`.
     pub mcp_servers: Value,
-    /// The mode to set (`None`: leave the adapter's).
-    pub mode: Option<String>,
+    /// The permission mode to set (`None`: leave the adapter's).
+    pub mode: Option<ModeChoice>,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     /// Steve's instructions as the session's system prompt, sent only to an adapter that
     /// advertises `sessionCapabilities.systemPrompt` ([`Opened::system_prompt`] says whether).
     pub system_prompt: Option<SystemPrompt<'a>>,
+}
+
+/// The adapter's mode id for one of Steve's permission modes, and what may stand in for it when
+/// the adapter does not offer it ([`crate::adapters::ModeMap::choice`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeChoice {
+    pub id: String,
+    /// A narrower mode that may be set instead (Plan asks before every change when the adapter
+    /// has no plan mode).
+    pub fallback: Option<String>,
+    /// The mode only narrows what the adapter does by itself (Plan, Ask): an adapter that reports
+    /// no modes at all asks for every permission, so nothing needs to be set. A wider mode is
+    /// refused there.
+    pub narrow: bool,
+}
+
+impl ModeChoice {
+    /// The id to set given the modes the adapter offers (`None`: it reports none): `Ok(None)` sets
+    /// nothing; an error when the mode cannot be had.
+    pub fn resolve(&self, available: Option<&[String]>) -> Result<Option<String>, String> {
+        match available {
+            None if self.narrow => Ok(None),
+            None => Err(format!("unsupported: permission mode {}", self.id)),
+            Some(ids) if ids.contains(&self.id) => Ok(Some(self.id.clone())),
+            Some(ids) => match &self.fallback {
+                Some(f) if ids.contains(f) => Ok(Some(f.clone())),
+                _ => Err(format!(
+                    "unsupported: permission mode {} (the adapter offers {})",
+                    self.id,
+                    ids.join(", ")
+                )),
+            },
+        }
+    }
+}
+
+/// The mode ids a `session/new|load` response offers (`modes.availableModes`, else the `mode`
+/// config option); `None` when it reports neither.
+pub fn offered_modes(r: &Value) -> Option<Vec<String>> {
+    let ids = |v: &Value, key: &str| {
+        v.as_array().map(|a| {
+            a.iter()
+                .filter_map(|m| m.get(key).and_then(Value::as_str).map(String::from))
+                .collect::<Vec<_>>()
+        })
+    };
+    r.pointer("/modes/availableModes")
+        .and_then(|v| ids(v, "id"))
+        .or_else(|| {
+            r.get("configOptions")?
+                .as_array()?
+                .iter()
+                .find(|o| o.get("category").and_then(Value::as_str) == Some("mode"))
+                .and_then(|o| o.get("options"))
+                .and_then(|v| ids(v, "value"))
+        })
 }
 
 /// A system prompt for the session (ACP `systemPrompt` on `session/new`).
@@ -78,6 +134,8 @@ pub enum Strictness {
 #[derive(Debug, Clone)]
 pub struct Opened {
     pub acp_id: String,
+    /// The mode set (`None`: none was).
+    pub mode: Option<String>,
     /// The adapter takes image blocks.
     pub image: bool,
     /// The session has [`OpenConfig::system_prompt`] as its system prompt.
@@ -101,26 +159,6 @@ pub async fn open(
     open_with_meta(l, c, None, reports, strictness).await
 }
 
-/// Open a read-only job using a mode declared by the adapter. Never inherit a user's
-/// permissive default; mode names come from ACP capabilities, not from the harness name.
-pub async fn open_read_only(
-    l: &Conn,
-    c: OpenConfig<'_>,
-    reports: &dyn Reports,
-) -> Result<Opened, RpcError> {
-    open_read_only_with_meta(l, c, None, reports).await
-}
-
-/// [`open_read_only`], with the same adapter metadata as ordinary sessions.
-pub async fn open_read_only_with_meta(
-    l: &Conn,
-    c: OpenConfig<'_>,
-    meta: Option<Value>,
-    reports: &dyn Reports,
-) -> Result<Opened, RpcError> {
-    open_with(l, c, meta, reports, Strictness::Strict, true).await
-}
-
 /// [`open`], with `meta` as the `_meta` of `session/new|load` (Claude Code's adapter reads its
 /// options there, `claudeCode.options.settings` among them).
 pub async fn open_with_meta(
@@ -130,16 +168,15 @@ pub async fn open_with_meta(
     reports: &dyn Reports,
     strictness: Strictness,
 ) -> Result<Opened, RpcError> {
-    open_with(l, c, meta, reports, strictness, false).await
+    open_with(l, c, meta, reports, strictness).await
 }
 
 async fn open_with(
     l: &Conn,
-    mut c: OpenConfig<'_>,
+    c: OpenConfig<'_>,
     meta: Option<Value>,
     reports: &dyn Reports,
     strictness: Strictness,
-    read_only: bool,
 ) -> Result<Opened, RpcError> {
     let strict = strictness == Strictness::Strict;
     let init = json!({
@@ -214,18 +251,21 @@ async fn open_with(
     if let Some(rep) = reported {
         reports.model(rep);
     }
-    if read_only {
-        let available = r.pointer("/modes/availableModes").and_then(Value::as_array);
-        c.mode = ["read-only", "plan"]
-            .into_iter()
-            .find(|id| available.is_some_and(|modes| modes.iter().any(|m| m["id"] == *id)))
-            .map(String::from);
-        if c.mode.is_none() {
-            return Err(err("适配器没有声明只读权限模式，无法运行对话回答".into()));
-        }
-    }
-    // the mode does not survive session/load, so it is set every time the process starts
-    if let Some(mode) = c.mode
+    // the mode does not survive session/load, so it is set every time the process starts; one the
+    // adapter does not offer is refused (or stood in for by a narrower one), never left to its
+    // own default
+    let mode = match &c.mode {
+        None => None,
+        Some(choice) => match choice.resolve(offered_modes(&r).as_deref()) {
+            Ok(id) => id,
+            Err(e) if strict => return Err(err(e)),
+            Err(e) => {
+                tracing::error!("{e}");
+                None
+            }
+        },
+    };
+    if let Some(mode) = &mode
         && let Err(e) = l
             .request(
                 "session/set_mode",
@@ -312,6 +352,7 @@ async fn open_with(
     }
     Ok(Opened {
         acp_id,
+        mode,
         image,
         system_prompt: system_prompt.is_some(),
     })
