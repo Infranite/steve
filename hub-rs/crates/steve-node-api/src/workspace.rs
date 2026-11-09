@@ -32,6 +32,13 @@ pub enum PrepareKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<RootPath>,
     },
+    /// The merge queue's staging of a target: a worktree, on `branch`, of the Node's own bare
+    /// mirror of the repository at `source`. The mirror is filled by fetching from `source` (its
+    /// branches as `refs/source/heads/*`, its remote-tracking refs and its tags): it never borrows
+    /// `source`'s objects, and `source`'s config and hooks play no part. The worktree starts at
+    /// `refs/remotes/origin/<branch>` as fetched; [`GitAction::Reset`] moves it for each batch, so
+    /// what it builds stays warm across batches. Only on the Hub's own Node for now.
+    Staging { source: RootPath, branch: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +298,15 @@ pub enum GitAction {
         message: Option<String>,
         #[serde(default = "yes")]
         back_out_on_conflict: bool,
+    },
+    /// Only in a [`PrepareKind::Staging`] workspace: the mirror is refreshed from its source first
+    /// (as it was filled), then the staging branch is checked out at `to`, forcibly, and what git
+    /// does not track is removed, but for the directories named in `keep` (wherever they are) and
+    /// those holding a `CACHEDIR.TAG` (build output kept warm). Nothing in the source changes.
+    Reset {
+        to: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keep: Vec<RelPath>,
     },
     /// Pushes the local `branch` (which must be at `expected_local`) to the same branch at `url`.
     /// `expected_remote` is the remote ref's sha the push may replace, whatever it is (a lease);

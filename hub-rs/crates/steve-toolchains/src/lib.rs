@@ -45,6 +45,18 @@ pub struct Dir {
     /// Only a cache: the whole directory may be given back when the disk is low.
     #[serde(default)]
     pub disposable: bool,
+    /// Kept in the merge queue's staging from one batch to the next (warm build output). `None`:
+    /// the default, kept when it is an item's or seeded one.
+    #[serde(default)]
+    pub mq_keep: Option<bool>,
+}
+
+impl Dir {
+    /// Whether the merge queue's staging keeps it across batches.
+    pub fn mq_keep(&self) -> bool {
+        self.mq_keep
+            .unwrap_or(matches!(self.scope, Scope::Item | Scope::Seed))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -242,6 +254,23 @@ impl Toolchains {
             .0
             .iter()
             .flat_map(|t| t.lockfiles.iter().map(String::as_str))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// The names of the in-tree directories the merge queue's staging keeps across batches.
+    pub fn mq_keep_names(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self
+            .0
+            .iter()
+            .flat_map(|t| {
+                t.dirs
+                    .iter()
+                    .filter(|d| d.mq_keep())
+                    .filter_map(|d| d.in_tree.as_deref())
+            })
             .collect();
         v.sort();
         v.dedup();
