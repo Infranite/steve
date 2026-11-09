@@ -4970,6 +4970,7 @@ dependencies = [
  "steve-i18n",
  "steve-knowledge",
  "steve-modules",
+ "steve-node-wire",
  "steve-store",
  "steve-vault",
  "subtle",
