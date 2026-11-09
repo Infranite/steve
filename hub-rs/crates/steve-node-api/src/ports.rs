@@ -107,6 +107,10 @@ pub trait Discovery: Send + Sync {
     /// Where an entry of [`Discovery::history`] (or `session:<id>`, a harness session) is. A key
     /// the Node did not list is `invalid`.
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation>;
+    /// How the machine is doing now (B3); a Node that cannot say answers `unsupported`.
+    async fn vitals(&self) -> ApiResult<NodeVitals> {
+        Err(ApiError::new(ErrorCode::Unsupported, "vitals"))
+    }
 }
 
 /// All faces of one Node.

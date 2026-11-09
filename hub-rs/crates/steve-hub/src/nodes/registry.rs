@@ -42,6 +42,17 @@ impl NodeRegistry {
         true
     }
 
+    /// The Nodes with a live link now.
+    pub fn linked(&self) -> Vec<String> {
+        self.slots
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, s)| !s.conn.is_closed())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     pub fn current(&self, node: &str) -> Option<u64> {
         self.slots
             .lock()

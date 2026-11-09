@@ -126,6 +126,7 @@ pub const MIGRATIONS: &[&str] = &[
     // 55: access tokens and the clients signed in with them (who connects, with what, by which route).
     include_str!("../migrations/055.sql"),
     include_str!("../migrations/056.sql"),
+    include_str!("../migrations/057.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
