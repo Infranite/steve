@@ -95,6 +95,8 @@ pub struct Spawn {
     pub env: Vec<(OsString, OsString)>,
     /// Prefix for stderr log lines (`[acp <sessionId>]`).
     pub log_tag: String,
+    /// Start from an empty environment: `env` is all of it (the sandbox's level 2).
+    pub clean_env: bool,
 }
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
@@ -225,6 +227,9 @@ impl Conn {
         on_exit: impl FnOnce(ExitReport) + Send + 'static,
     ) -> Result<Arc<Conn>, RpcError> {
         let mut cmd = Command::new(&sp.program);
+        if sp.clean_env {
+            cmd.env_clear();
+        }
         cmd.args(&sp.args)
             .current_dir(&sp.cwd)
             .envs(sp.env.iter().map(|(k, v)| (k, v)))
@@ -614,6 +619,7 @@ mod control_tests {
                     cwd: dir.path().into(),
                     env: vec![],
                     log_tag: "exit-observation-test".into(),
+                    clean_env: false,
                 },
                 1024,
                 |_| true,
@@ -649,6 +655,7 @@ mod control_tests {
             cwd: dir.path().into(),
             env: ["STEVE_UPGRADE_CONTROL_TOKEN", "STEVE_SUPERVISOR_PID", "STEVE_UPGRADE_ID"].into_iter().map(|k|(k.into(), "synthetic".into())).collect(),
             log_tag: "test".into(),
+            clean_env: false,
         };
         let conn = Conn::spawn(sp, |_, _| {}, || {}).unwrap();
         tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
@@ -677,6 +684,7 @@ mod control_tests {
             .map(|(k, v)| (k.into(), v.into()))
             .collect(),
             log_tag: "test".into(),
+            clean_env: false,
         };
         let conn = Conn::spawn(sp, |_, _| {}, || {}).unwrap();
         tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
@@ -705,6 +713,7 @@ mod backpressure_tests {
             cwd: dir.path().into(),
             env: vec![],
             log_tag: "test".into(),
+            clean_env: false,
         };
         let seen = Arc::new(AtomicU64::new(0));
         let room = Arc::new(tokio::sync::Semaphore::new(0));

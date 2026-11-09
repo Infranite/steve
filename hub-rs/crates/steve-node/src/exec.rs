@@ -101,6 +101,13 @@ pub(crate) fn run(inner: &Arc<crate::Inner>, op: &OperationId, r: &Run) -> Resul
         ("/bin/sh".into(), args)
     };
     let mut cmd = Command::new(program);
+    // level 2 of the sandbox: a fresh login environment, then the command's own
+    if r.confined
+        && let Some(fresh) = inner.confine.fresh_env()
+    {
+        cmd.env_clear();
+        cmd.envs(fresh.iter().map(|(k, v)| (k, v)));
+    }
     cmd.args(args)
         .current_dir(&r.dir)
         .process_group(0)
