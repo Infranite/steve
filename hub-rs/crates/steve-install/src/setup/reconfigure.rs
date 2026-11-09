@@ -256,20 +256,27 @@ impl Snapshot {
                 "steve.env 指向另一 STEVE_HOME；不会重配置"
             );
         }
-        for name in ["STEVE_OIDC_ISSUER", "STEVE_OIDC_CLIENT_ID"] {
-            ensure!(
-                values.get(name).is_some_and(|v| !v.is_empty()),
-                "本次仅维护已有 OIDC 配置，缺少 {name}"
+        /* OIDC is optional since 2026-11-09 (a Hub set up without it signs in with access tokens):
+         * when it is configured, it is kept whole and maintained as before */
+        let oidc = ["STEVE_OIDC_ISSUER", "STEVE_OIDC_CLIENT_ID", "STEVE_OIDC_CLIENT_SECRET_FILE"]
+            .iter()
+            .any(|k| values.get(*k).is_some_and(|v| !v.is_empty()));
+        if oidc {
+            for name in ["STEVE_OIDC_ISSUER", "STEVE_OIDC_CLIENT_ID"] {
+                ensure!(
+                    values.get(name).is_some_and(|v| !v.is_empty()),
+                    "本次仅维护已有 OIDC 配置，缺少 {name}"
+                );
+            }
+            let secret = Path::new(
+                values
+                    .get("STEVE_OIDC_CLIENT_SECRET_FILE")
+                    .context("已有 OIDC secret 必须由文件引用；本次不会创建或迁移 secret")?,
             );
+            ensure!(secret.is_absolute(), "OIDC secret 文件必须为绝对路径");
+            owned(secret, false)?;
+            guard(&mut runtime.guards, secret)?;
         }
-        let secret = Path::new(
-            values
-                .get("STEVE_OIDC_CLIENT_SECRET_FILE")
-                .context("已有 OIDC secret 必须由文件引用；本次不会创建或迁移 secret")?,
-        );
-        ensure!(secret.is_absolute(), "OIDC secret 文件必须为绝对路径");
-        owned(secret, false)?;
-        guard(&mut runtime.guards, secret)?;
         match values.get("STEVE_VAULT_KEYSTORE").map(String::as_str) {
             Some("dir") => {
                 let keys = Path::new(
@@ -451,6 +458,10 @@ fn changes(
         }
     }
     let old_issuer = value(current, "STEVE_OIDC_ISSUER");
+    if old_issuer.is_empty() {
+        /* no OIDC to maintain: signing in is by access token */
+        return Ok(changes);
+    }
     let issuer = ask_value(input, "OIDC issuer", Some(old_issuer), false, |answer| {
         let parsed = oidc_issuer_url(answer)?;
         Ok(if answer == old_issuer {
@@ -927,7 +938,6 @@ mod tests {
     use serde_json::json;
     use std::collections::VecDeque;
     use std::os::unix::fs::symlink;
-    use zeroize::Zeroizing;
 
     struct Answers {
         values: VecDeque<String>,
@@ -958,9 +968,6 @@ mod tests {
             } else {
                 value
             })
-        }
-        fn secret(&mut self, _: &str) -> Result<Zeroizing<String>> {
-            panic!("maintenance must not request or rotate a secret")
         }
     }
 

@@ -1,0 +1,1 @@
+安装 Hub 时不再询问 OIDC。配置检查通过后，安装向导会为 owner（默认是当前系统用户名）签发第一个访问 token，在结束时显示出来，并保存在 `secrets/owner.token`（权限 0600）。网页登录页新增“用户名 + 访问 token”的表单，登录后凭据保存在 HttpOnly cookie 里；退出登录时，这个客户端会同时被吊销。已经配置 OIDC 的 Hub 照常可以用单点登录，`steve setup --reconfigure` 在没有 OIDC 配置时会跳过相关字段。

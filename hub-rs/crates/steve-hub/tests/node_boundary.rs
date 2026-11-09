@@ -299,7 +299,7 @@ const ALLOWED: &[Entry] = &[
     e(Dir, "steve-install/src/common.rs", 1, Hub, "operator installer inventories its immutable package and private release copies, not projects"),
     e(Fs, "steve-install/src/common.rs", 7, Hub, "operator installer owns private setup receipts and verified package copies"),
     e(Dir, "steve-install/src/setup.rs", 1, Hub, "first installation checks an explicitly selected vault-key directory is empty before owning it"),
-    e(Fs, "steve-install/src/setup.rs", 7, Hub, "first installation validates, copies and registers only its own release and configuration under a setup lock"),
+    e(Fs, "steve-install/src/setup.rs", 8, Hub, "first installation validates, copies and registers only its own release and configuration under a setup lock, and reads back the owner token it saved"),
     e(Spawn, "steve-install/src/setup/reconfigure.rs", 1, Hub, "operator configuration maintenance runs only the verified installed Hub's bounded configuration check"),
     e(Fs, "steve-install/src/setup/reconfigure.rs", 7, Hub, "operator configuration maintenance reads private configuration and locks, syncs and archives its own recoverable transaction"),
     e(Spawn, "steve-install/src/service.rs", 1, Hub, "operator service manager invokes fixed launchctl/systemctl and verified installation identity commands"),

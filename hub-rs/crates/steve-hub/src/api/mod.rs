@@ -279,7 +279,7 @@ async fn lookup_user(
 ) -> Result<Who, ApiError> {
     let token = cookie(headers, "steve_session");
     // a client signed in with an access token says who it is with every request (A1)
-    let signed = match (crate::access::bearer(headers), st.modules.as_ref()) {
+    let signed = match (crate::access::credential_of(headers), st.modules.as_ref()) {
         (Some(cred), Some(m)) => {
             let store = m.store.clone();
             let found = blocking(move || {
@@ -432,7 +432,12 @@ async fn require_user(State(st): State<AppState>, mut req: Request, next: Next) 
             } else {
                 Value::Null
             };
-            json_response(401, &json!({ "error": "unauthenticated", "login": login }))
+            // `token`: a client may sign in with a user's name and an access token (`/auth/token`)
+            let token = st.modules.is_some();
+            json_response(
+                401,
+                &json!({ "error": "unauthenticated", "login": login, "token": token }),
+            )
         }
         // a throw in requireUser reaches Hono's default handler, not api.onError
         Err(e) => {

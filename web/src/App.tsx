@@ -6,6 +6,8 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
+import { Input } from "@/components/ui/input"
+import { api, signIn } from "@/api"
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command"
 import { BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, Building2Icon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LockIcon, UsersRoundIcon, WorkflowIcon, InboxIcon, ListTodoIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, PlugIcon, PlusIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon } from "lucide-react"
 import { st, useStore, start } from "@/store"
@@ -120,6 +122,31 @@ function Redirect({ to }: { to: string }) {
   return null
 }
 
+/** signing in with a user's name and an access token (`steve-hub --access token create` on the Hub's machine) */
+function TokenSignIn() {
+  const t = useT()
+  const [user, setUser] = useState("")
+  const [token, setToken] = useState("")
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const go = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!user.trim() || !token.trim() || busy) return
+    setBusy(true); setError("")
+    try { await api.tokenSignIn(user.trim(), token.trim(), st.webVersion); location.reload() }
+    catch (x) { setError((x as Error).message); setBusy(false) }
+  }
+  return (
+    <form onSubmit={go} className="flex w-full max-w-xs flex-col gap-2 text-left" data-token-sign-in>
+      <Input value={user} onChange={(e) => setUser(e.target.value)} placeholder={t("shell:app.userName")} autoComplete="username" autoFocus />
+      <Input value={token} onChange={(e) => setToken(e.target.value)} placeholder={t("shell:app.accessToken")} type="password" autoComplete="current-password" />
+      {error && <div className="type-footnote text-destructive">{error}</div>}
+      <Button type="submit" disabled={busy || !user.trim() || !token.trim()}>{busy ? <Spinner className="size-4" /> : t("shell:app.signIn")}</Button>
+      <div className="type-footnote text-muted-foreground">{t("shell:app.tokenHint")}</div>
+    </form>
+  )
+}
+
 function Splash({ children }: { children: React.ReactNode }) {
   return <div className="flex h-[100dvh] flex-col items-center justify-center gap-4 bg-background px-6 text-center text-foreground">{children}</div>
 }
@@ -134,7 +161,8 @@ export default function App() {
   useEffect(() => { sonnerToast.dismiss() }, [a, b, c])
   if (st.login) return (
     <Splash><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{t("shell:app.signInToContinue")}</div></div>
-      <Button onClick={() => { location.href = st.login + "?back=" + encodeURIComponent(location.pathname + location.hash) }} data-login>{t("shell:app.signIn")}</Button></Splash>
+      {signIn.token && <TokenSignIn />}
+      {(signIn.link || !signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => { location.href = (signIn.link ?? st.login) + "?back=" + encodeURIComponent(location.pathname + location.hash) }} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}</Splash>
   )
   if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><div className="type-callout text-muted-foreground">{st.error}</div></> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
   const view =

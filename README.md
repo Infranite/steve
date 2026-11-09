@@ -202,7 +202,7 @@ A flow is a graph of 11 node kinds: trigger, filter, decision table, sub-flow, w
 
 The stats page counts tokens (cache and reasoning included), cache hit rate, estimated cost next to what the harness reports, money the cache saved, items started and finished, lead, cycle and wait time, first-pass rate and rework. Filter by project, bot, model and source.
 
-Sign-in is OIDC with PKCE. Workspaces are data boundaries, each with its own item prefix. The UI stays live over one SSE stream with resumable cursors, and a phone reconnects as soon as the page is visible again. There are in-place upgrades with backup and rollback, daily backups for macOS source installs, signed macOS releases that keep the vault key across rebuilds, a <kbd>⌘</kbd> <kbd>K</kbd> command palette, light and dark themes, and English or 简体中文.
+Sign-in is a user name and an access token the Hub issues, or optionally OIDC with PKCE. Each client is known by its kind and the route it comes by. Workspaces are data boundaries, each with its own item prefix. The UI stays live over one SSE stream with resumable cursors, and a phone reconnects as soon as the page is visible again. There are in-place upgrades with backup and rollback, daily backups for macOS source installs, signed macOS releases that keep the vault key across rebuilds, a <kbd>⌘</kbd> <kbd>K</kbd> command palette, light and dark themes, and English or 简体中文.
 
 <sub>Screenshots come from a demo workspace on the real Hub and web UI, with scripted agents. The UI is shown in Chinese; switch to English in Settings → Appearance.</sub>
 
@@ -271,7 +271,7 @@ brew install infranite/tap/steve
 steve setup
 ```
 
-The setup wizard asks whether this machine is a Hub or Node. For a Hub it defaults to listening on `0.0.0.0:8440`, asks separately for the browser/OIDC callback URL, collects your OIDC settings, prepares its private runtime directory and macOS signing identity, checks the configuration, and registers a user service. For a Node it accepts the Hub's HTTPS address and reads the one-time pairing code from stdin; confirm the fingerprint in Hub **Devices**. Then start the role you configured:
+The setup wizard asks whether this machine is a Hub or Node. For a Hub it defaults to listening on `0.0.0.0:8440`, asks separately for the browser URL, prepares its private runtime directory and macOS signing identity, checks the configuration, issues the owner's first access token, and registers a user service. For a Node it accepts the Hub's HTTPS address and reads the one-time pairing code from stdin; confirm the fingerprint in Hub **Devices**. Then start the role you configured:
 
 ```sh
 steve hub start       # on the Hub
@@ -321,7 +321,7 @@ STEVE_WEB_DIR="$PWD/web/dist" \
   hub-rs/target/debug/steve-hub
 ```
 
-Open **http://127.0.0.1:8440** and sign in. `STEVE_DEV_LOGIN=1` adds a one-click owner login that only works **from loopback**. It's for trying Steve out; for anything long-lived, set up OIDC (below).
+Open **http://127.0.0.1:8440** and sign in. `STEVE_DEV_LOGIN=1` adds a one-click owner login that only works **from loopback**. It's for trying Steve out. For anything long-lived, issue an access token with `steve-hub --access token create` and sign in with your user name and that token. OIDC is optional (below).
 
 > [!TIP]
 > `STEVE_HOME` keeps this instance's data separate from `~/.steve`, the default. On Linux without a desktop keyring (Secret Service), the vault refuses to start: set `STEVE_VAULT_KEYSTORE=dir` and point `STEVE_VAULT_KEY_DIR` at a `0700` directory outside `STEVE_HOME`.
@@ -330,7 +330,7 @@ Open **http://127.0.0.1:8440** and sign in. `STEVE_DEV_LOGIN=1` adds a one-click
 
 Steve reads its settings from the environment. For a service, put them in `$STEVE_HOME/steve.env` (template: [`ops/steve.env.example`](ops/steve.env.example)). Keep secrets out of the checkout and reference them with `*_FILE` variables.
 
-For an existing Hub that completed managed setup, run `steve setup --reconfigure` (or add `--home /absolute/path/to/hub`) to edit its listening addresses, browser URL and existing OIDC issuer/client ID. It reads the current literal `steve.env`, preserves other lines and comments, and keeps the existing secret file and installation identity. Review the proposed changes and explicitly confirm before configuration checks, private backups and saving. It does not restart the service; use `steve hub restart` with the original home and service label when ready. See [reconfiguring an installed Hub](docs/deployment.md#reconfiguring-an-installed-hub) for checks and interruption recovery. This command does not reconfigure or re-pair Nodes.
+For an existing Hub that completed managed setup, run `steve setup --reconfigure` (or add `--home /absolute/path/to/hub`) to edit its listening addresses, browser URL and, when one is configured, its OIDC issuer/client ID. It reads the current literal `steve.env`, preserves other lines and comments, and keeps the existing secret file and installation identity. Review the proposed changes and explicitly confirm before configuration checks, private backups and saving. It does not restart the service; use `steve hub restart` with the original home and service label when ready. See [reconfiguring an installed Hub](docs/deployment.md#reconfiguring-an-installed-hub) for checks and interruption recovery. This command does not reconfigure or re-pair Nodes.
 
 | Variable | Purpose |
 |---|---|
@@ -338,7 +338,7 @@ For an existing Hub that completed managed setup, run `steve setup --reconfigure
 | `STEVE_HOST`, `STEVE_PORT` | Listen addresses, comma-separated, on one port (bare-binary default `127.0.0.1:8440`; `steve setup` writes `0.0.0.0:8440` and enables wildcard listening); for a proxy on another machine add the address it reaches, e.g. `127.0.0.1,100.64.0.2`. `0.0.0.0`/`::` is refused unless `STEVE_ALLOW_ANY_HOST=1` |
 | `STEVE_WEB_DIR` | The built web UI the Hub serves |
 | `STEVE_PUBLIC_URL` | A URL your integrations can reach, only needed for callbacks. No shared hosted endpoint is provided. |
-| `STEVE_OIDC_ISSUER`, `STEVE_OIDC_CLIENT_ID`, `STEVE_OIDC_CLIENT_SECRET_FILE` | Sign-in through your OIDC provider |
+| `STEVE_OIDC_ISSUER`, `STEVE_OIDC_CLIENT_ID`, `STEVE_OIDC_CLIENT_SECRET_FILE` | Optional single sign-on through your OIDC provider |
 | `STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB`, `STEVE_WORKTREE_IDLE_HOURS` | Disk guards for item worktrees |
 | `STEVE_UPDATE_CHECK` | `0` turns off the periodic release check. Debug builds don't check unless it is `1` |
 | `STEVE_YOLO` | `off` disables YOLO for the whole instance |

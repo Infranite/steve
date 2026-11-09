@@ -159,6 +159,27 @@ struct SignIn {
     token: String,
     #[serde(default)]
     client: ClientInfo,
+    /// A web page served by this Hub: the credential is also set as the [`COOKIE`] (HttpOnly), so the
+    /// page's own requests and event stream carry it without script access to it.
+    #[serde(default)]
+    cookie: bool,
+}
+
+/// The cookie a same-origin web page keeps its client credential in.
+pub const COOKIE: &str = "steve_client";
+/// How long that cookie lasts: a year (the client is revoked, not the cookie timed out).
+const COOKIE_AGE: i64 = 365 * 24 * 3600;
+
+fn client_cookie(value: &str, max_age: i64, secure: bool) -> String {
+    format!(
+        "{COOKIE}={value}; Max-Age={max_age}; Path=/; HttpOnly{}; SameSite=Lax",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+/// The client credential of a request: `Authorization: Bearer`, else the [`COOKIE`].
+pub fn credential_of(headers: &HeaderMap) -> Option<String> {
+    bearer(headers).or_else(|| crate::api::cookie(headers, COOKIE).filter(|c| !c.is_empty()))
 }
 
 #[derive(Deserialize, Default)]
@@ -268,15 +289,23 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
                     steve_store::WS,
                 )
                 .ok();
-            reply(
+            let cred = credential(&c.id, &secret);
+            let mut res = reply(
                 StatusCode::OK,
                 json!({
                     "client_id": c.id,
-                    "credential": credential(&c.id, &secret),
+                    "credential": cred,
                     "user": {"id": u.id, "name": u.name},
                     "hub": {"version": st.cfg.version, "api": API_VERSION},
                 }),
-            )
+            );
+            if b.cookie {
+                let secure = route.ends_with("+tls") || st.cfg.public_url.starts_with("https://");
+                if let Ok(v) = client_cookie(&cred, COOKIE_AGE, secure).parse() {
+                    res.headers_mut().append(axum::http::header::SET_COOKIE, v);
+                }
+            }
+            res
         }
         Ok(Ok(None)) => {
             if !key.is_empty() {
@@ -304,11 +333,31 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
     }
 }
 
-/// `/hello` and `/token`, nested under `/auth` with the login routes; no session required.
+/// Signs this client out: it is revoked, and its cookie cleared.
+async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::response::Response {
+    if let (Some(cred), Some(m)) = (credential_of(&headers), st.modules.as_ref()) {
+        let store = m.store.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(Some((_, c))) = store.access().client_user(&cred) {
+                store.access().client_revoke(&c.id).ok();
+            }
+        })
+        .await;
+    }
+    let mut res = reply(StatusCode::OK, json!({"ok": true}));
+    if let Ok(v) = client_cookie("", 0, false).parse() {
+        res.headers_mut().append(axum::http::header::SET_COOKIE, v);
+    }
+    res
+}
+
+/// `/hello`, `/token` and `/client/logout`, nested under `/auth` with the login routes; no session
+/// required.
 pub fn auth_routes(st: AppState) -> Router {
     Router::new()
         .route("/hello", get(hello))
         .route("/token", post(sign_in))
+        .route("/client/logout", post(sign_out))
         .with_state(st)
 }
 

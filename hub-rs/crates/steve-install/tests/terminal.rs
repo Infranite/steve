@@ -147,7 +147,7 @@ fn executable(path: &Path, content: &str) {
 }
 
 #[test]
-fn actual_setup_ctrl_c_restores_echo_and_never_persists_the_secret() {
+fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     let account = root.join("account");
@@ -218,53 +218,24 @@ fn actual_setup_ctrl_c_restores_echo_and_never_persists_the_secret() {
         .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
         .process_group(0);
     let mut process = Process(command.spawn().unwrap());
-    for (prompt, answer) in [
-        (
-            "浏览器访问地址 [http://127.0.0.1:8440]: ",
-            "http://0.0.0.0:8440\n",
-        ),
-        (
-            "浏览器访问地址 [http://127.0.0.1:8440]: ",
-            "https://hub.example/\n",
-        ),
-        ("OIDC issuer: ", "http://192.0.2.20/issuer/\n"),
-        ("OIDC issuer: ", "https://issuer.example/tenant/\n"),
-        ("OIDC client ID: ", "\n"),
-        ("OIDC client ID: ", "terminal-client\n"),
-    ] {
-        pty.wait_prompt(&mut process.0, prompt);
-        pty.master.write_all(answer.as_bytes()).unwrap();
-    }
-    pty.wait_prompt(&mut process.0, "OIDC client secret（不回显）: ");
-    let hidden = pty.attributes();
-    assert_eq!(hidden.c_lflag & (libc::ECHO | libc::ICANON | libc::ISIG), 0);
-    let sentinel = "terminal-secret-must-never-appear-7f0a34";
-    pty.master.write_all(sentinel.as_bytes()).unwrap();
-    pty.master.write_all(&[3]).unwrap();
+    // an address a browser can't use is asked again; then the person gives up (end of input)
+    pty.wait_prompt(&mut process.0, "浏览器访问地址 [http://127.0.0.1:8440]: ");
+    pty.master.write_all(b"http://0.0.0.0:8440\n").unwrap();
+    pty.wait_prompt(&mut process.0, "浏览器访问地址 [http://127.0.0.1:8440]: ");
+    pty.master.write_all(&[4]).unwrap();
     let status = pty.wait_exit(&mut process.0);
-    assert_eq!(status.code(), Some(1), "Ctrl-C is handled as cancellation");
+    assert_eq!(status.code(), Some(1), "end of input is handled as cancellation");
     let after = pty.attributes();
-    assert_eq!(
-        after.c_lflag, before.c_lflag,
-        "terminal flags must be restored"
-    );
-    assert_eq!(
-        after.c_cc, before.c_cc,
-        "terminal input controls must be restored"
-    );
+    assert_eq!(after.c_lflag, before.c_lflag, "terminal flags are unchanged");
+    assert_eq!(after.c_cc, before.c_cc, "terminal input controls are unchanged");
     let output = String::from_utf8_lossy(&pty.output);
-    for prompt in [
-        "浏览器访问地址 [http://127.0.0.1:8440]: ",
-        "OIDC issuer: ",
-        "OIDC client ID: ",
-    ] {
-        assert_eq!(output.matches(prompt).count(), 2, "{output}");
-    }
-    assert!(output.contains("secret 输入已中断"), "{output}");
-    assert!(
-        !output.contains(sentinel),
-        "secret was echoed by the real CLI"
+    assert_eq!(
+        output.matches("浏览器访问地址 [http://127.0.0.1:8440]: ").count(),
+        2,
+        "{output}"
     );
+    assert!(output.contains("初始化已中断"), "{output}");
+    assert!(!output.contains("OIDC"), "setup asks for no OIDC: {output}");
 
     let receipt_bytes = fs::read(install.join("setup.json")).unwrap();
     let receipt: Value = serde_json::from_slice(&receipt_bytes).unwrap();
@@ -272,7 +243,6 @@ fn actual_setup_ctrl_c_restores_echo_and_never_persists_the_secret() {
     assert_eq!(receipt["files"], json!({}));
     assert!(receipt["environment"].is_null());
     assert_ne!(receipt["keychain_started"], true);
-    assert!(!String::from_utf8_lossy(&receipt_bytes).contains(sentinel));
     for relative in [
         "secrets",
         "steve.env",
