@@ -20,6 +20,9 @@
 //! ```text
 //! STEVE_ROUTE_EVAL_SAVE=1 cargo test -p steve-core ahead_eval_real_model -- --ignored --nocapture
 //! ```
+//!
+//! The batch eval routes the 20 synthetic cases (no history) in bursts of [`BURST`], one call each
+//! ([`gateway::route_many`]), outputs in `tests/batch_outputs.json`. Same bar as one at a time.
 
 use super::decide::{DecideCtx, decide, for_main, now_while_answering, without_router};
 use crate::gateway::{self, ClaudeCli, FocusItem, ModelGateway, RouteCtx, Said, Tier};
@@ -33,6 +36,7 @@ const CASES: &str = include_str!("tests/route_cases.json");
 const OUTPUTS: &str = include_str!("tests/route_outputs.json");
 const AHEAD: &str = include_str!("tests/ahead_cases.json");
 const AHEAD_OUTPUTS: &str = include_str!("tests/ahead_outputs.json");
+const BATCH_OUTPUTS: &str = include_str!("tests/batch_outputs.json");
 
 #[derive(Deserialize)]
 struct Cases {
@@ -531,6 +535,97 @@ async fn route_eval_real_model() {
             .join("src/thread/tests/route_outputs.json");
         std::fs::write(p, serde_json::to_string_pretty(&out).unwrap() + "\n").unwrap();
     }
+    assert_eq!(bad, 0, "a question became an item");
+    assert!(rate >= 0.9, "hit rate {rate}");
+}
+
+/// How many synthetic cases the batch eval routes in one call.
+const BURST: usize = 5;
+
+/// The synthetic cases in bursts of [`BURST`], each burst's id the ids joined.
+fn bursts(c: &Cases) -> Vec<(String, Vec<Case>)> {
+    let syn: Vec<Case> = c
+        .cases
+        .iter()
+        .filter(|x| x.id.starts_with("syn_") && x.history.is_empty())
+        .cloned()
+        .collect();
+    syn.chunks(BURST)
+        .map(|b| {
+            (
+                b.iter()
+                    .map(|x| x.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join("+"),
+                b.to_vec(),
+            )
+        })
+        .collect()
+}
+
+/// Scores the bursts' replies: each case as [`score`] would, from its element of the array.
+fn batch_report(ctx: &RouteCtx, c: &Cases, out: &BTreeMap<String, Value>) -> (f64, usize) {
+    let mut all = vec![];
+    for (id, b) in bursts(c) {
+        let texts: Vec<String> = b.iter().map(routed).collect();
+        let raw = out.get(&id).and_then(|v| v["raw"].as_str());
+        let rs = raw.and_then(|raw| gateway::parse_routes(ctx, &texts, raw));
+        assert!(rs.is_some(), "burst {id} unusable: {raw:?}");
+        for (x, r) in b.iter().zip(rs.unwrap()) {
+            let raw = serde_json::json!({
+                "kind": r.kind, "confidence": r.confidence, "signals": r.signals,
+                "item": r.item, "title": r.title, "goal": r.goal,
+            })
+            .to_string();
+            all.push(score(ctx, x, Some(&raw)));
+        }
+    }
+    report(&all)
+}
+
+#[test]
+fn recorded_batch_outputs_pass_the_bar() {
+    let c: Cases = serde_json::from_str(CASES).unwrap();
+    let out: BTreeMap<String, Value> = serde_json::from_str(BATCH_OUTPUTS).unwrap();
+    let ctx = route_ctx(&c.ctx);
+    assert_eq!(out.len(), bursts(&c).len());
+    let (rate, bad) = batch_report(&ctx, &c, &out);
+    assert_eq!(bad, 0, "a question became an item");
+    assert!(rate >= 0.9, "hit rate {rate}");
+}
+
+/// The real fast tier on the bursts. Writes `tests/batch_outputs.json` with STEVE_ROUTE_EVAL_SAVE=1.
+#[tokio::test]
+#[ignore = "calls the real model"]
+async fn batch_eval_real_model() {
+    let c: Cases = serde_json::from_str(CASES).unwrap();
+    let ctx = route_ctx(&c.ctx);
+    let (gw, _dir) = real_gateway();
+    let mut out = BTreeMap::new();
+    for (id, b) in bursts(&c) {
+        let texts: Vec<String> = b.iter().map(routed).collect();
+        let prompt = gateway::route_prompt_for(&ctx, &texts, &[], false);
+        let t0 = std::time::Instant::now();
+        let r = gw
+            .call(
+                &prompt,
+                Tier::Fast,
+                Duration::from_secs(90),
+                &gateway::ThinkTools::None,
+            )
+            .await
+            .ok();
+        out.insert(
+            id,
+            serde_json::json!({"raw": r.as_ref().map(|p| p.text.clone()), "model": r.map(|p| p.model), "ms": t0.elapsed().as_millis() as u64}),
+        );
+    }
+    if std::env::var_os("STEVE_ROUTE_EVAL_SAVE").is_some() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/thread/tests/batch_outputs.json");
+        std::fs::write(p, serde_json::to_string_pretty(&out).unwrap() + "\n").unwrap();
+    }
+    let (rate, bad) = batch_report(&ctx, &c, &out);
     assert_eq!(bad, 0, "a question became an item");
     assert!(rate >= 0.9, "hit rate {rate}");
 }

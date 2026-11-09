@@ -101,6 +101,20 @@ impl Drop for Deferred {
     }
 }
 
+/// The most messages of a lane routed in one call ([`Core::route_batch`]).
+const BATCH_MAX: usize = 8;
+
+/// A message routed with others before its turn ([`Core::route_batch`]).
+struct Prerouted {
+    /// the text it was routed as: edited since, it is routed again
+    text: String,
+    route: Route,
+    /// its share of the call's time
+    ms: i64,
+    /// the router knew what Steve was still answering ([`RouteCtx::pending`])
+    pending: bool,
+}
+
 /// Why a waiting message could not be taken off its lane's queue ([`Core::claim`]).
 enum Claim {
     /// edited after it was routed ahead: its text now
@@ -602,7 +616,12 @@ impl Core {
             gateway::route(self.gw(), &c, &routed_text(text, files), &history, false),
         )
         .await;
-        let ms = now() - r0;
+        self.goes_ahead(ws, text, r, now() - r0)
+    }
+
+    /// A route made while Steve is still answering ([`Core::ahead`], or a burst's): kept when the
+    /// message goes now ([`decide::now_while_answering`]), `None` when it waits.
+    fn goes_ahead(&self, ws: &str, text: &str, r: Route, ms: i64) -> Option<(Route, i64)> {
         let named = self.named_bot(ws, text).ok()?;
         let d = decide::decide(
             &r,
@@ -613,6 +632,76 @@ impl Core {
         );
         let d = decide::for_main(d, &r);
         decide::now_while_answering(&r, &d).then_some((r, ms))
+    }
+
+    /// Routes `first` and the messages waiting behind it on the same lane in one call, at most
+    /// [`BATCH_MAX`] (2026-11-09: a burst costs one routing, not one per message). Plain questions,
+    /// which need no router, and messages with a fixed way are left out; with fewer than two left,
+    /// or when the call fails, nothing is routed here and each goes alone as before. While Steve is
+    /// still answering in the main conversation, the router is told what, as for one message.
+    async fn route_batch(
+        &self,
+        ws: &str,
+        first: &Job,
+        rest: &std::collections::VecDeque<Job>,
+        out: &mut HashMap<String, Prerouted>,
+    ) {
+        let guest = first.conv.guest();
+        let mut picked: Vec<(String, String, Vec<FileRef>)> = vec![];
+        for j in std::iter::once(first).chain(rest.iter()) {
+            if picked.len() >= BATCH_MAX {
+                break;
+            }
+            if j.after || j.direct || j.conv != first.conv || out.contains_key(&j.mid) {
+                continue;
+            }
+            let Ok(Some(text)) = self.waiting_text(ws, &j.mid) else {
+                continue;
+            };
+            if decide::without_router(&text, !j.files.is_empty(), guest, &[]).is_some() {
+                continue;
+            }
+            picked.push((j.mid.clone(), text, j.files.clone()));
+        }
+        if picked.len() < 2 {
+            return;
+        }
+        let (Ok(history), Ok(mut c)) = (
+            self.history_before(ws, &picked[0].0),
+            self.route_ctx_in(ws, guest),
+        ) else {
+            return;
+        };
+        if !guest && self.answering(ws) {
+            c.pending = self.inline_questions(ws);
+            if let Some(d) = lock(&self.0.thread.deferred).get(ws) {
+                c.pending.extend(d.iter().map(|(_, t)| t.clone()));
+            }
+        }
+        let texts: Vec<String> = picked.iter().map(|(_, t, f)| routed_text(t, f)).collect();
+        let r0 = now();
+        let Some(rs) = crate::stats::tagged(
+            "route",
+            ws,
+            gateway::route_many(self.gw(), &c, &texts, &history),
+        )
+        .await
+        else {
+            return;
+        };
+        let ms = (now() - r0) / picked.len() as i64;
+        let pending = !c.pending.is_empty();
+        for ((mid, text, _), route) in picked.into_iter().zip(rs) {
+            out.insert(
+                mid,
+                Prerouted {
+                    text,
+                    route,
+                    ms,
+                    pending,
+                },
+            );
+        }
     }
 
     /// The enabled bot a message's “@名字 …” names.
@@ -933,8 +1022,15 @@ impl Core {
         let core = self.clone();
         let (w, key) = (ws.to_string(), key.to_string());
         tokio::spawn(async move {
+            /* messages taken off the channel to be routed together, and the routes they got */
+            let mut backlog: std::collections::VecDeque<Job> = Default::default();
+            let mut routed: HashMap<String, Prerouted> = HashMap::new();
             loop {
-                let j = match tokio::time::timeout(LANE_IDLE, rx.recv()).await {
+                let next = match backlog.pop_front() {
+                    Some(j) => Ok(Some(j)),
+                    None => tokio::time::timeout(LANE_IDLE, rx.recv()).await,
+                };
+                let j = match next {
                     Ok(Some(j)) => j,
                     Ok(None) => return,
                     Err(_) => {
@@ -951,6 +1047,14 @@ impl Core {
                         return;
                     }
                 };
+                /* the messages said meanwhile are routed together with this one: one call for a burst */
+                while let Ok(more) = rx.try_recv() {
+                    backlog.push_back(more);
+                }
+                if !j.after && !j.direct && !routed.contains_key(&j.mid) && !backlog.is_empty() {
+                    core.route_batch(&w, &j, &backlog, &mut routed).await;
+                }
+                let mut pre = routed.remove(&j.mid);
                 let mut ahead = None;
                 /* a message off the after lane counts as waiting until it is handled, so one said
                 meanwhile is still asked whether it needs this one's answer */
@@ -975,7 +1079,12 @@ impl Core {
                             j.text.clone()
                         }
                     };
-                    match core.ahead(&w, &j.mid, &text, &j.files).await {
+                    /* routed in a burst with what is being answered in view: decided as one alone would be */
+                    let r = match pre.take().filter(|p| p.pending && p.text == text) {
+                        Some(p) => core.goes_ahead(&w, &text, p.route, p.ms),
+                        None => core.ahead(&w, &j.mid, &text, &j.files).await,
+                    };
+                    match r {
                         Some(r) => ahead = Some((text, r)),
                         None => {
                             core.defer(&w, Job { text, ..j });
@@ -983,13 +1092,17 @@ impl Core {
                         }
                     }
                 }
+                if let Some(p) = pre.filter(|p| !p.pending && !j.after && ahead.is_none()) {
+                    ahead = Some((p.text, (p.route, p.ms)));
+                }
                 let _activity = core.store().store().activity("thread_router").await;
                 let (direct, after) = (j.direct, j.after);
                 let routed_as = ahead.as_ref().map(|(t, _)| t.as_str());
                 let j = match core.claim(&w, &j.mid, routed_as) {
-                    /* edited after it was routed ahead: the route was for other words, so it waits */
+                    /* edited after it was routed: the route was for other words, so it is routed again
+                    as it is now (and waits, if Steve is still answering and it needs that) */
                     Err(Claim::Changed(text)) => {
-                        core.defer(&w, Job { text, ..j });
+                        backlog.push_front(Job { text, ..j });
                         continue;
                     }
                     Err(Claim::Failed(e)) => {

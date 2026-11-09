@@ -1745,3 +1745,38 @@ async fn a_failure_on_the_card_clears_when_the_item_goes_on() {
         3
     );
 }
+
+/// 2026-11-09: messages said in a burst are routed in one call, each decided on its own and handled
+/// in order; a plain question among them needs no router and goes alone.
+#[tokio::test]
+async fn a_burst_is_routed_in_one_call() {
+    let k = Kit::new();
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            assert!(p.contains("a JSON array of 2 objects"), "{p}");
+            Ok(
+                r#"[{"kind":"item","confidence":0.9,"signals":["change"],"title":"改按钮"},
+                   {"kind":"config","confidence":0.9,"title":"标签"}]"#
+                    .into(),
+            )
+        } else {
+            Ok(r#"{"changes":[]}"#.into())
+        }
+    });
+    let before = items(&k);
+    /* said before the lane runs: they wait together */
+    let a = k.core.say(WS, "把发送按钮改成蓝色", &[]).unwrap();
+    let b = k.core.say(WS, "加一个叫财务的标签", &[]).unwrap();
+    until(|| route_opt(&k, &a).is_some() && route_opt(&k, &b).is_some()).await;
+    let calls =
+        k.gw.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with("You are the router"))
+            .count();
+    assert_eq!(calls, 1, "one routing for the burst");
+    assert_eq!(route_log(&k, &a).kind, "item");
+    assert_eq!(route_log(&k, &b).kind, "config");
+    until(|| items(&k) == before + 1).await;
+}
