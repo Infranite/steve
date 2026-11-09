@@ -143,6 +143,20 @@ Evidence is asynchronous and best effort. Coverage reports known retention gaps,
 
 Snapshots are sampled reads, not a distributed transaction. `changed_during_read` reports a changed item revision during sampling; unchanged revision does not guarantee every remote process stayed unchanged. Start with `explain`, inspect the relevant events and report facts, hypotheses and missing evidence separately. Diagnosis does not automatically retry, modify code or deploy a release.
 
+## Several machines
+
+Steve runs work on Nodes. The Hub is always one of them: its own Node, `local`, runs in the Hub's process by default, or in a process of its own with `STEVE_NODE_MODE=service`. Any other machine can become a Node as well. A typical arrangement is an always-on Hub with other machines added as Nodes, but none is assumed: one machine on its own is a complete Steve.
+
+- **Reaching the Hub:** a Node dials the Hub, never the other way round. It can use the Hub's HTTPS address (a reverse proxy that terminates TLS, see [Remote Nodes](#remote-nodes)) or [tailcat](#remote-nodes-over-tailcat) when there is no public address or VPN.
+- **Adding a machine:** pair it from Devices with a code ([Pairing a separate Node](#pairing-a-separate-node)), or let the Hub [install it over tailcat](#installing-a-node-remotely-over-tailcat).
+- **What runs where:**
+  - A project's work runs on the Node whose machine has the project.
+  - Work without a project stays on the Hub's own Node. `STEVE_NODE_BIND` names another Node for it, and `STEVE_NODE_PLACEMENT=spread` sends it to a clearly less loaded one.
+  - Tags on Nodes let an item ask for a kind of machine.
+  - A remote Node runs only its owner's work, and commands only if its own `policy.json` allows them.
+- **When a machine is away:** its sessions wait. After `STEVE_NODE_HANDOFF_MIN` minutes with messages waiting, the item goes on in a new session elsewhere. Work on that machine that was never pushed stays there.
+- **Seeing how they do:** Devices shows each machine's load, memory, disk and round trip. It also tells you when a project disk runs short.
+
 ## Pairing a separate Node
 
 Remote Nodes are experimental. They run `bin/steve-node`, shipped alongside the Hub and Web in the platform Release bundle. Download the same release for the Node's OS and architecture, verify its manifest, size and SHA256, then extract it into a permanent release directory on that machine. `bin/steve-node --build-info` reports its release version, full commit and target; packaging rejects a Node whose identity differs from the Hub. Source builds remain available for development with `cargo build --locked --release --manifest-path hub-rs/Cargo.toml -p steve-node-cli`.
