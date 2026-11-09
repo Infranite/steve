@@ -251,6 +251,10 @@ fn applied(l: &LedgerEntry) -> Result<String, (ErrorCode, String)> {
 
 #[async_trait]
 impl MqNode for MqNodes {
+    async fn ready(&self, s: &Staging) -> Result<String, String> {
+        self.placed(s).await.map(|at| at.p.node_id.to_string())
+    }
+
     async fn stage(&self, s: &Staging, op: &str) -> Step<String> {
         // the target as its host has it now, fetched where the project is (once per batch run:
         // asked again, the reset answers what it did)

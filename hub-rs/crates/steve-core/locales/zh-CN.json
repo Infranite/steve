@@ -444,5 +444,6 @@
   "core.mq.host_closed": "托管方关闭了 PR #%{n}，没有合入",
   "core.mq.off": "合并队列没有开启（STEVE_MQ=1）",
   "core.mq.policy_unknown": "合并队列没有这个设置：%{field}",
-  "core.mq.policy_bad": "合并队列的设置不对：%{why}"
+  "core.mq.policy_bad": "合并队列的设置不对：%{why}",
+  "core.mq.node_gone": "这一批的 Node 已经 %{minutes} 分钟连不上了：%{why}。可以继续等（重跑）或退回"
 }
