@@ -421,5 +421,18 @@
   "core.mq.split": "MQ-%{batch} 检查没通过，拆成 MQ-%{a} 和 MQ-%{b} 定位原因，先合入通过的一半",
   "core.mq.why_failed": "检查没通过：\n%{tail}",
   "core.mq.why_failed_with": "和已合入的 %{with} 放在一起时检查没通过：\n%{tail}",
-  "core.mq.why_returned": "你把这一批退回了"
+  "core.mq.why_returned": "你把这一批退回了",
+  "core.mq.cutting": "RT-%{train} 正在发布",
+  "core.mq.carried": "RT-%{from} 没有发布，这一项改由 RT-%{into} 发布",
+  "core.mq.train_question": "发布 RT-%{train}（%{upstream}，%{n} 项）",
+  "core.mq.train_draft": "这一趟一起发布：\n%{list}\n\n等你回答期间合入的改动会加进这一趟，卡片随之更新。",
+  "core.mq.cut_failed": "RT-%{train} 发布失败",
+  "core.mq.cut_unknown": "RT-%{train} 的发布结果不明",
+  "core.mq.red": "%{branch} 在 RT-%{train} 发布前检查变红了",
+  "core.mq.released": "RT-%{train} 已发布为 v%{version}",
+  "core.mq.released_unnamed": "RT-%{train} 已发布",
+  "core.mq.tags_unread": "读不到目标的 tag，没有发布",
+  "core.mq.cut_not_released": "发布结果不明，但远端最高的 tag 没有变，确定没有发布：%{why}",
+  "core.mq.cut_ci_failed": "CI 没有通过：偶发失败就先用下面的 gh run rerun 重跑失败的任务，等它通过后再重试；否则先在主分支上修好。\n",
+  "core.mq.cut_ci_running": "CI 还在跑：等它通过后再重试。\n"
 }

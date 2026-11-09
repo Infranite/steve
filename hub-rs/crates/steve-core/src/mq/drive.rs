@@ -22,6 +22,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_store::mq::{self as rows, MqEntry, MqTarget, NewEntry};
 
@@ -29,6 +30,7 @@ use super::exec::{self, Member, MqNode, Staging};
 use super::policy::Policy;
 use super::queue::{Action as Qa, Answer, CardKind, Event as Qe, Outcome, Why};
 use super::store::{self as rowstore, Loaded};
+use super::train::{self, Action as Ta, CutResult, Event as Te};
 use crate::error::Result;
 use crate::repo::{Item, NewDecision};
 use crate::{Core, Tx, detach};
@@ -38,6 +40,7 @@ pub const OP_LAND: &str = "land";
 /// Decision subjects: a target's one-time permission, a batch's card.
 pub const SUBJECT_TARGET: &str = "mq_target";
 pub const SUBJECT_BATCH: &str = "mq_batch";
+pub const SUBJECT_TRAIN: &str = "mq_train";
 /// What `granted_by` says for a target you did not allow.
 const REFUSED: &str = "refused";
 /// How long a host's rules read for a target stay good.
@@ -151,7 +154,11 @@ impl Core {
         for t in all {
             let at = crate::util::now();
             let id = t.id.clone();
-            if let Err(e) = self.mq_event(&id, |l, p| l.queue.apply(p, Qe::Tick { at })) {
+            if let Err(e) = self.mq_event(&id, |l, p| {
+                let ta = l.trains.apply(p, Te::Tick { at });
+                l.train_out.extend(ta);
+                l.queue.apply(p, Qe::Tick { at })
+            }) {
                 tracing::warn!(target = id, "merge queue tick: {e}");
             }
         }
@@ -169,6 +176,18 @@ impl Core {
             let Ok(live) = s.reader(|c| rows::batches_live(c, &t.id)) else {
                 continue;
             };
+            if let Ok(trains) = s.reader(|c| rows::trains_live(c, &t.id)) {
+                for tr in trains.iter().filter(|tr| tr.state == "cutting") {
+                    let running = RUNNING
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains(&(format!("rt:{}", t.id), tr.no as u64));
+                    if !running {
+                        let (c, tid, no) = (self.clone(), t.id.clone(), tr.no as u64);
+                        detach(move || c.mq_cut(&tid, no));
+                    }
+                }
+            }
             for b in live.iter().filter(|b| b.state == "running") {
                 let running = RUNNING
                     .lock()
@@ -202,6 +221,11 @@ impl Core {
                     Qa::Land { members, commit, .. } => {
                         for m in members {
                             l.landed.push((m.clone(), commit.clone()));
+                            // a project released by a tag: what landed waits for its train
+                            if tagged(tx, m)? {
+                                let ta = l.trains.apply(&l.policy, Te::Landed { id: m.clone(), at });
+                                l.train_out.extend(ta);
+                            }
                         }
                     }
                     Qa::Return { id, why } => {
@@ -238,12 +262,362 @@ impl Core {
                 };
                 rows::stat_add(tx, target, kind, batch, None, &data)?;
             }
-            Ok::<_, steve_store::StoreError>(Some((l.target.clone(), out)))
+            let tout = std::mem::take(&mut l.train_out);
+            for a in &tout {
+                let (kind, no, data) = match a {
+                    Ta::Ask { train, members } => ("train_closed", *train, json!({"members": members.len()})),
+                    Ta::Cut { train, members } => ("train_cut", *train, json!({"members": members.len()})),
+                    Ta::Released { train, members, version } => (
+                        "train_released",
+                        *train,
+                        json!({"members": members.len(), "version": version}),
+                    ),
+                    Ta::Card { train, .. } => ("card", *train, json!({"train": true})),
+                    Ta::Update { train, members } => ("train_joined", *train, json!({"members": members.len()})),
+                    Ta::Carry { into, members, .. } => ("train_carried", *into, json!({"members": members.len()})),
+                };
+                rows::stat_add(tx, target, kind, None, Some(no as i64), &data)?;
+            }
+            Ok::<_, steve_store::StoreError>(Some((l.target.clone(), out, tout)))
         })?;
-        if let Some((t, out)) = done {
+        if let Some((t, out, tout)) = done {
             self.mq_carry(&t, out);
+            self.mq_carry_train(&t, tout);
         }
         Ok(())
+    }
+
+    /// What the release train's actions do outside the rows.
+    fn mq_carry_train(&self, t: &MqTarget, out: Vec<Ta>) {
+        for a in out {
+            match a {
+                Ta::Ask { train, members } => self.mq_train_card(t, train, &members),
+                Ta::Update { train, members } => self.mq_train_card(t, train, &members),
+                Ta::Cut { train, members } => {
+                    for m in &members {
+                        self.mq_note(
+                            m,
+                            &steve_i18n::stored(|| {
+                                steve_i18n::t!("core.mq.cutting", train = train)
+                            }),
+                        );
+                    }
+                    let (c, tid) = (self.clone(), t.id.clone());
+                    detach(move || c.mq_cut(&tid, train));
+                }
+                Ta::Released {
+                    train,
+                    members,
+                    version,
+                } => {
+                    let _ = self.store().store().transaction(|tx| {
+                        tx.execute(
+                            "UPDATE mq_trains SET version = ?, tag = ? WHERE target_id = ? AND no = ?",
+                            rusqlite::params![version, version.as_ref().map(|v| format!("v{v}")), t.id, train as i64],
+                        )?;
+                        Ok::<_, steve_store::StoreError>(())
+                    });
+                    for m in &members {
+                        self.mq_released(m, train, version.as_deref());
+                    }
+                }
+                Ta::Card { train, kind } => self.mq_train_fail_card(t, train, &kind),
+                Ta::Carry {
+                    from,
+                    into,
+                    members,
+                } => {
+                    for m in &members {
+                        self.mq_note(
+                            m,
+                            &steve_i18n::stored(|| {
+                                steve_i18n::t!("core.mq.carried", from = from, into = into)
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The one card of a train, made when it closes and rewritten in place while what lands joins it.
+    fn mq_train_card(&self, t: &MqTarget, train: u64, members: &[String]) {
+        let s = self.store().store();
+        let items: Vec<String> = members
+            .iter()
+            .filter_map(|m| s.reader(|c| rows::entry_get(c, m)).ok().flatten())
+            .map(|e| self.mq_label(&e))
+            .collect();
+        let (question, draft) = steve_i18n::stored(|| {
+            (
+                steve_i18n::t!(
+                    "core.mq.train_question",
+                    train = train,
+                    upstream = t.upstream.as_str(),
+                    n = items.len()
+                ),
+                steve_i18n::t!(
+                    "core.mq.train_draft",
+                    list = items
+                        .iter()
+                        .map(|i| format!("- {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            )
+        });
+        let row = s
+            .reader(|c| rows::train_get(c, &t.id, train as i64))
+            .ok()
+            .flatten();
+        let open = row
+            .as_ref()
+            .and_then(|r| r.decision_id.clone())
+            .filter(|d| {
+                self.store()
+                    .decision(d)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|d| d.status == "open")
+            });
+        if let Some(d) = open {
+            let r = s.transaction(|tx| {
+                tx.execute(
+                    "UPDATE decisions SET question = ?, draft = ? WHERE id = ? AND status = 'open'",
+                    rusqlite::params![question, draft, d],
+                )?;
+                tx.publish(steve_store::ChangeEvent::Decision {
+                    id: d.clone(),
+                    item_id: Some(None),
+                });
+                Ok::<_, steve_store::StoreError>(())
+            });
+            if let Err(e) = r {
+                tracing::warn!(target = t.id, train, "merge queue: train card: {e}");
+            }
+            return;
+        }
+        let ws = self.mq_workspace(t);
+        match self.store().decision_create(NewDecision {
+            workspace_id: ws,
+            kind: "approve".into(),
+            subject_type: SUBJECT_TRAIN.into(),
+            subject_id: batch_subject(&t.id, train),
+            question,
+            draft: Some(draft),
+            options: Some(vec!["release".into(), "skip".into()]),
+            requested_by: "steve".into(),
+            ..Default::default()
+        }) {
+            Ok(d) => {
+                let _ = s.transaction(|tx| {
+                    tx.execute(
+                        "UPDATE mq_trains SET decision_id = ? WHERE target_id = ? AND no = ?",
+                        rusqlite::params![d.id, t.id, train as i64],
+                    )?;
+                    Ok::<_, steve_store::StoreError>(())
+                });
+            }
+            Err(e) => tracing::warn!(target = t.id, train, "merge queue: train card: {e}"),
+        }
+    }
+
+    /// A train's release failed, is unknown, or its branch failed before it: a card asks.
+    fn mq_train_fail_card(&self, t: &MqTarget, train: u64, kind: &train::CardKind) {
+        let (question, draft, options) = steve_i18n::stored(|| match kind {
+            train::CardKind::Failed(why) => (
+                steve_i18n::t!("core.mq.cut_failed", train = train),
+                why.clone(),
+                vec!["retry".to_string(), "drop".to_string()],
+            ),
+            train::CardKind::Unknown(why) => (
+                steve_i18n::t!("core.mq.cut_unknown", train = train),
+                why.clone(),
+                vec![
+                    "released".to_string(),
+                    "retry".to_string(),
+                    "drop".to_string(),
+                ],
+            ),
+            train::CardKind::Red(why) => (
+                steve_i18n::t!("core.mq.red", train = train, branch = t.branch.as_str()),
+                why.clone(),
+                vec!["wait".to_string(), "drop".to_string()],
+            ),
+        });
+        let ws = self.mq_workspace(t);
+        if let Err(e) = self.store().decision_create(NewDecision {
+            workspace_id: ws,
+            kind: "fail".into(),
+            subject_type: SUBJECT_TRAIN.into(),
+            subject_id: batch_subject(&t.id, train),
+            question,
+            draft: Some(draft),
+            options: Some(options),
+            requested_by: "steve".into(),
+            ..Default::default()
+        }) {
+            tracing::warn!(target = t.id, train, "merge queue: train card: {e}");
+        }
+    }
+
+    /// Release train `no` of `target` on its Node (off the lock), then record what it came to.
+    fn mq_cut(&self, target: &str, no: u64) {
+        let key = format!("rt:{target}");
+        let Some(_running) = Running::take(&key, no) else {
+            return;
+        };
+        let Some(node) = self.mq_node() else {
+            return;
+        };
+        let s = self.store().store();
+        let (Ok(Some(t)), Ok(Some(tr))) = (
+            s.reader(|c| rows::target_get(c, target)),
+            s.reader(|c| rows::train_get(c, target, no as i64)),
+        ) else {
+            return;
+        };
+        if tr.state != "cutting" {
+            return;
+        }
+        let members = s
+            .reader(|c| rows::train_members(c, target, no as i64))
+            .unwrap_or_default();
+        let heads: Vec<String> = members.iter().map(|e| e.head.clone()).collect();
+        let Some(project) = members
+            .iter()
+            .filter_map(|e| e.item_id.as_deref())
+            .filter_map(|i| self.store().item(i).ok().flatten())
+            .find_map(|i| i.project_id)
+        else {
+            let why = steve_i18n::stored(|| steve_i18n::t!("core.mq.no_project"));
+            let _ = self.mq_event(target, |l, p| {
+                let ta = l.trains.apply(
+                    p,
+                    Te::Cut {
+                        train: no,
+                        result: CutResult::Unknown { why },
+                    },
+                );
+                l.train_out.extend(ta);
+                vec![]
+            });
+            return;
+        };
+        let staging = Staging {
+            target_id: t.id.clone(),
+            project_id: project,
+            upstream: t.upstream.clone(),
+            branch: t.branch.clone(),
+            keep: steve_toolchains::Toolchains::builtin()
+                .mq_keep_names()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        };
+        let policy = Policy::of(&t.policy, None);
+        // each answered retry is a run of its own; a run cut short by a restart is the same one
+        let run = s
+            .reader(|c| rows::steps_of(c, target, no as i64, true))
+            .unwrap_or_default()
+            .iter()
+            .filter(|x| x.kind == "cut" && matches!(x.state.as_str(), "failed" | "unknown"))
+            .count() as u32;
+        let st = s.clone();
+        let tid = t.id.clone();
+        let record = move |r: exec::Record| {
+            let _ = st.transaction(|tx| {
+                rows::step_put(
+                    tx,
+                    &rows::MqStep {
+                        operation_id: r.op.clone(),
+                        target_id: tid.clone(),
+                        batch_no: None,
+                        train_no: Some(no as i64),
+                        kind: r.kind.into(),
+                        state: r.state.into(),
+                        result: r.detail.clone(),
+                        created: 0,
+                        updated: 0,
+                    },
+                )
+            });
+        };
+        let ci = std::time::Duration::from_secs(policy.cut_ci_wait_s);
+        let deadline =
+            std::time::Duration::from_secs(policy.cut_deadline_s.max(policy.cut_ci_wait_s + 60));
+        let result = crate::node_git::block_on(steve_i18n::scope(
+            steve_i18n::ZH_CN,
+            exec::run_cut(&*node, &staging, no, run, &heads, ci, deadline, &record),
+        ));
+        let Some(result) = result else {
+            return;
+        };
+        if let Err(e) = self.mq_event(target, |l, p| {
+            let ta = l.trains.apply(p, Te::Cut { train: no, result });
+            l.train_out.extend(ta);
+            vec![]
+        }) {
+            tracing::warn!(
+                target,
+                train = no,
+                "merge queue: recording the release: {e}"
+            );
+        }
+    }
+
+    /// An entry was released: its item records it and looks at its completion again.
+    fn mq_released(&self, entry: &str, train: u64, version: Option<&str>) {
+        let Ok(Some(e)) = self.store().store().reader(|c| rows::entry_get(c, entry)) else {
+            return;
+        };
+        let Some(item) = e.item_id else {
+            return;
+        };
+        let text = steve_i18n::stored(|| match version {
+            Some(v) => steve_i18n::t!("core.mq.released", train = train, version = v),
+            None => steve_i18n::t!("core.mq.released_unnamed", train = train),
+        });
+        let mut x = self.tx();
+        let r = (|| -> Result<()> {
+            x.db().timeline_add(&item, "steve", "sys", &text, None)?;
+            x.db()
+                .item_patch(&item, crate::patch![now: text.as_str()])?;
+            x.forget_probe(&item);
+            x.lc_try_close(&item)?;
+            Ok(())
+        })();
+        if let Err(err) = r {
+            tracing::warn!(item, "merge queue: released: {err}");
+        }
+    }
+
+    /// "Release now" on a target: its open train closes and releases (you said so: no card).
+    pub fn mq_release_now(&self, target: &str) -> Result<()> {
+        let at = crate::util::now();
+        self.mq_event(target, |l, p| {
+            let ta = l.trains.apply(p, Te::Now { at, approved: true });
+            l.train_out.extend(ta);
+            vec![]
+        })
+    }
+
+    /// "Merge and release now" on an item: its train closes as soon as it has landed.
+    pub fn mq_merge_release_now(&self, item: &str) -> Result<bool> {
+        let s = self.store().store();
+        let Some(e) = s.reader(|c| rows::entry_live_of_item(c, item))? else {
+            return Ok(false);
+        };
+        if e.state != "landed" {
+            s.transaction(|tx| rows::entry_release_now(tx, &e.id, true))?;
+        }
+        let (id, at) = (e.id.clone(), crate::util::now());
+        self.mq_event(&e.target_id, |l, p| {
+            let ta = l.trains.apply(p, Te::NowFor { id, at });
+            l.train_out.extend(ta);
+            vec![]
+        })?;
+        Ok(true)
     }
 
     /// What the actions do outside the rows: runs started, items told, cards opened.
@@ -649,6 +1023,38 @@ impl Core {
                     tracing::warn!(target, batch, "merge queue answer: {e}");
                 }
             }
+            SUBJECT_TRAIN => {
+                let Some((target, train)) = parse_batch(subject) else {
+                    return;
+                };
+                let at = crate::util::now();
+                let ev = match choice {
+                    "release" => Te::Answer {
+                        train,
+                        release: true,
+                        at,
+                    },
+                    "skip" => Te::Answer {
+                        train,
+                        release: false,
+                        at,
+                    },
+                    "retry" => Te::Retry { train },
+                    "released" => Te::Cut {
+                        train,
+                        result: CutResult::Released { version: None },
+                    },
+                    "wait" => return,
+                    _ => Te::GiveUp { train, at },
+                };
+                if let Err(e) = self.mq_event(&target, |l, p| {
+                    let ta = l.trains.apply(p, ev);
+                    l.train_out.extend(ta);
+                    vec![]
+                }) {
+                    tracing::warn!(target, train, "merge queue answer: {e}");
+                }
+            }
             _ => {}
         }
     }
@@ -960,4 +1366,23 @@ impl Tx<'_> {
         }
         Ok(None)
     }
+}
+
+/// Whether the entry's item belongs to a project released by a tag (its changes wait for a train).
+fn tagged(
+    c: &rusqlite::Connection,
+    entry: &str,
+) -> std::result::Result<bool, steve_store::StoreError> {
+    let release: Option<String> = c
+        .query_row(
+            "SELECT p.release FROM mq_entries e JOIN items i ON i.id = e.item_id
+               JOIN projects p ON p.id = i.project_id WHERE e.id = ?",
+            [entry],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(release
+        .and_then(|r| serde_json::from_str::<Value>(&r).ok())
+        .is_some_and(|r| r["done_when"] == steve_store::DONE_TAG))
 }
