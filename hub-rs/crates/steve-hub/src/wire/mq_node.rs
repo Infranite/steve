@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use steve_core::mq::exec::{Checked, Cut, Merged, MqNode, Pushed, Staging, Step};
+use steve_core::mq::host::MqHost;
 use steve_node_api::*;
 
 use super::flow_cmd::{command, dir_digest, prepare_dir, resource_of};
@@ -35,27 +36,27 @@ const CHECK_OUTPUT: u64 = 64 * 1024;
 const SECRET_ID: &str = "github";
 const HEADER: &str = "AUTHORIZATION";
 
-/// The token to push to an upstream with (`None`: push without one, as to a local repository).
-pub type Tokens = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
-
 pub struct MqNodes {
     workspaces: Arc<Workspaces>,
     secrets: Arc<NodeSecrets>,
-    tokens: Tokens,
+    /// Where a push's token comes from (the project's GitHub connection), once wired; none: pushes
+    /// go without one (a repository on this machine).
+    host: std::sync::OnceLock<Arc<dyn MqHost>>,
     /// How long to wait for a push's answer (tests shorten it).
     push_wait: Duration,
 }
 
 impl MqNodes {
-    pub fn new(
-        workspaces: Arc<Workspaces>,
-        secrets: Arc<NodeSecrets>,
-        tokens: Tokens,
-    ) -> Arc<MqNodes> {
+    /// The host that gives pushes their token.
+    pub fn set_host(&self, h: Arc<dyn MqHost>) {
+        let _ = self.host.set(h);
+    }
+
+    pub fn new(workspaces: Arc<Workspaces>, secrets: Arc<NodeSecrets>) -> Arc<MqNodes> {
         Arc::new(MqNodes {
             workspaces,
             secrets,
-            tokens,
+            host: std::sync::OnceLock::new(),
             push_wait: Duration::from_secs(6 * 60),
         })
     }
@@ -289,6 +290,34 @@ impl MqNode for MqNodes {
         }
     }
 
+    async fn reset(&self, s: &Staging, op: &str, to: &str) -> Step<String> {
+        let keep = s
+            .keep
+            .iter()
+            .filter_map(|k| RelPath::new(k).ok())
+            .collect();
+        match self
+            .apply(
+                s,
+                op,
+                GitAction::Reset {
+                    to: to.into(),
+                    keep,
+                },
+                STEP_WAIT,
+            )
+            .await
+        {
+            Err(e) => Step::Failed(e),
+            Ok((_, _, None)) => Step::Unknown("the reset did not come back in time".into()),
+            Ok((_, _, Some(l))) => match applied(&l) {
+                Ok(head) => Step::Done(head),
+                Err((ErrorCode::OutcomeUnknown, w)) => Step::Unknown(w),
+                Err((_, w)) => Step::Failed(w),
+            },
+        }
+    }
+
     async fn merge(&self, s: &Staging, op: &str, commit: &str, message: &str) -> Merged {
         let action = GitAction::Merge {
             commit: commit.into(),
@@ -452,102 +481,11 @@ impl MqNode for MqNodes {
     }
 
     async fn push(&self, s: &Staging, op: &str, base: &str, tip: &str) -> Pushed {
-        let at = match self.placed(s).await {
-            Ok(a) => a,
-            Err(e) => return Pushed::Failed(e),
-        };
-        let w = match self.staging(s, &at).await {
-            Ok(w) => w,
-            Err(e) => return Pushed::Failed(e),
-        };
-        let url = canonical_url(&s.upstream);
-        let token = (self.tokens)(&s.upstream);
-        let runtime = at.p.runtime.clone();
-        let known = runtime.ledger(op).ok().flatten();
-        if known.is_none() {
-            let f = match Self::facts(
-                &at.p.node,
-                &w,
-                GitQuery {
-                    workspace: w.clone(),
-                    refs: vec![format!("refs/heads/{}", s.branch)],
-                    ranges: vec![],
-                    fetch: false,
-                    reads: vec![],
-                    heads_only: true,
-                },
-            )
-            .await
-            {
-                Ok(f) => f,
-                Err(e) => return Pushed::Failed(e.to_string()),
-            };
-            let apply = GitApply {
-                workspace: w.clone(),
-                expected: f.revision,
-                expected_head: f.head,
-                action: GitAction::Push {
-                    remote: "origin".into(),
-                    branch: s.branch.clone(),
-                    expected_remote: Some(base.into()),
-                    url: url.clone(),
-                    origin_must_be: github_repo(&url),
-                    expected_local: tip.into(),
-                    auth: token.as_ref().map(|_| SecretRef {
-                        id: SECRET_ID.into(),
-                        how: SecretDelivery::Header {
-                            name: HEADER.into(),
-                        },
-                    }),
-                },
-            };
-            let sub = subject(s);
-            let r = match &token {
-                Some(t) => self
-                    .secrets
-                    .submit_push(
-                        op,
-                        at.p.node_id.clone(),
-                        vec![SECRET_ID.into()],
-                        Arc::new(HeaderValue::of(t)),
-                        || {
-                            runtime
-                                .ledger(op)
-                                .map(|e| e.is_none_or(|e| !e.is_settled()))
-                        },
-                        || runtime.submit(op, &sub, "git_apply", apply),
-                    )
-                    .map(|_| ()),
-                None => runtime.submit(op, &sub, "git_apply", apply).map(|_| ()),
-            };
-            if let Err(e) = r {
-                return Pushed::Failed(e.to_string());
-            }
-            if token.is_some() {
-                self.secrets.watch_push(&runtime, op);
-            }
-        } else if let Some(t) = &token
-            && known.as_ref().is_some_and(|l| !l.is_settled())
-        {
-            // written before a restart, not answered yet: what it may take is given again
-            let _ = self.secrets.give_once(
-                op,
-                at.p.node_id.clone(),
-                vec![SECRET_ID.into()],
-                Arc::new(HeaderValue::of(t)),
-                || {
-                    runtime
-                        .ledger(op)
-                        .map(|e| e.is_some_and(|e| !e.is_settled()))
-                },
-            );
-            self.secrets.watch_push(&runtime, op);
-        }
-        let Some(l) = Self::settled(&at.p, op, self.push_wait).await else {
-            return Pushed::Unknown("no answer in time".into());
-        };
-        self.secrets.retire_push(op);
-        pushed(&l)
+        self.push_to(s, op, Some(base), tip, None).await
+    }
+
+    async fn push_branch(&self, s: &Staging, op: &str, tip: &str, to: &str) -> Pushed {
+        self.push_to(s, op, None, tip, Some(to)).await
     }
 
     async fn remote(&self, s: &Staging) -> Option<String> {
@@ -747,6 +685,119 @@ impl MqNode for MqNodes {
     }
 }
 
+impl MqNodes {
+    /// The staging's HEAD (`tip`) pushed to the target's branch over `base`, or to the branch `to`.
+    async fn push_to(
+        &self,
+        s: &Staging,
+        op: &str,
+        base: Option<&str>,
+        tip: &str,
+        to: Option<&str>,
+    ) -> Pushed {
+        let at = match self.placed(s).await {
+            Ok(a) => a,
+            Err(e) => return Pushed::Failed(e),
+        };
+        let w = match self.staging(s, &at).await {
+            Ok(w) => w,
+            Err(e) => return Pushed::Failed(e),
+        };
+        let url = canonical_url(&s.upstream);
+        let token = match self.host.get() {
+            Some(h) => h.token(&s.project_id).await,
+            None => None,
+        };
+        let runtime = at.p.runtime.clone();
+        let known = runtime.ledger(op).ok().flatten();
+        if known.is_none() {
+            let f = match Self::facts(
+                &at.p.node,
+                &w,
+                GitQuery {
+                    workspace: w.clone(),
+                    refs: vec![format!("refs/heads/{}", s.branch)],
+                    ranges: vec![],
+                    fetch: false,
+                    reads: vec![],
+                    heads_only: true,
+                },
+            )
+            .await
+            {
+                Ok(f) => f,
+                Err(e) => return Pushed::Failed(e.to_string()),
+            };
+            let apply = GitApply {
+                workspace: w.clone(),
+                expected: f.revision,
+                expected_head: f.head,
+                action: GitAction::Push {
+                    remote: "origin".into(),
+                    branch: s.branch.clone(),
+                    expected_remote: base.map(String::from),
+                    url: url.clone(),
+                    origin_must_be: github_repo(&url),
+                    expected_local: tip.into(),
+                    auth: token.as_ref().map(|_| SecretRef {
+                        id: SECRET_ID.into(),
+                        how: SecretDelivery::Header {
+                            name: HEADER.into(),
+                        },
+                    }),
+                    remote_branch: to.map(String::from),
+                },
+            };
+            let sub = subject(s);
+            let r = match &token {
+                Some(t) => self
+                    .secrets
+                    .submit_push(
+                        op,
+                        at.p.node_id.clone(),
+                        vec![SECRET_ID.into()],
+                        Arc::new(HeaderValue::of(t)),
+                        || {
+                            runtime
+                                .ledger(op)
+                                .map(|e| e.is_none_or(|e| !e.is_settled()))
+                        },
+                        || runtime.submit(op, &sub, "git_apply", apply),
+                    )
+                    .map(|_| ()),
+                None => runtime.submit(op, &sub, "git_apply", apply).map(|_| ()),
+            };
+            if let Err(e) = r {
+                return Pushed::Failed(e.to_string());
+            }
+            if token.is_some() {
+                self.secrets.watch_push(&runtime, op);
+            }
+        } else if let Some(t) = &token
+            && known.as_ref().is_some_and(|l| !l.is_settled())
+        {
+            // written before a restart, not answered yet: what it may take is given again
+            let _ = self.secrets.give_once(
+                op,
+                at.p.node_id.clone(),
+                vec![SECRET_ID.into()],
+                Arc::new(HeaderValue::of(t)),
+                || {
+                    runtime
+                        .ledger(op)
+                        .map(|e| e.is_some_and(|e| !e.is_settled()))
+                },
+            );
+            self.secrets.watch_push(&runtime, op);
+        }
+        let Some(l) = Self::settled(&at.p, op, self.push_wait).await else {
+            return Pushed::Unknown("no answer in time".into());
+        };
+        self.secrets.retire_push(op);
+        pushed(&l)
+    }
+}
+
 /// How a settled push ended.
 fn pushed(l: &LedgerEntry) -> Pushed {
     if l.state == "rejected" {
@@ -921,7 +972,7 @@ mod tests {
             })
             .unwrap();
         T {
-            mq: MqNodes::new(ws, secrets, Arc::new(|_: &str| None)),
+            mq: MqNodes::new(ws, secrets),
             _tmp: tmp,
             root,
             store,
@@ -1043,5 +1094,17 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(t.remote(), tip);
+        // a commit fed on its own branch (a host's merge queue, a batch's pull request)
+        let st = t.staging();
+        assert_eq!(t.mq.reset(&st, "op_mqt_reset", &h4).await, Step::Done(h4.clone()));
+        assert_eq!(
+            t.mq.push_branch(&st, "op_mqt_push", &h4, "steve/mq/main/MQ-9").await,
+            Pushed::Done
+        );
+        assert_eq!(
+            sh(&t.root.join("remotes/r.git"), &["rev-parse", "steve/mq/main/MQ-9"]),
+            h4
+        );
+        assert_eq!(t.remote(), tip, "main untouched");
     }
 }

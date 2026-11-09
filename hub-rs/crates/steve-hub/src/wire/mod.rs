@@ -19,6 +19,7 @@ pub mod local_service;
 pub mod mcp;
 pub mod mcp_extra;
 pub mod modules;
+pub mod mq_host;
 pub mod mq_node;
 pub mod node_binding;
 pub mod node_env;
@@ -772,12 +773,11 @@ pub fn wire_assembly(
         core.set_node_git(Arc::new(item_git::ItemGit::new(workspaces.clone())));
     }
     /* the merge queue's staging is on the Hub's own Node (STEVE_MQ=1 turns the queue on) */
-    if node_host.is_some() {
-        core.set_mq_node(mq_node::MqNodes::new(
-            workspaces.clone(),
-            secrets.clone(),
-            Arc::new(|_: &str| None),
-        ));
+    let mq_nodes = node_host
+        .as_ref()
+        .map(|_| mq_node::MqNodes::new(workspaces.clone(), secrets.clone()));
+    if let Some(n) = &mq_nodes {
+        core.set_mq_node(n.clone());
     }
     /* inline research (thread-routing R2): read-only claude runs; each run's models come from
     设置 · 模型 (default STEVE_MODELS_RESEARCH) with the request */
@@ -855,6 +855,12 @@ pub fn wire_assembly(
         }),
     })?;
     let _ = host.flow.set(built.flow.clone());
+    /* the merge queue's host: pull requests and pushes go through the project's GitHub connection */
+    if let Some(n) = &mq_nodes {
+        let h = Arc::new(mq_host::GitHubHost::new(db.clone(), built.tools.gh.clone()));
+        n.set_host(h.clone());
+        core.set_mq_host(h);
+    }
     let yolo = steve_core::yolo::Yolo::new(
         steve_core::repo::Db::new(db.clone()),
         yolo_forced,

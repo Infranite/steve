@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS mq_entries (
   batch_no INTEGER, train_no INTEGER,
   landed_commit TEXT, landed_at INTEGER,
   release_now INTEGER NOT NULL DEFAULT 0,       -- "merge and release now": its train closes once it lands
+  pr INTEGER,                                   -- its pull request, when it went to the host's merge queue
   reason TEXT,
   legacy_id TEXT UNIQUE,                        -- the 031 request it was converted from
   arrived INTEGER NOT NULL, updated INTEGER NOT NULL);

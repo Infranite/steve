@@ -447,3 +447,290 @@ fn a_refused_release_asks_and_its_changes_go_with_the_next_train_when_given_up()
     );
     assert_eq!(s.node.cuts.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+/// A host for a target that takes changes only through pull requests, over the Node's bare
+/// upstream: pull requests are kept here, their checks scripted, a merge is a merge commit pushed
+/// to the target.
+struct FakeHost {
+    node: Arc<GitNode>,
+    upstream: PathBuf,
+    work: PathBuf,
+    prs: std::sync::Mutex<Vec<crate::mq::host::Pr>>,
+    heads: std::sync::Mutex<Vec<(u64, String)>>,
+    /// What the checks say, one per look (the last one stays).
+    checks: std::sync::Mutex<Vec<crate::mq::host::Checks>>,
+    merges: std::sync::atomic::AtomicUsize,
+    closed: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeHost {
+    fn new(s: &Setup) -> Arc<FakeHost> {
+        let upstream = s.k.home().join("origin.git");
+        let work = s.k.home().join("host-work");
+        g(
+            s.k.home(),
+            &[
+                "clone",
+                "-q",
+                &upstream.to_string_lossy(),
+                &work.to_string_lossy(),
+            ],
+        );
+        for (a, b) in [("user.name", "gh"), ("user.email", "gh@example.invalid")] {
+            g(&work, &["config", a, b]);
+        }
+        Arc::new(FakeHost {
+            node: s.node.clone(),
+            upstream,
+            work,
+            prs: Default::default(),
+            heads: Default::default(),
+            checks: std::sync::Mutex::new(vec![crate::mq::host::Checks::None]),
+            merges: Default::default(),
+            closed: Default::default(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::mq::host::MqHost for FakeHost {
+    async fn token(&self, _p: &str) -> Option<String> {
+        None
+    }
+    async fn open_pr(
+        &self,
+        _p: &str,
+        head: &str,
+        _base: &str,
+        _t: &str,
+        _b: &str,
+    ) -> crate::mq::exec::Step<crate::mq::host::Pr> {
+        let mut prs = self.prs.lock().unwrap();
+        let mut heads = self.heads.lock().unwrap();
+        if let Some((n, _)) = heads.iter().find(|(_, h)| h == head) {
+            let p = prs.iter().find(|p| p.number == *n).unwrap().clone();
+            return crate::mq::exec::Step::Done(p);
+        }
+        let sha = g(&self.upstream, &["rev-parse", head]);
+        let p = crate::mq::host::Pr {
+            number: prs.len() as u64 + 1,
+            state: "open".into(),
+            merged: false,
+            merge_commit: None,
+            head_sha: sha,
+            node_id: Some(format!("PR_{}", prs.len() + 1)),
+        };
+        heads.push((p.number, head.into()));
+        prs.push(p.clone());
+        crate::mq::exec::Step::Done(p)
+    }
+    async fn pr(&self, _p: &str, n: u64) -> crate::mq::exec::Step<crate::mq::host::Pr> {
+        match self.prs.lock().unwrap().iter().find(|p| p.number == n) {
+            Some(p) => crate::mq::exec::Step::Done(p.clone()),
+            None => crate::mq::exec::Step::Failed("no such pr".into()),
+        }
+    }
+    async fn checks(&self, _p: &str, _sha: &str) -> crate::mq::exec::Step<crate::mq::host::Checks> {
+        let mut c = self.checks.lock().unwrap();
+        let x = if c.len() > 1 {
+            c.remove(0)
+        } else {
+            c[0].clone()
+        };
+        crate::mq::exec::Step::Done(x)
+    }
+    async fn merge(
+        &self,
+        _p: &str,
+        n: u64,
+        sha: &str,
+        title: &str,
+    ) -> crate::mq::exec::Step<String> {
+        let mut prs = self.prs.lock().unwrap();
+        let Some(p) = prs.iter_mut().find(|p| p.number == n) else {
+            return crate::mq::exec::Step::Failed("no such pr".into());
+        };
+        if p.merged || p.head_sha != sha {
+            return crate::mq::exec::Step::Failed("Pull Request is not mergeable".into());
+        }
+        g(&self.work, &["pull", "-q", "--ff-only", "origin", "main"]);
+        g(&self.work, &["fetch", "-q", "origin", sha]);
+        g(&self.work, &["merge", "-q", "--no-ff", "-m", title, sha]);
+        g(&self.work, &["push", "-q", "origin", "main"]);
+        let c = g(&self.work, &["rev-parse", "HEAD"]);
+        p.merged = true;
+        p.state = "closed".into();
+        p.merge_commit = Some(c.clone());
+        self.merges
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::mq::exec::Step::Done(c)
+    }
+    async fn close(&self, _p: &str, n: u64, branch: &str) {
+        if let Some(p) = self.prs.lock().unwrap().iter_mut().find(|p| p.number == n)
+            && !p.merged
+        {
+            p.state = "closed".into();
+        }
+        let _ = crate::git::git(&self.upstream, &["branch", "-D", branch]);
+        self.closed.lock().unwrap().push(branch.into());
+    }
+    async fn enqueue(&self, _p: &str, _pr: &crate::mq::host::Pr) -> crate::mq::exec::Step<()> {
+        crate::mq::exec::Step::Done(())
+    }
+}
+
+/// The target takes changes through pull requests (as its host's rules were read).
+fn through_prs(s: &Setup) -> Arc<FakeHost> {
+    let h = FakeHost::new(s);
+    s.k.core.set_mq_host(h.clone());
+    s.k.db()
+        .store()
+        .transaction(|tx| {
+            let target = crate::lane::target::target_of(&s.repo, None).unwrap();
+            let t = rows::target_for(tx, &target.upstream, &target.branch)?;
+            rows::target_grant(tx, &t.id, "me")?;
+            rows::target_policy_set(tx, &t.id, r#"{"host_poll_s": 1}"#)?;
+            rows::target_mode_set(
+                tx,
+                &t.id,
+                Some("host_pr"),
+                &serde_json::json!({"at": steve_store::now()}).to_string(),
+            )
+        })
+        .unwrap();
+    let _ = &h.node;
+    h
+}
+
+#[test]
+fn through_a_pull_request_the_batch_merges_once_the_hosts_checks_pass() {
+    let s = setup();
+    let k = &s.k;
+    let h = through_prs(&s);
+    *h.checks.lock().unwrap() = vec![
+        crate::mq::host::Checks::Pending { done: 0 },
+        crate::mq::host::Checks::Passed,
+    ];
+    let (a, _, wa) = accepted(&s, "a.txt", "A\n");
+    assert!(
+        k.wait(|| entry(k, &a).is_some_and(|e| e.state == "landed")),
+        "{:?} {:?}",
+        entry(k, &a),
+        k.timeline_texts(&a)
+    );
+    // one pull request for the batch, merged with a merge commit: A's commit is in the target
+    assert_eq!(h.prs.lock().unwrap().len(), 1);
+    assert_eq!(h.merges.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(on_main(&s, &head(&wa)));
+    assert_eq!(h.closed.lock().unwrap().as_slice(), ["steve/mq/main/MQ-1"]);
+    assert_eq!(
+        s.node.pushes.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "never pushed to main directly"
+    );
+    assert!(
+        k.wait(|| k.phase(&a) == "closed"),
+        "{:?}",
+        k.timeline_texts(&a)
+    );
+}
+
+#[test]
+fn through_a_pull_request_failing_host_checks_send_the_change_back() {
+    let s = setup();
+    let k = &s.k;
+    let h = through_prs(&s);
+    *h.checks.lock().unwrap() = vec![crate::mq::host::Checks::Failed(
+        "ci: failure https://ci/1".into(),
+    )];
+    let (a, sa, wa) = accepted(&s, "a.txt", "A\n");
+    assert!(
+        k.wait(|| entry(k, &a).is_some_and(|e| e.state == "returned")),
+        "{:?}",
+        entry(k, &a)
+    );
+    assert!(
+        entry(k, &a)
+            .unwrap()
+            .reason
+            .unwrap()
+            .contains("ci: failure")
+    );
+    assert!(!on_main(&s, &head(&wa)));
+    assert_eq!(h.merges.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        h.closed.lock().unwrap().len(),
+        1,
+        "the pull request and its branch go"
+    );
+    assert!(k.wait(|| {
+        k.rt.prompts_of(&sa)
+            .iter()
+            .any(|p| p.contains("ci: failure"))
+    }));
+}
+
+#[test]
+fn a_host_with_its_own_merge_queue_gets_each_change_and_says_what_merged() {
+    let s = setup();
+    let k = &s.k;
+    let h = through_prs(&s);
+    k.db()
+        .store()
+        .transaction(|tx| {
+            let target = crate::lane::target::target_of(&s.repo, None).unwrap();
+            let t = rows::target_for(tx, &target.upstream, &target.branch)?;
+            rows::target_mode_set(
+                tx,
+                &t.id,
+                Some("host_queue"),
+                &serde_json::json!({"at": steve_store::now()}).to_string(),
+            )
+        })
+        .unwrap();
+    let (a, _, wa) = accepted(&s, "a.txt", "A\n");
+    // handed over: its own pull request, enqueued; Steve batches nothing
+    assert!(
+        k.wait(|| entry(k, &a).is_some_and(|e| e.pr.is_some())),
+        "{:?} {:?}",
+        entry(k, &a),
+        k.timeline_texts(&a)
+    );
+    let n = entry(k, &a).unwrap().pr.unwrap() as u64;
+    assert_eq!(entry(k, &a).unwrap().state, "batched");
+    assert!(
+        k.db()
+            .store()
+            .reader(|c| rows::batches_live(c, &entry(k, &a).unwrap().target_id))
+            .unwrap()
+            .is_empty()
+    );
+    // the host's queue merges it; the next look says so and the item closes by its rule
+    let sha = h.prs.lock().unwrap()[0].head_sha.clone();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(crate::mq::host::MqHost::merge(
+            &*h,
+            "p",
+            n,
+            &sha,
+            "merged by the queue",
+        ));
+    k.core.mq_tick();
+    assert!(
+        k.wait(|| entry(k, &a).is_some_and(|e| e.state == "landed")),
+        "{:?}",
+        entry(k, &a)
+    );
+    assert!(on_main(&s, &head(&wa)));
+    assert!(
+        k.wait(|| k.phase(&a) == "closed"),
+        "{:?}",
+        k.timeline_texts(&a)
+    );
+    assert_eq!(
+        s.node.pushes.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing pushed to main by Steve"
+    );
+}

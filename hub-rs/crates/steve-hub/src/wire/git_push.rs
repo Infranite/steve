@@ -290,6 +290,7 @@ impl GitPush {
                                     name: HEADER.into(),
                                 },
                             }),
+                            remote_branch: None,
                         },
                     };
                     // Given before it can be sent; a failed submission withdraws only this

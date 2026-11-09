@@ -224,6 +224,8 @@ pub struct World {
     /// Workflow run id → how many times failed jobs were re-run.
     pub reruns: HashMap<u64, u32>,
     pub hooks: Vec<Hook>,
+    /// What was handed to a repository's merge queue (GraphQL `enqueuePullRequest`): repo, number.
+    pub merge_queue: Vec<(String, u64)>,
     pub calls: Vec<Call>,
     pub faults: VecDeque<PendingFault>,
     pub rate: RateLimit,
@@ -245,6 +247,7 @@ impl World {
             pats: HashMap::new(),
             repos: BTreeMap::new(),
             pulls: Vec::new(),
+            merge_queue: Vec::new(),
             issues: Vec::new(),
             comments: Vec::new(),
             check_runs: Vec::new(),

@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 use steve_store::mq::{self as rows, MqEntry, MqTarget, NewEntry};
 
 use super::exec::{self, Member, MqNode, Staging};
+use super::host::{Land, MqHost, PrLand};
 use super::policy::Policy;
 use super::queue::{Action as Qa, Answer, CardKind, Event as Qe, Outcome, Why};
 use super::store::{self as rowstore, Loaded};
@@ -101,7 +102,7 @@ fn why_text(w: &Why) -> String {
 /// The effective policy of a target: paused until you allowed it and its host takes a direct push.
 fn effective(t: &MqTarget, p: &Policy) -> Policy {
     let mut p = p.clone();
-    if t.granted_at.is_none() || t.mode.as_deref() != Some("push") {
+    if t.granted_at.is_none() || !matches!(t.mode.as_deref(), Some("push" | "host_pr")) {
         p.paused = true;
     }
     p
@@ -115,6 +116,15 @@ impl Core {
 
     pub(crate) fn mq_node(&self) -> Option<Arc<dyn MqNode>> {
         self.0.mq_node.get().cloned()
+    }
+
+    /// The host of targets that take changes through pull requests or their own merge queue.
+    pub fn set_mq_host(&self, h: Arc<dyn MqHost>) {
+        let _ = self.0.mq_host.set(h);
+    }
+
+    pub(crate) fn mq_host(&self) -> Option<Arc<dyn MqHost>> {
+        self.0.mq_host.get().cloned()
     }
 
     /// The merge queue merges (and the lanes do not): `STEVE_MQ=1` with its Node wired.
@@ -152,6 +162,11 @@ impl Core {
             return;
         };
         for t in all {
+            if t.mode.as_deref() == Some("host_queue") {
+                let (c, t2) = (self.clone(), t.clone());
+                detach(move || c.mq_poll_hosted(&t2));
+                c_feed(self, &t);
+            }
             let at = crate::util::now();
             let id = t.id.clone();
             if let Err(e) = self.mq_event(&id, |l, p| {
@@ -774,10 +789,26 @@ impl Core {
             rows::batch_step(tx, target, no as i64, Some("integrating"), None, None)
         });
         let started = crate::util::now();
+        let host = self.mq_host();
+        let pr = match (t.mode.as_deref(), &host) {
+            (Some("host_pr"), Some(h)) => Some(PrLand {
+                host: &**h,
+                project: &staging.project_id,
+                poll: std::time::Duration::from_secs(policy.host_poll_s.max(1)),
+                deadline: std::time::Duration::from_secs(policy.host_deadline_s.max(1)),
+            }),
+            _ => None,
+        };
+        let land = match pr {
+            Some(p) => Land::Pr(p),
+            None => Land::Push,
+        };
         let ran = crate::node_git::block_on(async {
             steve_i18n::scope(
                 steve_i18n::ZH_CN,
-                exec::run_batch(&*node, &staging, no, run, &members, &policy, !skip, &record),
+                exec::run_batch_on(
+                    &*node, &staging, no, run, &members, &policy, !skip, &land, &record,
+                ),
             )
             .await
         });
@@ -1073,7 +1104,12 @@ impl Core {
         } else {
             self.mq_mode(&t)
         };
-        if refused || (t.granted_at.is_some() && mode.as_deref() != Some("push")) {
+        let lands = match mode.as_deref() {
+            Some("push") => true,
+            Some("host_pr" | "host_queue") => self.mq_host().is_some(),
+            _ => false,
+        };
+        if refused || (t.granted_at.is_some() && !lands) {
             let why = steve_i18n::stored(|| {
                 if refused {
                     steve_i18n::t!("core.mq.refused", branch = t.branch.as_str())
@@ -1084,9 +1120,220 @@ impl Core {
             self.mq_withdraw_all(&t, &why);
             return;
         }
+        // the host's own merge queue merges: each entry is handed to it, Steve batches nothing
+        if mode.as_deref() == Some("host_queue") {
+            if t.granted_at.is_some() {
+                self.mq_feed_all(&t);
+            }
+            return;
+        }
         let at = crate::util::now();
         if let Err(e) = self.mq_event(target, |l, p| l.queue.apply(p, Qe::Tick { at })) {
             tracing::warn!(target, "merge queue admit: {e}");
+        }
+    }
+
+    /// Every queued entry of `t` not handed to its host's merge queue yet is, each on a thread.
+    fn mq_feed_all(&self, t: &MqTarget) {
+        let queued: Vec<MqEntry> = self
+            .store()
+            .store()
+            .reader(|c| rows::entries_live(c, &t.id))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.state == "queued" && e.pr.is_none())
+            .collect();
+        for e in queued {
+            let (c, tid, eid) = (self.clone(), t.id.clone(), e.id.clone());
+            detach(move || c.mq_feed(&tid, &eid));
+        }
+    }
+
+    /// One entry to its host's merge queue: its commit pushed from the staging to a branch of its
+    /// own, a pull request for it, the pull request enqueued. What becomes of it the host says
+    /// ([`Core::mq_poll_hosted`]).
+    fn mq_feed(&self, target: &str, entry: &str) {
+        static FEEDING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        {
+            let mut f = FEEDING.lock().unwrap_or_else(|e| e.into_inner());
+            if f.iter().any(|x| x == entry) {
+                return;
+            }
+            f.push(entry.into());
+        }
+        let done = || {
+            FEEDING
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|x| x != entry)
+        };
+        let (Some(node), Some(host)) = (self.mq_node(), self.mq_host()) else {
+            return done();
+        };
+        let s = self.store().store();
+        let (Ok(Some(t)), Ok(Some(e))) = (
+            s.reader(|c| rows::target_get(c, target)),
+            s.reader(|c| rows::entry_get(c, entry)),
+        ) else {
+            return done();
+        };
+        if e.state != "queued" || e.pr.is_some() {
+            return done();
+        }
+        let Some(project) = e
+            .item_id
+            .as_deref()
+            .and_then(|i| self.store().item(i).ok().flatten())
+            .and_then(|i| i.project_id)
+        else {
+            return done();
+        };
+        let staging = Staging {
+            target_id: t.id.clone(),
+            project_id: project.clone(),
+            upstream: t.upstream.clone(),
+            branch: t.branch.clone(),
+            keep: vec![],
+        };
+        let branch = format!("steve/mq/{}/{}", t.branch, e.id);
+        let label = self.mq_label(&e);
+        let op = |k: &str| steve_node_api::derived_id("op_mqfeed", &format!("{}/{k}", e.id));
+        let fed = crate::node_git::block_on(steve_i18n::scope(steve_i18n::ZH_CN, async {
+            match node.reset(&staging, &op("reset"), &e.head).await {
+                exec::Step::Done(_) => {}
+                exec::Step::Failed(w) | exec::Step::Unknown(w) => return Err(w),
+            }
+            match node
+                .push_branch(&staging, &op("push"), &e.head, &branch)
+                .await
+            {
+                exec::Pushed::Done => {}
+                exec::Pushed::Moved => return Err(branch.clone()),
+                exec::Pushed::Failed(w) | exec::Pushed::Unknown(w) => return Err(w),
+            }
+            let pr = match host
+                .open_pr(&project, &branch, &t.branch, &label, &label)
+                .await
+            {
+                exec::Step::Done(p) => p,
+                exec::Step::Failed(w) | exec::Step::Unknown(w) => return Err(w),
+            };
+            match host.enqueue(&project, &pr).await {
+                exec::Step::Done(()) => Ok(pr.number),
+                exec::Step::Failed(w) | exec::Step::Unknown(w) => Err(w),
+            }
+        }));
+        match fed {
+            Some(Ok(n)) => {
+                let _ = s.transaction(|tx| {
+                    rows::entry_pr_set(tx, &e.id, n as i64)?;
+                    rows::stat_add(tx, target, "fed", None, None, &json!({"pr": n}))
+                });
+                self.mq_note(
+                    &e.id,
+                    &steve_i18n::stored(|| {
+                        steve_i18n::t!("core.mq.fed", n = n, branch = t.branch.as_str())
+                    }),
+                );
+            }
+            Some(Err(why)) => {
+                let why = steve_i18n::stored(|| steve_i18n::t!("core.mq.feed_failed", why = why));
+                self.mq_withdraw_one(&t, &e, &why);
+            }
+            None => {}
+        }
+        done();
+    }
+
+    /// What became of the entries `t` handed to its host's merge queue: merged is landed, closed
+    /// unmerged or failing its checks goes back to its agent; open waits.
+    pub(crate) fn mq_poll_hosted(&self, t: &MqTarget) {
+        let Some(host) = self.mq_host() else {
+            return;
+        };
+        let s = self.store().store();
+        let hosted: Vec<MqEntry> = s
+            .reader(|c| rows::entries_live(c, &t.id))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.state == "batched" && e.pr.is_some())
+            .collect();
+        for e in hosted {
+            let Some(project) = e
+                .item_id
+                .as_deref()
+                .and_then(|i| self.store().item(i).ok().flatten())
+                .and_then(|i| i.project_id)
+            else {
+                continue;
+            };
+            let n = e.pr.unwrap_or_default() as u64;
+            let seen = crate::node_git::block_on(async {
+                match host.pr(&project, n).await {
+                    exec::Step::Done(p) if p.merged => Some(Ok(p.merge_commit)),
+                    exec::Step::Done(p) if p.state != "open" => {
+                        Some(Err(steve_i18n::stored(|| {
+                            steve_i18n::t!("core.mq.host_closed", n = n)
+                        })))
+                    }
+                    exec::Step::Done(p) => match host.checks(&project, &p.head_sha).await {
+                        exec::Step::Done(super::host::Checks::Failed(f)) => {
+                            host.close(&project, n, &format!("steve/mq/{}/{}", t.branch, e.id))
+                                .await;
+                            Some(Err(f))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            })
+            .flatten();
+            let Some(seen) = seen else { continue };
+            let id = e.id.clone();
+            let r = self.mq_event(&t.id, move |l, _p| {
+                let landed = seen.is_ok();
+                if let Some(x) = l.queue.entries.iter_mut().find(|x| x.id == id) {
+                    x.state = if landed {
+                        super::queue::EntryState::Landed
+                    } else {
+                        super::queue::EntryState::Returned
+                    };
+                }
+                match seen {
+                    Ok(commit) => vec![Qa::Land {
+                        batch: None,
+                        members: vec![id],
+                        commit,
+                    }],
+                    Err(why) => vec![Qa::Return {
+                        id,
+                        why: Why::Left(why),
+                    }],
+                }
+            });
+            if let Err(err) = r {
+                tracing::warn!(target = t.id, "merge queue: host queue: {err}");
+            }
+        }
+    }
+
+    /// One entry leaves the queue; its item goes on without it.
+    fn mq_withdraw_one(&self, t: &MqTarget, e: &MqEntry, why: &str) {
+        let id = e.id.clone();
+        let _ = self.mq_event(&t.id, |l, p| l.queue.apply(p, Qe::Withdraw { id }));
+        let Some(item) = e.item_id.clone() else {
+            return;
+        };
+        let mut x = self.tx();
+        let r = (|| -> Result<()> {
+            let i = x.item(&item)?;
+            x.mq_land_op(&i, "waived", json!({"why": why}))?;
+            x.db().timeline_add(&item, "steve", "sys", why, None)?;
+            x.mq_without(&i)?;
+            Ok(())
+        })();
+        if let Err(err) = r {
+            tracing::warn!(item, "merge queue: withdrawn: {err}");
         }
     }
 
@@ -1385,4 +1632,11 @@ fn tagged(
     Ok(release
         .and_then(|r| serde_json::from_str::<Value>(&r).ok())
         .is_some_and(|r| r["done_when"] == steve_store::DONE_TAG))
+}
+
+/// A host-queue target hands what waits to its host (on each tick, after a restart too).
+fn c_feed(c: &Core, t: &MqTarget) {
+    if t.granted_at.is_some() && c.mq_host().is_some() {
+        c.mq_feed_all(t);
+    }
 }
