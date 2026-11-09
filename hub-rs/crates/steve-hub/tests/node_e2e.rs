@@ -39,6 +39,9 @@ fn free_port() -> u16 {
 struct Home {
     dir: tempfile::TempDir,
     port: u16,
+    /// The service Node's loopback port: its own free port, not the Hub's + 3, which on a host
+    /// handing out ports in order is often another test's Hub.
+    local_port: u16,
     log: PathBuf,
     web: PathBuf,
 }
@@ -56,6 +59,7 @@ impl Home {
         .expect("web version");
         Home {
             port: free_port(),
+            local_port: free_port(),
             log: dir.path().join("acp.log"),
             web,
             dir,
@@ -187,6 +191,7 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
     c.env("HOME", h.dir.path())
         .env("STEVE_HOME", h.steve())
         .env("STEVE_PORT", h.port.to_string())
+        .env("STEVE_LOCAL_NODE_PORT", h.local_port.to_string())
         .env("STEVE_HOST", "127.0.0.1")
         .env("STEVE_PUBLIC_URL", h.base())
         .env("STEVE_DEV_LOGIN", "1")
