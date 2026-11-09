@@ -120,7 +120,7 @@ export function NewProjectDialog() {
         <DialogHeader><DialogTitle className="type-headline">{t("pages:projects.newProject")}</DialogTitle><DialogDescription className="type-callout">{t("pages:projects.newProjectDesc")}</DialogDescription></DialogHeader>
         <FieldGroup className="gap-4">
           <Field className="gap-1.5"><FieldLabel htmlFor="pj-path">{t("pages:projects.dir")}</FieldLabel>
-            <Input id="pj-path" autoFocus className="rounded-lg font-mono text-[13px]" value={path} onChange={(e) => { setPath(e.target.value); setGit(null) }} placeholder="~/Agents/steve" data-project-path />
+            <Input id="pj-path" autoFocus className="rounded-lg font-mono text-[13px]" value={path} onChange={(e) => { setPath(e.target.value); setGit(null) }} placeholder="~/code/my-project" data-project-path />
             {dirs.length > 0 && !dirs.includes(path) && <div className="flex flex-wrap gap-1">{dirs.map((x) => <button key={x} type="button" onClick={() => setPath(x)} className="rounded-md bg-muted px-2 py-0.5 font-mono text-[12px] text-muted-foreground hover:text-foreground">{x}</button>)}</div>}
           </Field>
           <Field className="gap-1.5"><FieldLabel htmlFor="pj-n">{t("pages:projects.name")}</FieldLabel><Input id="pj-n" className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} placeholder={t("pages:projects.projectNamePh")} /></Field>

@@ -222,8 +222,7 @@ impl Tx<'_> {
         if p.device_id != crate::release::HUB_DEVICE {
             return Ok(false);
         }
-        let canon = |s: &Path| std::fs::canonicalize(s).unwrap_or_else(|_| s.to_path_buf());
-        Ok(canon(Path::new(&p.path)) == canon(&self.cfg().steve_repo))
+        Ok(crate::config::is_steve_project(&p.path, &self.cfg().steve_repo))
     }
 
     /// Steve checks that the result runs here: Steve's own project with a completion rule.

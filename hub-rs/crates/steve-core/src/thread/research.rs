@@ -846,7 +846,7 @@ impl Core {
         } else {
             vec![]
         };
-        let repo = self.config().steve_repo.to_string_lossy().to_string();
+        let repo = self.config().steve_repo.clone();
         let project = j
             .project
             .as_deref()
@@ -854,7 +854,9 @@ impl Core {
             .or_else(|| {
                 projects
                     .iter()
-                    .find(|p| p.path == repo && p.device_id == "hub")
+                    .find(|p| {
+                        crate::config::is_steve_project(&p.path, &repo) && p.device_id == "hub"
+                    })
             })
             .cloned();
         let cx = self.chat_context(ws, j.user.as_deref().filter(|_| own), &j.question);

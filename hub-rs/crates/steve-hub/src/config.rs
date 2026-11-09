@@ -476,9 +476,11 @@ impl Config {
             version: crate::build_identity()
                 .map(|(version, _)| version.to_owned())
                 .unwrap_or_else(|| env("STEVE_VERSION", "dev")),
+            /* set, or the checkout this program was built in; nobody's directory by default */
             steve_repo: get("STEVE_REPO")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| home_dir().join("Agents/steve")),
+                .or_else(steve_core::config::steve_checkout_of_exe)
+                .unwrap_or_default(),
             debug_route: get("STEVE_DEBUG_ROUTE").is_some(),
             codex_home: get("CODEX_HOME")
                 .map(PathBuf::from)
