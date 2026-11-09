@@ -183,7 +183,54 @@ fn cache_for(url_path: &str) -> Option<&'static str> {
 }
 
 /// Serves an unmatched request: a static file, else the SPA index for GET/HEAD, else 404.
+/// What the Hub's own port answers for a page: the web client, unless it has a port of its own
+/// ([`Config::web_port`]); then the Hub's port is the API only and says where the pages are.
 pub async fn serve(cfg: &Config, req: Request) -> Response {
+    if let Some(port) = cfg.web_port {
+        if !matches!(*req.method(), Method::GET | Method::HEAD) {
+            return ApiError::no_route().into_response();
+        }
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "error": format!("the web client is served on port {port}"),
+                "web_port": port,
+            })),
+        )
+            .into_response();
+    }
+    pages(cfg, req).await
+}
+
+/// The web client on its own port (A3): its pages, and `/hub.json`, the address of the Hub that
+/// serves them as seen from the page (a suggestion the page shows when it asks which Hub to use).
+pub fn web_only(cfg: std::sync::Arc<Config>) -> axum::Router {
+    let c = cfg.clone();
+    axum::Router::new()
+        .route(
+            "/hub.json",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let port = c.listen.port;
+                async move {
+                    let host = headers
+                        .get(header::HOST)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|h| reqwest::Url::parse(&format!("http://{h}")).ok())
+                        .and_then(|u| u.host_str().map(str::to_string))
+                        .unwrap_or_else(|| "127.0.0.1".into());
+                    let host = if host.contains(':') { format!("[{host}]") } else { host };
+                    axum::Json(serde_json::json!({ "hub": format!("http://{host}:{port}") }))
+                }
+            }),
+        )
+        .fallback(move |req: Request| {
+            let cfg = cfg.clone();
+            async move { pages(&cfg, req).await }
+        })
+}
+
+/// The web client's files, and its `index.html` for any other page path.
+async fn pages(cfg: &Config, req: Request) -> Response {
     let get = matches!(*req.method(), Method::GET | Method::HEAD);
     if !get {
         return ApiError::no_route().into_response();

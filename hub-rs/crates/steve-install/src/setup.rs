@@ -166,6 +166,11 @@ fn completion_lines(
             .context("原监听端口缺失")?
             .parse()?;
         lines.push(format!("监听地址：{}", SocketAddr::new(host, port)));
+        if let Some(web) = environment["STEVE_WEB_PORT"].as_str() {
+            lines.push(format!(
+                "网页端口：{web}。第一次打开网页时，输入 Hub 地址 http://<这台机器的地址>:{port}"
+            ));
+        }
         lines.push(format!(
             "浏览器地址（配置值，尚未验证可达）：{}",
             environment["STEVE_PUBLIC_URL"].as_str().unwrap_or("")
@@ -654,11 +659,12 @@ impl<'a> Wizard<'a> {
             )?,
         };
         println!("监听地址决定哪些网络可连接；浏览器地址是你在浏览器里打开 Steve 的地址。0.0.0.0 不能用作浏览器地址。");
+        /* the web client has a port of its own (A3): the Hub's port answers the API only */
+        let web_port = bind.port().checked_add(1).context("监听端口太大，网页没有可用的下一个端口")?;
         let default_url = if bind.ip().is_unspecified() || bind.ip().is_loopback() {
             Some(format!(
-                "http://{}:{}",
+                "http://{}:{web_port}",
                 if bind.is_ipv6() { "[::1]" } else { "127.0.0.1" },
-                bind.port()
             ))
         } else {
             None
@@ -673,7 +679,7 @@ impl<'a> Wizard<'a> {
         /* no OIDC here (2026-11-09): sign-in is a user's name and an access token, issued below;
          * single sign-on is configured later, if wanted */
         let mut env = json!({"STEVE_HOST":bind.ip().to_string(),"STEVE_PORT":bind.port().to_string(),"STEVE_PUBLIC_URL":public,
-            "STEVE_WEB_DIR":self.home.join("web/current")});
+            "STEVE_WEB_PORT":web_port.to_string(),"STEVE_WEB_DIR":self.home.join("web/current")});
         if bind.ip().is_unspecified() {
             env["STEVE_ALLOW_ANY_HOST"] = "1".into();
         }
@@ -1173,6 +1179,7 @@ mod tests {
         assert_eq!(env["STEVE_HOST"], "0.0.0.0");
         assert_eq!(env["STEVE_ALLOW_ANY_HOST"], "1");
         assert_eq!(env["STEVE_PUBLIC_URL"], "https://hub.example");
+        assert_eq!(env["STEVE_WEB_PORT"], "8441", "the web client on a port of its own");
         assert!(env.get("STEVE_OIDC_ISSUER").is_none());
         let bytes = fs::read_to_string(home.join("steve.env")).unwrap();
         assert!(!bytes.contains("OIDC"));

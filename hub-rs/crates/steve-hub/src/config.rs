@@ -91,12 +91,17 @@ impl Listen {
 
     /// Bind every host; fails (naming the address) if any one cannot be bound.
     pub async fn bind(&self) -> std::io::Result<Vec<tokio::net::TcpListener>> {
+        self.bind_port(self.port).await
+    }
+
+    /// Every host on `port` (the web client's own port, [`Config::web_port`]).
+    pub async fn bind_port(&self, port: u16) -> std::io::Result<Vec<tokio::net::TcpListener>> {
         let mut out = Vec::with_capacity(self.hosts.len());
         for h in &self.hosts {
-            let l = tokio::net::TcpListener::bind((h.as_str(), self.port))
+            let l = tokio::net::TcpListener::bind((h.as_str(), port))
                 .await
                 .map_err(|e| {
-                    std::io::Error::new(e.kind(), format!("listen on {h}:{}: {e}", self.port))
+                    std::io::Error::new(e.kind(), format!("listen on {h}:{port}: {e}"))
                 })?;
             out.push(l);
         }
@@ -134,6 +139,9 @@ pub struct Config {
     /// Web origins a client may call this Hub from besides those of signed-in web clients
     /// (`STEVE_CLIENT_ORIGINS`, comma-separated), e.g. a web client served on its own port.
     pub client_origins: Vec<String>,
+    /// The web client's own port (`STEVE_WEB_PORT`), on the same hosts as the Hub: set, the web pages are
+    /// served there and the Hub's port answers the API only (A3); unset, both on the Hub's port.
+    pub web_port: Option<u16>,
     pub web_dir: PathBuf,
     pub oidc: Oidc,
     /// `/auth/dev` from loopback, for local development only.
@@ -349,6 +357,18 @@ impl Config {
 
         let public_raw = env("STEVE_PUBLIC_URL", "http://127.0.0.1:8440");
         let public_url = strip_slash(&public_raw);
+        let web_port = match get("STEVE_WEB_PORT").filter(|v| !v.trim().is_empty()) {
+            None => None,
+            Some(v) => match v.trim().parse::<u16>() {
+                Ok(p) if p != 0 && p != port_n as u16 => Some(p),
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        var: "STEVE_WEB_PORT",
+                        msg: format!("a port other than STEVE_PORT ({port_n}), not {v}"),
+                    });
+                }
+            },
+        };
         let public_urls = get("STEVE_PUBLIC_URLS")
             .unwrap_or_else(|| public_raw.clone())
             .split(',')
@@ -433,6 +453,7 @@ impl Config {
             )?,
             public_url,
             public_urls,
+            web_port,
             client_origins: get("STEVE_CLIENT_ORIGINS")
                 .unwrap_or_default()
                 .split(',')
