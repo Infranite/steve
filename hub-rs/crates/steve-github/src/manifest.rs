@@ -107,8 +107,8 @@ pub fn manifest(workspace_name: &str, public_url: &str, origin: &str) -> Value {
             "checks": "read", "actions": "write", "statuses": "read"
         },
         "default_events": [
-            "pull_request", "pull_request_review", "check_suite", "check_run", "workflow_run",
-            "issues", "issue_comment", "installation_repositories"
+            "pull_request", "pull_request_review", "pull_request_review_comment", "check_suite",
+            "check_run", "workflow_run", "issues", "issue_comment", "installation_repositories"
         ]
     })
 }
@@ -583,7 +583,7 @@ mod tests {
         );
         assert_eq!(m["setup_url"], "http://o.test/api/github/app/installed");
         assert_eq!(m["default_permissions"]["actions"], "write");
-        assert_eq!(m["default_events"].as_array().unwrap().len(), 8);
+        assert_eq!(m["default_events"].as_array().unwrap().len(), 9);
         assert_eq!(manifest("Lee", "u", "o")["name"], "Steve · Lee");
     }
 }

@@ -30,9 +30,10 @@ const AVAILABLE_TTL_MS: i64 = 5 * 60_000;
 
 /// Events of a PAT repository hook: the App's list without the App-only
 /// `installation_repositories`, plus `status` for legacy CI.
-pub const REPO_HOOK_EVENTS: [&str; 8] = [
+pub const REPO_HOOK_EVENTS: [&str; 9] = [
     "pull_request",
     "pull_request_review",
+    "pull_request_review_comment",
     "check_suite",
     "check_run",
     "workflow_run",

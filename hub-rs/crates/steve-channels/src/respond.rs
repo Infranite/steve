@@ -39,6 +39,8 @@ pub enum By {
     Flow { flow_id: String },
     /// The response rules.
     Rules,
+    /// A reply in the thread an item came from, by whoever raised it or you: sent to that item.
+    Thread { item: String },
 }
 
 /// What steps 4–7 did with a message.
@@ -439,6 +441,7 @@ impl Channels {
 /// “等你确认回复” instead of “没有流程，只记录”).
 pub(crate) fn mark_event(tx: &Tx, event_id: &str, r: &Response) -> ChannelResult<()> {
     let outcome = match (&r.by, r.act) {
+        (By::Thread { .. }, _) => "item",
         (By::Skipped | By::Flow { .. }, _) | (_, Act::Record) => return Ok(()),
         (_, Act::CreateItem(_)) if r.item_id.is_some() => "item",
         _ if r.decision_id.is_some() => "need",
