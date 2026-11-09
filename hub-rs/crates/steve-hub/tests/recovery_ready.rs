@@ -148,7 +148,8 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
         .env("STEVE_TAKEOVER_CONTINUES", "0")
         .env_remove("STEVE_NO_RESUME")
         // the local Node, the default
-        .env_remove("STEVE_NODE_MODE")
+        // the Node in the Hub's process: killing the Hub cuts its turns, which is what is tested
+        .env("STEVE_NODE_MODE", "local")
         .env_remove("STEVE_NODE")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
@@ -380,12 +381,14 @@ async fn a_turn_cut_by_a_crash_is_never_sent_again() {
     let v = serving(&h).await;
     assert_eq!(v["recovery"]["state"], "ok", "{v}");
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
+    // B6: the restart cut it; the Hub gives it up (the Node confirms its process is gone)
     assert!(
         until(30, || async {
-            count(&h, "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='unknown'", &sid) == 1
+            count(&h, "SELECT COUNT(*) FROM node_commands WHERE method=?", "abandon") == 1
+                && count(&h, "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='unknown'", &sid) == 0
         })
         .await,
-        "the cut attempt is unknown"
+        "the cut attempt is given up, not left unknown"
     );
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(plain(&h), 1, "never sent again: {:?}", h.prompts());
@@ -417,8 +420,15 @@ async fn a_failing_recovery_is_reported_and_the_hub_still_serves() {
     let (st, _) = c.call("GET", "/api/state", None).await;
     assert_eq!(st, 200, "the app serves");
     // the Node's recovery is not held back by the other one
-    let n = health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
-    assert_eq!(n["node"]["unknown"], 1, "{n}");
+    health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
+    // and it gave up the turn the kill cut (B6)
+    assert!(
+        until(30, || async {
+            count(&h, "SELECT COUNT(*) FROM node_commands WHERE method=?", "abandon") == 1
+        })
+        .await,
+        "the cut turn is given up"
+    );
 }
 
 fn atomic(p: &Path, v: &Value) {
