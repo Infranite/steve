@@ -22,9 +22,15 @@ const ASK: Duration = Duration::from_secs(15);
 const POINTS: usize = 288;
 
 /// Samples until the Hub stops. `local`: the Node in the Hub's own process (`"local"`).
-pub async fn sample(store: Store, local: Option<Arc<dyn Node>>, svc: Option<Arc<NodeService>>) {
+pub async fn sample(
+    store: Store,
+    local: Option<Arc<dyn Node>>,
+    svc: Option<Arc<NodeService>>,
+    low: u64,
+) {
     loop {
         sample_once(&store, local.as_ref(), svc.as_ref()).await;
+        warn_low_disks(&store, low).await;
         tokio::time::sleep(EVERY).await;
     }
 }
@@ -79,6 +85,62 @@ pub async fn sample_once(
             }
         }
     }
+}
+
+/// Remote Nodes whose roots are short of space now, said once per episode (F1): the Hub's own
+/// machine has its own notice (the worktree watch). `low`: `STEVE_DISK_LOW_GB`.
+static WARNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+pub async fn warn_low_disks(store: &Store, low: u64) {
+    let store = store.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let since = super::now() - 5 * 60 * 1000;
+        let rows: Vec<(String, String, String)> = store
+            .reader(|c| {
+                let mut st = c.prepare(
+                    "SELECT v.node_id, n.name, v.data FROM node_vitals v JOIN nodes n ON n.node_id = v.node_id
+                      WHERE n.local = 0 AND v.at >= ?
+                        AND v.at = (SELECT MAX(at) FROM node_vitals w WHERE w.node_id = v.node_id)",
+                )?;
+                let v = st
+                    .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, steve_store::StoreError>(v)
+            })
+            .unwrap_or_default();
+        let mut warned = WARNED.lock().unwrap();
+        for (id, name, data) in rows {
+            let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
+            let short = v["roots"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r["free"].as_u64())
+                .min()
+                .filter(|free| *free < low);
+            match short {
+                Some(free) if warned.insert(id.clone()) => {
+                    let text = steve_i18n::t!(
+                        "hub.node.disk_low",
+                        name = name,
+                        free = steve_core::workspace::human(free)
+                    );
+                    let db = steve_core::repo::Db::new(store.clone());
+                    if let Err(e) =
+                        steve_core::notify::notify(&db, steve_store::WS, "disk", "info", &text, None)
+                    {
+                        tracing::error!("node disk notice: {e}");
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    warned.remove(&id);
+                }
+            }
+        }
+    })
+    .await;
 }
 
 /// One Node's day as the page draws it: the latest sample whole, and at most [`POINTS`] points

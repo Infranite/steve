@@ -694,7 +694,9 @@ impl Core {
     /// workspaces hear of it once (again only after it was above `low` in between). Runs forever.
     pub async fn run_workspace_watch(self) {
         let mut tick = tokio::time::interval(CHECK_EVERY);
-        let mut warned = false;
+        // what was said last in this episode: nothing, low, or the floor (F1: low is said too,
+        // before anything is refused)
+        let mut warned = Pressure::Ok;
         loop {
             tick.tick().await;
             let c = self.clone();
@@ -714,16 +716,37 @@ impl Core {
             }
             let pol = self.config().disk;
             match r.free_after.map(|f| pol.pressure(f)) {
-                Some(Pressure::Floor) if !warned => {
-                    warned = true;
+                Some(Pressure::Floor) if warned != Pressure::Floor => {
+                    warned = Pressure::Floor;
                     if let Err(e) = self.warn_floor(r.free_after.unwrap_or(0)) {
                         tracing::error!("disk notice {e}");
                     }
                 }
-                Some(Pressure::Ok) => warned = false,
+                Some(Pressure::Low) if warned == Pressure::Ok => {
+                    warned = Pressure::Low;
+                    if let Err(e) = self.warn_low(r.free_after.unwrap_or(0)) {
+                        tracing::error!("disk notice {e}");
+                    }
+                }
+                Some(Pressure::Ok) => warned = Pressure::Ok,
                 _ => {}
             }
         }
+    }
+
+    /// Below `low` but above the floor: nothing is refused yet; what Steve could give back it did.
+    fn warn_low(&self, free: u64) -> Result<()> {
+        let t = self.tx();
+        let text = format!(
+            "磁盘只剩 {}（提醒线 {}）：Steve 已回收已完成和闲置事项的构建缓存。低于 {} 时新事项将暂时不建工作区，可以在“设置 · 数据 · 工作区与磁盘”查看占用。",
+            human(free),
+            human(self.config().disk.low),
+            human(self.config().disk.floor)
+        );
+        for ws in t.db().workspace_ids()? {
+            crate::notify::notify(t.db(), &ws, "disk", "info", &text, None)?;
+        }
+        Ok(())
     }
 
     fn warn_floor(&self, free: u64) -> Result<()> {
