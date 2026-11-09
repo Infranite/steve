@@ -81,6 +81,27 @@ Omitting `--label` reads the label from the existing service registration; omitt
 
 Backups and transaction records remain under `<home>/setup-reconfigure/`. If interruption leaves a `pending` transaction, rerun `steve setup --reconfigure` with the same home and confirm recovery. Recovery verifies the installation and preserves a committed change or restores an uncommitted change from its private backups. If files have been edited externally, it retains the recovery record and refuses to overwrite them. After recovery, run the wizard again for further changes. EOF or declining confirmation before saving leaves the configuration untouched.
 
+## Access tokens and clients
+
+Besides a browser session, a client signs in with a user's name and one of that user's access tokens. The Hub issues the token and keeps only its hash. The client gets a credential of its own and sends it as `Authorization: Bearer <credential>` from then on.
+
+- `GET /auth/hello` says which Hub this is, its API version and which sign-ins it offers.
+- `POST /auth/token {"user": "...", "token": "stt_...", "client": {"kind": "web|mac|ios|cli|...", "name": "...", "platform": "...", "version": "..."}}` returns `{client_id, credential}`.
+
+The Hub records each client's kind and name, and the route it last came by. Routes are `loopback`, `lan`, `tailnet`, `proxy` or `public`, with `+tls` added when the request arrived over TLS. Forwarding headers are believed only from this machine or the local network. Failed sign-ins from another address are slowed down after ten tries in ten minutes.
+
+Manage tokens and clients on the Hub's machine, also when it does not answer:
+
+```sh
+steve-hub --access token create [--user NAME] [--name LABEL] [--days N]   # shown once
+steve-hub --access token list
+steve-hub --access token revoke ID        # signs out the clients that used it
+steve-hub --access client list
+steve-hub --access client revoke ID
+```
+
+On a Hub nobody has signed in to yet, `token create` makes `--user` (default: your account name) its owner.
+
 ## Diagnostic capture and queries
 
 New items, including ordinary conversation items and workflow child items, automatically start one 30-minute window of detailed capture. The deadline is persisted when the item is created; queries, restarts and continuing the item never extend it. Older items are not enabled retroactively. Once a window expires or the owner stops it, it stays stopped until the instance owner explicitly starts another 1–60 minute window in **Debug**. There is no new environment switch.

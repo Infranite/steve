@@ -1,0 +1,1 @@
+新增用户名 + 访问 token 的登录方式。Hub 签发 token，客户端用“用户名 + token”换取自己的凭据，之后以 `Authorization: Bearer` 访问；Hub 会记录每个客户端的类型、名称，以及它最近一次通过哪条路径连进来（本机、局域网、tailnet、反向代理或公网，是否 TLS）。在 Hub 所在的机器上用 `steve-hub --access token create|list|revoke` 和 `steve-hub --access client list|revoke` 管理，Hub 不响应时也能用；吊销 token 会同时让用它登录的客户端下线。原有的浏览器登录（OIDC、本机开发登录）不变。

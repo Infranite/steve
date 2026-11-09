@@ -171,5 +171,7 @@
   "hub.node.unbound.bind_failed": "没能把它绑定到 Node 上",
   "hub.node.remote.not_owner": "远程 Node 只运行其所有者本人的工作，而这台 Node 不是由这个工作区的所有者配对的",
   "hub.node.remote.shared": "在远程 Node 支持沙箱之前，它只运行其所有者本人的工作；这个工作区还有其他成员，Steve 无法确认这项工作属于 Node 的所有者",
-  "hub.node.remote.refused": "远程 Node %{node} 不接这项工作：%{why}"
+  "hub.node.remote.refused": "远程 Node %{node} 不接这项工作：%{why}",
+  "hub.access.too_many": "登录失败次数太多，请过一会儿再试",
+  "hub.access.wrong": "用户名或 token 不对"
 }

@@ -559,6 +559,11 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string(&report)?);
         std::process::exit(if report.ok { 0 } else { 2 });
     }
+    // tokens and clients on this machine (access.rs); needs the configuration, not the running Hub
+    if std::env::args().nth(1).as_deref() == Some("--access") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(crate::access::main(&args));
+    }
     // the one-shot launchd job of a one-click local upgrade (upgrades/runner.rs); needs no Config
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--upgrade-runner") {

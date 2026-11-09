@@ -123,6 +123,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/053.sql"),
     // 54: bounded, item-scoped diagnostic capture and metadata.
     include_str!("../migrations/054.sql"),
+    // 55: access tokens and the clients signed in with them (who connects, with what, by which route).
+    include_str!("../migrations/055.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

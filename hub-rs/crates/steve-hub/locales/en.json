@@ -171,5 +171,7 @@
   "hub.node.unbound.bind_failed": "binding it to the Node failed",
   "hub.node.remote.not_owner": "a remote Node only runs its owner's own work, and this Node was not paired by the owner of this workspace",
   "hub.node.remote.shared": "until remote Nodes are sandboxed they only run their owner's own work, and this workspace has other members, so Steve cannot tell the work is the Node owner's",
-  "hub.node.remote.refused": "The remote Node %{node} does not take this work: %{why}"
+  "hub.node.remote.refused": "The remote Node %{node} does not take this work: %{why}",
+  "hub.access.too_many": "Too many failed sign-ins. Please try again later.",
+  "hub.access.wrong": "Wrong user name or token"
 }
