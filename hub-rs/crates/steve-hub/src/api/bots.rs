@@ -14,7 +14,6 @@ use crate::error::ApiError;
 use crate::js;
 use crate::validate::{Check, Num, Str};
 
-const HARNESSES: &[&str] = &["claude-code", "codex"];
 const ACCEPT: &[&str] = &["inherit", "manual", "auto"];
 const PERM: &[&str] = &[
     "default",
@@ -24,9 +23,10 @@ const PERM: &[&str] = &[
     "bypassPermissions",
 ];
 
-/// `BotPatch` (or the create variant: `name` required, `harness` defaulting to `claude-code`), as the
-/// parsed object with only the present keys, in schema order.
-fn bot_in(v: &Value, create: bool) -> Result<Obj, ApiError> {
+/// `BotPatch` (or the create variant: `name` required, `harness` defaulting to the default adapter),
+/// as the parsed object with only the present keys, in schema order. `harnesses`: the adapter ids
+/// the Hub knows ([`crate::config::Config::harness_ids`]).
+fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError> {
     let mut c = Check::object(v);
     let mut p = Obj::new();
     let mut put = |k: &str, x: Option<Value>| {
@@ -41,11 +41,14 @@ fn bot_in(v: &Value, create: bool) -> Result<Obj, ApiError> {
     };
     put("name", name.map(Value::from));
     put("role", c.opt_str("role", Str::max(200)).map(Value::from));
-    let harness = c.opt_enum("harness", HARNESSES);
+    let allowed: Vec<&str> = harnesses.iter().map(String::as_str).collect();
+    let harness = c.opt_enum("harness", &allowed);
     put(
         "harness",
         if create {
-            Some(json!(harness.unwrap_or_else(|| "claude-code".into())))
+            Some(json!(harness.unwrap_or_else(|| {
+                steve_acp::adapters::DEFAULT_ADAPTER.0.into()
+            })))
         } else {
             harness.map(Value::from)
         },
@@ -155,7 +158,7 @@ pub async fn create(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let p = bot_in(&body(&b)?, true)?;
+    let p = bot_in(&body(&b)?, true, &st.cfg.harness_ids())?;
     let (ws, me) = (c.ws.clone(), c.me.clone());
     let (out, id) = st
         .write(move |r| {
@@ -230,7 +233,10 @@ pub async fn draft(
         json!(get("rules").map(js::string).unwrap_or_else(|| desc.clone())),
     );
     f.insert("model".into(), model);
-    f.insert("harness".into(), json!("claude-code"));
+    f.insert(
+        "harness".into(),
+        json!(steve_acp::adapters::DEFAULT_ADAPTER.0),
+    );
     f.insert("perm_mode".into(), json!("default"));
     st.write(move |w| {
         let b = w.bot_create(&c.ws, &f, &c.me)?;
@@ -246,7 +252,7 @@ pub async fn patch_one(
     b: Bytes,
 ) -> ApiResult {
     check_bot(&st, &c.ws, &id).await?;
-    let p = bot_in(&body(&b)?, false)?;
+    let p = bot_in(&body(&b)?, false, &st.cfg.harness_ids())?;
     st.write(move |r| {
         if let Some(Value::String(dp)) = p.get("default_project")
             && !dp.is_empty()
@@ -439,15 +445,28 @@ pub async fn memories_clear(State(st): State<AppState>, Extension(c): Extension<
 mod tests {
     use super::*;
 
+    fn ids() -> Vec<String> {
+        vec!["claude-code".into(), "codex".into(), "mine".into()]
+    }
+
+    #[test]
+    fn bot_harness_is_any_known_adapter() {
+        assert!(bot_in(&json!({"harness": "mine"}), false, &ids()).is_ok());
+        assert_eq!(
+            bot_in(&json!({"harness": "unknown"}), false, &ids()).unwrap_err(),
+            ApiError::Invalid(vec!["harness".into()])
+        );
+    }
+
     #[test]
     fn bot_patch_validation() {
-        assert!(bot_in(&json!({"reasoning_effort": "high"}), false).is_ok());
-        assert!(bot_in(&json!({"reasoning_effort": null}), false).is_ok());
+        assert!(bot_in(&json!({"reasoning_effort": "high"}), false, &ids()).is_ok());
+        assert!(bot_in(&json!({"reasoning_effort": null}), false, &ids()).is_ok());
         assert_eq!(
-            bot_in(&json!({"reasoning_effort": "turbo"}), false).unwrap_err(),
+            bot_in(&json!({"reasoning_effort": "turbo"}), false, &ids()).unwrap_err(),
             ApiError::Invalid(vec!["reasoning_effort".into()])
         );
-        let e = bot_in(&json!({"name": "", "proactive": 3, "avatar": {"color": "red", "skin": "12", "round": 101}}), false).unwrap_err();
+        let e = bot_in(&json!({"name": "", "proactive": 3, "avatar": {"color": "red", "skin": "12", "round": 101}}), false, &ids()).unwrap_err();
         assert_eq!(
             e,
             ApiError::Invalid(vec![
@@ -461,6 +480,7 @@ mod tests {
         let p = bot_in(
             &json!({"name": "A", "extra": 1, "model": null, "avatar": {"round": 70.0, "x": 1}}),
             true,
+            &ids(),
         )
         .expect("ok");
         assert_eq!(
@@ -468,7 +488,7 @@ mod tests {
             r#"{"name":"A","harness":"claude-code","model":null,"avatar":{"round":70}}"#
         );
         assert_eq!(
-            bot_in(&json!({}), true).unwrap_err(),
+            bot_in(&json!({}), true, &ids()).unwrap_err(),
             ApiError::Invalid(vec!["name".into()])
         );
     }

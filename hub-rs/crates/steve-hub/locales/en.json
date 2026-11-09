@@ -117,6 +117,8 @@
   "hub.runtime.no_codex": "codex not found",
   "hub.runtime.no_adapter": "Missing ACP adapter %{adapter}",
   "hub.runtime.via_acp": "Runs through the ACP adapter",
+  "hub.runtime.adapter_missing": "The adapter could not be started",
+  "hub.runtime.initialize_failed": "The adapter did not answer initialize",
   "hub.runtime.path_missing": "Not found",
   "hub.import.gone": "The local record no longer exists",
   "hub.import.already": "Already imported",

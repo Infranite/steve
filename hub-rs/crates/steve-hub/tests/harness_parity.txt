@@ -20,8 +20,6 @@ steve-core/src/models.rs	CLAUDE_CODE	9
 steve-core/src/models.rs	harness ==	2
 steve-core/src/orchestrator.rs	"claude-code"	2
 steve-core/src/stats.rs	"claude-cli"	1
-steve-hub/src/api/bots.rs	"claude-code"	3
-steve-hub/src/api/bots.rs	"codex"	1
 steve-hub/src/api/misc.rs	"claude-code"	1
 steve-hub/src/catalog.rs	"claude"	1
 steve-hub/src/catalog.rs	CLAUDE_CODE	3
