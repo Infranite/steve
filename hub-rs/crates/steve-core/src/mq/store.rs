@@ -28,6 +28,8 @@ pub struct Loaded {
     pub reasons: Vec<(String, String)>,
     /// Set by the caller before saving: entries that landed, with the commit.
     pub landed: Vec<(String, Option<String>)>,
+    /// What the release train has to do, gathered while the event is applied.
+    pub train_out: Vec<super::train::Action>,
 }
 
 fn entry_state(s: &str) -> Option<EntryState> {
@@ -176,6 +178,7 @@ pub fn load(
         train_rows: trains.into_iter().map(|r| (r.no, r)).collect(),
         reasons: vec![],
         landed: vec![],
+        train_out: vec![],
     }))
 }
 

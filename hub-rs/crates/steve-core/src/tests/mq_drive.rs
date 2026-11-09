@@ -308,3 +308,142 @@ fn a_returned_item_only_rebased_goes_in_again_without_a_new_acceptance() {
     );
     let _ = t;
 }
+
+/// The project releases by a tag cut by its own `ops/cut-release.py` (the Node runs it).
+fn tagged_setup() -> Setup {
+    let s = setup();
+    let k = &s.k;
+    std::fs::create_dir_all(s.repo.join("ops")).unwrap();
+    std::fs::write(s.repo.join("ops/cut-release.py"), "# cut\n").unwrap();
+    g(&s.repo, &["add", "-A"]);
+    g(&s.repo, &["commit", "-q", "-m", "release script"]);
+    g(&s.repo, &["push", "-q", "origin", "main"]);
+    let rel = Release {
+        kind: "script".into(),
+        cmd: String::new(),
+        done_when: Some("tag".into()),
+    };
+    k.db()
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE projects SET release = ? WHERE id = ?",
+                rusqlite::params![serde_json::to_string(&rel).unwrap(), s.project],
+            )?;
+            let target = crate::lane::target::target_of(&s.repo, None).unwrap();
+            let t = rows::target_for(tx, &target.upstream, &target.branch)?;
+            rows::target_policy_set(tx, &t.id, r#"{"release_max": 2}"#)?;
+            rows::target_grant(tx, &t.id, "me")?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+    s
+}
+
+fn train_card(k: &Kit) -> Option<crate::repo::Decision> {
+    k.db()
+        .decisions_open(WS)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.subject_type == crate::mq::drive::SUBJECT_TRAIN)
+}
+
+#[test]
+fn what_landed_is_released_by_one_train_with_one_card() {
+    let s = tagged_setup();
+    let k = &s.k;
+    let (a, _, wa) = accepted(&s, "a.txt", "A\n");
+    assert!(
+        k.wait(|| entry(k, &a).is_some_and(|e| e.state == "landed")),
+        "{:?} {:?}",
+        entry(k, &a),
+        k.timeline_texts(&a)
+    );
+    // merged, not released: it waits for its train (no card yet: one change, a window of 2 h)
+    assert_eq!(k.phase(&a), "closing");
+    assert!(train_card(k).is_none());
+    let (b, _, wb) = accepted(&s, "b.txt", "B\n");
+    assert!(k.wait(|| train_card(k).is_some()), "{:?}", entry(k, &b));
+    let card = train_card(k).unwrap();
+    assert!(
+        card.draft.contains(&a) && card.draft.contains(&b),
+        "{}",
+        card.draft
+    );
+    assert_eq!(
+        s.node.cuts.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing before you answer"
+    );
+    k.core.resolve(&card.id, "release", "", "me").unwrap();
+    // one release for both, and both close by their rule (merged and tagged)
+    assert!(
+        k.wait(|| k.phase(&a) == "closed" && k.phase(&b) == "closed"),
+        "{:?} {:?}",
+        k.status(&a),
+        k.timeline_texts(&a)
+    );
+    assert_eq!(s.node.cuts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        k.timeline_texts(&b)
+            .iter()
+            .any(|l| l.contains("已发布为 v0.1.0"))
+    );
+    assert_eq!(entry(k, &a).unwrap().state, "released");
+    let _ = (wa, wb);
+}
+
+#[test]
+fn a_release_whose_end_is_lost_is_found_on_the_target_and_not_cut_again() {
+    let s = tagged_setup();
+    let k = &s.k;
+    *s.node.fault.lock().unwrap() = Fault::CutLost;
+    let (a, _, _) = accepted(&s, "a.txt", "A\n");
+    assert!(k.wait(|| entry(k, &a).is_some_and(|e| e.state == "landed")));
+    // release now, without a card
+    let t = entry(k, &a).unwrap().target_id;
+    k.core.mq_release_now(&t).unwrap();
+    assert!(
+        k.wait(|| k.phase(&a) == "closed"),
+        "{:?} {:?}",
+        k.status(&a),
+        k.timeline_texts(&a)
+    );
+    assert_eq!(
+        s.node.cuts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "cut once"
+    );
+    assert!(
+        train_card(k).is_none(),
+        "no card: the tag says it was released"
+    );
+    // asked again (a restart's recovery): found released, not cut again
+    k.core.mq_recover();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(s.node.cuts.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_refused_release_asks_and_its_changes_go_with_the_next_train_when_given_up() {
+    let s = tagged_setup();
+    let k = &s.k;
+    *s.node.fault.lock().unwrap() = Fault::CutRefused;
+    let (a, _, _) = accepted(&s, "a.txt", "A\n");
+    assert!(k.wait(|| entry(k, &a).is_some_and(|e| e.state == "landed")));
+    let t = entry(k, &a).unwrap().target_id;
+    k.core.mq_release_now(&t).unwrap();
+    assert!(k.wait(|| train_card(k).is_some_and(|d| d.kind == "fail")));
+    let card = train_card(k).unwrap();
+    assert!(card.draft.contains("gh run rerun"), "{}", card.draft);
+    assert_eq!(card.options, ["retry", "drop"]);
+    // retry once CI passes
+    *s.node.fault.lock().unwrap() = Fault::None;
+    k.core.resolve(&card.id, "retry", "", "me").unwrap();
+    assert!(
+        k.wait(|| k.phase(&a) == "closed"),
+        "{:?}",
+        k.timeline_texts(&a)
+    );
+    assert_eq!(s.node.cuts.load(std::sync::atomic::Ordering::SeqCst), 2);
+}

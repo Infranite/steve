@@ -37,6 +37,10 @@ pub struct Policy {
     pub node: Option<String>,
     /// How often a target that keeps moving is integrated again before the batch stops.
     pub moved_retries: u32,
+    /// How long the release step may wait for CI on the merged head (`--ci-wait`).
+    pub cut_ci_wait_s: u64,
+    /// How long the release step may take in all, CI included.
+    pub cut_deadline_s: u64,
 }
 
 impl Default for Policy {
@@ -56,6 +60,8 @@ impl Default for Policy {
             paused: false,
             node: None,
             moved_retries: 2,
+            cut_ci_wait_s: 30 * 60,
+            cut_deadline_s: 45 * 60,
         }
     }
 }

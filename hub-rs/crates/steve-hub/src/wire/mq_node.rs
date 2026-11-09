@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use steve_core::mq::exec::{Checked, Merged, MqNode, Pushed, Staging, Step};
+use steve_core::mq::exec::{Checked, Cut, Merged, MqNode, Pushed, Staging, Step};
 use steve_node_api::*;
 
 use super::flow_cmd::{command, dir_digest, prepare_dir, resource_of};
@@ -568,6 +568,132 @@ impl MqNode for MqNodes {
         .await
         .ok()?;
         f.refs.into_iter().next().and_then(|(_, sha)| sha)
+    }
+
+    async fn cut(&self, s: &Staging, op: &str, ci_wait: Duration, deadline: Duration) -> Cut {
+        // the staging at the target's tip, as fetched now; the script takes it from there
+        let reset = derived_id("op_mqcutstage", op);
+        match self.stage(s, &reset).await {
+            Step::Done(_) => {}
+            Step::Failed(w) => return Cut::Failed(w),
+            Step::Unknown(w) => return Cut::Unknown(w),
+        }
+        let r = async {
+            let at = self.placed(s).await?;
+            let w = self.staging(s, &at).await?;
+            // an older script without the CI gate takes no --ci-wait
+            let f = Self::facts(
+                &at.p.node,
+                &w,
+                GitQuery {
+                    workspace: w.clone(),
+                    refs: vec![],
+                    ranges: vec![],
+                    fetch: false,
+                    reads: vec![GitRead::Show {
+                        rev: "HEAD".into(),
+                        path: Some(RelPath::new("ops/cut-release.py").map_err(|e| e.to_string())?),
+                        max: 1 << 20,
+                    }],
+                    heads_only: true,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            let script = match f.reads.into_iter().next().map(|r| r.answer) {
+                Some(GitAnswer::Blob {
+                    found: true, bytes, ..
+                }) => String::from_utf8_lossy(&bytes).into_owned(),
+                _ => return Err("the repository has no ops/cut-release.py".to_string()),
+            };
+            let mut command = format!(
+                "python3 ops/cut-release.py cut --branch '{}'",
+                s.branch.replace('\'', "")
+            );
+            if script.contains("--ci-wait") {
+                command.push_str(&format!(" --ci-wait {}", ci_wait.as_secs()));
+            }
+            let end = steve_store::now() + deadline.as_millis() as i64;
+            let spec = ExecSpec {
+                workspace: w,
+                command,
+                cwd: None,
+                policy: ExecutionPolicy {
+                    revision: Revision::new("mq-cut").expect("constant id"),
+                    permissions: PermissionMode::Ask,
+                    sandbox: SandboxRequirement::None,
+                    readable: vec![],
+                    network: NetworkScope::Unrestricted,
+                    tools: GrantId::new("hub").expect("constant id"),
+                },
+                limits: Limits {
+                    deadline: Timestamp(end),
+                    offline_until: Timestamp(end),
+                    max_output_bytes: CHECK_OUTPUT,
+                    max_tokens: None,
+                    max_cost: None,
+                },
+                env: vec![],
+                secrets: vec![],
+            };
+            self.ledgered(
+                &at.p,
+                op,
+                &subject(s),
+                "exec",
+                async { Ok(spec) },
+                deadline + CHECK_GRACE,
+            )
+            .await
+        };
+        let l = match r.await {
+            Err(e) => return Cut::Failed(e),
+            Ok(None) => return Cut::Unknown("no answer in time".into()),
+            Ok(Some(l)) => l,
+        };
+        if l.state == "rejected" {
+            return Cut::Failed(
+                l.refusal
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "refused".into()),
+            );
+        }
+        match l.receipt.as_ref().map(|r| &r.state) {
+            Some(Observed::Finished {
+                outcome: Outcome::Succeeded,
+                result: Some(OperationResult::Exec(r)),
+                ..
+            }) => match r.exit_code {
+                Some(0) => Cut::Done(format!("{}{}", r.stdout, r.stderr)),
+                Some(_) => Cut::Failed(format!("{}{}", r.stdout, r.stderr)),
+                None => Cut::Unknown("ended by a signal".into()),
+            },
+            _ => Cut::Unknown(l.state.clone()),
+        }
+    }
+
+    async fn tags(&self, s: &Staging) -> Option<Vec<(String, String)>> {
+        let at = self.placed(s).await.ok()?;
+        let f = Self::facts(
+            &at.p.node,
+            &at.project,
+            GitQuery {
+                workspace: at.project.clone(),
+                refs: vec![],
+                ranges: vec![],
+                fetch: true,
+                reads: vec![GitRead::RemoteTags {
+                    remote: "origin".into(),
+                }],
+                heads_only: true,
+            },
+        )
+        .await
+        .ok()?;
+        match f.reads.into_iter().next().map(|r| r.answer) {
+            Some(GitAnswer::RemoteTags { tags }) => Some(tags),
+            _ => None,
+        }
     }
 
     async fn contains(&self, s: &Staging, ancestor: &str, of: &str) -> Option<bool> {
