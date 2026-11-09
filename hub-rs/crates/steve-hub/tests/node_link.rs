@@ -149,6 +149,7 @@ async fn local_node(h: &Hub, id: Identity, node: &NodeId) -> Running {
         hub_id: h.svc.hub_id.clone(),
         pin: None,
         loopback: true,
+        hub_key: None,
         name: "local".into(),
     };
     let n = local.clone();

@@ -4,7 +4,12 @@
 //! 2. Node → Hub `hello {node_id, incarnation, proto, codecs, heads, caps, sig}`, where `sig` is
 //!    Ed25519 over `"steve-node-hello-v1" ‖ hub_id ‖ conn_id ‖ nonce ‖ sha256(canonical hello
 //!    without sig)`: bound to this Hub, this connection and this nonce, so it replays nowhere.
-//! 3. Hub → Node `welcome {gen, proto, paused, heartbeat_ms}`, or `error {code}` and a close.
+//! 3. Hub → Node `welcome {gen, proto, paused, heartbeat_ms, hub_key, sig}`, or `error {code}` and
+//!    a close. `sig` is the Hub's Ed25519 over `"steve-hub-welcome-v1" ‖ conn_id ‖ nonce ‖
+//!    sha256(canonical hello) ‖ sha256(canonical welcome without sig)` (M1): the Hub's identity end
+//!    to end, wherever TLS ends (a proxy, a tunnel, plain loopback). A Node that knows its Hub's
+//!    key (from pairing, or remembered from the first signed welcome) refuses any other; a Hub of
+//!    an earlier release sends neither field, and a Node of one ignores them.
 //!
 //! Unknown, pending and revoked Nodes and bad signatures all get one `denied` text: a refusal tells
 //! the dialler nothing about which it was. `denied` means only that: a Hub that could not decide
@@ -62,6 +67,48 @@ pub struct Welcome {
     pub proto: (u16, u16),
     pub paused: bool,
     pub heartbeat_ms: u64,
+    /// The Hub's public identity key (hex); empty from a Hub without one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hub_key: String,
+    /// [`welcome_message`] signed by that key (hex).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sig: String,
+}
+
+/// The bytes a welcome signs: this connection, this nonce, the hello it answers, and itself.
+pub fn welcome_message(c: &Challenge, h: &Hello, w: &Welcome) -> Vec<u8> {
+    let mut unsigned = w.clone();
+    unsigned.sig = String::new();
+    let hello = serde_json::to_value(h).unwrap_or(Value::Null);
+    let welcome = serde_json::to_value(&unsigned).unwrap_or(Value::Null);
+    let mut m = b"steve-hub-welcome-v1".to_vec();
+    for part in [&c.conn_id, &c.nonce] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m.push(0);
+    m.extend_from_slice(&identity::sha256(canonical_json(&hello).as_bytes()));
+    m.push(0);
+    m.extend_from_slice(&identity::sha256(canonical_json(&welcome).as_bytes()));
+    m
+}
+
+/// The key a signed welcome proves, `None` for an unsigned one; an error when it is signed and
+/// the signature does not hold.
+pub fn welcome_key(c: &Challenge, h: &Hello, w: &Welcome) -> Result<Option<[u8; 32]>, Refused> {
+    if w.sig.is_empty() && w.hub_key.is_empty() {
+        return Ok(None);
+    }
+    let bad = || refused("invalid", "a welcome whose signature does not hold");
+    let key: [u8; 32] = hex::decode(&w.hub_key)
+        .ok()
+        .and_then(|k| k.try_into().ok())
+        .ok_or_else(bad)?;
+    let sig = hex::decode(&w.sig).map_err(|_| bad())?;
+    if !identity::verify(&key, &welcome_message(c, h, w), &sig) {
+        return Err(bad());
+    }
+    Ok(Some(key))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,12 +207,24 @@ async fn refuse(sink: &mut FrameSink, r: &Refused) {
     let _ = sink.close().await;
 }
 
-/// The Hub's side. On refusal the error and the close are already sent.
+/// The Hub's side, its welcome unsigned (a Hub without an identity key). On refusal the error and
+/// the close are already sent.
 pub async fn accept(
     sink: &mut FrameSink,
     stream: &mut FrameStream,
     hub_id: &str,
     admission: &dyn Admission,
+) -> Result<(Hello, Admitted), Refused> {
+    accept_as(sink, stream, hub_id, admission, None).await
+}
+
+/// [`accept`], the welcome signed with `hub`, the Hub's identity (M1).
+pub async fn accept_as(
+    sink: &mut FrameSink,
+    stream: &mut FrameStream,
+    hub_id: &str,
+    admission: &dyn Admission,
+    hub: Option<&Identity>,
 ) -> Result<(Hello, Admitted), Refused> {
     let run = async {
         let challenge = Challenge {
@@ -214,12 +273,17 @@ pub async fn accept(
             .await
             .map_err(internal)?
             .ok_or_else(denied)?;
-        let welcome = Welcome {
+        let mut welcome = Welcome {
             generation: admitted.generation,
             proto: PROTOCOL,
             paused: admitted.paused,
             heartbeat_ms: 10_000,
+            hub_key: hub.map(|k| hex::encode(k.public())).unwrap_or_default(),
+            sig: String::new(),
         };
+        if let Some(k) = hub {
+            welcome.sig = hex::encode(k.sign(&welcome_message(&challenge, &hello, &welcome)));
+        }
         send_ctl(
             sink,
             "welcome",
@@ -249,6 +313,8 @@ pub struct NodeIntro<'a> {
     pub caps: Option<Capabilities>,
     /// The Hub this Node paired with: a challenge from any other is refused.
     pub hub_id: Option<&'a str>,
+    /// That Hub's identity key, when known: a welcome it did not sign is refused (M1).
+    pub hub_key: Option<[u8; 32]>,
 }
 
 /// The Node's side.
@@ -301,6 +367,12 @@ pub async fn dial_as(
             serde_json::from_value(p).map_err(|_| refused("invalid", "malformed welcome"))?;
         if welcome.proto.0 != proto.0 {
             return Err(refused("unsupported", "no common protocol"));
+        }
+        let signed = welcome_key(&challenge, &hello, &welcome)?;
+        if let Some(want) = intro.hub_key
+            && signed != Some(want)
+        {
+            return Err(refused(DENIED, "not the hub this node paired with"));
         }
         Ok((challenge, welcome))
     };

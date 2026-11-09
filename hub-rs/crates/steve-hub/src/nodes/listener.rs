@@ -158,7 +158,8 @@ async fn serve_after(
         svc: svc.clone(),
         previous: Mutex::new(None),
     };
-    let accepted = handshake::accept(&mut sink, &mut stream, &svc.hub_id, &admit).await;
+    let hub = svc.identity.get().map(|k| k.as_ref());
+    let accepted = handshake::accept_as(&mut sink, &mut stream, &svc.hub_id, &admit, hub).await;
     drop(unproven);
     let (hello, admitted) = match accepted {
         Ok(x) => x,

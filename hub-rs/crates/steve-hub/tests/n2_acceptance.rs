@@ -534,6 +534,15 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
     let n = NodeHome::new();
     let code = c.code().await;
     let node = n.pair(&h, &code);
+    // M1: pairing handed the Node the Hub's identity key; every welcome is checked against it
+    let hub_key = steve_node_wire::Identity::load(&h.steve().join("secrets/hub-identity.key"))
+        .expect("the hub's identity key")
+        .public();
+    let paired: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(n.path().join("node/node.json")).expect("node.json"),
+    )
+    .expect("pairing");
+    assert_eq!(paired["hub_key"], hex::encode(hub_key));
     c.confirm(&node).await;
     // the owner names the Node new sessions go to, and restarts the Hub with it
     hub.kill();

@@ -78,6 +78,9 @@ pub struct NodeService {
     /// Vault uses' values for the commands given to each Node (set once at boot; without it a
     /// Node's `secret.take` is `unsupported`).
     pub secrets: std::sync::OnceLock<Arc<crate::wire::node_secrets::NodeSecrets>>,
+    /// The Hub's identity key (M1): it signs every welcome, and pairing hands its public half to
+    /// the Node. Set once at boot ([`identity_at`]); unset (tests), welcomes go unsigned.
+    pub identity: std::sync::OnceLock<Arc<steve_node_wire::Identity>>,
     /// Links still in the handshake ([`MAX_UNPROVEN`] at most).
     pub(crate) handshakes: Arc<tokio::sync::Semaphore>,
     /// Reaching the Node routes over tailcat (set once at boot).
@@ -87,6 +90,23 @@ pub struct NodeService {
 }
 
 const HUB_ID_KEY: &str = "node.hub_id";
+
+/// The Hub's identity key in `home` (`secrets/hub-identity.key`, 0600), made the first time.
+pub fn identity_at(home: &std::path::Path) -> std::io::Result<steve_node_wire::Identity> {
+    let path = home.join("secrets/hub-identity.key");
+    match steve_node_wire::Identity::load(&path) {
+        Ok(id) => Ok(id),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let id = steve_node_wire::Identity::generate()?;
+            id.save(&path)?;
+            Ok(id)
+        }
+        Err(e) => Err(e),
+    }
+}
 
 /// How many Node links may be in the handshake at once (M5); more are answered 503 before upgrading.
 pub const MAX_UNPROVEN: usize = 64;
@@ -140,6 +160,7 @@ impl NodeService {
             limiter: pairing::Limiter::default(),
             links: tokio::sync::Mutex::new(()),
             secrets: std::sync::OnceLock::new(),
+            identity: std::sync::OnceLock::new(),
             handshakes: Arc::new(tokio::sync::Semaphore::new(MAX_UNPROVEN)),
             tailcat: std::sync::OnceLock::new(),
             installs: std::sync::OnceLock::new(),
