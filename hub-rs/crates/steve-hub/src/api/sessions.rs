@@ -207,6 +207,17 @@ pub async fn end(
     ok_true()
 }
 
+/// `POST /sessions/{id}/continue`: the item goes on in a new session (U10).
+pub async fn continue_new(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    own_session(&st, &c.ws, &id).await?;
+    let ns = st.domain.continue_in_new_session(&id, &c.me).await?;
+    ok(json!({ "session": ns }))
+}
+
 pub async fn patch_one(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,

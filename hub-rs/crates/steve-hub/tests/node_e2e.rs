@@ -567,27 +567,34 @@ async fn a_node_session_end_to_end() {
     );
     assert!(wait(30, || steve_v1(&h, &sid, "held-done") > 0).await);
 
-    // ── the Hub killed mid-turn: the attempt is unknown afterwards and never re-run
+    // ── the Hub killed mid-turn: the attempt is never re-run; the Hub gives it up on its own once
+    // the Node confirms the old harness is gone, and the agent is continued (B6)
     c.say(&sid, "崩溃验收-K2 @sleep 600000").await;
     assert!(wait(30, || h.got("崩溃验收-K2") == 1).await);
     hub.kill();
     let mut hub = spawn(&h, true, &[]);
     serving(&h).await;
     assert!(
-        wait(30, || attempts(&h, &sid, "unknown") == 1).await,
-        "the cut attempt is unknown; log:\n{}",
+        wait(30, || {
+            h.count(
+                "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND json_extract(a.completion,'$.stop_reason')='node_restarted'",
+                &sid,
+            ) == 1
+        })
+        .await,
+        "the cut attempt is given up; log:\n{}",
         hub_log(&h)
     );
     assert!(
-        wait(10, || steve_v1(&h, &sid, "等待对账") > 0).await,
-        "the session says it awaits reconciliation"
+        wait(10, || steve_v1(&h, &sid, "Node 重启了") > 0).await,
+        "the session says why"
     );
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("崩溃验收-K2"), 1, "never re-run: {:?}", h.prompts());
     let n = node_health(&h).await;
     assert_eq!(
         (&n["reconciled"], &n["unknown"], &n["parked"]),
-        (&json!(true), &json!(1), &json!(0)),
+        (&json!(true), &json!(0), &json!(0)),
         "healthz after the kill: {n}"
     );
     assert!(n["sessions"].as_i64() >= Some(1), "{n}");
@@ -621,7 +628,7 @@ async fn a_node_session_end_to_end() {
         "healthz with the Node off: {n}"
     );
     assert!(n["parked"].as_i64() >= Some(1), "parked: {n}");
-    assert_eq!(n["unknown"], 1, "still unknown: {n}");
+    assert_eq!(n["unknown"], 0, "given up before: {n}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

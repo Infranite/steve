@@ -190,6 +190,20 @@ impl Tx<'_> {
         self.takeover_continue(&i, sid, why, &text)
     }
 
+    /// The turn was cut because the Node running it restarted (its harness gone, the attempt given
+    /// up by the Hub): the agent is continued once more (within the same limit), told to check the
+    /// state before redoing anything. `Some(why)` for the card.
+    pub(crate) fn takeover_restarted(
+        &mut self,
+        item_id: &str,
+        sid: &str,
+        why: &str,
+    ) -> Result<Option<String>> {
+        let i = self.item(item_id)?;
+        let text = "（Steve）上一回合被打断了：运行它的 Node 重启了。先核对现状再动手：已经完成的推送、合并、打 tag、发布不要重做；然后接着做，做完用 steve_deliver 交付，需要用户决定时用 steve_ask。";
+        self.takeover_continue(&i, sid, why, text)
+    }
+
     /// The frozen result moved and the closing went void: the agent hears why. Waiting for an answer
     /// of yours (or still at work), it hears it with the next message; idle, Steve continues it now.
     pub(crate) fn takeover_invalidated(&mut self, item_id: &str, why: &str) -> Result<()> {

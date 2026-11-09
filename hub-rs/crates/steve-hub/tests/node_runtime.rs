@@ -1669,11 +1669,12 @@ impl H {
     }
 }
 
-/// D5 acceptance "断线或重启后不重跑": the Node restarts with the Hub mid-turn. The attempt nobody
-/// can tell the end of becomes unknown and keeps its session; it is never sent again. Stop gives
-/// it up (abandon), and only what was queued since goes, on a reopened session.
+/// D5 acceptance "断线或重启后不重跑", B6: the Node restarts with the Hub mid-turn. The attempt
+/// nobody can tell the end of becomes unknown and is never sent again; the Hub gives it up on its
+/// own (abandon, which the Node answers only once the harness is gone) and the turn ends as
+/// `node_restarted`, so the core continues the agent. What was queued goes on a reopened session.
 #[tokio::test]
-async fn a_restart_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
+async fn a_restart_mid_turn_is_never_rerun_and_the_hub_gives_it_up() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
@@ -1691,47 +1692,31 @@ async fn a_restart_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
 
     h.node.restart();
     h.restart_hub().await;
-    assert_eq!(
-        h.q::<String>("SELECT state FROM runtime_attempts"),
-        "unknown"
-    );
-    assert_eq!(h.systems("等待对账"), 1, "shown as awaiting reconciliation");
-    assert!(h.rt.is_busy(S));
-    assert_eq!(h.rt.running_turns(), 1);
-    assert_eq!(
-        h.rt.prompt(S, "second", "user", &[]).unwrap(),
-        Planned::Busy,
-        "an unknown attempt keeps its session"
-    );
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    until("given up on its own", || h.ends().len() == 1).await;
+    assert_eq!(h.ends()[0].1, steve_node_api::NODE_RESTARTED);
+    assert_eq!(h.systems("Node 重启了"), 1, "told why");
+    assert_eq!(h.systems("等待对账"), 0, "nothing waits for a person");
     assert_eq!(h.count("start_turn"), 1, "never sent again");
-
-    // a second restart finds nothing new to say
-    h.restart_hub().await;
-    assert_eq!(h.systems("等待对账"), 1, "told once");
-    assert_eq!(h.count("start_turn"), 1);
-
-    assert!(h.rt.cancel(S).unwrap());
-    until("abandoned", || h.ends().len() == 1).await;
-    assert_eq!(h.ends()[0].1, "abandoned");
-    // L4: the restarts did not cut the attempt's statistics row; the abandon ended it
-    // (the next turn may have started already: the first row is the abandoned attempt's)
-    let rows = h.stat_rows();
-    assert!(!rows.is_empty() && rows.len() <= 2, "{rows:?}");
-    assert!(
-        rows.iter().all(|r| r.1.as_deref() != Some("interrupted")),
-        "{rows:?}"
-    );
-    assert!(rows[0].0.is_some(), "finished");
-    assert_eq!(
-        rows[0].1.as_deref(),
-        Some("abandoned"),
-        "never 'interrupted'"
-    );
     let target: String = h.q(
         "SELECT json_extract(request,'$.body.target') FROM node_commands WHERE method='abandon'",
     );
     assert_eq!(target, first_op.as_str(), "the frozen target");
+    // L4: the restarts did not cut the attempt's statistics row; the abandon ended it
+    let rows = h.stat_rows();
+    assert!(!rows.is_empty(), "{rows:?}");
+    assert!(rows[0].0.is_some(), "finished");
+    assert!(
+        rows.iter().all(|r| r.1.as_deref() != Some("interrupted")),
+        "{rows:?}"
+    );
+
+    // a second restart finds nothing new to say
+    h.restart_hub().await;
+    assert_eq!(h.systems("Node 重启了"), 1, "told once");
+    assert_eq!(h.count("abandon"), 1);
+
+    // the next message opens the session again; the first turn is never retried
+    h.rt.prompt(S, "second", "user", &[]).unwrap();
     until("reopened and next turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
     let first_turn: i64 = h.q(
@@ -1743,11 +1728,40 @@ async fn a_restart_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
     let exec = h.attempts()[1].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
     until("second end", || h.ends().len() == 2).await;
-    until("second row ended", || {
-        h.stat_rows().iter().all(|r| r.0.is_some())
+}
+
+/// B6: a person who pressed Stop on the attempt before the Hub's own abandon landed is answered
+/// as a Stop: the turn ends `abandoned`, never continued.
+#[tokio::test]
+async fn a_stop_pressed_on_a_restart_cut_turn_stays_a_stop() {
+    let mut h = hub();
+    h.bind();
+    h.rt.prompt(S, "first", "user", &[]).unwrap();
+    until("running", || {
+        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
     })
     .await;
-    assert_eq!(h.stat_rows().len(), 2);
+    h.node.refuse_next(
+        "abandon",
+        ApiError::new(
+            ErrorCode::Conflict,
+            "this execution is being abandoned already",
+        ),
+    );
+    h.node.restart();
+    h.restart_hub().await;
+    until("the Hub's abandon refused", || {
+        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='abandon' AND state IN ('finished','rejected')") == 1
+    })
+    .await;
+    assert_eq!(
+        h.q::<String>("SELECT state FROM runtime_attempts"),
+        "unknown",
+        "still unknown: yours"
+    );
+    assert!(h.rt.cancel(S).unwrap());
+    until("abandoned", || h.ends().len() == 1).await;
+    assert_eq!(h.ends()[0].1, "abandoned", "a Stop is never continued");
 }
 
 /// A restart lets every Node session go silently: an idle one is found released, so the next
@@ -3642,6 +3656,11 @@ async fn a_conflict_on_one_stream_quarantines_it_and_the_others_go_on() {
         ))
     };
     assert_eq!((note(S), note(B)), (1, 0), "one note, on A");
+    // U10: the note says it will not recover and the page offers the way forward
+    let flagged: i64 = h.q(&format!(
+        "SELECT COUNT(*) FROM events WHERE session_id='{S}' AND kind='system' AND json_extract(data,'$.faulted')=1 AND data LIKE '%新会话%'"
+    ));
+    assert_eq!(flagged, 1, "the note offers a new session");
 
     // A's stream applies nothing more: its end waits, and nothing is run again
     h.node.finish(&a, build::done()).await.unwrap();
@@ -3932,8 +3951,20 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
         "planned"
     );
     let late = h.seen.stash.lock().unwrap().take().unwrap();
+    // the Hub's own abandon (B6) is refused here, so the attempt stays unknown for this check
+    h.node.refuse_next(
+        "abandon",
+        ApiError::new(
+            ErrorCode::Conflict,
+            "this execution is being abandoned already",
+        ),
+    );
     h.node.restart();
     h.restart_hub().await;
+    until("the Hub's abandon refused", || {
+        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='abandon' AND state IN ('finished','rejected')") == 1
+    })
+    .await;
     assert_eq!(
         h.q::<String>(
             "SELECT state FROM runtime_attempts ORDER BY created DESC, rowid DESC LIMIT 1"

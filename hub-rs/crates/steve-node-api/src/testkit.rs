@@ -323,7 +323,7 @@ impl FakeNode {
                 && !matches!(a.receipt.state, Observed::Unknown { .. })
             {
                 a.receipt.state = Observed::Unknown {
-                    reason: "the node restarted while it ran".into(),
+                    reason: crate::RESTARTED.into(),
                 };
             }
         }

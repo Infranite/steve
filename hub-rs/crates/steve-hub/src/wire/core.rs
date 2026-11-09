@@ -1672,6 +1672,10 @@ impl Domain for CoreDomain {
         let (c, sid) = (self.core.clone(), session.to_string());
         blocking(move || c.end_session(&sid)).await
     }
+    async fn continue_in_new_session(&self, session: &str, actor: &str) -> BResult<String> {
+        let (c, sid, actor) = (self.core.clone(), session.to_string(), actor.to_string());
+        blocking(move || c.continue_in_new_session(&sid, &actor)).await
+    }
     async fn fork(
         &self,
         ws: &str,

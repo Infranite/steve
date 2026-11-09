@@ -45,5 +45,11 @@ pub const PROTOCOL: (u16, u16) = (0, 3);
 pub const AUTO_MODE: (u16, u16) = (0, 2);
 /// The first protocol with [`Discovery::vitals`] (B3): an older Node is not asked.
 pub const VITALS: (u16, u16) = (0, 3);
+/// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness
+/// with it, is gone): what the Hub gives up and continues on its own (B6), unlike other unknowns.
+pub const RESTARTED: &str = "the node restarted while it ran";
+/// The `stop_reason` of a turn given up because its Node restarted, its harness provably gone:
+/// the agent is continued once, told to check first.
+pub const NODE_RESTARTED: &str = "node_restarted";
 /// Version of [`events::NodeEvent`] bodies, separate from the transport.
 pub const EVENT_SCHEMA: u16 = 1;
