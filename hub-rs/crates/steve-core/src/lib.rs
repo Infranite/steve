@@ -24,6 +24,7 @@ pub mod git;
 pub mod housekeeping;
 pub mod kinds;
 pub mod lane;
+pub mod mq;
 pub mod lifecycle;
 mod marks;
 pub mod models;
