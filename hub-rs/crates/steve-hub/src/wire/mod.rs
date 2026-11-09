@@ -728,6 +728,7 @@ pub fn wire_assembly(
         node: node_host.as_ref().map(|h| h.runtime.clone()),
         fleet: fleet.clone(),
         bind_remote,
+        spread: vars("STEVE_NODE_PLACEMENT").is_some_and(|v| v.trim().eq_ignore_ascii_case("spread")),
         store: db.clone(),
         host: host.clone(),
         workspaces: workspaces.clone(),
@@ -870,6 +871,14 @@ pub fn wire_assembly(
     if let Some(f) = &fleet {
         f.set_service(tool_service.clone());
         jobs.push(Box::pin(start_fleet(f.clone(), db.clone())));
+    }
+    // work waiting for a device that stays away goes on elsewhere (B5)
+    if let Some(svc) = &nodes {
+        jobs.push(Box::pin(crate::nodes::handover::run(
+            svc.clone(),
+            core.clone(),
+            crate::nodes::handover::minutes(|k| vars(k)),
+        )));
     }
     let local_node = model_node.as_ref().map(|h| h.node.clone());
     // how each machine is doing, for the devices page (B3)

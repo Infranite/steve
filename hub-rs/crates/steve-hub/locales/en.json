@@ -184,6 +184,7 @@
   "hub.node.unbound.stopped": "the local Node is not running",
   "hub.node.unbound.unreadable": "its records could not be read just now",
   "hub.node.unbound.bind_failed": "binding it to the Node failed",
+  "hub.node.handed_over": "Device “%{name}” has been offline for %{minutes} minutes; the messages waiting for it went on in a new session",
   "hub.node.takeover_suspected": "The link of device “%{name}” was taken over repeatedly within a minute, as if someone else holds its key. Steve has paused it. Check it in Devices: if only your own machine runs it, change its key there with steve-node rotate; otherwise revoke the device.",
   "hub.node.remote.not_owner": "a remote Node only runs its owner's own work, and this Node was not paired by the owner of this workspace",
   "hub.node.remote.shared": "until remote Nodes are sandboxed they only run their owner's own work, and this workspace has other members, so Steve cannot tell the work is the Node owner's",

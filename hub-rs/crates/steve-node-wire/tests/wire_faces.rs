@@ -247,8 +247,11 @@ async fn the_faces_answer_over_the_wire_exactly_like_the_node() {
     assert_eq!(direct.log(), fake.log());
 }
 
+/// A remote Node never offers secret files; a command goes to it, and runs as its own policy says
+/// (B4: the Node refuses it unless its owner let commands run there). The Hub's own Node in a
+/// process of its own (colocated, B1) keeps what it offers.
 #[tokio::test]
-async fn a_remote_node_never_offers_secret_files_and_runs_no_exec() {
+async fn a_remote_node_never_offers_secret_files_and_decides_its_commands() {
     let fake = FakeNode::new("n1");
     fake.set_features(vec![FEATURE_SECRET_FILE.into(), "other".into()]);
     fake.prepare_workspace(cmd("op_w", prepare("item:ST-1")))
@@ -257,7 +260,7 @@ async fn a_remote_node_never_offers_secret_files_and_runs_no_exec() {
     let w = wire(fake.clone(), 1);
     let c = w.remote.probe(false).await.unwrap();
     assert_eq!(c.features, ["other"]);
-    let e = w
+    let r = w
         .remote
         .exec(cmd(
             "op_e",
@@ -272,9 +275,12 @@ async fn a_remote_node_never_offers_secret_files_and_runs_no_exec() {
             },
         ))
         .await
-        .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
-    assert_eq!(fake.log().len(), 1, "nothing was sent");
+        .unwrap();
+    assert_eq!(r.operation.as_str(), "op_e");
+    assert_eq!(fake.log().len(), 2, "the command reached the Node");
+    w.remote.set_colocated(true);
+    let c = w.remote.probe(false).await.unwrap();
+    assert!(c.features.iter().any(|f| f == FEATURE_SECRET_FILE));
 }
 
 #[tokio::test]

@@ -1067,6 +1067,7 @@ mod host_tests {
             node: Some(rt.clone()),
             fleet: None,
             bind_remote: None,
+            spread: false,
             store: store.clone(),
             host,
             // no local face: the roots are not built again before a bind, so a directory added
@@ -1217,6 +1218,7 @@ mod host_tests {
             node: Some(runtime),
             fleet: None,
             bind_remote: None,
+            spread: false,
             store: store.clone(),
             host,
             workspaces: super::super::workspaces::Workspaces::new(
@@ -1328,6 +1330,7 @@ mod host_tests {
             node: None,
             fleet: None,
             bind_remote: None,
+            spread: false,
             store: store.clone(),
             host,
             workspaces: super::super::workspaces::Workspaces::new(

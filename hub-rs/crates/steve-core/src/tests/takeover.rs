@@ -1406,3 +1406,36 @@ fn a_turn_a_node_restart_cut_is_continued() {
     );
     assert_eq!(k.open_fails(&item).len(), 1, "out of continues: yours");
 }
+
+/// B5: a session whose device has been offline long, with a message waiting, goes on in a new
+/// session that carries the conversation and the waiting message; nothing waiting, nothing moves.
+#[test]
+fn a_session_on_a_long_offline_device_moves_to_a_new_one() {
+    let k = kit(1);
+    let (item, sid) = started(&k);
+    assert_eq!(
+        k.core.hand_over_from_offline(&sid, "laptop", 45).unwrap(),
+        None
+    );
+    k.db()
+        .queue_add(&sid, "还要加一个测试-W3", "u", &[])
+        .unwrap();
+    let ns = k
+        .core
+        .hand_over_from_offline(&sid, "laptop", 45)
+        .unwrap()
+        .expect("moved");
+    assert_eq!(k.db().session(&sid).unwrap().unwrap().status, "ended");
+    let active = k.db().sessions_of_item(&item).unwrap().pop().unwrap();
+    assert_eq!(active.id, ns);
+    let p = k.rt.prompts_of(&ns).pop().unwrap();
+    assert!(p.contains("laptop") && p.contains("45 分钟"), "{p}");
+    assert!(
+        p.contains("还要加一个测试-W3"),
+        "the waiting message goes along: {p}"
+    );
+    assert!(
+        p.contains("没有推送出去的改动") && p.contains("不要重做"),
+        "{p}"
+    );
+}
