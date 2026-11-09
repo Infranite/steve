@@ -967,7 +967,7 @@ async fn connections_passkeys_and_github_are_mounted() {
     assert_eq!(s, 200, "{ig}");
     let ps = ig["providers"].as_array().expect("providers");
     let ids: Vec<_> = ps.iter().filter_map(|p| p["id"].as_str()).collect();
-    assert_eq!(ids, ["feishu", "github", "mail"], "{ig}");
+    assert_eq!(ids, ["feishu", "github", "mail", "ext_ws"], "{ig}");
     let status = |id: &str| {
         ps.iter()
             .find(|p| p["id"] == id)
@@ -998,6 +998,16 @@ async fn connections_passkeys_and_github_are_mounted() {
     assert_eq!(app["channel"]["receive"], "long_connection");
     assert_eq!(app["channel"]["start"], json!([{"kind": "form"}]));
     assert_eq!(app["pairing"], Value::Null);
+    // the external channel: you, through a channel service, made from its credential form
+    let ext = ps.iter().find(|p| p["id"] == "ext_ws").expect("ext_ws");
+    let side = &ext["adapters"][0];
+    assert_eq!(side["id"], "ext_ws");
+    assert_eq!(side["identity"], "self");
+    assert_eq!(side["pairing"], Value::Null);
+    assert_eq!(side["channel"]["mode"], "self");
+    assert_eq!(side["channel"]["receive"], "long_connection");
+    assert_eq!(side["channel"]["message_ids"], "none");
+    assert_eq!(side["channel"]["start"], json!([{"kind": "form"}]));
     assert!(
         feishu["areas"]
             .to_string()
