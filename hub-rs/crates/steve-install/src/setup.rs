@@ -7,7 +7,6 @@ use std::io::{self, IsTerminal, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
 
 mod reconfigure;
 
@@ -24,7 +23,6 @@ pub struct Options {
 trait Prompts {
     fn interactive(&self) -> bool;
     fn line(&mut self, title: &str, default: Option<&str>, optional: bool) -> Result<String>;
-    fn secret(&mut self, title: &str) -> Result<Zeroizing<String>>;
 }
 
 struct Terminal;
@@ -59,82 +57,6 @@ impl Prompts for Terminal {
             }
             return Ok(answer.into());
         }
-    }
-    fn secret(&mut self, title: &str) -> Result<Zeroizing<String>> {
-        use std::os::fd::AsRawFd;
-        if !io::stdin().is_terminal() {
-            bail!("需要交互终端输入 secret；不会从环境或命令行读取。");
-        }
-        let fd = io::stdin().as_raw_fd();
-        // SAFETY: tcgetattr fills the termios structure for this process's terminal.
-        let mut before: libc::termios = unsafe { std::mem::zeroed() };
-        if unsafe { libc::tcgetattr(fd, &mut before) } != 0 {
-            bail!("无法读取终端属性");
-        }
-        let mut hidden = before;
-        // Treat Ctrl-C/Ctrl-D as input while the secret is read, so unwinding restores
-        // the terminal instead of the process exiting with echo disabled.
-        hidden.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG);
-        hidden.c_cc[libc::VMIN] = 1;
-        hidden.c_cc[libc::VTIME] = 0;
-        if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &hidden) } != 0 {
-            bail!("无法关闭终端回显");
-        }
-        struct Restore(i32, libc::termios);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    libc::tcsetattr(self.0, libc::TCSAFLUSH, &self.1);
-                }
-            }
-        }
-        let restore = Restore(fd, before);
-        print!("{title}: ");
-        io::stdout().flush()?;
-        let mut bytes = Zeroizing::new(Vec::new());
-        loop {
-            let mut byte = 0u8;
-            // SAFETY: byte is writable for one byte, and fd is this terminal's stdin.
-            let count = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
-            if count < 0 {
-                return Err(io::Error::last_os_error().into());
-            }
-            if count == 0 || matches!(byte, 3 | 4) {
-                bail!("secret 输入已中断；初始化进度保留");
-            }
-            match byte {
-                b'\n' | b'\r' => break,
-                8 | 127 => {
-                    if let Some(last) = bytes.pop() {
-                        if last & 0b1100_0000 == 0b1000_0000 {
-                            while bytes.last().is_some_and(|b| b & 0b1100_0000 == 0b1000_0000) {
-                                bytes.pop();
-                            }
-                            bytes.pop();
-                        }
-                    }
-                }
-                21 => bytes.clear(),
-                b if b < 32 => bail!("secret 不能包含控制字符"),
-                b => {
-                    if bytes.len() >= 64 * 1024 {
-                        bail!("secret 长度超过限制");
-                    }
-                    bytes.push(b);
-                }
-            }
-        }
-        drop(restore);
-        println!();
-        let value = Zeroizing::new(
-            std::str::from_utf8(&bytes)
-                .context("secret 必须为 UTF-8")?
-                .to_string(),
-        );
-        if value.is_empty() || value.contains(['\n', '\r', '\0']) {
-            bail!("secret 不能为空或包含换行");
-        }
-        Ok(value)
     }
 }
 
@@ -220,6 +142,9 @@ fn modified_setup_file(name: &str) -> anyhow::Error {
     )
 }
 
+/// Where setup keeps the owner's first access token (`user=…`, `token=…`; mode 0600).
+const OWNER_TOKEN: &str = "secrets/owner.token";
+
 fn completion_lines(
     role: &str,
     home: &Path,
@@ -264,7 +189,27 @@ fn completion_lines(
     lines.push(format!("steve {role} status --home {quoted_home}"));
     lines.push(format!("steve {role} doctor --home {quoted_home}"));
     if role == "hub" {
-        lines.push("下一步：启动后在上述浏览器地址完成 OIDC 登录，并用该 Hub 的 /healthz 核验运行版本。服务启动和本机安装检查不代表登录已通过。".into());
+        match fs::read_to_string(home.join(OWNER_TOKEN)) {
+            Ok(saved) => {
+                let field = |k: &str| {
+                    saved
+                        .lines()
+                        .find_map(|l| l.strip_prefix(&format!("{k}=")))
+                        .unwrap_or("")
+                        .to_string()
+                };
+                lines.push(format!("登录用户名：{}", field("user")));
+                lines.push(format!("访问 token：{}", field("token")));
+                lines.push(format!(
+                    "（token 已保存在 {}，权限 0600；需要更多 token 时运行 steve-hub --access token create）",
+                    home.join(OWNER_TOKEN).display()
+                ));
+            }
+            Err(_) => lines.push(
+                "没有找到 owner token；在 Hub 所在机器上运行 steve-hub --access token create 签发。".into(),
+            ),
+        }
+        lines.push("下一步：启动后在上述浏览器地址用用户名和 token 登录，并用该 Hub 的 /healthz 核验运行版本。服务启动和本机安装检查不代表登录已通过。".into());
     } else {
         lines.push("下一步：在 Hub Devices 核验同一设备已连接；本机进程运行不代表已连接，也不代表可以执行任务。".into());
     }
@@ -689,7 +634,13 @@ impl<'a> Wizard<'a> {
                 }
             }
             self.owned_file("steve.env", Some(&env_bytes(env.as_object().unwrap())?))?;
-            self.owned_file("secrets/oidc-client-secret", None)?;
+            /* a setup before 2026-11-09 asked for OIDC and keeps its secret */
+            if self.record["files"]
+                .get("secrets/oidc-client-secret")
+                .is_some()
+            {
+                self.owned_file("secrets/oidc-client-secret", None)?;
+            }
             return Ok(env);
         }
         let bind = match listen {
@@ -702,9 +653,7 @@ impl<'a> Wizard<'a> {
                 listen_address,
             )?,
         };
-        println!(
-            "监听地址决定哪些网络可连接；浏览器地址用于登录及 OIDC 回调。0.0.0.0 不能用作回调地址。"
-        );
+        println!("监听地址决定哪些网络可连接；浏览器地址是你在浏览器里打开 Steve 的地址。0.0.0.0 不能用作浏览器地址。");
         let default_url = if bind.ip().is_unspecified() || bind.ip().is_loopback() {
             Some(format!(
                 "http://{}:{}",
@@ -721,22 +670,9 @@ impl<'a> Wizard<'a> {
             false,
             |value| browser_url(value, "访问地址"),
         )?;
-        let issuer = ask_value(self.input, "OIDC issuer", None, false, oidc_issuer_url)?;
-        let client = self.input.line("OIDC client ID", None, false)?;
-        println!("请在 OIDC 提供方登记回调：{public}/auth/callback");
-        let secret_path = self.home.join("secrets/oidc-client-secret");
-        if self.record["files"]
-            .get("secrets/oidc-client-secret")
-            .is_none()
-            || !exists(&secret_path)
-        {
-            let secret = self.input.secret("OIDC client secret（不回显）")?;
-            self.owned_file("secrets/oidc-client-secret", Some(secret.as_bytes()))?;
-        } else {
-            self.owned_file("secrets/oidc-client-secret", None)?;
-        }
+        /* no OIDC here (2026-11-09): sign-in is a user's name and an access token, issued below;
+         * single sign-on is configured later, if wanted */
         let mut env = json!({"STEVE_HOST":bind.ip().to_string(),"STEVE_PORT":bind.port().to_string(),"STEVE_PUBLIC_URL":public,
-            "STEVE_OIDC_ISSUER":issuer,"STEVE_OIDC_CLIENT_ID":client,"STEVE_OIDC_CLIENT_SECRET_FILE":secret_path,
             "STEVE_WEB_DIR":self.home.join("web/current")});
         if bind.ip().is_unspecified() {
             env["STEVE_ALLOW_ANY_HOST"] = "1".into();
@@ -853,6 +789,22 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             for warning in warnings {
                 println!("{}", warning.as_str().unwrap_or("配置警告"));
             }
+        }
+        /* the owner's first access token, once: the Hub makes this account's user its owner */
+        if wizard.record["files"].get(OWNER_TOKEN).is_none() {
+            let user = std::env::var("USER")
+                .ok()
+                .filter(|u| !u.trim().is_empty())
+                .unwrap_or_else(|| "owner".into());
+            let issued = captured(
+                &candidate.join("bin/steve-hub"),
+                &home,
+                &["--access", "token", "create", "--user", &user, "--name", "setup", "--json"],
+                Some(&env),
+            )?;
+            let token = issued["token"].as_str().context("没有拿到 owner token")?;
+            let body = format!("user={}\ntoken={token}\n", issued["user"].as_str().unwrap_or(&user));
+            wizard.owned_file(OWNER_TOKEN, Some(body.as_bytes()))?;
         }
     } else {
         wizard.owned_file("roots.json", Some(b"[]\n"))?;
@@ -979,9 +931,6 @@ mod tests {
             }
             Ok(self.0.remove(0))
         }
-        fn secret(&mut self, _: &str) -> Result<Zeroizing<String>> {
-            Ok(Zeroizing::new("fixture-only".into()))
-        }
     }
     fn meta(version: &str) -> Value {
         json!({"version":version,"commit":"a".repeat(40)})
@@ -1036,9 +985,6 @@ mod tests {
                     );
                 }
                 Ok("invalid-url".into())
-            }
-            fn secret(&mut self, _: &str) -> Result<Zeroizing<String>> {
-                unreachable!()
             }
         }
         for (interactive, fail_read) in [(false, false), (true, true)] {
@@ -1129,7 +1075,7 @@ mod tests {
                     r"steve hub {action} --home '/tmp/steve user'\''s data'"
                 )));
             }
-            assert!(lines.iter().any(|line| line.contains("完成 OIDC 登录")));
+            assert!(lines.iter().any(|line| line.contains("用用户名和 token 登录")));
         }
         let lines = completion_lines("node", home, &Value::Null, false)
             .unwrap()
@@ -1211,45 +1157,42 @@ mod tests {
         assert!(Wizard::claim(&source, &home, "hub", &meta("1.0.2"), &mut input).is_err());
     }
     #[test]
-    fn new_hub_configuration_binds_all_interfaces_and_keeps_callback_separate() {
-        for issuer in [
-            "https://identity.example",
-            "https://identity.example/",
-            "https://identity.example/realms/workspace",
-            "https://identity.example/application/o/steve/",
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let source = temp.path().join("package");
-            private_dir(&source).unwrap();
-            let home = temp.path().join("home");
-            let keys = temp.path().join("keys");
-            let mut answers = vec![
-                "https://hub.example/".into(),
-                format!(" {issuer} "),
-                "client".into(),
-            ];
-            if cfg!(target_os = "linux") {
-                answers.push(keys.to_str().unwrap().into());
-            }
-            let mut input = Answers(answers);
-            let mut wizard =
-                Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input).unwrap();
-            let env = wizard.hub_config(Some("0.0.0.0:8440")).unwrap();
-            assert_eq!(env["STEVE_HOST"], "0.0.0.0");
-            assert_eq!(env["STEVE_ALLOW_ANY_HOST"], "1");
-            assert_eq!(env["STEVE_PUBLIC_URL"], "https://hub.example");
-            assert_eq!(env["STEVE_OIDC_ISSUER"], issuer);
-            let bytes = fs::read_to_string(home.join("steve.env")).unwrap();
-            assert!(
-                bytes
-                    .lines()
-                    .any(|line| line == format!("STEVE_OIDC_ISSUER='{issuer}'"))
-            );
-            assert!(!bytes.contains("fixture-only"));
-            assert_eq!(
-                fs::read(home.join("secrets/oidc-client-secret")).unwrap(),
-                b"fixture-only"
-            );
+    fn new_hub_configuration_binds_all_interfaces_and_asks_for_no_oidc() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("package");
+        private_dir(&source).unwrap();
+        let home = temp.path().join("home");
+        let keys = temp.path().join("keys");
+        let mut answers = vec!["https://hub.example/".into()];
+        if cfg!(target_os = "linux") {
+            answers.push(keys.to_str().unwrap().into());
         }
+        let mut input = Answers(answers);
+        let mut wizard = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input).unwrap();
+        let env = wizard.hub_config(Some("0.0.0.0:8440")).unwrap();
+        assert_eq!(env["STEVE_HOST"], "0.0.0.0");
+        assert_eq!(env["STEVE_ALLOW_ANY_HOST"], "1");
+        assert_eq!(env["STEVE_PUBLIC_URL"], "https://hub.example");
+        assert!(env.get("STEVE_OIDC_ISSUER").is_none());
+        let bytes = fs::read_to_string(home.join("steve.env")).unwrap();
+        assert!(!bytes.contains("OIDC"));
+        assert!(!home.join("secrets/oidc-client-secret").exists());
+        // resumed: the same environment, nothing asked again
+        drop(wizard);
+        let mut input = Answers(vec![]);
+        let mut wizard = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input).unwrap();
+        assert_eq!(wizard.hub_config(None).unwrap(), env);
+    }
+
+    #[test]
+    fn completion_shows_the_owner_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        private_dir(&home.join("secrets")).unwrap();
+        private_file(&home.join(OWNER_TOKEN), b"user=lee\ntoken=stt_abc\n").unwrap();
+        let env = json!({"STEVE_HOST":"127.0.0.1","STEVE_PORT":"8440","STEVE_PUBLIC_URL":"http://127.0.0.1:8440"});
+        let lines = completion_lines("hub", home, &env, false).unwrap();
+        assert!(lines.contains(&"登录用户名：lee".to_string()), "{lines:?}");
+        assert!(lines.contains(&"访问 token：stt_abc".to_string()), "{lines:?}");
     }
 }

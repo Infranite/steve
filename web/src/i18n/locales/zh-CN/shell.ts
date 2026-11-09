@@ -425,6 +425,10 @@ export default {
   app: {
     signInToContinue: "登录后继续",
     signIn: "登录",
+    signInWithBrowser: "用单点登录",
+    userName: "用户名",
+    accessToken: "访问 token",
+    tokenHint: "token 由 Hub 签发：在 Hub 所在的机器上运行 steve-hub --access token create 获取。",
     cantConnect: "连不上 Steve",
   },
   /* office.tsx: docx/xlsx/pptx read in the page */

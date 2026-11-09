@@ -9,7 +9,7 @@ export type Load<T> = { s: "loading" } | { s: "unwired" } | { s: "error"; err: s
 
 /** report an error from an action: a lost session goes to the login screen, anything else is a toast */
 export function report(e: unknown) {
-  if (e instanceof Unauthenticated) { st.login = e.login; emit(); return }
+  if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit(); return }
   toast((e as Error)?.message || t("accounts:error.generic"))
 }
 
@@ -23,7 +23,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: unknown[], types: string[
     try { const data = await fn(); if (n === seq.current) setV({ s: "ok", data }) }
     catch (e) {
       if (n !== seq.current) return
-      if (e instanceof Unauthenticated) { st.login = e.login; emit(); return }
+      if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit(); return }
       if (e instanceof NotWired) setV({ s: "unwired" })
       else setV({ s: "error", err: (e as Error).message, status: e instanceof HubError ? e.status : 0 })
     }

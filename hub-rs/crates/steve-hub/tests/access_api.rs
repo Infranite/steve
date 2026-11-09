@@ -166,3 +166,69 @@ async fn a_client_signs_in_with_a_token_and_is_known_by_its_credential() {
     let (s, _) = e.call("GET", "/api/me", Some(&cred), None).await;
     assert_eq!(s, 401);
 }
+
+/// A2: a page served by the Hub signs in with a token and keeps the credential in an HttpOnly cookie.
+#[tokio::test]
+async fn a_page_signs_in_with_a_token_into_a_cookie_and_out_again() {
+    let e = start().await;
+    let (s, unauth) = e.call("GET", "/api/me", None, None).await;
+    assert_eq!(s, 401);
+    assert_eq!(unauth["token"], true, "{unauth}");
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (_, token) = st.access().token_create(&owner.id, "page", None).unwrap();
+    let r = e
+        .http
+        .post(format!("{}/auth/token", e.base))
+        .json(&json!({"user": owner.name, "token": token, "cookie": true, "client": {"kind": "web", "name": "Safari"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let set = r
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("steve_client="))
+        .expect("client cookie")
+        .to_string();
+    assert!(
+        set.contains("HttpOnly") && set.contains("SameSite=Lax"),
+        "{set}"
+    );
+    let cookie = set.split(';').next().unwrap().to_string();
+    let me = |c: String| {
+        let (http, base) = (e.http.clone(), e.base.clone());
+        async move {
+            let r = http
+                .get(format!("{base}/api/me"))
+                .header("cookie", c)
+                .send()
+                .await
+                .unwrap();
+            let s = r.status().as_u16();
+            (s, r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let (s, v) = me(cookie.clone()).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["client"]["name"], "Safari");
+    let r = e
+        .http
+        .post(format!("{}/auth/client/logout", e.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert!(
+        r.headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|c| c.starts_with("steve_client=;") && c.contains("Max-Age=0"))
+    );
+    let (s, _) = me(cookie).await;
+    assert_eq!(s, 401, "the client is revoked, not only its cookie cleared");
+}

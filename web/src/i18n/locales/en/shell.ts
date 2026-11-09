@@ -442,6 +442,10 @@ export default {
   app: {
     signInToContinue: "Sign in to continue",
     signIn: "Sign in",
+    signInWithBrowser: "Use single sign-on",
+    userName: "User name",
+    accessToken: "Access token",
+    tokenHint: "The Hub issues tokens: run steve-hub --access token create on the Hub's machine to get one.",
     cantConnect: "Can't reach Steve",
   },
   office: {

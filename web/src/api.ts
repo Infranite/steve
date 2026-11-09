@@ -127,12 +127,15 @@ export const wsHeaders = (h: Record<string, string> = {}): Record<string, string
 /** the same for what can't carry a header (an EventSource, an <img>, a download link): `?ws=` */
 export const withWs = (url: string) => (pageWs ? `${url}${url.includes("?") ? "&" : "?"}ws=${encodeURIComponent(pageWs)}` : url)
 
-export class Unauthenticated extends Error { login: string | null; constructor(login: string | null) { super("unauthenticated"); this.login = login } }
+/** what the Hub's last 401 offered: its sign-in page (`link`: OIDC or the local development login) and/or signing in
+ * with a user's name and an access token (`token`, A1) */
+export const signIn: { link: string | null; token: boolean } = { link: null, token: false }
+export class Unauthenticated extends Error { login: string | null; constructor(login: string | null, token?: boolean) { super("unauthenticated"); this.login = login; signIn.link = login; if (token !== undefined) signIn.token = token } }
 const CUT = {}
 async function req<T>(method: string, path: string, body?: unknown, seen?: (r: Response) => void): Promise<T> {
   /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever */
   const r = await fetch("/api" + path, { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined })
-  if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null) }
+  if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null, j.token === true) }
   const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
   if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
   if (!r.ok) throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
@@ -161,7 +164,7 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
   /* the session's own 401 carries `login`; a 401 from a module (e.g. 请重新登录后再登记) is an ordinary error */
-  if (r.status === 401 && (!j || j.error === "unauthenticated" || "login" in j)) throw new Unauthenticated(j?.login ?? null)
+  if (r.status === 401 && (!j || j.error === "unauthenticated" || "login" in j)) throw new Unauthenticated(j?.login ?? null, j?.token === true)
   if (!json) {
     if (r.ok && method !== "GET") return {} as T // 204, or an empty body
     if (r.ok || r.status === 404 || r.status === 405) throw new NotWired()
@@ -246,10 +249,19 @@ export const api = {
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
     const r = await fetch("/api/files?name=" + encodeURIComponent(name), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "same-origin" })
-    if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null) }
+    if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null, j.token === true) }
     const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error ?? t("shell:http.uploadFailed", { status: r.status })); return j as RFile
   },
-  logout: () => fetch("/auth/logout", { method: "POST", credentials: "same-origin" }),
+  /* a browser session and a token-signed client alike */
+  logout: () => Promise.all([fetch("/auth/logout", { method: "POST", credentials: "same-origin" }), fetch("/auth/client/logout", { method: "POST", credentials: "same-origin" })]),
+  /** signs this page in with a user's name and an access token; the Hub keeps the client's credential in an HttpOnly cookie */
+  tokenSignIn: async (user: string, token: string, version: string): Promise<void> => {
+    const ua = navigator.userAgent
+    const browser = /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" : /Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "Browser"
+    const r = await fetch("/auth/token", { method: "POST", headers: { "content-type": "application/json", "accept-language": lang() }, credentials: "same-origin",
+      body: JSON.stringify({ user, token, cookie: true, client: { kind: "web", name: browser, platform: (navigator as any).userAgentData?.platform ?? navigator.platform ?? "", version } }) })
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error ?? t("shell:http.failed", { status: r.status })) }
+  },
 }
 /** the live stream; `cursor` is the watermark of the state on screen, `onOpen(resumed)` is false when the Hub could not
  * be asked to resume (no cursor yet): then everything on screen has to be refetched */

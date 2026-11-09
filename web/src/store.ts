@@ -161,7 +161,7 @@ export function announceUpdate(update: StateUpdate | null) {
   try { if (localStorage.getItem(key) === update.version) return; localStorage.setItem(key, update.version) } catch { return }
   toast(t("core:toast.updateAvailable", { version: update.version }), { action: { label: t("core:toast.updateView"), onClick: () => { location.hash = "#/settings/about" } } })
 }
-const fail = (e: unknown) => { if (e instanceof Unauthenticated) { st.login = e.login; emit(); return } toast((e as Error).message || t("core:error.generic")) }
+const fail = (e: unknown) => { if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit(); return } toast((e as Error).message || t("core:error.generic")) }
 /** run an API call; refresh afterwards; report errors as a toast */
 async function call<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
   try { const r = await p; if (ok) toast(ok); await refresh(); return r } catch (e) { fail(e); return undefined }

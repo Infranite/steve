@@ -201,7 +201,7 @@ Bot 通过 `steve_secret_use` 使用密钥，但读不到它。每次使用都�
 
 统计页记录 token（含缓存和推理）、缓存命中率、估算花费和 harness 自报花费的对比、缓存省下的钱、事项开始与完成数、前置 / 周期 / 等待时间、一次通过率和返工。可以按项目、Bot、模型和来源筛选。
 
-登录用 OIDC（PKCE）。工作区是数据边界，各有自己的事项前缀。界面靠一条可续传的 SSE 流保持实时，手机页面回到前台就立刻重连。另外还有：带备份和回滚的原地升级、macOS 源码部署的每日备份、重建后仍能读取保险箱密钥的签名版 macOS 程序、<kbd>⌘</kbd> <kbd>K</kbd> 命令面板、浅色 / 深色主题，以及中英文界面。
+登录用 Hub 签发的用户名 + 访问 token，也可以选配 OIDC（PKCE）。每个客户端的类型和连接路径都有记录。工作区是数据边界，各有自己的事项前缀。界面靠一条可续传的 SSE 流保持实时，手机页面回到前台就立刻重连。另外还有：带备份和回滚的原地升级、macOS 源码部署的每日备份、重建后仍能读取保险箱密钥的签名版 macOS 程序、<kbd>⌘</kbd> <kbd>K</kbd> 命令面板、浅色 / 深色主题，以及中英文界面。
 
 <sub>截图来自一个演示工作区：真实的 Hub 和 Web 界面，智能体按脚本运行。</sub>
 
@@ -301,7 +301,7 @@ STEVE_WEB_DIR="$PWD/web/dist" \
   hub-rs/target/debug/steve-hub
 ```
 
-打开 **http://127.0.0.1:8440** 登录。`STEVE_DEV_LOGIN=1` 会加一个一键以所有者身份登录的入口，**只接受回环地址**，用来试用。要长期使用，请配置 OIDC（见下文）。
+打开 **http://127.0.0.1:8440** 登录。`STEVE_DEV_LOGIN=1` 会加一个一键以所有者身份登录的入口，**只接受回环地址**，用来试用。要长期使用，请用 `steve-hub --access token create` 签发访问 token，用用户名和 token 登录；OIDC 是可选项（见下文）。
 
 > [!TIP]
 > `STEVE_HOME` 让这个实例的数据和默认的 `~/.steve` 分开。在没有桌面密钥环（Secret Service）的 Linux 上，保险箱会拒绝启动：设置 `STEVE_VAULT_KEYSTORE=dir`，再把 `STEVE_VAULT_KEY_DIR` 指向 `STEVE_HOME` 之外、权限为 `0700` 的目录。
@@ -316,7 +316,7 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | `STEVE_HOST`、`STEVE_PORT` | 监听地址，可用逗号分隔多个，共用一个端口（默认 `127.0.0.1:8440`）；反向代理在另一台机器上时，加上它访问的地址，例如 `127.0.0.1,100.64.0.2`。`0.0.0.0`/`::` 会被拒绝，除非设置 `STEVE_ALLOW_ANY_HOST=1` |
 | `STEVE_WEB_DIR` | Hub 提供的 Web 构建产物 |
 | `STEVE_PUBLIC_URL` | 集成回调能访问到的地址，只在需要回调时设置。不提供共享的托管地址。 |
-| `STEVE_OIDC_ISSUER`、`STEVE_OIDC_CLIENT_ID`、`STEVE_OIDC_CLIENT_SECRET_FILE` | 通过你的 OIDC 服务登录 |
+| `STEVE_OIDC_ISSUER`、`STEVE_OIDC_CLIENT_ID`、`STEVE_OIDC_CLIENT_SECRET_FILE` | 可选：通过你的 OIDC 服务单点登录 |
 | `STEVE_DISK_FLOOR_GB`、`STEVE_DISK_LOW_GB`、`STEVE_WORKTREE_IDLE_HOURS` | 事项 worktree 的磁盘保护 |
 | `STEVE_UPDATE_CHECK` | 设为 `0` 关闭定期检查新版本。debug 构建默认不检查，设为 `1` 才会检查 |
 | `STEVE_YOLO` | 设为 `off` 在整个实例上关闭 YOLO |
