@@ -237,10 +237,11 @@ pub async fn claim(
                 pubkey: &pubkey,
                 fingerprint: &fingerprint,
             };
-            // a key that is already paired is refused like a bad code (the UNIQUE fingerprint)
+            // a key that is already paired is refused like a bad code (by the key itself: a
+            // fingerprint stored before M4 is shorter)
             let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM nodes WHERE fingerprint=?)",
-                [&fingerprint],
+                "SELECT EXISTS(SELECT 1 FROM nodes WHERE pubkey=? OR fingerprint=?)",
+                rusqlite::params![&pubkey[..], &fingerprint],
                 |r| r.get(0),
             )?;
             if exists {
@@ -269,6 +270,111 @@ pub async fn claim(
     }
 }
 
+#[derive(Deserialize)]
+pub struct RotateBody {
+    node_id: String,
+    new_pubkey: String,
+    /// [`identity::rotate_message`] signed by the key the Hub knows, and by the new one.
+    sig_old: String,
+    sig_new: String,
+}
+
+/// `POST /node/rotate` (M4): a Node replaces its key. Both keys sign the change (the old one says
+/// it is this Node, the new one that the Node holds it), bound to this Hub; the Hub swaps the key
+/// where the old one is still current, closes the link of the old key, and audits it. The Node
+/// then connects with its new key. A Node that lost its key cannot do this: it is revoked and
+/// paired again.
+pub async fn rotate(
+    State(svc): State<Arc<NodeService>>,
+    Peer(peer): Peer,
+    headers: HeaderMap,
+    Json(b): Json<RotateBody>,
+) -> Response {
+    if !svc.ingress.allows(peer, &headers) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+    if !svc
+        .limiter
+        .take(&code_hash(&format!("rotate:{}", b.node_id)))
+    {
+        return err(429, "slow down");
+    }
+    let key = |h: &str| {
+        hex::decode(h)
+            .ok()
+            .and_then(|v| <[u8; 32]>::try_from(v).ok())
+    };
+    let (Some(new), Ok(sig_old), Ok(sig_new)) = (
+        key(&b.new_pubkey),
+        hex::decode(&b.sig_old),
+        hex::decode(&b.sig_new),
+    ) else {
+        return denied();
+    };
+    let (store, node) = (svc.store.clone(), b.node_id.clone());
+    let old = blocking(move || {
+        store.reader(|c| {
+            use rusqlite::OptionalExtension;
+            Ok(c.query_row(
+                "SELECT pubkey FROM nodes WHERE node_id=? AND state IN ('active','paused')",
+                [&node],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?)
+        })
+    })
+    .await;
+    let old = match old {
+        Ok(Some(k)) => match <[u8; 32]>::try_from(k.as_slice()) {
+            Ok(k) => k,
+            Err(_) => return denied(),
+        },
+        Ok(None) => return denied(),
+        Err(r) => return *r,
+    };
+    let msg = identity::rotate_message(&svc.hub_id, &b.node_id, &old, &new);
+    if new == old
+        || !identity::verify(&old, &msg, &sig_old)
+        || !identity::verify(&new, &msg, &sig_new)
+    {
+        return denied();
+    }
+    let fingerprint = identity::fingerprint(&new);
+    let (store, node, fp) = (svc.store.clone(), b.node_id.clone(), fingerprint.clone());
+    let swapped = blocking(move || {
+        store.transaction(|tx| {
+            let taken: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM nodes WHERE pubkey=?)",
+                [&new[..]],
+                |r| r.get(0),
+            )?;
+            if taken {
+                return Ok(false);
+            }
+            // only where the old key is still the current one: two rotations never both land
+            let n = tx.execute(
+                "UPDATE nodes SET pubkey=?, fingerprint=? WHERE node_id=? AND pubkey=? AND state IN ('active','paused')",
+                rusqlite::params![&new[..], fp, node, &old[..]],
+            )?;
+            if n == 1 {
+                steve_store::nodes::audit(tx, Some(&node), None, "key_rotated", Some(&fp), now())?;
+            }
+            Ok(n == 1)
+        })
+    })
+    .await;
+    match swapped {
+        Ok(true) => {
+            // the link of the old key goes; the Node dials again with the new one
+            let _g = svc.links.lock().await;
+            svc.registry.kill(&b.node_id, "key rotated");
+            json_response(200, &json!({ "fingerprint": fingerprint }))
+        }
+        Ok(false) => denied(),
+        Err(r) => *r,
+    }
+}
+
 pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Response {
     let store = svc.store.clone();
     let rows =
@@ -284,6 +390,10 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             let linked = svc.registry.current(&n.node_id).is_some();
             let mut v = serde_json::to_value(&n).unwrap_or(Value::Null);
             v["linked"] = json!(linked);
+            // from the key, at today's length: a Node paired before M4 stored 16 digits
+            if let Ok(k) = <[u8; 32]>::try_from(n.pubkey.as_slice()) {
+                v["fingerprint"] = json!(identity::fingerprint(&k));
+            }
             v
         })
         .collect();
