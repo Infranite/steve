@@ -38,8 +38,29 @@ pub(super) fn sandbox_mode(
             "adapter cannot provide the requested research sandbox",
         ));
     }
-    super::sandbox_mode(requirement, false)
+    let unsupported = |why: &str| Err(ApiError::new(ErrorCode::Unsupported, why));
+    match requirement {
+        SandboxRequirement::None => Ok(r::SandboxMode::Off),
+        SandboxRequirement::Required { guarantees } if guarantees.is_empty() => {
+            Ok(r::SandboxMode::Off)
+        }
+        SandboxRequirement::Required { guarantees } if only_fs(guarantees) => {
+            if r::sandbox::available() {
+                Ok(r::SandboxMode::Required)
+            } else {
+                unsupported("no sandbox-exec on this node")
+            }
+        }
+        SandboxRequirement::AllowFallback {
+            preferred,
+            acceptable,
+        } if only_fs(preferred) && acceptable.is_empty() => Ok(r::SandboxMode::Auto),
+        _ => unsupported("this node's research sandbox only gives fs-readonly"),
+    }
 }
+
+/// Tools that load nothing but deferred tool schemas (Claude Code's `ToolSearch`).
+const INERT_TOOLS: [&str; 1] = ["ToolSearch"];
 
 /// The ACP kind describes what a tool does, independent of its adapter's spelling. Steve's MCP
 /// tools still have an explicit allowlist because the server exposes actions as well as reads.
@@ -56,11 +77,7 @@ pub(crate) fn guard(
     };
     if fact.origin == ToolOrigin::Steve {
         let name = fact.name.strip_prefix("mcp__steve__").unwrap_or(&fact.name);
-        return if steve_tools
-            && r::guard::MCP_TOOLS
-                .iter()
-                .any(|n| n.strip_prefix("mcp__steve__") == Some(name))
-        {
+        return if steve_tools && r::guard::MCP_TOOLS.contains(&name) {
             Ok(())
         } else {
             Err(r::Violation::Tool { tool })
@@ -69,7 +86,8 @@ pub(crate) fn guard(
     if fact.origin == ToolOrigin::External {
         return Err(r::Violation::Tool { tool });
     }
-    if r::guard::INERT_TOOLS.contains(&fact.name.as_str()) {
+    // a harness's own bookkeeping that touches nothing (loading deferred tool schemas)
+    if INERT_TOOLS.contains(&fact.name.as_str()) {
         return Ok(());
     }
     let mut scope = scope.clone();
@@ -128,10 +146,9 @@ pub(crate) fn guard(
         r::guard::check_path(&tool, path, &scope)?;
     }
     if fact.category == ToolCategory::Search {
-        // Preserve the secret/glob checks even when an adapter supplies no locations.
+        // what the search reaches, even when an adapter supplies no locations
         if let Some(input) = fact.raw.get("rawInput") {
-            r::research_guard("Grep", input, &scope)?;
-            r::research_guard("Glob", input, &scope)?;
+            r::guard::check_search(&tool, input, &scope)?;
         }
     }
     Ok(())
@@ -264,7 +281,7 @@ async fn prepare(
     req: &r::ResearchRequest,
     plan: &r::AttemptPlan,
     run_id: &str,
-    adapter_state: &Path,
+    adapter_state: Option<&Path>,
     confine: Option<&str>,
 ) -> std::io::Result<Prepared> {
     let dir = cfg.scratch.join(run_id);
@@ -280,14 +297,13 @@ async fn prepare(
     let sandboxed = r::sandbox::decide(cfg.sandbox)
         .ok_or_else(|| std::io::Error::other("research requires an unavailable system sandbox"))?;
     let profile = if sandboxed {
-        // Both configured adapter state stores are treated alike. Project and attachment paths
-        // never become writable simply because an adapter chose to run a command.
-        let sb = r::sandbox::profile(&[
-            dir.clone(),
-            r::guard::resolve(&cfg.claude_dir),
-            r::guard::resolve(adapter_state),
-        ])
-        .ok_or_else(|| std::io::Error::other("unusable research sandbox path"))?;
+        // The run's directory and the harness's own state. Project and attachment paths never
+        // become writable simply because an adapter chose to run a command.
+        let writable: Vec<PathBuf> = std::iter::once(dir.clone())
+            .chain(adapter_state.map(r::guard::resolve))
+            .collect();
+        let sb = r::sandbox::profile(&writable)
+            .ok_or_else(|| std::io::Error::other("unusable research sandbox path"))?;
         // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
         let sb = format!("{sb}{}", confine.unwrap_or_default());
         let path = dir.join("sandbox.sb");
@@ -318,18 +334,15 @@ fn outcome(run_id: String, model: String, status: r::RunStatus) -> r::ResearchOu
         run_id,
         status,
         model: Some(model),
-        claude_session: None,
+        session: None,
         answer: String::new(),
         offer: None,
         citations: vec![],
         files_read: vec![],
-        tools: vec![],
         turns: 0,
         ms: 0,
         first_text_ms: None,
-        cost_usd: None,
         sandboxed: false,
-        result: None,
         raw: String::new(),
     }
 }
@@ -349,12 +362,24 @@ impl LocalNode {
         let started = Instant::now();
         let run_id = workspace::dir_name(exec.attempt().as_str());
         let mut out = outcome(run_id.clone(), plan.model.clone(), r::RunStatus::Done);
+        // the harness's own state, where it declares one (its configuration, logins, history)
+        let state_dir = self
+            .0
+            .cfg
+            .acp
+            .adapter_properties(&req.harness)
+            .state
+            .map(|st| {
+                std::env::var_os(&st.env)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.0.cfg.acp.user_home.join(&st.default))
+            });
         let prepared = match prepare(
             cfg,
             req,
             plan,
             &run_id,
-            &self.0.cfg.acp.codex_home,
+            state_dir.as_deref(),
             self.0.confine.seatbelt_rules(),
         )
         .await
@@ -501,7 +526,7 @@ impl LocalNode {
         out.turns = state.turns;
         out.files_read = state.files.clone();
         out.raw = state.raw();
-        out.claude_session = state.session;
+        out.session = state.session;
         out.status = if let Some(status) = state.stop.or(failure) {
             status
         } else if why.is_some() {
@@ -510,7 +535,7 @@ impl LocalNode {
             match result {
                 Some(Ok(done)) => {
                     out.raw = done.text;
-                    out.claude_session = Some(done.session);
+                    out.session = Some(done.session);
                     match done.stop_reason.as_str() {
                         "cancelled" => r::RunStatus::Stopped,
                         "max_tokens" | "max_turn_requests" => {

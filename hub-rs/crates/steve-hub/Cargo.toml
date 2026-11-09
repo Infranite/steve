@@ -30,7 +30,6 @@ steve-vault = { path = "../steve-vault" }
 steve-stats = { path = "../steve-stats" }
 steve-node-api = { path = "../steve-node-api" }
 steve-node = { path = "../steve-node" }
-steve-print = { path = "../steve-print" }
 steve-node-wire = { path = "../steve-node-wire" }
 steve-node-cli = { path = "../steve-node-cli" }
 steve-transcript = { path = "../steve-transcript", features = ["legacy"] }

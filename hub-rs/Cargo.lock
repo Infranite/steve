@@ -5126,7 +5126,6 @@ dependencies = [
  "steve-node-api",
  "steve-node-cli",
  "steve-node-wire",
- "steve-print",
  "steve-research",
  "steve-stats",
  "steve-store",
@@ -5339,7 +5338,6 @@ dependencies = [
  "steve-acp",
  "steve-knowledge",
  "steve-node-api",
- "steve-print",
  "steve-research",
  "steve-toolchains",
  "steve-vault",
@@ -5410,26 +5408,10 @@ name = "steve-people"
 version = "0.1.0"
 
 [[package]]
-name = "steve-print"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "serde_json",
- "sha2 0.11.1",
- "steve-node-api",
- "steve-vault",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "steve-research"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
- "libc",
  "regex",
  "serde",
  "serde_json",
@@ -5438,7 +5420,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]

@@ -130,13 +130,6 @@ pub async fn prepare(dir: &Path, files: &[Attachment]) -> std::io::Result<Prepar
     })
 }
 
-/// The one user message of a run with images (`--input-format stream-json`): the prompt, then the images.
-pub fn stdin_message(prompt: &str, images: &[Value]) -> String {
-    let mut content = vec![json!({"type": "text", "text": prompt})];
-    content.extend(images.iter().cloned());
-    json!({"type": "user", "message": {"role": "user", "content": content}}).to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,9 +185,6 @@ mod tests {
         assert!(p.note.contains("（前面消息里的）"));
         assert!(p.note.contains("text/plain，1 KB）"));
         assert!(p.note.contains("gone.pdf：没能读取"));
-        let m: Value = serde_json::from_str(&stdin_message("Q", &p.images)).unwrap();
-        assert_eq!(m["message"]["content"][0]["text"], "Q");
-        assert_eq!(m["message"]["content"][1]["type"], "image");
         assert!(prepare(&dir, &[]).await.unwrap().dir.is_none());
     }
 }

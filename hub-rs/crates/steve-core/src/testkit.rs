@@ -678,7 +678,7 @@ impl crate::thread::Researcher for FakeResearch {
             offer: self.offer.lock().unwrap().clone(),
             end,
             model: Some("fake-research".into()),
-            claude_session: Some("cs_1".into()),
+            session: Some("cs_1".into()),
             turns: 2,
             ..Default::default()
         }

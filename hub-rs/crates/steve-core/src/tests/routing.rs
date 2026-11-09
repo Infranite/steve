@@ -1071,14 +1071,15 @@ async fn a_follow_up_resumes_the_research_session() {
     let q1 = k.core.say(WS, A1, &[]).unwrap();
     settle(&k, 2).await;
     let run1 = k.db().store().thread().runs_of_message(&q1).unwrap()[0].clone();
-    assert_eq!(run1.claude_session.as_deref(), Some("cs_1"));
+    assert_eq!(run1.session.as_deref(), Some("cs_1"));
+    assert_eq!(run1.harness.as_deref(), Some("claude-code"));
     let q2 = k.core.say(WS, "重点讲检索那块", &[]).unwrap();
     settle(&k, 4).await;
     let seen = fr.seen.lock().unwrap().clone();
     assert!(seen[0].resume.is_none());
     let r = seen[1].resume.clone().expect("a follow-up resumes");
     assert_eq!(
-        (r.run.as_str(), r.claude_session.as_str(), r.model.as_str()),
+        (r.run.as_str(), r.session.as_str(), r.model.as_str()),
         (run1.id.as_str(), "cs_1", "fake-research")
     );
     assert!(r.prior_answer.starts_with("知识系统分三层"));
