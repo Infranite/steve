@@ -441,5 +441,8 @@
   "core.mq.pr_merge_unknown": "Whether PR #%{n} merged is not known: %{why}",
   "core.mq.fed": "Handed to the host's merge queue (PR #%{n}, into %{branch})",
   "core.mq.feed_failed": "Could not hand it to the host's merge queue: %{why}. This item is merged the project's usual way",
-  "core.mq.host_closed": "The host closed PR #%{n} without merging it"
+  "core.mq.host_closed": "The host closed PR #%{n} without merging it",
+  "core.mq.off": "The merge queue is off (STEVE_MQ=1)",
+  "core.mq.policy_unknown": "The merge queue has no setting %{field}",
+  "core.mq.policy_bad": "The merge queue's settings are not valid: %{why}"
 }

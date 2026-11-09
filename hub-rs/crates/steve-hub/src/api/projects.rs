@@ -596,7 +596,42 @@ pub async fn lane(
         js::string(&v["target"]["branch"]),
     );
     v["lane"] = json!(lane_for_ws(st.domain.lane_view(&up, &br).await?, &c.ws).0);
+    v["queue"] = json!(st.domain.mq_view(&up, &br, &c.ws).await?);
     ok(v)
+}
+
+/// `POST /api/projects/:id/queue`: what you do on the merge queue of the project's target, one of
+/// `{"policy": {field: value | null}}` (a field set, or back to its default), `{"allow": bool}`
+/// (whether Steve may merge into it), `{"release_now": true}`, `{"once": true}` (one batch through
+/// while it is paused). The queue as shown after.
+pub async fn queue_act(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    let v = body(&b)?;
+    let ok_shape = v.as_object().is_some_and(|o| {
+        !o.is_empty()
+            && o.iter().all(|(k, x)| match k.as_str() {
+                "policy" => x.is_object(),
+                "allow" => x.is_boolean(),
+                "release_now" | "once" => x == &json!(true),
+                _ => false,
+            })
+    });
+    if !ok_shape {
+        return Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.project.queue_bad"
+        )));
+    }
+    let (path, _) = lane_project(&st, &c, id).await?;
+    let t = blocking(move || lane_target(&path)).await?;
+    let q = st
+        .domain
+        .mq_act(&t.upstream, &t.branch, &c.ws, v, &c.me)
+        .await?;
+    ok(json!({ "queue": q }))
 }
 
 /// The longest merge window you may set, in minutes (a day).
