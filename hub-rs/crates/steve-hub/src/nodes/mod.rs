@@ -13,6 +13,7 @@ pub mod listener;
 pub mod pairing;
 pub mod registry;
 pub mod tailcat;
+pub mod vitals;
 pub use ingress::Ingress;
 
 use std::net::SocketAddr;

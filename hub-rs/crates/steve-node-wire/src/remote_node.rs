@@ -311,6 +311,11 @@ impl Discovery for RemoteNode {
         self.needs(2, "history.locate")?;
         self.go(HISTORY_LOCATE, &source, None, false).await
     }
+    async fn vitals(&self) -> ApiResult<NodeVitals> {
+        self.needs(steve_node_api::VITALS.1, "node.vitals")?;
+        self.go(NODE_VITALS, &serde_json::json!({}), None, false)
+            .await
+    }
 }
 
 impl Node for RemoteNode {

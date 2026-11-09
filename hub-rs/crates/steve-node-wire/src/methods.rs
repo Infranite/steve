@@ -112,6 +112,7 @@ rpc_table! {
     HISTORY_IMPORT = "history.import": HubToNode Control Command true;
     IMPORT_PAGE = "import.page": HubToNode Control Read false;
     HISTORY_LOCATE = "history.locate": HubToNode Control Read false;
+    NODE_VITALS = "node.vitals": HubToNode Control Read false;
     // EventSink
     EVENTS_COMMIT = "events.commit": NodeToHub Events Commit false;
     // HubTools

@@ -10,6 +10,7 @@ import { st, toast, refresh, tm } from "@/store"
 import { api, type RDevice, type RNode, type RPairing } from "@/api"
 import { go, Page, Group, Row, SectionLabel, StatusDot, Meta, Empty, Status, closeSheet, openSheet } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
+import { VitalsSection } from "@/devices-vitals"
 import { TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
 import { hubBase } from "@/hub"
@@ -89,6 +90,7 @@ export function DevicesView() {
         <Row title={t("shell:devices.fingerprint")} sub={<span className="font-mono break-all select-all">{node.fingerprint}</span>} />
         {node.last_seen != null && <Row title={t("shell:devices.lastConnected")} sub={tm(node.last_seen)} />}
       </Group> : <p role="status">{t("shell:devices.nodeNotVisible")}</p>}
+      {node && <VitalsSection node={node.node_id} />}
       <DialogFooter><Button variant="outline" onClick={() => setSelected(null)}>{t("shell:devices.gotIt")}</Button></DialogFooter>
     </DialogContent></Dialog>}
     </>
@@ -110,6 +112,7 @@ export function DeviceView({ id }: { id: string }) {
           <Row title={t("shell:devices.access")} sub={t("shell:devices.accessSub")} />
           <Row title={t("shell:devices.models")} sub={t("shell:devices.modelsSub")} />
         </Group></section>}
+        {isHub && <VitalsSection node="local" />}
         <section><SectionLabel right={<span className="type-footnote font-normal">{t("shell:devices.maxSessions", { count: d.max_sessions })}</span>}>{t("shell:devices.sessionsHere", { count: ss.length })}</SectionLabel>
           {ss.length ? <Group>{ss.map((k) => { const s = st.S[k]; return <Row key={k} title={s.title} sub={s.item ? t("shell:devices.sessionSub", { item: s.item, n: s.n, up: s.up }) : t("shell:devices.noItem")} onClick={() => go("#/sessions/" + k)}><Status s={s.st} sess /></Row> })}</Group> : <Empty title={t("shell:devices.noSessions")} />}</section>
         <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>{t("shell:devices.runtimes")}</SectionLabel>

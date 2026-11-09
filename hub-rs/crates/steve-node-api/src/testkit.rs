@@ -2174,6 +2174,18 @@ impl WorkspaceExecutor for FakeNode {
 
 #[async_trait]
 impl Discovery for FakeNode {
+    /// Fixed figures: 8 CPUs at load 2, 16 GiB of which 4 GiB free, nothing under roots.
+    async fn vitals(&self) -> ApiResult<NodeVitals> {
+        Ok(NodeVitals {
+            at: Timestamp(1),
+            cpus: Some(8),
+            load: Some([2.0, 1.0, 0.5]),
+            mem_total: Some(16 << 30),
+            mem_available: Some(4 << 30),
+            roots: vec![],
+            sessions: 0,
+        })
+    }
     async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {
         let st = self.st();
         let capacity = st.capacity.clone().unwrap_or(Capacity {
