@@ -463,6 +463,7 @@ export default {
     history: "history",
     historyBeforeHint: "Written before this account was connected: only recorded, Steve did not act on it",
     historyLateHint: "Arrived long after it was written: only recorded, Steve did not act on it",
+    historyBackfillHint: "Read back after the connection was interrupted: only recorded, Steve did not act on it",
     madeItem: "Created item {{id}}",
     approve: "Approve in the inbox",
   },

@@ -946,6 +946,8 @@ fn map_message(m: &Value, chat: &ChatRow, ids: &Ids) -> InboundMessage {
         raw: json!(m),
         source_id: None,
         edited: super::inbound::edited_at(ms(m, "update_time"), created),
+        mine: false,
+        backfill: false,
     }
 }
 

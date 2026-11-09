@@ -447,6 +447,8 @@ pub fn parse_receive(env: &Value, bot_open_id: &str) -> Result<Option<InboundMes
         raw: env.clone(),
         source_id: None,
         edited: edited_at(ms(m, "update_time"), created),
+        mine: false,
+        backfill: false,
     }))
 }
 

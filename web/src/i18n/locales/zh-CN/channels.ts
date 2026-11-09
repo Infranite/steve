@@ -468,6 +468,7 @@ export default {
     history: "旧消息",
     historyBeforeHint: "接入这个账号之前写的消息：只记录，Steve 没有处理",
     historyLateHint: "写完很久才收到的消息：只记录，Steve 没有处理",
+    historyBackfillHint: "连接中断后补取回来的消息：只记录，Steve 没有处理",
     madeItem: "建成了事项 {{id}}",
     approve: "在待处理里批准",
   },

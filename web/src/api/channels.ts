@@ -52,7 +52,7 @@ export type ChanMessage = {
   id: string; space_id: string; direction: "in" | "out"; sender: { name: string; party_id: string | null; account_id?: string | null }; persona_id: string | null; on_behalf: "none" | "persona" | "proxy"
   text: string | null; status: "received" | "draft" | "pending" | "sent" | "failed" | "unknown" | "recalled" | "blocked"; work_item_id: string | null; decision_id: string | null; created: number; sent: number | null; purged: number | null; basis: Basis | null
   /** only recorded as history when it came in: written before the connection was on, or arrived too late (newer Hubs) */
-  history?: "before" | "late" | null
+  history?: "before" | "late" | "backfill" | null
 }
 export type SpaceDetail = Space & { recent: ChanMessage[] }
 export type Reveal = { name: boolean; role: boolean; ai: boolean; steve: boolean; owner: boolean }
