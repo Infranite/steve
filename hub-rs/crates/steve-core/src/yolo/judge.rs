@@ -409,6 +409,13 @@ pub enum Subject {
     Connection,
     /// `fail` / `delivery_batch`.
     BatchFailed,
+    /// `fail` / `mq_batch`: a merge-queue batch whose checks gave no result (`no_result`; else
+    /// its bisection reached the limit), run again `reruns` times of the `limit` YOLO may.
+    QueueBatch {
+        no_result: bool,
+        reruns: u32,
+        limit: u32,
+    },
     /// Cards that block nothing: signals, new spaces, memory candidates, attribute confirmations, merges.
     Muted,
     /// Known kind, but the evidence could not be gathered (preview, a missing row).
@@ -879,6 +886,26 @@ fn table(f: &Facts, p: &Policy, env: &Env) -> Verdict {
         Subject::FlowRun { .. } => decline("flow", "流程停在对外节点，重放会重复对外效果"),
         Subject::Connection => decline("connection", "需要你本人重新授权"),
         Subject::BatchFailed => decline("batch.failed", "交付批次失败不自动重试"),
+        // checks have no outward effect: running them again is YOLO's, as many times as the
+        // target's policy says (once by default); landing without them, or sending a batch back,
+        // stays yours
+        Subject::QueueBatch {
+            no_result,
+            reruns,
+            limit,
+        } => {
+            if !no_result {
+                return decline("mq.limit", "定位失败原因的轮数用完了，留给你");
+            }
+            if reruns >= limit {
+                return decline("mq.rerun_used", "这一批已经重跑过检查，留给你");
+            }
+            auto(
+                "rerun",
+                "mq.rerun",
+                "检查没有结果，重跑一次：检查没有对外效果",
+            )
+        }
         Subject::Muted => Verdict::Mute {
             rule: "mute".into(),
             reason: "不挡任何事项，只进摘要".into(),
@@ -1204,6 +1231,7 @@ pub fn subject_from_row(
         ("accept", "item") => later("检查结果"),
         ("approve", "release") | ("approve", "delivery_batch") => later("发布状态"),
         ("fail", "delivery_batch") => Subject::BatchFailed,
+        ("fail", "mq_batch") => later("合并队列批次"),
         ("fail", "item") | ("fail", "stall") => later("停下的原因"),
         ("ask", "question") => later("代答"),
         ("propose", "item") if d.question.starts_with("前置事项都已完成") => {
