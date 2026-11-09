@@ -4,17 +4,15 @@
 //!
 //! - [`target`]: which target a working copy merges into, the same for every clone, remote spelling and
 //!   worktree of the repository;
-//! - [`precheck`]: what a request brings that the target, or another request, doesn't have already;
 //! - [`batch`]: the window of a lane (straight through when idle, batched when concurrent), as a pure
 //!   state machine.
 //!
-//! `target` and `precheck` are local git: fetch first ([`precheck::fetch`]), off the core's lock; `batch` touches
-//! nothing outside itself.
+//! `target` is local git: fetch first ([`crate::upstream::fetch`]), off the core's lock; `batch` touches
+//! nothing outside itself. Whether a change is on its target already is [`crate::upstream::presence`].
 
 pub mod batch;
 pub mod drive;
 pub mod exec;
-pub mod precheck;
 pub mod profile;
 pub mod status;
 pub mod store;

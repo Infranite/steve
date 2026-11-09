@@ -1,11 +1,11 @@
-//! Merge lanes on real repositories: which target a working copy merges into, and what a request
-//! brings that the target or another request has already.
+//! Merge lanes on real repositories: which target a working copy merges into, and whether a change
+//! is on the target already.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::lane::precheck::{Overlap, Presence, Request, overlap, precheck};
 use crate::lane::target::target_of;
+use crate::upstream::{Presence, presence};
 
 fn g(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -61,6 +61,20 @@ fn repo(home: &Path) -> PathBuf {
 }
 
 const UP: &str = "refs/remotes/origin/main";
+
+/// Whether `head`'s change is on `target` (a ref) as last fetched; a target that is not there is
+/// unknown.
+fn on(r: &Path, target: &str, head: &str) -> Presence {
+    match Command::new("git")
+        .arg("-C")
+        .arg(r)
+        .args(["rev-parse", "--verify", "--quiet", target])
+        .output()
+    {
+        Ok(o) if o.status.success() => presence(r, head, String::from_utf8_lossy(&o.stdout).trim()),
+        _ => Presence::Unknown(format!("没有 {target}")),
+    }
+}
 
 /// Pushes `main` and fetches, as another merge into the target would.
 fn land(r: &Path) {
@@ -164,21 +178,18 @@ fn a_change_already_on_the_target_is_found_however_it_was_merged() {
     /* not merged */
     g(&r, &["checkout", "-q", "-b", "feat"]);
     let feat = commit(&r, "b.txt", "feature\n", "feature");
-    assert_eq!(precheck(&r, UP, &feat, &[]).presence, Presence::Absent);
+    assert_eq!(on(&r, UP, &feat), Presence::Absent);
 
     /* merged as is (fast-forward) */
     g(&r, &["checkout", "-q", "main"]);
     g(&r, &["merge", "-q", "--ff-only", "feat"]);
     land(&r);
-    let p = precheck(&r, UP, &feat, &[]);
     assert_eq!(
-        p.presence,
+        on(&r, UP, &feat),
         Presence::Landed {
             commit: feat.clone()
         }
     );
-    assert_eq!(p.target_commit.as_deref(), Some(feat.as_str()));
-    assert!(p.checked_at > 0);
 
     /* rebased: main moved on, the branch's copy differs in id only */
     g(&r, &["checkout", "-q", "-b", "two", &base]);
@@ -188,10 +199,7 @@ fn a_change_already_on_the_target_is_found_however_it_was_merged() {
     land(&r);
     let copy = g(&r, &["rev-parse", "HEAD"]);
     assert_ne!(copy, two);
-    assert_eq!(
-        precheck(&r, UP, &two, &[]).presence,
-        Presence::Landed { commit: copy }
-    );
+    assert_eq!(on(&r, UP, &two), Presence::Landed { commit: copy });
 
     /* squashed: two commits arrive as one */
     g(&r, &["checkout", "-q", "-b", "three", &base]);
@@ -202,125 +210,22 @@ fn a_change_already_on_the_target_is_found_however_it_was_merged() {
     g(&r, &["commit", "-q", "-m", "squash"]);
     land(&r);
     let squash = g(&r, &["rev-parse", "HEAD"]);
-    assert_eq!(
-        precheck(&r, UP, &three, &[]).presence,
-        Presence::Landed { commit: squash }
-    );
+    assert_eq!(on(&r, UP, &three), Presence::Landed { commit: squash });
 
     /* a branch with no history in common with the target (an old line): definitely not on it */
     g(&r, &["checkout", "-q", "--orphan", "old"]);
     let old = commit(&r, "old.txt", "old\n", "old line");
-    assert_eq!(precheck(&r, UP, &old, &[]).presence, Presence::Absent);
-    let p = precheck(
-        &r,
-        UP,
-        &three,
-        &[Request {
-            id: "ST-old",
-            head: &old,
-        }],
-    );
-    assert!(p.overlaps.is_empty(), "{:?}", p.overlaps);
+    assert_eq!(on(&r, UP, &old), Presence::Absent);
     g(&r, &["checkout", "-q", "main"]);
 
     /* git can't tell: not "absent" */
     assert!(matches!(
-        precheck(&r, UP, "0123456789abcdef0123456789abcdef01234567", &[]).presence,
+        on(&r, UP, "0123456789abcdef0123456789abcdef01234567"),
         Presence::Unknown(_)
     ));
     assert!(matches!(
-        precheck(&r, "refs/remotes/origin/nope", &three, &[]).presence,
+        on(&r, "refs/remotes/origin/nope", &three),
         Presence::Unknown(_)
-    ));
-}
-
-#[test]
-fn overlapping_requests_are_told_apart_only_on_exact_evidence() {
-    let t = tempfile::tempdir().unwrap();
-    let r = repo(t.path());
-    let base = g(&r, &["rev-parse", "HEAD"]);
-
-    /* the same change on two bases: equal patch ids */
-    g(&r, &["checkout", "-q", "-b", "a", &base]);
-    let a = commit(&r, "b.txt", "feature\n", "feature");
-    g(&r, &["checkout", "-q", "main"]);
-    commit(&r, "z.txt", "elsewhere\n", "main moves on");
-    land(&r);
-    g(&r, &["checkout", "-q", "-b", "a2"]);
-    g(&r, &["cherry-pick", &a]);
-    let a2 = g(&r, &["rev-parse", "HEAD"]);
-    let up = g(&r, &["rev-parse", UP]);
-    assert_eq!(overlap(&r, &up, &a2, &a), Some(Overlap::Same));
-
-    /* one builds on the other: the earlier adds nothing on top of the later */
-    g(&r, &["checkout", "-q", "-b", "more", &a]);
-    let more = commit(&r, "b.txt", "feature\nand more\n", "more");
-    assert_eq!(overlap(&r, &up, &a, &more), Some(Overlap::InOther));
-    assert_eq!(overlap(&r, &up, &more, &a), Some(Overlap::HasOther));
-
-    /* nothing shared */
-    g(&r, &["checkout", "-q", "-b", "c", &base]);
-    let c = commit(&r, "c.txt", "other\n", "other");
-    assert_eq!(overlap(&r, &up, &c, &a), None);
-
-    /* the ST-36/ST-34 case: the same work redone on an older base, one line differing */
-    g(&r, &["checkout", "-q", "-b", "x", &base]);
-    let x = commit(
-        &r,
-        "a.txt",
-        "one\ntwo\nthree\nkinds: bug feat\nlabel row\nfilter\n",
-        "kinds",
-    );
-    g(&r, &["checkout", "-q", "-b", "y", &base]);
-    let y = commit(
-        &r,
-        "a.txt",
-        "one\ntwo\nthree\nkinds: bug feat doc\nlabel row\nfilter\n",
-        "kinds again",
-    );
-    assert_eq!(
-        overlap(&r, &up, &y, &x),
-        Some(Overlap::Partial {
-            files: vec!["a.txt".into()],
-            present: 2,
-            added: 3
-        })
-    );
-
-    /* indentation is meaning: equal `--stable` patch ids are not the same change */
-    g(&r, &["checkout", "-q", "-b", "i1", &base]);
-    let i1 = commit(&r, "f.py", "if x:\n    return 1\n", "indent 4");
-    g(&r, &["checkout", "-q", "-b", "i2", &base]);
-    let i2 = commit(&r, "f.py", "if x:\n        return 1\n", "indent 8");
-    assert!(matches!(
-        overlap(&r, &up, &i2, &i1),
-        Some(Overlap::Partial { .. })
-    ));
-
-    /* precheck lists only the requests that overlap, and keeps the order */
-    let p = precheck(
-        &r,
-        UP,
-        &a2,
-        &[
-            Request {
-                id: "ST-1",
-                head: &c,
-            },
-            Request {
-                id: "ST-2",
-                head: &a,
-            },
-            Request {
-                id: "ST-3",
-                head: &a2,
-            },
-        ],
-    );
-    assert_eq!(p.overlaps, vec![("ST-2".to_string(), Overlap::Same)]);
-    assert!(matches!(
-        overlap(&r, &up, &a, "0123456789abcdef0123456789abcdef01234567"),
-        Some(Overlap::Unknown(_))
     ));
 }
 
