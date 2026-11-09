@@ -1,6 +1,6 @@
-//! LocalNode running think jobs against stand-in `claude` and `codex` scripts: one model per
-//! attempt, the draft as it is written, files and images where the harness reads them, and a
-//! process group that is proven gone however the attempt ends.
+//! LocalNode running think jobs against a stand-in ACP adapter: one model per attempt, the draft
+//! as it is written, files and images as ACP sends them, and a process group that is proven gone
+//! however the attempt ends. Every harness runs the same way; the adapter is one of nobody's.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -10,59 +10,91 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use steve_acp::AcpConfig;
-use steve_node::{JobHarnesses, LocalNode, NodeConfig, Storage};
+use steve_node::{LocalNode, NodeConfig, Storage};
 use steve_node_api::testkit::RecordingSink;
 use steve_node_api::testkit::build::{cmd, job};
 use steve_node_api::*;
 
-/// The stand-in `claude -p`. Its argv goes to `<log>.args`, its working directory to `<log>.cwd`,
-/// one line per process to `<log>.spawns`, stdin (with images) to `<log>.stdin`. What it does is
-/// picked by the message: `@fail`, `@hang` (its pid to `<log>.pid`), `@read` (the attachment back as
-/// its answer); otherwise two messages, the second the answer.
-const CLAUDE: &str = r#"#!/bin/sh
-log="$FAKE_LOG"
-echo "$$" >> "$log.spawns"
-printf '%s\n' "$@" > "$log.args"
-pwd -P > "$log.cwd"
-case "$*" in *--input-format*) cat > "$log.stdin";; esac
-start='{"type":"stream_event","event":{"type":"message_start","message":{}}}'
-delta() { printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$1"; }
-case "$*" in
-*@fail*)
-  echo '{"type":"result","is_error":true,"result":"API Error: 503 overloaded","modelUsage":{"m-busy":{"inputTokens":4,"outputTokens":0}}}'
-  exit 1;;
-*@hang*)
-  echo "$$" > "$log.pid"
-  echo "$start"; delta "写到一半"
-  sleep 60 & wait;;
-*@read*)
-  body=$(cat .steve/attachments/att_1-notes.md)
-  echo "$start"; delta "$body"
-  printf '{"type":"result","is_error":false,"result":"%s"}\n' "$body";;
-*)
-  echo "$start"; delta "先看"; delta "一下"
-  echo "$start"; delta "答案"
-  echo '{"type":"result","is_error":false,"result":"答案","total_cost_usd":0.25,"modelUsage":{"m1":{"inputTokens":3,"outputTokens":2,"costUSD":0.25}}}';;
-esac
+/// The stand-in ACP adapter. Its argv goes to `<log>.args`, its working directory to `<log>.cwd`,
+/// one line per process to `<log>.spawns`, `session/new` to `<log>.new`, the config options it was
+/// set to to `<log>.config`, the prompt to `<log>.prompt`. What it does is picked by the message:
+/// `@fail` (a 503, its usage reported), `@hang` (its pid to `<log>.pid`), `@read` (reads the
+/// attachment, says so as an ACP read, and answers with it), `@stop` (ends with `max_tokens`);
+/// otherwise two messages, the second the answer.
+const ADAPTER: &str = r#"#!/usr/bin/env python3
+import json, os, sys, time
+log = "FAKE_LOG"
+def put(what, text, mode="w"):
+    try:
+        with open(log + "." + what, mode) as f: f.write(text)
+    except OSError:
+        pass
+put("spawns", "%d\n" % os.getpid(), "a")
+put("args", "\n".join(sys.argv[1:]))
+put("cwd", os.getcwd())
+def send(v):
+    print(json.dumps(v, ensure_ascii=False), flush=True)
+def update(sid, u):
+    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": u}})
+def chunk(sid, text, mid):
+    update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": mid, "content": {"type": "text", "text": text}})
+options = lambda model, effort: [
+    {"id": "model", "category": "model", "type": "select", "currentValue": model,
+     "options": [{"value": "m1"}, {"value": "m2"}]},
+    {"id": "effort", "category": "thought_level", "type": "select", "currentValue": effort,
+     "options": [{"value": "low"}, {"value": "high"}]}]
+state = {"model": "m1", "effort": "low"}
+for line in sys.stdin:
+    msg = json.loads(line)
+    m, p = msg.get("method"), msg.get("params") or {}
+    result = {}
+    if m == "initialize":
+        result = {"protocolVersion": 1, "agentCapabilities": {
+            "promptCapabilities": {"image": True},
+            "sessionCapabilities": {"systemPrompt": {"mode": {"override": {}, "append": {}}}}}}
+    elif m == "session/new":
+        put("new", json.dumps(p, ensure_ascii=False))
+        result = {"sessionId": "s1", "modes": {"currentModeId": "default", "availableModes": [
+            {"id": "default"}, {"id": "plan"}]}, "configOptions": options(state["model"], state["effort"])}
+    elif m == "session/set_config_option":
+        state[p["configId"]] = p["value"]
+        put("config", "%s=%s\n" % (p["configId"], p["value"]), "a")
+        result = {"configOptions": options(state["model"], state["effort"])}
+    elif m == "session/prompt":
+        put("prompt", json.dumps(p["prompt"], ensure_ascii=False))
+        sid, text = p["sessionId"], p["prompt"][0].get("text", "")
+        if "@fail" in text:
+            update(sid, {"sessionUpdate": "usage_update", "used": 4, "size": 100,
+                         "cost": {"amount": 0.01, "currency": "USD"}})
+            send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": "API Error: 503 overloaded"}})
+            continue
+        if "@hang" in text:
+            put("pid", str(os.getpid()))
+            chunk(sid, "写到一半", "a")
+            time.sleep(60)
+        if "@read" in text:
+            path = os.path.join(os.getcwd(), ".steve/attachments/att_1-notes.md")
+            update(sid, {"sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "read",
+                         "title": "Read", "status": "pending", "locations": [{"path": path}],
+                         "rawInput": {"file_path": path}})
+            body = open(path).read()
+            update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"})
+            chunk(sid, body, "a")
+            result = {"stopReason": "end_turn"}
+        elif "@stop" in text:
+            chunk(sid, "写了一半", "a")
+            result = {"stopReason": "max_tokens"}
+        else:
+            chunk(sid, "先看", "a"); chunk(sid, "一下", "a"); chunk(sid, "答案", "b")
+            result = {"stopReason": "end_turn", "usage": {"inputTokens": 3, "outputTokens": 2}}
+    if "id" in msg:
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
 "#;
 
-/// The stand-in `codex exec --json`: argv to `<log>.args`, the message (stdin) to `<log>.stdin`,
-/// the `-i` files' sizes to `<log>.images`; two whole messages, then the usage.
-const CODEX: &str = r#"#!/bin/sh
-log="$FAKE_LOG"
-echo "$$" >> "$log.spawns"
-printf '%s\n' "$@" > "$log.args"
-cat > "$log.stdin"
-: > "$log.images"
-prev=""
-for a in "$@"; do
-  if [ "$prev" = "-i" ]; then wc -c < "$a" | tr -d ' ' >> "$log.images"; fi
-  prev="$a"
-done
-echo '{"type":"item.completed","item":{"type":"agent_message","text":"先想想"}}'
-echo '{"type":"item.completed","item":{"type":"agent_message","text":"答案"}}'
-echo '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":3,"reasoning_output_tokens":1}}'
-"#;
+/// The adapter id the jobs run on: one of nobody's, declared to keep its own sandbox (so its logs
+/// reach the test). [`a_custom_adapter_with_nothing_declared_runs_in_the_nodes_sandbox`] runs it
+/// with nothing declared.
+const FAKE: &str = "fake";
 
 struct T {
     _dir: Option<tempfile::TempDir>,
@@ -84,13 +116,11 @@ impl T {
     fn at(root: &Path) -> T {
         let root = root.to_path_buf();
         let log = root.join("fake");
-        for (name, body) in [("claude", CLAUDE), ("codex", CODEX)] {
-            let body = body.replace("\"$FAKE_LOG\"", &format!("'{}'", log.display()));
-            let p = root.join(name);
-            std::fs::write(&p, body).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let body = ADAPTER.replace("FAKE_LOG", &log.display().to_string());
+        let p = root.join("adapter.py");
+        std::fs::write(&p, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         T {
             _dir: None,
             root,
@@ -106,8 +136,16 @@ impl T {
             node: NodeId::new("hub").unwrap(),
             home: self.root.join("node"),
             acp: AcpConfig {
-                declared: Default::default(),
-                adapters: HashMap::new(),
+                declared: HashMap::from([(
+                    FAKE.to_string(),
+                    serde_json::from_value(json!({"properties": {
+                        "nested_sandbox": false, "self_read_only": true}}))
+                    .unwrap(),
+                )]),
+                adapters: HashMap::from([
+                    (FAKE.to_string(), self.root.join("adapter.py")),
+                    ("bare".to_string(), self.root.join("adapter.py")),
+                ]),
                 node: "node".into(),
                 claude_executable: "claude".into(),
                 steve_home: self.root.join("steve"),
@@ -124,10 +162,6 @@ impl T {
                 execs: 0,
             },
             storage: Storage::default(),
-            jobs: JobHarnesses {
-                claude: Some(self.root.join("claude")),
-                codex: Some(self.root.join("codex")),
-            },
         }
     }
 
@@ -156,10 +190,6 @@ impl T {
 
     fn read(&self, what: &str) -> String {
         std::fs::read_to_string(format!("{}.{what}", self.log.display())).unwrap_or_default()
-    }
-
-    fn args(&self) -> Vec<String> {
-        self.read("args").lines().map(String::from).collect()
     }
 
     fn spawns(&self) -> usize {
@@ -332,7 +362,7 @@ async fn a_think_job_streams_its_draft_and_ends_with_its_answer() {
     let t = T::new();
     let n = t.node();
     let r = n
-        .start_job(now_cmd("op_j", think("a_1", "claude-code", "数数")))
+        .start_job(now_cmd("op_j", think("a_1", FAKE, "数数")))
         .await
         .unwrap();
     assert_eq!(r.state, Observed::Running);
@@ -395,29 +425,19 @@ async fn a_think_job_streams_its_draft_and_ends_with_its_answer() {
         })
         .unwrap();
     assert_eq!(
-        (
-            usage.model.as_deref(),
-            usage.measurement,
-            usage.tokens.input,
-            usage.cost.map(|m| m.decimal)
-        ),
-        (
-            Some("m1"),
-            Measurement::Final,
-            Some(3),
-            Some("0.25".to_string())
-        )
+        (usage.measurement, usage.tokens.input, usage.tokens.output),
+        (Measurement::Final, Some(3), Some(2))
     );
-    // the cache-friendly layout: the head as the system prompt, no tools; one model
-    let args = t.args();
-    let at = |flag: &str| {
-        args.iter()
-            .position(|a| a == flag)
-            .map(|i| args[i + 1].clone())
-    };
-    assert_eq!(at("--system-prompt").as_deref(), Some("你是 Steve。"));
-    assert_eq!(at("--tools").as_deref(), Some(""));
-    assert_eq!(at("--model").as_deref(), Some("m1"));
+    // the head as the session's system prompt in place of the harness's own (no tools); the
+    // message alone is the prompt; one model
+    let new: serde_json::Value = serde_json::from_str(&t.read("new")).unwrap();
+    assert_eq!(
+        new["systemPrompt"],
+        json!({"mode": "override", "content": [{"type": "text", "text": "你是 Steve。"}]})
+    );
+    let prompt: serde_json::Value = serde_json::from_str(&t.read("prompt")).unwrap();
+    assert_eq!(prompt, json!([{"type": "text", "text": "数数"}]));
+    assert_eq!(t.read("config"), "model=m1\n");
     // in a scratch directory of its own, cleaned up after
     let cwd = t.read("cwd");
     assert!(
@@ -434,11 +454,7 @@ async fn a_read_attached_job_reads_its_file_and_nothing_else() {
     let t = T::new();
     let n = t.node();
     let a = t.files.add("att_1", b"notes", "text/markdown");
-    let mut j = think(
-        "a_1",
-        "claude-code",
-        "@read 总结 .steve/attachments/att_1-notes.md",
-    );
+    let mut j = think("a_1", FAKE, "@read 总结 .steve/attachments/att_1-notes.md");
     j.run.prompt.push(Part::File {
         artifact: a,
         name: ".steve/attachments/att_1-notes.md".into(),
@@ -455,13 +471,9 @@ async fn a_read_attached_job_reads_its_file_and_nothing_else() {
             text: "notes".into()
         }]
     );
-    let args = t.args();
-    let tools: Vec<&str> = steve_print::ATTACHMENT_TOOLS.to_vec();
-    assert!(
-        args.windows(tools.len()).any(|w| w == tools.as_slice()),
-        "{args:?}"
-    );
-    assert!(!args.iter().any(|a| a == "--system-prompt"));
+    // with tools the head comes after the harness's own system prompt
+    let new: serde_json::Value = serde_json::from_str(&t.read("new")).unwrap();
+    assert_eq!(new["systemPrompt"]["mode"], "append");
     assert_eq!(
         t.files.asked.lock().unwrap().clone(),
         vec![FileAccess::Execution(exec("a_1"))],
@@ -470,87 +482,73 @@ async fn a_read_attached_job_reads_its_file_and_nothing_else() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn images_go_on_claudes_stdin_and_to_codex_as_files() {
+async fn images_go_as_acp_image_blocks() {
     let t = T::new();
     let n = t.node();
     let png = t.files.add("img_1", b"\x89PNG-bytes", "image/png");
-    let mut j = think("a_1", "claude-code", "看图");
-    j.run.prompt.push(Part::Image {
-        artifact: png.clone(),
-    });
+    let mut j = think("a_1", FAKE, "看图");
+    j.run.prompt.push(Part::Image { artifact: png });
     n.start_job(now_cmd("op_c", j)).await.unwrap();
     completion(finished(&n, "op_c").await);
-    let stdin: serde_json::Value = serde_json::from_str(t.read("stdin").trim()).unwrap();
+    let prompt: serde_json::Value = serde_json::from_str(&t.read("prompt")).unwrap();
     use base64::Engine as _;
     assert_eq!(
-        stdin["message"]["content"][1]["source"],
-        json!({"type": "base64", "media_type": "image/png",
-            "data": base64::engine::general_purpose::STANDARD.encode(b"\x89PNG-bytes")})
+        prompt,
+        json!([{"type": "text", "text": "看图"}, {"type": "image", "mimeType": "image/png",
+            "data": base64::engine::general_purpose::STANDARD.encode(b"\x89PNG-bytes")}])
     );
-    assert_eq!(stdin["message"]["content"][0]["text"], "看图");
+}
 
-    let mut j = think("a_2", "codex", "看图");
-    j.run.prompt.push(Part::Image { artifact: png });
-    n.start_job(now_cmd("op_x", j)).await.unwrap();
-    let c = completion(finished(&n, "op_x").await);
-    assert_eq!(
-        c.result,
-        vec![Part::Text {
-            text: "答案".into()
-        }]
-    );
-    assert_eq!(t.read("images").trim(), "10");
-    assert_eq!(t.read("stdin"), "看图");
-    let args = t.args();
-    assert!(args.windows(2).any(|w| w == ["-m", "m1"]), "{args:?}");
-    // the operation reads finished as soon as its end is journaled; the attempt's events reach the
-    // sink after that, the end last
-    t.until("a_2's events delivered", |t| {
-        t.sink.events().into_iter().any(|e| {
-            e.subject == Subject::Execution(exec("a_2"))
-                && matches!(e.body, EventBody::AttemptEnded { .. })
-        })
-    })
-    .await;
-    // two whole messages: two messages
-    let started = t
-        .sink
-        .events()
-        .into_iter()
-        .filter(|e| {
-            e.subject == Subject::Execution(exec("a_2"))
-                && matches!(e.body, EventBody::MessageStarted { .. })
-        })
-        .count();
-    assert_eq!(started, 2);
-    let usage = t
-        .sink
-        .events()
-        .into_iter()
-        .find_map(|e| match e.body {
-            EventBody::Usage { report } if e.subject == Subject::Execution(exec("a_2")) => {
-                Some(report)
-            }
-            _ => None,
-        })
+/// An adapter that stops the turn otherwise (`max_tokens`) fails with that reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_the_adapter_cut_short_fails_with_its_stop_reason() {
+    let t = T::new();
+    let n = t.node();
+    n.start_job(now_cmd("op_j", think("a_1", FAKE, "@stop")))
+        .await
         .unwrap();
+    let c = completion(finished(&n, "op_j").await);
     assert_eq!(
-        (usage.tokens.input, usage.tokens.reasoning),
-        (Some(6), Some(1))
+        (c.outcome, c.stop_reason.as_str(), c.result),
+        (Outcome::Failed, "max_tokens", vec![])
     );
+}
+
+/// An adapter of one's own with nothing declared: plain ACP, in the Node's read-only sandbox where
+/// the platform has one (what it writes outside its scratch directory does not land).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_custom_adapter_with_nothing_declared_runs_in_the_nodes_sandbox() {
+    let t = T::new();
+    let n = t.node();
+    n.start_job(now_cmd("op_j", think("a_1", "bare", "数数")))
+        .await
+        .unwrap();
+    let c = completion(finished(&n, "op_j").await);
+    assert_eq!(
+        (c.outcome, c.result),
+        (
+            Outcome::Succeeded,
+            vec![Part::Text {
+                text: "答案".into()
+            }]
+        )
+    );
+    if steve_research::sandbox::available() {
+        assert_eq!(t.spawns(), 0, "its log is outside what it may write");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failing_model_fails_once_and_nothing_tries_another() {
     let t = T::new();
     let n = t.node();
-    n.start_job(now_cmd("op_j", think("a_1", "claude-code", "@fail")))
+    n.start_job(now_cmd("op_j", think("a_1", FAKE, "@fail")))
         .await
         .unwrap();
     let c = completion(finished(&n, "op_j").await);
     assert_eq!(
         (c.outcome, c.stop_reason.as_str()),
-        (Outcome::Failed, "harness")
+        (Outcome::Failed, "error")
     );
     assert!(c.transient, "a 503 may pass by itself");
     assert_eq!(
@@ -568,7 +566,7 @@ async fn a_failing_model_fails_once_and_nothing_tries_another() {
 async fn cancel_stops_the_whole_group() {
     let t = T::new();
     let n = t.node();
-    n.start_job(now_cmd("op_j", think("a_1", "claude-code", "@hang")))
+    n.start_job(now_cmd("op_j", think("a_1", FAKE, "@hang")))
         .await
         .unwrap();
     t.until("the harness", |t| !t.read("pid").is_empty()).await;
@@ -594,7 +592,7 @@ async fn cancel_stops_the_whole_group() {
     assert!(unsafe { libc::kill(-(pid as libc::pid_t), 0) } != 0);
     assert!(no_scratch(&t));
     // its capacity is free again
-    n.start_job(now_cmd("op_2", think("a_2", "claude-code", "x")))
+    n.start_job(now_cmd("op_2", think("a_2", FAKE, "x")))
         .await
         .unwrap();
     completion(finished(&n, "op_2").await);
@@ -604,7 +602,7 @@ async fn cancel_stops_the_whole_group() {
 async fn a_job_past_its_deadline_times_out() {
     let t = T::new();
     let n = t.node();
-    let mut j = think("a_1", "claude-code", "@hang");
+    let mut j = think("a_1", FAKE, "@hang");
     j.run.limits.deadline = Timestamp(wall() + 1_000);
     n.start_job(now_cmd("op_j", j)).await.unwrap();
     t.until("the harness", |t| !t.read("pid").is_empty()).await;
@@ -622,7 +620,7 @@ async fn a_job_past_its_deadline_times_out() {
 async fn a_restart_leaves_the_job_unknown_until_it_is_abandoned() {
     let t = T::new();
     let n = t.node();
-    n.start_job(now_cmd("op_j", think("a_1", "claude-code", "@hang")))
+    n.start_job(now_cmd("op_j", think("a_1", FAKE, "@hang")))
         .await
         .unwrap();
     t.until("the harness", |t| !t.read("pid").is_empty()).await;
@@ -638,7 +636,7 @@ async fn a_restart_leaves_the_job_unknown_until_it_is_abandoned() {
     assert!(matches!(r.state, Observed::Unknown { .. }), "{r:?}");
     // never run again: the same command gives the same receipt
     let again = n
-        .start_job(now_cmd("op_j", think("a_1", "claude-code", "@hang")))
+        .start_job(now_cmd("op_j", think("a_1", FAKE, "@hang")))
         .await;
     assert_eq!(t.spawns(), 1, "{again:?}");
     n.abandon(now_cmd(
@@ -664,7 +662,7 @@ async fn child_job_node_process() {
     };
     let t = T::at(Path::new(&root));
     let n = t.node();
-    n.start_job(now_cmd("op_j", think("a_1", "claude-code", "@hang")))
+    n.start_job(now_cmd("op_j", think("a_1", FAKE, "@hang")))
         .await
         .unwrap();
     t.until("the harness", |t| !t.read("pid").is_empty()).await;
@@ -742,13 +740,13 @@ async fn a_killed_node_leaves_its_job_group_until_it_is_abandoned() {
 async fn a_job_command_runs_once_and_an_attempt_never_twice() {
     let t = T::new();
     let n = t.node();
-    let c = now_cmd("op_j", think("a_1", "claude-code", "x"));
+    let c = now_cmd("op_j", think("a_1", FAKE, "x"));
     let first = n.start_job(c.clone()).await.unwrap();
     assert_eq!(n.start_job(c.clone()).await.unwrap(), first);
     completion(finished(&n, "op_j").await);
     assert_eq!(n.start_job(c).await.unwrap().operation.as_str(), "op_j");
     let e = n
-        .start_job(now_cmd("op_j2", think("a_1", "claude-code", "x")))
+        .start_job(now_cmd("op_j2", think("a_1", FAKE, "x")))
         .await
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Conflict);
@@ -761,7 +759,7 @@ async fn what_this_node_cannot_run_is_refused() {
     // no job capacity: no jobs at all
     let n = t.open(0);
     let e = n
-        .start_job(now_cmd("op_1", think("a_1", "claude-code", "x")))
+        .start_job(now_cmd("op_1", think("a_1", FAKE, "x")))
         .await
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Unsupported);
@@ -775,14 +773,14 @@ async fn what_this_node_cannot_run_is_refused() {
     let jobs: Vec<&str> = caps
         .harnesses
         .iter()
-        .filter(|h| h.jobs && !h.sessions)
+        .filter(|h| h.jobs)
         .map(|h| h.name.as_str())
         .collect();
-    assert_eq!(jobs, ["claude-code", "codex"]);
+    assert_eq!(jobs, ["bare", FAKE], "every adapter runs jobs");
     for (op, spec) in [
         ("op_r", {
             let mut r = steve_node_api::testkit::build::research("j_1", "a_r", "x");
-            r.run.limits = think("a_r", "claude-code", "x").run.limits;
+            r.run.limits = think("a_r", FAKE, "x").run.limits;
             r
         }),
         ("op_h", think("a_h", "gemini", "x")),
@@ -790,18 +788,18 @@ async fn what_this_node_cannot_run_is_refused() {
         let e = n.start_job(now_cmd(op, spec)).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::Unsupported, "{op}");
     }
-    let mut past = think("a_p", "claude-code", "x");
+    let mut past = think("a_p", FAKE, "x");
     past.run.limits.deadline = Timestamp(wall() - 1);
     assert_eq!(
         n.start_job(now_cmd("op_p", past)).await.unwrap_err().code,
         ErrorCode::Expired
     );
     // one at a time with a capacity of one
-    n.start_job(now_cmd("op_1", think("a_1", "claude-code", "@hang")))
+    n.start_job(now_cmd("op_1", think("a_1", FAKE, "@hang")))
         .await
         .unwrap();
     assert_eq!(
-        n.start_job(now_cmd("op_2", think("a_2", "claude-code", "x")))
+        n.start_job(now_cmd("op_2", think("a_2", FAKE, "x")))
             .await
             .unwrap_err()
             .code,

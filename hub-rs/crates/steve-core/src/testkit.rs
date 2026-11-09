@@ -692,3 +692,107 @@ impl Drop for Kit {
         crate::release::test_spawned::kill(&self.core.config().home);
     }
 }
+
+/// A stand-in ACP adapter for the in-process gateway ([`crate::LocalAcp`]), started for every
+/// built-in adapter id. Each prompt appends `{"harness", "model", "effort", "system", "prompt"}`
+/// to `runs.jsonl`. What it does is picked by the model: `broken` dies, `busy` answers a 503,
+/// `slow` hangs; any other answers with `reply.txt`, its usage and cost reported.
+pub struct FakeAcp {
+    pub dir: std::path::PathBuf,
+    pub acp: steve_acp::AcpConfig,
+}
+
+const FAKE_ACP: &str = r#"#!/usr/bin/env python3
+import json, os, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+harness = os.path.basename(sys.argv[0])[:-3]
+def send(v):
+    print(json.dumps(v, ensure_ascii=False), flush=True)
+def update(sid, u):
+    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": u}})
+efforts = [{"value": e} for e in ["low", "medium", "high", "xhigh", "max"]]
+state = {"model": None, "effort": None, "system": None}
+def options():
+    return [{"id": "model", "category": "model", "type": "select", "currentValue": state["model"] or "default", "options": []},
+            {"id": "effort", "category": "thought_level", "type": "select", "currentValue": state["effort"] or "medium", "options": efforts}]
+for line in sys.stdin:
+    msg = json.loads(line)
+    m, p = msg.get("method"), msg.get("params") or {}
+    result = {}
+    if m == "initialize":
+        result = {"protocolVersion": 1, "agentCapabilities": {"promptCapabilities": {"image": True},
+            "sessionCapabilities": {"systemPrompt": {"mode": {"override": {}, "append": {}}}}}}
+    elif m == "session/new":
+        sp = p.get("systemPrompt")
+        state["system"] = sp and [sp["mode"], sp["content"][0]["text"]]
+        result = {"sessionId": "s1", "modes": {"currentModeId": "default", "availableModes": [{"id": "plan"}, {"id": "read-only"}]}, "configOptions": options()}
+    elif m == "session/set_config_option":
+        state[p["configId"]] = p["value"]
+        result = {"configOptions": options()}
+    elif m == "session/prompt":
+        with open(os.path.join(here, "runs.jsonl"), "a") as f:
+            f.write(json.dumps({"harness": harness, "model": state["model"], "effort": state["effort"],
+                "system": state["system"], "prompt": p["prompt"]}, ensure_ascii=False) + "\n")
+        sid, model = p["sessionId"], state["model"]
+        if model == "broken":
+            sys.exit(2)
+        if model == "slow":
+            time.sleep(30)
+        if model == "busy":
+            send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": "API Error: 503 upstream unavailable"}})
+            continue
+        reply = open(os.path.join(here, "reply.txt")).read()
+        update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": reply}})
+        update(sid, {"sessionUpdate": "usage_update", "used": 1, "size": 2, "cost": {"amount": 0.000829045, "currency": "USD"}})
+        result = {"stopReason": "end_turn", "usage": {"inputTokens": 2, "outputTokens": 4, "cachedReadTokens": 11097, "cachedWriteTokens": 5727}}
+    if "id" in msg:
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+"#;
+
+impl FakeAcp {
+    /// The adapter in `dir`, answering `reply`.
+    pub fn new(dir: &std::path::Path, reply: &str) -> FakeAcp {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(dir.join("reply.txt"), reply).unwrap();
+        let mut adapters = HashMap::new();
+        for id in steve_acp::adapters::builtin_ids() {
+            let p = dir.join(format!("{id}.py"));
+            std::fs::write(&p, FAKE_ACP).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            adapters.insert(id.to_string(), p);
+        }
+        FakeAcp {
+            dir: dir.to_path_buf(),
+            acp: steve_acp::AcpConfig {
+                adapters,
+                declared: HashMap::new(),
+                node: "node".into(),
+                claude_executable: "claude".into(),
+                steve_home: dir.join("steve"),
+                codex_home: dir.join("codex-home"),
+                user_home: dir.to_path_buf(),
+                version: "test".into(),
+                idle_release: Duration::from_secs(60),
+                retry_delays: vec![],
+            },
+        }
+    }
+
+    /// The in-process one-model runner on it.
+    pub fn one(&self) -> crate::LocalAcp {
+        crate::LocalAcp {
+            acp: self.acp.clone(),
+            cwd: self.dir.join("scratch"),
+        }
+    }
+
+    /// The runs so far, then forgets them.
+    pub fn runs(&self) -> Vec<serde_json::Value> {
+        let p = self.dir.join("runs.jsonl");
+        let log = std::fs::read_to_string(&p).unwrap_or_default();
+        let _ = std::fs::remove_file(&p);
+        log.lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+}

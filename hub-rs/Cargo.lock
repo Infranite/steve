@@ -5007,7 +5007,6 @@ dependencies = [
  "steve-modules",
  "steve-node",
  "steve-node-api",
- "steve-print",
  "steve-stats",
  "steve-store",
  "steve-toolchains",

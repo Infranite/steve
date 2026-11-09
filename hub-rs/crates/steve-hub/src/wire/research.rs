@@ -227,7 +227,7 @@ impl ResearchAdapter {
         ws: &str,
         out: &r::ResearchOutcome,
         usage: Vec<steve_core::gateway::ModelUsage>,
-        codex: bool,
+        harness: &str,
     ) {
         let model = out.model.clone().unwrap_or_default();
         let ok = matches!(out.status, r::RunStatus::Done);
@@ -242,11 +242,7 @@ impl ResearchAdapter {
             usage,
             model,
             failures: vec![],
-            harness: if codex {
-                steve_core::gateway::CODEX_HARNESS
-            } else {
-                ""
-            },
+            harness: harness.to_string(),
         };
         let tag = steve_core::stats::CallTag {
             purpose: "research",
@@ -259,10 +255,10 @@ impl ResearchAdapter {
     }
 
     /// The tokens of an in-process run, from the harness's closing result.
-    fn usage_of_result(out: &r::ResearchOutcome) -> (Vec<steve_core::gateway::ModelUsage>, bool) {
+    fn usage_of_result(out: &r::ResearchOutcome) -> Vec<steve_core::gateway::ModelUsage> {
         let model = out.model.clone().unwrap_or_default();
         let codex = out.result.as_ref().is_some_and(|d| d["harness"] == "codex");
-        let usage = match out.result.as_ref() {
+        match out.result.as_ref() {
             // Codex reports one usage object for the turn, input counting the cached part
             Some(d) if codex => d
                 .get("usage")
@@ -280,10 +276,12 @@ impl ResearchAdapter {
                     }]
                 })
                 .unwrap_or_default(),
-            Some(d) => steve_core::gateway::usage_of(d, &model),
+            Some(d) => steve_print::claude_usage(d, &model)
+                .into_iter()
+                .map(steve_core::gateway::model_usage)
+                .collect(),
             None => vec![],
-        };
-        (usage, codex)
+        }
     }
 
     /// The run's end for the thread: its statistics row, the audit of a violation, and the
@@ -293,9 +291,8 @@ impl ResearchAdapter {
         q: &ResearchRequest,
         out: r::ResearchOutcome,
         usage: Vec<steve_core::gateway::ModelUsage>,
-        codex: bool,
     ) -> ResearchOutcome {
-        self.record(&q.ws, &out, usage, codex);
+        self.record(&q.ws, &out, usage, &q.models.harness);
         let (end, error) = match &out.status {
             r::RunStatus::Done => (RunEnd::Done, None),
             r::RunStatus::Stopped => (RunEnd::Stopped, None),
@@ -367,8 +364,8 @@ impl ResearchAdapter {
             }
         }
         let out = run.finish().await;
-        let (usage, codex) = Self::usage_of_result(&out);
-        self.conclude(q, out, usage, codex)
+        let usage = Self::usage_of_result(&out);
+        self.conclude(q, out, usage)
     }
 
     /// A run as jobs on the local Node: admitted here, its attempts planned here
@@ -476,7 +473,6 @@ impl ResearchAdapter {
         };
         let last_err = r::drive(&plans, &mut runner).await;
         let ms = runner.t0.elapsed().as_millis() as u64;
-        let codex = req.harness == "codex" && !runner.usage.is_empty();
         let usage = super::node_runtime::normalized_usage(
             std::mem::take(&mut runner.usage),
             runner.model.as_deref().unwrap_or_default(),
@@ -485,7 +481,7 @@ impl ResearchAdapter {
         .map(steve_core::gateway::model_usage)
         .collect();
         let out = runner.outcome(&q.run, &q.question, last_err, ms);
-        let out = self.conclude(q, out, usage, codex);
+        let out = self.conclude(q, out, usage);
         drop(slot);
         out
     }

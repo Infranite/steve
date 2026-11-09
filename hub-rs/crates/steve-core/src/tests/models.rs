@@ -1,42 +1,21 @@
-//! 设置 · 模型: the setting decides which `--model` (and `--effort`) the router's `claude -p` gets, in
-//! fallback order, and which models a research run is asked to use. The harness is a stand-in script
-//! that logs its arguments.
+//! 设置 · 模型: the setting decides which model (and effort) the router's one-shot call gets, in
+//! fallback order, on which harness adapter, and which models a research run is asked to use. The
+//! adapter is a stand-in ([`FakeAcp`]) that logs each run.
 
-use crate::ClaudeCli;
+use crate::InProcess;
 use crate::repo::WS;
-use crate::testkit::{FakeResearch, Kit, Step};
+use crate::testkit::{FakeAcp, FakeResearch, Kit, Step};
 use serde_json::json;
 
-/// A stand-in `claude`: appends its arguments (one per line, then `--`) to `args.log`; model `broken`
-/// dies, any other answers a chat route.
-fn fake_claude(dir: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let reply = json!({"type": "result", "is_error": false, "result": json!({"kind": "chat", "confidence": 0.9}).to_string()});
-    std::fs::write(dir.join("reply.json"), reply.to_string()).unwrap();
-    let exe = dir.join("claude");
-    std::fs::write(
-        &exe,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" -- >> '{0}/args.log'\nfor a; do case \"$p\" in --model) m=\"$a\";; esac; p=\"$a\"; done\n[ \"$m\" = broken ] && {{ echo boom >&2; exit 2; }}\ncat '{0}/reply.json'\n",
-            dir.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-    exe
-}
-
-/// `(model, effort)` of each run logged so far, then clears the log.
-fn runs(dir: &std::path::Path) -> Vec<(String, Option<String>)> {
-    let p = dir.join("args.log");
-    let log = std::fs::read_to_string(&p).unwrap_or_default();
-    let _ = std::fs::remove_file(&p);
-    log.split("\n--\n")
-        .filter(|r| !r.trim().is_empty())
+/// `(model, effort)` of each run logged so far (`""`: the adapter's default), then forgets them.
+fn runs(acp: &FakeAcp) -> Vec<(String, Option<String>)> {
+    acp.runs()
+        .into_iter()
         .map(|r| {
-            let l: Vec<&str> = r.lines().collect();
-            let after = |f: &str| l.iter().position(|x| *x == f).map(|i| l[i + 1].to_string());
-            (after("--model").unwrap_or_default(), after("--effort"))
+            (
+                r["model"].as_str().unwrap_or("").to_string(),
+                r["effort"].as_str().map(String::from),
+            )
         })
         .collect()
 }
@@ -45,12 +24,12 @@ fn runs(dir: &std::path::Path) -> Vec<(String, Option<String>)> {
 async fn the_setting_picks_the_routers_model_in_order() {
     let k = Kit::new();
     let dir = tempfile::tempdir().unwrap();
-    let cli = ClaudeCli {
-        one: crate::LocalPrint {
-            codex: None,
-            executable: fake_claude(dir.path()),
-            cwd: dir.path().into(),
-        },
+    let acp = FakeAcp::new(
+        dir.path(),
+        &json!({"kind": "chat", "confidence": 0.9}).to_string(),
+    );
+    let cli = InProcess {
+        one: acp.one(),
         fast: vec!["unused".into()],
         smart: vec!["unused".into()],
         models: Some(k.core.models().clone()),
@@ -68,7 +47,7 @@ async fn the_setting_picks_the_routers_model_in_order() {
     let r = route().await;
     assert!(!r.fallback, "{r:?}");
     assert_eq!(r.model.as_deref(), Some("claude-haiku-5-5"));
-    assert_eq!(runs(dir.path()), [("claude-haiku-5-5".into(), None)]);
+    assert_eq!(runs(&acp), [("claude-haiku-5-5".into(), None)]);
 
     /* the user picks opus with high effort: the next call uses it, no restart */
     k.core
@@ -81,27 +60,19 @@ async fn the_setting_picks_the_routers_model_in_order() {
         .unwrap();
     let r = route().await;
     assert_eq!(r.model.as_deref(), Some("claude-opus-5-5"));
-    // the effort does not turn the router into a call with Claude Code's tools: it keeps the
-    // cache-friendly layout (stable head as the system prompt, no tools)
-    let log = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
-    let args: Vec<&str> = log.lines().collect();
-    let at = |f: &str| args.iter().position(|x| *x == f);
+    // the effort does not turn the router into a call with the harness's tools: the stable head
+    // is the session's system prompt, in place of the harness's own
+    let run = acp.runs().remove(0);
+    assert_eq!(run["system"][0], "override");
     assert!(
-        at("--system-prompt").is_some() && at("--append-system-prompt").is_none(),
-        "{log}"
-    );
-    assert_eq!(at("--tools").map(|i| args[i + 1]), Some(""), "{log}");
-    let system = log
-        .split_once("\n--system-prompt\n")
-        .and_then(|(_, r)| r.split_once("\n--tools\n"))
-        .map(|(h, _)| h);
-    assert!(
-        system.is_some_and(|h| h.contains("Bots (id: role):")),
-        "{log}"
+        run["system"][1]
+            .as_str()
+            .is_some_and(|h| h.contains("Bots (id: role):")),
+        "{run}"
     );
     assert_eq!(
-        runs(dir.path()),
-        [("claude-opus-5-5".into(), Some("high".into()))]
+        (run["model"].as_str(), run["effort"].as_str()),
+        (Some("claude-opus-5-5"), Some("high"))
     );
 
     /* fallback order: the first model fails, the second answers */
@@ -116,7 +87,7 @@ async fn the_setting_picks_the_routers_model_in_order() {
     let r = route().await;
     assert_eq!(r.model.as_deref(), Some("claude-sonnet-5-5"));
     assert_eq!(
-        runs(dir.path()),
+        runs(&acp),
         [("broken".into(), None), ("claude-sonnet-5-5".into(), None)]
     );
 
@@ -131,7 +102,7 @@ async fn the_setting_picks_the_routers_model_in_order() {
         )
         .unwrap();
     route().await;
-    assert_eq!(runs(dir.path()), [("claude-sonnet-5-5".into(), None)]);
+    assert_eq!(runs(&acp), [("claude-sonnet-5-5".into(), None)]);
 }
 
 #[tokio::test]
@@ -215,76 +186,19 @@ async fn new_agent_sessions_take_the_workspace_default() {
     assert_eq!(started(&k).as_deref(), Some("claude-haiku-5-5"));
 }
 
-/// A stand-in `codex`: appends its arguments (one per line, then `--`) to `codex.log` and stdin to
-/// `codex.stdin`; model `broken` fails its turn, any other answers with `reply.txt` as Codex's JSON
-/// events (with usage).
-fn fake_codex(dir: &std::path::Path, reply: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(dir.join("reply.txt"), reply).unwrap();
-    let ok = |text: &str| {
-        format!(
-            "{}\n{}\n{}\n",
-            json!({"type": "thread.started", "thread_id": "t1"}),
-            json!({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": text}}),
-            json!({"type": "turn.completed", "usage": {"input_tokens": 6721, "cached_input_tokens": 6000, "cache_write_input_tokens": 0, "output_tokens": 9, "reasoning_output_tokens": 2}}),
-        )
-    };
-    std::fs::write(dir.join("ok.jsonl"), ok(reply)).unwrap();
-    std::fs::write(
-        dir.join("broken.jsonl"),
-        format!(
-            "{}\n{}\n",
-            json!({"type": "error", "message": "requested model is not available"}),
-            json!({"type": "turn.failed", "error": {"message": "requested model is not available"}}),
-        ),
-    )
-    .unwrap();
-    let exe = dir.join("codex");
-    std::fs::write(
-        &exe,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" -- >> '{0}/codex.log'\ncat > '{0}/codex.stdin'\nfor a; do case \"$p\" in -m) m=\"$a\";; -i) cat \"$a\" >> '{0}/codex.images';; esac; p=\"$a\"; done\n[ \"$m\" = broken ] && {{ cat '{0}/broken.jsonl'; exit 0; }}\ncat '{0}/ok.jsonl'\n",
-            dir.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-    exe
-}
-
-/// Each logged `codex` run's arguments, then clears the log.
-fn codex_runs(dir: &std::path::Path) -> Vec<Vec<String>> {
-    let p = dir.join("codex.log");
-    let log = std::fs::read_to_string(&p).unwrap_or_default();
-    let _ = std::fs::remove_file(&p);
-    log.split("\n--\n")
-        .map(|r| r.trim_end_matches("\n--").to_string())
-        .filter(|r| !r.trim().is_empty())
-        .map(|r| r.lines().map(String::from).collect())
-        .collect()
-}
-
-fn after(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1).cloned())
-}
-
-/// Steve on Codex: routing and chat answers run through `codex exec` with Steve's model and effort,
-/// and are booked under `codex-cli`; a route override keeps Claude Code.
+/// Steve on another harness (Codex): routing and chat answers run on its adapter with Steve's
+/// model and effort, and are booked under its id; a route override goes back to Claude Code.
 #[tokio::test]
-async fn a_codex_steve_routes_and_answers_through_codex_exec() {
+async fn a_codex_steve_routes_and_answers_on_its_adapter() {
     let k = Kit::new();
     let dir = tempfile::tempdir().unwrap();
-    let route_reply = json!({"kind": "chat", "confidence": 0.9}).to_string();
-    let codex = fake_codex(dir.path(), &route_reply);
+    let acp = FakeAcp::new(
+        dir.path(),
+        &json!({"kind": "chat", "confidence": 0.9}).to_string(),
+    );
     let gw = crate::stats::RecordingGateway::new(
-        std::sync::Arc::new(ClaudeCli {
-            one: crate::LocalPrint {
-                codex: Some(codex),
-                executable: fake_claude(dir.path()),
-                cwd: dir.path().into(),
-            },
+        std::sync::Arc::new(InProcess {
+            one: acp.one(),
             fast: vec!["unused".into()],
             smart: vec!["unused".into()],
             models: Some(k.core.models().clone()),
@@ -313,52 +227,23 @@ async fn a_codex_steve_routes_and_answers_through_codex_exec() {
     assert!(!r.fallback, "{r:?}");
     assert_eq!(r.kind, "answer");
     assert_eq!(r.model.as_deref(), Some("gpt-6-luna"));
-    let cx = codex_runs(dir.path());
-    assert_eq!(cx.len(), 1);
-    let a = &cx[0];
-    assert_eq!(a[0], "exec");
-    for f in ["--json", "--ephemeral", "--skip-git-repo-check", "-"] {
-        assert!(a.contains(&f.to_string()), "{f}: {a:?}");
-    }
-    assert_eq!(after(a, "-s").as_deref(), Some("read-only"));
-    assert_eq!(after(a, "-m").as_deref(), Some("gpt-6-luna"));
-    assert!(
-        a.contains(&"model_reasoning_effort=\"low\"".to_string()),
-        "{a:?}"
+    let run = acp.runs().remove(0);
+    assert_eq!(run["harness"], "codex");
+    assert_eq!(
+        (run["model"].as_str(), run["effort"].as_str()),
+        (Some("gpt-6-luna"), Some("low"))
     );
-    assert!(a.contains(&"mcp_servers={}".to_string()));
-    // no tools for routing: no shell, the stable head replaces Codex's instructions
+    // the message alone is the prompt, the stable head the system prompt
+    let prompt = run["prompt"][0]["text"].as_str().unwrap();
     assert!(
-        a.windows(2)
-            .any(|w| w[0] == "--disable" && w[1] == "shell_tool"),
-        "{a:?}"
+        prompt.contains("你好") && !prompt.contains("Bots (id: role):"),
+        "{prompt}"
     );
-    let instr = a
-        .iter()
-        .find_map(|x| x.strip_prefix("model_instructions_file="))
-        .expect("instructions file");
-    let instr: String = serde_json::from_str(instr).unwrap();
-    assert!(
-        std::fs::read_to_string(&instr)
-            .unwrap()
-            .contains("Bots (id: role):")
-    );
-    // the message itself goes on stdin, without the head
-    let stdin = std::fs::read_to_string(dir.path().join("codex.stdin")).unwrap();
-    assert!(
-        stdin.contains("你好") && !stdin.contains("Bots (id: role):"),
-        "{stdin}"
-    );
-    assert!(!dir.path().join("args.log").exists(), "claude was not run");
 
-    // a chat answer: Codex's message is the answer, heard once it is complete
+    // a chat answer: the adapter's message is the answer
     std::fs::write(
-        dir.path().join("ok.jsonl"),
-        format!(
-            "{}\n{}\n",
-            json!({"type": "item.completed", "item": {"id": "i", "type": "agent_message", "text": json!({"thought": "想了想", "answer": "四"}).to_string()}}),
-            json!({"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 5}}),
-        ),
+        dir.path().join("reply.txt"),
+        json!({"thought": "想了想", "answer": "四"}).to_string(),
     )
     .unwrap();
     let main = k.db().bot("steve").unwrap().unwrap();
@@ -375,7 +260,7 @@ async fn a_codex_steve_routes_and_answers_through_codex_exec() {
     assert_eq!((ans.text.as_str(), ans.thought.as_str()), ("四", "想了想"));
     assert_eq!(ans.model.as_deref(), Some("gpt-6-luna"));
     assert_eq!(heard.lock().unwrap().last().unwrap().1, "四");
-    assert_eq!(codex_runs(dir.path()).len(), 1);
+    assert_eq!(acp.runs().len(), 1);
 
     // a failing model falls back down the list; an override puts routing back on Claude Code
     k.core
@@ -393,6 +278,11 @@ async fn a_codex_steve_routes_and_answers_through_codex_exec() {
     )
     .await;
     assert_eq!(ans.model.as_deref(), Some("gpt-6-sol"));
+    std::fs::write(
+        dir.path().join("reply.txt"),
+        json!({"kind": "chat", "confidence": 0.9}).to_string(),
+    )
+    .unwrap();
     let r = crate::stats::tagged(
         "route",
         WS,
@@ -400,9 +290,13 @@ async fn a_codex_steve_routes_and_answers_through_codex_exec() {
     )
     .await;
     assert_eq!(r.model.as_deref(), Some("claude-haiku-5-5"));
-    assert_eq!(runs(dir.path()), [("claude-haiku-5-5".into(), None)]);
+    let last = acp.runs().pop().unwrap();
+    assert_eq!(
+        (last["harness"].as_str(), last["model"].as_str()),
+        (Some("claude-code"), Some("claude-haiku-5-5"))
+    );
 
-    // statistics: harness and model of each call, Codex input without the cached part
+    // statistics: the adapter and model of each call
     type Booked = (String, String, String, Option<i64>, Option<i64>, bool);
     let rows: Vec<Booked> = k
         .db()
@@ -417,41 +311,23 @@ async fn a_codex_steve_routes_and_answers_through_codex_exec() {
             Ok(v)
         })
         .unwrap();
+    let booked = |purpose: &str, harness: &str, model: &str| -> Booked {
+        (
+            purpose.into(),
+            harness.into(),
+            model.into(),
+            Some(2),
+            Some(11097),
+            true,
+        )
+    };
     assert_eq!(
         rows,
         vec![
-            (
-                "route".into(),
-                "codex-cli".into(),
-                "gpt-6-luna".into(),
-                Some(721),
-                Some(6000),
-                true
-            ),
-            (
-                "chat".into(),
-                "codex-cli".into(),
-                "gpt-6-luna".into(),
-                Some(60),
-                Some(40),
-                true
-            ),
-            (
-                "chat".into(),
-                "codex-cli".into(),
-                "gpt-6-sol".into(),
-                Some(60),
-                Some(40),
-                true
-            ),
-            (
-                "route".into(),
-                "claude-cli".into(),
-                "claude-haiku-5-5".into(),
-                None,
-                None,
-                true
-            ),
+            booked("route", "codex", "gpt-6-luna"),
+            booked("chat", "codex", "gpt-6-luna"),
+            booked("chat", "codex", "gpt-6-sol"),
+            booked("route", "claude-code", "claude-haiku-5-5"),
         ]
     );
     // and the settings page shows what each purpose ran on
@@ -465,13 +341,13 @@ async fn a_codex_steve_routes_and_answers_through_codex_exec() {
     assert_eq!(chat["recent"]["used"][0]["harness"], json!("codex"));
 }
 
-/// A Codex judgment with no model named runs Codex's own default (`-m` left out); a Codex Steve
-/// without a codex executable fails clearly.
+/// A judgment with no model named runs the adapter's own default (no model is set); a Steve on
+/// an adapter this host does not have fails clearly.
 #[tokio::test]
-async fn codex_without_a_model_or_an_executable() {
+async fn no_model_runs_the_adapters_default_and_a_missing_adapter_says_so() {
     let k = Kit::new();
     let dir = tempfile::tempdir().unwrap();
-    let codex = fake_codex(dir.path(), "标题");
+    let acp = FakeAcp::new(dir.path(), "标题");
     k.db()
         .bot_patch(
             "steve",
@@ -479,12 +355,8 @@ async fn codex_without_a_model_or_an_executable() {
             "me",
         )
         .unwrap();
-    let cli = |codex: Option<std::path::PathBuf>| ClaudeCli {
-        one: crate::LocalPrint {
-            codex,
-            executable: fake_claude(dir.path()),
-            cwd: dir.path().into(),
-        },
+    let cli = |acp: &FakeAcp| InProcess {
+        one: acp.one(),
         fast: vec![],
         smart: vec![],
         models: Some(k.core.models().clone()),
@@ -493,7 +365,7 @@ async fn codex_without_a_model_or_an_executable() {
     let p = crate::stats::tagged(
         "chat",
         WS,
-        cli(Some(codex)).call(
+        cli(&acp).call(
             "hi",
             crate::gateway::Tier::Smart,
             std::time::Duration::from_secs(10),
@@ -503,15 +375,16 @@ async fn codex_without_a_model_or_an_executable() {
     .await
     .unwrap();
     assert_eq!(p.text, "标题");
-    let a = &codex_runs(dir.path())[0];
-    assert_eq!(after(a, "-m"), None);
-    // a call with tools keeps Codex's shell and instructions
-    assert!(!a.iter().any(|x| x == "shell_tool"), "{a:?}");
-    assert!(!a.iter().any(|x| x.starts_with("model_instructions_file=")));
+    let run = acp.runs().remove(0);
+    assert_eq!(run["model"], serde_json::Value::Null, "{run}");
+    // a call with tools and no stable head keeps the harness's own system prompt as it is
+    assert_eq!(run["system"], serde_json::Value::Null);
+    let mut without = FakeAcp::new(dir.path(), "标题");
+    without.acp.adapters.remove("codex");
     let e = crate::stats::tagged(
         "chat",
         WS,
-        cli(None).call(
+        cli(&without).call(
             "hi",
             crate::gateway::Tier::Smart,
             std::time::Duration::from_secs(10),
@@ -523,14 +396,13 @@ async fn codex_without_a_model_or_an_executable() {
     assert!(e.to_string().contains("codex"), "{e}");
 }
 
-/// A chat answer with an image on Codex: the image reaches `codex exec` as `-i <file>`, and the file is
-/// gone after the call.
+/// A chat answer with an image: the image reaches the adapter as an ACP image block.
 #[tokio::test]
-async fn codex_gets_the_images_of_a_chat_answer() {
+async fn the_adapter_gets_the_images_of_a_chat_answer() {
     use base64::Engine;
     let k = Kit::new();
     let dir = tempfile::tempdir().unwrap();
-    let codex = fake_codex(
+    let acp = FakeAcp::new(
         dir.path(),
         &json!({"thought": "", "answer": "是一张图"}).to_string(),
     );
@@ -541,12 +413,8 @@ async fn codex_gets_the_images_of_a_chat_answer() {
             "me",
         )
         .unwrap();
-    let cli = ClaudeCli {
-        one: crate::LocalPrint {
-            codex: Some(codex),
-            executable: fake_claude(dir.path()),
-            cwd: dir.path().into(),
-        },
+    let cli = InProcess {
+        one: acp.one(),
         fast: vec![],
         smart: vec![],
         models: Some(k.core.models().clone()),
@@ -566,15 +434,10 @@ async fn codex_gets_the_images_of_a_chat_answer() {
     )
     .await;
     assert_eq!(ans.text, "是一张图", "{ans:?}");
-    let a = &codex_runs(dir.path())[0];
-    let img = after(a, "-i").expect("an -i argument");
-    assert!(img.ends_with(".png"), "{img}");
+    let run = acp.runs().remove(0);
     assert_eq!(
-        std::fs::read_to_string(dir.path().join("codex.images")).unwrap(),
-        "PNGDATA"
-    );
-    assert!(
-        !std::path::Path::new(&img).exists(),
-        "removed after the call"
+        run["prompt"][1],
+        json!({"type": "image", "mimeType": "image/png",
+            "data": base64::engine::general_purpose::STANDARD.encode(b"PNGDATA")})
     );
 }

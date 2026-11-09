@@ -20,8 +20,6 @@
   "stats.label.other": "Other",
   "stats.label.claude_code": "Claude Code",
   "stats.label.codex": "Codex",
-  "stats.label.claude_cli": "claude -p",
-  "stats.label.codex_cli": "codex exec",
   "stats.label.stall": "Stalled",
   "stats.label.error": "Conversation errors",
   "stats.label.restart": "Hub restarts",

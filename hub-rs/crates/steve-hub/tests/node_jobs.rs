@@ -12,54 +12,75 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use steve_core::gateway::{ModelGateway, Readable, ThinkTools, Tier, with_images};
 use steve_core::stats::{RecordingGateway, tagged};
-use steve_core::{ClaudeCli, Fallback, LocalPrint};
+use steve_core::{Fallback, InProcess, LocalAcp};
 use steve_hub::wire::node_files::NodeFiles;
 use steve_hub::wire::node_runtime::{NodeDomain, NodePrint, NodeRuntime, Sink};
 use steve_node_api::testkit::{FakeNode, build};
 use steve_node_api::*;
 use steve_store::{FnPublisher, Store, StoreError};
 
-/// The stand-in `claude -p`, for both ways of running it. argv to `<log>.args`, one line per
-/// process to `<log>.spawns`, stdin (images) to `<log>.stdin`. `--model m-busy` is a 503 with the
-/// tokens it spent; `@hang` writes its pid to `<log>.pid` and waits; `@read` answers with the
-/// attachment; otherwise two messages, the second the answer. With stream-json it streams, else it
-/// prints the result object only. `@slow` answers after 3 s.
-const CLAUDE: &str = r#"#!/bin/sh
-log="$FAKE_LOG"
-echo "$$" >> "$log.spawns"
-printf '%s\n' "$@" > "$log.args"
-stream=0
-case "$*" in *stream-json*) stream=1;; esac
-case "$*" in *--input-format*) cat > "$log.stdin";; esac
-model=""; prev=""
-for a in "$@"; do if [ "$prev" = "--model" ]; then model="$a"; fi; prev="$a"; done
-msg() { if [ $stream = 1 ]; then echo '{"type":"stream_event","event":{"type":"message_start","message":{}}}'; fi; }
-delta() { if [ $stream = 1 ]; then printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$1"; fi; }
-case "$*" in *@slow*)
-  sleep 3
-  printf '{"type":"result","is_error":false,"result":"慢答"}\n'
-  exit 0;;
-esac
-case "$*" in *@hang*)
-  echo "$$" > "$log.pid"
-  msg; delta "写到一半"
-  sleep 60 & wait
-  exit 0;;
-esac
-if [ "$model" = "m-busy" ]; then
-  echo '{"type":"result","is_error":true,"result":"API Error: 503 overloaded","modelUsage":{"m-busy":{"inputTokens":4,"outputTokens":0,"costUSD":0.01}}}'
-  exit 1
-fi
-case "$*" in
-*@read*)
-  body=$(cat .steve/attachments/*-notes.md)
-  msg; delta "$body"
-  printf '{"type":"result","is_error":false,"result":"%s"}\n' "$body";;
-*)
-  msg; delta "先看"; delta "一下"
-  msg; delta "答案"
-  printf '{"type":"result","is_error":false,"result":"答案","total_cost_usd":0.25,"modelUsage":{"%s":{"inputTokens":3,"outputTokens":2,"cacheReadInputTokens":5,"costUSD":0.25}}}\n' "$model";;
-esac
+/// The stand-in ACP adapter, for both ways of running it (in process and as a Node job). One line
+/// per process to `<log>.spawns`, `session/new` to `<log>.new`, the prompt to `<log>.prompt`.
+/// Model `m-busy` is a 503 (its cost reported); `@hang` writes its pid to `<log>.pid` and waits;
+/// `@read` reads the attachment (an ACP read) and answers with it; `@slow` answers after 3 s;
+/// otherwise two messages, the second the answer.
+const ADAPTER: &str = r#"#!/usr/bin/env python3
+import glob, json, os, sys, time
+log = "FAKE_LOG"
+def put(what, text, mode="w"):
+    with open(log + "." + what, mode) as f: f.write(text)
+put("spawns", "%d\n" % os.getpid(), "a")
+def send(v):
+    print(json.dumps(v, ensure_ascii=False), flush=True)
+def update(sid, u):
+    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": u}})
+def chunk(sid, text, mid):
+    update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": mid, "content": {"type": "text", "text": text}})
+state = {"model": "default"}
+def options():
+    return [{"id": "model", "category": "model", "type": "select", "currentValue": state["model"], "options": []}]
+for line in sys.stdin:
+    msg = json.loads(line)
+    m, p = msg.get("method"), msg.get("params") or {}
+    result = {}
+    if m == "initialize":
+        result = {"protocolVersion": 1, "agentCapabilities": {"promptCapabilities": {"image": True},
+            "sessionCapabilities": {"systemPrompt": {"mode": {"override": {}, "append": {}}}}}}
+    elif m == "session/new":
+        put("new", json.dumps(p, ensure_ascii=False))
+        result = {"sessionId": "s1", "modes": {"currentModeId": "default", "availableModes": [{"id": "plan"}]}, "configOptions": options()}
+    elif m == "session/set_config_option":
+        state[p["configId"]] = p["value"]
+        result = {"configOptions": options()}
+    elif m == "session/prompt":
+        put("prompt", json.dumps(p["prompt"], ensure_ascii=False))
+        sid = p["sessionId"]
+        text = " ".join(b.get("text", "") for b in p["prompt"])
+        if "@slow" in text:
+            time.sleep(3)
+            chunk(sid, "慢答", "a")
+        elif "@hang" in text:
+            put("pid", str(os.getpid()))
+            chunk(sid, "写到一半", "a")
+            time.sleep(60)
+        elif state["model"] == "m-busy":
+            update(sid, {"sessionUpdate": "usage_update", "used": 4, "size": 100, "cost": {"amount": 0.01, "currency": "USD"}})
+            send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": "API Error: 503 overloaded"}})
+            continue
+        elif "@read" in text:
+            path = os.path.abspath(glob.glob(".steve/attachments/*-notes.md")[0])
+            update(sid, {"sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "read", "title": "Read",
+                         "status": "pending", "locations": [{"path": path}], "rawInput": {"file_path": path}})
+            body = open(path).read()
+            update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"})
+            chunk(sid, body, "a")
+        else:
+            chunk(sid, "先看", "a"); chunk(sid, "一下", "a"); chunk(sid, "答案", "b")
+            update(sid, {"sessionUpdate": "usage_update", "used": 10, "size": 100, "cost": {"amount": 0.25, "currency": "USD"}})
+            result = {"stopReason": "end_turn", "usage": {"inputTokens": 3, "outputTokens": 2, "cachedReadTokens": 5}}
+        result = result or {"stopReason": "end_turn"}
+    if "id" in msg:
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
 "#;
 
 struct NoDomain;
@@ -158,14 +179,14 @@ impl Local {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let log = root.join("fake");
-        let claude = root.join("claude");
+        let adapter = root.join("adapter.py");
         std::fs::write(
-            &claude,
-            CLAUDE.replace("\"$FAKE_LOG\"", &format!("'{}'", log.display())),
+            &adapter,
+            ADAPTER.replace("FAKE_LOG", &log.display().to_string()),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
         for d in ["scratch", "data"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
@@ -175,18 +196,7 @@ impl Local {
                 ceiling: steve_node::PolicyCeiling::unlimited(),
                 node: NodeId::new("local").unwrap(),
                 home: root.join("node"),
-                acp: steve_acp::AcpConfig {
-                    declared: Default::default(),
-                    adapters: HashMap::new(),
-                    node: "node".into(),
-                    claude_executable: "claude".into(),
-                    steve_home: root.join("steve"),
-                    codex_home: root.join("codex-home"),
-                    user_home: root.clone(),
-                    version: "test".into(),
-                    idle_release: Duration::from_secs(600),
-                    retry_delays: vec![],
-                },
+                acp: Self::acp(&root),
                 roots: vec![],
                 capacity: Capacity {
                     sessions: 0,
@@ -194,10 +204,6 @@ impl Local {
                     execs: 0,
                 },
                 storage: steve_node::Storage::default(),
-                jobs: steve_node::JobHarnesses {
-                    claude: Some(claude),
-                    codex: None,
-                },
             })
             .unwrap(),
         );
@@ -221,6 +227,28 @@ impl Local {
         }
     }
 
+    /// The adapter as Steve's default one, keeping its own sandbox (so its log reaches the test).
+    fn acp(root: &Path) -> steve_acp::AcpConfig {
+        let id = steve_acp::adapters::DEFAULT_ADAPTER.0.to_string();
+        steve_acp::AcpConfig {
+            declared: HashMap::from([(
+                id.clone(),
+                serde_json::from_value(json!({"properties": {
+                    "nested_sandbox": false, "self_read_only": true}}))
+                .unwrap(),
+            )]),
+            adapters: HashMap::from([(id, root.join("adapter.py"))]),
+            node: "node".into(),
+            claude_executable: "claude".into(),
+            steve_home: root.join("steve"),
+            codex_home: root.join("codex-home"),
+            user_home: root.to_path_buf(),
+            version: "test".into(),
+            idle_release: Duration::from_secs(600),
+            retry_delays: vec![],
+        }
+    }
+
     fn smart(models: &[&str]) -> Vec<String> {
         models.iter().map(|m| m.to_string()).collect()
     }
@@ -228,10 +256,9 @@ impl Local {
     /// Steve's gateway in process.
     fn legacy(&self, models: &[&str]) -> RecordingGateway {
         RecordingGateway::new(
-            Arc::new(ClaudeCli {
-                one: LocalPrint {
-                    executable: self.root.join("claude"),
-                    codex: None,
+            Arc::new(InProcess {
+                one: LocalAcp {
+                    acp: Self::acp(&self.root),
                     cwd: self.root.join("scratch"),
                 },
                 fast: vec![],
@@ -267,7 +294,7 @@ impl Local {
     }
 
     fn reset(&self) {
-        for what in ["spawns", "args", "stdin", "pid"] {
+        for what in ["spawns", "new", "prompt", "pid"] {
             let _ = std::fs::remove_file(format!("{}.{what}", self.log.display()));
         }
     }
@@ -461,8 +488,8 @@ async fn the_draft_streams_as_in_process() {
     assert_eq!(b, a);
 }
 
-/// Images go to the harness on stdin, and a chat answer's attachments are where the prompt says,
-/// with the same Read-only arguments as in process.
+/// Images go to the adapter as ACP image blocks, and a chat answer's attachments are where the
+/// prompt says, read the same way as in process.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn images_and_attachments_reach_the_run() {
     use base64::Engine;
@@ -488,7 +515,10 @@ async fn images_and_attachments_reach_the_run() {
     .await
     .unwrap();
     assert_eq!(p.text, "答案");
-    assert!(h.read("stdin").contains(&b64), "the image went in on stdin");
+    assert!(
+        h.read("prompt").contains(&b64),
+        "the image went in the prompt"
+    );
     assert_eq!(
         q::<String>(
             &h.store,
@@ -530,21 +560,23 @@ async fn images_and_attachments_reach_the_run() {
         .call("@read", Tier::Smart, Duration::from_secs(20), &tools)
         .await
         .unwrap();
-    let legacy_args = h.read("args");
+    let legacy_new = h.read("new");
     let node = h
         .node(&["m1"])
         .call("@read", Tier::Smart, Duration::from_secs(20), &tools)
         .await
         .unwrap();
     assert_eq!((legacy.text.as_str(), node.text.as_str()), (body, body));
-    assert!(legacy_args.contains("--allowedTools"), "{legacy_args}");
-    // the Node always streams (it shows the draft); the tool arguments are the same
-    let tool_args = |a: &str| -> Vec<String> {
-        let v: Vec<&str> = a.lines().collect();
-        let at = v.iter().position(|x| *x == "--tools").unwrap();
-        v[at..at + 6].iter().map(|s| s.to_string()).collect()
+    // with tools the harness keeps its own system prompt and tools, on both paths
+    let tools_of = |new: &str| {
+        let v: Value = serde_json::from_str(new).unwrap();
+        (
+            v["systemPrompt"].clone(),
+            v.pointer("/_meta/claudeCode/options/tools").cloned(),
+        )
     };
-    assert_eq!(tool_args(&h.read("args")), tool_args(&legacy_args));
+    assert_eq!(tools_of(&legacy_new), (Value::Null, None));
+    assert_eq!(tools_of(&h.read("new")), tools_of(&legacy_new));
 }
 
 /// A call given up (its future dropped: the stop button, a `select!`) cancels its job on the

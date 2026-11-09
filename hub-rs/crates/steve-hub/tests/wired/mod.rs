@@ -653,6 +653,8 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     let model = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude-chan.mjs");
     let e = start_with(&[
         ("CLAUDE_CODE_EXECUTABLE", model.to_string()),
+        ("STEVE_ADAPTER_CLAUDE", model.to_string()),
+        ("STEVE_ADAPTER_CODEX", model.to_string()),
         ("STEVE_FEISHU_API_BASE", fake.base_url().to_string()),
     ])
     .await;
@@ -960,7 +962,11 @@ async fn a_new_issue_becomes_a_suggestion() {
     assert_eq!(s, 200, "{v}");
     let fid = v["id"].as_str().expect("flow id").to_string();
     let (s, v) = e
-        .call("PATCH", &format!("/api/flows/{fid}"), Some(json!({"enabled": true})))
+        .call(
+            "PATCH",
+            &format!("/api/flows/{fid}"),
+            Some(json!({"enabled": true})),
+        )
         .await;
     assert_eq!(s, 200, "{v}");
     e.seams

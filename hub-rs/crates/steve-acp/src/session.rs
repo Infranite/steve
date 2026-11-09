@@ -44,6 +44,17 @@ pub struct OpenConfig<'a> {
     pub mode: Option<String>,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    /// Steve's instructions as the session's system prompt, sent only to an adapter that
+    /// advertises `sessionCapabilities.systemPrompt` ([`Opened::system_prompt`] says whether).
+    pub system_prompt: Option<SystemPrompt<'a>>,
+}
+
+/// A system prompt for the session (ACP `systemPrompt` on `session/new`).
+#[derive(Debug, Clone, Copy)]
+pub struct SystemPrompt<'a> {
+    pub text: &'a str,
+    /// In place of the harness's own (`override`), else after it (`append`).
+    pub replace: bool,
 }
 
 /// Facts as they become known.
@@ -69,6 +80,8 @@ pub struct Opened {
     pub acp_id: String,
     /// The adapter takes image blocks.
     pub image: bool,
+    /// The session has [`OpenConfig::system_prompt`] as its system prompt.
+    pub system_prompt: bool,
 }
 
 fn err(message: String) -> RpcError {
@@ -141,11 +154,25 @@ async fn open_with(
     let image = init
         .pointer("/agentCapabilities/promptCapabilities/image")
         .is_some_and(truthy);
+    // a system prompt of the client's own, in the mode the adapter advertises
+    let system_prompt = c.system_prompt.filter(|sp| {
+        let mode = if sp.replace { "override" } else { "append" };
+        init.pointer("/agentCapabilities/sessionCapabilities/systemPrompt/mode")
+            .and_then(|m| m.get(mode))
+            .is_some_and(|v| !v.is_null() && v != &Value::Bool(false))
+    });
+    let system_prompt_json = system_prompt.map(|sp| {
+        json!({"mode": if sp.replace { "override" } else { "append" },
+            "content": [{"type": "text", "text": sp.text}]})
+    });
     let (r, acp_id) = match c.resume {
         Some(id) => {
             let mut p = json!({ "sessionId": id, "cwd": c.cwd, "mcpServers": c.mcp_servers });
             if let Some(m) = &meta {
                 p["_meta"] = m.clone();
+            }
+            if let Some(sp) = &system_prompt_json {
+                p["systemPrompt"] = sp.clone();
             }
             let r = l
                 .request("session/load", p, Some(Duration::from_secs(120)))
@@ -156,6 +183,9 @@ async fn open_with(
             let mut p = json!({ "cwd": c.cwd, "mcpServers": c.mcp_servers });
             if let Some(m) = meta {
                 p["_meta"] = m;
+            }
+            if let Some(sp) = system_prompt_json {
+                p["systemPrompt"] = sp;
             }
             let r = l
                 .request("session/new", p, Some(Duration::from_secs(120)))
@@ -280,7 +310,11 @@ async fn open_with(
     } else if let Some(actual) = effort_opt.and_then(|o| o["currentValue"].as_str()) {
         reports.effort(actual);
     }
-    Ok(Opened { acp_id, image })
+    Ok(Opened {
+        acp_id,
+        image,
+        system_prompt: system_prompt.is_some(),
+    })
 }
 
 /// Switch the session's model. claude-agent-acp 0.99.1 and codex-acp only take the "model" config

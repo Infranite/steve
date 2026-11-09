@@ -1,5 +1,6 @@
-//! Model gateway (gateway.ts): Steve's own short model calls through the harness CLI in print mode, with a
-//! timeout per call and a fallback down each tier's model list. The router, chat answers and config drafts
+//! Model gateway (gateway.ts): Steve's own short model calls as one-shot ACP calls of the purpose's
+//! harness adapter (on the Hub's Node, or in process), with a timeout per call and a fallback down
+//! each tier's model list. The router, chat answers and config drafts
 //! are built here from data the caller collected under the core lock, so no lock is held while a model runs.
 
 use crate::error::{CoreError, Result, msg};
@@ -11,6 +12,8 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
+pub use steve_acp::{Image, OneShotError};
+pub use steve_node_api::UsageReport;
 pub use steve_store::ModelUsage;
 
 /// "fast" is for routing and other short calls, "smart" for answers and drafts.
@@ -25,7 +28,7 @@ pub enum Tier {
 pub struct Printed {
     pub text: String,
     pub model: String,
-    /// The harness's `total_cost_usd` of the answering run, when it reports one (module budgets add it up).
+    /// The dollars the answering run reported, when it reports any (module budgets add them up).
     pub cost_usd: Option<f64>,
     /// Tokens per model over every model tried, failed tries included.
     pub usage: Vec<ModelUsage>,
@@ -48,14 +51,14 @@ pub struct Attempt {
     pub model: String,
     /// `<model>: <error>` of each try that failed (503, timeout…).
     pub failures: Vec<String>,
-    /// The harness the call ran on as the statistics name it (`claude-cli`, `codex-cli`); empty: `claude-cli`.
-    pub harness: &'static str,
+    /// The harness adapter the call ran on (its id); empty: none was chosen.
+    pub harness: String,
 }
 
 /// Told what the model has written so far in its current message, each time it grows.
 pub type OnText<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
-/// One model call with fallback; implemented by [`Fallback`] ([`ClaudeCli`] in process), faked in tests.
+/// One model call with fallback; implemented by [`Fallback`] ([`InProcess`] in process), faked in tests.
 #[async_trait]
 pub trait ModelGateway: Send + Sync {
     /// `claudePrintWith`: `tools` are what the call may use besides answering (a chat answer that reads
@@ -111,7 +114,7 @@ pub trait ModelGateway: Send + Sync {
                 usage: p.usage.clone(),
                 model: p.model.clone(),
                 failures: vec![],
-                harness: "",
+                harness: String::new(),
                 result: Ok(p),
             },
             Err(e) => Attempt {
@@ -120,7 +123,7 @@ pub trait ModelGateway: Send + Sync {
                 usage: vec![],
                 model: String::new(),
                 failures: vec![js_head(&e.to_string(), 200).to_string()],
-                harness: "",
+                harness: String::new(),
                 result: Err(e),
             },
         }
@@ -150,40 +153,134 @@ impl Tried {
         }
     }
 
-    /// A [`steve_print`] run in the gateway's terms: its error in Steve's words, its usage as rows
-    /// (`codex`: the run was Codex's). A run elsewhere (a Node job) is put back into these terms too.
-    pub fn of(ran: steve_print::Ran, codex: bool) -> Tried {
-        let timed_out = matches!(ran.reply, Err(steve_print::PrintError::Timeout(_)));
+    /// A one-shot run in the gateway's terms: its error in Steve's words, its usage as rows. A run
+    /// elsewhere (a Node job) is put back into these terms too.
+    pub fn of(
+        reply: std::result::Result<(String, Option<f64>), OneShotError>,
+        usage: Vec<UsageReport>,
+    ) -> Tried {
+        let timed_out = matches!(reply, Err(OneShotError::Timeout(_)));
         Tried {
             timed_out,
-            reply: ran
-                .reply
-                .map(|r| (r.text, r.cost.as_ref().and_then(steve_print::cost_f64)))
-                .map_err(|e| print_error(e, codex)),
-            usage: ran.usage.into_iter().map(model_usage).collect(),
+            reply: reply.map_err(call_error),
+            usage: usage.into_iter().map(model_usage).collect(),
         }
     }
 }
 
-/// What a failed print run says (`codex`: stderr is cut to 300 characters).
-fn print_error(e: steve_print::PrintError, codex: bool) -> CoreError {
-    use steve_print::PrintError as P;
+/// What a failed one-shot call says: the adapter's words, cut to 300 characters.
+fn call_error(e: OneShotError) -> CoreError {
     match e {
-        P::OutputLimit => msg("输出超出这次运行的限制"),
-        P::Timeout(t) => msg(format!("Command timed out after {} ms", t.as_millis())),
-        P::Failed(err) if codex => msg(format!("Command failed: {}", js_head(&err, 300))),
-        P::Failed(err) => msg(format!("Command failed: {err}")),
-        P::Harness { text, .. } => msg(js_head(&text, 300).to_string()),
-        P::CodexFailed => msg("Codex 失败"),
-        P::NoResult => msg("harness 没有返回结果"),
-        P::NoOutput => msg("harness 没有输出"),
-        P::Io(e) => CoreError::Io(e),
+        OneShotError::OutputLimit => msg("输出超出这次运行的限制"),
+        OneShotError::Timeout(t) => msg(format!("Command timed out after {} ms", t.as_millis())),
+        OneShotError::Failed(err) => msg(format!("Command failed: {}", js_head(&err, 300))),
+        OneShotError::Harness { text, .. } => msg(js_head(&text, 300).to_string()),
+        e @ OneShotError::Unsupported(_) => msg(e.to_string()),
+        OneShotError::Io(e) => CoreError::Io(e),
     }
 }
 
-/// A usage report of a print run as the statistics' row (its dollars back to the same `f64`).
-pub fn model_usage(r: steve_print::UsageReport) -> ModelUsage {
-    use steve_print::UsageScope;
+/// Dollars as reported (`Money.decimal`), read back.
+pub fn cost_f64(m: &steve_node_api::Money) -> Option<f64> {
+    m.decimal.parse().ok()
+}
+
+/// Convert one attempt's meter reports into accounting rows. A cumulative snapshot replaces
+/// earlier figures, and a final figure replaces deltas field by field (missing is unknown,
+/// not zero). Report ids remain the replay boundary.
+pub fn merged_usage(
+    reports: impl IntoIterator<Item = UsageReport>,
+    fallback_model: &str,
+) -> Vec<UsageReport> {
+    fn add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.saturating_add(b)),
+            (a, b) => a.or(b),
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut totals: Vec<UsageReport> = vec![];
+    for mut report in reports {
+        if !seen.insert(report.report_id.clone()) {
+            continue;
+        }
+        if report.model.as_deref().is_none_or(str::is_empty) {
+            report.model = Some(fallback_model.to_string());
+        }
+        let Some(total) = totals.iter_mut().find(|t| {
+            t.meter_epoch == report.meter_epoch
+                && t.model == report.model
+                && t.scope == report.scope
+        }) else {
+            totals.push(report);
+            continue;
+        };
+        if total.measurement == steve_node_api::Measurement::Final
+            && report.measurement != steve_node_api::Measurement::Final
+        {
+            continue;
+        }
+        let delta = report.measurement == steve_node_api::Measurement::Delta;
+        let merge = |a, b| if delta { add(a, b) } else { b.or(a) };
+        total.tokens = steve_node_api::Tokens {
+            input: merge(total.tokens.input, report.tokens.input),
+            output: merge(total.tokens.output, report.tokens.output),
+            cache_read: merge(total.tokens.cache_read, report.tokens.cache_read),
+            cache_write: merge(total.tokens.cache_write, report.tokens.cache_write),
+            reasoning: merge(total.tokens.reasoning, report.tokens.reasoning),
+        };
+        if let Some(cost) = report.cost {
+            total.cost = Some(if delta {
+                match total
+                    .cost
+                    .as_ref()
+                    .filter(|old| old.currency == cost.currency)
+                {
+                    Some(old) => steve_node_api::Money {
+                        decimal: (cost_f64(old).unwrap_or(0.0) + cost_f64(&cost).unwrap_or(0.0))
+                            .to_string(),
+                        currency: cost.currency,
+                    },
+                    None => cost,
+                }
+            } else {
+                cost
+            });
+        }
+        total.context_used = report.context_used.or(total.context_used);
+        total.context_limit = report.context_limit.or(total.context_limit);
+        total.measurement = report.measurement;
+        total.report_id = report.report_id;
+    }
+    // `all` already includes the main loop. Keep a main-only dollar figure if no all figure
+    // reported dollars, but never count the main tokens twice.
+    let all_epochs: std::collections::HashSet<_> = totals
+        .iter()
+        .filter(|r| r.scope == steve_node_api::UsageScope::All)
+        .map(|r| r.meter_epoch.clone())
+        .collect();
+    let priced_epochs: std::collections::HashSet<_> = totals
+        .iter()
+        .filter(|r| r.scope == steve_node_api::UsageScope::All && r.cost.is_some())
+        .map(|r| r.meter_epoch.clone())
+        .collect();
+    totals.retain_mut(|r| {
+        if r.scope == steve_node_api::UsageScope::Main && all_epochs.contains(&r.meter_epoch) {
+            r.tokens = Default::default();
+            if priced_epochs.contains(&r.meter_epoch) {
+                r.cost = None;
+            }
+            r.cost.is_some()
+        } else {
+            true
+        }
+    });
+    totals
+}
+
+/// A usage report as the statistics' row (its dollars back to the same `f64`).
+pub fn model_usage(r: UsageReport) -> ModelUsage {
+    use steve_node_api::UsageScope;
     let n = |x: Option<u64>| x.and_then(|x| i64::try_from(x).ok());
     let scope = match r.scope {
         UsageScope::All => "all",
@@ -199,7 +296,7 @@ pub fn model_usage(r: steve_print::UsageReport) -> ModelUsage {
             cache_write: n(r.tokens.cache_write),
             reasoning: n(r.tokens.reasoning),
         },
-        cost_reported: r.cost.as_ref().and_then(steve_print::cost_f64),
+        cost_reported: r.cost.as_ref().and_then(cost_f64),
         detail: json!({"scope": scope}),
     }
 }
@@ -211,13 +308,13 @@ pub struct OneCall<'a> {
     /// Per try, not for the whole fallback.
     pub timeout: Duration,
     pub tools: &'a ThinkTools,
-    /// The purpose runs on Codex (设置 · 模型), else on Claude Code.
-    pub codex: bool,
+    /// The harness adapter the purpose runs on (设置 · 模型), by its id.
+    pub harness: &'a str,
     /// The images of the call ([`with_images`]), the same for every model tried.
-    pub images: &'a [steve_print::Image],
+    pub images: &'a [Image],
 }
 
-/// A single attempt of one model, with no fallback of its own: in process ([`LocalPrint`]), or elsewhere
+/// A single attempt of one model, with no fallback of its own: in process ([`LocalAcp`]), or elsewhere
 /// (a Node). [`Fallback`] keeps the policy around it: which models, in which order, and what the
 /// statistics see of the tries.
 #[async_trait]
@@ -232,23 +329,18 @@ pub trait OneModel: Send + Sync {
     ) -> Tried;
 }
 
-/// Steve's judgments through a harness CLI in `STEVE_HOME/scratch`, in this process.
-///
-/// - Claude Code: `claude -p <prompt> --output-format json --model <m>`.
-/// - Codex: `codex exec --json --ephemeral -s read-only [-m <m>] -` with the prompt on stdin (see
-///   [`steve_print::codex_args`]).
-pub struct LocalPrint {
-    pub executable: PathBuf,
-    /// `codex` for purposes that run on Codex; `None`: such calls fail with a clear error.
-    pub codex: Option<PathBuf>,
+/// Steve's judgments as one-shot ACP calls in `STEVE_HOME/scratch`, in this process (a Hub
+/// without its own Node): the same driver a Node's think jobs run ([`steve_acp::oneshot`]).
+pub struct LocalAcp {
+    pub acp: steve_acp::AcpConfig,
     pub cwd: PathBuf,
 }
 
 #[async_trait]
-impl OneModel for LocalPrint {
-    /// One run of `model` through [`steve_print`]: Codex when `codex`, else `claude -p` (json, or
-    /// stream-json when `on_text` is given or there are images). `effort` comes from 设置 · 模型 and is
-    /// kept apart from `tools`, so a call without tools keeps its cache-friendly layout ([`print_args`]).
+impl OneModel for LocalAcp {
+    /// One run of `model` on the call's adapter. Without tools the prompt's stable head (or
+    /// [`GATEWAY_SYSTEM`]) is the system prompt, in place of the harness's own where the adapter
+    /// takes one; with tools it only reads the call's attachments.
     async fn once(
         &self,
         call: &OneCall<'_>,
@@ -256,30 +348,119 @@ impl OneModel for LocalPrint {
         effort: Option<&str>,
         on_text: Option<OnText<'_>>,
     ) -> Tried {
-        let (harness, executable) = if call.codex {
-            let Some(exe) = &self.codex else {
-                return Tried::failed(msg(
-                    "没有配置 codex（CODEX_EXECUTABLE），不能用 Codex 做判断",
-                ));
-            };
-            (steve_print::Harness::Codex, exe)
-        } else {
-            (steve_print::Harness::Claude, &self.executable)
-        };
+        use steve_node_api::{EventBody, Role};
         let (head, message) = split_static(call.prompt);
-        let run = steve_print::PrintRun {
-            harness,
-            executable,
-            cwd: &self.cwd,
-            model,
-            effort,
-            head,
-            message,
-            tools: tool_mode(call.tools),
-            images: call.images,
-            timeout: call.timeout,
+        let tools_off = !call.tools.any();
+        let head = head.or(tools_off.then_some(GATEWAY_SYSTEM));
+        let mut prompt = vec![json!({"type": "text", "text": message})];
+        prompt.extend(call.images.iter().map(Image::block));
+        let readable: Vec<PathBuf> = match call.tools {
+            ThinkTools::None => vec![],
+            ThinkTools::Read(files) => files.iter().map(|f| self.cwd.join(&f.rel_path)).collect(),
         };
-        Tried::of(steve_print::run(&run, on_text).await, call.codex)
+        let allow = |f: &steve_acp::normalize::ToolFact| reads_only(f, &self.cwd, &readable);
+        let text = std::sync::Mutex::new((None::<String>, String::new()));
+        let usage = std::sync::Mutex::new(vec![]);
+        let event = |ev: EventBody| match ev {
+            EventBody::MessageStarted {
+                message,
+                role: Role::Assistant,
+                ..
+            } => {
+                let mut t = text.lock().unwrap();
+                *t = (Some(message), String::new());
+            }
+            EventBody::TextDelta {
+                message, text: d, ..
+            } => {
+                let mut t = text.lock().unwrap();
+                if t.0.as_deref() == Some(message.as_str()) {
+                    t.1.push_str(&d);
+                    if let Some(f) = on_text {
+                        f(&t.1);
+                    }
+                }
+            }
+            EventBody::Usage { report } => usage.lock().unwrap().push(report),
+            _ => {}
+        };
+        if let Err(e) = std::fs::create_dir_all(&self.cwd) {
+            return Tried::failed(CoreError::Io(e));
+        }
+        let req = steve_acp::oneshot::Request {
+            cfg: &self.acp,
+            harness: call.harness,
+            cwd: &self.cwd,
+            model: (!model.is_empty()).then_some(model),
+            effort,
+            resume: None,
+            head,
+            tools_off,
+            prompt,
+            mcp_servers: json!([]),
+            wrap: None,
+            timeout: call.timeout,
+            prefix: "gateway",
+            on_session: None,
+            max_output_bytes: 64 << 20,
+            on_activity: None,
+            allow_tool: &allow,
+        };
+        let out = steve_acp::oneshot::run(req, &|_| true, &event).await;
+        let usage = merged_usage(usage.into_inner().unwrap(), model);
+        let cost = |u: &[UsageReport]| {
+            let c: Vec<f64> = u
+                .iter()
+                .filter_map(|r| r.cost.as_ref().and_then(cost_f64))
+                .collect();
+            (!c.is_empty()).then(|| c.iter().sum::<f64>())
+        };
+        let reply = match out {
+            Ok(o) if o.stop_reason == "end_turn" => Ok((o.text, cost(&usage))),
+            Ok(o) => Err(OneShotError::Harness {
+                text: format!("the harness stopped: {}", o.stop_reason),
+                code: None,
+                transient: false,
+            }),
+            Err(e) => Err(e),
+        };
+        Tried::of(reply, usage)
+    }
+}
+
+/// A tool of a one-shot call that only reads: the harness's own bookkeeping (a think step with no
+/// action), or a read or search of the call's own files.
+pub fn reads_only(
+    f: &steve_acp::normalize::ToolFact,
+    cwd: &std::path::Path,
+    readable: &[PathBuf],
+) -> bool {
+    use steve_node_api::{ToolCategory, ToolOrigin};
+    if f.origin != ToolOrigin::Harness || f.url.is_some() || f.command.is_some() {
+        return false;
+    }
+    match f.category {
+        ToolCategory::Think => f.paths.is_empty() && f.cwd.is_none(),
+        ToolCategory::Read | ToolCategory::Search => {
+            let canon = |p: &str| {
+                let p = std::path::Path::new(p);
+                let p = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    cwd.join(p)
+                };
+                p.canonicalize().ok()
+            };
+            !f.paths.is_empty()
+                && f.paths.iter().all(|p| {
+                    canon(p).is_some_and(|p| {
+                        readable
+                            .iter()
+                            .any(|r| r.canonicalize().ok().as_ref() == Some(&p))
+                    })
+                })
+        }
+        _ => false,
     }
 }
 
@@ -295,8 +476,8 @@ pub struct Fallback<M> {
     pub models: Option<crate::models::Models>,
 }
 
-/// Steve's gateway in process: the fallback over [`LocalPrint`].
-pub type ClaudeCli = Fallback<LocalPrint>;
+/// Steve's gateway in process: the fallback over [`LocalAcp`].
+pub type InProcess = Fallback<LocalAcp>;
 
 /// The mark on a failure that ran out of time ([`Attempt::failures`]), ahead of the harness's words.
 pub const TIMED_OUT: &str = "[timeout]";
@@ -305,12 +486,9 @@ pub const TIMED_OUT: &str = "[timeout]";
 /// take under 20 s).
 pub const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The statistics' harness name of `codex exec` calls (`usage_records.harness`).
-pub const CODEX_HARNESS: &str = "codex-cli";
-
 /// The images of [`with_images`] blocks (`{"type":"image","source":{"type":"base64",…}}`); a block
 /// without base64 data is left out.
-fn images_of(blocks: &[Value]) -> Vec<steve_print::Image> {
+fn images_of(blocks: &[Value]) -> Vec<Image> {
     use base64::Engine;
     blocks
         .iter()
@@ -319,7 +497,7 @@ fn images_of(blocks: &[Value]) -> Vec<steve_print::Image> {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(src["data"].as_str()?)
                 .ok()?;
-            Some(steve_print::Image {
+            Some(Image {
                 mime: src["media_type"].as_str().unwrap_or("").to_string(),
                 bytes,
             })
@@ -364,7 +542,7 @@ pub struct Readable {
 /// than the in-process one can place the files and choose its own flags.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ThinkTools {
-    /// No tools at all (the cache-friendly layout of [`print_args`]).
+    /// No tools at all (the harness's own system prompt and tools left out where it allows).
     #[default]
     None,
     /// The Read tool only, for these files (already copied next to the in-process run).
@@ -378,11 +556,6 @@ impl ThinkTools {
     }
 }
 
-/// The `claude -p` arguments of `tools`: none, or [`ATTACHMENT_TOOLS`].
-pub fn cli_tools(tools: &ThinkTools) -> &'static [&'static str] {
-    steve_print::tool_args(tool_mode(tools))
-}
-
 /// The tools of a chat answer: none without readable attachments, else Read for those files.
 pub fn answer_tools(files: &ChatFiles) -> ThinkTools {
     if files.readable.is_empty() {
@@ -392,34 +565,8 @@ pub fn answer_tools(files: &ChatFiles) -> ThinkTools {
     }
 }
 
-/// The print run's tool mode of `tools` (the files themselves are already next to the in-process run).
-fn tool_mode(tools: &ThinkTools) -> steve_print::ToolMode {
-    match tools {
-        ThinkTools::None => steve_print::ToolMode::None,
-        ThinkTools::Read(_) => steve_print::ToolMode::ReadOnly,
-    }
-}
-
-pub use steve_print::{ATTACHMENT_TOOLS, GATEWAY_SYSTEM};
-
-/// The message for `-p` and the arguments that lay a `claude -p` call out for the prompt cache
-/// ([`steve_print::claude_layout`]): without tools the prompt's stable head (or [`GATEWAY_SYSTEM`])
-/// replaces Claude Code's system prompt and tools; with tools it is appended to them.
-pub fn print_args<'a>(prompt: &'a str, tools: &ThinkTools) -> (&'a str, Vec<&'a str>) {
-    let (head, message) = split_static(prompt);
-    (message, steve_print::claude_layout(head, tool_mode(tools)))
-}
-
-/// The tokens a harness `result` object reports ([`steve_print::claude_usage`]): one row per key of
-/// `modelUsage` (the models that actually answered, sub-calls included), else one row from `usage`
-/// booked to `model`, the model asked for. Missing figures stay `None`. Dollars: each model's
-/// `costUSD`, else `total_cost_usd` on the first row.
-pub fn usage_of(d: &Value, model: &str) -> Vec<ModelUsage> {
-    steve_print::claude_usage(d, model)
-        .into_iter()
-        .map(model_usage)
-        .collect()
-}
+/// The system prompt of a call without tools whose prompt has no stable head of its own.
+pub const GATEWAY_SYSTEM: &str = "You are a component of Steve, a personal assistant app. Follow the instructions in the user message exactly and reply with only what they ask for.";
 
 /// Adds `more` to `into`, summing rows of the same model and scope (a model tried twice).
 fn merge_usage(into: &mut Vec<ModelUsage>, more: Vec<ModelUsage>) {
@@ -477,7 +624,6 @@ impl<M: OneModel> Fallback<M> {
         let t0 = Instant::now();
         let choice = self.choice(tier);
         let models = &choice.models;
-        let codex = choice.harness == crate::models::CODEX;
         let mut a = Attempt {
             result: Err(msg("没有可用的模型")),
             attempts: 0,
@@ -485,11 +631,11 @@ impl<M: OneModel> Fallback<M> {
             usage: vec![],
             model: String::new(),
             failures: vec![],
-            harness: if codex { CODEX_HARNESS } else { "" },
+            harness: choice.harness.clone(),
         };
-        // Codex with no model named runs its configured default (`-m` left out)
+        // no model named: the harness's own default (no model is set)
         let default_only = [String::new()];
-        let models: &[String] = if codex && models.is_empty() {
+        let models: &[String] = if models.is_empty() {
             &default_only
         } else {
             models
@@ -500,7 +646,7 @@ impl<M: OneModel> Fallback<M> {
             prompt,
             timeout,
             tools,
-            codex,
+            harness: &choice.harness,
             images: &images,
         };
         for m in models {
@@ -624,7 +770,32 @@ impl steve_modules::Gateway for SharedGateway {
     }
 }
 
-pub use steve_print::{jstr, truthy};
+/// JS `String(v)` for a JSON value.
+pub fn jstr(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => "null".into(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Array(a) => a
+            .iter()
+            .map(|x| if x.is_null() { String::new() } else { jstr(x) })
+            .collect::<Vec<_>>()
+            .join(","),
+        Value::Object(_) => "[object Object]".into(),
+    }
+}
+
+/// JS truthiness of a JSON value.
+pub fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0 && !f.is_nan()),
+        Value::String(s) => !s.is_empty(),
+        _ => true,
+    }
+}
 
 static BRACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{[\s\S]*\}").expect("valid regex"));
 
@@ -1742,97 +1913,6 @@ mod tests {
             ])
         );
         assert!(t.any() && !ThinkTools::None.any());
-        assert_eq!(
-            cli_tools(&t),
-            [
-                "--tools",
-                "Read",
-                "--allowedTools",
-                "Read",
-                "--setting-sources",
-                "user"
-            ],
-            "Read is the only tool there is, user settings only"
-        );
-        assert!(cli_tools(&ThinkTools::None).is_empty());
-    }
-
-    /// The `claude -p` layout and tool arguments in the order [`LocalPrint::once`] passes them.
-    fn layout<'a>(prompt: &'a str, tools: &ThinkTools) -> (&'a str, Vec<&'a str>) {
-        let (m, mut a) = print_args(prompt, tools);
-        a.extend(cli_tools(tools));
-        (m, a)
-    }
-
-    #[test]
-    fn print_args_put_the_stable_head_in_the_system_prompt() {
-        let p = with_static("rules", "message");
-        assert_eq!(
-            layout(&p, &ThinkTools::None),
-            (
-                "message",
-                vec![
-                    "--system-prompt",
-                    "rules",
-                    "--tools",
-                    "",
-                    "--strict-mcp-config",
-                    "--disable-slash-commands"
-                ]
-            )
-        );
-        // no head: a short fixed system prompt, still no tools
-        assert_eq!(
-            layout("just this", &ThinkTools::None),
-            (
-                "just this",
-                vec![
-                    "--system-prompt",
-                    GATEWAY_SYSTEM,
-                    "--tools",
-                    "",
-                    "--strict-mcp-config",
-                    "--disable-slash-commands"
-                ]
-            )
-        );
-        // tools wanted: Claude Code's own prompt stays, the head is appended, Read is the only tool;
-        // the files themselves are not arguments (they are already next to the run)
-        let read = ThinkTools::Read(vec![readable("fil_a1", "log.txt")]);
-        assert_eq!(
-            layout(&p, &read),
-            (
-                "message",
-                vec![
-                    "--append-system-prompt",
-                    "rules",
-                    "--strict-mcp-config",
-                    "--disable-slash-commands",
-                    "--tools",
-                    "Read",
-                    "--allowedTools",
-                    "Read",
-                    "--setting-sources",
-                    "user"
-                ]
-            )
-        );
-        assert_eq!(
-            layout("m", &ThinkTools::Read(vec![])),
-            (
-                "m",
-                vec![
-                    "--strict-mcp-config",
-                    "--disable-slash-commands",
-                    "--tools",
-                    "Read",
-                    "--allowedTools",
-                    "Read",
-                    "--setting-sources",
-                    "user"
-                ]
-            )
-        );
     }
 
     #[test]
@@ -1871,40 +1951,33 @@ mod tests {
         assert_eq!(draft_of("直接回答"), (String::new(), "直接回答".into()));
     }
 
-    /// What a failed print run says, word for word as before the run moved to steve-print.
+    /// What a failed call says: the adapter's words, cut.
     #[test]
     fn a_failed_run_says_why_in_steves_words() {
-        use steve_print::PrintError as P;
-        let said = |e, codex| print_error(e, codex).to_string();
+        let said = |e| call_error(e).to_string();
         assert_eq!(
-            said(P::Timeout(Duration::from_millis(200)), false),
+            said(OneShotError::Timeout(Duration::from_millis(200))),
             "Command timed out after 200 ms"
         );
         assert_eq!(
-            said(P::Failed("nope".into()), false),
+            said(OneShotError::Failed("nope".into())),
             "Command failed: nope"
         );
         let long = "x".repeat(400);
-        assert_eq!(said(P::Failed(long.clone()), false).len(), 16 + 400);
+        assert_eq!(said(OneShotError::Failed(long.clone())).len(), 16 + 300);
         assert_eq!(
-            said(P::Failed(long.clone()), true).len(),
-            16 + 300,
-            "Codex's stderr is cut"
-        );
-        assert_eq!(
-            said(
-                P::Harness {
-                    text: long,
-                    transient: false
-                },
-                false
-            )
+            said(OneShotError::Harness {
+                text: long,
+                code: None,
+                transient: false
+            })
             .len(),
             300
         );
-        assert_eq!(said(P::CodexFailed, true), "Codex 失败");
-        assert_eq!(said(P::NoResult, false), "harness 没有返回结果");
-        assert_eq!(said(P::NoOutput, true), "harness 没有输出");
+        assert_eq!(
+            said(OneShotError::Unsupported("images")),
+            "unsupported: images"
+        );
     }
 
     #[test]

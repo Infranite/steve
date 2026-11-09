@@ -300,7 +300,6 @@ impl Hub {
                     execs: 0,
                 },
                 storage: steve_node::Storage::default(),
-                jobs: Default::default(),
             })
             .unwrap(),
         );

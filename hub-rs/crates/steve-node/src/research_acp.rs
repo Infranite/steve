@@ -422,6 +422,8 @@ impl LocalNode {
                 model: (!plan.model.is_empty()).then_some(plan.model.as_str()),
                 effort: req.effort.as_deref(),
                 resume: plan.resume.as_deref(),
+                head: None,
+                tools_off: false,
                 prompt: prepared.prompt,
                 mcp_servers: mcp,
                 wrap: Some(&wrap),

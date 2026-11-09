@@ -277,15 +277,6 @@ pub(crate) fn local_node_config(
             worktree_floor: cfg.disk.floor,
             ..steve_node::Storage::default()
         },
-        // think jobs run the same CLIs the in-process gateway runs
-        jobs: if kinds.think {
-            steve_node::JobHarnesses {
-                claude: Some(cfg.claude_executable.clone().into()),
-                codex: Some(cfg.codex_executable.clone().into()),
-            }
-        } else {
-            steve_node::JobHarnesses::default()
-        },
     }
 }
 
@@ -681,10 +672,9 @@ pub fn wire_assembly(
                 models: models(),
             })
         }
-        _ => Arc::new(steve_core::ClaudeCli {
-            one: steve_core::LocalPrint {
-                codex: Some(cfg.codex_executable.clone().into()),
-                executable: cfg.claude_executable.clone().into(),
+        _ => Arc::new(steve_core::InProcess {
+            one: steve_core::LocalAcp {
+                acp: acp_config(cfg),
                 cwd: cfg.scratch.clone(),
             },
             fast: cfg.models.fast.clone(),

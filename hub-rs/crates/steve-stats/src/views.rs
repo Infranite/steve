@@ -113,8 +113,6 @@ pub fn fixed_label(key: &str) -> Option<String> {
         "other" => steve_i18n::t!("stats.label.other"),
         "claude-code" => steve_i18n::t!("stats.label.claude_code"),
         "codex" => steve_i18n::t!("stats.label.codex"),
-        "claude-cli" => steve_i18n::t!("stats.label.claude_cli"),
-        "codex-cli" => steve_i18n::t!("stats.label.codex_cli"),
         "stall" => steve_i18n::t!("stats.label.stall"),
         "error" => steve_i18n::t!("stats.label.error"),
         "restart" => steve_i18n::t!("stats.label.restart"),

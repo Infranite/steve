@@ -18,9 +18,6 @@ use crate::gateway::{Attempt, ModelGateway, OnText, Printed, ThinkTools, Tier};
 
 pub use steve_modules::gateway::{CallTag, current_tag, for_item, purpose, tagged};
 
-/// The harness name gateway rows are booked under (`claude -p`).
-pub const HARNESS: &str = "claude-cli";
-
 /// A [`ModelGateway`] that writes one usage row per model for every call, failed ones included (`ok=0`).
 pub struct RecordingGateway {
     inner: Arc<dyn ModelGateway>,
@@ -107,12 +104,12 @@ pub fn record(store: &Store, a: &Attempt, tag: &CallTag) -> steve_store::Result<
             day: day.clone(),
             source: "gateway".into(),
             purpose: tag.purpose.into(),
+            // the adapter the call ran on; a call that never chose one, Steve's default adapter's
             harness: if a.harness.is_empty() {
-                HARNESS
+                steve_acp::adapters::DEFAULT_ADAPTER.0.to_string()
             } else {
-                a.harness
-            }
-            .into(),
+                a.harness.clone()
+            },
             turn_id: None,
             session_id: None,
             item_id: tag.item_id.clone(),
@@ -181,14 +178,9 @@ impl ModelGateway for RecordingGateway {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::gateway::{ClaudeCli, SharedGateway, usage_of};
+    use crate::gateway::SharedGateway;
     use steve_modules::Gateway as _;
     use steve_store::Tokens;
-
-    /// `claude -p --output-format json` as measured on 2026-11-01 (claude-haiku-5-5 via the gateway).
-    const RECORDED: &str = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":2140,"num_turns":1,"result":"ok","session_id":"x","total_cost_usd":0.000829045,"usage":{"input_tokens":2,"cache_creation_input_tokens":5727,"cache_read_input_tokens":11097,"output_tokens":4},"modelUsage":{"claude-haiku-5-5":{"inputTokens":2,"outputTokens":4,"cacheReadInputTokens":11097,"cacheCreationInputTokens":5727,"webSearchRequests":0,"costUSD":0.000829045,"contextWindow":200000,"costBasis":"list"}}}"#;
-    /// A gateway 503 that still says what it used.
-    const BUSY: &str = r#"{"type":"result","subtype":"error","is_error":true,"result":"API Error: 503 upstream unavailable","total_cost_usd":0,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}"#;
 
     fn haiku() -> Tokens {
         Tokens {
@@ -200,27 +192,14 @@ mod tests {
         }
     }
 
-    /// A stand-in `claude`: model `haiku` answers with [`RECORDED`], `busy` with [`BUSY`] (exit 1),
-    /// `slow` hangs, anything else dies without output. Streaming runs print the same `result` line.
+    /// The stand-in adapter ([`crate::testkit::FakeAcp`]): model `haiku` answers "ok" with its
+    /// usage and cost, `busy` with a 503, `slow` hangs, `broken` dies.
     fn fake(dir: &std::path::Path) -> Arc<dyn ModelGateway> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(dir.join("ok.json"), RECORDED).unwrap();
-        std::fs::write(dir.join("busy.json"), BUSY).unwrap();
-        let exe = dir.join("claude");
-        let script = format!(
-            "#!/bin/sh\nfor a; do case \"$p\" in --model) m=\"$a\";; esac; p=\"$a\"; done\ncase \"$m\" in\n  haiku) cat '{0}/ok.json';;\n  busy) cat '{0}/busy.json'; exit 1;;\n  slow) sleep 5;;\n  *) echo boom >&2; exit 2;;\nesac\n",
-            dir.display()
-        );
-        std::fs::write(&exe, script).unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Arc::new(ClaudeCli {
-            one: crate::LocalPrint {
-                codex: None,
-                executable: exe,
-                cwd: dir.into(),
-            },
+        let acp = crate::testkit::FakeAcp::new(dir, "ok");
+        Arc::new(crate::InProcess {
+            one: acp.one(),
             fast: vec!["busy".into(), "haiku".into()],
-            smart: vec!["slow".into(), "dead".into()],
+            smart: vec!["slow".into(), "broken".into()],
             models: None,
         })
     }
@@ -250,7 +229,7 @@ mod tests {
             let v = st
                 .query_map([], |r| {
                     assert_eq!(r.get::<_, String>(13)?, "gateway");
-                    assert_eq!(r.get::<_, String>(14)?, HARNESS);
+                    assert_eq!(r.get::<_, String>(14)?, "claude-code");
                     Ok(Row {
                         ws: r.get(0)?,
                         purpose: r.get(1)?,
@@ -273,152 +252,6 @@ mod tests {
             Ok(v)
         })
         .unwrap()
-    }
-
-    #[test]
-    fn the_recorded_cli_output_gives_four_figures_and_the_model() {
-        let d: Value = serde_json::from_str(RECORDED).unwrap();
-        let u = usage_of(&d, "asked-for");
-        assert_eq!(u.len(), 1);
-        assert_eq!(u[0].model, "claude-haiku-5-5");
-        assert_eq!(u[0].tokens, haiku());
-        assert_eq!(u[0].cost_reported, Some(0.000829045));
-        assert_eq!(u[0].detail, json!({"scope": "all"}));
-        /* only `usage`: booked to the model asked for, the total cost on it */
-        let mut d2 = d.clone();
-        d2.as_object_mut().unwrap().remove("modelUsage");
-        let u = usage_of(&d2, "asked-for");
-        assert_eq!(
-            (u[0].model.as_str(), u[0].tokens, u[0].cost_reported),
-            ("asked-for", haiku(), Some(0.000829045))
-        );
-        assert_eq!(u[0].detail, json!({"scope": "main"}));
-        /* two models: each its own row and its own cost */
-        let two = json!({"result":"x","total_cost_usd":0.5,"modelUsage":{
-            "claude-opus-5-5":{"inputTokens":10,"outputTokens":20,"costUSD":0.4},
-            "claude-haiku-5-5":{"inputTokens":1,"outputTokens":null,"costUSD":0.1}}});
-        let u = usage_of(&two, "m");
-        assert_eq!(u.len(), 2);
-        assert_eq!(u[1].tokens.output, None, "null stays unreported");
-        assert_eq!(
-            u.iter().map(|r| r.cost_reported).collect::<Vec<_>>(),
-            [Some(0.4), Some(0.1)]
-        );
-        /* nothing reported */
-        assert!(usage_of(&json!({"result":"x"}), "m").is_empty());
-    }
-
-    /// The rows the gateway booked before the print run moved to steve-print: `steve_stats::normalize`
-    /// straight on the harness's JSON.
-    fn rows_before(d: &Value, model: &str) -> Vec<ModelUsage> {
-        let total = d.get("total_cost_usd").and_then(Value::as_f64);
-        let tokens = |u: &Value| {
-            steve_stats::normalize("claude-cli", steve_stats::RawUsage::from_json(u), true)
-        };
-        let mut rows: Vec<ModelUsage> = match (d.get("modelUsage"), d.get("usage")) {
-            (Some(Value::Object(m)), _) if !m.is_empty() => m
-                .iter()
-                .map(|(k, u)| ModelUsage {
-                    model: k.clone(),
-                    tokens: tokens(u),
-                    cost_reported: u.get("costUSD").and_then(Value::as_f64),
-                    detail: json!({"scope": "all"}),
-                })
-                .collect(),
-            (_, Some(u @ Value::Object(_))) => vec![ModelUsage {
-                model: model.to_string(),
-                tokens: tokens(u),
-                cost_reported: None,
-                detail: json!({"scope": "main"}),
-            }],
-            _ if total.is_some() => vec![ModelUsage {
-                model: model.to_string(),
-                detail: json!({"scope": "main"}),
-                ..ModelUsage::default()
-            }],
-            _ => vec![],
-        };
-        if rows.iter().all(|r| r.cost_reported.is_none())
-            && let Some(r) = rows.first_mut()
-        {
-            r.cost_reported = total;
-        }
-        rows
-    }
-
-    /// UsageReport → ModelUsage gives exactly the rows of before, cost and reasoning included.
-    #[test]
-    fn print_reports_book_the_same_rows_as_before() {
-        let recorded: Value = serde_json::from_str(RECORDED).unwrap();
-        let busy: Value = serde_json::from_str(BUSY).unwrap();
-        let mut only_usage = recorded.clone();
-        only_usage.as_object_mut().unwrap().remove("modelUsage");
-        let cases = [
-            recorded,
-            busy,
-            only_usage,
-            json!({"result":"x","total_cost_usd":0.5,"modelUsage":{
-                "claude-opus-5-5":{"inputTokens":10,"outputTokens":20,"costUSD":0.4,"reasoningOutputTokens":7},
-                "claude-haiku-5-5":{"inputTokens":1,"outputTokens":null,"costUSD":0.1}}}),
-            json!({"total_cost_usd": 0.1 + 0.2}),
-            json!({"result": "x"}),
-        ];
-        for (i, d) in cases.iter().enumerate() {
-            assert_eq!(
-                usage_of(d, "asked-for"),
-                rows_before(d, "asked-for"),
-                "case {i}"
-            );
-        }
-        assert_eq!(usage_of(&cases[0], "x")[0].cost_reported, Some(0.000829045));
-        assert_eq!(usage_of(&cases[3], "x")[0].tokens.reasoning, Some(7));
-    }
-
-    /// steve-print reads the same Tokens as the statistics' normalizer for the print harnesses.
-    #[test]
-    fn print_tokens_match_the_normalizer() {
-        let cases: &[(&str, Value)] = &[
-            (
-                "claude-cli",
-                json!({"input_tokens": 2, "cache_creation_input_tokens": 5727, "cache_read_input_tokens": 11097, "output_tokens": 4}),
-            ),
-            (
-                "claude-cli",
-                json!({"inputTokens": 2, "outputTokens": 4, "cacheReadInputTokens": 11097, "cacheCreationInputTokens": 5727, "costUSD": 0.0008}),
-            ),
-            (
-                "claude-cli",
-                json!({"inputTokens": 5, "outputTokens": null, "cachedReadTokens": null}),
-            ),
-            ("claude-cli", json!({})),
-            ("claude-cli", json!(null)),
-            (
-                "codex",
-                json!({"inputTokens": 1000, "outputTokens": 300, "cachedReadTokens": 800, "thoughtTokens": 120}),
-            ),
-            (
-                "codex",
-                json!({"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 5, "reasoning_output_tokens": 3}),
-            ),
-            ("codex", json!({"inputTokens": 10, "cachedReadTokens": 800})),
-            ("codex", json!({"inputTokens": 10, "outputTokens": 1})),
-            ("codex", json!({"input_tokens": 12.0, "output_tokens": 3})),
-        ];
-        for (i, (h, v)) in cases.iter().enumerate() {
-            let want = steve_stats::normalize(h, steve_stats::RawUsage::from_json(v), true);
-            let report = steve_print::UsageReport {
-                report_id: "r".into(),
-                model: Some("m".into()),
-                meter_epoch: steve_print::Epoch::new("e").unwrap(),
-                scope: steve_print::UsageScope::Main,
-                measurement: steve_print::Measurement::Final,
-                tokens: steve_print::tokens(v, *h == "codex"),
-                context_used: None,
-                context_limit: None,
-                cost: None,
-            };
-            assert_eq!(crate::gateway::model_usage(report).tokens, want, "case {i}");
-        }
     }
 
     #[tokio::test]
@@ -450,12 +283,12 @@ mod tests {
                 r[0].purpose.as_str(),
                 r[0].ws.as_str()
             ),
-            ("claude-haiku-5-5", 2, true, "route", "default")
+            ("haiku", 2, true, "route", "default")
         );
         assert_eq!((r[0].tokens, r[0].cost), (haiku(), Some(0.000829045)));
         assert_eq!(
             r[0].detail,
-            json!({"scope": "all", "failures": ["busy: API Error: 503 upstream unavailable"]})
+            json!({"scope": "main", "failures": ["busy: API Error: 503 upstream unavailable"]})
         );
         /* the daily cube agrees */
         let (calls, input, hit_base): (i64, i64, i64) = s
@@ -543,12 +376,8 @@ mod tests {
         /* a chat answer, streamed */
         let seen = std::sync::Mutex::new(0);
         let fast_only = RecordingGateway::new(
-            Arc::new(ClaudeCli {
-                one: crate::LocalPrint {
-                    codex: None,
-                    executable: dir.path().join("claude"),
-                    cwd: dir.path().into(),
-                },
+            Arc::new(crate::InProcess {
+                one: crate::testkit::FakeAcp::new(dir.path(), "ok").one(),
                 fast: vec!["haiku".into()],
                 smart: vec!["haiku".into()],
                 models: None,
@@ -574,20 +403,14 @@ mod tests {
             .collect();
         assert_eq!(
             summary,
-            [
-                ("flow", "claude-haiku-5-5", Some("it_none")),
-                ("chat", "claude-haiku-5-5", None),
-            ]
+            [("flow", "haiku", Some("it_none")), ("chat", "haiku", None),]
         );
         assert_eq!(r[1].tokens, haiku());
-        assert!(
-            *seen.lock().unwrap() == 0,
-            "the result line alone has no deltas"
-        );
+        assert_eq!(*seen.lock().unwrap(), 1, "the one chunk is heard");
     }
 
-    /// One try as [`Scripted`] saw it: model, effort, Codex, timeout in ms, streaming.
-    type Try = (String, Option<String>, bool, u128, bool);
+    /// One try as [`Scripted`] saw it: model, effort, harness, timeout in ms, streaming.
+    type Try = (String, Option<String>, String, u128, bool);
 
     /// A [`crate::gateway::OneModel`] that answers like [`fake`]'s script without a process, and notes
     /// what each try was given.
@@ -607,19 +430,23 @@ mod tests {
             self.tries.lock().unwrap().push((
                 model.to_string(),
                 effort.map(str::to_string),
-                call.codex,
+                call.harness.to_string(),
                 call.timeout.as_millis(),
                 on_text.is_some(),
             ));
-            let json = |t: &str| serde_json::from_str::<Value>(t).unwrap();
             let (reply, usage) = match model {
                 "haiku" => (
                     Ok(("ok".to_string(), Some(0.000829045))),
-                    usage_of(&json(RECORDED), model),
+                    vec![ModelUsage {
+                        model: model.into(),
+                        tokens: haiku(),
+                        cost_reported: Some(0.000829045),
+                        detail: json!({"scope": "main"}),
+                    }],
                 ),
                 "busy" => (
                     Err(crate::error::msg("API Error: 503 upstream unavailable")),
-                    usage_of(&json(BUSY), model),
+                    vec![],
                 ),
                 "slow" => (
                     Err(crate::error::msg(format!(
@@ -628,7 +455,12 @@ mod tests {
                     ))),
                     vec![],
                 ),
-                _ => (Err(crate::error::msg("Command failed: boom")), vec![]),
+                _ => (
+                    Err(crate::error::msg(
+                        "Command failed: the adapter exited unexpectedly",
+                    )),
+                    vec![],
+                ),
             };
             let timed_out = model == "slow";
             crate::gateway::Tried {
@@ -665,7 +497,7 @@ mod tests {
                 tries: Default::default(),
             },
             fast: vec!["busy".into(), "haiku".into()],
-            smart: vec!["slow".into(), "dead".into()],
+            smart: vec!["slow".into(), "broken".into()],
             models: None,
         };
         let seen_text = std::sync::Mutex::new(0);
@@ -688,14 +520,19 @@ mod tests {
         assert_eq!(
             a,
             &[
-                ("busy".to_string(), None, false, 10_000, false),
-                ("haiku".into(), None, false, 10_000, false),
-                ("busy".into(), None, false, 10_000, true),
-                ("haiku".into(), None, false, 10_000, true),
+                ("busy".to_string(), None, cc(), 10_000, false),
+                ("haiku".into(), None, cc(), 10_000, false),
+                ("busy".into(), None, cc(), 10_000, true),
+                ("haiku".into(), None, cc(), 10_000, true),
                 // #9: a timeout ends the chain, the next model is not tried
-                ("slow".into(), None, false, 1500, false),
+                ("slow".into(), None, cc(), 1500, false),
             ]
         );
+    }
+
+    /// The adapter a call that chose none runs on.
+    fn cc() -> String {
+        steve_acp::adapters::DEFAULT_ADAPTER.0.into()
     }
 
     fn tries(f: &crate::gateway::Fallback<Scripted>) -> Vec<Try> {

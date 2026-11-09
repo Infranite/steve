@@ -1099,7 +1099,13 @@ impl Actor {
             token,
             exec,
             op,
-            norm: Normalizer::new(root, spec.run.attempt.as_str(), meter),
+            norm: Normalizer::new(root, spec.run.attempt.as_str(), meter).input_includes_cache(
+                self.inner
+                    .cfg
+                    .acp
+                    .adapter_properties(&spec.run.choice.harness)
+                    .usage_input_includes_cache,
+            ),
             spec,
             phase: Phase::Starting,
             acted: false,
@@ -2272,6 +2278,7 @@ async fn open_harness(
             mode,
             model: row.open.choice.model.as_deref(),
             effort: row.open.choice.effort.as_deref(),
+            system_prompt: None,
         },
         meta,
         &seen,

@@ -96,7 +96,6 @@ impl OnNode {
                 execs: 0,
             },
             storage: steve_node::Storage::default(),
-            jobs: Default::default(),
         };
         let node = {
             let _in = rt.enter();
