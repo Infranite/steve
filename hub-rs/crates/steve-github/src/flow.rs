@@ -27,6 +27,9 @@ pub const BY: &str = "gh_pr";
 /// `flows.origin` of the template.
 pub const TEMPLATE_ORIGIN: &str = "template:github";
 pub const TEMPLATE_NAME: &str = "PR 检查失败";
+/// D2: a new issue becomes a suggestion (a proposed item the user starts).
+pub const ISSUE_TEMPLATE_ORIGIN: &str = "template:github-issues";
+pub const ISSUE_TEMPLATE_NAME: &str = "新 issue";
 
 /// [`EventSink`] over S1: `RawEvent { source: "github", .. }` through the repo's connection.
 pub struct FlowSink(pub Arc<dyn steve_flow::EventSink>);
@@ -165,8 +168,8 @@ impl Action for GhItemLink {
 }
 
 /// The template graph (原型 r5): a failed check on a PR linked to an item whose repo says
-/// `ci_fail=supplement` → supplement the item; a failure on the default branch → notify; a linked
-/// PR with `ci_fail=signal` → nothing beyond the signal.
+/// `ci_fail=supplement` → supplement the item; a failure on the default branch → a suggestion (a
+/// proposed item, D2); a linked PR with `ci_fail=signal` → nothing beyond the signal.
 pub fn template_graph() -> Value {
     json!({
         "nodes": [
@@ -179,8 +182,8 @@ pub fn template_graph() -> Value {
              ], "else_label": "只记录"}},
             {"id": "l", "kind": "action", "title": "送补充给事项",
              "config": {"action": "item.link", "by": BY, "fallback": "none"}},
-            {"id": "n", "kind": "action", "title": "提醒你",
-             "config": {"action": "notify", "text": "{{event.summary}}"}}
+            {"id": "n", "kind": "action", "title": "建议去修",
+             "config": {"action": "item.create", "mode": "propose", "title": "主干检查失败：{{event.summary}}"}}
         ],
         "edges": [
             {"from": "t", "to": "f"},
@@ -190,10 +193,47 @@ pub fn template_graph() -> Value {
     })
 }
 
+/// D2: a new issue on a linked repository → a suggestion card (a proposed item, its text quoted as
+/// untrusted). The user starts it; set the node's mode to `start` to have Steve start such items
+/// itself. YOLO never accepts a GitHub-sourced proposal on its own.
+pub fn issue_template_graph() -> Value {
+    json!({
+        "nodes": [
+            {"id": "t", "kind": "trigger", "title": "新 issue",
+             "config": {"source": "github", "types": ["github.issue_opened"]}},
+            {"id": "c", "kind": "action", "title": "建议处理",
+             "config": {"action": "item.create", "mode": "propose", "title": "{{event.summary}}"}}
+        ],
+        "edges": [{"from": "t", "to": "c"}]
+    })
+}
+
 impl GitHub {
     /// The flow module (template install). Unset: no template.
     pub fn set_flow(&self, f: Arc<FlowCx>) {
         *self.0.flow.write().unwrap_or_else(|e| e.into_inner()) = Some(f);
+        // workspaces with repositories from before a template existed get it once (D2)
+        let wss: Vec<String> = self
+            .store()
+            .reader(|c| {
+                let mut st = c.prepare("SELECT DISTINCT workspace_id FROM gh_repos")?;
+                let v = st
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, steve_store::StoreError>(v)
+            })
+            .unwrap_or_default();
+        for ws in wss {
+            match self.install_template(&ws, "steve") {
+                Ok(Some(f)) => {
+                    tracing::info!(flow = %f, ws = %ws, "github flow template installed")
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, ws = %ws, "github flow template not installed")
+                }
+            }
+        }
     }
 
     pub(crate) fn flow(&self) -> Option<Arc<FlowCx>> {
@@ -207,16 +247,44 @@ impl GitHub {
     /// Installs “PR 检查失败” (enabled, `origin=template:github`) unless the workspace ever had it
     /// (a deleted template stays deleted). Returns the new flow's id.
     pub fn install_template(&self, ws: &str, actor: &str) -> Result<Option<String>, ApiError> {
+        let issues = self.install_one(
+            ws,
+            actor,
+            ISSUE_TEMPLATE_ORIGIN,
+            ISSUE_TEMPLATE_NAME,
+            "关联仓库里有新 issue 时，提一个建议事项，由你决定要不要开始。",
+            issue_template_graph(),
+        )?;
+        let checks = self.install_one(
+            ws,
+            actor,
+            TEMPLATE_ORIGIN,
+            TEMPLATE_NAME,
+            "关联事项的 PR 检查失败时，把失败的检查送给事项去修；主干失败时提一个建议事项。",
+            template_graph(),
+        )?;
+        Ok(checks.or(issues))
+    }
+
+    /// One template, unless the workspace ever had it (a deleted template stays deleted).
+    fn install_one(
+        &self,
+        ws: &str,
+        actor: &str,
+        origin: &'static str,
+        name: &'static str,
+        description: &'static str,
+        graph: Value,
+    ) -> Result<Option<String>, ApiError> {
         let Some(flow) = self.flow() else {
             return Ok(None);
         };
-        let graph =
-            steve_flow::graph::validate(&template_graph(), &flow.nodes).map_err(ApiError::rule)?;
+        let graph = steve_flow::graph::validate(&graph, &flow.nodes).map_err(ApiError::rule)?;
         let now = self.now();
         self.store().transaction(|tx| {
             let had: bool = tx.query_row(
                 "SELECT EXISTS (SELECT 1 FROM flows WHERE workspace_id = ? AND origin = ?)",
-                rusqlite::params![ws, TEMPLATE_ORIGIN],
+                rusqlite::params![ws, origin],
                 |r| r.get(0),
             )?;
             if had {
@@ -228,11 +296,11 @@ impl GitHub {
                 actor,
                 &NewFlow {
                     kind: "flow",
-                    name: TEMPLATE_NAME,
-                    description: "关联事项的 PR 检查失败时，把失败的检查送给事项去修；主干失败时提醒你。",
+                    name,
+                    description,
                     graph: &graph,
-                    origin: TEMPLATE_ORIGIN,
-                    origin_label: flows::origin_label(TEMPLATE_ORIGIN),
+                    origin,
+                    origin_label: flows::origin_label(origin),
                     enabled: true,
                 },
                 now,

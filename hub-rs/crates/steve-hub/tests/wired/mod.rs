@@ -940,3 +940,61 @@ async fn module_draft_kinds_are_reachable() {
         "{v}"
     );
 }
+
+/// D2: a GitHub workspace has the "新 issue" flow; a new issue becomes a suggestion (a proposed item
+/// the user starts), and installing again adds nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_issue_becomes_a_suggestion() {
+    let e = start().await;
+    let now = steve_store::now();
+    let (me_id, me_party) = owner(&e).await;
+    let gh = e.connection(&me_id, &me_party, "github_pat", "github", "octo");
+    // the template as a flow (installing it needs a linked repository; its graph is what counts)
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/flows",
+            Some(json!({"name": "新 issue", "graph": steve_github::flow::issue_template_graph()})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let fid = v["id"].as_str().expect("flow id").to_string();
+    let (s, v) = e
+        .call("PATCH", &format!("/api/flows/{fid}"), Some(json!({"enabled": true})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    e.seams
+        .github
+        .ingest(
+            "default",
+            &gh,
+            steve_github::events::SignalEvent {
+                type_key: "github.issue_opened".into(),
+                external_id: "issue_opened:1".into(),
+                occurred: now,
+                thread_key: Some("issue:ghi_1".into()),
+                group_key: Some("repo:ghr_1".into()),
+                scope_ext_id: Some("octo/app".into()),
+                actor: Some(steve_github::events::Actor {
+                    login: "someone".into(),
+                    kind: "User".into(),
+                }),
+                summary: "octo/app #7 导出 CSV 时乱码-I7".into(),
+                payload: json!({"repo": "octo/app", "number": 7}),
+            },
+        )
+        .await
+        .expect("github ingest");
+    assert!(
+        until(15, || async {
+            one::<i64>(
+                &e.db,
+                "SELECT COUNT(*) FROM items WHERE title LIKE '%乱码-I7%'",
+                &[],
+            )
+            .is_some_and(|n| n == 1)
+        })
+        .await,
+        "a proposed item for the issue"
+    );
+}
