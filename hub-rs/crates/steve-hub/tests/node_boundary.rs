@@ -291,6 +291,7 @@ const ALLOWED: &[Entry] = &[
     e(Spawn, "steve-core/src/yolo/procs.rs", 1, Hub, "`ps`: the process table"),
     e(Spawn, "steve-hub/src/config.rs", 1, Hub, "npm config"),
     e(Spawn, "steve-hub/src/system.rs", 1, Hub, "host facts (sw_vers, sysctl, uname, hostname)"),
+    e(Fs, "steve-hub/src/nodes/mod.rs", 1, Hub, "the Hub's own identity key directory"),
     e(Spawn, "steve-hub/src/nodes/tailcat.rs", 2, Hub, "tailcat genkey and serve: the Hub's own tunnel for remote Nodes"),
     e(Fs, "steve-hub/src/nodes/tailcat.rs", 2, Hub, "the Hub's tailcat key directory"),
     e(Spawn, "steve-hub/src/nodes/install.rs", 2, Hub, "ssh-keygen and ssh: the Hub installing a Node on another machine"),

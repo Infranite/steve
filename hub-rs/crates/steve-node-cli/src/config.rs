@@ -35,6 +35,10 @@ pub struct Pairing {
     /// Paired over plain loopback (same machine, `STEVE_NODE_LOOPBACK_PLAINTEXT=1`).
     #[serde(default)]
     pub loopback: bool,
+    /// The Hub's identity key (hex, M1): from pairing, or remembered from the first welcome it
+    /// signed. Known, a welcome without its signature is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_key: Option<String>,
     pub name: String,
 }
 

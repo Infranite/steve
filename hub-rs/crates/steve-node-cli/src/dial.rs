@@ -136,6 +136,11 @@ pub async fn pair(
         hub_id: field("hub_id")?,
         pin,
         loopback: plain,
+        // a Hub of an earlier release has none: remembered from its first signed welcome then
+        hub_key: v["hub_key"]
+            .as_str()
+            .filter(|k| key_of(k).is_some())
+            .map(str::to_string),
         name: name.into(),
     };
     home.save_pairing(&p)?;
@@ -161,7 +166,31 @@ pub async fn run(home: &Home) -> Result<()> {
         tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")
     };
     let node = LocalNode::open(home.node_config(node_id)?).map_err(|e| anyhow!("{e}"))?;
-    run_until(&node, serve(node.clone(), &p, &id, &trust), stopping).await
+    run_until(
+        &node,
+        serve_at(node.clone(), Some(Home(home.0.clone())), &p, &id, &trust),
+        stopping,
+    )
+    .await
+}
+
+fn key_of(hex_key: &str) -> Option<[u8; 32]> {
+    hex::decode(hex_key).ok()?.try_into().ok()
+}
+
+/// Keeps the Hub's identity key in the pairing, the first time a welcome proves one.
+fn remember(home: &Home, key: [u8; 32]) {
+    let saved = home.pairing().and_then(|mut p| {
+        if p.hub_key.is_none() {
+            p.hub_key = Some(hex::encode(key));
+            home.save_pairing(&p)?;
+            tracing::info!("remembered the hub's identity key; welcomes it did not sign are refused from now on");
+        }
+        Ok(())
+    });
+    if let Err(e) = saved {
+        tracing::warn!("keeping the hub's identity key: {e:#}");
+    }
 }
 
 /// Dropping the dial future first closes its connection and stops new commands. Shutdown then
@@ -197,6 +226,18 @@ impl Drop for CloseLink {
 /// unknown, wrong Hub); every other failure is retried with backoff, the journal keeping what
 /// happened meanwhile.
 pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -> Result<()> {
+    serve_at(node, None, p, id, trust).await
+}
+
+/// [`serve`], keeping in `home`'s pairing the Hub key a first signed welcome proves.
+pub async fn serve_at(
+    node: LocalNode,
+    home: Option<Home>,
+    p: &Pairing,
+    id: &Identity,
+    trust: &Trust,
+) -> Result<()> {
+    let known = std::sync::Mutex::new(p.hub_key.as_deref().and_then(key_of));
     let link = HubLink::new();
     let _close_link = CloseLink(link.clone());
     node.connect(
@@ -228,7 +269,21 @@ pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -
             (None, None) => unreachable!(),
         };
         let linked = match url {
-            Ok(url) => link_once(&node, &server, &link, &url, &node_id, &p.hub_id, id, trust).await,
+            Ok(url) => {
+                let key = *known.lock().unwrap();
+                let learnt = |k: [u8; 32]| {
+                    *known.lock().unwrap() = Some(k);
+                    if let Some(h) = &home {
+                        remember(h, k);
+                    }
+                };
+                let hub = HubOf {
+                    id: &p.hub_id,
+                    key,
+                    learnt: &learnt,
+                };
+                link_once(&node, &server, &link, &url, &node_id, hub, id, trust).await
+            }
             Err(e) => Err(Stop::Retry(format!("{e:#}"))),
         };
         drop(tunnel);
@@ -267,6 +322,14 @@ fn stop_for(e: &handshake::Refused) -> Stop {
     }
 }
 
+/// The Hub this Node paired with: its id, its identity key when known, and what to do when a
+/// welcome first proves one.
+struct HubOf<'a> {
+    id: &'a str,
+    key: Option<[u8; 32]>,
+    learnt: &'a (dyn Fn([u8; 32]) + Sync),
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn link_once(
     node: &LocalNode,
@@ -274,7 +337,7 @@ async fn link_once(
     link: &Arc<HubLink>,
     url: &str,
     node_id: &NodeId,
-    hub_id: &str,
+    hub: HubOf<'_>,
     id: &Identity,
     trust: &Trust,
 ) -> Result<(), Stop> {
@@ -298,11 +361,18 @@ async fn link_once(
             incarnation: node.incarnation(),
             heads,
             caps: None,
-            hub_id: Some(hub_id),
+            hub_id: Some(hub.id),
+            hub_key: hub.key,
         },
     )
     .await
     .map_err(|e| stop_for(&e))?;
+    // checked by dial: a welcome's key holds; kept the first time (trust on first use)
+    if hub.key.is_none()
+        && let Some(k) = key_of(&welcome.hub_key)
+    {
+        (hub.learnt)(k);
+    }
     let conn = Conn::spawn(
         sink,
         stream,
