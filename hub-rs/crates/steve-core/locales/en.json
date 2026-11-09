@@ -444,5 +444,6 @@
   "core.mq.host_closed": "The host closed PR #%{n} without merging it",
   "core.mq.off": "The merge queue is off (STEVE_MQ=1)",
   "core.mq.policy_unknown": "The merge queue has no setting %{field}",
-  "core.mq.policy_bad": "The merge queue's settings are not valid: %{why}"
+  "core.mq.policy_bad": "The merge queue's settings are not valid: %{why}",
+  "core.mq.node_gone": "This batch's Node has been unreachable for %{minutes} min: %{why}. Wait for it (run again) or send the batch back"
 }

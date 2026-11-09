@@ -829,3 +829,72 @@ fn the_project_page_shows_the_queue_its_statistics_and_sets_its_policy() {
             .is_empty()
     );
 }
+
+#[test]
+fn a_node_that_is_not_there_is_waited_for_then_a_card_asks() {
+    let s = setup();
+    let k = &s.k;
+    k.db()
+        .store()
+        .transaction(|tx| {
+            let target = crate::lane::target::target_of(&s.repo, None).unwrap();
+            let t = rows::target_for(tx, &target.upstream, &target.branch)?;
+            rows::target_grant(tx, &t.id, "me")?;
+            rows::target_policy_set(tx, &t.id, r#"{"node_wait_s": 0}"#)
+        })
+        .unwrap();
+    *s.node.fault.lock().unwrap() = Fault::Offline;
+    let (a, _, _) = accepted(&s, "a.txt", "A\n");
+    let batch = || {
+        let e = entry(k, &a)?;
+        let no = e.batch_no?;
+        k.db()
+            .store()
+            .reader(|c| rows::batch_get(c, &e.target_id, no))
+            .unwrap()
+    };
+    // waits for its Node: nothing done, no card yet
+    assert!(
+        k.wait(|| batch().is_some_and(|b| b.step.as_deref() == Some("waiting_node"))),
+        "{:?}",
+        batch()
+    );
+    assert!(
+        !k.db()
+            .decisions_open(WS)
+            .unwrap()
+            .iter()
+            .any(|d| d.subject_type == crate::mq::drive::SUBJECT_BATCH)
+    );
+    // past its wait (0 here): a card asks; you say wait (run again) once it is back
+    k.core.mq_tick();
+    let card = || {
+        k.db()
+            .decisions_open(WS)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.subject_type == crate::mq::drive::SUBJECT_BATCH)
+    };
+    assert!(k.wait(|| card().is_some()), "{:?}", batch());
+    assert!(card().unwrap().draft.contains("offline"));
+    *s.node.fault.lock().unwrap() = Fault::None;
+    k.core
+        .resolve(&card().unwrap().id, "rerun", "", "me")
+        .unwrap();
+    assert!(
+        k.wait(|| entry(k, &a).is_some_and(|e| e.state == "landed")),
+        "{:?}",
+        batch()
+    );
+    let t = k
+        .db()
+        .store()
+        .reader(|c| rows::target_get(c, &entry(k, &a).unwrap().target_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        t.node_id.as_deref(),
+        Some("local"),
+        "the Node it is kept on"
+    );
+}

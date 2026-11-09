@@ -785,6 +785,66 @@ impl Core {
                 )
             });
         };
+        // its Node first: one that is not there is waited for (the tick asks again), and past
+        // `node_wait_s` the batch has no result: a card asks
+        match crate::node_git::block_on(node.ready(&staging)) {
+            Some(Ok(n)) => {
+                let _ = s.transaction(|tx| {
+                    if t.node_id.is_none() {
+                        rows::target_node_set(tx, target, Some(&n))?;
+                    }
+                    rows::batch_result(tx, target, no as i64, None, None, Some(""))
+                });
+            }
+            Some(Err(why)) => {
+                let since = b
+                    .outcome
+                    .as_deref()
+                    .and_then(|o| o.strip_prefix("waiting_node:"))
+                    .and_then(|x| x.parse::<i64>().ok());
+                let now = crate::util::now();
+                match since {
+                    Some(at) if now - at >= policy.node_wait_s as i64 * 1000 => {
+                        let why = steve_i18n::stored(|| {
+                            steve_i18n::t!(
+                                "core.mq.node_gone",
+                                minutes = (now - at) / 60_000,
+                                why = why.as_str()
+                            )
+                        });
+                        let _ = s.transaction(|tx| {
+                            rows::batch_result(tx, target, no as i64, None, None, Some(""))
+                        });
+                        let _ = self.mq_event(target, |l, p| {
+                            l.queue.apply(
+                                p,
+                                Qe::Done {
+                                    batch: no,
+                                    outcome: Outcome::Unknown { why },
+                                },
+                            )
+                        });
+                    }
+                    Some(_) => {}
+                    None => {
+                        let mark = format!("waiting_node:{now}");
+                        let _ = s.transaction(|tx| {
+                            rows::batch_step(
+                                tx,
+                                target,
+                                no as i64,
+                                Some("waiting_node"),
+                                None,
+                                None,
+                            )?;
+                            rows::batch_result(tx, target, no as i64, None, None, Some(&mark))
+                        });
+                    }
+                }
+                return;
+            }
+            None => return,
+        }
         let _ = s.transaction(|tx| {
             rows::batch_step(tx, target, no as i64, Some("integrating"), None, None)
         });
