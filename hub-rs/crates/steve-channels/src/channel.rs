@@ -541,6 +541,12 @@ pub struct InboundMessage {
     /// so: how late it arrived is counted from there ([`crate::inbound::history_of`]), not from
     /// [`Self::created`].
     pub edited: Option<i64>,
+    /// The remote says the connection's own account wrote it (an external channel's `is_mine`):
+    /// it is yours, never answered, whatever handle the sender came under.
+    pub mine: bool,
+    /// Read back to fill a gap or the time before a resume, not delivered live: stored and only
+    /// recorded ([`crate::inbound::History::Backfill`]).
+    pub backfill: bool,
 }
 
 impl InboundMessage {
@@ -570,6 +576,8 @@ impl InboundMessage {
             raw: Value::Null,
             source_id: None,
             edited: None,
+            mine: false,
+            backfill: false,
         }
     }
 
@@ -597,6 +605,18 @@ impl InboundMessage {
     /// When the message was last edited at the provider (unix ms; [`Self::edited`]).
     pub fn edited(mut self, at: i64) -> Self {
         self.edited = Some(at);
+        self
+    }
+
+    /// Written by the connection's own account, as the remote says ([`Self::mine`]).
+    pub fn mine(mut self, mine: bool) -> Self {
+        self.mine = mine;
+        self
+    }
+
+    /// Read back, not delivered live: only recorded ([`Self::backfill`]).
+    pub fn backfill(mut self) -> Self {
+        self.backfill = true;
         self
     }
 

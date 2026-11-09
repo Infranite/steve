@@ -70,6 +70,8 @@ pub const ECHO_WINDOW_MS: i64 = 10 * 60_000;
 pub const LABEL_HISTORY_BEFORE: &str = "接入前的旧消息，只记录";
 /// `outcome_label` of a message that arrived later than the connection's lateness.
 pub const LABEL_HISTORY_LATE: &str = "到达太晚的旧消息，只记录";
+/// `outcome_label` of a message read back to fill a gap ([`InboundMessage::backfill`]).
+pub const LABEL_HISTORY_BACKFILL: &str = "补取的旧消息，只记录";
 /// How late a message may arrive and still be acted on, by default ([`ConnFacts::late_ms`]).
 pub const DEFAULT_LATE_MS: i64 = 30 * 60_000;
 /// The lateness a connection may be set to (`late_minutes` 1 … 10080).
@@ -86,6 +88,9 @@ pub enum History {
     Before,
     /// Arrived later than the connection's lateness after it was written (or last edited).
     Late,
+    /// Read back to fill a gap, not delivered live ([`InboundMessage::backfill`]). Counted with
+    /// [`Self::Before`] on the connection's settings.
+    Backfill,
 }
 
 impl History {
@@ -93,6 +98,7 @@ impl History {
         match self {
             Self::Before => "before",
             Self::Late => "late",
+            Self::Backfill => "backfill",
         }
     }
 
@@ -100,6 +106,7 @@ impl History {
         match self {
             Self::Before => LABEL_HISTORY_BEFORE,
             Self::Late => LABEL_HISTORY_LATE,
+            Self::Backfill => LABEL_HISTORY_BACKFILL,
         }
     }
 }
@@ -503,7 +510,8 @@ impl Channels {
             msg.edited,
             now,
             precision,
-        );
+        )
+        .or(msg.backfill.then_some(History::Backfill));
         let written = store.transaction(|tx| {
             self.write(
                 tx,
@@ -1001,14 +1009,16 @@ impl Channels {
         let set = spaces::settings(tx, &space.id)?;
         let sender_is_ours = sender.as_ref().is_some_and(|s| s.is_ours);
         // you, however the adapter named you (a handle of yours it saw as someone new)
-        let from_owner = !msg.sender.is_bot
-            && crate::arbiter::from_owner(
-                tx,
-                ws,
-                &owner_users(tx, ws, facts)?,
-                sender_party.as_deref(),
-                &msg.sender,
-            )?;
+        // (or the remote says so: an external channel's `is_mine`, on your own account)
+        let from_owner = (msg.mine && mode == Mode::Own)
+            || (!msg.sender.is_bot
+                && crate::arbiter::from_owner(
+                    tx,
+                    ws,
+                    &owner_users(tx, ws, facts)?,
+                    sender_party.as_deref(),
+                    &msg.sender,
+                )?);
         // on your own account your words are yours, never someone's to answer
         let own = sender_account.as_deref() == Some(facts.account_id.as_str())
             || (from_owner && mode == Mode::Own);
@@ -1092,7 +1102,7 @@ fn only_history(tx: &Tx, space: &str) -> ChannelResult<bool> {
 /// shows them).
 fn count_history(tx: &Tx, conn: &str, h: History, now: i64) -> ChannelResult<()> {
     let col = match h {
-        History::Before => "history_before",
+        History::Before | History::Backfill => "history_before",
         History::Late => "history_late",
     };
     tx.execute(
