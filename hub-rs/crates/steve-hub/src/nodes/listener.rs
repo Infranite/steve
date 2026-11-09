@@ -231,6 +231,12 @@ async fn serve_after(
     let (code, reason) = conn.closed().await;
     tracing::info!(node = %node, generation, code, reason, "node link closed");
     svc.registry.remove(node.as_str(), generation);
+    // when it was last there: how long it has been away counts from here (B5)
+    let (store, id) = (svc.store.clone(), node.to_string());
+    let _ = tokio::task::spawn_blocking(move || {
+        store.transaction(|tx| steve_store::nodes::touch(tx, &id, now()))
+    })
+    .await;
     remote.detach(generation);
 }
 

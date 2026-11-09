@@ -164,20 +164,22 @@ impl Home {
     }
 
     pub fn node_config(&self, node: NodeId) -> Result<steve_node::NodeConfig> {
+        let ceiling = self.ceiling()?;
         Ok(steve_node::NodeConfig {
             node,
             home: self.local(),
             acp: self.acp()?,
             roots: self.roots()?,
-            // N2: a remote Node hosts sessions only; jobs and execs stay local to the Hub
+            // sessions, and commands (flow steps, vault uses, pushes) when its owner lets them run
+            // here (`policy.json` `exec`, B4); jobs stay with the Hub
             capacity: steve_node_api::Capacity {
                 sessions: 16,
                 jobs: 0,
-                execs: 0,
+                execs: if ceiling.exec { 4 } else { 0 },
             },
             storage: steve_node::Storage::default(),
             jobs: Default::default(),
-            ceiling: self.ceiling()?,
+            ceiling,
         })
     }
 }

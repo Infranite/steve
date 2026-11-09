@@ -430,6 +430,9 @@ pub struct RoutedRuntime {
     pub fleet: Option<Arc<crate::nodes::NodeFleet>>,
     /// The remote Node new sessions are bound to when they can be (`STEVE_NODE_BIND`); unset: none.
     pub bind_remote: Option<steve_node_api::NodeId>,
+    /// `STEVE_NODE_PLACEMENT=spread` (B4): a new session without a fixed Node may go to a linked
+    /// remote Node that is clearly less loaded than this machine.
+    pub spread: bool,
     /// Where bindings are read.
     pub store: steve_store::Store,
     /// A binding starts in the mode the session is meant to have ([`HubHost::perm_mode`]), and in
@@ -490,6 +493,18 @@ fn node_of_strict(
             .optional()?,
         )
     })
+}
+
+/// How much less loaded (load per CPU) a remote Node must be for a new session to go there.
+const SPREAD_MARGIN: f64 = 0.25;
+
+/// The least loaded of `there` if it is clearly less loaded than `here`.
+fn spread_pick<T>(here: f64, there: impl IntoIterator<Item = (T, f64)>) -> Option<T> {
+    there
+        .into_iter()
+        .filter(|(_, l)| l.is_finite() && *l + SPREAD_MARGIN < here)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id)
 }
 
 impl RoutedRuntime {
@@ -597,7 +612,59 @@ impl RoutedRuntime {
     /// Binds a new session to the configured remote Node when it can run there. False: it was not
     /// (not configured, not possible for this session, or the bind failed), nothing changed.
     fn bind_remote(&self, session_id: &str, after: Option<&str>) -> bool {
-        let (Some(f), Some(target)) = (&self.fleet, &self.bind_remote) else {
+        let target = match &self.bind_remote {
+            Some(t) => t.clone(),
+            None if self.spread => match self.spread_target() {
+                Some(t) => t,
+                None => return false,
+            },
+            None => return false,
+        };
+        self.bind_remote_to(session_id, after, &target)
+    }
+
+    /// The linked remote Node clearly less loaded than this machine (load per CPU, from the
+    /// vitals of the last few minutes, B3), if any: the least loaded of them.
+    fn spread_target(&self) -> Option<steve_node_api::NodeId> {
+        let f = self.fleet.as_ref()?;
+        let since = crate::nodes::now() - 5 * 60 * 1000;
+        let load = |id: &str| -> Option<f64> {
+            let data: String = self
+                .store
+                .reader(|c| {
+                    use rusqlite::OptionalExtension;
+                    c.query_row(
+                        "SELECT data FROM node_vitals WHERE node_id=? AND at>=? ORDER BY at DESC LIMIT 1",
+                        rusqlite::params![id, since],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(steve_store::StoreError::from)
+                })
+                .ok()??;
+            let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+            let cpus = v["cpus"].as_f64().filter(|c| *c > 0.0)?;
+            Some(v["load"][0].as_f64()? / cpus)
+        };
+        // this machine unknown: nothing to compare with, the work stays
+        let here = load("local")?;
+        let there = f
+            .nodes()
+            .into_iter()
+            .filter(|id| id != "local")
+            .filter_map(|id| steve_node_api::NodeId::new(id).ok())
+            .filter(|id| f.remote(id).generation().is_some())
+            .filter_map(|id| load(id.as_str()).map(|l| (id, l)));
+        spread_pick(here, there)
+    }
+
+    fn bind_remote_to(
+        &self,
+        session_id: &str,
+        after: Option<&str>,
+        target: &steve_node_api::NodeId,
+    ) -> bool {
+        let Some(f) = &self.fleet else {
             return false;
         };
         // H1: a remote Node runs only its owner's own work until runs there are sandboxed
@@ -2201,6 +2268,7 @@ mod routed_tests {
             node: None,
             fleet: None,
             bind_remote: None,
+            spread: false,
             workspaces: super::super::workspaces::Workspaces::new(
                 store.clone(),
                 None,
@@ -2703,6 +2771,16 @@ mod yolo_input_tests {
 #[cfg(test)]
 mod prepared_dir_tests {
     use super::{display_path, prepared_dir, yolo_input};
+
+    #[test]
+    fn spread_goes_only_where_it_is_clearly_lighter() {
+        use super::spread_pick;
+        assert_eq!(spread_pick(1.0, [("a", 0.9), ("b", 0.5), ("c", 0.6)]), Some("b"));
+        assert_eq!(spread_pick(1.0, [("a", 0.9)]), None, "not clearly lighter");
+        assert_eq!(spread_pick(0.1, [("a", 0.0)]), None, "this machine is idle enough");
+        assert_eq!(spread_pick(1.0, [("a", f64::NAN)]), None);
+        assert_eq!(spread_pick::<&str>(1.0, []), None);
+    }
     use std::path::{Path, PathBuf};
     use std::time::Duration;
     use steve_node_api::testkit::build;

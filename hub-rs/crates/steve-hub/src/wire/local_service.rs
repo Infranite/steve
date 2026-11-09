@@ -120,6 +120,8 @@ pub(crate) fn host(
     .map_err(|e| err(&e))?;
     let node_id = NodeId::new(NODE_ID).expect("constant node id");
     let remote = svc.fleet.remote(&node_id);
+    // on this machine: jobs and secrets written to a file stand as the Node says
+    remote.set_colocated(true);
     let node = ServiceNode::new(node_id.clone(), remote.clone() as Arc<dyn Node>, &home);
     node.set_roots(
         super::node_binding::roots(store, &super::workspaces::configured(cfg))

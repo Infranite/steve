@@ -32,14 +32,28 @@ pub struct RemoteNode {
     id: NodeId,
     slot: Mutex<Slot>,
     connected: watch::Sender<Option<u64>>,
+    /// The Hub's own Node in a process of its own (B1): on this machine, so what it says it can do
+    /// (jobs, secrets written to a file) stands.
+    colocated: std::sync::atomic::AtomicBool,
 }
 
 impl RemoteNode {
+    /// The Hub's own Node, linked from a process of its own on this machine (B1).
+    pub fn set_colocated(&self, on: bool) {
+        self.colocated
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn is_colocated(&self) -> bool {
+        self.colocated.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn new(id: NodeId) -> Arc<RemoteNode> {
         Arc::new(RemoteNode {
             id,
             slot: Mutex::new(Slot::default()),
             connected: watch::channel(None).0,
+            colocated: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -175,11 +189,14 @@ impl SessionExecutor for RemoteNode {
 impl JobExecutor for RemoteNode {
     /// N2: a remote Node runs no jobs (their sandboxing is local-only so far). Refused here,
     /// nothing sent, so the caller may route it elsewhere.
-    async fn start_job(&self, _c: Command<JobSpec>) -> ApiResult<Receipt> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "jobs do not run on a remote node yet",
-        ))
+    async fn start_job(&self, c: Command<JobSpec>) -> ApiResult<Receipt> {
+        if !self.is_colocated() {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "jobs do not run on a remote node yet",
+            ));
+        }
+        self.cmd(JOB_START, &c, true).await
     }
 }
 
@@ -242,11 +259,10 @@ impl WorkspaceExecutor for RemoteNode {
         self.cmd(GIT_APPLY, &c, false).await
     }
     /// N2: no execs on a remote Node either (see `start_job`); nothing is sent.
-    async fn exec(&self, _c: Command<ExecSpec>) -> ApiResult<Receipt> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "execs do not run on a remote node yet",
-        ))
+    /// A command (a flow step, a vault use, a push) on the Node: it runs only when the Node's own
+    /// policy lets commands run there (`policy.json` `exec`, B4), the Node refuses it otherwise.
+    async fn exec(&self, c: Command<ExecSpec>) -> ApiResult<Receipt> {
+        self.cmd(EXEC_START, &c, true).await
     }
     async fn list_dir(&self, path: PathRef, page: PageRequest) -> ApiResult<Page<FileInfo>> {
         self.go(FS_LIST, &ListDirArgs { path, page }, None, false)
@@ -288,10 +304,12 @@ impl Discovery for RemoteNode {
         let mut c: Capabilities = self
             .go(HARNESS_PROBE, &ProbeArgs { fresh }, None, false)
             .await?;
-        c.capacity.jobs = 0;
-        c.capacity.execs = 0;
-        // secrets are never written to a remote Node's disk
-        c.features.retain(|f| f != FEATURE_SECRET_FILE);
+        if !self.is_colocated() {
+            // jobs stay with the Hub; commands as the Node's own policy allows (B4)
+            c.capacity.jobs = 0;
+            // secrets are never written to a remote Node's disk
+            c.features.retain(|f| f != FEATURE_SECRET_FILE);
+        }
         Ok(c)
     }
     async fn history(&self, page: PageRequest) -> ApiResult<Page<HistoryEntry>> {

@@ -397,3 +397,40 @@ async fn steve_node_rotate_swaps_the_key_on_disk() {
     ));
     assert_eq!(stored, fp);
 }
+
+/// B5: a session on a device away long enough, with a message waiting, is due to go on elsewhere;
+/// one with nothing waiting, one whose device is linked, or one away too short is not. Away counts
+/// from when it was last seen, and never from before the Hub started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_waiting_for_a_device_long_away_is_due_to_move() {
+    use steve_hub::nodes::handover::due;
+    let h = Hub::start().await;
+    let (_id, node) = h.paired("u1").await;
+    h.session("s_wait");
+    h.session("s_idle");
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            for s in ["s_wait", "s_idle"] {
+                tx.execute(
+                    "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,?2,'{}',?1,'r','ready',1)",
+                    [s, node.as_str()],
+                )?;
+            }
+            tx.execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('q1','s_wait','hi','u',1)", [])?;
+            tx.execute("UPDATE nodes SET last_seen=0 WHERE node_id=?", [node.as_str()])?;
+            Ok(())
+        })
+        .unwrap();
+    let min = 60_000;
+    let d = due(&h.store, &h.svc, 30, 0, 45 * min);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!((d[0].0.as_str(), d[0].2), ("s_wait", 45));
+    assert!(
+        due(&h.store, &h.svc, 30, 0, 20 * min).is_empty(),
+        "not long enough"
+    );
+    assert!(
+        due(&h.store, &h.svc, 30, 40 * min, 45 * min).is_empty(),
+        "the Hub has been up only 5 minutes"
+    );
+}

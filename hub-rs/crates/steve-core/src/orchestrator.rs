@@ -746,6 +746,15 @@ impl Core {
     pub fn continue_in_new_session(&self, session_id: &str, actor: &str) -> Result<String> {
         self.tx().continue_in_new_session(session_id, actor)
     }
+    /// See [`Tx::hand_over_from_offline`].
+    pub fn hand_over_from_offline(
+        &self,
+        session_id: &str,
+        device: &str,
+        minutes: i64,
+    ) -> Result<Option<String>> {
+        self.tx().hand_over_from_offline(session_id, device, minutes)
+    }
     /// Ends an idle session its runtime cannot take any more, with `note` (zh-CN, stored) as its
     /// last system event, once: it is never woken again (a message to it is refused, one in its
     /// item starts a new session). False, with nothing changed: no such session, ended or retired
@@ -3979,6 +3988,52 @@ impl Tx<'_> {
         );
         let ns = self.start_session(&item, Some(&opening), None)?;
         Ok(ns.id)
+    }
+
+    /// B5: the device running `sid` has been offline `minutes` while messages wait for it. The
+    /// item goes on in a new session (placed as any new session is): `sid` ends, and the new one
+    /// opens with its conversation, the messages that waited, and what it cannot see (work on that
+    /// device not pushed anywhere). `None`, with nothing changed: nothing waits, or no such session.
+    pub(crate) fn hand_over_from_offline(
+        &mut self,
+        sid: &str,
+        device: &str,
+        minutes: i64,
+    ) -> Result<Option<String>> {
+        let Some(s) = self.db().session(sid)? else {
+            return Ok(None);
+        };
+        let Some(item) = s.item_id.clone() else {
+            return Ok(None);
+        };
+        let waiting = self.db().queued(sid)?;
+        if waiting.is_empty() || s.status == "ended" {
+            return Ok(None);
+        }
+        let ctx = self.transcript_up_to(sid, i64::MAX)?;
+        let messages = waiting
+            .iter()
+            .map(|q| format!("- {}", q.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.end_and_release(sid)?;
+        self.db().event_add(
+            sid,
+            "system",
+            json!({"text": format!("运行这个会话的设备「{device}」离线 {minutes} 分钟，事项在新会话里继续")}),
+        )?;
+        self.db().timeline_add(
+            &item,
+            "steve",
+            "sys",
+            &format!("设备「{device}」离线 {minutes} 分钟，会话 #{} 转到新会话", s.no),
+            None,
+        )?;
+        let opening = format!(
+            "这是接着上一个会话开的新会话：运行上一个会话的设备「{device}」已经离线 {minutes} 分钟，Steve 把事项转到这里继续。上一个会话里的对话：\n\n{ctx}\n\n还没来得及处理的消息：\n{messages}\n\n（Steve）先核对现状再动手：那台设备上没有推送出去的改动在这里看不到；已经完成的推送、合并、打 tag、发布不要重做；然后接着做，做完用 steve_deliver 交付，需要用户决定时用 steve_ask。"
+        );
+        let ns = self.start_session(&item, Some(&opening), None)?;
+        Ok(Some(ns.id))
     }
 
     pub(crate) fn end_session(&mut self, sid: &str) -> Result<()> {

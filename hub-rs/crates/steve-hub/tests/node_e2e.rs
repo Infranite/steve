@@ -1141,7 +1141,21 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
 /// timeline says so.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_git_items_worktree_is_made_and_given_back_by_the_node() {
+    git_worktree_case("local").await;
+}
+
+/// B1: the same with the Hub's own Node in a process of its own: its roots come through the
+/// roots file, and the worktree is made, used and given back by that process.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_git_items_worktree_on_the_service_node() {
+    git_worktree_case("service").await;
+}
+
+async fn git_worktree_case(mode: &str) {
     let h = Home::new();
+    let port = free_port().to_string();
+    let extra = [("STEVE_LOCAL_NODE_PORT", port.as_str())];
+    let _guard = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let repo = h.dir.path().join("repo");
     std::fs::create_dir_all(&repo).expect("repo");
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -1151,7 +1165,7 @@ async fn a_git_items_worktree_is_made_and_given_back_by_the_node() {
     std::fs::write(repo.join("a.txt"), "a\n").expect("file");
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "a"]);
-    let _hub = spawn(&h, true, &[]);
+    let _hub = spawn_mode(&h, Some(mode), &extra);
     serving(&h).await;
     let c = Client::login(&h).await;
     node_health_until(&h, 30, |n| n["reconciled"] == true).await;
