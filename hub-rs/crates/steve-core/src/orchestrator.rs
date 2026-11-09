@@ -273,7 +273,7 @@ impl Core {
             "steve",
             true,
             json!({
-                "name": "Steve", "harness": "claude-code", "model": crate::models::STEVE_DEFAULT_MODEL, "role": "你的助手：理解需求、分派、汇报", "accept_mode": "inherit", "perm_mode": "default",
+                "name": "Steve", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "model": crate::models::STEVE_DEFAULT_MODEL, "role": "你的助手：理解需求、分派、汇报", "accept_mode": "inherit", "perm_mode": "default",
                 "persona": "沉稳、简洁，先说结论；不客套", "avatar": {"color": "#7aa7c7", "round": 70},
                 "rules": "能直接回答的就回答；是一件事就建事项交给合适的 Bot。只在有新结果或需要决定时打扰。",
             }),
@@ -309,7 +309,7 @@ impl Core {
             "dev",
             false,
             json!({
-                "name": "Steve 开发", "harness": "claude-code", "role": "开发 Steve 自己：Hub、前端、部署脚本", "accept_mode": "inherit", "perm_mode": "auto",
+                "name": "Steve 开发", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "role": "开发 Steve 自己：Hub、前端、部署脚本", "accept_mode": "inherit", "perm_mode": "auto",
                 "persona": "直接、话少", "default_project": steve_project.as_ref().map(|p| p.id.clone()), "avatar": {"color": "#8c7ae6", "round": 45},
                 "rules": "在 git worktree 的分支上工作，不直接改 main。改完必须跑类型检查和测试；界面改动要截图自查。提交信息用中文说明改了什么。不推送、不发布，除非用 steve_request_approval 得到批准。",
             }),
@@ -753,7 +753,8 @@ impl Core {
         device: &str,
         minutes: i64,
     ) -> Result<Option<String>> {
-        self.tx().hand_over_from_offline(session_id, device, minutes)
+        self.tx()
+            .hand_over_from_offline(session_id, device, minutes)
     }
     /// Ends an idle session its runtime cannot take any more, with `note` (zh-CN, stored) as its
     /// last system event, once: it is never woken again (a message to it is refused, one in its
@@ -4026,7 +4027,10 @@ impl Tx<'_> {
             &item,
             "steve",
             "sys",
-            &format!("设备「{device}」离线 {minutes} 分钟，会话 #{} 转到新会话", s.no),
+            &format!(
+                "设备「{device}」离线 {minutes} 分钟，会话 #{} 转到新会话",
+                s.no
+            ),
             None,
         )?;
         let opening = format!(

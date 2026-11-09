@@ -102,15 +102,28 @@ impl AcpConfig {
         let home = home_dir();
         let mut root: Option<PathBuf> = None;
         let mut npm = || root.get_or_insert_with(npm_root).clone();
-        let claude = var("STEVE_ADAPTER_CLAUDE").unwrap_or_else(|| default_claude_adapter(&npm()));
-        let codex = var("STEVE_ADAPTER_CODEX").unwrap_or_else(|| default_codex_adapter(&npm()));
+        // npm root -g only when an adapter is not named by its variable
+        let named: Vec<(&str, Option<PathBuf>)> = crate::adapters::builtin_ids()
+            .zip(crate::adapters::builtin_commands(Path::new("")))
+            .map(|(id, (_, v, _))| (id, var(v)))
+            .collect();
+        let adapters: HashMap<String, PathBuf> = named
+            .into_iter()
+            .map(|(id, cmd)| {
+                let cmd = cmd.unwrap_or_else(|| {
+                    let root = npm();
+                    crate::adapters::builtin_commands(&root)
+                        .find(|(b, ..)| *b == id)
+                        .map(|(.., c)| c)
+                        .unwrap_or_default()
+                });
+                (id.to_owned(), cmd)
+            })
+            .collect();
         let steve_home = var("STEVE_HOME").unwrap_or_else(|| home.join(".steve"));
         let steve_home = std::path::absolute(&steve_home).unwrap_or(steve_home);
         Self {
-            adapters: HashMap::from([
-                ("claude-code".to_owned(), claude),
-                ("codex".to_owned(), codex),
-            ]),
+            adapters,
             declared: HashMap::new(),
             // `STEVE_NODE=local` is the deprecated 0.2.50 spelling of STEVE_NODE_MODE=local (the
             // Steve Node switch), not a Node.js binary

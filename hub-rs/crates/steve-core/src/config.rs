@@ -104,8 +104,8 @@ impl CoreConfig {
         }
         c.models_check = trimmed(&env("STEVE_MODELS_CHECK", ""));
         c.default_models.insert(
-            "claude-code".into(),
-            env("STEVE_DEFAULT_MODEL_CLAUDE", "claude-opus-5-5"),
+            steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+            env(steve_acp::adapters::DEFAULT_MODEL_VAR, "claude-opus-5-5"),
         );
         c.steve_repo = std::env::var("STEVE_REPO")
             .map(PathBuf::from)
@@ -132,7 +132,7 @@ impl CoreConfig {
             models_research: list("claude-sonnet-5-5,claude-opus-5-5"),
             models_check: vec![],
             default_models: HashMap::from([(
-                "claude-code".to_string(),
+                steve_acp::adapters::DEFAULT_ADAPTER.0.to_string(),
                 "claude-opus-5-5".to_string(),
             )]),
             steve_repo: home.join("no-repo"),

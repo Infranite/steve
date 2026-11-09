@@ -204,7 +204,8 @@ fn text_field(key: &str, label: &str, current: &str) -> BotField {
     }
 }
 
-fn bot_fields(b: &Bot, projects: &[crate::repo::Project]) -> Vec<BotField> {
+/// `efforts`: what the bot's harness adapter takes.
+fn bot_fields(b: &Bot, projects: &[crate::repo::Project], efforts: &[String]) -> Vec<BotField> {
     let pro_at = |v: &Value| {
         v.as_i64()
             .and_then(|i| usize::try_from(i).ok())
@@ -243,14 +244,9 @@ fn bot_fields(b: &Bot, projects: &[crate::repo::Project]) -> Vec<BotField> {
                 label: "思考强度".into(),
                 ty: "enum",
                 values: Some(
-                    (if b.harness == "codex" {
-                        vec!["默认", "none", "minimal", "low", "medium", "high", "xhigh"]
-                    } else {
-                        vec!["默认", "low", "medium", "high", "max"]
-                    })
-                    .iter()
-                    .map(|v| v.to_string())
-                    .collect(),
+                    std::iter::once("默认".to_string())
+                        .chain(efforts.iter().cloned())
+                        .collect(),
                 ),
                 current: json!(b.reasoning_effort.as_deref().unwrap_or("默认")),
             },
@@ -386,7 +382,7 @@ fn blank_bot(ws: &str, name: &str) -> Bot {
         name: name.into(),
         role: String::new(),
         main: false,
-        harness: "claude-code".into(),
+        harness: steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
         model: None,
         rules: String::new(),
         accept_mode: "inherit".into(),
@@ -963,6 +959,14 @@ const CORE_OPTIONS: [&str; 7] = [
 ];
 
 impl Core {
+    /// The reasoning efforts adapter `harness` takes (none for an adapter the Hub does not have).
+    fn harness_efforts(&self, harness: &str) -> Vec<String> {
+        self.models()
+            .harness(harness)
+            .map(|h| h.efforts)
+            .unwrap_or_default()
+    }
+
     /// Draft a change of `target` from a request in plain words (`kind: global` lets the model pick the target).
     pub async fn draft(&self, ws: &str, target: Target, request: &str) -> Result<Proposal> {
         crate::stats::tagged("draft", ws, self.draft_untagged(ws, target, request)).await
@@ -1042,10 +1046,11 @@ impl Core {
                     Some(b) if db.bot_in_workspace(&b.id, ws)? => b,
                     _ => return Err(msg(steve_i18n::t!("core.bot.not_found"))),
                 };
-                let fs: Vec<FieldSpec> = bot_fields(&b, &db.projects(ws)?)
-                    .into_iter()
-                    .map(|f| f.spec)
-                    .collect();
+                let fs: Vec<FieldSpec> =
+                    bot_fields(&b, &db.projects(ws)?, &self.harness_efforts(&b.harness))
+                        .into_iter()
+                        .map(|f| f.spec)
+                        .collect();
                 (
                     steve_i18n::t!("core.draft.title.bot", bot = b.display()),
                     format!("#/bots/{}", b.id),
@@ -1144,7 +1149,7 @@ impl Core {
                         .bot(&id)?
                         .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?,
                 };
-                let mut fs = bot_fields(&b, &db.projects(ws)?);
+                let mut fs = bot_fields(&b, &db.projects(ws)?, &self.harness_efforts(&b.harness));
                 /* a new bot starts enabled */
                 if fresh.is_some() {
                     fs.retain(|f| f.spec.key != "enabled");
@@ -1820,7 +1825,10 @@ impl Core {
         match p.target.kind.as_str() {
             "bot" if new_bot_name(&tid).is_some() => {
                 let mut nb = p.patch.clone();
-                nb.insert("harness".into(), json!("claude-code"));
+                nb.insert(
+                    "harness".into(),
+                    json!(steve_acp::adapters::DEFAULT_ADAPTER.0),
+                );
                 let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
                 before.insert("created".into(), json!(b.id));
             }

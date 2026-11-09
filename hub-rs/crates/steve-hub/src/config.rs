@@ -263,21 +263,6 @@ pub fn js_number(s: &str) -> f64 {
     t.parse::<f64>().unwrap_or(f64::NAN)
 }
 
-fn npm_platform() -> (&'static str, &'static str) {
-    let os = match std::env::consts::OS {
-        "macos" => "darwin",
-        "windows" => "win32",
-        o => o,
-    };
-    let arch = match std::env::consts::ARCH {
-        "aarch64" => "arm64",
-        "x86_64" => "x64",
-        "x86" => "ia32",
-        a => a,
-    };
-    (os, arch)
-}
-
 /// `npm root -g`, or the Homebrew default when npm is missing.
 fn npm_root() -> String {
     // npm's global prefix is the directory above `node`'s bin unless an npmrc moves it; when the adapter
@@ -341,20 +326,6 @@ fn harness_manifest(
             tracing::warn!("harness manifest {}: {e}; ignored", path.display());
             Default::default()
         }
-    }
-}
-
-fn codex_adapter(root: &str) -> String {
-    let pkg = Path::new(root).join("@zed-industries/codex-acp");
-    let (os, arch) = npm_platform();
-    let native = pkg
-        .join("node_modules/@zed-industries")
-        .join(format!("codex-acp-{os}-{arch}"))
-        .join("bin/codex-acp");
-    if native.exists() {
-        native.to_string_lossy().into_owned()
-    } else {
-        pkg.join("bin/codex-acp.js").to_string_lossy().into_owned()
     }
 }
 
@@ -470,23 +441,21 @@ impl Config {
         // npm root -g only when an adapter default is actually needed
         let mut root: Option<String> = None;
         let mut npm = || root.get_or_insert_with(npm_root).clone();
-        let claude_default = |root: &str| {
-            Path::new(root)
-                .join("@agentclientprotocol/claude-agent-acp/dist/index.js")
-                .to_string_lossy()
-                .into_owned()
-        };
-        type Fallback<'a> = &'a dyn Fn(&str) -> String;
-        let builtin: [(&str, &str, Fallback); 2] = [
-            ("claude-code", "STEVE_ADAPTER_CLAUDE", &claude_default),
-            ("codex", "STEVE_ADAPTER_CODEX", &codex_adapter),
-        ];
         let mut adapters = BTreeMap::new();
-        for (id, var, default) in builtin {
+        let vars: Vec<(&str, &str)> = steve_acp::adapters::builtin_commands(Path::new(""))
+            .map(|(id, var, _)| (id, var))
+            .collect();
+        for (id, var) in vars {
             let declared = commands
                 .remove(id)
                 .map(|c| c.to_string_lossy().into_owned());
-            let command = get(var).or(declared).unwrap_or_else(|| default(&npm()));
+            let command = get(var).or(declared).unwrap_or_else(|| {
+                let root = npm();
+                steve_acp::adapters::builtin_commands(Path::new(&root))
+                    .find(|(b, ..)| *b == id)
+                    .map(|(.., c)| c.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
             adapters.insert(id.to_string(), command);
         }
         adapters.extend(
@@ -553,8 +522,8 @@ impl Config {
                 )),
             },
             default_models: BTreeMap::from([(
-                "claude-code".to_string(),
-                env("STEVE_DEFAULT_MODEL_CLAUDE", "claude-opus-5-5"),
+                steve_acp::adapters::DEFAULT_ADAPTER.0.to_string(),
+                env(steve_acp::adapters::DEFAULT_MODEL_VAR, "claude-opus-5-5"),
             )]),
             idle_release_ms: if idle.is_finite() && idle >= 0.0 {
                 idle as u64

@@ -367,6 +367,10 @@ struct Builtin {
     id: &'static str,
     name: &'static str,
     install_hint: &'static str,
+    /// The variable that names its command (`STEVE_ADAPTER_*`), and where it is installed by
+    /// default under `npm root -g`.
+    command_var: &'static str,
+    default_command: fn(&Path) -> PathBuf,
     properties: fn() -> AdapterProperties,
 }
 
@@ -375,6 +379,8 @@ const BUILTINS: &[Builtin] = &[
         id: "claude-code",
         name: "Claude Code",
         install_hint: "@agentclientprotocol/claude-agent-acp",
+        command_var: "STEVE_ADAPTER_CLAUDE",
+        default_command: crate::config::default_claude_adapter,
         properties: || AdapterProperties {
             self_read_only: false,
             nested_sandbox: true,
@@ -401,6 +407,8 @@ const BUILTINS: &[Builtin] = &[
         id: "codex",
         name: "Codex",
         install_hint: "@zed-industries/codex-acp",
+        command_var: "STEVE_ADAPTER_CODEX",
+        default_command: crate::config::default_codex_adapter,
         // Codex has no plan mode and its own default may be full access, so the mode is always
         // set: read-only asks before every edit or command, auto works inside the workspace and
         // asks before network access or writes outside it; full-access only for FullAccess.
@@ -451,6 +459,19 @@ pub const DEFAULT_ADAPTER: (&str, &str) = ("claude-code", "claude-code-acp");
 pub fn builtin_ids() -> impl Iterator<Item = &'static str> {
     BUILTINS.iter().map(|b| b.id)
 }
+
+/// The built-in entries' commands: per id, the variable that names it and the command the global
+/// npm install under `npm_root` gives.
+pub fn builtin_commands(
+    npm_root: &Path,
+) -> impl Iterator<Item = (&'static str, &'static str, PathBuf)> + '_ {
+    BUILTINS
+        .iter()
+        .map(move |b| (b.id, b.command_var, (b.default_command)(npm_root)))
+}
+
+/// The variable that names the default model of new sessions on the default adapter.
+pub const DEFAULT_MODEL_VAR: &str = "STEVE_DEFAULT_MODEL_CLAUDE";
 
 /// The spec of `id`: its built-in data (if any) with `declared` over it.
 pub fn spec(id: &str, declared: Option<&Declaration>) -> AdapterSpec {

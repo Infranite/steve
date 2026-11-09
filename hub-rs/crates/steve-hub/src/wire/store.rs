@@ -422,7 +422,8 @@ impl Repo for StoreBackend {
         let get = |k: &str| f.get(k).filter(|v| !v.is_null()).cloned();
         let nb = s::NewBot {
             name: str_field(f, "name").unwrap_or_default(),
-            harness: str_field(f, "harness").unwrap_or_else(|| "claude-code".into()),
+            harness: str_field(f, "harness")
+                .unwrap_or_else(|| steve_acp::adapters::DEFAULT_ADAPTER.0.into()),
             role: str_field(f, "role"),
             model: str_field(f, "model"),
             reasoning_effort: str_field(f, "reasoning_effort"),
