@@ -134,20 +134,30 @@ pub fn seen(store: &Store, c: &Client, route: &str, ip: Option<String>) {
 const TRIES: u32 = 10;
 const TRIES_WINDOW: Duration = Duration::from_secs(600);
 static FAILED: LazyLock<Mutex<HashMap<String, (Instant, u32)>>> = LazyLock::new(Default::default);
+static PAIR_FAILED: LazyLock<Mutex<HashMap<String, (Instant, u32)>>> =
+    LazyLock::new(Default::default);
 
-fn too_many(ip: &str) -> bool {
-    let m = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+fn too_many_in(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str) -> bool {
+    let m = map.lock().unwrap_or_else(|e| e.into_inner());
     m.get(ip)
         .is_some_and(|(at, n)| at.elapsed() < TRIES_WINDOW && *n >= TRIES)
 }
 
-fn failed(ip: &str) {
-    let mut m = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+fn failed_in(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str) {
+    let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
     let e = m.entry(ip.to_string()).or_insert((Instant::now(), 0));
     if e.0.elapsed() >= TRIES_WINDOW {
         *e = (Instant::now(), 0);
     }
     e.1 += 1;
+}
+
+fn too_many(ip: &str) -> bool {
+    too_many_in(&FAILED, ip)
+}
+
+fn failed(ip: &str) {
+    failed_in(&FAILED, ip);
 }
 
 /// The client kinds a sign-in may name; anything else is `other`.
@@ -371,16 +381,38 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
     }
 }
 
-/// Signs this client out: it is revoked, and its cookie cleared.
+/// Signs this client out: it is revoked, any unclaimed pairings it created are dropped, and its cookie cleared.
 async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::response::Response {
     if let (Some(cred), Some(m)) = (credential_of(&headers), st.modules.as_ref()) {
         let store = m.store.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        let revoked_client = tokio::task::spawn_blocking(move || {
             if let Ok(Some((_, c))) = store.access().client_user(&cred) {
                 store.access().client_revoke(&c.id).ok();
+                return Some((c.user_id, c.id));
             }
+            None
         })
-        .await;
+        .await
+        .ok()
+        .flatten();
+        if let Some((uid, cid)) = revoked_client {
+            drop_pending_pairings(|p| p.user_id == uid && p.creator_client_id.as_deref() == Some(cid.as_str()));
+        }
+    } else if let (Some(tok), Some(m)) = (crate::api::cookie(&headers, "steve_session"), st.modules.as_ref()) {
+        let b = st.backend.clone();
+        let uid = tokio::task::spawn_blocking(move || {
+            b.reader()
+                .ok()
+                .and_then(|r| r.user_by_session(&tok).ok().flatten())
+                .and_then(|u| u.get("id").and_then(Value::as_str).map(str::to_string))
+        })
+        .await
+        .ok()
+        .flatten();
+        let _ = m;
+        if let Some(uid) = uid {
+            drop_pending_pairings(|p| p.user_id == uid && p.creator_client_id.is_none());
+        }
     }
     let mut res = reply(StatusCode::OK, json!({"ok": true}));
     if let Ok(v) = client_cookie("", 0, false, false).parse() {
@@ -960,8 +992,9 @@ pub async fn token_revoke(
 ) -> Result<axum::response::Response, crate::error::ApiError> {
     let store = store_of(&st)?;
     let me = c.me.clone();
+    let tid = id.clone();
     let done = tokio::task::spawn_blocking(move || {
-        let Some(t) = store.access().token(&id)?.filter(|t| t.user_id == me) else {
+        let Some(t) = store.access().token(&tid)?.filter(|t| t.user_id == me) else {
             return Ok::<_, steve_store::StoreError>(false);
         };
         let ok = store.access().token_revoke(&t.id)?;
@@ -974,6 +1007,8 @@ pub async fn token_revoke(
     if !done {
         return Err(crate::error::ApiError::not_found("token"));
     }
+    let uid = c.me.clone();
+    drop_pending_pairings(|p| p.user_id == uid && p.token_id.as_deref() == Some(id.as_str()));
     ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     Ok(reply(StatusCode::OK, json!({"ok": true})))
 }
@@ -986,8 +1021,9 @@ pub async fn client_revoke(
 ) -> Result<axum::response::Response, crate::error::ApiError> {
     let store = store_of(&st)?;
     let me = c.me.clone();
+    let cid = id.clone();
     let done = tokio::task::spawn_blocking(move || {
-        let Some(cl) = store.access().client(&id)?.filter(|x| x.user_id == me) else {
+        let Some(cl) = store.access().client(&cid)?.filter(|x| x.user_id == me) else {
             return Ok::<_, steve_store::StoreError>(false);
         };
         let ok = store.access().client_revoke(&cl.id)?;
@@ -1000,6 +1036,8 @@ pub async fn client_revoke(
     if !done {
         return Err(crate::error::ApiError::not_found("client"));
     }
+    let uid = c.me.clone();
+    drop_pending_pairings(|p| p.user_id == uid && p.creator_client_id.as_deref() == Some(id.as_str()));
     ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     Ok(reply(StatusCode::OK, json!({"ok": true})))
 }
@@ -1010,12 +1048,17 @@ pub async fn client_revoke(
 const PAIR_TTL_MS: i64 = 5 * 60 * 1000;
 /// How long a claimed pairing stays inspectable so the showing screen can confirm pairing.
 const PAIR_KEEP_MS: i64 = 15 * 60 * 1000;
+/// Maximum retained pairings per user (evicting oldest unclaimed/expired first).
+const PAIR_MAX_PER_USER: usize = 16;
 const PAIR_PREFIX: &str = "stp_";
 
 #[derive(Clone)]
 struct PendingPair {
     id: String,
     user_id: String,
+    creator_client_id: Option<String>,
+    token_id: Option<String>,
+    created_at: i64,
     code_hash: String,
     expires: i64,
     claimed_at: Option<i64>,
@@ -1023,6 +1066,11 @@ struct PendingPair {
 }
 
 static PAIRINGS: LazyLock<Mutex<HashMap<String, PendingPair>>> = LazyLock::new(Default::default);
+
+fn drop_pending_pairings(pred: impl Fn(&PendingPair) -> bool) {
+    let mut m = PAIRINGS.lock().unwrap_or_else(|e| e.into_inner());
+    m.retain(|_, p| p.client.is_some() || !pred(p));
+}
 
 fn pair_code() -> String {
     format!(
@@ -1266,6 +1314,18 @@ pub async fn pair_create(
     body: Option<Json<PairCreateIn>>,
 ) -> Result<axum::response::Response, crate::error::ApiError> {
     let store = store_of(&st)?;
+    let creator_client_id = c.client.as_ref().map(|x| x.id.clone());
+    let creator_token_id = if let Some(cid) = creator_client_id.clone() {
+        let s_tok = store.clone();
+        tokio::task::spawn_blocking(move || {
+            Ok::<_, steve_store::StoreError>(s_tok.access().client(&cid)?.and_then(|cl| cl.token_id))
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?
+    } else {
+        None
+    };
     let now_ms = steve_store::now();
     let expires = now_ms + PAIR_TTL_MS;
     let code = pair_code();
@@ -1285,11 +1345,25 @@ pub async fn pair_create(
     {
         let mut m = PAIRINGS.lock().unwrap_or_else(|e| e.into_inner());
         clean_pairings(&mut m, now_ms);
+        while m.values().filter(|p| p.user_id == c.me).count() >= PAIR_MAX_PER_USER {
+            let evict_id = m
+                .iter()
+                .filter(|(_, p)| p.user_id == c.me)
+                .min_by_key(|(_, p)| (p.client.is_some(), p.created_at))
+                .map(|(k, _)| k.clone());
+            let Some(evict_id) = evict_id else {
+                break;
+            };
+            m.remove(&evict_id);
+        }
         m.insert(
             id.clone(),
             PendingPair {
                 id: id.clone(),
                 user_id: c.me.clone(),
+                creator_client_id,
+                token_id: creator_token_id,
+                created_at: now_ms,
                 code_hash: pair_hash(&code),
                 expires,
                 claimed_at: None,
@@ -1335,7 +1409,7 @@ pub async fn pair_status(
     let Some(p) = item else {
         return Err(crate::error::ApiError::not_found("pairing"));
     };
-    let status = if p.claimed_at.is_some() {
+    let status = if p.client.is_some() {
         "claimed"
     } else if now_ms >= p.expires {
         "expired"
@@ -1385,7 +1459,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
         .clone()
         .filter(|_| !route.starts_with("loopback"))
         .unwrap_or_default();
-    if !key.is_empty() && too_many(&key) {
+    if !key.is_empty() && too_many_in(&PAIR_FAILED, &key) {
         return reply(
             StatusCode::TOO_MANY_REQUESTS,
             json!({"error": steve_i18n::t!("hub.access.too_many")}),
@@ -1415,12 +1489,17 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
         found_id.and_then(|id| {
             let p = m.get_mut(&id)?;
             p.claimed_at = Some(now_ms);
-            Some((p.id.clone(), p.user_id.clone()))
+            Some((
+                p.id.clone(),
+                p.user_id.clone(),
+                p.creator_client_id.clone(),
+                p.token_id.clone(),
+            ))
         })
     };
-    let Some((pair_id, user_id)) = matched else {
+    let Some((pair_id, user_id, creator_client_id, token_id)) = matched else {
         if !key.is_empty() {
-            failed(&key);
+            failed_in(&PAIR_FAILED, &key);
         }
         return reply(
             StatusCode::UNAUTHORIZED,
@@ -1440,9 +1519,25 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
     let s2 = store.clone();
     let uid_copy = user_id.clone();
     let done = tokio::task::spawn_blocking(move || {
+        if let Some(cid) = &creator_client_id {
+            let Some(cl) = s2.access().client(cid)? else {
+                return Ok(None);
+            };
+            if cl.revoked.is_some() {
+                return Ok(None);
+            }
+        }
+        if let Some(tid) = &token_id {
+            let Some(tok) = s2.access().token(tid)? else {
+                return Ok(None);
+            };
+            if tok.revoked.is_some() || tok.expires.is_some_and(|exp| exp <= now_ms) {
+                return Ok(None);
+            }
+        }
         s2.access().client_create(
             &uid_copy,
-            None,
+            token_id.as_deref(),
             &NewClient {
                 kind: &kind,
                 name: &name,
@@ -1506,11 +1601,24 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
             }
             res
         }
-        Ok(Ok(None)) => reply(
-            StatusCode::UNAUTHORIZED,
-            json!({"error": steve_i18n::t!("hub.access.pair_expired")}),
-        ),
+        Ok(Ok(None)) => {
+            PAIRINGS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&pair_id);
+            reply(
+                StatusCode::UNAUTHORIZED,
+                json!({"error": steve_i18n::t!("hub.access.pair_expired")}),
+            )
+        }
         Ok(Err(e)) => {
+            if let Some(p) = PAIRINGS
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .get_mut(&pair_id)
+            {
+                p.claimed_at = None;
+            }
             tracing::error!("pair sign in: {e}");
             reply(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1518,6 +1626,13 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
             )
         }
         Err(e) => {
+            if let Some(p) = PAIRINGS
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .get_mut(&pair_id)
+            {
+                p.claimed_at = None;
+            }
             tracing::error!("pair sign in: {e}");
             reply(
                 StatusCode::INTERNAL_SERVER_ERROR,

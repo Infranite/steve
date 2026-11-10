@@ -570,3 +570,122 @@ async fn qr_pairing_mints_a_single_use_client_credential_and_reports_claim() {
     let (s, _) = e.call("GET", "/api/me", Some(&ios_cred), None).await;
     assert_eq!(s, 401);
 }
+
+#[tokio::test]
+async fn qr_paired_clients_inherit_token_revocation_and_pending_codes_drop_on_logout() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (tok_row, token) = st.access().token_create(&owner.id, "laptop", None).unwrap();
+    let (_, ok) = e
+        .call(
+            "POST",
+            "/auth/token",
+            None,
+            Some(json!({"user": owner.name, "token": token, "client": {"kind": "mac", "name": "Laptop"}})),
+        )
+        .await;
+    let laptop_cred = ok["credential"].as_str().unwrap().to_string();
+
+    // Pair phone A from laptop -> phone A inherits laptop's token_id
+    let (_, pair_a) = e
+        .call(
+            "POST",
+            "/api/access/pairings",
+            Some(&laptop_cred),
+            Some(json!({"name": "Laptop Hub"})),
+        )
+        .await;
+    let code_a = pair_a["code"].as_str().unwrap().to_string();
+    let (s, claimed_a) = e
+        .call(
+            "POST",
+            "/auth/pair",
+            None,
+            Some(json!({"code": code_a, "client": {"kind": "ios", "name": "Phone A"}})),
+        )
+        .await;
+    assert_eq!(s, 200, "{claimed_a}");
+    let phone_a_cred = claimed_a["credential"].as_str().unwrap().to_string();
+    let phone_a_id = claimed_a["client_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        st.access()
+            .client(&phone_a_id)
+            .unwrap()
+            .unwrap()
+            .token_id
+            .as_deref(),
+        Some(tok_row.id.as_str()),
+        "paired client carries creator's token_id"
+    );
+
+    // Create another pending pairing B, then sign out laptop: pending code B is immediately unusable
+    let (_, pair_b) = e
+        .call("POST", "/api/access/pairings", Some(&laptop_cred), None)
+        .await;
+    let code_b = pair_b["code"].as_str().unwrap().to_string();
+    let (s, _) = e
+        .call("POST", "/auth/client/logout", Some(&laptop_cred), None)
+        .await;
+    assert_eq!(s, 200);
+    let (s, _) = e
+        .call(
+            "POST",
+            "/auth/pair",
+            None,
+            Some(json!({"code": code_b, "client": {"kind": "ios", "name": "Phone B"}})),
+        )
+        .await;
+    assert_eq!(s, 401, "creator logout drops its unclaimed pairing codes");
+
+    // Phone A is still signed in after laptop's individual logout, until token is revoked
+    let (s, _) = e.call("GET", "/api/me", Some(&phone_a_cred), None).await;
+    assert_eq!(s, 200);
+
+    // Revoking laptop's access token also revokes Phone A
+    st.access().token_revoke(&tok_row.id).unwrap();
+    let (s, _) = e.call("GET", "/api/me", Some(&phone_a_cred), None).await;
+    assert_eq!(s, 401, "revoking creator token revokes paired clients");
+}
+
+#[tokio::test]
+async fn failed_qr_pair_attempts_do_not_lock_out_token_sign_in() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (_, token) = st.access().token_create(&owner.id, "desk", None).unwrap();
+
+    // Exhaust 10 failed /auth/pair calls from a forwarded external IP
+    for _ in 0..10 {
+        let r = e
+            .http
+            .post(format!("{}/auth/pair", e.base))
+            .header("x-forwarded-for", "198.51.100.42")
+            .json(&json!({"code": "stp_wrong", "client": {"kind": "ios"}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 401);
+    }
+    // 11th /auth/pair from that IP hits 429
+    let r = e
+        .http
+        .post(format!("{}/auth/pair", e.base))
+        .header("x-forwarded-for", "198.51.100.42")
+        .json(&json!({"code": "stp_wrong", "client": {"kind": "ios"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 429);
+
+    // /auth/token from the same IP still succeeds (separate limiter)
+    let r = e
+        .http
+        .post(format!("{}/auth/token", e.base))
+        .header("x-forwarded-for", "198.51.100.42")
+        .json(&json!({"user": owner.name, "token": token, "client": {"kind": "web"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+}
