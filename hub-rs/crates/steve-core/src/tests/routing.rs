@@ -1082,7 +1082,13 @@ async fn a_follow_up_resumes_the_research_session() {
         (r.run.as_str(), r.session.as_str(), r.model.as_str()),
         (run1.id.as_str(), "cs_1", "fake-research")
     );
-    assert!(r.prior_answer.starts_with("知识系统分三层"));
+    // one that has to start over finds the earlier answer among its recent messages
+    assert!(
+        seen[1]
+            .history
+            .iter()
+            .any(|h| h.author == "steve" && h.text.starts_with("知识系统分三层"))
+    );
     let run2 = k.db().store().thread().runs_of_message(&q2).unwrap()[0].clone();
     assert_eq!(run2.prev_run.as_deref(), Some(run1.id.as_str()));
     /* the run had its own MCP token while it ran, cleared at the end */

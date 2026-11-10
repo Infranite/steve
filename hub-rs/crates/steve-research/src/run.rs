@@ -17,8 +17,6 @@ pub const DEFAULT_IDLE: Duration = Duration::from_secs(600);
 /// After the harness closed its output it is ending: by default it gets this long to exit before it
 /// counts as stuck ([`Budget::exit_wait`]).
 pub const EXIT_WAIT: Duration = Duration::from_secs(45);
-/// Default research models (`STEVE_MODELS_RESEARCH`), non-kiro.
-pub const DEFAULT_MODELS: &str = "claude-sonnet-5-5,claude-opus-5-5";
 
 /// Limits of one run (setting `thread.research`). By default a run is bounded by nothing but its own end,
 /// the user's stop and the stall detector; the wall time, turns and tool calls are only limited when the
@@ -69,26 +67,11 @@ impl Budget {
     }
 }
 
-/// `STEVE_MODELS_RESEARCH` (comma-separated), or [`DEFAULT_MODELS`].
-pub fn models_from_env() -> Vec<String> {
-    let v = std::env::var("STEVE_MODELS_RESEARCH").unwrap_or_default();
-    let list: Vec<String> = v
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect();
-    if list.is_empty() {
-        DEFAULT_MODELS.split(',').map(String::from).collect()
-    } else {
-        list
-    }
-}
-
 /// How research runs.
 #[derive(Debug, Clone)]
 pub struct ResearchConfig {
-    /// Tried in order until one starts answering (`STEVE_MODELS_RESEARCH`).
+    /// Tried in order until one starts answering, when the request names none. Empty: the harness's
+    /// own default model.
     pub models: Vec<String>,
     /// Each run gets `<scratch>/<run id>/`.
     pub scratch: PathBuf,
@@ -104,11 +87,11 @@ pub struct ResearchConfig {
 }
 
 impl ResearchConfig {
-    /// Defaults: models from the environment, `$HOME`, the default budget, sandbox when available.
+    /// Defaults: no model named, `$HOME`, the default budget, sandbox when available.
     pub fn new(scratch: impl Into<PathBuf>) -> Self {
         let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
         ResearchConfig {
-            models: models_from_env(),
+            models: vec![],
             scratch: scratch.into(),
             files_root: std::env::temp_dir().join("steve-research-files"),
             home,
@@ -134,12 +117,14 @@ pub struct McpAccess {
 }
 
 /// Continue an earlier run's session (`session/load` on the same adapter, same model). When that
-/// fails, a fresh run starts with `prior_answer` as context instead.
+/// fails, a fresh run starts with `fresh` instead.
 #[derive(Debug, Clone)]
 pub struct Resume {
     pub session: String,
     pub model: String,
-    pub prior_answer: String,
+    /// What a run that starts over asks: the whole prompt (rules, recent messages, question), as
+    /// for a first question. The request's own `prompt` is the question alone.
+    pub fresh: String,
 }
 
 /// One research run to start.
@@ -311,7 +296,7 @@ pub struct AttemptPlan {
 /// The attempts of a run in the order to try them (the Hub's policy):
 /// - the request's models, or the configured ones; none named: the adapter's own default;
 /// - a follow-up first continues the earlier session with its model, then starts fresh on each model
-///   with the earlier answer as context.
+///   with the whole prompt ([`Resume::fresh`]).
 pub fn plan(req: &ResearchRequest, cfg: &ResearchConfig) -> Vec<AttemptPlan> {
     let default_only = [String::new()];
     let models: &[String] = match req.models.as_deref() {
@@ -330,17 +315,14 @@ pub fn plan(req: &ResearchRequest, cfg: &ResearchConfig) -> Vec<AttemptPlan> {
     match &req.resume {
         None => fresh(req.prompt.clone()).collect(),
         Some(r) => {
-            let prior = format!(
-                "上一轮你的回答：\n{}\n\n用户接着问：\n{}",
-                r.prior_answer.trim(),
-                req.prompt.trim()
-            );
             let resumed = AttemptPlan {
                 model: r.model.clone(),
                 resume: Some(r.session.clone()),
                 prompt: req.prompt.clone(),
             };
-            std::iter::once(resumed).chain(fresh(prior)).collect()
+            std::iter::once(resumed)
+                .chain(fresh(r.fresh.clone()))
+                .collect()
         }
     }
 }
@@ -451,12 +433,12 @@ mod tests {
         r.resume = Some(Resume {
             session: "sess_1".into(),
             model: "opus".into(),
-            prior_answer: "  前面的答案 \n".into(),
+            fresh: WHOLE.into(),
         });
         r
     }
 
-    const PRIOR: &str = "上一轮你的回答：\n前面的答案\n\n用户接着问：\n再细一点";
+    const WHOLE: &str = "规则\n最近的对话：\nSteve：前面的答案\n用户的问题：\n再细一点";
 
     #[test]
     fn plan_without_resume_tries_each_configured_model() {
@@ -468,13 +450,13 @@ mod tests {
     }
 
     #[test]
-    fn a_follow_up_continues_the_session_then_starts_fresh_with_the_prior_answer() {
+    fn a_follow_up_continues_the_session_then_starts_fresh_with_the_whole_prompt() {
         assert_eq!(
             plan(&follow_up(), &cfg()),
             vec![
                 at("opus", Some("sess_1"), "再细一点"),
-                at("sonnet", None, PRIOR),
-                at("opus", None, PRIOR),
+                at("sonnet", None, WHOLE),
+                at("opus", None, WHOLE),
             ]
         );
     }
@@ -486,11 +468,15 @@ mod tests {
         assert_eq!(plan(&r, &cfg()), vec![at("haiku", None, "prompt")]);
         r.models = Some(Vec::new());
         assert_eq!(plan(&r, &cfg()), vec![at("", None, "prompt")]);
+        // a configuration names no model of its own
+        r.models = None;
+        let plain = ResearchConfig::new("/tmp/scratch");
+        assert_eq!(plan(&r, &plain), vec![at("", None, "prompt")]);
         let mut f = follow_up();
         f.models = Some(Vec::new());
         assert_eq!(
             plan(&f, &cfg()),
-            vec![at("opus", Some("sess_1"), "再细一点"), at("", None, PRIOR)]
+            vec![at("opus", Some("sess_1"), "再细一点"), at("", None, WHOLE)]
         );
     }
 

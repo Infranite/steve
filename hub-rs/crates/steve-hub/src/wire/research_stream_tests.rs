@@ -278,19 +278,22 @@ async fn research_model_failure_falls_back_before_any_text_or_tools() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn expired_research_continuation_starts_fresh_with_prior_answer() {
+async fn expired_research_continuation_starts_fresh_with_the_whole_prompt() {
     let t = Test::new().await;
     let first = t
         .run(t.request("run-original", &["ready"]), &Seen::default())
         .await;
     assert_eq!(first.end, RunEnd::Done, "{first:?}");
     let mut q = t.request("run-followup", &["ready"]);
+    q.history = vec![steve_core::gateway::Said {
+        author: "steve".into(),
+        text: first.text,
+    }];
     q.resume = Some(ResumeFrom {
         run: "run-original".into(),
         session: first.session.unwrap(),
         harness: "test-research".into(),
         model: "ready".into(),
-        prior_answer: first.text,
     });
     let out = t.run(q, &Seen::default()).await;
     assert_eq!(out.end, RunEnd::Done, "{out:?}");

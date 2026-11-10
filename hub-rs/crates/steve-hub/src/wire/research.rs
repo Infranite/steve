@@ -166,14 +166,15 @@ impl ResearchAdapter {
             brief: q.brief.clone(),
         });
         let cwd = q.project.as_ref().map(|p| PathBuf::from(&p.path));
-        /* a follow-up continues the earlier session: the question alone is the prompt */
+        /* a follow-up continues the earlier session: the question alone is the prompt. One that has
+        to start over asks the whole prompt, so it keeps the rules, the access and the brief */
         let (prompt, resume) = match &q.resume {
             Some(f) => (
                 q.question.clone(),
                 Some(r::Resume {
                     session: f.session.clone(),
                     model: f.model.clone(),
-                    prior_answer: f.prior_answer.clone(),
+                    fresh: prompt,
                 }),
             ),
             None => (prompt, None),

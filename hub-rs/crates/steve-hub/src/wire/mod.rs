@@ -105,11 +105,24 @@ pub fn tune_sqlite() {
     }
 }
 
-fn core_config(cfg: &Config) -> steve_core::CoreConfig {
+/// The core's configuration: every model list is what the installation names, none by default (a
+/// call without one runs on the harness's own default model).
+fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
+    let list = |k: &str| -> Vec<String> {
+        vars(k)
+            .unwrap_or_default()
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect()
+    };
     let mut c = steve_core::CoreConfig::for_home(&cfg.home);
     c.port = cfg.listen.port;
     c.models_fast = cfg.models.fast.clone();
     c.models_smart = cfg.models.smart.clone();
+    /* the research and disclosure defaults of 设置 · 模型 (as steve-research and the channels read them) */
+    c.models_research = list("STEVE_MODELS_RESEARCH");
+    c.models_check = list("STEVE_MODELS_CHECK");
     c.default_models = cfg.default_models.clone().into_iter().collect();
     c.steve_repo = cfg.steve_repo.clone();
     c.no_resume = cfg.no_resume;
@@ -548,20 +561,7 @@ pub fn wire_assembly(
         yolo: std::sync::OnceLock::new(),
         local_node: std::sync::OnceLock::new(),
     });
-    let mut core_cfg = core_config(cfg);
-    /* the research and disclosure defaults of 设置 · 模型 (as steve-research and the channels read them) */
-    let list = |k: &str| -> Vec<String> {
-        vars(k)
-            .unwrap_or_default()
-            .split(',')
-            .map(|x| x.trim().to_string())
-            .filter(|x| !x.is_empty())
-            .collect()
-    };
-    if !list("STEVE_MODELS_RESEARCH").is_empty() {
-        core_cfg.models_research = list("STEVE_MODELS_RESEARCH");
-    }
-    core_cfg.models_check = list("STEVE_MODELS_CHECK");
+    let core_cfg = core_config(cfg, &vars);
     let mut node_jobs = vec![];
     let secrets = node_secrets::NodeSecrets::new();
     // Model calls always execute on a local Node. Session/workspace routing keeps its existing
@@ -717,7 +717,8 @@ pub fn wire_assembly(
         core.set_mq_node(n.clone());
     }
     /* inline research (thread-routing R2): read-only runs on the local Node; each run's harness and
-    models come from 设置 · 模型 (default STEVE_MODELS_RESEARCH) with the request */
+    models come from 设置 · 模型 with the request (none there: STEVE_MODELS_RESEARCH, else the
+    harness's own default model) */
     let mut research = steve_research::ResearchConfig::new(cfg.scratch.join("research"));
     research.models = core.config().models_research.clone();
     let mut adapter = research::ResearchAdapter::new(
@@ -942,6 +943,27 @@ mod tests {
             "STEVE_PRINCIPAL_STATE",
             "typo"
         )])));
+    }
+
+    /// The core's own lists are fixtures: an installation that names no model has none for any
+    /// purpose, research included.
+    #[test]
+    fn an_installation_names_no_model_unless_told() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().display().to_string();
+        let cfg = |kv: &[(&str, &str)]| {
+            let get = |k: &str| match k {
+                "STEVE_HOME" | "HOME" => Some(home.clone()),
+                _ => kv.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string()),
+            };
+            Config::from_vars(get).unwrap()
+        };
+        let c = core_config(&cfg(&[]), &vars(&[]));
+        assert!(c.models_fast.is_empty() && c.models_smart.is_empty());
+        assert!(c.models_research.is_empty() && c.models_check.is_empty());
+        let named = [("STEVE_MODELS_RESEARCH", "a, b,")];
+        let c = core_config(&cfg(&named), &vars(&[("STEVE_MODELS_RESEARCH", "a, b,")]));
+        assert_eq!(c.models_research, ["a", "b"]);
     }
 
     #[tokio::test]

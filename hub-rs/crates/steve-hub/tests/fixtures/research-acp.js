@@ -27,7 +27,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     const text = m.params.prompt.filter(p => p.type === "text").map(p => p.text).join("\n")
     send({ method: "session/update", params: { sessionId: "expired-session", update: {
       sessionUpdate: "agent_message_chunk", content: {
-        type: "text", text: text.includes("上一轮你的回答：") ? "fresh answer with prior context" : "answer",
+        type: "text", text: text.includes("Steve：answer") ? "fresh answer with prior context" : "answer",
       },
     } } })
     if (model === "slow") continue

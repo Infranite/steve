@@ -126,8 +126,6 @@ pub struct ResumeFrom {
     pub harness: String,
     /// continuing needs the same model
     pub model: String,
-    /// the earlier answer, the context of a fresh run when resuming is not possible
-    pub prior_answer: String,
 }
 
 /// How long a research answer can be followed up in the same harness session.
@@ -342,13 +340,14 @@ impl Core {
             .iter()
             .rev()
             .find(|m| m.author == "steve" && !super::hidden(m));
+        // when the session cannot be continued the run starts over, with this answer among its
+        // recent messages
         Ok(match last_steve {
             Some(m) if &m.id == reply => Some(ResumeFrom {
                 run: r.id.clone(),
                 session: session.clone(),
                 harness: r.harness.clone().unwrap_or_default(),
                 model: model.clone(),
-                prior_answer: m.text.clone(),
             }),
             _ => None,
         })

@@ -534,7 +534,6 @@ async fn a_run_on_the_node_answers_falls_back_and_continues() {
         session: "sess-1".into(),
         harness: "claude-code".into(),
         model: "m2".into(),
-        prior_answer: "add 什么都不做。".into(),
     });
     let out = node.adapter.research(r, &Seen::default()).await;
     assert_eq!(out.end, RunEnd::Done, "{out:?}");

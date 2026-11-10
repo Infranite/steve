@@ -27,8 +27,8 @@ pub use attach::Attachment;
 pub use guard::{Scope, Violation};
 pub use prompt::{DirInfo, PromptInput};
 pub use run::{
-    AttemptPlan, AttemptRunner, Attempted, Budget, BudgetHit, DEFAULT_IDLE, DEFAULT_MODELS,
-    EXIT_WAIT, McpAccess, ResearchConfig, ResearchError, ResearchOutcome, ResearchRequest, Resume,
-    RunStatus, drive, models_from_env, plan, present,
+    AttemptPlan, AttemptRunner, Attempted, Budget, BudgetHit, DEFAULT_IDLE, EXIT_WAIT, McpAccess,
+    ResearchConfig, ResearchError, ResearchOutcome, ResearchRequest, Resume, RunStatus, drive,
+    plan, present,
 };
 pub use sandbox::SandboxMode;
