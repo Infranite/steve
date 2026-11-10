@@ -2,6 +2,7 @@ import Foundation
 
 public struct PairingPayload: Sendable, Equatable {
     public static let codePrefix = "stp_"
+    public static let maxNameLength = 64
 
     public var version: Int
     public var code: String
@@ -12,9 +13,34 @@ public struct PairingPayload: Sendable, Equatable {
     public init(version: Int = 1, code: String, name: String? = nil, publicURL: URL? = nil, lanURLs: [URL] = []) {
         self.version = version
         self.code = code
-        self.name = name
+        self.name = Self.sanitizeName(name)
         self.publicURL = publicURL
         self.lanURLs = lanURLs
+    }
+
+    /// Strips control/format characters and newlines, collapses internal whitespace, and caps length
+    /// so an untrusted `steve://pair` URI cannot spoof multi-line alert text.
+    public static func sanitizeName(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let forbidden = CharacterSet.controlCharacters
+            .union(.newlines)
+            .union(.illegalCharacters)
+        var cleanedScalars = String.UnicodeScalarView()
+        for scalar in raw.unicodeScalars {
+            if forbidden.contains(scalar) || scalar.properties.isDefaultIgnorableCodePoint {
+                if CharacterSet.newlines.contains(scalar) || scalar == "\t" {
+                    cleanedScalars.append(" ")
+                }
+                continue
+            }
+            cleanedScalars.append(scalar)
+        }
+        let collapsed = String(cleanedScalars)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard !collapsed.isEmpty else { return nil }
+        return String(collapsed.prefix(maxNameLength))
     }
 
     /// Parses `steve://pair?v=1&code=stp_...&name=...&pub=...&lan=...` into a typed `PairingPayload`.
@@ -32,8 +58,7 @@ public struct PairingPayload: Sendable, Equatable {
             return nil
         }
         let version = items.first(where: { $0.name == "v" })?.value.flatMap(Int.init) ?? 1
-        let rawName = items.first(where: { $0.name == "name" })?.value?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = (rawName?.isEmpty == false) ? rawName : nil
+        let name = sanitizeName(items.first(where: { $0.name == "name" })?.value)
 
         let pubURL: URL?
         if let rawPub = items.first(where: { $0.name == "pub" })?.value {

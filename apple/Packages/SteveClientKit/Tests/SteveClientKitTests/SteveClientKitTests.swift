@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import WebKit
 import XCTest
 @testable import SteveClientKit
 
@@ -442,7 +443,10 @@ final class SteveClientKitTests: XCTestCase {
         //    it creates a distinct profile and NEVER overwrites `local-default` or steals its credential!
         let validPubEncoded = realNewHub.baseURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
         let overlappingURI = "steve://pair?v=1&code=stp_fedcba9876543210fedcba9876543210&name=PairedHub&pub=\(validPubEncoded)&lan=\(lanLocalEncoded)"
-        let pairedProfile = try await coordinator.pairWithQRCode(uri: overlappingURI)
+        coordinator.requestExternalPairingConfirmation(uri: overlappingURI)
+        XCTAssertNotNil(coordinator.pendingExternalPairConfirmation)
+        let maybePairedProfile = await coordinator.confirmPendingExternalPairing()
+        let pairedProfile = try XCTUnwrap(maybePairedProfile)
         XCTAssertNotEqual(pairedProfile.id, HubProfile.localDefaultID)
         XCTAssertEqual(store.profiles.count, 2)
         let localAfter = store.profiles.first { $0.id == HubProfile.localDefaultID }!
@@ -566,7 +570,14 @@ final class SteveClientKitTests: XCTestCase {
         let lanEncoded = mockHub.baseURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
         let pairURI = "steve://pair?v=1&code=stp_0123456789abcdef0123456789abcdef&name=Office%20Mac&pub=\(pubEncoded)&lan=\(lanEncoded)"
 
-        let profile = try await coordinator.pairWithQRCode(uri: pairURI)
+        coordinator.isQRScannerPresented = true
+        XCTAssertTrue(coordinator.stageScannedPairingCode(pairURI))
+        XCTAssertFalse(coordinator.isQRScannerPresented)
+        XCTAssertEqual(mockHub.pairCallCount(), 0, "Scanner staging must not call /auth/pair before user confirms")
+
+        let maybeProfile = await coordinator.confirmPendingExternalPairing()
+        let profile = try XCTUnwrap(maybeProfile)
+        XCTAssertEqual(mockHub.pairCallCount(), 1)
         XCTAssertEqual(profile.name, "Office Mac")
         XCTAssertEqual(store.activeProfile.id, profile.id)
         XCTAssertEqual(store.credential(for: profile.id), "cli_paired.secret_cred")
@@ -642,6 +653,190 @@ final class SteveClientKitTests: XCTestCase {
 
         XCTAssertNil(store.credential(for: HubProfile.localDefaultID))
         XCTAssertNil(coordinator.proxy.currentTarget().credential)
+    }
+
+    // Round 2 N1 & N6: Scanner/paste staging cancels cleanly without claiming, and pairing URI `name` strips newlines/control/BiDi chars and caps length.
+    @MainActor
+    func testScannerStagingRequiresConfirmationAndSanitizesPairingDisplayName() async throws {
+        let mockHub = try await MockUpstreamServer.start()
+        defer { mockHub.stop() }
+
+        let suiteName = "test.steve.scanner-confirm.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = HubStore(
+            defaults: defaults,
+            credentials: InMemoryCredentialStore(),
+            includeLocalDefault: false
+        )
+        let coordinator = SteveClientCoordinator(
+            hubStore: store,
+            preferredPortDefaults: defaults,
+            clientDescriptor: ClientDescriptor(kind: "ios", name: "Test iPhone", platform: "iOS", version: "0.3.0")
+        )
+        defer { coordinator.stop() }
+
+        let spoofedName = "Trusted Mac\r\n\u{202E}Target: https://trusted.local\u{0007} " + String(repeating: "X", count: 80)
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+")
+        let encodedName = spoofedName.addingPercentEncoding(withAllowedCharacters: allowed)!
+        let lanEncoded = mockHub.baseURL.absoluteString.addingPercentEncoding(withAllowedCharacters: allowed)!
+        let uri = "steve://pair?v=1&code=stp_11223344556677889900aabbccddeeff&name=\(encodedName)&lan=\(lanEncoded)"
+
+        coordinator.isQRScannerPresented = true
+        XCTAssertTrue(coordinator.stageScannedPairingCode(uri))
+        XCTAssertFalse(coordinator.isQRScannerPresented, "Scanner presentation state must close before showing confirmation")
+
+        let pending = try XCTUnwrap(coordinator.pendingExternalPairConfirmation)
+        XCTAssertFalse(pending.displayName.contains("\n"))
+        XCTAssertFalse(pending.displayName.contains("\r"))
+        XCTAssertFalse(pending.displayName.unicodeScalars.contains(where: { $0.value == 0x202E || $0.value == 0x0007 }))
+        XCTAssertLessThanOrEqual(pending.displayName.count, PairingPayload.maxNameLength)
+        XCTAssertTrue(pending.displayName.hasPrefix("Trusted Mac Target: https://trusted.local "))
+
+        // Before confirmation and after cancellation, `/auth/pair` must NEVER be called
+        XCTAssertEqual(mockHub.pairCallCount(), 0)
+        XCTAssertFalse(store.hasProfiles)
+
+        coordinator.cancelPendingExternalPairing()
+        XCTAssertNil(coordinator.pendingExternalPairConfirmation)
+        XCTAssertEqual(mockHub.pairCallCount(), 0)
+        XCTAssertFalse(store.hasProfiles)
+    }
+
+    // Round 2 N2: Subframe navigation policy cancels scripted external `http(s)` navigations without launching system browser.
+    func testSubframeNavigationPolicyBlocksScriptedExternalBrowserLaunch() {
+        let gateway = URL(string: "http://127.0.0.1:51234")!
+        let external = URL(string: "https://attacker.example/phish")!
+        let gatewayEmbed = URL(string: "http://127.0.0.1:51234/api/files/f_pdf")!
+
+        // Sandboxed agent iframe scripted navigation (`targetFrameIsMain == false`, `.other`) -> cancel, never openExternal
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: external,
+                gateway: gateway,
+                targetFrameIsMain: false,
+                sourceFrameIsMain: false,
+                navigationType: .other
+            ),
+            .cancel
+        )
+
+        // Sandboxed agent iframe scripted `target="_blank"` (`targetFrameIsMain == nil`, `sourceFrameIsMain == false`, `.other`) -> cancel
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: external,
+                gateway: gateway,
+                targetFrameIsMain: nil,
+                sourceFrameIsMain: false,
+                navigationType: .other
+            ),
+            .cancel
+        )
+
+        // Explicit user click inside an iframe (`navigationType == .linkActivated`) -> opens external browser
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: external,
+                gateway: gateway,
+                targetFrameIsMain: false,
+                sourceFrameIsMain: false,
+                navigationType: .linkActivated
+            ),
+            .openExternal(external)
+        )
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: external,
+                gateway: gateway,
+                targetFrameIsMain: nil,
+                sourceFrameIsMain: false,
+                navigationType: .linkActivated
+            ),
+            .openExternal(external)
+        )
+
+        // Legitimate embeds (`about:srcdoc`, `blob:`, and gateway-origin PDF/mail iframe) remain `.allow`
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: URL(string: "about:srcdoc")!,
+                gateway: gateway,
+                targetFrameIsMain: false,
+                sourceFrameIsMain: true,
+                navigationType: .other
+            ),
+            .allow
+        )
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: URL(string: "blob:http://127.0.0.1:51234/uuid")!,
+                gateway: gateway,
+                targetFrameIsMain: false,
+                sourceFrameIsMain: true,
+                navigationType: .other
+            ),
+            .allow
+        )
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: gatewayEmbed,
+                gateway: gateway,
+                targetFrameIsMain: false,
+                sourceFrameIsMain: true,
+                navigationType: .other
+            ),
+            .allow
+        )
+
+        // Custom `steve:` scheme in any frame is always cancelled
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: URL(string: "steve://pair?v=1&code=stp_12345678&lan=http://127.0.0.1:9999")!,
+                gateway: gateway,
+                targetFrameIsMain: true,
+                sourceFrameIsMain: true,
+                navigationType: .linkActivated
+            ),
+            .cancel
+        )
+    }
+
+    // Round 2 Finding 14 remainder: Keychain write failure throws `CredentialStoreError.saveFailed` without adding a broken profile.
+    @MainActor
+    func testAddPairedProfileThrowsWhenCredentialSaveFails() async throws {
+        final class FailingCredentialStore: CredentialStoring, @unchecked Sendable {
+            func credential(for hubID: String) -> String? { nil }
+            func setCredential(_ credential: String?, for hubID: String) -> Bool { false }
+        }
+
+        let mockHub = try await MockUpstreamServer.start()
+        defer { mockHub.stop() }
+
+        let suiteName = "test.steve.keychain-fail.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = HubStore(
+            defaults: defaults,
+            credentials: FailingCredentialStore(),
+            includeLocalDefault: false
+        )
+        let coordinator = SteveClientCoordinator(
+            hubStore: store,
+            preferredPortDefaults: defaults,
+            clientDescriptor: ClientDescriptor(kind: "ios", name: "Test iPhone", platform: "iOS", version: "0.3.0")
+        )
+        defer { coordinator.stop() }
+
+        let lanEncoded = mockHub.baseURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
+        let uri = "steve://pair?v=1&code=stp_aabbccddeeff00112233445566778899&name=FailKeychainHub&lan=\(lanEncoded)"
+        XCTAssertTrue(coordinator.stageScannedPairingCode(uri))
+
+        let result = await coordinator.confirmPendingExternalPairing()
+        XCTAssertNil(result)
+        XCTAssertFalse(store.hasProfiles, "Must not persist HubProfile when Keychain save returns false")
+        XCTAssertEqual(coordinator.externalPairErrorMessage, CredentialStoreError.saveFailed.localizedDescription)
     }
 }
 
@@ -720,6 +915,7 @@ private final class MockUpstreamServer: @unchecked Sendable {
     let baseURL: URL
     private let lock = NSLock()
     private var recordedLogoutAuth: String?
+    private var recordedPairCalls = 0
 
     private init(listener: NWListener, port: UInt16) {
         self.listener = listener
@@ -732,9 +928,21 @@ private final class MockUpstreamServer: @unchecked Sendable {
         return recordedLogoutAuth
     }
 
+    func pairCallCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedPairCalls
+    }
+
     private func recordLogout(_ auth: String) {
         lock.lock()
         recordedLogoutAuth = auth
+        lock.unlock()
+    }
+
+    private func recordPairCall() {
+        lock.lock()
+        recordedPairCalls += 1
         lock.unlock()
     }
 
@@ -811,6 +1019,7 @@ private final class MockUpstreamServer: @unchecked Sendable {
                     } else if path == "/auth/token" {
                         payload = Data("{\"client_id\":\"cli_web_tok\",\"credential\":\"cli_web_tok.secret_cred\",\"user\":{\"id\":\"owner\",\"name\":\"Owner\"},\"hub\":{\"version\":\"0.3.0\",\"api\":1}}".utf8)
                     } else if path == "/auth/pair" {
+                        box.server?.recordPairCall()
                         if omitPairCredential {
                             payload = Data("{\"client_id\":\"cli_evil\",\"user\":{\"id\":\"owner\",\"name\":\"Owner\"},\"hub\":{\"version\":\"0.3.0\",\"api\":1}}".utf8)
                         } else {

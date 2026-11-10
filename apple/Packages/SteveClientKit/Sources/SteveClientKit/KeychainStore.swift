@@ -2,6 +2,20 @@ import Foundation
 import os
 import Security
 
+public enum CredentialStoreError: LocalizedError, Sendable, Equatable {
+    case saveFailed
+
+    public var errorDescription: String? {
+        switch self {
+        case .saveFailed:
+            return L10n.tr(
+                "无法将客户端凭证保存到系统钥匙串。",
+                "Failed to save the client credential to Keychain."
+            )
+        }
+    }
+}
+
 public protocol CredentialStoring: Sendable {
     func credential(for hubID: String) -> String?
     @discardableResult

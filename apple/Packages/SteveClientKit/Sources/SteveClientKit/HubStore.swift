@@ -94,8 +94,9 @@ public final class HubStore: ObservableObject {
 
     /// Saves a QR-paired Hub profile with a mandatory freshly minted credential.
     /// Never merges into `local-default` or into any profile whose endpoint set differs.
+    /// Throws `CredentialStoreError.saveFailed` if the credential cannot be persisted.
     @discardableResult
-    public func addPairedProfile(_ profile: HubProfile, credential: String, makeActive: Bool = true) -> HubProfile {
+    public func addPairedProfile(_ profile: HubProfile, credential: String, makeActive: Bool = true) throws -> HubProfile {
         var candidate = profile
         candidate.isLocalDefault = false
         if candidate.id == HubProfile.localDefaultID {
@@ -103,20 +104,26 @@ public final class HubStore: ObservableObject {
         }
 
         let candidateSig = Self.endpointSignature(of: candidate)
-        if let existingIdx = profiles.firstIndex(where: {
+        let existingIdx = profiles.firstIndex(where: {
             !$0.isLocalDefault && $0.id != HubProfile.localDefaultID && Self.endpointSignature(of: $0) == candidateSig
-        }) {
+        })
+        if let existingIdx {
             let existing = profiles[existingIdx]
             candidate.id = existing.id
             if candidate.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 candidate.name = existing.name
             }
+        }
+
+        guard credentials.setCredential(credential, for: candidate.id) else {
+            throw CredentialStoreError.saveFailed
+        }
+
+        if let existingIdx {
             profiles[existingIdx] = candidate
         } else {
             profiles.append(candidate)
         }
-
-        credentials.setCredential(credential, for: candidate.id)
         if makeActive {
             activeHubID = candidate.id
         }
@@ -187,12 +194,14 @@ public final class HubStore: ObservableObject {
         persist()
     }
 
-    public func updateAuthMetadata(id: String, clientID: String?, userName: String?, credential: String?) {
-        guard let idx = profiles.firstIndex(where: { $0.id == id }) else { return }
+    @discardableResult
+    public func updateAuthMetadata(id: String, clientID: String?, userName: String?, credential: String?) -> Bool {
+        guard let idx = profiles.firstIndex(where: { $0.id == id }) else { return false }
+        guard credentials.setCredential(credential, for: id) else { return false }
         profiles[idx].clientID = clientID
         profiles[idx].userName = userName
-        credentials.setCredential(credential, for: id)
         persist()
+        return true
     }
 
     public struct RemovedHub: Sendable {

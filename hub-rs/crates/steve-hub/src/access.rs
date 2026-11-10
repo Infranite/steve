@@ -398,7 +398,10 @@ async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::respo
         if let Some((uid, cid)) = revoked_client {
             drop_pending_pairings(|p| p.user_id == uid && p.creator_client_id.as_deref() == Some(cid.as_str()));
         }
-    } else if let (Some(tok), Some(m)) = (crate::api::cookie(&headers, "steve_session"), st.modules.as_ref()) {
+    } else if let (Some(tok), true) = (
+        crate::api::cookie(&headers, "steve_session"),
+        st.modules.is_some(),
+    ) {
         let b = st.backend.clone();
         let uid = tokio::task::spawn_blocking(move || {
             b.reader()
@@ -409,7 +412,6 @@ async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::respo
         .await
         .ok()
         .flatten();
-        let _ = m;
         if let Some(uid) = uid {
             drop_pending_pairings(|p| p.user_id == uid && p.creator_client_id.is_none());
         }

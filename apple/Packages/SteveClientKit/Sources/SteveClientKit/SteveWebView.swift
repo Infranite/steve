@@ -138,6 +138,68 @@ public struct SteveWebView: NSViewRepresentableFallback {
         }
     }
 
+    internal enum NavigationDisposition: Equatable, Sendable {
+        case allow
+        case cancel
+        case openExternal(URL)
+    }
+
+    internal static func decideNavigationDisposition(
+        url: URL,
+        gateway: URL?,
+        targetFrameIsMain: Bool?,
+        sourceFrameIsMain: Bool,
+        navigationType: WKNavigationType
+    ) -> NavigationDisposition {
+        let scheme = url.scheme?.lowercased() ?? ""
+
+        // Never initiate pairing from web content; custom `steve:` links in web pages are ignored.
+        if scheme == "steve" {
+            return .cancel
+        }
+
+        // Allow `about:blank` / `about:srcdoc` (used by sandboxed markdown/mail HTML preview iframes).
+        if scheme == "about" {
+            return .allow
+        }
+
+        // `target="_blank"` links have `targetFrame == nil` (`targetFrameIsMain == nil`).
+        // From subframes, only open the system browser on an explicit user link click (`linkActivated`).
+        if targetFrameIsMain == nil {
+            if (scheme == "http" || scheme == "https") && (sourceFrameIsMain || navigationType == .linkActivated) {
+                return .openExternal(url)
+            }
+            return .cancel
+        }
+
+        // Subframe navigations (`targetFrame.isMainFrame == false`):
+        // Allow gateway-origin embeds (PDF/mail iframes) and `blob:`/`data:`, but cancel scripted
+        // external `http(s)` navigations without launching the system browser unless `.linkActivated`.
+        if targetFrameIsMain == false {
+            if let gateway, isGatewayOrigin(url, gateway: gateway) {
+                return .allow
+            }
+            if scheme == "blob" || scheme == "data" {
+                return .allow
+            }
+            if (scheme == "http" || scheme == "https") && navigationType == .linkActivated {
+                return .openExternal(url)
+            }
+            return .cancel
+        }
+
+        // Confine in-webview main-frame http(s) navigations strictly to the loopback gateway origin.
+        if let gateway, isGatewayOrigin(url, gateway: gateway) {
+            return .allow
+        }
+
+        if scheme == "http" || scheme == "https" {
+            return .openExternal(url)
+        }
+
+        return .cancel
+    }
+
     internal static func isGatewayOrigin(_ url: URL, gateway: URL) -> Bool {
         guard let urlScheme = url.scheme?.lowercased(),
               let gwScheme = gateway.scheme?.lowercased(),
@@ -275,49 +337,24 @@ public struct SteveWebView: NSViewRepresentableFallback {
                 return
             }
 
-            let scheme = url.scheme?.lowercased() ?? ""
-
-            // Never initiate pairing from web content; custom `steve:` links in web pages are ignored.
-            if scheme == "steve" {
-                decisionHandler(.cancel)
-                return
-            }
-
-            // Allow `about:blank` / `about:srcdoc` (used by sandboxed markdown/mail HTML preview iframes).
-            if scheme == "about" {
-                decisionHandler(.allow)
-                return
-            }
-
             let gateway = loadedGateway ?? parent.coordinator.localGatewayURL
+            let disposition = SteveWebView.decideNavigationDisposition(
+                url: url,
+                gateway: gateway,
+                targetFrameIsMain: navigationAction.targetFrame?.isMainFrame,
+                sourceFrameIsMain: navigationAction.sourceFrame.isMainFrame,
+                navigationType: navigationAction.navigationType
+            )
 
-            // `target="_blank"` links have `targetFrame == nil` — open http(s) targets in the system browser.
-            if navigationAction.targetFrame == nil {
-                if scheme == "http" || scheme == "https" {
-                    openInSystemBrowser(url, gateway: gateway)
-                }
-                decisionHandler(.cancel)
-                return
-            }
-
-            // Confine in-webview http(s) navigations strictly to the loopback gateway origin.
-            if let gateway, SteveWebView.isGatewayOrigin(url, gateway: gateway) {
+            switch disposition {
+            case .allow:
                 decisionHandler(.allow)
-                return
-            }
-
-            if scheme == "http" || scheme == "https" {
-                openInSystemBrowser(url, gateway: gateway)
+            case .cancel:
                 decisionHandler(.cancel)
-                return
+            case .openExternal(let externalURL):
+                openInSystemBrowser(externalURL, gateway: gateway)
+                decisionHandler(.cancel)
             }
-
-            if (scheme == "blob" || scheme == "data") && navigationAction.targetFrame?.isMainFrame == false {
-                decisionHandler(.allow)
-                return
-            }
-
-            decisionHandler(.cancel)
         }
 
         @MainActor
@@ -329,7 +366,8 @@ public struct SteveWebView: NSViewRepresentableFallback {
         ) -> WKWebView? {
             if let url = navigationAction.request.url,
                let scheme = url.scheme?.lowercased(),
-               scheme == "http" || scheme == "https" {
+               (scheme == "http" || scheme == "https"),
+               (navigationAction.sourceFrame.isMainFrame || navigationAction.navigationType == .linkActivated) {
                 let gateway = loadedGateway ?? parent.coordinator.localGatewayURL
                 openInSystemBrowser(url, gateway: gateway)
             }

@@ -63,7 +63,7 @@ struct IOSRootView: View {
         .alert(
             L10n.tr("确认配对并连接到此 Hub？", "Pair and connect to this Hub?"),
             isPresented: Binding(
-                get: { coordinator.pendingExternalPairConfirmation != nil },
+                get: { !coordinator.isQRScannerPresented && coordinator.pendingExternalPairConfirmation != nil },
                 set: { if !$0 { coordinator.cancelPendingExternalPairing() } }
             ),
             presenting: coordinator.pendingExternalPairConfirmation

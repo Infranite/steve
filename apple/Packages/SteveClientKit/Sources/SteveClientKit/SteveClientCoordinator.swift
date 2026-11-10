@@ -215,24 +215,40 @@ public final class SteveClientCoordinator: ObservableObject {
         pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: trimmed, payload: payload)
     }
 
+    /// Validates a scanned or pasted `steve://pair` URI from the iOS scanner, dismisses the scanner,
+    /// and stages user confirmation so no code is ever claimed before the user approves the target Hub.
+    @discardableResult
+    public func stageScannedPairingCode(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let payload = PairingPayload.parse(trimmed) else {
+            return false
+        }
+        isQRScannerPresented = false
+        pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: trimmed, payload: payload)
+        return true
+    }
+
     public func cancelPendingExternalPairing() {
         pendingExternalPairConfirmation = nil
     }
 
-    public func confirmPendingExternalPairing() async {
-        guard let pending = pendingExternalPairConfirmation else { return }
+    @discardableResult
+    public func confirmPendingExternalPairing() async -> HubProfile? {
+        guard let pending = pendingExternalPairConfirmation else { return nil }
         pendingExternalPairConfirmation = nil
         do {
-            _ = try await pairWithQRCode(uri: pending.rawURI)
+            return try await pairWithQRCode(uri: pending.rawURI)
         } catch {
             externalPairErrorMessage = error.localizedDescription
+            return nil
         }
     }
 
     /// Pairs this device by resolving the QR payload's public-first / LAN-fallback endpoints
     /// and claiming the single-use `stp_...` code for a dedicated Keychain-stored client credential.
+    /// Private so every external/UI entry point must pass through `pendingExternalPairConfirmation`.
     @discardableResult
-    public func pairWithQRCode(uri: String) async throws -> HubProfile {
+    private func pairWithQRCode(uri: String) async throws -> HubProfile {
         guard let payload = PairingPayload.parse(uri) else {
             throw HubClientAPIError.invalidResponse
         }
@@ -257,7 +273,7 @@ public final class SteveClientCoordinator: ObservableObject {
             lastKnownVersion: claim.hub.version,
             lastConnectedAt: Date()
         )
-        let saved = hubStore.addPairedProfile(profile, credential: credential, makeActive: true)
+        let saved = try hubStore.addPairedProfile(profile, credential: credential, makeActive: true)
         await activateCurrentHub(forceReloadWeb: true)
         return saved
     }
@@ -276,12 +292,14 @@ public final class SteveClientCoordinator: ObservableObject {
         guard let credential = signed.credential, !credential.isEmpty else {
             throw HubClientAPIError.missingCredential
         }
-        hubStore.updateAuthMetadata(
+        guard hubStore.updateAuthMetadata(
             id: profile.id,
             clientID: signed.client_id,
             userName: signed.user.name,
             credential: credential
-        )
+        ) else {
+            throw CredentialStoreError.saveFailed
+        }
         hubStore.updateConnectionMetadata(id: profile.id, version: signed.hub.version)
         await activateCurrentHub(forceReloadWeb: true)
     }

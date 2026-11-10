@@ -8,7 +8,7 @@ struct QRCodeScannerSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var pastedURI = ""
-    @State private var isPairing = false
+    @State private var hasQueuedConfirmation = false
     @State private var errorMessage: String?
     @State private var cameraPermissionDenied = false
 
@@ -37,8 +37,8 @@ struct QRCodeScannerSheet: View {
                     } else {
                         CameraQRPreview(
                             onCodeScanned: { code in
-                                guard !isPairing else { return }
-                                Task { await handleScanned(code) }
+                                guard !hasQueuedConfirmation else { return }
+                                handleScanned(code)
                             },
                             onPermissionDenied: {
                                 cameraPermissionDenied = true
@@ -53,20 +53,6 @@ struct QRCodeScannerSheet: View {
                             RoundedRectangle(cornerRadius: 18, style: .continuous)
                                 .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, dash: [18, 10]))
                                 .frame(width: 220, height: 220)
-                        }
-                    }
-
-                    if isPairing {
-                        ZStack {
-                            Color.black.opacity(0.45)
-                                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                            VStack(spacing: 10) {
-                                ProgressView()
-                                    .tint(.white)
-                                Text(L10n.tr("正在配对并连接 Hub…", "Pairing and connecting to Hub…"))
-                                    .font(.callout.weight(.medium))
-                                    .foregroundStyle(.white)
-                            }
                         }
                     }
                 }
@@ -101,10 +87,10 @@ struct QRCodeScannerSheet: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                         Button(L10n.tr("配对", "Pair")) {
-                            Task { await handleScanned(pastedURI) }
+                            handleScanned(pastedURI)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(isPairing || pastedURI.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(hasQueuedConfirmation || pastedURI.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
 
@@ -121,7 +107,7 @@ struct QRCodeScannerSheet: View {
         }
     }
 
-    private func handleScanned(_ raw: String) async {
+    private func handleScanned(_ raw: String) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard PairingPayload.parse(trimmed) != nil else {
             if raw == pastedURI {
@@ -132,17 +118,14 @@ struct QRCodeScannerSheet: View {
             }
             return
         }
-        isPairing = true
+        guard !hasQueuedConfirmation else { return }
+        hasQueuedConfirmation = true
         errorMessage = nil
-        do {
-            _ = try await coordinator.pairWithQRCode(uri: trimmed)
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            dismiss()
-        } catch {
-            errorMessage = error.localizedDescription
-            UINotificationFeedbackGenerator().notificationOccurred(.error)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            _ = coordinator.stageScannedPairingCode(trimmed)
         }
-        isPairing = false
     }
 }
 

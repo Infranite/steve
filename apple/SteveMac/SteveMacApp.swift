@@ -18,6 +18,7 @@ struct SteveMacApp: App {
             version: version
         )
 
+        #if DEBUG
         let defaults: UserDefaults
         if let suite = env["STEVE_CLIENT_DEFAULTS_SUITE"], !suite.isEmpty,
            let customDefaults = UserDefaults(suiteName: suite) {
@@ -34,6 +35,10 @@ struct SteveMacApp: App {
         } else {
             credStore = KeychainCredentialStore()
         }
+        #else
+        let defaults = UserDefaults.standard
+        let credStore: CredentialStoring = KeychainCredentialStore()
+        #endif
 
         let hubStore = HubStore(
             defaults: defaults,

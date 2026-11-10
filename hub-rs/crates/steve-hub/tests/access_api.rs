@@ -689,3 +689,92 @@ async fn failed_qr_pair_attempts_do_not_lock_out_token_sign_in() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
 }
+
+#[tokio::test]
+async fn qr_pair_mint_failure_rolls_back_claim_so_retry_succeeds() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (_, token) = st.access().token_create(&owner.id, "desk", None).unwrap();
+
+    let (_, ok) = e
+        .call(
+            "POST",
+            "/auth/token",
+            None,
+            Some(json!({"user": owner.name, "token": token, "client": {"kind": "mac", "name": "Desk Mac"}})),
+        )
+        .await;
+    let mac_cred = ok["credential"].as_str().unwrap().to_string();
+
+    let (_, pair_res) = e
+        .call("POST", "/api/access/pairings", Some(&mac_cred), None)
+        .await;
+    let pair_id = pair_res["id"].as_str().unwrap().to_string();
+    let code = pair_res["code"].as_str().unwrap().to_string();
+
+    // Force `client_create` to fail inside SQLite during `POST /auth/pair`
+    {
+        let conn = rusqlite::Connection::open(&e.db).expect("open sqlite");
+        conn.execute_batch(
+            "CREATE TRIGGER test_fail_client_mint
+             BEFORE INSERT ON clients
+             BEGIN
+                 SELECT RAISE(ABORT, 'simulated mint failure');
+             END;",
+        )
+        .expect("create trigger");
+    }
+
+    let (s, _) = e
+        .call(
+            "POST",
+            "/auth/pair",
+            None,
+            Some(json!({"code": code, "client": {"kind": "ios", "name": "iPhone"}})),
+        )
+        .await;
+    assert_eq!(s, 500, "mint failure returns 500");
+
+    // Pairing status must remain `pending` (not falsely reported as `claimed`)
+    let (s, status) = e
+        .call(
+            "GET",
+            &format!("/api/access/pairings/{pair_id}"),
+            Some(&mac_cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200);
+    assert_eq!(status["status"], "pending");
+
+    // Drop the fault trigger and confirm the same pairing code can now be claimed cleanly
+    {
+        let conn = rusqlite::Connection::open(&e.db).expect("open sqlite");
+        conn.execute_batch("DROP TRIGGER test_fail_client_mint;")
+            .expect("drop trigger");
+    }
+
+    let (s, claimed) = e
+        .call(
+            "POST",
+            "/auth/pair",
+            None,
+            Some(json!({"code": code, "client": {"kind": "ios", "name": "iPhone"}})),
+        )
+        .await;
+    assert_eq!(s, 200, "{claimed}");
+    assert!(claimed["credential"].as_str().is_some());
+
+    let (s, status_after) = e
+        .call(
+            "GET",
+            &format!("/api/access/pairings/{pair_id}"),
+            Some(&mac_cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200);
+    assert_eq!(status_after["status"], "claimed");
+}
+
