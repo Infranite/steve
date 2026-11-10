@@ -3,10 +3,12 @@
 //! npm registry (the user's npm configuration, so a mirror works). No version is pinned: the latest
 //! release is what Steve runs.
 //!
-//! - `steve setup` installs them ([`install`]);
+//! - `steve setup` installs the ones its user chose ([`install`]) and records the choice
+//!   ([`selection`]): an adapter that was not chosen is not installed later either;
 //! - a Node checks for newer releases once a day and upgrades an adapter none of its sessions is
 //!   using ([`Updates`]), as `STEVE_ADAPTER_UPDATES` says (`auto`, the default; `check`; `off`);
-//! - `steve adapters status|upgrade` does the same by hand.
+//! - `steve adapters status|upgrade` does the same by hand, and `steve adapters install <id>` adds
+//!   one.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -34,6 +36,45 @@ pub fn package(id: &str) -> Option<&'static str> {
     crate::adapters::builtin_packages()
         .find(|(b, _)| *b == id)
         .map(|(_, p)| p)
+}
+
+/// The Steve home whose adapters `command` is installed in (`<home>/adapters/node_modules/…`).
+pub fn home_of(command: &Path) -> Option<PathBuf> {
+    let mut p = command;
+    while let Some(parent) = p.parent() {
+        if p.file_name().is_some_and(|n| n == "node_modules")
+            && parent.file_name().is_some_and(|n| n == "adapters")
+        {
+            return parent.parent().map(Path::to_path_buf);
+        }
+        p = parent;
+    }
+    None
+}
+
+fn selection_file(home: &Path) -> PathBuf {
+    dir(home).join("selected.json")
+}
+
+/// The built-in adapters `home` was asked to have (`steve setup`'s choice, and what
+/// `adapters install <id>` added since). `None`: nothing was ever chosen, which means all of them.
+pub fn selection(home: &Path) -> Option<Vec<String>> {
+    serde_json::from_slice(&std::fs::read(selection_file(home)).ok()?).ok()
+}
+
+fn select(home: &Path, ids: &[&str]) -> Result<(), String> {
+    let file = selection_file(home);
+    std::fs::create_dir_all(dir(home)).map_err(|e| format!("{}: {e}", dir(home).display()))?;
+    let text = serde_json::to_string(ids).map_err(|e| e.to_string())?;
+    std::fs::write(&file, text + "\n").map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// Whether Steve keeps built-in `id` in `home`: it is installed there, was chosen, or nothing was
+/// ever chosen. An adapter its user left out is neither installed by the daily check nor reported
+/// as missing.
+pub fn wanted(home: &Path, id: &str) -> bool {
+    package(id).is_some_and(|p| installed(home, p).is_some())
+        || selection(home).is_none_or(|chosen| chosen.iter().any(|c| c == id))
 }
 
 /// The version of `package` installed in `home`'s adapters.
@@ -204,7 +245,10 @@ impl UpdatePolicy {
 }
 
 /// `steve-hub --adapters …` and `steve-node adapters …` (what `steve setup` and `steve adapters`
-/// run): `status [--json]` (installed and latest), `install` (the latest of each, also to upgrade).
+/// run): `status [--json]` (installed and latest), `list --json` (what there is to choose from,
+/// without asking the registry), `install [<id>…]` (the latest of each of those, also to upgrade;
+/// without ids, the ones this home keeps) and `install --only [<id>…]` (the same, and exactly
+/// those are the choice from now on: none, without ids).
 /// The exit code: 0, 1 (npm failed), 2 (usage, or no npm).
 pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
     let json = args.iter().any(|a| a == "--json");
@@ -217,6 +261,7 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
             } else {
                 for s in &list {
                     let state = match (&s.installed, &s.latest, &s.error) {
+                        (None, _, _) if !wanted(home, s.id) => "未选择".to_string(),
                         (None, _, _) => "未安装".to_string(),
                         (Some(i), Some(l), _) if newer(l, i) => format!("{i}，可升级到 {l}"),
                         (Some(i), Some(_), _) => format!("{i}，已是最新"),
@@ -231,16 +276,72 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
             }
             0
         }
+        Some("list") => {
+            let adapters: Vec<serde_json::Value> = crate::adapters::builtin_packages()
+                .map(|(id, package)| {
+                    serde_json::json!({
+                        "id": id,
+                        "name": crate::adapters::spec(id, None).name,
+                        "package": package,
+                        "installed": installed(home, package),
+                        "selected": wanted(home, id),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::json!({"npm": npm.is_some(), "chosen": selection(home).is_some(), "adapters": adapters})
+            );
+            0
+        }
         Some("install") | Some("upgrade") => {
+            let ids: Vec<&str> = args[1..]
+                .iter()
+                .map(String::as_str)
+                .filter(|a| !a.starts_with("--"))
+                .collect();
+            if let Some(unknown) = ids.iter().find(|id| package(id).is_none()) {
+                let known: Vec<&str> = crate::adapters::builtin_ids().collect();
+                eprintln!("没有这个适配器：{unknown}（可选：{}）", known.join("、"));
+                return 2;
+            }
+            /* --only: exactly these are chosen (none, without ids); otherwise named ids join an
+             * earlier choice, and without ids what is wanted is brought up to date */
+            let only = args.iter().any(|a| a == "--only");
+            let recorded = match (only, selection(home)) {
+                (true, _) => Some(ids.clone()),
+                (false, Some(before)) if !ids.is_empty() => Some(
+                    crate::adapters::builtin_ids()
+                        .filter(|id| ids.contains(id) || before.iter().any(|b| b == id))
+                        .collect(),
+                ),
+                _ => None,
+            };
+            if let Some(chosen) = recorded {
+                if let Err(e) = select(home, &chosen) {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            }
+            let targets: Vec<&str> = crate::adapters::builtin_ids()
+                .filter(|id| match only || !ids.is_empty() {
+                    true => ids.contains(id),
+                    false => wanted(home, id),
+                })
+                .collect();
+            if targets.is_empty() {
+                println!("没有选择任何 ACP 适配器；用 steve adapters install <id> 添加。");
+                return 0;
+            }
             let Some(npm) = npm else {
                 eprintln!("{NO_NPM}");
                 return 2;
             };
-            let packages: Vec<&str> = crate::adapters::builtin_packages().map(|(_, p)| p).collect();
+            let packages: Vec<&str> = targets.iter().filter_map(|id| package(id)).collect();
             println!("正在安装 ACP 适配器到 {}：{}", dir(home).display(), packages.join("、"));
             match install(&npm, home, &packages) {
                 Ok(()) => {
-                    for s in status(home, None) {
+                    for s in status(home, None).iter().filter(|s| targets.contains(&s.id)) {
                         println!(
                             "{} ({}): {}",
                             s.id,
@@ -257,7 +358,7 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
             }
         }
         _ => {
-            eprintln!("用法：adapters status [--json] | install | upgrade");
+            eprintln!("用法：adapters status [--json] | list --json | install [--only] [<id>…] | upgrade");
             2
         }
     }

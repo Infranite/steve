@@ -5,6 +5,7 @@ pub mod release;
 pub mod service;
 pub mod setup;
 pub mod signing;
+pub mod ui;
 
 pub fn build_info() -> serde_json::Value {
     serde_json::json!({

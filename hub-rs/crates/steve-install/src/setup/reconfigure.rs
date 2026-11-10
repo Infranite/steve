@@ -500,6 +500,9 @@ fn json_bytes(value: &Value) -> Result<Vec<u8>> {
 }
 
 fn confirm(input: &mut dyn Prompts, title: &str) -> Result<bool> {
+    if input.rich() {
+        return input.confirm(title.trim_end_matches("[y/N]").trim_end(), false);
+    }
     let answer = ask_value(input, title, Some("N"), false, |answer| {
         match answer.to_ascii_lowercase().as_str() {
             "y" | "yes" => Ok(true),
@@ -555,9 +558,9 @@ fn check(runtime: &Runtime, home: &Path, values: &BTreeMap<String, String>) -> R
         .as_array()
         .is_some_and(|warnings| !warnings.is_empty())
     {
-        println!(
+        crate::ui::info(&format!(
             "本机配置检查通过，现有安装仍有可选能力提示；这不代表 OIDC 登录或外网可达已验证。"
-        );
+        ));
     }
     Ok(())
 }
@@ -810,7 +813,10 @@ fn recover(home: &Path) -> Result<(PathBuf, bool)> {
 }
 
 pub(super) fn run(options: &Options, input: &mut dyn Prompts) -> Result<()> {
-    run_with(options, input, inspect, check)
+    crate::ui::intro("重新配置 Hub");
+    run_with(options, input, inspect, check)?;
+    crate::ui::outro("");
+    Ok(())
 }
 
 fn run_with(
@@ -829,19 +835,19 @@ fn run_with(
     owned(&home, true).context("重配置需要已有 Hub 目录；不会创建或接管目录")?;
     if exists(&pending_path(&home)) {
         let pending = Pending::load(&home)?;
-        println!(
+        crate::ui::info(&format!(
             "发现未完成的配置事务：{}。恢复会保留已提交的配置，或将未提交的配置回退到原文件。",
             pending.directory.display()
-        );
+        ));
         if !confirm(input, "现在恢复上次配置事务？[y/N]")? {
-            println!("已取消恢复；没有写入任何文件。");
+            crate::ui::info(&format!("已取消恢复；没有写入任何文件。"));
             return Ok(());
         }
         let _locks = locks(&home)?;
         // Also recheck the actual installation, rather than trusting paths in a journal alone.
         inspect(&home)?;
         let (archive, committed) = recover(&home)?;
-        println!(
+        crate::ui::info(&format!(
             "{}；记录：{}。需要新的修改时再次运行 steve setup --reconfigure。",
             if committed {
                 "已核验上次配置提交"
@@ -849,13 +855,13 @@ fn run_with(
                 "已恢复上次配置修改前的文件"
             },
             archive.display()
-        );
+        ));
         return Ok(());
     }
     let snapshot = Snapshot::read(&home, &inspect)?;
-    println!(
+    crate::ui::info(&format!(
         "维护已有 Hub 网络和 OIDC 配置。OIDC secret 保留原文件及内容；本次不修改身份或服务状态。"
-    );
+    ));
     let changes = changes(&snapshot, options, input)?;
     let candidate = snapshot.document.update(&changes)?;
     let record = updated_receipt(&snapshot.record, &candidate)?;
@@ -866,21 +872,21 @@ fn run_with(
     };
     snapshot.verify()?;
     if candidate == snapshot.env && candidate_receipt == snapshot.receipt {
-        println!("配置与收据已经一致，无需修改。");
+        crate::ui::info(&format!("配置与收据已经一致，无需修改。"));
         return Ok(());
     }
-    println!("准备保存以下配置：");
+    crate::ui::info(&format!("准备保存以下配置："));
     for (name, new) in &changes {
         if snapshot.document.values().get(name) != Some(new) {
-            println!("  {name} = {new}");
+            crate::ui::info(&format!("  {name} = {new}"));
         }
     }
     if changes.is_empty() {
-        println!("  仅将初始化收据同步到当前 steve.env，保留现有配置。");
+        crate::ui::info(&format!("  仅将初始化收据同步到当前 steve.env，保留现有配置。"));
     }
-    println!("  OIDC secret：保留原路径及内容");
+    crate::ui::info(&format!("  OIDC secret：保留原路径及内容"));
     if !confirm(input, "确认保存并备份现有配置？[y/N]")? {
-        println!("已取消重配置；没有写入任何文件。");
+        crate::ui::info(&format!("已取消重配置；没有写入任何文件。"));
         return Ok(());
     }
     let _locks = locks(&home)?;
@@ -919,16 +925,16 @@ fn run_with(
             };
         }
     };
-    println!(
+    crate::ui::info(&format!(
         "配置与收据已保存，本机配置检查通过。备份：{}",
         archive.display()
-    );
-    println!(
+    ));
+    crate::ui::info(&format!(
         "运行中的 Hub 仍使用启动时的配置；准备好后执行 steve hub restart --home {} --label {}。",
         shell_quote(home.to_str().context("路径必须为 UTF-8")?)?,
         shell_quote(&snapshot.runtime.label)?
-    );
-    println!("重启后再验证浏览器访问和 OIDC 登录；本次没有验证网络可达或登录。");
+    ));
+    crate::ui::info(&format!("重启后再验证浏览器访问和 OIDC 登录；本次没有验证网络可达或登录。"));
     Ok(())
 }
 

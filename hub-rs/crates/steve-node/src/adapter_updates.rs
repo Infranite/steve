@@ -23,16 +23,7 @@ const BUSY_AGAIN: Duration = Duration::from_secs(600);
 
 /// The Steve home whose `adapters` `command` is installed in (`<home>/adapters/node_modules/…`).
 pub(crate) fn managed_home(command: &Path) -> Option<PathBuf> {
-    let mut p = command;
-    while let Some(parent) = p.parent() {
-        if p.file_name().is_some_and(|n| n == "node_modules")
-            && parent.file_name().is_some_and(|n| n == "adapters")
-        {
-            return parent.parent().map(Path::to_path_buf);
-        }
-        p = parent;
-    }
-    None
+    managed::home_of(command)
 }
 
 #[derive(Default)]
@@ -96,6 +87,10 @@ impl AdapterUpdates {
             let (Some(home), Some(package)) = (managed_home(command), managed::package(id)) else {
                 continue;
             };
+            /* an adapter the user left out at setup is not installed behind their back */
+            if !managed::wanted(&home, id) {
+                continue;
+            }
             let (n, p) = (npm.clone(), package.to_string());
             let latest = tokio::task::spawn_blocking(move || managed::latest(&n, &p))
                 .await

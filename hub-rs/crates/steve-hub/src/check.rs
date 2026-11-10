@@ -119,6 +119,12 @@ pub(crate) fn local_node_warnings(cfg: &Config, vars: &crate::wire::Vars) -> Vec
             .extension()
             .is_some_and(|e| e == "js");
         if !available(adapter, !js) {
+            /* an adapter the user left out at setup (steve_acp::managed) is not a problem to report */
+            if steve_acp::managed::home_of(std::path::Path::new(adapter))
+                .is_some_and(|home| !steve_acp::managed::wanted(&home, harness))
+            {
+                continue;
+            }
             warnings.push(format!(
                 "ACP adapter {harness} is unavailable at {adapter}; install its ACP adapter \
                  and configure its registry entry with an absolute path before starting \

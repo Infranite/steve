@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use steve_install::{common, setup};
+use steve_install::{common, setup, ui};
 
 mod output;
 
-const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n              [--label LABEL] [--vault-dir PATH]\n  steve setup [hub] --reconfigure [--home PATH] [--listen IP:port]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL] [--json]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n  steve adapters status|upgrade [hub|node] [--home PATH]\n\nsetup 默认监听 0.0.0.0:8440，浏览器/OIDC 地址单独配置。\nsetup 注册服务，本次不启动服务；不导入登录凭据或授予 Node 工作目录。\n--reconfigure 只维护已安装 Hub 的网络与现有 OIDC 配置，保留 secret、身份和数据；不会自动重启。\n服务命令在终端显示摘要；管道或 --json 保持 JSON 输出。\n";
+const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440] [--public-url URL]\n              [--adapters ID,ID|all|none]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n              [--label LABEL] [--vault-dir PATH]\n  steve setup [hub] --reconfigure [--home PATH] [--listen IP:port]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL] [--json]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n  steve adapters status|upgrade [hub|node] [--home PATH]\n  steve adapters install ID [ID...] [hub|node] [--home PATH]\n\nsetup 在终端里是向导：选角色、网络和要装的 ACP 适配器，装完可以直接启动 Hub。\nsetup 默认监听 0.0.0.0:8440，网页地址随监听地址推出（--public-url 指定，--reconfigure 以后再改）。\n非终端（管道、TERM=dumb、STEVE_PLAIN=1）下 setup 只注册服务，不启动；不导入登录凭据或授予 Node 工作目录。\n--reconfigure 只维护已安装 Hub 的网络与现有 OIDC 配置，保留 secret、身份和数据；不会自动重启。\n服务命令在终端显示摘要；管道或 --json 保持 JSON 输出。\n";
 
 fn option(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
     let mut found = None;
@@ -54,8 +54,14 @@ fn bundle() -> Result<PathBuf> {
 fn main() {
     let code = match run(std::env::args().skip(1).collect()) {
         Ok(code) => code,
+        /* the prompt already said so */
+        Err(error) if error.is::<ui::Cancelled>() => 130,
         Err(error) => {
-            eprintln!("steve: {error:#}");
+            if ui::decorated() {
+                ui::fail(&format!("{error:#}"));
+            } else {
+                eprintln!("steve: {error:#}");
+            }
             1
         }
     };
@@ -87,6 +93,8 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                 hub: option(&mut args, "--hub")?,
                 pin: option(&mut args, "--pin")?,
                 listen: option(&mut args, "--listen")?,
+                public_url: option(&mut args, "--public-url")?,
+                adapters: option(&mut args, "--adapters")?,
                 label: option(&mut args, "--label")?,
                 vault_dir: option(&mut args, "--vault-dir")?.map(PathBuf::from),
                 role: if args
@@ -151,8 +159,22 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             } else {
                 print!(
                     "{}",
-                    output::service(&command, &action, &home, label.as_deref(), &report)
+                    ui::summary(&output::service(&command, &action, &home, label.as_deref(), &report))
                 );
+                /* the service manager has the job; say when the Hub itself answers */
+                let started = command == "hub"
+                    && matches!(action.as_str(), "start" | "restart")
+                    && report["ok"] != false;
+                if let (true, Some((api, web))) = (started, setup::hub_urls(&home)) {
+                    let spinner = ui::Spinner::start("等待 Hub 应答");
+                    match setup::hub_ready(&api, std::time::Duration::from_secs(45)) {
+                        Some(health) => spinner.done(
+                            "Hub 已就绪",
+                            &format!("v{} · 网页 {web}", health["version"].as_str().unwrap_or("?")),
+                        ),
+                        None => spinner.warn("Hub 还没有应答；用 steve hub status 和 steve hub doctor 查看原因。"),
+                    }
+                }
             }
             Ok(if report["ok"] == false { 1 } else { 0 })
         }
@@ -165,7 +187,14 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             };
             let action = if action == "upgrade" { "install".to_string() } else { action };
             if !matches!(action.as_str(), "status" | "install") {
-                bail!("请选择 adapters status/upgrade");
+                bail!("请选择 adapters status/upgrade/install");
+            }
+            /* install <id>…: those adapters, added to what this home keeps */
+            let mut ids = Vec::new();
+            while action == "install"
+                && args.first().is_some_and(|a| !matches!(a.as_str(), "hub" | "node") && !a.starts_with("--"))
+            {
+                ids.push(args.remove(0));
             }
             /* hub or node: as given, else the Hub's home when there is one */
             let role = match args.first().map(String::as_str) {
@@ -187,7 +216,9 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                 .join("current")
                 .canonicalize()
                 .with_context(|| format!("{role} 尚未初始化；请先运行 steve setup"))?;
-            setup::adapters(&role, &home, &current, &[&action])
+            let mut passed = vec![action.as_str()];
+            passed.extend(ids.iter().map(String::as_str));
+            setup::adapters(&role, &home, &current, &passed)
         }
         "upgrade" => {
             let home = role_home("hub", option(&mut args, "--home")?)?;
