@@ -154,8 +154,9 @@ pub struct AdapterProperties {
     /// model; without it they try the bot's model, else the adapter's own default.
     pub model_fallback: bool,
     /// Words that name its quick, cheap models, best first (`haiku`): of the models the adapter
-    /// itself offers, the first whose id contains one is what Steve's cheap, frequent judgments
-    /// (routing, titles) are put on once. None: they follow Steve's model like everything else.
+    /// itself offers, the newest whose name has one as a whole word is what Steve's cheap, frequent
+    /// judgments (routing, titles) are put on once. None: they follow Steve's model like everything
+    /// else.
     pub fast_models: Vec<String>,
 }
 

@@ -69,19 +69,52 @@ impl Harness {
         }
     }
 
-    /// Its quick, cheap model: of the models it offers, the first whose id contains the earliest
-    /// of its declared words. None before it has answered a probe (a declared list is not what
-    /// this installation has) or when it offers no such model.
+    /// Its quick, cheap model: of the models it offers, one whose name (the id after any route
+    /// prefix, `route/name`) has the earliest of its declared words as a whole word (`mini` is in
+    /// `gpt-6-mini`, not in `gemini-3`). Of several: the one on the route of its default model,
+    /// then the newest by the numbers in the name, then the plainest name, then the first offered.
+    /// None before it has answered a probe (a declared list is not what this installation has) or
+    /// when it offers no such model.
     pub fn fast_model(&self) -> Option<String> {
         if self.ready != Some(true) {
             return None;
         }
+        let split = |id: &str| match id.rsplit_once('/') {
+            Some((route, name)) => (Some(route.to_string()), name.to_ascii_lowercase()),
+            None => (None, id.to_ascii_lowercase()),
+        };
+        let words = |name: &str| -> Vec<String> {
+            name.split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(String::from)
+                .collect()
+        };
+        let numbers = |name: &str| -> Vec<u64> {
+            name.split(|c: char| !c.is_ascii_digit())
+                .filter_map(|n| n.parse().ok())
+                .collect()
+        };
+        let own = self.default_model.as_deref().and_then(|d| split(d).0);
         self.fast_models.iter().find_map(|w| {
             let w = w.to_ascii_lowercase();
             self.models
                 .iter()
-                .find(|m| !w.is_empty() && m.id.to_ascii_lowercase().contains(&w))
-                .map(|m| m.id.clone())
+                .enumerate()
+                .filter_map(|(at, m)| {
+                    let (route, name) = split(&m.id);
+                    let ws = words(&name);
+                    ws.contains(&w).then(|| {
+                        let rank = (
+                            route == own,
+                            numbers(&name),
+                            std::cmp::Reverse(ws.len()),
+                            std::cmp::Reverse(at),
+                        );
+                        (rank, &m.id)
+                    })
+                })
+                .max_by(|a, b| a.0.cmp(&b.0))
+                .map(|(_, id)| id.clone())
         })
     }
 
@@ -122,4 +155,85 @@ pub fn name_of(list: &[Harness], id: &str) -> String {
         || steve_acp::adapters::spec(id, None).name,
         |h| h.name.clone(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An adapter that calls `words` quick and has answered a probe with `models`.
+    fn offering(words: &[&str], default: Option<&str>, models: &[&str]) -> Harness {
+        let mut h = Harness::declared("mine", None);
+        h.ready = Some(true);
+        h.fast_models = words.iter().map(|w| w.to_string()).collect();
+        h.default_model = default.map(String::from);
+        h.models = models
+            .iter()
+            .map(|m| HarnessModel {
+                id: m.to_string(),
+                name: None,
+                description: None,
+            })
+            .collect();
+        h
+    }
+
+    #[test]
+    fn the_quick_model_is_a_whole_word_the_newest_and_on_the_default_s_route() {
+        let pick = |words: &[&str], default: Option<&str>, models: &[&str]| {
+            offering(words, default, models).fast_model()
+        };
+        // a list in alphabetical order: the newest, not the first
+        let claude = [
+            "default",
+            "claude-fable-5-2",
+            "claude-haiku-4-5-20251001",
+            "claude-haiku-5-5",
+            "claude-haiku-5-5-thinking",
+            "gw/claude-haiku-4-5-20251001",
+            "gw/claude-haiku-5-5",
+            "other/claude-haiku-6",
+        ];
+        assert_eq!(
+            pick(&["haiku"], None, &claude).as_deref(),
+            Some("claude-haiku-5-5")
+        );
+        // the default model goes through a route: the quick one takes the same
+        assert_eq!(
+            pick(&["haiku"], Some("gw/claude-fable-5-2"), &claude).as_deref(),
+            Some("gw/claude-haiku-5-5")
+        );
+        // a route that has none: any, the newest
+        assert_eq!(
+            pick(&["haiku"], Some("none/x"), &claude).as_deref(),
+            Some("other/claude-haiku-6")
+        );
+        // a word inside another word or in the route is not the word
+        let mixed = [
+            "gemini-3-flash",
+            "local/mac-mini/qwen-3",
+            "gpt-5.6-luna-mini",
+            "gpt-6-luna",
+            "gpt-6-luna-mini",
+        ];
+        assert_eq!(
+            pick(&["mini"], None, &mixed).as_deref(),
+            Some("gpt-6-luna-mini")
+        );
+        assert_eq!(pick(&["mini"], None, &mixed[..2]), None);
+        // the earliest declared word that names a model, whatever the case; an alias alone is fine
+        assert_eq!(
+            pick(&["nano", "mini"], None, &mixed).as_deref(),
+            Some("gpt-6-luna-mini")
+        );
+        assert_eq!(
+            pick(&["haiku"], None, &["default", "opus", "Haiku"]).as_deref(),
+            Some("Haiku")
+        );
+        assert_eq!(pick(&[""], None, &mixed), None);
+        // nothing before a probe has answered
+        let mut h = offering(&["haiku"], None, &claude);
+        h.ready = None;
+        assert_eq!(h.fast_model(), None);
+    }
 }

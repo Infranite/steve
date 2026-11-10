@@ -1302,15 +1302,15 @@ mod tests {
         // it offers no model its declaration calls quick: still nothing
         probed(&m, CLAUDE_CODE, &["default", "opus"]);
         assert!(!m.migrate("default").unwrap());
-        // it does: the earliest declared word, the first model that has it, whatever the case
+        // it does: the newest model with the earliest declared word ([`Harness::fast_model`])
         probed(
             &m,
             CLAUDE_CODE,
-            &["default", "opus", "Haiku", "claude-haiku-5-5"],
+            &["default", "opus", "claude-haiku-4-5", "claude-haiku-5-5"],
         );
         assert_eq!(
             m.recommended(route),
-            Some(ch(CLAUDE_CODE, &["Haiku"], None))
+            Some(ch(CLAUDE_CODE, &["claude-haiku-5-5"], None))
         );
         assert_eq!(m.recommended(purpose_of("chat").unwrap()), None);
         // an override made before stays as it is
@@ -1324,7 +1324,7 @@ mod tests {
         for p in ["route", "disclosure", "flow", "intent"] {
             assert_eq!(
                 m.for_purpose("default", p),
-                ch(CLAUDE_CODE, &["Haiku"], None),
+                ch(CLAUDE_CODE, &["claude-haiku-5-5"], None),
                 "{p}"
             );
         }
