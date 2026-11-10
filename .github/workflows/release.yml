@@ -4,6 +4,7 @@ name: Release
 # hiccup) is run again on the same tag with `gh run rerun <run id> --failed`: nothing is published
 # before every target built, so the version is not lost.
 # The build uses no cache: a cache saved on a tag can be read only by that tag, never by the next one.
+# Every job has a time limit of two to several times its longest run; one stopped there is rerun the same way.
 on:
   push:
     tags: ['v[0-9]*.[0-9]*.[0-9]*']
@@ -17,6 +18,7 @@ env:
 jobs:
   web:
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -41,6 +43,7 @@ jobs:
           - runner: macos-15
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
     env:
       MACOSX_DEPLOYMENT_TARGET: '14.0'
     steps:
@@ -92,6 +95,7 @@ jobs:
           - runner: macos-15
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -123,6 +127,7 @@ jobs:
   publish:
     needs: package
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
