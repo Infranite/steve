@@ -270,7 +270,7 @@ async fn a_models_draft_sets_lists_effort_and_agent_defaults_and_undoes() {
         assert!(p.contains("  route.harness · 分流（"));
         assert!(p.contains("跟随 Steve（现在是 Claude Code · claude-sonnet-5-5 → claude-opus-5-5）"));
         assert!(p.contains("  route · 分流 · 模型"));
-        assert!(p.contains("  route.effort · 分流 · 推理强度 · enum · 默认|低|中|高|很高|最高|关闭|最低 · \"默认\""));
+        assert!(p.contains("  route.effort · 分流 · 推理强度 · enum · 默认|低|中|高|很高|最高|极致 · \"默认\""));
         assert!(p.contains("  agent.claude-code · Claude Code 新会话的默认模型"));
         Ok(r#"{"changes":[{"key":"route","value":"claude-sonnet-5-5，claude-haiku-5-5"},{"key":"chat.harness","value":"Codex"},{"key":"research.effort","value":"最高"},{"key":"agent.codex","value":"gpt-6-sol"},{"key":"yolo","value":"not a model!"}]}"#.into())
     });

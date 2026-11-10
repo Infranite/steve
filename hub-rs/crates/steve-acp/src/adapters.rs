@@ -441,7 +441,7 @@ const BUILTINS: &[Builtin] = &[
             usage_input_includes_cache: true,
             usage_fallback: UsageFallback::CodexRollout,
             fallback_models: vec![],
-            fallback_efforts: strings(&["low", "medium", "high", "xhigh", "max"]),
+            fallback_efforts: strings(&["low", "medium", "high", "xhigh", "max", "ultra"]),
             model_fallback: false,
         },
     },
