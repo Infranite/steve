@@ -347,6 +347,7 @@ pub async fn call(
 ) -> Result<String, String> {
     let ws = run.workspace_id.clone();
     match name {
+        n if super::onboard_mcp::is(n) => super::onboard_mcp::call(x, run, n, args, owner).await,
         super::diagnostics::TOOL => {
             let (store, core, run, args) = (
                 x.store.clone(),
@@ -421,6 +422,23 @@ pub async fn call(
     }
 }
 
+/// The first meeting is on for `run` (`onboard_mcp::open`), asked off the async workers.
+async fn meeting(x: &Extra, run: &ThreadRun) -> bool {
+    let (core, run) = (x.tools.core.clone(), run.clone());
+    tokio::task::spawn_blocking(move || super::onboard_mcp::open(&core, &run))
+        .await
+        .unwrap_or(false)
+}
+
+/// What `/mcp` lists for `run`: the research tools, and the first meeting's while it is on for it.
+async fn listed(x: &Extra, run: &ThreadRun) -> Vec<Value> {
+    let mut list = tools();
+    if meeting(x, run).await {
+        list.extend(super::onboard_mcp::tools());
+    }
+    list
+}
+
 /// The research tools as a Node's catalog (a research job's grant): the very set `/mcp` lists for
 /// an in-process run's token.
 pub fn descriptors() -> Vec<steve_node_api::ToolDescriptor> {
@@ -433,6 +451,16 @@ pub fn descriptors() -> Vec<steve_node_api::ToolDescriptor> {
             read_only: true,
         })
         .collect()
+}
+
+/// The catalog of the research job of `run`: [`descriptors`], and the first meeting's tools while
+/// it is on for that run.
+pub async fn catalog(x: &Extra, run: &ThreadRun) -> Vec<steve_node_api::ToolDescriptor> {
+    let mut list = descriptors();
+    if meeting(x, run).await {
+        list.extend(super::onboard_mcp::descriptors());
+    }
+    list
 }
 
 /// A research job's tool call through its Node, answered as `/mcp` answers an in-process run.
@@ -468,7 +496,7 @@ pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Res
             StatusCode::ACCEPTED.into_response()
         }
         "ping" => rpc(&id, json!({})),
-        "tools/list" => rpc(&id, json!({"tools": tools()})),
+        "tools/list" => rpc(&id, json!({"tools": listed(x, &run).await})),
         "tools/call" => {
             let name = msg
                 .pointer("/params/name")

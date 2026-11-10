@@ -1034,6 +1034,16 @@ pub trait Domain: Send + Sync + 'static {
         todo_backend!("models_write")
     }
 
+    // ── first meeting ──
+    /// Begins the first meeting (`steve_core::thread::onboard`): the id of its welcome message.
+    async fn onboard_start(&self, ws: &str, actor: &str) -> BResult<String> {
+        todo_backend!("onboard_start")
+    }
+    /// Ends the first meeting, whether or not it ran.
+    async fn onboard_end(&self, ws: &str, actor: &str) -> BResult<()> {
+        todo_backend!("onboard_end")
+    }
+
     // ── conversational configuration (changes.ts) ──
     async fn config_draft(&self, ws: &str, target: &Obj, text: &str) -> BResult<Obj> {
         todo_backend!("config_draft")

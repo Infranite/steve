@@ -208,8 +208,10 @@ pub trait Service: Send + Sync {
         name: &str,
         args: serde_json::Value,
     ) -> Result<String, String>;
-    /// The tools a research job sees: read-only ones only.
-    fn research_catalog(&self) -> Vec<ToolDescriptor> {
+    /// The tools the research job of `run` sees: the read-only ones, and the first meeting's
+    /// while that is on for it.
+    async fn research_catalog(&self, run: &ThreadRun) -> Vec<ToolDescriptor> {
+        let _ = run;
         vec![]
     }
     /// Runs research tool `name` for thread run `run`; anything else is refused.
@@ -236,8 +238,8 @@ impl Service for ToolService {
     ) -> Result<String, String> {
         self.call(session, name, args).await
     }
-    fn research_catalog(&self) -> Vec<ToolDescriptor> {
-        super::research_mcp::descriptors()
+    async fn research_catalog(&self, run: &ThreadRun) -> Vec<ToolDescriptor> {
+        super::research_mcp::catalog(&self.extra, run).await
     }
     async fn research_call(
         &self,
@@ -324,7 +326,7 @@ impl NodeTools {
             .cloned()
             .ok_or_else(|| ApiError::new(ErrorCode::Offline, "tool service not ready"))
     }
-    fn catalog_of(service: &dyn Service, caller: &Caller) -> ApiResult<Catalog> {
+    async fn catalog_of(service: &dyn Service, caller: &Caller) -> ApiResult<Catalog> {
         let tools = match caller {
             Caller::Session(_) => service.catalog(),
             Caller::DependencyManagement(_) => service
@@ -332,7 +334,7 @@ impl NodeTools {
                 .into_iter()
                 .filter(|t| caller.permits(&t.name))
                 .collect(),
-            Caller::Research(_) => service.research_catalog(),
+            Caller::Research(r) => service.research_catalog(r).await,
         };
         let digest = digest_of(&tools)?;
         Ok(Catalog {
@@ -426,7 +428,7 @@ fn saved(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Optio
 impl HubTools for NodeTools {
     async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog> {
         let caller = self.authorized(&execution, true).await?;
-        Self::catalog_of(&*self.service()?, &caller)
+        Self::catalog_of(&*self.service()?, &caller).await
     }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
         let key = q.key();
@@ -445,7 +447,7 @@ impl HubTools for NodeTools {
             return Err(denied());
         }
         let service = self.service()?;
-        let catalog = Self::catalog_of(&*service, &session)?;
+        let catalog = Self::catalog_of(&*service, &session).await?;
         if catalog.revision != q.catalog {
             return Err(ApiError::new(ErrorCode::Stale, "tool catalog changed"));
         }

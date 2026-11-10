@@ -80,6 +80,8 @@ async fn the_first_meeting_is_a_conversation_with_steve_itself() {
     );
     assert!(fr.seen.lock().unwrap()[1].full);
     assert!(k.core.onboard_allows(WS, &mid, None).unwrap());
+    assert!(!k.core.onboard_allows(WS, "msg_nowhere", None).unwrap());
+    assert!(!k.core.onboard_allows("ws_other", &mid, None).unwrap());
 
     /* a message that names an item is still the router's; the run it picks is part of the meeting */
     k.core.say(WS, "ST-99 是做什么的？", &[]).unwrap();

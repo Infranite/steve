@@ -1866,6 +1866,14 @@ impl Domain for CoreDomain {
         );
         blocking(move || Ok(c.models().write(&ws, &values, &actor, "settings.models")?)).await
     }
+    async fn onboard_start(&self, ws: &str, actor: &str) -> BResult<String> {
+        let (c, ws, actor) = (self.core.clone(), ws.to_string(), actor.to_string());
+        blocking(move || c.onboard_start(&ws, &actor)).await
+    }
+    async fn onboard_end(&self, ws: &str, actor: &str) -> BResult<()> {
+        let (c, ws, actor) = (self.core.clone(), ws.to_string(), actor.to_string());
+        blocking(move || c.onboard_end(&ws, &actor)).await
+    }
     async fn config_draft(&self, ws: &str, target: &Obj, text: &str) -> BResult<Obj> {
         let t = steve_core::changes::Target {
             kind: target

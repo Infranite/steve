@@ -77,9 +77,14 @@ impl Core {
     }
 
     /// Whether the run answering message `mid` (asked by `user`) may use the first meeting's tools:
-    /// the owner's own main conversation, while the meeting is on.
+    /// the owner's own main conversation, while the meeting is on. A message that is not there (or
+    /// is another workspace's) opens nothing.
     pub fn onboard_allows(&self, ws: &str, mid: &str, user: Option<&str>) -> Result<bool> {
-        Ok(self.conv_of(mid) == MAIN
+        let here = self
+            .store()
+            .message(mid)?
+            .is_some_and(|m| m.workspace_id == ws && m.space == MAIN);
+        Ok(here
             && super::research::asked_by_owner(self.store(), user)
             && self.onboard_pending(ws)?)
     }

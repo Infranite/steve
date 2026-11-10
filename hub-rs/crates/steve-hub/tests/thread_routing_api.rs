@@ -855,3 +855,295 @@ async fn retried_sends_go_once() {
         .count();
     assert_eq!(made, 1, "{:#?}", state["items"]);
 }
+
+/// The first meeting: the owner starts it, its tools exist for the run answering them in Steve's
+/// own conversation while it is on, and what they write is what the pages show.
+#[tokio::test]
+async fn the_first_meeting_writes_through_its_own_tools() {
+    let e = start().await;
+    let (s, v) = e.call("POST", "/api/onboard/start", None).await;
+    assert_eq!(s, 200, "{v}");
+    let hello = v["message"].as_str().unwrap().to_string();
+    let t = e.settle(1).await;
+    assert_eq!(
+        (t[0]["id"].as_str(), t[0]["author"].as_str()),
+        (Some(hello.as_str()), Some("steve"))
+    );
+    assert_eq!(t[0]["meta"]["onboard"], true);
+    let onboard = || async {
+        let (_, st) = e.call("GET", "/api/state", None).await;
+        st["settings"]["onboard"].clone()
+    };
+    assert_eq!(onboard().await, "pending");
+    let (_, v) = e.call("POST", "/api/onboard/start", None).await;
+    assert_eq!(v["message"], hello.as_str(), "one meeting, one welcome");
+    assert_eq!(e.thread().await.len(), 1);
+
+    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let th = store.thread();
+    for (message, token) in [
+        (hello.as_str(), "meet-token-1"),
+        ("msg_elsewhere", "meet-token-2"),
+    ] {
+        let run = th
+            .run_add(&steve_store::NewThreadRun {
+                workspace_id: "default".into(),
+                message_id: message.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        th.run_patch(
+            &run.id,
+            &steve_store::RunPatch {
+                status: Some("running".into()),
+                token_hash: Some(Some(steve_store::sha(token))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let rpc = |body: Value, tok: &'static str| {
+        let http = e.http.clone();
+        let url = format!("{}/mcp", e.base);
+        async move {
+            let r = http
+                .post(url)
+                .header("authorization", format!("Bearer {tok}"))
+                .header("accept", "application/json, text/event-stream")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            r.json::<Value>().await.unwrap_or(Value::Null)
+        }
+    };
+    let names = |tok: &'static str| {
+        let listing = rpc(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            tok,
+        );
+        async move {
+            let v = listing.await;
+            v["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    /* (the tool's text, whether it is an error) */
+    let tool = |tok: &'static str, name: &str, args: Value| {
+        let call = rpc(
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": args}}),
+            tok,
+        );
+        async move {
+            let v = call.await;
+            (
+                v["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                v["result"]["isError"] == true,
+            )
+        }
+    };
+    const ALL: [&str; 4] = [
+        "steve_onboard_profile",
+        "steve_onboard_models",
+        "steve_onboard_bots",
+        "steve_onboard_done",
+    ];
+    let mine = names("meet-token-1").await;
+    assert!(ALL.iter().all(|t| mine.iter().any(|n| n == t)), "{mine:?}");
+    assert!(mine.iter().any(|n| n == "steve_items_search"), "{mine:?}");
+    /* a run that answers nothing in Steve's own conversation neither sees nor reaches them */
+    let other = names("meet-token-2").await;
+    assert!(
+        !other.iter().any(|n| n.starts_with("steve_onboard")),
+        "{other:?}"
+    );
+    let (said, failed) = tool(
+        "meet-token-2",
+        "steve_onboard_profile",
+        json!({"name": "别人"}),
+    )
+    .await;
+    assert!(failed && said.contains("first meeting is not on"), "{said}");
+
+    /* the profile: the "me" contact and confirmed memories about it */
+    let (said, failed) = tool(
+        "meet-token-1",
+        "steve_onboard_profile",
+        json!({"name": "小李", "about": "后端工程师，用 Steve 管自己的开源项目", "facts": ["主要写 Rust"], "preferences": ["回答先给结论"]}),
+    )
+    .await;
+    assert!(
+        !failed && said.contains("小李") && said.contains("2 memories"),
+        "{said}"
+    );
+    let (_, me) = e.call("GET", "/api/contacts/me", None).await;
+    assert_eq!(me["name"], "小李", "{me}");
+    assert_eq!(me["note"], "后端工程师，用 Steve 管自己的开源项目", "{me}");
+    let (_, mems) = e.call("GET", "/api/parties/me/memories", None).await;
+    let mems = mems.to_string();
+    assert!(
+        mems.contains("主要写 Rust") && mems.contains("回答先给结论"),
+        "{mems}"
+    );
+    let (said, failed) = tool(
+        "meet-token-1",
+        "steve_onboard_profile",
+        json!({"facts": ["主要写 Rust"]}),
+    )
+    .await;
+    assert!(!failed && said.contains("1 already known"), "{said}");
+    let (said, failed) = tool("meet-token-1", "steve_onboard_profile", json!({})).await;
+    assert!(failed && said.contains("Nothing to save"), "{said}");
+
+    /* the models: the list first, then a choice from it */
+    let (said, failed) = tool("meet-token-1", "steve_onboard_models", json!({})).await;
+    assert!(!failed, "{said}");
+    let seen: Value = serde_json::from_str(&said).unwrap();
+    let harness = seen["steve"]["harness"].as_str().unwrap().to_string();
+    assert!(
+        seen["purposes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["key"] == "route"),
+        "{seen}"
+    );
+    let offered: Vec<String> = seen["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["id"] == harness.as_str())
+        .unwrap()["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!offered.is_empty(), "{seen}");
+    let fast = offered.last().unwrap().clone();
+    let (said, failed) = tool(
+        "meet-token-1",
+        "steve_onboard_models",
+        json!({"purposes": {"route": {"models": [fast]}, "title": {"harness": harness, "models": [fast]}}}),
+    )
+    .await;
+    assert!(!failed, "{said}");
+    let (_, view) = e.call("GET", "/api/settings/models", None).await;
+    let route = view["purposes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["key"] == "route")
+        .unwrap()
+        .clone();
+    assert_eq!(route["value"]["harness"], harness.as_str(), "{route}");
+    assert_eq!(route["value"]["models"], json!([fast]), "{route}");
+    let (said, failed) = tool(
+        "meet-token-1",
+        "steve_onboard_models",
+        json!({"purposes": {"route": {"models": ["no-such-model"]}}}),
+    )
+    .await;
+    assert!(failed && said.contains("is not a model of"), "{said}");
+    let (said, failed) = tool(
+        "meet-token-1",
+        "steve_onboard_models",
+        json!({"purposes": {"route": {"harness": "no-such-harness", "models": [fast]}}}),
+    )
+    .await;
+    assert!(failed && said.contains("no harness"), "{said}");
+
+    /* the Bots: created as the Bots page creates them, once */
+    let bots = || async {
+        let (_, st) = e.call("GET", "/api/state", None).await;
+        st["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let before = bots().await.len();
+    let (said, failed) = tool(
+        "meet-token-1",
+        "steve_onboard_bots",
+        json!({"bots": [{"name": "x".repeat(41)}]}),
+    )
+    .await;
+    assert!(failed && said.contains("longer than 40"), "{said}");
+    let (said, failed) = tool(
+        "meet-token-1",
+        "steve_onboard_bots",
+        json!({"bots": [
+            {"name": "代码审查", "role": "审查每个改动", "rules": "先读 diff，再读测试。", "model": fast},
+            {"name": "写文档", "role": "写和改文档", "persona": "简洁"},
+        ]}),
+    )
+    .await;
+    assert!(
+        !failed && said.contains("Created: 代码审查, 写文档."),
+        "{said}"
+    );
+    let now = bots().await;
+    assert_eq!(now.len(), before + 2, "{now:?}");
+    let (said, failed) = tool(
+        "meet-token-1",
+        "steve_onboard_bots",
+        json!({"bots": [{"name": "代码审查"}]}),
+    )
+    .await;
+    assert!(!failed && said.contains("Skipped"), "{said}");
+    assert_eq!(bots().await.len(), before + 2);
+    let audited: i64 = store
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM audit WHERE action IN ('bot.create', 'settings.models', 'mm.create')",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(audited, 2 + 1 + 2, "every write is in the audit log");
+
+    /* over: the tools close */
+    let (said, failed) = tool("meet-token-1", "steve_onboard_done", json!({})).await;
+    assert!(!failed, "{said}");
+    assert_eq!(onboard().await, "done");
+    let after = names("meet-token-1").await;
+    assert!(
+        !after.iter().any(|n| n.starts_with("steve_onboard")),
+        "{after:?}"
+    );
+    let (said, failed) = tool(
+        "meet-token-1",
+        "steve_onboard_profile",
+        json!({"name": "再来"}),
+    )
+    .await;
+    assert!(failed && said.contains("first meeting is not on"), "{said}");
+    let (_, me) = e.call("GET", "/api/contacts/me", None).await;
+    assert_eq!(me["name"], "小李");
+
+    /* meeting again is a new welcome; skipping ends it; neither is a member's to do */
+    let (_, v) = e.call("POST", "/api/onboard/start", None).await;
+    assert_ne!(v["message"], hello.as_str());
+    assert_eq!(onboard().await, "pending");
+    assert_eq!(e.call("POST", "/api/onboard/skip", None).await.0, 200);
+    assert_eq!(onboard().await, "done");
+    store
+        .with_conn(|c| {
+            c.execute("UPDATE users SET role='member' WHERE role='owner'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(e.call("POST", "/api/onboard/start", None).await.0, 403);
+    assert_eq!(e.call("POST", "/api/onboard/skip", None).await.0, 403);
+    assert_eq!(onboard().await, "done");
+}

@@ -921,6 +921,22 @@ pub async fn models_patch(
     ok(st.domain.models_view(&c.ws).await?)
 }
 
+/// `POST /api/onboard/start`: Steve opens the first meeting in the main conversation (the tour's
+/// last step, and "meet again" in the settings). Answers `{message}`, the welcome; one that is on
+/// already is left alone. The instance's owner only: the meeting acts on this machine.
+pub async fn onboard_start(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
+    owner_or(&c, || steve_i18n::t!("hub.onboard.owner_only"))?;
+    let message = st.domain.onboard_start(&c.ws, &c.me).await?;
+    ok(json!({"ok": true, "message": message}))
+}
+
+/// `POST /api/onboard/skip`: no first meeting, or the end of the one that is on.
+pub async fn onboard_skip(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
+    owner_or(&c, || steve_i18n::t!("hub.onboard.owner_only"))?;
+    st.domain.onboard_end(&c.ws, &c.me).await?;
+    ok_true()
+}
+
 pub async fn config_draft(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,

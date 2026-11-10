@@ -669,6 +669,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
             get(misc::models_get).patch(misc::models_patch),
         )
         .route("/settings", patch(misc::settings_patch))
+        .route("/onboard/start", post(misc::onboard_start))
+        .route("/onboard/skip", post(misc::onboard_skip))
         .route("/config/draft", post(misc::config_draft))
         .route("/config/{id}/apply", post(misc::config_apply))
         .route("/config/{id}/undo", post(misc::config_undo))

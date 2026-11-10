@@ -27,6 +27,7 @@ pub mod node_files;
 pub mod node_runtime;
 pub mod node_secrets;
 pub mod node_tools;
+pub mod onboard_mcp;
 pub mod outbox;
 pub mod ports;
 pub mod principal;
