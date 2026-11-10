@@ -1,6 +1,5 @@
 # Places that still tell harnesses apart by name (tests/harness_parity.rs). The list only
 # shrinks: move each to a declared adapter property or an ACP capability.
-steve-acp/src/codex.rs	"codex"	1
 steve-hub/src/catalog.rs	"claude"	1
 steve-hub/src/resume.rs	"claude-code"	1
 steve-hub/src/resume.rs	"codex"	1

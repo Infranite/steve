@@ -14,7 +14,7 @@ use steve_node_wire::Identity;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: steve-node pair <hub-url> [--pin sha256:…] [--name NAME] | run | rotate | status | forget | --build-info | --version\n\
+        "usage: steve-node pair <hub-url> [--pin sha256:…] [--name NAME] | run | rotate | status | adapters [status|install] | forget | --build-info | --version\n\
          The pairing code is read from STEVE_PAIR_CODE or stdin, never from the command line."
     );
     std::process::exit(2)
@@ -104,6 +104,13 @@ async fn main() -> Result<()> {
                     id.fingerprint()
                 ),
                 Err(e) => println!("{e}\nfingerprint {}", id.fingerprint()),
+            }
+        }
+        Some("adapters") => {
+            let h = home.harness()?;
+            let code = steve_acp::managed::cli(&home.0, h.node.as_deref(), &args[1..]);
+            if code != 0 {
+                std::process::exit(code);
             }
         }
         Some("forget") => {

@@ -4,6 +4,9 @@ class Steve < Formula
   version "@VERSION@"
   license "MIT"
 
+  # the ACP adapters (steve setup installs them with npm) are Node.js programs
+  depends_on "node"
+
   on_macos do
     depends_on arch: :arm64
     depends_on macos: :sonoma
@@ -33,6 +36,7 @@ class Steve < Formula
   def caveats
     <<~EOS
       Set up a Hub with `steve setup`, then start it with `steve hub start`.
+      Setup installs the ACP adapters; `steve adapters status` shows them.
       For a remote Node, use `steve setup node --hub https://your-hub.example`.
       `steve hub doctor` and `steve node doctor` work without a reachable Hub.
       Homebrew installs the launcher and a verified bundle. Steve manages its

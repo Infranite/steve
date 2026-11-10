@@ -585,6 +585,16 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         let args: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(crate::access::main(&args));
     }
+    // the ACP adapters in this Hub's home (steve_acp::managed); `steve setup` and `steve adapters` run it
+    if std::env::args().nth(1).as_deref() == Some("--adapters") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let home = std::env::var_os("STEVE_HOME")
+            .filter(|h| !h.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| crate::config::home_dir().join(".steve"));
+        let node = std::env::var_os("STEVE_NODE").map(std::path::PathBuf::from);
+        std::process::exit(steve_acp::managed::cli(&home, node.as_deref(), &args));
+    }
     // the one-shot launchd job of a one-click local upgrade (upgrades/runner.rs); needs no Config
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--upgrade-runner") {

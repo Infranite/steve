@@ -140,6 +140,11 @@ export default {
     harness: {
       builtin: "Built-in",
       custom: "Custom",
+      upToDate: "Adapter {{version}} is up to date (checked {{at}})",
+      updatePending: "Adapter update available: {{from}} → {{to}}, installed when no session runs on this device",
+      updateAvailable: "Adapter {{to}} is available: run steve adapters upgrade",
+      updateUnchecked: "Adapter updates not checked yet",
+      updateError: "Checking for adapter updates failed: {{error}}",
       cap: { sessions: "Sessions", judge: "Judge", images: "Images", resume: "Resume", history: "History" },
       mode: { plan: "Plan", ask: "Ask", accept_edits: "Accept edits", auto: "Auto", full_access: "Full access" },
       add: "Add harness",

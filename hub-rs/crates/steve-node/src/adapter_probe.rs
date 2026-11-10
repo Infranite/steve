@@ -19,6 +19,11 @@ const INITIALIZE: Duration = Duration::from_secs(20);
 pub(crate) struct AdapterProbes(tokio::sync::Mutex<Option<(Instant, HashMap<String, Probe>)>>);
 
 impl AdapterProbes {
+    /// The next [`Self::get`] asks the adapters again.
+    pub(crate) async fn forget(&self) {
+        *self.0.lock().await = None;
+    }
+
     pub(crate) async fn get(
         &self,
         cfg: &AcpConfig,
@@ -112,6 +117,7 @@ pub(crate) fn info(cfg: &AcpConfig, id: &str, p: &Probe) -> AdapterInfo {
             efforts: o.efforts.clone(),
         }),
         session_error: p.session_error.clone(),
+        update: None,
     }
 }
 

@@ -1,0 +1,4 @@
+- ACP 适配器现在是 Steve 的依赖：`steve setup` 用 npm 把 `@agentclientprotocol/claude-agent-acp` 和 `@agentclientprotocol/codex-acp` 装进安装目录下的 `adapters`（不碰全局 npm），不再需要手动 `npm install -g`。需要 Node.js，Homebrew 公式已声明依赖 `node`；没有 npm 时 setup 照常完成，并提示装好 Node.js 后运行 `steve adapters install`。
+- 内置适配器升级检查：Node 启动一分钟后、之后每天向 npm 查一次最新版本（沿用 npm 的镜像配置），在没有会话或任务运行时自动升级，下一个会话就用新版本。设备页"运行环境"显示每个适配器的当前版本和最新版本。`STEVE_ADAPTER_UPDATES=check` 只显示不升级，`off` 关闭。也可以手动 `steve adapters status` / `steve adapters upgrade`。
+- Codex 改用 `@agentclientprotocol/codex-acp`（原来的 `@zed-industries/codex-acp` 已停止更新）。权限档位对应它的模式：计划和每次询问是 `read-only`，接受编辑是 `workspace-write`，自动是 `agent`（只在判断为不安全时询问），完全放行是 `agent-full-access`。它会自己报告每轮的 token 用量。
+- 用环境变量、`harness.json` 指定的或全局安装的适配器照旧使用，Steve 不去升级它们。

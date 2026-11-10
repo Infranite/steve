@@ -13,9 +13,9 @@
 //! is signalled, so the `claude` child of claude-agent-acp does not outlive it.
 
 pub mod adapters;
-mod codex;
 mod config;
 mod errors;
+pub mod managed;
 pub mod normalize;
 pub mod oneshot;
 pub mod permission;
@@ -27,7 +27,6 @@ mod util;
 pub use adapters::{
     AdapterEntry, AdapterProperties, AdapterSpec, Declaration, ModeMap, StateDir, UsageFallback,
 };
-pub use codex::{codex_args, sanitize_catalog};
 pub use config::{AcpConfig, default_claude_adapter, default_codex_adapter, npm_root};
 pub use errors::{is_dead_agent, is_transient};
 pub use oneshot::{Image, OneShotError};

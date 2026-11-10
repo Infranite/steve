@@ -110,6 +110,8 @@ export type RRuntime = {
   adapter_version?: string | null; default_model?: string | null; efforts?: string[]; modes?: string[] | null
   caps?: { sessions: boolean; jobs: boolean; images: boolean; resume: boolean; history: boolean; mcp_http: boolean; system_prompt: boolean; fork?: boolean } | null
   auth?: { id: string; name: string; description?: string | null }[]
+  /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
+  update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
 }
 export type REvent = { seq: number; ts: number; kind: string; data: any }
 export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[] }

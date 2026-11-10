@@ -449,12 +449,21 @@ impl Config {
             let declared = commands
                 .remove(id)
                 .map(|c| c.to_string_lossy().into_owned());
+            // Steve's own install (`<home>/adapters`), else a global npm one, else Steve's own
+            // path: where `steve setup` and the Node's updates put it
             let command = get(var).or(declared).unwrap_or_else(|| {
+                let own = steve_acp::managed::command(&home, id).unwrap_or_default();
+                if own.exists() {
+                    return own.to_string_lossy().into_owned();
+                }
                 let root = npm();
                 steve_acp::adapters::builtin_commands(Path::new(&root))
                     .find(|(b, ..)| *b == id)
-                    .map(|(.., c)| c.to_string_lossy().into_owned())
-                    .unwrap_or_default()
+                    .map(|(.., c)| c)
+                    .filter(|c| c.exists())
+                    .unwrap_or(own)
+                    .to_string_lossy()
+                    .into_owned()
             });
             adapters.insert(id.to_string(), command);
         }

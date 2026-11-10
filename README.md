@@ -303,15 +303,15 @@ npm run build:web
 cargo build --locked --manifest-path hub-rs/Cargo.toml -p steve-hub
 ```
 
-### 2. Install the adapters for the harnesses you use
+### 2. Install the adapters
 
-Steve talks to harnesses through their ACP adapters. These are required for Agent execution with the selected harness, but are not required to start the Hub or open its settings. Install only the adapters you use on each executing Node. The current implementation finds them in the global npm root:
+Steve talks to harnesses through their ACP adapters, `@agentclientprotocol/claude-agent-acp` and `@agentclientprotocol/codex-acp`. They need Node.js (npm). `steve setup` installs them into the home's `adapters` directory and the Node keeps them up to date; for a development Hub, install them the same way:
 
 ```sh
-npm install -g @agentclientprotocol/claude-agent-acp @zed-industries/codex-acp
+STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install
 ```
 
-Install the ones you use. If `claude` isn't at `/opt/homebrew/bin/claude`, set `CLAUDE_CODE_EXECUTABLE`. To point at adapters elsewhere, set `STEVE_ADAPTER_CLAUDE` / `STEVE_ADAPTER_CODEX`.
+A global npm install is used when the home has none. If `claude` isn't at `/opt/homebrew/bin/claude`, set `CLAUDE_CODE_EXECUTABLE`. To point at adapters elsewhere, set `STEVE_ADAPTER_CLAUDE` / `STEVE_ADAPTER_CODEX`.
 
 ### 3. Run
 
@@ -358,6 +358,7 @@ For an existing Hub that completed managed setup, run `steve setup --reconfigure
 | `STEVE_DISK_OBSERVE` | Default `on` (on a Node) records bounded asynchronous working-directory disk observations in its journal; explicit `off` disables new records. This grants no execution or cleanup permission ([budgets and retention](docs/deployment.md#node-disk-observations)) |
 | `STEVE_TAILCAT`, `STEVE_TAILCAT_PORT` | Remote Nodes over tailcat (optional, turned on in Devices): the `tailcat` program when it is not on `PATH`, and the loopback port its Node-only listener uses (default: Hub port + 2) |
 | `STEVE_NODE_INSTALLERS` | A local directory with the release's `steve-installer.json` and installer archives, for remote Node installs from a Hub without access to GitHub |
+| `STEVE_ADAPTER_UPDATES` | What a Node does about newer releases of the ACP adapters Steve installed: `auto` (default: checks daily and upgrades when no session runs), `check` (shows them only), `off` |
 | `STEVE_NODE_PLACEMENT` | `spread` (default) sends a project-less item's new session to a linked remote Node that is clearly less loaded than the Hub's machine; `local` keeps new sessions on the Hub's machine unless `STEVE_NODE_BIND` names a Node |
 | `STEVE_NODE_HANDOFF_MIN` | Minutes a device may be offline while messages wait for its session before Steve continues the item in a new session elsewhere (default 30; `0` never) |
 | `STEVE_NODE_PROXY_PEERS` | Optional exact IPs of TLS-terminating proxies for remote Node ingress; default is loopback only |

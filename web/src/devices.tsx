@@ -123,7 +123,7 @@ export function DeviceView({ id }: { id: string }) {
         <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>{t("shell:devices.runtimes")}</SectionLabel>
           {st.runtimes.length ? <Group>{st.runtimes.map((r) => <Row key={r.id} icon={<span className="flex size-8 items-center justify-center rounded-lg bg-muted text-muted-foreground"><CpuIcon className="size-4" strokeWidth={1.5} /></span>}
             title={<span className="inline-flex items-center gap-1.5">{r.name}<Badge variant="outline" className="type-footnote">{r.custom ? t("shell:devices.harness.custom") : t("shell:devices.harness.builtin")}</Badge><span className="type-footnote text-muted-foreground">{r.version || r.adapter_version}</span></span>}
-            sub={<span className="flex flex-col gap-0.5"><span>{r.note} · <span className="font-mono">{r.path.replace(/^\/Users\/[^/]+/, "~")}</span></span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}<RuntimeChips r={r} /></span>}>
+            sub={<span className="flex flex-col gap-0.5"><span>{r.note} · <span className="font-mono">{r.path.replace(/^\/Users\/[^/]+/, "~")}</span></span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></span>}>
             <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={r.ok ? "done" : "wait"} />{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</span></Row>)}</Group> : <Empty title={t("shell:devices.noRuntimes")} />}
           {isHub && <AddHarness />}</section>
         <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/projects")}>{t("shell:devices.manageProjects")}</Button>}>{t("shell:devices.projectsHere", { count: dirs.length })}</SectionLabel>
@@ -136,6 +136,20 @@ export function DeviceView({ id }: { id: string }) {
 }
 
 /** what a harness adapter can do and the permission modes it offers, as its probe said */
+/** an adapter Steve keeps up to date: installed and latest release, as of the Node's last check */
+function AdapterUpdate({ r }: { r: RRuntime }) {
+  const t = useT()
+  const u = r.update
+  if (!u || u.policy === "off") return null
+  const newer = !!u.latest && u.latest !== u.installed
+  const text = u.error ? t("shell:devices.harness.updateError", { error: u.error })
+    : !u.latest ? t("shell:devices.harness.updateUnchecked")
+    : !newer ? t("shell:devices.harness.upToDate", { version: u.installed ?? "", at: u.checked ? tm(u.checked) : "" })
+    : u.policy === "auto" ? t("shell:devices.harness.updatePending", { from: u.installed ?? "—", to: u.latest })
+    : t("shell:devices.harness.updateAvailable", { to: u.latest })
+  return <span className={newer || u.error ? "text-attention" : undefined} data-adapter-update>{text}</span>
+}
+
 function RuntimeChips({ r }: { r: RRuntime }) {
   const t = useT()
   const caps = r.caps
