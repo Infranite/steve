@@ -46,8 +46,9 @@ fn create_item_starts_a_session_in_a_scratch_dir_with_the_protocol() {
     let s = only_session(&k, &i.id);
     assert_eq!(
         (s.no, s.status.as_str(), s.model.as_deref()),
-        // the seeded Steve bot names its model (claude-sonnet-5-5, which its judgments use too)
-        (1, "starting", Some("claude-sonnet-5-5"))
+        // the seeded Steve bot names no model: the session takes the workspace's agent default
+        // (this kit's STEVE_DEFAULT_MODEL_CLAUDE; an installation sets none: the harness's own)
+        (1, "starting", Some("claude-opus-5-5"))
     );
     let p = &k.rt.prompts_of(&s.id)[0];
     assert!(p.starts_with("You are working for Steve, the user's assistant, on item ST-1: “标题”.\nGoal (from the user): 写一首诗\nThis item has no project; you are in a scratch directory made for it.\nWorking directory: "));

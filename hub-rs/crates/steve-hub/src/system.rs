@@ -143,8 +143,11 @@ impl Runtimes {
                     self.node.get().cloned(),
                 );
                 tokio::spawn(async move {
-                    let list = probe(&cfg, node.as_deref(), false).await;
-                    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), list));
+                    let (list, answered) = probe(&cfg, node.as_deref(), false).await;
+                    if answered {
+                        *cache.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some((Instant::now(), list));
+                    }
                     refreshing.store(false, Ordering::SeqCst);
                 });
             }
@@ -155,9 +158,11 @@ impl Runtimes {
         if !fresh && let Some((_, list)) = self.cached() {
             return list;
         }
-        let list = probe(&self.cfg, self.node.get().map(|n| n.as_ref()), fresh).await;
-        *self.cache.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((Instant::now(), list.clone()));
+        let (list, answered) = probe(&self.cfg, self.node.get().map(|n| n.as_ref()), fresh).await;
+        if answered {
+            *self.cache.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((Instant::now(), list.clone()));
+        }
         list
     }
 }
@@ -183,16 +188,17 @@ fn shown(mut list: Value) -> Value {
     list
 }
 
-/// What the local Node's probe reports about its harnesses (none when it cannot say).
+/// What the local Node's probe reports about its harnesses; `None` when it cannot say (not linked
+/// yet, as just after the Hub starts), which is not "no adapter".
 async fn node_harnesses(
     node: &dyn steve_node_api::Node,
     fresh: bool,
-) -> Vec<steve_node_api::HarnessCapability> {
+) -> Option<Vec<steve_node_api::HarnessCapability>> {
     match node.probe(fresh).await {
-        Ok(c) => c.harnesses,
+        Ok(c) => Some(c.harnesses),
         Err(e) => {
             tracing::warn!("probe of the local Node: {e}");
-            vec![]
+            None
         }
     }
 }
@@ -216,7 +222,7 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 (Some(AdapterStatus::Ready), _) => (false, "session_failed"),
                 (Some(AdapterStatus::AdapterMissing), _) => (false, "adapter_missing"),
                 (Some(AdapterStatus::InitializeFailed), _) => (false, "initialize_failed"),
-                // without a Node to ask: there or not
+                // without a Node's answer: there or not
                 (None, None) if Path::new(path).exists() => (true, "acp"),
                 (None, _) => (false, "adapter_missing"),
             };
@@ -268,12 +274,19 @@ fn version_of(said: &str) -> String {
 }
 
 /// The harness list. `node`: the local Node runs the adapters (`fresh`: it asks them again).
-async fn probe(cfg: &Config, node: Option<&dyn steve_node_api::Node>, fresh: bool) -> Value {
+/// The rows, and whether they are the Node's answer. A Node that could not be asked leaves the
+/// rows to whether each adapter's command is there, and the list is not kept.
+async fn probe(
+    cfg: &Config,
+    node: Option<&dyn steve_node_api::Node>,
+    fresh: bool,
+) -> (Value, bool) {
     let harnesses = match node {
-        Some(n) => Some(node_harnesses(n, fresh).await),
+        Some(n) => node_harnesses(n, fresh).await,
         None => None,
     };
-    json!(rows(cfg, harnesses.as_deref()))
+    let answered = node.is_none() || harnesses.is_some();
+    (json!(rows(cfg, harnesses.as_deref())), answered)
 }
 
 // ── local harness history ──
@@ -679,6 +692,52 @@ mod tests {
         let list = rt.get(false).await;
         assert_eq!(list[0]["id"], json!("claude-code"));
         assert_eq!(list[0]["ok"], json!(false));
+    }
+
+    /// A Node that cannot answer yet (just after the Hub starts) is not "no adapter": the rows say
+    /// whether each adapter is there, and the next request asks the Node again.
+    #[tokio::test]
+    async fn a_node_not_answering_is_not_a_missing_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude.js");
+        std::fs::write(&claude, "").unwrap();
+        let claude = claude.to_string_lossy().into_owned();
+        let vars = [
+            ("STEVE_ADAPTER_CLAUDE", claude.as_str()),
+            ("STEVE_ADAPTER_CODEX", "/nonexistent/codex"),
+        ];
+        let cfg = Config::from_vars(|k| {
+            vars.iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        })
+        .expect("config");
+        let rt = Runtimes::new(Arc::new(cfg));
+        let node = steve_node_api::testkit::FakeNode::new("local");
+        node.refuse_next(
+            "probe",
+            steve_node_api::ApiError::new(steve_node_api::ErrorCode::Offline, "node offline"),
+        );
+        rt.set_node(node.clone());
+        let list = rt.list(false).await;
+        let row = |l: &Value, id: &str| {
+            l.as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            row(&list, "claude-code")["ok"],
+            json!(true),
+            "there: {list}"
+        );
+        assert_eq!(row(&list, "codex")["note"], json!("adapter_missing"));
+        assert!(rt.cached().is_none(), "not kept");
+        // the Node answers now: its report, kept
+        rt.list(false).await;
+        assert!(rt.cached().is_some());
     }
 
     /// Harness parity S1: an adapter the Hub's manifest adds is a runtime like the built-in ones,

@@ -777,6 +777,14 @@ impl Service {
                     vec!["launchctl".into(), "bootout".into(), target.clone()],
                     true,
                 )?;
+                /* bootout returns before launchd has let the job go; a bootstrap then fails and a
+                 * restart leaves the service stopped */
+                if action == "restart" {
+                    let until = Instant::now() + Duration::from_secs(15);
+                    while self.state()?["loaded"] == true && Instant::now() < until {
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                }
             }
             if matches!(action, "start" | "restart") {
                 if action == "start" && state["loaded"] == true {

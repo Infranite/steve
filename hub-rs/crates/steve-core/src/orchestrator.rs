@@ -276,7 +276,7 @@ impl Core {
             "steve",
             true,
             json!({
-                "name": "Steve", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "model": crate::models::STEVE_DEFAULT_MODEL, "role": "你的助手：理解需求、分派、汇报", "accept_mode": "inherit", "perm_mode": "default",
+                "name": "Steve", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "role": "你的助手：理解需求、分派、汇报", "accept_mode": "inherit", "perm_mode": "default",
                 "persona": "沉稳、简洁，先说结论；不客套", "avatar": {"color": "#7aa7c7", "round": 70},
                 "rules": "能直接回答的就回答；是一件事就建事项交给合适的 Bot。只在有新结果或需要决定时打扰。",
             }),
@@ -318,12 +318,12 @@ impl Core {
             }),
             WS,
         )?;
-        /* a Steve bot with no harness gets one (and a judgment model); one that has a harness is left
-        as the user set it, model or not */
+        /* a Steve bot with no harness gets one, with no model: the harness's own default; one that has a
+        harness is left as the user set it, model or not */
         db.store().with_conn(|c| {
             c.execute(
-                "UPDATE bots SET harness = 'claude-code', model = coalesce(model, ?) WHERE id = 'steve' AND harness = ''",
-                [crate::models::STEVE_DEFAULT_MODEL],
+                "UPDATE bots SET harness = 'claude-code' WHERE id = 'steve' AND harness = ''",
+                [],
             )?;
             Ok(())
         })?;
