@@ -580,6 +580,69 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(coordinator.summary.totalDevices, 3)
         XCTAssertTrue(coordinator.summary.steveThinking)
     }
+
+    @MainActor
+    func testWebSignInAndLogoutThroughProxySyncsNativeHubStoreAndSummary() async throws {
+        let mockHub = try await MockUpstreamServer.start()
+        defer { mockHub.stop() }
+
+        let suiteName = "test.steve.websync.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let creds = InMemoryCredentialStore()
+        let store = HubStore(
+            defaults: defaults,
+            credentials: creds,
+            defaultProfile: HubProfile(id: HubProfile.localDefaultID, name: "Local Hub", lanURLs: [mockHub.baseURL], isLocalDefault: true),
+            includeLocalDefault: true
+        )
+        let coordinator = SteveClientCoordinator(
+            hubStore: store,
+            preferredPortDefaults: defaults,
+            clientDescriptor: ClientDescriptor(kind: "mac", name: "Test Mac", platform: "macOS", version: "0.3.0")
+        )
+        defer { coordinator.stop() }
+
+        let gateway = try await coordinator.proxy.ensureRunning()
+        await coordinator.activateCurrentHub(forceReloadWeb: true)
+        XCTAssertNil(store.credential(for: HubProfile.localDefaultID))
+
+        // Simulate Web UI submitting `POST /auth/token` through `HubLoopbackProxy`
+        let (_, loginResp) = try await RawTCPHTTPClient.request(
+            port: coordinator.proxy.port,
+            method: "POST",
+            path: "/auth/token",
+            headers: [
+                ("Host", "127.0.0.1:\(coordinator.proxy.port)"),
+                ("Origin", gateway.absoluteString),
+                ("Cookie", coordinator.proxy.authCookieHeader),
+            ]
+        )
+        XCTAssertEqual(loginResp.status, 200)
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        XCTAssertEqual(store.credential(for: HubProfile.localDefaultID), "cli_web_tok.secret_cred")
+        XCTAssertEqual(coordinator.proxy.currentTarget().credential, "cli_web_tok.secret_cred")
+        XCTAssertEqual(coordinator.summary.phase, .connected)
+
+        // Simulate Web UI logging out via `POST /auth/client/logout`
+        let (_, logoutResp) = try await RawTCPHTTPClient.request(
+            port: coordinator.proxy.port,
+            method: "POST",
+            path: "/auth/client/logout",
+            headers: [
+                ("Host", "127.0.0.1:\(coordinator.proxy.port)"),
+                ("Origin", gateway.absoluteString),
+                ("Cookie", coordinator.proxy.authCookieHeader),
+            ]
+        )
+        XCTAssertEqual(logoutResp.status, 200)
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        XCTAssertNil(store.credential(for: HubProfile.localDefaultID))
+        XCTAssertNil(coordinator.proxy.currentTarget().credential)
+    }
 }
 
 private struct RawHTTPResponse {
@@ -745,6 +808,8 @@ private final class MockUpstreamServer: @unchecked Sendable {
                     let payload: Data
                     if path == "/auth/hello" {
                         payload = Data("{\"name\":\"steve\",\"version\":\"0.3.0\",\"api\":1,\"login\":{\"token\":true,\"oidc\":false}}".utf8)
+                    } else if path == "/auth/token" {
+                        payload = Data("{\"client_id\":\"cli_web_tok\",\"credential\":\"cli_web_tok.secret_cred\",\"user\":{\"id\":\"owner\",\"name\":\"Owner\"},\"hub\":{\"version\":\"0.3.0\",\"api\":1}}".utf8)
                     } else if path == "/auth/pair" {
                         if omitPairCredential {
                             payload = Data("{\"client_id\":\"cli_evil\",\"user\":{\"id\":\"owner\",\"name\":\"Owner\"},\"hub\":{\"version\":\"0.3.0\",\"api\":1}}".utf8)

@@ -104,18 +104,20 @@ public struct HubSwitcherSheet: View {
 
                 Section(L10n.tr("手动接入其它 Hub", "Connect Another Hub")) {
                     TextField(
-                        L10n.tr(
-                            "Hub 地址（如 https://hub.example.com 或 192.168.1.10:8440）",
-                            "Hub URL (e.g. https://hub.example.com or 192.168.1.10:8440)"
-                        ),
-                        text: $newAddress
+                        L10n.tr("Hub 地址", "Hub URL"),
+                        text: $newAddress,
+                        prompt: Text("https://hub.example.com · 192.168.1.10:8440")
                     )
                     .autocorrectionDisabled()
                     #if os(iOS)
                     .textInputAutocapitalization(.never)
                     .keyboardType(.URL)
                     #endif
-                    TextField(L10n.tr("备注名称（可选）", "Display name (optional)"), text: $newName)
+                    TextField(
+                        L10n.tr("备注名称", "Display name"),
+                        text: $newName,
+                        prompt: Text(L10n.tr("可选", "Optional"))
+                    )
 
                     if let errorMessage {
                         Text(errorMessage)

@@ -34,6 +34,7 @@ public final class SteveClientCoordinator: ObservableObject {
     @Published public var isQRScannerPresented = false
     @Published public var pendingExternalPairConfirmation: PendingPairConfirmation?
     @Published public var externalPairErrorMessage: String?
+    @Published public private(set) var lastCreatedPairing: CreatedPairing?
 
     public let hubStore: HubStore
     public let api: HubClientAPI
@@ -58,6 +59,30 @@ public final class SteveClientCoordinator: ObservableObject {
         self.resolver = resolver
         self.proxy = HubLoopbackProxy(webRoot: webRoot, preferredPortDefaults: preferredPortDefaults)
         self.clientDescriptor = clientDescriptor
+
+        self.proxy.setAuthEventHandler { [weak self] hubID, event in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                switch event {
+                case .signedIn(let signed):
+                    self.hubStore.updateAuthMetadata(
+                        id: hubID,
+                        clientID: signed.client_id,
+                        userName: signed.user.name,
+                        credential: signed.credential
+                    )
+                    self.hubStore.updateConnectionMetadata(id: hubID, version: signed.hub.version)
+                    if self.hubStore.activeHubID == hubID {
+                        await self.refreshActiveHubState()
+                    }
+                case .signedOut:
+                    self.hubStore.updateAuthMetadata(id: hubID, clientID: nil, userName: nil, credential: nil)
+                    if self.hubStore.activeHubID == hubID {
+                        await self.refreshActiveHubState()
+                    }
+                }
+            }
+        }
     }
 
     public func startIfNeeded() {
@@ -269,10 +294,12 @@ public final class SteveClientCoordinator: ObservableObject {
         guard let endpoint else {
             throw EndpointResolutionError.noCandidates
         }
-        return try await api.createPairing(
+        let created = try await api.createPairing(
             endpoint: endpoint,
             credential: hubStore.credential(for: profile.id)
         )
+        lastCreatedPairing = created
+        return created
     }
 
     public func pollPairingStatus(id: String) async throws -> PairingClaimStatus {
@@ -290,6 +317,10 @@ public final class SteveClientCoordinator: ObservableObject {
     }
 
     // MARK: - Internal Resolution & Status Polling
+
+    public func refreshActiveHubState() async {
+        await activateCurrentHub(forceReloadWeb: false)
+    }
 
     public func activateCurrentHub(forceReloadWeb: Bool) async {
         if forceReloadWeb {

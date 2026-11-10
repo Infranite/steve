@@ -10,7 +10,7 @@ import Security
 public final class HubLoopbackProxy: @unchecked Sendable {
     public static let proxyAuthCookieName = "steve_proxy_key"
 
-    public struct ActiveTarget: Sendable {
+    public struct ActiveTarget: Sendable, Equatable {
         public var hubID: String
         public var baseURL: URL?
         public var credential: String?
@@ -20,6 +20,11 @@ public final class HubLoopbackProxy: @unchecked Sendable {
             self.baseURL = baseURL
             self.credential = credential
         }
+    }
+
+    public enum ProxyAuthEvent: Sendable, Equatable {
+        case signedIn(PairSignInResponse)
+        case signedOut
     }
 
     private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
@@ -46,6 +51,7 @@ public final class HubLoopbackProxy: @unchecked Sendable {
     private let queue = DispatchQueue(label: "app.steve.client.loopback-proxy", qos: .userInitiated)
     private let lock = NSLock()
     private var target = ActiveTarget()
+    private var authEventHandler: (@Sendable (String, ProxyAuthEvent) -> Void)?
     private var listener: NWListener?
     private var isListening = false
     private var lastBoundPort: UInt16 = 0
@@ -93,6 +99,12 @@ public final class HubLoopbackProxy: @unchecked Sendable {
     public func updateTarget(_ newTarget: ActiveTarget) {
         lock.lock()
         target = newTarget
+        lock.unlock()
+    }
+
+    public func setAuthEventHandler(_ handler: (@Sendable (String, ProxyAuthEvent) -> Void)?) {
+        lock.lock()
+        authEventHandler = handler
         lock.unlock()
     }
 
@@ -645,6 +657,7 @@ public final class HubLoopbackProxy: @unchecked Sendable {
             guard let http = response as? HTTPURLResponse else {
                 throw URLError(.badServerResponse)
             }
+            observeAuthResponse(path: request.path, statusCode: http.statusCode, data: data, hubID: active.hubID)
             var outHeaders = Self.filteredUpstreamHeaders(from: http, hubID: active.hubID, stripContentLength: true)
             outHeaders.append(("Content-Length", "\(data.count)"))
             outHeaders.append(("Connection", "close"))
@@ -658,6 +671,29 @@ public final class HubLoopbackProxy: @unchecked Sendable {
             } else {
                 try await sendAll(data: head + data, over: connection)
             }
+        }
+    }
+
+    private func observeAuthResponse(path: String, statusCode: Int, data: Data, hubID: String) {
+        guard !hubID.isEmpty else { return }
+        if statusCode == 200 && (path == "/auth/token" || path == "/auth/pair"),
+           let signed = try? JSONDecoder().decode(PairSignInResponse.self, from: data),
+           let cred = signed.credential, !cred.isEmpty {
+            let handler: (@Sendable (String, ProxyAuthEvent) -> Void)? = lock.withLock {
+                if target.hubID == hubID {
+                    target.credential = cred
+                }
+                return authEventHandler
+            }
+            handler?(hubID, .signedIn(signed))
+        } else if (200...299).contains(statusCode) && (path == "/auth/client/logout" || path == "/auth/logout") {
+            let handler: (@Sendable (String, ProxyAuthEvent) -> Void)? = lock.withLock {
+                if target.hubID == hubID {
+                    target.credential = nil
+                }
+                return authEventHandler
+            }
+            handler?(hubID, .signedOut)
         }
     }
 

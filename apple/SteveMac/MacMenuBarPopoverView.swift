@@ -62,8 +62,9 @@ struct MacMenuBarPopoverView: View {
                     Label(coordinator.summary.route.displayTitle, systemImage: routeSymbol)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    if let version = coordinator.summary.hubVersion {
-                        Text("v\(version.trimmingCharacters(in: CharacterSet(charactersIn: "v")))")
+                    if let version = coordinator.summary.hubVersion, !version.isEmpty {
+                        let formattedVersion = version.first?.isNumber == true ? "v\(version)" : version
+                        Text(formattedVersion)
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
                     }
