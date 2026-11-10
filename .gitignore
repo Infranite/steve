@@ -8,3 +8,12 @@ data/
 # Local runtime and QA artifacts must never be published.
 .steve/
 __pycache__/
+
+# Apple / SwiftPM / Xcode build artifacts
+.build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+apple/Build/
+apple/WebDist/
+

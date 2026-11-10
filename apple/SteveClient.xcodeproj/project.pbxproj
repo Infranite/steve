@@ -1,0 +1,405 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000010000000000000001 /* SteveMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000110000000000000001 /* SteveMacApp.swift */; };
+		A10000020000000000000001 /* MacMainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000120000000000000001 /* MacMainWindowView.swift */; };
+		A10000030000000000000001 /* MacMenuBarPopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000130000000000000001 /* MacMenuBarPopoverView.swift */; };
+		A10000040000000000000001 /* SteveClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000510000000000000001 /* SteveClientKit */; };
+		A10000050000000000000001 /* SteveIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000150000000000000001 /* SteveIOSApp.swift */; };
+		A10000060000000000000001 /* IOSRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000160000000000000001 /* IOSRootView.swift */; };
+		A10000070000000000000001 /* QRCodeScannerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000170000000000000001 /* QRCodeScannerSheet.swift */; };
+		A10000080000000000000001 /* SteveClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000520000000000000001 /* SteveClientKit */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A10000110000000000000001 /* SteveMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteveMacApp.swift; sourceTree = "<group>"; };
+		A10000120000000000000001 /* MacMainWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacMainWindowView.swift; sourceTree = "<group>"; };
+		A10000130000000000000001 /* MacMenuBarPopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacMenuBarPopoverView.swift; sourceTree = "<group>"; };
+		A10000140000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10000150000000000000001 /* SteveIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteveIOSApp.swift; sourceTree = "<group>"; };
+		A10000160000000000000001 /* IOSRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSRootView.swift; sourceTree = "<group>"; };
+		A10000170000000000000001 /* QRCodeScannerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScannerSheet.swift; sourceTree = "<group>"; };
+		A10000180000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10000190000000000000001 /* SteveMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SteveMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A100001A0000000000000001 /* SteveIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SteveIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000210000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000040000000000000001 /* SteveClientKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000220000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000080000000000000001 /* SteveClientKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000300000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A10000310000000000000001 /* SteveMac */,
+				A10000320000000000000001 /* SteveIOS */,
+				A10000330000000000000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000310000000000000001 /* SteveMac */ = {
+			isa = PBXGroup;
+			children = (
+				A10000110000000000000001 /* SteveMacApp.swift */,
+				A10000120000000000000001 /* MacMainWindowView.swift */,
+				A10000130000000000000001 /* MacMenuBarPopoverView.swift */,
+				A10000140000000000000001 /* Info.plist */,
+			);
+			path = SteveMac;
+			sourceTree = "<group>";
+		};
+		A10000320000000000000001 /* SteveIOS */ = {
+			isa = PBXGroup;
+			children = (
+				A10000150000000000000001 /* SteveIOSApp.swift */,
+				A10000160000000000000001 /* IOSRootView.swift */,
+				A10000170000000000000001 /* QRCodeScannerSheet.swift */,
+				A10000180000000000000001 /* Info.plist */,
+			);
+			path = SteveIOS;
+			sourceTree = "<group>";
+		};
+		A10000330000000000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A10000190000000000000001 /* SteveMac.app */,
+				A100001A0000000000000001 /* SteveIOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000410000000000000001 /* SteveMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000720000000000000001 /* Build configuration list for PBXNativeTarget "SteveMac" */;
+			buildPhases = (
+				A10000610000000000000001 /* Sources */,
+				A10000210000000000000001 /* Frameworks */,
+				A10000630000000000000001 /* Bundle Web UI */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SteveMac;
+			packageProductDependencies = (
+				A10000510000000000000001 /* SteveClientKit */,
+			);
+			productName = SteveMac;
+			productReference = A10000190000000000000001 /* SteveMac.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A10000420000000000000001 /* SteveIOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000730000000000000001 /* Build configuration list for PBXNativeTarget "SteveIOS" */;
+			buildPhases = (
+				A10000620000000000000001 /* Sources */,
+				A10000220000000000000001 /* Frameworks */,
+				A10000640000000000000001 /* Bundle Web UI */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SteveIOS;
+			packageProductDependencies = (
+				A10000520000000000000001 /* SteveClientKit */,
+			);
+			productName = SteveIOS;
+			productReference = A100001A0000000000000001 /* SteveIOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000400000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
+				TargetAttributes = {
+					A10000410000000000000001 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+					A10000420000000000000001 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+				};
+			};
+			buildConfigurationList = A10000710000000000000001 /* Build configuration list for PBXProject "SteveClient" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = "zh-Hans";
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				"zh-Hans",
+				en,
+				Base,
+			);
+			mainGroup = A10000300000000000000001;
+			packageReferences = (
+				A10000500000000000000001 /* XCLocalSwiftPackageReference "Packages/SteveClientKit" */,
+			);
+			productRefGroup = A10000330000000000000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A10000410000000000000001 /* SteveMac */,
+				A10000420000000000000001 /* SteveIOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A10000630000000000000001 /* Bundle Web UI */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Bundle Web UI";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nWEB_DIST=\"${SRCROOT}/../web/dist\"\nDEST=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/WebDist\"\nif [ -d \"${WEB_DIST}\" ]; then\n  rm -rf \"${DEST}\"\n  mkdir -p \"${DEST}\"\n  cp -R \"${WEB_DIST}/.\" \"${DEST}/\"\nfi\n";
+			showEnvVarsInLog = 0;
+		};
+		A10000640000000000000001 /* Bundle Web UI */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Bundle Web UI";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nWEB_DIST=\"${SRCROOT}/../web/dist\"\nDEST=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/WebDist\"\nif [ -d \"${WEB_DIST}\" ]; then\n  rm -rf \"${DEST}\"\n  mkdir -p \"${DEST}\"\n  cp -R \"${WEB_DIST}/.\" \"${DEST}/\"\nfi\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000610000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000010000000000000001 /* SteveMacApp.swift in Sources */,
+				A10000020000000000000001 /* MacMainWindowView.swift in Sources */,
+				A10000030000000000000001 /* MacMenuBarPopoverView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000620000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000050000000000000001 /* SteveIOSApp.swift in Sources */,
+				A10000060000000000000001 /* IOSRootView.swift in Sources */,
+				A10000070000000000000001 /* QRCodeScannerSheet.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A10000810000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				MARKETING_VERSION = 0.3.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A10000820000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				MARKETING_VERSION = 0.3.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A10000830000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = SteveMac/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.steve.client.macos;
+				PRODUCT_NAME = Steve;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		A10000840000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = SteveMac/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.steve.client.macos;
+				PRODUCT_NAME = Steve;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		A10000850000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = SteveIOS/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.steve.client.ios;
+				PRODUCT_NAME = Steve;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A10000860000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = SteveIOS/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.steve.client.ios;
+				PRODUCT_NAME = Steve;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000710000000000000001 /* Build configuration list for PBXProject "SteveClient" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000810000000000000001 /* Debug */,
+				A10000820000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000720000000000000001 /* Build configuration list for PBXNativeTarget "SteveMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000830000000000000001 /* Debug */,
+				A10000840000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000730000000000000001 /* Build configuration list for PBXNativeTarget "SteveIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000850000000000000001 /* Debug */,
+				A10000860000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A10000500000000000000001 /* XCLocalSwiftPackageReference "Packages/SteveClientKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/SteveClientKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A10000510000000000000001 /* SteveClientKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000500000000000000001 /* XCLocalSwiftPackageReference "Packages/SteveClientKit" */;
+			productName = SteveClientKit;
+		};
+		A10000520000000000000001 /* SteveClientKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000500000000000000001 /* XCLocalSwiftPackageReference "Packages/SteveClientKit" */;
+			productName = SteveClientKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A10000400000000000000001 /* Project object */;
+}

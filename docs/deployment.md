@@ -123,6 +123,7 @@ Besides a browser session, a client signs in with a user's name and one of that 
 
 - `GET /auth/hello` says which Hub this is, its API version and which sign-ins it offers.
 - `POST /auth/token {"user": "...", "token": "stt_...", "client": {"kind": "web|mac|ios|cli|...", "name": "...", "platform": "...", "version": "..."}}` returns `{client_id, credential}`.
+- `POST /api/access/pairings` (authenticated) issues a 5-minute single-use `stp_...` pairing code together with the Hub's configured public URL (when set) and reachable LAN addresses, encoded as a `steve://pair?v=1&code=stp_...` QR URI; `GET /api/access/pairings/{id}` reports when a device claims it, and `POST /auth/pair` exchanges that single-use code for a dedicated client credential without creating a reusable access token.
 
 The Hub records each client's kind and name, and the route it last came by. Routes are `loopback`, `lan`, `tailnet`, `proxy` or `public`, with `+tls` added when the request arrived over TLS. Forwarding headers are believed only from this machine or the local network. Failed sign-ins from another address are slowed down after ten tries in ten minutes.
 
@@ -153,6 +154,21 @@ The web page can run on its own origin instead of the Hub's port.
 - **Cross-origin access.** The Hub answers cross-origin calls with credentials only from the origins of web clients that signed in there, and from those listed in `STEVE_CLIENT_ORIGINS` (comma-separated). The sign-in paths and a `401` are readable from any origin.
 - **Same machine.** A Hub on the same host as the page (another port) is the same site, so its sign-in cookie works over plain HTTP.
 - **Another machine.** A Hub on another host needs HTTPS: the Hub then sets its cookie with `SameSite=None; Secure`.
+
+## macOS and iOS clients
+
+Native macOS (`SteveMac`) and iOS (`SteveIOS`) clients live in `apple/SteveClient.xcodeproj` atop the shared Swift package `apple/Packages/SteveClientKit`.
+
+- **Default local Hub & multi-Hub switching.** On launch, the client automatically connects to the local Hub (`127.0.0.1:8440`, or `STEVE_HUB_URL` when set in the process environment). Additional Hubs can be added manually or by QR pairing and switched at any time from the window toolbar, the macOS menu bar item, the iOS floating Hub pill, **Settings · Access & clients**, or <kbd>⌘</kbd> <kbd>K</kbd>.
+- **Mobile QR pairing and route selection.** Signed-in **Web** and **macOS** clients generate a 5-minute single-use QR code in **Settings · Access & clients** (or from the macOS toolbar / menu bar). Scanning the QR code in the iOS app claims a dedicated Keychain-stored client credential via `POST /auth/pair`. When the Hub advertises a public address (`STEVE_PUBLIC_URL`), the client connects over the public address by default and falls back to the advertised LAN addresses if the public route is unreachable; when no public address is configured, it connects directly over LAN.
+- **macOS menu bar status item.** `SteveMac` provides a live status bar icon (`MenuBarExtra`) displaying connection phase, route (`loopback` / `LAN` / `public`), Hub version, active workspace, running sessions, pending Inbox decisions, online devices, quick Hub switching, QR pairing, and one-click navigation into the main window.
+- **Building from source** (macOS 14+ with Xcode):
+
+```sh
+./scripts/build-apple-client.sh
+```
+
+Individual targets can also be run directly (`./scripts/build-apple-client.sh test`, `mac`, `ios`, or `ios-sim`).
 
 ## An external channel service
 
