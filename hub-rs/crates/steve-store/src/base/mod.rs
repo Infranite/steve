@@ -1,6 +1,6 @@
 //! The shared base of the new modules (migration 4): visibility scopes, disclosure
 //! levels, memories, entity tags, generic links, persisted changesets, decisions opened inside a
-//! transaction, audit and revisions.
+//! transaction, audit, revisions and messages.
 //!
 //! Everything here is a free function over `&Connection` (reads, usually from [`Store::reader`]) or
 //! [`Tx`] (writes, from [`Store::transaction`]), so a module service can combine its own SQL and these
@@ -332,6 +332,21 @@ pub fn audit(
     )?
     .execute(params![ws, now(), actor, action, target, to_json(detail)?])?;
     Ok(())
+}
+
+/// A message written with the rest of the transaction (`Messages::add` on `tx`). Returns the id.
+pub fn message_add(
+    tx: &Tx,
+    ws: &str,
+    author: &str,
+    text: &str,
+    item_id: Option<&str>,
+    meta: &Value,
+    space: &str,
+) -> Result<String> {
+    let id = crate::repo::message_insert(tx, ws, author, text, item_id, meta, space)?;
+    tx.publish(crate::ChangeEvent::Message { id: id.clone() });
+    Ok(id)
 }
 
 /// Writes `revisions(object_type, object_id, version, patch={before,after}, author)`. The caller

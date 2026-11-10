@@ -313,7 +313,7 @@ pub async fn install_link(
     Some(paused)
 }
 
-/// Pauses `node` and tells its owner; `true` once it is paused.
+/// Pauses `node`, audits it and tells its owner, all in one transaction; `true` once it is paused.
 async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
     let (store, id) = (svc.store.clone(), node.to_string());
     let r = tokio::task::spawn_blocking(move || {
@@ -325,7 +325,7 @@ async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
                     |r| r.get(0),
                 )
                 .optional()?;
-            if name.is_some() {
+            if let Some(name) = &name {
                 steve_store::nodes::audit(
                     tx,
                     Some(&id),
@@ -338,17 +338,12 @@ async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
                     )),
                     now(),
                 )?;
+                // a paused Node nobody was told about would just look broken
+                let text = steve_i18n::t!("hub.node.takeover_suspected", name = name);
+                steve_core::notify::notify_in(tx, steve_store::WS, "system", "fail", &text, None)?;
             }
             Ok(name)
         })?;
-        if let Some(name) = &name {
-            let db = steve_core::repo::Db::new(store);
-            let text = steve_i18n::t!("hub.node.takeover_suspected", name = name);
-            if let Err(e) = steve_core::notify::notify(&db, steve_store::WS, "system", "fail", &text, None)
-            {
-                tracing::error!("takeover notice: {e}");
-            }
-        }
         Ok::<_, StoreError>(name.is_some())
     })
     .await;

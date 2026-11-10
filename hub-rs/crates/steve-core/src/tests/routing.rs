@@ -1364,6 +1364,30 @@ fn a_boot_without_resuming_records_no_main_conversation_intent() {
 }
 
 #[test]
+fn a_notice_written_in_a_transaction_stays_or_goes_with_it() {
+    let k = Kit::new();
+    let told = |text: &str, keep: bool| {
+        k.db().store().transaction(|tx| {
+            crate::notify::notify_in(tx, WS, "system", "fail", text, None)?;
+            if keep {
+                Ok(())
+            } else {
+                Err(steve_store::StoreError::NotFound("the rest of the write failed"))
+            }
+        })
+    };
+    assert!(told("没写下来", false).is_err());
+    assert!(k.core.notifications(WS).unwrap().is_empty());
+    assert!(k.db().messages(WS).unwrap().is_empty());
+    told("写下来了", true).unwrap();
+    let n = k.core.notifications(WS).unwrap();
+    assert_eq!((n.len(), n[0].text.as_str()), (1, "写下来了"));
+    // a failure without an item also leaves its line in the conversation, pointing at the notice
+    let ms = k.db().messages(WS).unwrap();
+    assert_eq!((ms.len(), &ms[0].meta["notice"]["ref"]), (1, &json!(n[0].id)));
+}
+
+#[test]
 fn a_message_lost_before_routing_gets_a_rerun_notice_once() {
     let k = Kit::new();
     let lost = k

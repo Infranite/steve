@@ -33,23 +33,41 @@ pub fn notify(
     text: &str,
     item: Option<&str>,
 ) -> Result<String> {
-    let id = db.message_add_in(
+    Ok(db
+        .store()
+        .transaction(|tx| notify_in(tx, ws, kind, level, text, item))?)
+}
+
+/// [`notify`] inside the caller's transaction: what happened and its notification are written
+/// together, or neither is.
+pub fn notify_in(
+    tx: &steve_store::Tx,
+    ws: &str,
+    kind: &str,
+    level: &str,
+    text: &str,
+    item: Option<&str>,
+) -> steve_store::Result<String> {
+    let id = steve_store::base::message_add(
+        tx,
         ws,
-        SPACE,
         "steve",
         text,
         item,
         &json!({"notice": {"kind": kind, "level": level}}),
+        SPACE,
     )?;
     /* notices stay in the notifications: an item's failure is already its fail card (the card in the
      * conversation, the pending strip), so only a failure without an item leaves a line here */
     if level == "fail" && item.is_none() {
-        db.message_add(
+        steve_store::base::message_add(
+            tx,
             ws,
             "steve",
             text,
             None,
-            Some(&json!({"notice": {"kind": kind, "level": level, "ref": id}})),
+            &json!({"notice": {"kind": kind, "level": level, "ref": id}}),
+            crate::thread::MAIN,
         )?;
     }
     Ok(id)

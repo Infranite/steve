@@ -1,13 +1,32 @@
 //! Decisions (the single source of 待处理) and the main thread with Steve.
 
 use super::Cached;
-use rusqlite::params;
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::{all, one, to_json};
 use crate::types::truthy;
 use crate::{ChangeEvent, Decision, Message, Result, Store, now, uid};
+
+/// One row in `messages`; the caller publishes its event. Returns the id.
+pub(crate) fn message_insert(
+    c: &Connection,
+    ws: &str,
+    author: &str,
+    text: &str,
+    item_id: Option<&str>,
+    meta: &Value,
+    space: &str,
+) -> Result<String> {
+    let id = uid("msg");
+    let meta = if truthy(meta) { Some(to_json(meta)?) } else { None };
+    c.run(
+        "INSERT INTO messages (id, workspace_id, space, author, text, item_id, meta, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        params![id, ws, space, author, text, item_id, meta, now()],
+    )?;
+    Ok(id)
+}
 
 impl Store {
     pub fn decisions(&self) -> Decisions<'_> {
@@ -360,12 +379,7 @@ impl Messages<'_> {
         space: &str,
     ) -> Result<String> {
         self.0.write(|w| {
-            let id = uid("msg");
-            let meta = if truthy(meta) { Some(to_json(meta)?) } else { None };
-            w.c.run(
-                "INSERT INTO messages (id, workspace_id, space, author, text, item_id, meta, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, ws, space, author, text, item_id, meta, now()],
-            )?;
+            let id = message_insert(w.c, ws, author, text, item_id, meta, space)?;
             w.publish(ChangeEvent::Message { id: id.clone() });
             Ok(id)
         })

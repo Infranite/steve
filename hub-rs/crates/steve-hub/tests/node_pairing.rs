@@ -348,6 +348,7 @@ async fn a_link_taken_over_again_and_again_pauses_the_node() {
         h.q::<String>(&format!("SELECT state FROM nodes WHERE node_id='{node}'")) == "paused"
     })
     .await;
+    // one transaction: whoever sees the pause sees its audit line and the owner's notice too
     assert_eq!(
         h.q::<i64>("SELECT COUNT(*) FROM node_audit WHERE what='takeover_suspected'"),
         1
