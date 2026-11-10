@@ -192,68 +192,6 @@ fn send_now_while_holding_for_a_release_waits_and_says_why() {
     assert_eq!(texts, ["二", "一"], "it goes first once the hold ends");
 }
 
-#[test]
-fn resumed_rows_are_conflicts_without_edit_removal_reordering_or_interrupt() {
-    let k = Kit::new();
-    let (item, sid) = started(&k);
-    queue(&k, &sid, &["ordinary first"]);
-    k.db()
-        .store()
-        .queued()
-        .add(&sid, "already delivered", "resumed:me", &[])
-        .unwrap();
-    let before = k.db().queued(&sid).unwrap();
-    let resumed = before
-        .iter()
-        .find(|q| q.via.starts_with("resumed:"))
-        .unwrap();
-    let events = kinds(&k, &sid);
-    let prompts = k.rt.prompts_of(&sid);
-    assert!(is_conflict(
-        k.core
-            .queued_edit(&sid, &resumed.id, "replacement action")
-            .unwrap_err()
-    ));
-    assert!(is_conflict(
-        k.core.queued_remove(&sid, &resumed.id).unwrap_err()
-    ));
-    assert!(is_conflict(
-        k.core.queued_send_now(&sid, &resumed.id).unwrap_err()
-    ));
-    let after = k.db().queued(&sid).unwrap();
-    let before = before
-        .into_iter()
-        .map(|q| (q.id, q.text, q.via, q.created))
-        .collect::<Vec<_>>();
-    let after = after
-        .into_iter()
-        .map(|q| (q.id, q.text, q.via, q.created))
-        .collect::<Vec<_>>();
-    assert_eq!(after, before);
-    assert_eq!(kinds(&k, &sid), events);
-    assert_eq!(k.rt.prompts_of(&sid), prompts);
-    assert!(
-        k.rt.st().cancelled.is_empty(),
-        "send-now must not interrupt an in-flight turn"
-    );
-    // Stopping recovery is an explicit task action, not a false claim that delivery was undone.
-    let paused = k
-        .core
-        .item_action(&item, crate::ItemAction::Pause, "me")
-        .unwrap();
-    assert_eq!(paused.status, "pause");
-    assert_eq!(k.rt.st().cancelled, vec![sid.clone()]);
-    assert!(k.rt.st().stopped.is_empty(), "a pause is no user stop");
-    assert!(
-        k.db()
-            .queued(&sid)
-            .unwrap()
-            .iter()
-            .any(|q| q.via == "resumed:me"),
-        "pause keeps delivery evidence for a later deliberate resume"
-    );
-}
-
 fn texts(k: &Kit, sid: &str) -> Vec<String> {
     k.db()
         .queued(sid)

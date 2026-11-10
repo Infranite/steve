@@ -1,9 +1,8 @@
 //! hub/test/supersede.test.ts: a question or failure card expires once the conversation goes on without it.
 
-use crate::lifecycle::{RESUME_WINDOW_MS, may_resume, settle, supersede, tidy};
+use crate::lifecycle::{settle, supersede, tidy};
 use crate::patch;
 use crate::testkit::Kit;
-use crate::util::now;
 use serde_json::json;
 
 fn ask(k: &Kit, item: &str, kind: &str) -> String {
@@ -62,59 +61,6 @@ fn nothing_to_supersede_changes_nothing() {
     k.db().item_patch(&i, patch![status: "pause"]).unwrap();
     assert_eq!(supersede(k.db(), &i, &["ask"], "x").unwrap(), 0);
     assert_eq!(k.status(&i).0, "pause");
-}
-
-#[test]
-fn a_restart_interrupted_turn_resumes_once_per_window() {
-    let k = Kit::new();
-    let i = k.item("run", "定义", None);
-    let s = k.session(&i, "idle");
-    assert!(may_resume(k.db(), &s, now()).unwrap());
-    k.db()
-        .event_add(
-            &s,
-            "system",
-            json!({"text": "Hub 重启，这一回合被中断，自动继续。", "resumed": true}),
-        )
-        .unwrap();
-    assert!(!may_resume(k.db(), &s, now()).unwrap());
-    assert!(may_resume(k.db(), &s, now() + RESUME_WINDOW_MS + 1000).unwrap());
-}
-
-#[test]
-fn a_turn_a_deploy_cut_resumes_even_right_after_another_resume() {
-    let k = Kit::new();
-    let i = k.item("run", "定义", None);
-    let s = k.session(&i, "idle");
-    let note = |k: &Kit, v: serde_json::Value| {
-        k.db().event_add(&s, "system", v).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    };
-    note(&k, json!({"text": "Hub 重启，自动继续。", "resumed": true}));
-    assert!(
-        !may_resume(k.db(), &s, now()).unwrap(),
-        "a crash right after: not again"
-    );
-    // a deploy cut it on purpose (it was waiting for a permission): not a crash loop
-    note(
-        &k,
-        json!({"text": "为了升级暂停了这一回合", "drain_cut": true}),
-    );
-    assert!(may_resume(k.db(), &s, now()).unwrap());
-    // resumed after that cut: an interruption now (no new cut) is a crash again
-    note(&k, json!({"text": "Hub 重启，自动继续。", "resumed": true}));
-    assert!(!may_resume(k.db(), &s, now()).unwrap());
-    // a called-off drain that continued its cut uses the cut up as well
-    note(
-        &k,
-        json!({"text": "为了升级暂停了这一回合", "drain_cut": true}),
-    );
-    assert!(crate::lifecycle::drain_cut(k.db(), &s).unwrap());
-    note(
-        &k,
-        json!({"text": "升级没有进行，这一回合接着做。", "drain_resumed": true}),
-    );
-    assert!(!crate::lifecycle::drain_cut(k.db(), &s).unwrap(), "used up");
 }
 
 #[test]

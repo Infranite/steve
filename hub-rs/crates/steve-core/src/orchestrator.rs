@@ -2,7 +2,7 @@
 
 use crate::error::{CoreError, Result, msg};
 use crate::git;
-use crate::lifecycle::{deps_open, may_resume, settle, supersede, tidy};
+use crate::lifecycle::{deps_open, settle, supersede, tidy};
 use crate::modules::Point;
 use crate::patch;
 use crate::release::NOTHING_TO_RELEASE;
@@ -34,14 +34,10 @@ pub const ACCEPT_AND_RELEASE: &str = "release";
 /// (验收，先不合并); `steve_publish` puts it in later.
 pub const NO_MERGE: &str = "no-merge";
 
-/// Put before a message the agent had already been given when the Hub stopped (its dispatch was
-/// submitted): it may be done or half done, so it comes back to be checked, never redone blindly.
-pub const RESUMED_NOTE: &str = "（以下是 Hub 重启前已经发给你的消息，你可能已经做了一部分或全部。只用来核对进度：先确认它的结果，已经做完的不要重做，没做完的接着做。）";
-
 /// An interruption older than this is not continued by itself (it is reported, the intent dropped).
 pub const RESUME_MAX_AGE_MS: i64 = 24 * 3_600_000;
 
-/// What a turn a restart cut continues with, first in its queue (B7: on the Node it moved to).
+/// What a turn a restart cut continues with.
 pub const RESUME: &str =
     "Hub 刚重启，上一回合被中断了，请从中断处继续；中断前做到一半的操作，先确认结果再往下。";
 
@@ -762,27 +758,6 @@ impl Core {
         self.tx()
             .hand_over_from_offline(session_id, device, minutes)
     }
-    /// Ends an idle session its runtime cannot take any more, with `note` (zh-CN, stored) as its
-    /// last system event, once: it is never woken again (a message to it is refused, one in its
-    /// item starts a new session). False, with nothing changed: no such session, ended or retired
-    /// already, or it has work in hand (a turn in flight, queued messages, a pending resume): it
-    /// is asked again at a later idle boundary. Queued messages of a session whose directory is
-    /// unusable never go (nothing flushes them): they are dropped with it, each one said.
-    pub fn retire_session(&self, session_id: &str, note: &str) -> Result<bool> {
-        self.tx().retire_session(session_id, note, false)
-    }
-    /// [`Self::retire_session`] for a session nothing will ever run again (one boot could not move
-    /// off the legacy runner, B7): its queued messages go with it whatever its directory, each one
-    /// said, since nothing would ever flush them (messages the old runner had delivered too). A
-    /// turn the restart cut in it is said as not continued, with a failure card (and why) where
-    /// its item still runs.
-    pub fn end_unmovable(&self, session_id: &str, note: &str) -> Result<bool> {
-        self.tx().retire_session(session_id, note, true)
-    }
-    /// A session just moved from the legacy runner to a Node: see [`Tx::moved_to_node`].
-    pub fn moved_to_node(&self, session_id: &str) -> Result<bool> {
-        self.tx().moved_to_node(session_id)
-    }
     pub fn fork(
         &self,
         ws: &str,
@@ -827,16 +802,6 @@ impl Core {
                 self.lane_recover();
             }
         }
-    }
-    /// What a session moved to a Node after boot (B7's later pass) has queued goes now, as
-    /// [`Self::ready`] sends what the sessions moved at boot have: nothing else would (a moved
-    /// session opens only once something is flushed to it). Not behind an upgrade's hold (lifting
-    /// it flushes), nor on a copy of the real database.
-    pub fn flush_moved(&self, session_id: &str) -> Result<()> {
-        if self.store().store().maintenance() || self.config().no_resume {
-            return Ok(());
-        }
-        self.tx().flush_held(session_id)
     }
     /// Hold new turns for an upgrade drain, or stop holding for it (a release's hold stays).
     pub fn maintenance_hold(&self, on: bool) -> Result<()> {
@@ -3013,12 +2978,6 @@ impl Tx<'_> {
         let db = self.db().clone();
         let send = |t: &Tx, m: &str| -> Result<()> {
             let Some(s) = &s else { return Ok(()) };
-            // a retired session is never woken: the answer is said there, not sent
-            if s.status == "ended" && t.retired(&s.id)? {
-                let why = steve_i18n::stored(|| steve_i18n::t!("core.conversation.retired"));
-                t.db().event_add(&s.id, "system", json!({"text": why}))?;
-                return Ok(());
-            }
             if s.status == "ended" {
                 t.db().session_patch(&s.id, patch![status: "idle"])?;
             }
@@ -3753,7 +3712,6 @@ impl Tx<'_> {
             .db()
             .session(sid)?
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
-        self.refuse_retired(&s)?;
         if let Some(i) = s.item_id.as_deref() {
             self.lc_guard_open(i)?;
             self.db()
@@ -3822,7 +3780,6 @@ impl Tx<'_> {
             .db()
             .session(sid)?
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
-        self.refuse_retired(&s)?;
         if let Some(i) = s.item_id.as_deref() {
             self.lc_guard_open(i)?;
         }
@@ -3927,78 +3884,6 @@ impl Tx<'_> {
             supersede(self.db(), item, &["ask", "fail"], "Bot 继续往下做了")?;
             self.db().item_patch(item, patch![now: "在等你批准"])?;
             settle(self.db(), item)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn retire_session(
-        &mut self,
-        sid: &str,
-        note: &str,
-        drop_queue: bool,
-    ) -> Result<bool> {
-        let Some(s) = self.db().session(sid)? else {
-            return Ok(false);
-        };
-        if s.status == "ended"
-            || self.retired(sid)?
-            || self.busy(sid)
-            || self.st.pending.contains_key(sid)
-        {
-            return Ok(false);
-        }
-        // queued messages wait for the flush that sends them, unless the session's directory is
-        // unusable: nothing ever flushes those, so they go with the session, each one said
-        let queued = self.db().queued(sid)?;
-        if !queued.is_empty() && !drop_queue && cwd_usable(Path::new(&s.cwd)) {
-            return Ok(false);
-        }
-        // a turn the restart cut that nothing will ever continue: said, with a failure card
-        // where its item still runs (it would otherwise look at work with no session for good)
-        let store = self.db().store().clone();
-        if drop_queue
-            && (s.status == "running"
-                || s.status == "starting"
-                || store.queued().resume_created(sid)?.is_some())
-        {
-            self.not_continued_for(&s, Some(note))?;
-            store.queued().resume_done(sid)?;
-        }
-        self.end_and_release(sid)?;
-        let mut dropped = 0;
-        for q in queued {
-            // all of it, messages the old runner had delivered (`resumed:`) too: nothing sends them
-            if let Some(q) = self.db().queue_remove_any(sid, &q.id)? {
-                self.db().event_add(
-                    sid,
-                    "queued_removed",
-                    json!({"id": q.id, "text": q.text, "retired": true}),
-                )?;
-                dropped += 1;
-            }
-        }
-        let note = if dropped == 0 {
-            note.to_string()
-        } else {
-            let more = steve_i18n::stored(|| {
-                steve_i18n::t!("core.conversation.retired_queue", n = dropped)
-            });
-            format!("{note}{more}")
-        };
-        self.db()
-            .event_add(sid, "system", json!({"text": note, "retired": true}))?;
-        Ok(true)
-    }
-
-    /// The session was ended for good by [`Self::retire_session`]: it is never woken again.
-    pub(crate) fn retired(&self, sid: &str) -> Result<bool> {
-        Ok(self.db().last_marker_ts(sid, "retired")?.is_some())
-    }
-
-    /// An error for a message to a retired session ([`Self::retired`]), which is never woken.
-    fn refuse_retired(&self, s: &Session) -> Result<()> {
-        if s.status == "ended" && self.retired(&s.id)? {
-            return Err(msg(steve_i18n::t!("core.conversation.retired")));
         }
         Ok(())
     }
@@ -4353,19 +4238,13 @@ impl Tx<'_> {
             }
         }
         // a turn a restart cut: its backend settles it (a Node's reconcile, or the Node it waits
-        // for). One no backend holds has nothing left to continue it (the legacy runner is gone,
-        // B7; boot moved every session it could to the local Node first): said once, the intent
-        // dropped
-        let pending = self.db().store().queued().resume_ids()?;
-        let store = self.db().store().clone();
+        // for). One no backend holds has nothing left to continue it: said once
         for s in self.db().sessions_all()? {
-            if s.status != "running" && s.status != "starting" && !pending.contains(&s.id) {
-                continue;
-            }
-            if s.status != "ended" && !self.rt().recovers_itself(&s.id) {
+            if (s.status == "running" || s.status == "starting")
+                && !self.rt().recovers_itself(&s.id)
+            {
                 self.not_continued(&s)?;
             }
-            store.queued().resume_done(&s.id)?;
         }
         Ok(())
     }
@@ -4373,11 +4252,6 @@ impl Tx<'_> {
     /// The turn of `s` a restart cut, which nothing continues: said in its conversation (and, for
     /// an item still at work, as a failure card), the session idle again.
     fn not_continued(&mut self, s: &Session) -> Result<()> {
-        self.not_continued_for(s, None)
-    }
-
-    /// [`Self::not_continued`]; `why` (stored text), when given, follows on the failure card.
-    fn not_continued_for(&mut self, s: &Session, why: Option<&str>) -> Result<()> {
         let item = match s.item_id.as_deref() {
             Some(i) => self.db().item(i)?,
             None => None,
@@ -4406,118 +4280,9 @@ impl Tx<'_> {
         self.db()
             .event_add(&s.id, "system", json!({"text": text}))?;
         if let (Some(i), true) = (&item, fail) {
-            match why {
-                Some(why) => self.fail(&i.id, &format!("{INTERRUPTED}。{why}"))?,
-                None => self.fail(&i.id, INTERRUPTED)?,
-            }
+            self.fail(&i.id, INTERRUPTED)?;
         }
         Ok(())
-    }
-
-    /// `sid` was just moved from the legacy runner to a Node (B7): what that runner left of it is
-    /// made right for the Node. Its open tool permission cards died with the old harness (said,
-    /// as at any restart); messages it had delivered come back as ones to check
-    /// ([`RESUMED_NOTE`]). A turn the restart cut continues on the Node, once, as it would have
-    /// on the old runner: [`RESUME`] goes first in its queue, unless the item is over, paused or
-    /// waits on the user, the cut is older than a day, or the session was continued like this
-    /// in the last half hour (then it is said, with a failure card where the item still runs).
-    /// Whether it continues.
-    pub(crate) fn moved_to_node(&mut self, sid: &str) -> Result<bool> {
-        let Some(s) = self.db().session(sid)? else {
-            return Ok(false);
-        };
-        for d in self.db().decisions_open(&s.workspace_id)? {
-            if d.kind == "approve"
-                && d.subject_type == "tool_call"
-                && d.session_id.as_deref() == Some(sid)
-            {
-                self.db()
-                    .decision_resolve(&d.id, json!({"expired": true}), "expired", None)?;
-                self.db().event_add(sid, "system", json!({"text": "Hub 重启，原工具授权请求已失效。尚未授权的操作不会自动获准；继续时必须重新请求授权。", "approval_expired": d.id}))?;
-                if let Some(i) = &d.item_id {
-                    self.db().timeline_add(
-                        i,
-                        "steve",
-                        "sys",
-                        "Hub 重启使工具授权失效，继续操作需要重新授权",
-                        Some(sid),
-                    )?;
-                    settle(self.db(), i)?;
-                }
-            }
-        }
-        let store = self.db().store().clone();
-        store.queued().unwrap_resumed(sid, RESUMED_NOTE)?;
-        let since = store.queued().resume_created(sid)?;
-        let cut = s.status == "running" || s.status == "starting" || since.is_some();
-        store.queued().resume_done(sid)?;
-        if !cut || s.status == "ended" {
-            return Ok(false);
-        }
-        self.db().session_patch(sid, patch![status: "idle"])?;
-        let item = match s.item_id.as_deref() {
-            Some(i) => self.db().item(i)?,
-            None => None,
-        };
-        let say = |t: &Tx, text: &str| t.db().event_add(sid, "system", json!({"text": text}));
-        let give_up = |t: &mut Tx, text: &str, why: String| -> Result<()> {
-            say(t, text)?;
-            if let Some(i) = &item {
-                t.fail(&i.id, &why)?;
-            }
-            Ok(())
-        };
-        if item.as_ref().is_some_and(|i| i.is_finished()) {
-            say(self, "Hub 重启，这一回合被中断。事项已结束，不自动继续。")?;
-            return Ok(false);
-        }
-        if item.as_ref().is_some_and(|i| i.status == "block") {
-            say(self, "Hub 重启，事项仍在等待前置完成，不恢复执行。")?;
-            return Ok(false);
-        }
-        if item.as_ref().is_some_and(|i| i.status == "pause") {
-            say(self, "Hub 重启，这一回合被中断。事项已暂停，继续时接着做。")?;
-            return Ok(false);
-        }
-        if !crate::lifecycle::drain_cut(self.db(), sid)?
-            && self.waits_on_user(s.item_id.as_deref())?
-        {
-            say(
-                self,
-                "Hub 重启，这一回合被中断。事项在等你处理，之后再继续。",
-            )?;
-            return Ok(false);
-        }
-        if since.is_some_and(|c| c < now() - RESUME_MAX_AGE_MS) {
-            give_up(
-                self,
-                "Hub 重启，这一回合中断已经超过一天，不自动继续，需要时让它继续。",
-                INTERRUPTED.to_string(),
-            )?;
-            return Ok(false);
-        }
-        if !may_resume(self.db(), sid, now())? {
-            give_up(
-                self,
-                "Hub 重启，这一回合被中断。半小时内已经自动继续过一次，这次等你决定。",
-                format!("{INTERRUPTED}（已经自动继续过一次）"),
-            )?;
-            return Ok(false);
-        }
-        store.queued().add_first(sid, RESUME, "steve")?;
-        let note = steve_i18n::stored(|| steve_i18n::t!("core.recover.moved"));
-        self.db()
-            .event_add(sid, "system", json!({"text": note, "resumed": true}))?;
-        if let Some(i) = &item {
-            self.db().timeline_add(
-                &i.id,
-                "steve",
-                "sys",
-                "Hub 重启打断了会话，已自动继续",
-                Some(sid),
-            )?;
-        }
-        Ok(true)
     }
 
     /// Prompts held for a restart or a release, or queued behind a turn it cut off, go now (unless the item waits on the user).

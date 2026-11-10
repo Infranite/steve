@@ -435,20 +435,6 @@ impl Db {
     pub fn events_up_to(&self, session: &str, seq: i64) -> Result<Vec<Event>> {
         Ok(self.s.events().up_to(session, seq)?)
     }
-    /// `ts` of the session's newest system event carrying `marker` (e.g. `resumed`, `drain_cut`): looked
-    /// up directly, however many events the session has.
-    pub fn last_marker_ts(&self, session: &str, marker: &str) -> Result<Option<i64>> {
-        let path = format!("$.{marker}");
-        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT ts FROM events WHERE session_id = ? AND kind = 'system' AND json_extract(data, ?) = 1
-                  ORDER BY seq DESC LIMIT 1",
-                rusqlite::params![session, path],
-                |r| r.get(0),
-            )
-            .optional()?)
-        })?)
-    }
     /// `ts` of the session's newest event.
     pub fn last_event_ts(&self, session: &str) -> Result<Option<i64>> {
         Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
@@ -521,10 +507,6 @@ impl Db {
     /// The removed row; `None` once a turn took it.
     pub fn queue_remove(&self, session: &str, id: &str) -> Result<Option<Queued>> {
         Ok(self.s.queued().remove(session, id)?)
-    }
-    /// [`Self::queue_remove`], a message a runner had delivered (`resumed:`) included.
-    pub fn queue_remove_any(&self, session: &str, id: &str) -> Result<Option<Queued>> {
-        Ok(self.s.queued().remove_any(session, id)?)
     }
     /// Moves a row to the head of the queue; `None` once a turn took it.
     pub fn queue_front(&self, session: &str, id: &str) -> Result<Option<Queued>> {

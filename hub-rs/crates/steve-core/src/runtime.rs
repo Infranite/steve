@@ -212,11 +212,6 @@ pub trait AgentRuntime: Send + Sync {
     fn node_working(&self) -> usize {
         0
     }
-    /// The pid of the session's live agent adapter (its process group leader), if one runs.
-    fn agent_pid(&self, session_id: &str) -> Option<u32> {
-        let _ = session_id;
-        None
-    }
     /// New sessions of items on a git worktree may be bound to a backend that makes the worktree
     /// itself (the local Node prepares it off the core's lock, before the session opens): the
     /// core then only names where it goes ([`crate::Core::workspace_ready`] says when it is there).

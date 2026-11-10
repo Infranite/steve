@@ -217,8 +217,6 @@ impl DependencyWaits<'_> {
                 if !live { return Err(refuse("当前会话不可续跑")); }
                 tx.execute("INSERT INTO queued(id,session_id,text,via,created,files) VALUES(?,?,?,'steve',?,'[]')",
                            params![crate::uid("q"),session,text,at])?;
-                // A dependency wake-up replaces an interrupted-turn resume intent.
-                tx.execute("DELETE FROM session_resume WHERE session_id=?", [session])?;
                 tx.publish(ChangeEvent::Session{id:session.into(),item_id:Some(Some(item.into()))});
             } else {
                 crate::decision_create_in(tx,&NewDecision {

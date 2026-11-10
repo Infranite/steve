@@ -77,10 +77,6 @@ pub struct FakeState {
     pub node_made: HashSet<String>,
     /// `tidy` calls: (session, keep_branch).
     pub tidies: Vec<(String, bool)>,
-    /// The adapter pid [`AgentRuntime::agent_pid`] gives a session (YOLO's `ps` root).
-    pub agent_pids: HashMap<String, u32>,
-    /// How often [`AgentRuntime::agent_pid`] was asked.
-    pub pid_asks: usize,
 }
 
 /// acp.ts in miniature: turns are tracked, prompts queue behind a running turn or the hold, and a test
@@ -325,11 +321,6 @@ impl AgentRuntime for FakeRuntime {
         } else {
             Configured::Applied
         })
-    }
-    fn agent_pid(&self, sid: &str) -> Option<u32> {
-        let mut st = self.st();
-        st.pid_asks += 1;
-        st.agent_pids.get(sid).copied()
     }
     fn is_holding(&self) -> bool {
         self.st().holding

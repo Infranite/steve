@@ -277,7 +277,6 @@ const ALLOWED: &[Entry] = &[
     /* Hub-host work */
     e(Spawn, "steve-core/src/lane/profile.rs", 1, Hub, "`gh api`"),
     e(Spawn, "steve-core/src/takeover.rs", 1, Hub, "`gh run list`"),
-    e(Spawn, "steve-core/src/yolo/procs.rs", 1, Hub, "`ps`: the process table"),
     e(Spawn, "steve-hub/src/config.rs", 1, Hub, "npm config"),
     e(Spawn, "steve-hub/src/system.rs", 1, Hub, "host facts (sw_vers, sysctl, uname, hostname)"),
     e(Fs, "steve-hub/src/nodes/mod.rs", 1, Hub, "the Hub's own identity key directory"),

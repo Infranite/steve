@@ -346,7 +346,6 @@ impl Tx<'_> {
     fn workflow_cancel_child(&mut self, child: &str) -> Result<()> {
         self.workflow_stop_child(child)?;
         for s in self.db().sessions_of_item(child)? {
-            self.db().store().queued().resume_done(&s.id)?;
             for q in self.db().queued(&s.id)? {
                 self.db().store().queued().remove(&s.id, &q.id)?;
             }

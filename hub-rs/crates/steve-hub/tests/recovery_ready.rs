@@ -393,14 +393,6 @@ async fn a_turn_cut_by_a_crash_is_never_sent_again() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(plain(&h), 1, "never sent again: {:?}", h.prompts());
     assert!(resumed(&h).is_empty(), "no resume: {:?}", h.prompts());
-    assert_eq!(
-        count(
-            &h,
-            "SELECT COUNT(*) FROM session_resume WHERE session_id=?",
-            &sid
-        ),
-        0
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

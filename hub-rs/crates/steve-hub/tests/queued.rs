@@ -255,61 +255,6 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
     let (_, st) = e.call("GET", "/api/state", None).await;
     assert_eq!(st["hold"], Value::Null, "no release hold");
 
-    // A persisted recovery receipt is already delivered, even though it is visible in queued.
-    // All public mutations, including the legacy DELETE endpoint, must reject it.
-    {
-        let c = rusqlite::Connection::open(&e.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).unwrap();
-        c.execute("INSERT INTO queued (id,session_id,text,via,created) VALUES ('q_recovery',?1,'already delivered','resumed:me',1)", [&sid]).unwrap();
-    }
-    let events_before = e.kinds(&sid).await;
-    for (method, path, body) in [
-        (
-            "PATCH",
-            format!("/api/sessions/{sid}/queued/q_recovery"),
-            Some(json!({"text":"must not rewrite delivered work"})),
-        ),
-        (
-            "DELETE",
-            format!("/api/sessions/{sid}/queued/q_recovery"),
-            None,
-        ),
-        (
-            "POST",
-            format!("/api/sessions/{sid}/queued/q_recovery/send-now"),
-            None,
-        ),
-        ("DELETE", "/api/queued/q_recovery".into(), None),
-    ] {
-        let (status, result) = e.call(method, &path, body).await;
-        assert_eq!(status, 409, "{method} {path}: {result}");
-    }
-    let recovery = e.queued(&sid).await;
-    assert_eq!(recovery.len(), 1);
-    assert_eq!(recovery[0]["text"], "already delivered");
-    assert_eq!(recovery[0]["via"], "resumed:me");
-    let queued_events = |events: Vec<String>| {
-        events
-            .into_iter()
-            .filter(|kind| kind.starts_with("queued_"))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        queued_events(e.kinds(&sid).await),
-        queued_events(events_before),
-        "rejected mutations publish no queue events"
-    );
-    assert_eq!(
-        e.session(&sid).await["busy"],
-        true,
-        "send-now did not cancel the running turn"
-    );
-    // Remove only this synthetic fixture before exercising the existing ordinary-queue scenario.
-    rusqlite::Connection::open(&e.db)
-        .unwrap()
-        .execute("DELETE FROM queued WHERE id='q_recovery'", [])
-        .unwrap();
-
     // an approval the agent asked for from inside its turn: the card says the agent is still finishing
     {
         let c = rusqlite::Connection::open(&e.db).expect("db");

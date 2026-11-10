@@ -1128,11 +1128,6 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Backend::Parked | Backend::Unbound => Ok(Configured::NotRunning),
         }
     }
-    /// A Node's pids are in its own namespace: they reach YOLO as the Node reported them
-    /// (`PermissionRequest.own_pids`), never through a `ps` here.
-    fn agent_pid(&self, _session_id: &str) -> Option<u32> {
-        None
-    }
 }
 
 // ── the HTTP layer's Domain ──
