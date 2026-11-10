@@ -191,27 +191,6 @@ fn plan_rolls_back_as_a_unit_and_reclaim_is_idempotent() {
 }
 
 #[test]
-fn returning_legacy_dispatches_does_not_touch_node_dispatch() {
-    let t = fresh();
-    ready(&t);
-    t.store.transaction::<_,StoreError>(|tx| {
-        claim_in(tx,"s","t",2)?;
-        dispatch_receipt_in(tx,"t","submitted",2)?;
-        tx.execute("INSERT INTO session_dispatch(id,session_id,text,via,created,state,updated) VALUES ('old','legacy','legacy text','user',1,'submitted',1)",[])?;
-        Ok(())
-    }).unwrap();
-    t.store.queued().return_legacy_dispatches().unwrap();
-    t.store.queued().return_legacy_dispatches().unwrap();
-    t.store.with_conn(|c| {
-        assert_eq!(count(c,"SELECT count(*) FROM session_dispatch WHERE backend='node' AND state='submitted' AND turn_id='t'"),1);
-        assert_eq!(count(c,"SELECT count(*) FROM queued WHERE session_id='s'"),0);
-        assert_eq!(count(c,"SELECT count(*) FROM session_resume WHERE session_id='s'"),0);
-        assert_eq!(count(c,"SELECT count(*) FROM queued WHERE session_id='legacy' AND via='resumed:user'"),1);
-        Ok(())
-    }).unwrap();
-}
-
-#[test]
 fn inbox_conflicts_gaps_duplicates_and_transactional_apply() {
     let t = fresh();
     let k = StreamKey {

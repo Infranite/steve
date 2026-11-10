@@ -728,14 +728,6 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
             "restart {round}: no 'Hub 重启' event; log:\n{}",
             hub_log(&h)
         );
-        assert_eq!(
-            h.count(
-                "SELECT COUNT(*) FROM session_resume WHERE session_id=?",
-                &sid
-            ),
-            0,
-            "restart {round}: no resume intent"
-        );
     }
     assert_eq!(fails(), fails_before, "no failure card");
 }

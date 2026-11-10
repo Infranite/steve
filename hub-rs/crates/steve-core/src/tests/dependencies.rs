@@ -516,41 +516,6 @@ fn interrupted_wait_recovers_durably_without_losing_or_duplicating_wakeup() {
 }
 
 #[test]
-fn moving_a_deploy_cut_wait_to_node_keeps_it_blocked_until_prerequisites_finish() {
-    let k = Kit::new();
-    let (item, dep, s) = setup(&k);
-    wait(&k, &s, &[&dep], "automatic");
-    k.db()
-        .event_add(
-            &s.id,
-            "system",
-            json!({"text": "为了升级暂停了这一回合", "drain_cut": true}),
-        )
-        .unwrap();
-    k.rt.st().turning.clear();
-    k.rt.st().attempts.clear();
-
-    assert!(!k.core.moved_to_node(&s.id).unwrap());
-    assert_eq!(k.status(&item).0, "block");
-    assert!(k.db().queued(&s.id).unwrap().is_empty());
-    assert!(k.open_kinds(&item).is_empty());
-    k.core.ready();
-    assert_eq!(k.rt.prompts_of(&s.id).len(), 1);
-    assert_eq!(
-        k.core
-            .tool_item_dependencies(&s, json!({"action":"get"}))
-            .unwrap()["wait_state"],
-        "waiting"
-    );
-
-    complete(&k, &dep);
-    k.core.lifecycle_tick().unwrap();
-    assert_eq!(k.rt.prompts_of(&s.id).len(), 2);
-    k.core.lifecycle_tick().unwrap();
-    assert_eq!(k.rt.prompts_of(&s.id).len(), 2);
-}
-
-#[test]
 fn wakeup_queue_survives_a_restart_after_transaction_before_runtime_flush() {
     let k = Kit::new();
     let (item, dep, s) = setup(&k);

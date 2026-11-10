@@ -193,24 +193,6 @@ fn branch_facts(core: &crate::Core, item: &Item, state: bool) -> BranchFacts {
 }
 
 impl Engine {
-    /// The processes the agent of `d`'s session started, looked up only for a command that kills.
-    fn own_pids(&self, d: &Decision, raw: &Value) -> Vec<u32> {
-        let mentions_kill = raw
-            .get("command")
-            .is_some_and(|c| c.to_string().contains("kill"));
-        // an item on a Node: its processes are the Node's to tell (the request's), never a `ps` here
-        let on_node = d
-            .item_id
-            .as_deref()
-            .is_some_and(|i| self.core().node_git().is_some_and(|p| p.on_node(i)));
-        let pid = d
-            .session_id
-            .as_deref()
-            .filter(|_| mentions_kill && !on_node)
-            .and_then(|s| self.core().0.runtime.agent_pid(s));
-        pid.map(super::procs::live_started_by).unwrap_or_default()
-    }
-
     /// Everything [`judge::judge`] needs about `d` (open, in scope).
     pub fn gather(&self, d: &Decision, policy: &Policy) -> ApiResult<Gathered> {
         let db = self.core().store();
@@ -263,10 +245,7 @@ impl Engine {
         let subject = match (d.kind.as_str(), d.subject_type.as_str()) {
             ("approve", "tool_call") => match self.tool_input(&d.id) {
                 Some(t) => Subject::Tool(Tool {
-                    own_pids: t
-                        .own_pids
-                        .clone()
-                        .unwrap_or_else(|| self.own_pids(d, &t.raw)),
+                    own_pids: t.own_pids.clone().unwrap_or_default(),
                     kind: t.kind,
                     title: d.question.trim_start_matches("允许执行：").to_string(),
                     raw: t.raw,

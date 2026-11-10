@@ -82,35 +82,6 @@ pub fn supersede_where(
     Ok(xs.len())
 }
 
-/// A turn cut off by a Hub restart continues by itself once; within this window after an automatic resume
-/// it waits for the user instead.
-pub const RESUME_WINDOW_MS: i64 = 30 * 60_000;
-
-/// No automatic resume of this session in the window before `at`.
-pub fn may_resume(db: &Store, session: &str, at: i64) -> Result<bool> {
-    // a drain cut it on purpose (a deploy) since it was last resumed: not a crash loop, it resumes
-    if drain_cut(db, session)? {
-        return Ok(true);
-    }
-    Ok(db
-        .last_marker_ts(session, "resumed")?
-        .is_none_or(|r| at - r >= RESUME_WINDOW_MS))
-}
-
-/// A deploy's drain cut the session's turn (it only waited for a permission answer) and it has not been
-/// resumed since: it was running before the deploy and goes on after it, whatever else waits on the item.
-pub fn drain_cut(db: &Store, session: &str) -> Result<bool> {
-    let Some(cut) = db.last_marker_ts(session, "drain_cut")? else {
-        return Ok(false);
-    };
-    // used up by the restart's resume, or by a called-off drain continuing it
-    let since = [
-        db.last_marker_ts(session, "resumed")?,
-        db.last_marker_ts(session, "drain_resumed")?,
-    ];
-    Ok(since.into_iter().flatten().all(|r| cut > r))
-}
-
 /// Cards left from before these rules: a question or failure older than a delivery or approval request has been moved past.
 pub fn tidy(db: &Store, item: &str) -> Result<usize> {
     let open: Vec<_> = db

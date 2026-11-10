@@ -249,8 +249,7 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
 }
 
 /// healthz's `node` block without a Node (a STEVE_NO_RESUME copy, STEVE_NODE_MODE unset): off, nothing reconciled, and the
-/// store's counts as they are: Node-bound sessions with queued messages are parked, and legacy
-/// sessions that could still run (and those with work in hand) are counted for the runner's removal.
+/// store's counts as they are: Node-bound sessions with queued messages are parked.
 #[tokio::test(flavor = "multi_thread")]
 async fn healthz_reports_the_node_path_without_a_node() {
     let e = start().await;
@@ -293,21 +292,6 @@ async fn healthz_reports_the_node_path_without_a_node() {
             &[&id, &node, &id, &phase],
         )
     };
-    // legacy: idle, with a queued message, with a submitted dispatch, ended with a pending resume, read-only
-    session("hz-idle", "idle", 0);
-    session("hz-queued", "idle", 0);
-    queue("hz-queued");
-    session("hz-submitted", "running", 0);
-    e.exec(
-        "INSERT INTO session_dispatch (id, session_id, text, via, created, state, updated) VALUES ('d1', 'hz-submitted', 'x', 'web', 0, 'submitted', 0)",
-        &[],
-    );
-    session("hz-ended", "ended", 0);
-    e.exec(
-        "INSERT INTO session_resume (session_id, created) VALUES ('hz-ended', 0)",
-        &[],
-    );
-    session("hz-readonly", "idle", 1);
     // Node-bound: one on the local Node with a message waiting, one released on a remote Node whose
     // last attempt nobody can tell the end of
     session("hz-local", "idle", 0);
@@ -326,17 +310,8 @@ async fn healthz_reports_the_node_path_without_a_node() {
     let after = node().await;
     let delta = |k: &str| n(&after, k) - n(&before, k);
     assert_eq!(
-        [
-            "/sessions",
-            "/open",
-            "/running",
-            "/unknown",
-            "/parked",
-            "/legacy/sessions",
-            "/legacy/busy"
-        ]
-        .map(delta),
-        [2, 1, 1, 1, 1, 3, 3],
+        ["/sessions", "/open", "/running", "/unknown", "/parked"].map(delta),
+        [2, 1, 1, 1, 1],
         "{before} -> {after}"
     );
 }

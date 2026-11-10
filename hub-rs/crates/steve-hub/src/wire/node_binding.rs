@@ -1306,7 +1306,6 @@ mod host_tests {
                 steve_core::Released::Gone
             ));
             assert_eq!(routed.running_turns(), 0);
-            assert_eq!(routed.agent_pid("work"), None);
             assert!(
                 !cfg.data_dir.exists(),
                 "the Hub must not prepare a workspace"

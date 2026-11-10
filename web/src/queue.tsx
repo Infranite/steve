@@ -1,7 +1,6 @@
 /* The queue strip under a composer: every message waiting for the session's next turn is its own row,
  * with 编辑 (inline), 撤回 (back into the composer when it is empty, else an undo toast) and 立即发送 (interrupts the
  * running turn; the queue, this message first, is the next turn). Attachments stay with the message.
- * `resumed:` rows were already delivered before restart: show recovery progress without queue mutations.
  * The main conversation has the same strip (ChatQueue): what you say while Steve is on a turn waits for it.
  * On an item page the queue is shown on the comments instead (QueuedComment); the strip keeps only what pairs with none. */
 import { useState, type ReactNode } from "react"
@@ -32,13 +31,11 @@ export function QueueStrip({ sid, rows, note, composer, prefix = "", className }
 }) {
   const t = useT()
   if (!rows.length) return null
-  const resumedCount = rows.filter(q => q.via.startsWith("resumed:")).length
-  const queuedCount = rows.length - resumedCount
   const strip = (s: string) => (prefix && s.startsWith(prefix) ? s.slice(prefix.length) : s)
   return (
-    <div role="region" aria-label={resumedCount ? t("shell:queue.regionResumed") : t("shell:queue.region")} className={"mb-2 rounded-xl border border-dashed " + (className ?? "")} data-sq>
+    <div role="region" aria-label={t("shell:queue.region")} className={"mb-2 rounded-xl border border-dashed " + (className ?? "")} data-sq>
       <div className="flex items-center gap-2 px-3.5 pt-2 pb-1 type-footnote text-muted-foreground" data-sq-note>
-        <ClockIcon className="size-3.5 shrink-0" aria-hidden /><span>{resumedCount > 0 && <>{t("shell:queue.resumedN", { count: resumedCount })}{queuedCount > 0 ? t("shell:queue.sep") : ""}</>}{queuedCount > 0 && t("shell:queue.queuedN", { count: queuedCount, note })}</span>
+        <ClockIcon className="size-3.5 shrink-0" aria-hidden /><span>{t("shell:queue.queuedN", { count: rows.length, note })}</span>
       </div>
       <ul className="flex flex-col">
         {rows.map((q) => <Row key={q.id} q={q} shown={strip(q.text)} ops={{
@@ -76,11 +73,11 @@ type QRow = Pick<RQueued, "id" | "text" | "files" | "via">
 type QOps = { edit: (text: string) => Promise<unknown>; withdraw: () => Promise<unknown>; sendNow?: () => Promise<unknown> } | null
 
 /** inline editing of one queued message: `edit` is the draft while editing, else null */
-function useQueuedEdit(shown: string, ops: QOps, locked = false) {
+function useQueuedEdit(shown: string, ops: QOps) {
   const [edit, setEdit] = useState<string | null>(null), [busy, setBusy] = useState(false)
   const run = async (f: () => Promise<unknown>) => { setBusy(true); try { await f() } finally { setBusy(false) } }
   const save = () => run(async () => {
-    if (locked || !ops) return
+    if (!ops) return
     const t = (edit ?? "").trim()
     if (!t || t === shown) { setEdit(null); return }
     await ops.edit(t)
@@ -111,20 +108,17 @@ function Actions({ e, shown, ops, via, className }: { e: QEdit; shown: string; o
 }
 
 function Row({ q, shown, ops }: { q: QRow; shown: string; ops: QOps }) {
-  const resumed = q.via.startsWith("resumed:")
-  const via = resumed ? q.via.slice("resumed:".length) : q.via
-  const e = useQueuedEdit(shown, ops, resumed), t = useT()
+  const e = useQueuedEdit(shown, ops), t = useT()
   return (
-    <li className="flex flex-col gap-1 border-t border-dashed px-3.5 py-2 sm:flex-row sm:items-start sm:gap-3" data-queued={q.id} data-queued-resumed={resumed || undefined}>
+    <li className="flex flex-col gap-1 border-t border-dashed px-3.5 py-2 sm:flex-row sm:items-start sm:gap-3" data-queued={q.id}>
       <div className="min-w-0 flex-1">
-        {!resumed && e.edit !== null ? <EditBox e={e} />
-          : via === "steve" ? <Brief text={shown} label={t("shell:queue.steveBrief")} className="type-callout text-muted-foreground" />
+        {e.edit !== null ? <EditBox e={e} />
+          : q.via === "steve" ? <Brief text={shown} label={t("shell:queue.steveBrief")} className="type-callout text-muted-foreground" />
           : (shown !== "（附件）" || !q.files?.length) && <div className="line-clamp-4 break-words" data-queued-text><Markdown text={shown} className="type-callout" /></div>}
-        {resumed && <p className="mt-1 type-footnote text-muted-foreground" data-queued-recovery-note>{t("shell:queue.recovering")}</p>}
         <Files files={q.files} className="mt-1.5" />
       </div>
-      {!resumed && !ops && <div className="flex shrink-0 items-center gap-1.5 py-1 type-footnote text-muted-foreground" data-queued-sending><Spinner className="size-3" />{t("shell:queue.submitting")}</div>}
-      {!resumed && ops && <Actions e={e} shown={shown} ops={ops} via={q.via} className="-ml-2 sm:ml-0" />}
+      {!ops && <div className="flex shrink-0 items-center gap-1.5 py-1 type-footnote text-muted-foreground" data-queued-sending><Spinner className="size-3" />{t("shell:queue.submitting")}</div>}
+      {ops && <Actions e={e} shown={shown} ops={ops} via={q.via} className="-ml-2 sm:ml-0" />}
     </li>
   )
 }
@@ -133,7 +127,7 @@ function Row({ q, shown, ops }: { q: QRow; shown: string; ops: QOps }) {
  * Every comment is also a queue row (“补充信息：” + its words) until the session takes it, so the item page shows the
  * queue state and controls on the comment and keeps no strip of its own. A row is paired with the latest unpaired
  * comment to the same session that has the same words and no reply yet; once paired the pair sticks, so editing the
- * queued words does not move the row. Rows that pair with nothing (Steve's, recovering ones, edited before a reload)
+ * queued words does not move the row. Rows that pair with nothing (Steve's, ones edited before a reload)
  * stay in the strip under the composer. */
 const paired = new Map<string, string>()
 export function queuedComments(tl: any[], sid: string | null, rows: RQueued[], prefix: string) {
@@ -144,7 +138,7 @@ export function queuedComments(tl: any[], sid: string | null, rows: RQueued[], p
   const find = (ok: (n: number) => boolean) => { let n = tl.length - 1; while (n >= 0 && !(open(n) && ok(n))) n--; return n }
   const strip = (t: string) => (t.startsWith(prefix) ? t.slice(prefix.length) : t)
   for (const q of [...rows].reverse()) {
-    if (q.via === "steve" || q.via.startsWith("resumed:")) { rest.unshift(q); continue }
+    if (q.via === "steve") { rest.unshift(q); continue }
     const pin = paired.get(q.id)
     let n = pin === undefined ? -1 : find((n) => key(n) === pin)
     if (n < 0) n = find((n) => tl[n][1] === strip(q.text))

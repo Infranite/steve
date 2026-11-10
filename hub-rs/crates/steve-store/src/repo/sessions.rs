@@ -575,22 +575,6 @@ impl QueuedRepo<'_> {
         })
     }
 
-    /// [`Self::add`] ahead of everything waiting in `session_id`'s queue.
-    pub fn add_first(&self, session_id: &str, text: &str, via: &str) -> Result<()> {
-        self.0.write(|w| {
-            w.c.run(
-                "INSERT INTO queued (id, session_id, text, via, created, files)
-                 VALUES (?1, ?2, ?3, ?4, coalesce((SELECT min(created) - 1 FROM queued WHERE session_id = ?2), ?5), NULL)",
-                params![uid("q"), session_id, text, via, now()],
-            )?;
-            w.publish(ChangeEvent::Session {
-                id: session_id.into(),
-                item_id: None,
-            });
-            Ok(())
-        })
-    }
-
     /// [`Self::add`] unless the same message (text and attachments) is already waiting in this
     /// session's queue: a second copy would only be merged away when the turn starts, after showing up
     /// twice. False when nothing was added.
@@ -649,79 +633,6 @@ impl QueuedRepo<'_> {
         })
     }
 
-    /// What an older Hub's legacy runner had in hand when it stopped (B7: the runner is gone), back
-    /// in the queue, before its sessions move to a Node or end: a message it claimed but never
-    /// delivered as it was; one it delivered (maybe acted on) marked `resumed:<via>`, to be checked
-    /// rather than redone, with a resume intent for its session. Their text, source, time and
-    /// attachments are kept, under fresh ids. Idempotent: the rows it took are marked interrupted.
-    pub fn return_legacy_dispatches(&self) -> Result<usize> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
-            tx.run("INSERT OR IGNORE INTO session_resume SELECT DISTINCT session_id,? FROM session_dispatch WHERE backend='legacy' AND state='submitted'", [now()])?;
-            tx.run("INSERT OR IGNORE INTO queued (id,session_id,text,via,created,files) SELECT id,session_id,text,via,created,files FROM session_dispatch WHERE backend='legacy' AND state='claimed'", [])?;
-            tx.run("INSERT OR IGNORE INTO queued (id,session_id,text,via,created,files) SELECT id,session_id,text,CASE WHEN via LIKE 'resumed:%' THEN via ELSE 'resumed:' || via END,created,files FROM session_dispatch WHERE backend='legacy' AND state='submitted'", [])?;
-            // fresh ids: the old ones stay the dispatch rows' (a Node's claim copies a message into
-            // session_dispatch under its own id)
-            tx.run("UPDATE queued SET id = 'q_' || lower(hex(randomblob(16))) WHERE id IN (SELECT id FROM session_dispatch WHERE backend='legacy' AND state IN ('claimed','submitted'))", [])?;
-            let n = tx.run("UPDATE session_dispatch SET state='interrupted',updated=? WHERE backend='legacy' AND state IN ('claimed','submitted')", [now()])?;
-            tx.commit()?;
-            Ok(n)
-        })
-    }
-
-    /// `session_id`'s queued `resumed:<via>` rows as the agent is to get them: `note` before the
-    /// text, and their own `via` back (so they can be edited or withdrawn again). How many.
-    pub fn unwrap_resumed(&self, session_id: &str, note: &str) -> Result<usize> {
-        self.0.write(|w| {
-            let n = w.c.run(
-                "UPDATE queued SET text = ?2 || char(10) || char(10) || text, via = substr(via, 9)
-                  WHERE session_id = ?1 AND via GLOB 'resumed:*'",
-                params![session_id, note],
-            )?;
-            if n > 0 {
-                w.publish(ChangeEvent::Session {
-                    id: session_id.into(),
-                    item_id: None,
-                });
-            }
-            Ok(n)
-        })
-    }
-
-    /// When the session's pending intent was first recorded.
-    pub fn resume_created(&self, session_id: &str) -> Result<Option<i64>> {
-        self.0.read(|c| {
-            super::one(
-                c,
-                "SELECT created FROM session_resume WHERE session_id = ?",
-                [session_id],
-                |r| r.get(0),
-            )
-        })
-    }
-    pub fn resume_ids(&self) -> Result<Vec<String>> {
-        self.0.read(|c| {
-            all(
-                c,
-                "SELECT session_id FROM session_resume ORDER BY created",
-                [],
-                |r| r.get(0),
-            )
-        })
-    }
-    pub fn resume_done(&self, session_id: &str) -> Result<()> {
-        self.0.write(|w| {
-            w.c.run(
-                "DELETE FROM session_resume WHERE session_id=?",
-                [session_id],
-            )?;
-            Ok(())
-        })
-    }
-
-    /// Already-delivered `resumed:` rows are recovery receipts, not mutable unsent messages.
-    /// Refuse them inside the same writer operation; Core maps None to the existing 409.
-    /// Recovery claim/take and explicit task pause/stop retain their own semantics.
     /// Sets the text of a row still waiting in `session_id`'s queue; returns `(before, after)`, or
     /// `None` when a turn already took it (or it never was there). Runs in one write, so it is either
     /// before the take (the turn sends the new text) or after it (nothing changes).
@@ -729,7 +640,7 @@ impl QueuedRepo<'_> {
         self.0.write(|w| {
             let Some(before) = one(
                 w.c,
-                "SELECT * FROM queued WHERE id = ? AND session_id = ? AND via NOT GLOB 'resumed:*'",
+                "SELECT * FROM queued WHERE id = ? AND session_id = ?",
                 [id, session_id],
                 Queued::from_row,
             )?
@@ -750,22 +661,11 @@ impl QueuedRepo<'_> {
     }
 
     /// Deletes one row of `session_id`'s queue and returns it; `None` when a turn already took it.
-    /// A message a runner had delivered (`resumed:<via>`, see [`Self::unwrap_resumed`]) stays.
     pub fn remove(&self, session_id: &str, id: &str) -> Result<Option<Queued>> {
-        self.remove_where(session_id, id, "AND via NOT GLOB 'resumed:*'")
-    }
-
-    /// [`Self::remove`], a delivered (`resumed:<via>`) row included: for a session nothing will
-    /// ever run again, whose whole queue goes with it.
-    pub fn remove_any(&self, session_id: &str, id: &str) -> Result<Option<Queued>> {
-        self.remove_where(session_id, id, "")
-    }
-
-    fn remove_where(&self, session_id: &str, id: &str, guard: &str) -> Result<Option<Queued>> {
         self.0.write(|w| {
             let q = one(
                 w.c,
-                &format!("DELETE FROM queued WHERE id = ? AND session_id = ? {guard} RETURNING *"),
+                "DELETE FROM queued WHERE id = ? AND session_id = ? RETURNING *",
                 [id, session_id],
                 Queued::from_row,
             )?;
@@ -786,7 +686,7 @@ impl QueuedRepo<'_> {
             let q = one(
                 w.c,
                 "UPDATE queued SET created = (SELECT min(created) - 1 FROM queued WHERE session_id = ?1 AND id != ?2)
-                 WHERE id = ?2 AND session_id = ?1 AND via NOT GLOB 'resumed:*' AND EXISTS (SELECT 1 FROM queued WHERE session_id = ?1 AND id != ?2 AND created <= (SELECT created FROM queued WHERE id = ?2))
+                 WHERE id = ?2 AND session_id = ?1 AND EXISTS (SELECT 1 FROM queued WHERE session_id = ?1 AND id != ?2 AND created <= (SELECT created FROM queued WHERE id = ?2))
                  RETURNING *",
                 [session_id, id],
                 Queued::from_row,
@@ -801,7 +701,7 @@ impl QueuedRepo<'_> {
             // already first (or alone), or gone
             one(
                 w.c,
-                "SELECT * FROM queued WHERE id = ? AND session_id = ? AND via NOT GLOB 'resumed:*'",
+                "SELECT * FROM queued WHERE id = ? AND session_id = ?",
                 [id, session_id],
                 Queued::from_row,
             )

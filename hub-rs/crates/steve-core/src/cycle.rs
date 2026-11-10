@@ -886,15 +886,11 @@ impl Tx<'_> {
         {
             g.operation = true;
         }
-        let resume = self.db().store().queued().resume_ids()?;
         for s in self.db().sessions_of_item(&i.id)? {
             if s.status == "ended" {
                 continue;
             }
-            if self.busy(&s.id)
-                || matches!(s.status.as_str(), "running" | "starting")
-                || resume.contains(&s.id)
-            {
+            if self.busy(&s.id) || matches!(s.status.as_str(), "running" | "starting") {
                 g.turn = true;
             }
             if c.kind == COMPLETE && !self.db().queued(&s.id)?.is_empty() {

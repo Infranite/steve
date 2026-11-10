@@ -288,25 +288,7 @@ fn upgrade_maintenance_refuses_source_release_and_rollback() {
     assert!(!k.core.source_release_busy());
 }
 
-/// A resume intent as an older Hub's boot left it (`session_resume`), `age` ms ago.
-fn intent(k: &Kit, sid: &str, age: i64) {
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT OR REPLACE INTO session_resume VALUES (?1, ?2)",
-                rusqlite::params![sid, crate::util::now() - age],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-}
-
-fn resume_ids(k: &Kit) -> Vec<String> {
-    k.db().store().queued().resume_ids().unwrap()
-}
-
-/// B7: there is no in-process runner to continue a cut turn. One no backend recovers is said
+/// Nothing in the Hub continues a cut turn. One no backend recovers is said
 /// once (with a failure card where the item still runs) and the session is idle again; prompts
 /// held for the restart go once the listener is up; nothing is ever sent as a resume.
 #[test]
@@ -350,7 +332,6 @@ fn after_a_restart_a_turn_nothing_continues_is_said_once_and_held_prompts_go() {
         vec!["新的一回合"],
         "a prompt held for the restart is sent after it"
     );
-    assert!(resume_ids(&k).is_empty());
     assert!(
         !k.timeline_texts(&cut_i)
             .contains(&"Hub 重启打断了会话，已自动继续".to_string())
@@ -364,7 +345,6 @@ fn an_interruption_on_a_paused_or_finished_item_is_noticed_once_without_a_card()
     let ps = k.session(&p, "running");
     let d = k.item("done", "收尾", None);
     let ds = k.session(&d, "running");
-    intent(&k, &ds, 0);
     for _ in 0..3 {
         k.core.recover().unwrap();
         k.core.ready();
@@ -373,7 +353,6 @@ fn an_interruption_on_a_paused_or_finished_item_is_noticed_once_without_a_card()
     assert_eq!(notices(&k, &ps, "事项已暂停"), 1);
     assert_eq!(notices(&k, &ds, "事项已结束"), 1);
     assert!(k.open_fails(&p).is_empty() && k.open_fails(&d).is_empty());
-    assert!(resume_ids(&k).is_empty(), "no intent is kept");
 }
 
 #[test]
@@ -397,7 +376,6 @@ fn a_finish_after_boot_closes_at_once() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "running");
-    intent(&k, &s, 0);
     k.core.recover().unwrap();
     // nothing will continue the cut turn: no turn holds the close
     k.finish(&i).unwrap();
@@ -409,12 +387,11 @@ fn a_finish_after_boot_closes_at_once() {
 #[test]
 fn a_session_that_recovers_itself_is_left_to_its_backend() {
     let k = Kit::new();
-    // a Node-owned session as D5 left it: never moved past 'starting', a resume intent from an
-    // earlier boot that is now over a day old, an open tool permission and a queued message
+    // a Node-owned session as D5 left it: never moved past 'starting', an open tool permission
+    // and a queued message
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "starting");
     k.rt.st().recovers_itself.insert(s.clone());
-    intent(&k, &s, crate::orchestrator::RESUME_MAX_AGE_MS + 1);
     let card = k.decision(&i, Some(&s), "approve", "tool_call", &["a|允许|allow_once"]);
     k.db().queue_add(&s, "排队的话", "me", &[]).unwrap();
     // a session no backend holds in the same database is said to be cut, once
@@ -441,7 +418,6 @@ fn a_session_that_recovers_itself_is_left_to_its_backend() {
         .collect();
     assert!(system.is_empty(), "no system event: {system:?}");
     assert!(k.open_fails(&i).is_empty(), "no failure card");
-    assert!(resume_ids(&k).is_empty(), "the leftover intent is dropped");
     assert_eq!(
         k.db().decision(&card).unwrap().unwrap().status,
         "open",
@@ -453,18 +429,4 @@ fn a_session_that_recovers_itself_is_left_to_its_backend() {
     );
     assert!(k.rt.prompts_of(&legacy).is_empty(), "never resumed");
     assert_eq!(notices(&k, &legacy, "没有自动继续"), 1);
-}
-
-#[test]
-fn a_leftover_intent_never_holds_the_queue_of_a_session_that_recovers_itself() {
-    let k = Kit::new();
-    let i = k.item("run", "执行", None);
-    let s = k.session(&i, "idle");
-    intent(&k, &s, 0);
-    k.rt.st().recovers_itself.insert(s.clone());
-    k.db().queue_add(&s, "后来的话", "me", &[]).unwrap();
-    k.core.recover().unwrap();
-    k.core.ready();
-    assert_eq!(k.rt.prompts_of(&s), vec!["后来的话"], "no RESUME");
-    assert!(resume_ids(&k).is_empty());
 }
