@@ -633,6 +633,7 @@ impl crate::thread::Researcher for FakeResearch {
                 }
                 Step::Tool(name, brief) => sink.tool(&crate::thread::ToolSeen {
                     name: name.into(),
+                    kind: String::new(),
                     brief: brief.into(),
                     ok: true,
                     error: None,
@@ -640,6 +641,7 @@ impl crate::thread::Researcher for FakeResearch {
                 }),
                 Step::ToolFailure(name, brief, error) => sink.tool(&crate::thread::ToolSeen {
                     name: name.into(),
+                    kind: String::new(),
                     brief: brief.into(),
                     ok: false,
                     error: Some(error.into()),

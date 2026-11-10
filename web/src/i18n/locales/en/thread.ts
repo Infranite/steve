@@ -35,6 +35,7 @@ export default {
       kb: "Checking the knowledge base",
       item: "Looking up items",
       other: "Running {{name}}",
+      exec: "Running",
     },
     liveMeta: "· tool {{n}} · {{time}}",
     liveMetaSlow: "· tool {{n}} · {{time}} · still reading…",

@@ -520,6 +520,7 @@ impl r::AttemptRunner for OnNode<'_> {
         };
         let mut progressed = false;
         let mut ids = std::collections::HashSet::new();
+        let mut running = None;
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         let mut health = tokio::time::interval(Duration::from_secs(1));
         let end = loop {
@@ -536,14 +537,29 @@ impl r::AttemptRunner for OnNode<'_> {
                     }
                     Some(News::Tool(v)) => {
                         progressed = true;
+                        let kind = serde_json::to_value(v.category)
+                            .ok()
+                            .and_then(|c| c.as_str().map(str::to_owned))
+                            .unwrap_or_default();
+                        let brief = v.target.unwrap_or_default();
                         let ok = match v.phase {
                             api::ToolPhase::Succeeded => true,
                             api::ToolPhase::Failed => false,
-                            _ => continue,
+                            // what the run is doing now: a call that takes minutes is seen while it runs
+                            _ => {
+                                let now = (v.id, brief);
+                                if running.as_ref() != Some(&now) {
+                                    self.sink.tool_running(&v.name, &kind, &now.1);
+                                    running = Some(now);
+                                }
+                                continue;
+                            }
                         };
+                        running = None;
                         self.sink.tool(&ToolSeen {
                             name: v.name,
-                            brief: v.target.unwrap_or_default(),
+                            kind,
+                            brief,
                             ok,
                             error: v.error,
                             ms: v.duration_ms.unwrap_or(0) as i64,

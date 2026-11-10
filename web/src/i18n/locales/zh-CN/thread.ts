@@ -34,6 +34,7 @@ export default {
       kb: "正在查知识库",
       item: "正在查事项",
       other: "正在{{name}}",
+      exec: "正在执行",
     },
     liveMeta: "· 第 {{n}} 个工具 · {{time}}",
     liveMetaSlow: "· 第 {{n}} 个工具 · {{time}} · 还在读…",

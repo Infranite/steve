@@ -64,6 +64,12 @@ pub enum ChangeEvent {
         name: String,
         brief: String,
         ok: bool,
+        /// The tool's category (`read`, `search`, `exec`, …); empty when the executor did not say.
+        #[serde(skip_serializing_if = "String::is_empty")]
+        kind: String,
+        /// The call has begun and has not ended: `ok` says nothing yet.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        running: bool,
     },
     /// An inline research run was queued, started or ended.
     #[serde(rename = "thread.run")]

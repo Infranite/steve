@@ -38,7 +38,7 @@ export function researchSummary(s: Steps): string {
 export function researchIcon(name: string) { return isRead(name) ? FileTextIcon : isSearch(name) ? SearchIcon : isKb(name) ? LibraryIcon : FileTextIcon }
 const TOOL_LABEL = (n: string) => (isRead(n) ? tr("thread:research.tool.read") : isSearch(n) ? tr("thread:research.tool.search") : isKb(n) ? tr("thread:research.tool.kb") : n.includes("item") ? tr("thread:research.tool.item") : n)
 /** "正在读" / "正在搜索": the live line's verb for a tool */
-const liveLabel = (n: string) => (isRead(n) ? tr("thread:research.live.read") : isSearch(n) ? tr("thread:research.live.search") : isKb(n) ? tr("thread:research.live.kb") : n.includes("item") ? tr("thread:research.live.item") : tr("thread:research.live.other", { name: n }))
+const liveLabel = (n: string, kind?: string) => (kind === "exec" ? tr("thread:research.live.exec") : isRead(n) ? tr("thread:research.live.read") : isSearch(n) ? tr("thread:research.live.search") : isKb(n) ? tr("thread:research.live.kb") : n.includes("item") ? tr("thread:research.live.item") : tr("thread:research.live.other", { name: n }))
 export const researchToolLabel = TOOL_LABEL
 
 /** the research being read right now: one line that keeps changing, with a stop button */
@@ -46,13 +46,14 @@ export function ResearchLive() {
   const l = st.live, [, tick] = useState(0), t = useT()
   useEffect(() => { if (!l) return; const t = setInterval(() => tick((x) => x + 1), 1000); return () => clearInterval(t) }, [l?.run])
   if (!l) return null
-  const last = l.tools[l.tools.length - 1], I = last ? researchIcon(last.name) : FileTextIcon
+  /* the call that runs now comes first: one that takes minutes is seen while it runs */
+  const now = l.now, last = now ?? l.tools[l.tools.length - 1], I = last ? researchIcon(last.name) : FileTextIcon
   return (
     <div className="-mb-1 flex max-w-[88%] items-center gap-2 self-start px-1" data-research-live={l.run}>
-      <TraceLine className="min-w-0 flex-1"><TraceIcon>{last ? <I strokeWidth={1.5} /> : <Spinner className="size-3.5" />}</TraceIcon>
-        <TraceTitle className="shrink-0">{last ? liveLabel(last.name) : t("thread:research.live.read")}</TraceTitle>
+      <TraceLine className="min-w-0 flex-1"><TraceIcon>{last && !now ? <I strokeWidth={1.5} /> : <Spinner className="size-3.5" />}</TraceIcon>
+        <TraceTitle className="shrink-0">{last ? liveLabel(last.name, last.kind) : t("thread:research.live.read")}</TraceTitle>
         <TraceDescription className="min-w-0 shrink truncate font-mono text-[12px]">{last?.brief ?? "…"}</TraceDescription>
-        <TraceDescription className="shrink-0 tabular-nums">{t(Date.now() - l.t0 > 90_000 ? "thread:research.liveMetaSlow" : "thread:research.liveMeta", { n: l.tools.length, time: secs(Date.now() - l.t0) })}</TraceDescription></TraceLine>
+        <TraceDescription className="shrink-0 tabular-nums">{t(Date.now() - l.t0 > 90_000 ? "thread:research.liveMetaSlow" : "thread:research.liveMeta", { n: l.tools.length + (now ? 1 : 0), time: secs(Date.now() - l.t0) })}</TraceDescription></TraceLine>
       <Button size="xs" variant="outline" className="shrink-0" onClick={() => stopRun(l.run)} data-research-stop><SquareIcon className="fill-current" />{t("thread:research.stop")}</Button>
     </div>
   )

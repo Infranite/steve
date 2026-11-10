@@ -28,7 +28,9 @@ pub const QUEUE_FULL: &str = "前面还有 3 个问题在排队，先等等或�
 pub struct ToolSeen {
     /// the harness tool name (`Read`, `Grep`, `mcp__steve__steve_knowledge_search`, …)
     pub name: String,
-    /// what it was about: a relative path with lines, a pattern, a query, an item id
+    /// its category (`read`, `search`, `exec`, …), or empty
+    pub kind: String,
+    /// what it was about: a relative path with lines, a pattern, a command, a query, an item id
     pub brief: String,
     pub ok: bool,
     /// Stable diagnostic code; never a raw tool error or result.
@@ -134,6 +136,8 @@ pub trait ResearchSink: Send + Sync {
     fn text(&self, text: &str);
     /// A tool call finished.
     fn tool(&self, t: &ToolSeen);
+    /// A tool call began, or says more about itself, and has not finished: what the run is doing now.
+    fn tool_running(&self, _name: &str, _kind: &str, _brief: &str) {}
 }
 
 /// What a run produced.
@@ -293,6 +297,24 @@ impl ResearchSink for Sink<'_> {
             name: t.name.clone(),
             brief: t.brief.clone(),
             ok: t.ok,
+            kind: t.kind.clone(),
+            running: false,
+        });
+    }
+    fn tool_running(&self, name: &str, kind: &str, brief: &str) {
+        let d = &self.drafts;
+        if d.quiet {
+            return;
+        }
+        d.core.store().publish(HubEvent::SteveTool {
+            ws: d.ws.into(),
+            mid: d.mid.into(),
+            run: self.run.into(),
+            name: name.into(),
+            brief: brief.into(),
+            ok: true,
+            kind: kind.into(),
+            running: true,
         });
     }
 }

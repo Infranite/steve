@@ -80,7 +80,7 @@ export type Steps = { route?: { kind: string; modelKind?: string; guard?: string
   research?: { run: string; model: string | null; ms: number; turns: number; tools: number; stopped?: "user" | "budget" | "violation" | "restart" | "failed" }
   tools: { name: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
 /** a research run being read live (steve.tool), for the user message `mid` */
-export type LiveRun = { mid: string; run: string; t0: number; tools: { name: string; brief: string; ok: boolean }[] }
+export type LiveRun = { mid: string; run: string; t0: number; tools: { name: string; brief: string; ok: boolean; kind?: string }[]; /** the call running right now */ now?: { name: string; brief: string; kind?: string } }
 /** an open decision with no item (a forked or imported session, or its item was deleted): shown with the same card */
 export type Orphan = { i: Item; w: Wait }
 export type Project = RProject
@@ -673,7 +673,8 @@ function onHub(e: HubEvent | ModuleEvent) {
   }
   if (e.type === "steve.tool") {
     if (st.live?.run !== e.run) st.live = { mid: e.mid, run: e.run, t0: Date.now(), tools: [] }
-    st.live.tools.push({ name: e.name, brief: e.brief, ok: e.ok })
+    if (e.running) st.live.now = { name: e.name, brief: e.brief, kind: e.kind }
+    else { st.live.now = undefined; st.live.tools.push({ name: e.name, brief: e.brief, ok: e.ok, kind: e.kind }) }
     if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
     drawDraft(); return
   }
