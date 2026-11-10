@@ -11,6 +11,7 @@
 //!   one.
 
 use std::path::{Path, PathBuf};
+use steve_i18n::t;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -251,6 +252,7 @@ impl UpdatePolicy {
 /// those are the choice from now on: none, without ids).
 /// The exit code: 0, 1 (npm failed), 2 (usage, or no npm).
 pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
+    steve_i18n::set_process(steve_i18n::from_env());
     let json = args.iter().any(|a| a == "--json");
     let npm = npm(node);
     match args.first().map(String::as_str) {
@@ -261,17 +263,17 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
             } else {
                 for s in &list {
                     let state = match (&s.installed, &s.latest, &s.error) {
-                        (None, _, _) if !wanted(home, s.id) => "未选择".to_string(),
-                        (None, _, _) => "未安装".to_string(),
-                        (Some(i), Some(l), _) if newer(l, i) => format!("{i}，可升级到 {l}"),
-                        (Some(i), Some(_), _) => format!("{i}，已是最新"),
-                        (Some(i), None, Some(e)) => format!("{i}（查不到最新版本：{e}）"),
+                        (None, _, _) if !wanted(home, s.id) => t!("acp.managed.not_selected"),
+                        (None, _, _) => t!("acp.managed.not_installed"),
+                        (Some(i), Some(l), _) if newer(l, i) => t!("acp.managed.upgradable", installed = i, latest = l),
+                        (Some(i), Some(_), _) => t!("acp.managed.up_to_date", installed = i),
+                        (Some(i), None, Some(e)) => t!("acp.managed.latest_unknown", installed = i, error = e),
                         (Some(i), None, None) => i.clone(),
                     };
                     println!("{} ({}): {state}", s.id, s.package);
                 }
                 if npm.is_none() {
-                    println!("{NO_NPM}");
+                    println!("{}", no_npm());
                 }
             }
             0
@@ -302,7 +304,7 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                 .collect();
             if let Some(unknown) = ids.iter().find(|id| package(id).is_none()) {
                 let known: Vec<&str> = crate::adapters::builtin_ids().collect();
-                eprintln!("没有这个适配器：{unknown}（可选：{}）", known.join("、"));
+                eprintln!("{}", t!("acp.managed.unknown_adapter", unknown = unknown, known = known.join(&t!("acp.managed.list_separator"))));
                 return 2;
             }
             /* --only: exactly these are chosen (none, without ids); otherwise named ids join an
@@ -330,15 +332,15 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                 })
                 .collect();
             if targets.is_empty() {
-                println!("没有选择任何 ACP 适配器；用 steve adapters install <id> 添加。");
+                println!("{}", t!("acp.managed.none_selected"));
                 return 0;
             }
             let Some(npm) = npm else {
-                eprintln!("{NO_NPM}");
+                eprintln!("{}", no_npm());
                 return 2;
             };
             let packages: Vec<&str> = targets.iter().filter_map(|id| package(id)).collect();
-            println!("正在安装 ACP 适配器到 {}：{}", dir(home).display(), packages.join("、"));
+            println!("{}", t!("acp.managed.installing", dir = dir(home).display(), packages = packages.join(&t!("acp.managed.list_separator"))));
             match install(&npm, home, &packages) {
                 Ok(()) => {
                     for s in status(home, None).iter().filter(|s| targets.contains(&s.id)) {
@@ -346,26 +348,28 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                             "{} ({}): {}",
                             s.id,
                             s.package,
-                            s.installed.as_deref().unwrap_or("未安装")
+                            s.installed.as_deref().unwrap_or(&t!("acp.managed.not_installed"))
                         );
                     }
                     0
                 }
                 Err(e) => {
-                    eprintln!("安装失败：{e}");
+                    eprintln!("{}", t!("acp.managed.install_failed", error = e));
                     1
                 }
             }
         }
         _ => {
-            eprintln!("用法：adapters status [--json] | list --json | install [--only] [<id>…] | upgrade");
+            eprintln!("{}", t!("acp.managed.usage"));
             2
         }
     }
 }
 
 /// What to do without npm.
-pub const NO_NPM: &str = "没有找到 npm：ACP 适配器需要 Node.js。macOS 上运行 brew install node，Linux 上用发行版的包或 https://nodejs.org 安装，然后再运行 steve adapters install。";
+pub fn no_npm() -> String {
+    t!("acp.managed.npm_missing")
+}
 
 #[cfg(test)]
 mod tests {

@@ -12,6 +12,8 @@
 //! One intended difference from the TS: adapters run in their own process group and the whole group
 //! is signalled, so the `claude` child of claude-agent-acp does not outlive it.
 
+steve_i18n::init!();
+
 pub mod adapters;
 mod config;
 mod errors;

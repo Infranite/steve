@@ -1,1 +1,14 @@
-{}
+{
+  "acp.managed.not_selected": "未选择",
+  "acp.managed.not_installed": "未安装",
+  "acp.managed.upgradable": "%{installed}，可升级到 %{latest}",
+  "acp.managed.up_to_date": "%{installed}，已是最新",
+  "acp.managed.latest_unknown": "%{installed}（查不到最新版本：%{error}）",
+  "acp.managed.unknown_adapter": "没有这个适配器：%{unknown}（可选：%{known}）",
+  "acp.managed.list_separator": "、",
+  "acp.managed.none_selected": "没有选择任何 ACP 适配器；用 steve adapters install <id> 添加。",
+  "acp.managed.installing": "正在安装 ACP 适配器到 %{dir}：%{packages}",
+  "acp.managed.install_failed": "安装失败：%{error}",
+  "acp.managed.usage": "用法：adapters status [--json] | list --json | install [--only] [<id>…] | upgrade",
+  "acp.managed.npm_missing": "没有找到 npm：ACP 适配器需要 Node.js。macOS 上运行 brew install node，Linux 上用发行版的包或 https://nodejs.org 安装，然后再运行 steve adapters install。"
+}

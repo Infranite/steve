@@ -3,6 +3,7 @@
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::ops::Range;
+use steve_i18n::t;
 
 struct Assignment {
     value: Range<usize>,
@@ -18,10 +19,10 @@ pub(crate) struct EnvDocument {
 }
 
 fn problem(line: Option<usize>, key: Option<&str>, reason: &str) -> anyhow::Error {
-    let location = line.map_or_else(|| "环境配置更新".into(), |n| format!("环境文件第 {n} 行"));
+    let location = line.map_or_else(|| t!("install.env.location_update"), |n| t!("install.env.location_line", n = n));
     match key {
-        Some(key) => anyhow::anyhow!("{location}（{key}）：{reason}"),
-        None => anyhow::anyhow!("{location}：{reason}"),
+        Some(key) => anyhow::anyhow!("{}", t!("install.env.problem_with_key", location = location, key = key, reason = reason)),
+        None => anyhow::anyhow!("{}", t!("install.env.problem", location = location, reason = reason)),
     }
 }
 
@@ -63,11 +64,11 @@ fn value_end(bytes: &[u8], start: usize, line: usize, key: &str) -> Result<usize
             Some(b'"') => match byte {
                 b'"' => quote = None,
                 b'$' | b'`' => {
-                    return Err(problem(Some(line), Some(key), "不支持展开或命令替换"));
+                    return Err(problem(Some(line), Some(key), &t!("install.env.no_expansion")));
                 }
                 b'\\' => {
                     let next = bytes.get(at + 1).ok_or_else(|| {
-                        problem(Some(line), Some(key), "不支持续行或未完成的转义")
+                        problem(Some(line), Some(key), &t!("install.env.no_continuation"))
                     })?;
                     // Inside double quotes POSIX shell only removes these backslashes.
                     // Other escaped characters retain the backslash and are decoded by shlex.
@@ -82,7 +83,7 @@ fn value_end(bytes: &[u8], start: usize, line: usize, key: &str) -> Result<usize
                 b'\'' | b'"' => quote = Some(byte),
                 b'\\' => {
                     if bytes.get(at + 1).is_none() {
-                        return Err(problem(Some(line), Some(key), "不支持续行或未完成的转义"));
+                        return Err(problem(Some(line), Some(key), &t!("install.env.no_continuation")));
                     }
                     at += 1;
                 }
@@ -91,7 +92,7 @@ fn value_end(bytes: &[u8], start: usize, line: usize, key: &str) -> Result<usize
                     return Err(problem(
                         Some(line),
                         Some(key),
-                        "值包含未引用的 shell 表达式或特殊字符",
+                        &t!("install.env.unquoted_shell"),
                     ));
                 }
                 // Do not accept shell operators, substitutions or glob/brace expansion
@@ -101,7 +102,7 @@ fn value_end(bytes: &[u8], start: usize, line: usize, key: &str) -> Result<usize
                     return Err(problem(
                         Some(line),
                         Some(key),
-                        "值包含未引用的 shell 表达式或特殊字符",
+                        &t!("install.env.unquoted_shell"),
                     ));
                 }
                 _ => {}
@@ -111,7 +112,7 @@ fn value_end(bytes: &[u8], start: usize, line: usize, key: &str) -> Result<usize
         at += 1;
     }
     if quote.is_some() {
-        return Err(problem(Some(line), Some(key), "引号未闭合；不支持跨行值"));
+        return Err(problem(Some(line), Some(key), &t!("install.env.quote_open")));
     }
     Ok(at)
 }
@@ -124,7 +125,7 @@ impl EnvDocument {
                 .filter(|&&b| b == b'\n')
                 .count()
                 + 1;
-            problem(Some(line), None, "文件必须为 UTF-8")
+            problem(Some(line), None, &t!("install.env.not_utf8"))
         })?;
         let mut document = Self {
             original: bytes.to_vec(),
@@ -148,7 +149,7 @@ impl EnvDocument {
                 None => raw,
             };
             if body.bytes().any(|b| matches!(b, 0 | b'\r')) {
-                return Err(problem(Some(line), None, "不支持 NUL 或独立回车字符"));
+                return Err(problem(Some(line), None, &t!("install.env.no_nul_or_cr")));
             }
             let bytes = body.as_bytes();
             let mut at = skip_blanks(bytes, 0);
@@ -164,7 +165,7 @@ impl EnvDocument {
                 return Err(problem(
                     Some(line),
                     None,
-                    "只支持 KEY=value 或 export KEY=value",
+                    &t!("install.env.assignment_only"),
                 ));
             }
             at += 1;
@@ -176,26 +177,26 @@ impl EnvDocument {
                 return Err(problem(
                     Some(line),
                     Some(key),
-                    "变量名后必须紧接等号；不支持 shell 语句",
+                    &t!("install.env.equals_after_name"),
                 ));
             }
             if document.assignments.contains_key(key) {
-                return Err(problem(Some(line), Some(key), "变量重复赋值"));
+                return Err(problem(Some(line), Some(key), &t!("install.env.duplicate")));
             }
             let start = at + 1;
             let end = value_end(bytes, start, line, key)?;
             let rest = skip_blanks(bytes, end);
             if rest != bytes.len() && bytes[rest] != b'#' {
-                return Err(problem(Some(line), Some(key), "每行只允许一个字面赋值"));
+                return Err(problem(Some(line), Some(key), &t!("install.env.one_per_line")));
             }
             // Prefixing the word preserves an initial # as assignment data, rather than
             // letting shlex treat a valid KEY=#fragment value as a comment.
             let words = shlex::split(&format!("v={}", &body[start..end]))
                 .filter(|words| words.len() == 1)
-                .ok_or_else(|| problem(Some(line), Some(key), "无法解析字面值"))?;
+                .ok_or_else(|| problem(Some(line), Some(key), &t!("install.env.unparsable")))?;
             let value = words[0]
                 .strip_prefix("v=")
-                .ok_or_else(|| problem(Some(line), Some(key), "无法解析字面值"))?;
+                .ok_or_else(|| problem(Some(line), Some(key), &t!("install.env.unparsable")))?;
             document.values.insert(key.to_owned(), value.to_owned());
             document.assignments.insert(
                 key.to_owned(),
@@ -220,21 +221,21 @@ impl EnvDocument {
         let mut appended = Vec::new();
         for (key, value) in changes {
             if !valid_key(key) {
-                return Err(problem(None, None, "环境变量名无效"));
+                return Err(problem(None, None, &t!("install.env.invalid_name")));
             }
             let assignment = self.assignments.get(key);
             if value.contains(['\n', '\r', '\0']) {
                 return Err(problem(
                     assignment.map(|a| a.line),
                     Some(key),
-                    "值不能包含换行、回车或 NUL",
+                    &t!("install.env.no_newline"),
                 ));
             }
             if self.values.get(key) == Some(value) {
                 continue;
             }
             let quoted = crate::common::shell_quote(value)
-                .map_err(|_| problem(assignment.map(|a| a.line), Some(key), "无法编码字面值"))?;
+                .map_err(|_| problem(assignment.map(|a| a.line), Some(key), &t!("install.env.unencodable")))?;
             match assignment {
                 Some(assignment) => replacements.push((assignment.value.clone(), quoted)),
                 None => appended.push((key, quoted)),

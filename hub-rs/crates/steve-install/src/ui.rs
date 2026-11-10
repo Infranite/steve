@@ -3,6 +3,7 @@
 //! `TERM=dumb`, `STEVE_PLAIN=1`) the same calls print and read plain lines, so scripts and logs
 //! keep working. `NO_COLOR` keeps the frame and drops the colours.
 use anyhow::Result;
+use steve_i18n::t;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 pub struct Cancelled;
 impl std::fmt::Display for Cancelled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("已取消；已完成的步骤保留，可以重新运行继续。")
+        f.write_str(&t!("install.ui.cancelled_error"))
     }
 }
 impl std::error::Error for Cancelled {}
@@ -333,7 +334,7 @@ fn mark(glyph: &str, tone: Tone, text: &str, detail: &str) {
     } else if detail.is_empty() {
         println!("{text}");
     } else {
-        println!("{text}（{detail}）");
+        println!("{}", t!("install.ui.text_with_detail", text = text, detail = detail));
     }
 }
 
@@ -375,7 +376,7 @@ pub fn heading(text: &str) {
 pub fn note(rows: &[(&str, String)]) {
     if !decorated() {
         for (label, value) in rows {
-            println!("{label}：{value}");
+            println!("{}", t!("install.ui.row", label = label, value = value));
         }
         return;
     }
@@ -500,7 +501,7 @@ pub fn step<T>(
             Ok(value)
         }
         Err(error) => {
-            spinner.fail(&format!("{doing}：没有完成"));
+            spinner.fail(&t!("install.ui.step_failed", doing = doing));
             Err(error)
         }
     }
@@ -642,7 +643,7 @@ fn cancelled(drawn: &mut usize, title: &str) -> anyhow::Error {
         drawn,
         &[
             format!("{}  {title}", paint(Tone::Red, "■")),
-            format!("{}  {}", paint(Tone::Dim, "└"), paint(Tone::Red, "已取消")),
+            format!("{}  {}", paint(Tone::Dim, "└"), paint(Tone::Red, &t!("install.ui.cancelled"))),
             String::new(),
         ],
     );
@@ -674,7 +675,7 @@ pub fn select(title: &str, choices: &[Choice], initial: usize) -> Result<usize> 
         lines.extend(option_lines(choices, at, |i| {
             if i == at { paint(Tone::Accent, "●") } else { paint(Tone::Dim, "○") }
         }));
-        lines.push(format!("{}  {}", paint(Tone::Dim, "└"), paint(Tone::Dim, "↑↓ 选择 · 回车确认")));
+        lines.push(format!("{}  {}", paint(Tone::Dim, "└"), paint(Tone::Dim, &t!("install.ui.select_hint"))));
         redraw(&mut drawn, &lines);
         match key()? {
             Key::Up | Key::Left | Key::Char('k') => at = (at + choices.len() - 1) % choices.len(),
@@ -711,7 +712,7 @@ pub fn multiselect(title: &str, choices: &[Choice], ticked: &[bool]) -> Result<V
         lines.push(format!(
             "{}  {}",
             paint(Tone::Dim, "└"),
-            paint(Tone::Dim, "↑↓ 移动 · 空格 勾选 · a 全选 · 回车确认")
+            paint(Tone::Dim, &t!("install.ui.multiselect_hint"))
         ));
         redraw(&mut drawn, &lines);
         match key()? {
@@ -732,7 +733,7 @@ pub fn multiselect(title: &str, choices: &[Choice], ticked: &[bool]) -> Result<V
     }
     drop(raw);
     let chosen: Vec<&str> = choices.iter().zip(&on).filter(|(_, on)| **on).map(|(c, _)| c.label.as_str()).collect();
-    let answer = if chosen.is_empty() { "不安装".to_owned() } else { chosen.join("、") };
+    let answer = if chosen.is_empty() { t!("install.ui.multiselect_none") } else { chosen.join(&t!("install.ui.list_separator")) };
     answered(&mut drawn, title, &answer);
     Ok(on)
 }
@@ -754,8 +755,8 @@ pub fn confirm(title: &str, initial: bool) -> Result<bool> {
             &mut drawn,
             &[
                 format!("{}  {}", paint(Tone::Accent, "◆"), paint(Tone::Bold, title)),
-                format!("{}  {}  {}  {}", bar(), option(yes, "是"), paint(Tone::Dim, "/"), option(!yes, "否")),
-                format!("{}  {}", paint(Tone::Dim, "└"), paint(Tone::Dim, "←→ 选择 · 回车确认 · 也可以直接按 y / n")),
+                format!("{}  {}  {}  {}", bar(), option(yes, &t!("install.ui.yes")), paint(Tone::Dim, "/"), option(!yes, &t!("install.ui.no"))),
+                format!("{}  {}", paint(Tone::Dim, "└"), paint(Tone::Dim, &t!("install.ui.confirm_hint"))),
             ],
         );
         match key()? {
@@ -777,7 +778,7 @@ pub fn confirm(title: &str, initial: bool) -> Result<bool> {
         }
     }
     drop(raw);
-    answered(&mut drawn, title, if yes { "是" } else { "否" });
+    answered(&mut drawn, title, &if yes { t!("install.ui.yes") } else { t!("install.ui.no") });
     Ok(yes)
 }
 
@@ -785,7 +786,7 @@ pub fn confirm(title: &str, initial: bool) -> Result<bool> {
 /// answer takes `default`. The end of input cancels.
 pub fn input(title: &str, default: Option<&str>) -> Result<String> {
     spaced();
-    let hint = default.map(|d| paint(Tone::Dim, &format!("  回车使用 {d}"))).unwrap_or_default();
+    let hint = default.map(|d| paint(Tone::Dim, &t!("install.ui.input_default", default = d))).unwrap_or_default();
     out(&format!(
         "{}  {}{hint}\n{}  {} ",
         paint(Tone::Accent, "◆"),
@@ -802,7 +803,8 @@ pub fn input(title: &str, default: Option<&str>) -> Result<String> {
     let typed = line.trim();
     let answer = if typed.is_empty() { default.unwrap_or("") } else { typed };
     let mut drawn = 2;
-    answered(&mut drawn, title, if answer.is_empty() { "（留空）" } else { answer });
+    let empty = t!("install.ui.input_empty");
+    answered(&mut drawn, title, if answer.is_empty() { &empty } else { answer });
     Ok(answer.to_owned())
 }
 
@@ -812,10 +814,11 @@ pub fn summary(text: &str) -> String {
     if !decorated() {
         return text.to_owned();
     }
+    let separator = t!("install.status.label_separator");
     let labels = text
         .lines()
         .skip(1)
-        .filter_map(|line| line.split_once('：'))
+        .filter_map(|line| line.split_once(separator.as_str()))
         .map(|(label, _)| width(label))
         .filter(|w| *w <= 16)
         .max()
@@ -824,7 +827,7 @@ pub fn summary(text: &str) -> String {
     for (at, line) in text.lines().enumerate() {
         if at == 0 {
             styled.push_str(&format!("  {}\n", paint(Tone::Accent, &paint(Tone::Bold, line))));
-        } else if let Some((label, value)) = line.split_once('：') {
+        } else if let Some((label, value)) = line.split_once(separator.as_str()) {
             styled.push_str(&format!("  {}  {value}\n", paint(Tone::Dim, &pad(label, labels))));
         } else if line.is_empty() {
             styled.push('\n');

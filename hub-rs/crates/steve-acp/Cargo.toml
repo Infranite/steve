@@ -6,6 +6,8 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
+steve-i18n = { path = "../steve-i18n" }
+rust-i18n = "=4.2.4"
 # Steve's events: what the ACP updates are translated into (normalize.rs).
 steve-node-api = { path = "../steve-node-api" }
 steve-vault = { path = "../steve-vault" }

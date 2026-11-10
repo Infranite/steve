@@ -225,6 +225,8 @@ pub fn clean_command(program: &Path, home: Option<&Path>) -> std::process::Comma
     if let Some(home) = home {
         command.env("STEVE_HOME", home);
     }
+    /* what the program prints is shown as this one's: the same language */
+    command.env("STEVE_LANG", steve_i18n::current());
     command
 }
 

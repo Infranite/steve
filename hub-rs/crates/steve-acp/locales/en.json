@@ -1,1 +1,14 @@
-{}
+{
+  "acp.managed.not_selected": "not selected",
+  "acp.managed.not_installed": "not installed",
+  "acp.managed.upgradable": "%{installed}, %{latest} is available",
+  "acp.managed.up_to_date": "%{installed}, up to date",
+  "acp.managed.latest_unknown": "%{installed} (the latest version could not be looked up: %{error})",
+  "acp.managed.unknown_adapter": "No such adapter: %{unknown} (available: %{known})",
+  "acp.managed.list_separator": ", ",
+  "acp.managed.none_selected": "No ACP adapter is selected; add one with steve adapters install <id>.",
+  "acp.managed.installing": "Installing ACP adapters into %{dir}: %{packages}",
+  "acp.managed.install_failed": "Install failed: %{error}",
+  "acp.managed.usage": "Usage: adapters status [--json] | list --json | install [--only] [<id>…] | upgrade",
+  "acp.managed.npm_missing": "npm was not found: ACP adapters need Node.js. On macOS run brew install node, on Linux use your distribution's package or https://nodejs.org, then run steve adapters install again."
+}

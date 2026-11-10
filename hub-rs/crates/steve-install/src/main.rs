@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, bail};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use steve_i18n::t;
 use steve_install::{common, setup, ui};
 
 mod output;
 
-const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440] [--public-url URL]\n              [--adapters ID,ID|all|none]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n              [--label LABEL] [--vault-dir PATH] [--fresh]\n  steve setup [hub] --reconfigure [--home PATH] [--listen IP:port]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL] [--json]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n  steve adapters status|upgrade [hub|node] [--home PATH]\n  steve adapters install ID [ID...] [hub|node] [--home PATH]\n\nsetup 在终端里是向导：选角色、网络和要装的 ACP 适配器，装完可以直接启动 Hub。\nsetup 默认监听 0.0.0.0:8440，网页地址随监听地址推出（--public-url 指定，--reconfigure 以后再改）。\n数据目录里已有另一版本的安装时，向导会问是否全新安装；--fresh 直接这样做：停掉并注销原服务，\n原目录整个改名为 <目录>.bak-<时间> 保留，不删除任何数据。\n非终端（管道、TERM=dumb、STEVE_PLAIN=1）下 setup 只注册服务，不启动；不导入登录凭据或授予 Node 工作目录。\n--reconfigure 只维护已安装 Hub 的网络与现有 OIDC 配置，保留 secret、身份和数据；不会自动重启。\n服务命令在终端显示摘要；管道或 --json 保持 JSON 输出。\n";
+steve_i18n::init!();
 
 fn option(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
     let mut found = None;
@@ -69,8 +70,14 @@ fn main() {
 }
 
 fn run(mut args: Vec<String>) -> Result<i32> {
+    /* the language of everything printed: --lang, else STEVE_LANG, the locale, the system's */
+    let lang = match option(&mut args, "--lang")? {
+        Some(tag) => steve_i18n::match_tag(&tag).with_context(|| format!("--lang {tag}: zh-CN or en"))?,
+        None => steve_i18n::from_env(),
+    };
+    steve_i18n::set_process(lang);
     if args.is_empty() || args.iter().any(|v| v == "--help" || v == "-h") {
-        print!("{HELP}");
+        print!("{}", t!("install.help"));
         return Ok(0);
     }
     if args == ["--version"] {
@@ -119,7 +126,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
         }
         "hub" | "node" => {
             if args.is_empty() {
-                bail!("请选择 start/stop/restart/status/doctor/update/uninstall");
+                bail!("{}", t!("install.cli.service_action_missing"));
             }
             let action = args.remove(0);
             if ![
@@ -180,13 +187,13 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                     && matches!(action.as_str(), "start" | "restart")
                     && report["ok"] != false;
                 if let (true, Some((api, web))) = (started, setup::hub_urls(&home)) {
-                    let spinner = ui::Spinner::start("等待 Hub 应答");
+                    let spinner = ui::Spinner::start(&t!("install.cli.hub_waiting"));
                     match setup::hub_ready(&api, std::time::Duration::from_secs(45)) {
                         Some(health) => spinner.done(
-                            "Hub 已就绪",
-                            &format!("v{} · 网页 {web}", health["version"].as_str().unwrap_or("?")),
+                            &t!("install.cli.hub_ready"),
+                            &t!("install.cli.hub_ready_detail", version = health["version"].as_str().unwrap_or("?"), web = web),
                         ),
-                        None => spinner.warn("Hub 还没有应答；用 steve hub status 和 steve hub doctor 查看原因。"),
+                        None => spinner.warn(&t!("install.cli.hub_silent")),
                     }
                 }
             }
@@ -201,7 +208,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             };
             let action = if action == "upgrade" { "install".to_string() } else { action };
             if !matches!(action.as_str(), "status" | "install") {
-                bail!("请选择 adapters status/upgrade/install");
+                bail!("{}", t!("install.cli.adapters_action_missing"));
             }
             /* install <id>…: those adapters, added to what this home keeps */
             let mut ids = Vec::new();
@@ -229,7 +236,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             let current = home
                 .join("current")
                 .canonicalize()
-                .with_context(|| format!("{role} 尚未初始化；请先运行 steve setup"))?;
+                .with_context(|| t!("install.cli.role_not_set_up", role = role))?;
             let mut passed = vec![action.as_str()];
             passed.extend(ids.iter().map(String::as_str));
             setup::adapters(&role, &home, &current, &passed)
@@ -237,25 +244,24 @@ fn run(mut args: Vec<String>) -> Result<i32> {
         "upgrade" => {
             let home = role_home("hub", option(&mut args, "--home")?)?;
             if args.is_empty() {
-                bail!("请选择 upgrade check/request/status/watch");
+                bail!("{}", t!("install.cli.upgrade_action_missing"));
             }
             let current = home
                 .join("current")
                 .canonicalize()
-                .context("Hub 尚未初始化；请先运行 steve setup")?;
+                .context(t!("install.cli.hub_not_set_up"))?;
             let releases = home.join("releases").canonicalize()?;
             if current.parent() != Some(releases.as_path()) {
-                bail!("current 不属于此安装的 releases");
+                bail!("{}", t!("install.cli.current_outside_releases"));
             }
             let output = common::clean_command(&current.join("bin/steve-hub"), Some(&home))
                 .arg("--build-info")
                 .output()?;
             let info: serde_json::Value = serde_json::from_slice(&output.stdout)
-                .context("无法核验已安装 Hub 的原生升级能力")?;
+                .context(t!("install.cli.upgrade_capability_unknown"))?;
             if !output.status.success() || info["upgrade_runner"]["native"] != true {
                 bail!(
-                    "当前 Hub 尚不支持原生升级入口；请先在旧版 Steve 设置页完成这一次升级，再使用 steve upgrade。"
-                );
+                    "{}", t!("install.cli.upgrade_unsupported"));
             }
             let status = common::clean_command(&current.join("bin/steve-hub"), Some(&home))
                 .arg("--upgrade-cli")

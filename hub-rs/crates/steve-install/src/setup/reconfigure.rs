@@ -13,6 +13,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+use steve_i18n::t;
 
 const TRANSACTIONS: &str = "setup-reconfigure";
 const EDITABLE: &[&str] = &[
@@ -38,9 +39,7 @@ impl Guard {
         let meta = fs::symlink_metadata(path)?;
         ensure!(
             meta.uid() == unsafe { libc::getuid() },
-            "配置依赖不属于当前用户：{}",
-            path.display()
-        );
+            "{}", t!("install.reconfigure.dep.not_owned", path = path.display()));
         let mode = meta.permissions().mode() & 0o777;
         if meta.file_type().is_symlink() {
             return Ok(Self::Link {
@@ -50,9 +49,7 @@ impl Guard {
         }
         ensure!(
             mode & 0o022 == 0,
-            "配置依赖可被其他用户写入：{}",
-            path.display()
-        );
+            "{}", t!("install.reconfigure.dep.writable_by_others", path = path.display()));
         if meta.is_file() {
             Ok(Self::File {
                 sha256: digest(path)?,
@@ -65,7 +62,7 @@ impl Guard {
                 uid: meta.uid(),
             })
         } else {
-            bail!("配置依赖不是普通文件或目录：{}", path.display())
+            bail!("{}", t!("install.reconfigure.dep.not_regular", path = path.display()))
         }
     }
 }
@@ -73,7 +70,7 @@ impl Guard {
 fn guard(guards: &mut BTreeMap<PathBuf, Guard>, path: &Path) -> Result<()> {
     let value = Guard::read(path)?;
     if let Some(previous) = guards.insert(path.into(), value.clone()) {
-        ensure!(previous == value, "读取期间安装状态发生变化；请重新运行");
+        ensure!(previous == value, "{}", t!("install.reconfigure.state_changed_reading"));
     }
     Ok(())
 }
@@ -82,9 +79,7 @@ fn verify_guards(guards: &BTreeMap<PathBuf, Guard>) -> Result<()> {
     for (path, expected) in guards {
         ensure!(
             Guard::read(path)? == *expected,
-            "配置或安装状态被其他操作修改，未覆盖：{}",
-            path.display()
-        );
+            "{}", t!("install.reconfigure.changed_elsewhere", path = path.display()));
     }
     Ok(())
 }
@@ -100,18 +95,16 @@ fn private_bytes(path: &Path) -> Result<Vec<u8>> {
         metadata.is_file()
             && metadata.uid() == unsafe { libc::getuid() }
             && metadata.permissions().mode() & 0o777 == 0o600,
-        "配置或收据必须是当前用户拥有的 0600 普通文件：{}",
-        path.display()
-    );
-    ensure!(metadata.len() <= 1024 * 1024, "配置或收据文件超过大小限制");
+        "{}", t!("install.reconfigure.file_mode", path = path.display()));
+    ensure!(metadata.len() <= 1024 * 1024, "{}", t!("install.reconfigure.file_too_large"));
     let mut data = Vec::new();
     file.take(1024 * 1024 + 1).read_to_end(&mut data)?;
-    ensure!(data.len() <= 1024 * 1024, "配置或收据文件超过大小限制");
+    ensure!(data.len() <= 1024 * 1024, "{}", t!("install.reconfigure.file_too_large"));
     Ok(data)
 }
 
 fn receipt(bytes: &[u8], home: &Path) -> Result<Value> {
-    let record: Value = serde_json::from_slice(bytes).context("初始化收据不是有效 JSON")?;
+    let record: Value = serde_json::from_slice(bytes).context(t!("install.reconfigure.receipt.not_json"))?;
     ensure!(
         record["format"] == 1
             && record["component"] == "hub"
@@ -121,11 +114,10 @@ fn receipt(bytes: &[u8], home: &Path) -> Result<Value> {
             && record["steps"]
                 .as_array()
                 .is_some_and(|steps| steps.iter().any(|step| step == "installed")),
-        "此目录不是已完成初始化的 managed Hub；不会接管旧数据"
-    );
-    let version = record["version"].as_str().context("初始化版本缺失")?;
+        "{}", t!("install.reconfigure.receipt.not_managed_hub"));
+    let version = record["version"].as_str().context(t!("install.reconfigure.receipt.version_missing"))?;
     let parsed = semver::Version::parse(version)?;
-    let commit = record["commit"].as_str().context("初始化提交缺失")?;
+    let commit = record["commit"].as_str().context(t!("install.reconfigure.receipt.commit_missing"))?;
     ensure!(
         parsed.to_string() == version
             && parsed.pre.is_empty()
@@ -134,20 +126,17 @@ fn receipt(bytes: &[u8], home: &Path) -> Result<Value> {
             && commit
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-        "初始化收据身份无效"
-    );
+        "{}", t!("install.reconfigure.receipt.identity_invalid"));
     ensure!(
         record["files"]["steve.env"].is_string(),
-        "初始化收据没有 steve.env 所有权记录"
-    );
+        "{}", t!("install.reconfigure.receipt.env_not_owned"));
     for digest in record["files"].as_object().unwrap().values() {
         ensure!(
             digest.as_str().is_some_and(|value| value.len() == 64
                 && value
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
-            "初始化文件摘要无效"
-        );
+            "{}", t!("install.reconfigure.receipt.file_digest_invalid"));
     }
     Ok(record)
 }
@@ -163,8 +152,7 @@ fn inspect(home: &Path) -> Result<Runtime> {
     let current = fs::canonicalize(home.join("current"))?;
     ensure!(
         current.parent() == Some(releases.as_path()),
-        "当前版本不在此 Hub 的 managed releases 目录中；不会接管外部安装"
-    );
+        "{}", t!("install.reconfigure.current_outside"));
     let mut guards = BTreeMap::new();
     // Validate the managed path and pin its files before the service API executes --build-info.
     for path in [
@@ -177,8 +165,7 @@ fn inspect(home: &Path) -> Result<Runtime> {
     let context = crate::service::Service::new("hub", home, None)?.reconfiguration_context()?;
     ensure!(
         context.release == current,
-        "读取期间当前版本发生变化；请重新运行"
-    );
+        "{}", t!("install.reconfigure.current_changed_reading"));
     for path in [
         home.to_path_buf(),
         home.join("current"),
@@ -220,15 +207,14 @@ struct Snapshot {
 
 impl Snapshot {
     fn read(home: &Path, inspect: &impl Fn(&Path) -> Result<Runtime>) -> Result<Self> {
-        owned(home, true).context("重配置需要已有 Hub 目录；请先完成 steve setup")?;
+        owned(home, true).context(t!("install.reconfigure.home_missing"))?;
         let receipt_bytes = private_bytes(&home.join("setup.json"))?;
         let record = receipt(&receipt_bytes, home)?;
         let env = private_bytes(&home.join("steve.env"))?;
         let document = EnvDocument::parse(&env)?;
         ensure!(
             !document.values().contains_key("STEVE_OIDC_CLIENT_SECRET"),
-            "steve.env 含内联 STEVE_OIDC_CLIENT_SECRET；本次只支持既有 secret 文件引用，不会复制内联凭据到收据"
-        );
+            "{}", t!("install.reconfigure.oidc.inline_secret"));
         let mut runtime = inspect(home)?;
         for (name, expected) in record["files"].as_object().unwrap() {
             ensure!(
@@ -236,25 +222,22 @@ impl Snapshot {
                     && Path::new(name)
                         .components()
                         .all(|p| matches!(p, Component::Normal(_))),
-                "初始化收据包含无效文件路径"
-            );
+                "{}", t!("install.reconfigure.receipt.path_invalid"));
             if name == "steve.env" {
                 continue;
             }
             let path = home.join(name);
             owned(&path, false)?;
             ensure!(
-                digest(&path)? == expected.as_str().context("初始化文件摘要无效")?,
-                "初始化受保护文件已修改：{name}；本次仅维护网络和 OIDC 字段"
-            );
+                digest(&path)? == expected.as_str().context(t!("install.reconfigure.receipt.file_digest_invalid"))?,
+                "{}", t!("install.reconfigure.protected_file_modified", name = name));
             guard(&mut runtime.guards, &path)?;
         }
         let values = document.values();
         if let Some(configured_home) = values.get("STEVE_HOME") {
             ensure!(
                 Path::new(configured_home) == home,
-                "steve.env 指向另一 STEVE_HOME；不会重配置"
-            );
+                "{}", t!("install.reconfigure.other_home"));
         }
         /* OIDC is optional since 2026-11-09 (a Hub set up without it signs in with access tokens):
          * when it is configured, it is kept whole and maintained as before */
@@ -265,15 +248,14 @@ impl Snapshot {
             for name in ["STEVE_OIDC_ISSUER", "STEVE_OIDC_CLIENT_ID"] {
                 ensure!(
                     values.get(name).is_some_and(|v| !v.is_empty()),
-                    "本次仅维护已有 OIDC 配置，缺少 {name}"
-                );
+                    "{}", t!("install.reconfigure.oidc.field_missing", name = name));
             }
             let secret = Path::new(
                 values
                     .get("STEVE_OIDC_CLIENT_SECRET_FILE")
-                    .context("已有 OIDC secret 必须由文件引用；本次不会创建或迁移 secret")?,
+                    .context(t!("install.reconfigure.oidc.secret_by_file"))?,
             );
-            ensure!(secret.is_absolute(), "OIDC secret 文件必须为绝对路径");
+            ensure!(secret.is_absolute(), "{}", t!("install.reconfigure.oidc.secret_path_relative"));
             owned(secret, false)?;
             guard(&mut runtime.guards, secret)?;
         }
@@ -282,26 +264,24 @@ impl Snapshot {
                 let keys = Path::new(
                     values
                         .get("STEVE_VAULT_KEY_DIR")
-                        .context("Vault 密钥目录未配置")?,
+                        .context(t!("install.reconfigure.vault.dir_unset"))?,
                 );
-                ensure!(keys.is_absolute(), "Vault 密钥目录必须为绝对路径");
-                owned(keys, true).context("既有 Vault 密钥目录必须存在；重配置不会创建密钥目录")?;
+                ensure!(keys.is_absolute(), "{}", t!("install.reconfigure.vault.dir_relative"));
+                owned(keys, true).context(t!("install.reconfigure.vault.dir_missing"))?;
                 let resolved = fs::canonicalize(keys)?;
                 ensure!(
                     !resolved.starts_with(home) && !home.starts_with(&resolved),
-                    "Vault 密钥目录必须在数据目录之外"
-                );
+                    "{}", t!("install.reconfigure.vault.dir_inside_home"));
                 guard(&mut runtime.guards, keys)?;
             }
             Some("file") => {
                 let keys = home.join("vault-keys");
-                owned(&keys, true).context("既有 vault-keys 必须存在；重配置不会创建密钥目录")?;
+                owned(&keys, true).context(t!("install.reconfigure.vault.keys_missing"))?;
                 guard(&mut runtime.guards, &keys)?;
             }
             Some("keychain") if cfg!(target_os = "macos") => {}
             _ => bail!(
-                "重配置仅支持显式指定的 dir/file（既有目录）或 macOS keychain；不会探测 auto 或其他 Vault backend"
-            ),
+                "{}", t!("install.reconfigure.vault.backend_unsupported")),
         }
         let snapshot = Self {
             home: home.into(),
@@ -320,8 +300,7 @@ impl Snapshot {
         ensure!(
             private_bytes(&self.home.join("steve.env"))? == self.env
                 && private_bytes(&self.home.join("setup.json"))? == self.receipt,
-            "填写期间配置或收据发生变化；请重新运行，未覆盖其他操作"
-        );
+            "{}", t!("install.reconfigure.changed_while_asking"));
         Ok(())
     }
 }
@@ -339,8 +318,8 @@ fn listening(value: &str) -> Result<Listening> {
     for part in value.split(',') {
         let part = part.trim();
         let (host, port) = if let Some(port) = part.strip_prefix("localhost:") {
-            let port: u16 = port.parse().context("localhost 监听端口无效")?;
-            ensure!(port != 0, "服务监听端口不能是 0");
+            let port: u16 = port.parse().context(t!("install.reconfigure.listen.localhost_port"))?;
+            ensure!(port != 0, "{}", t!("install.reconfigure.listen.port_zero"));
             ("localhost".to_owned(), port)
         } else {
             let address = listen_address(part)?;
@@ -349,8 +328,7 @@ fn listening(value: &str) -> Result<Listening> {
         };
         ensure!(
             selected_port.is_none_or(|p| p == port),
-            "所有监听地址必须使用同一个端口"
-        );
+            "{}", t!("install.reconfigure.listen.one_port"));
         selected_port = Some(port);
         if !hosts.contains(&host) {
             hosts.push(host);
@@ -358,7 +336,7 @@ fn listening(value: &str) -> Result<Listening> {
     }
     Ok(Listening {
         hosts: hosts.join(","),
-        port: selected_port.context("监听地址不能为空")?.to_string(),
+        port: selected_port.context(t!("install.reconfigure.listen.empty"))?.to_string(),
         any,
     })
 }
@@ -406,7 +384,7 @@ fn changes(
         Some(explicit) => explicit.clone(),
         None => ask_value(
             input,
-            "监听地址（多个 IP:端口用逗号分隔）",
+            &t!("install.reconfigure.listen.question"),
             Some(&old_listen),
             false,
             |answer| {
@@ -428,11 +406,11 @@ fn changes(
     let old_public = value(current, "STEVE_PUBLIC_URL");
     let public = ask_value(
         input,
-        "浏览器访问地址",
+        &t!("install.reconfigure.label.browser_address"),
         Some(old_public),
         false,
         |answer| {
-            let parsed = browser_url(answer, "访问地址")?;
+            let parsed = browser_url(answer, &t!("install.reconfigure.label.access_address"))?;
             Ok(if answer == old_public {
                 answer.to_owned()
             } else {
@@ -485,8 +463,7 @@ fn updated_receipt(original: &Value, candidate: &[u8]) -> Result<Value> {
     let document = EnvDocument::parse(candidate)?;
     ensure!(
         !document.values().contains_key("STEVE_OIDC_CLIENT_SECRET"),
-        "内联 OIDC secret 不能写入初始化收据；本次仅支持原文件引用"
-    );
+        "{}", t!("install.reconfigure.oidc.inline_secret_receipt"));
     let mut next = original.clone();
     next["environment"] = serde_json::to_value(document.values())?;
     next["files"]["steve.env"] = bytes_digest(candidate).into();
@@ -507,7 +484,7 @@ fn confirm(input: &mut dyn Prompts, title: &str) -> Result<bool> {
         match answer.to_ascii_lowercase().as_str() {
             "y" | "yes" => Ok(true),
             "n" | "no" => Ok(false),
-            _ => bail!("请输入 y 或 n"),
+            _ => bail!("{}", t!("install.reconfigure.answer_yes_no")),
         }
     })?;
     Ok(answer)
@@ -525,7 +502,7 @@ fn locks(home: &Path) -> Result<(File, File)> {
         .open(&path)?;
     setup
         .try_lock()
-        .context("此目录已有初始化或重配置正在进行")?;
+        .context(t!("install.reconfigure.busy"))?;
     owned(&path, false)?;
     Ok((setup, crate::release::lock_release(home)?))
 }
@@ -549,18 +526,15 @@ fn check(runtime: &Runtime, home: &Path, values: &BTreeMap<String, String>) -> R
     command.env("STEVE_HOME", home);
     let output = crate::signing::output(&mut command, Duration::from_secs(30))?;
     let report: Value =
-        serde_json::from_slice(&output.stdout).context("已安装 Hub 没有返回配置检查结果")?;
+        serde_json::from_slice(&output.stdout).context(t!("install.reconfigure.check.no_result"))?;
     ensure!(
         output.status.success() && report["ok"] == true,
-        "已安装 Hub 拒绝候选配置；原 steve.env 和 setup.json 保持不变，请检查监听地址、OIDC 文件和现有 Vault 配置"
-    );
+        "{}", t!("install.reconfigure.check.rejected"));
     if report["warnings"]
         .as_array()
         .is_some_and(|warnings| !warnings.is_empty())
     {
-        crate::ui::info(&format!(
-            "本机配置检查通过，现有安装仍有可选能力提示；这不代表 OIDC 登录或外网可达已验证。"
-        ));
+        crate::ui::info(&t!("install.reconfigure.check.passed_with_notes"));
     }
     Ok(())
 }
@@ -603,15 +577,13 @@ fn verify_transition(
     for key in before.values().keys().chain(after.values().keys()) {
         ensure!(
             EDITABLE.contains(&key.as_str()) || before.values().get(key) == after.values().get(key),
-            "重配置事务改变了不支持的字段"
-        );
+            "{}", t!("install.reconfigure.txn.unsupported_field"));
     }
     let original = receipt(before_receipt, home)?;
     let candidate = receipt(after_receipt, home)?;
     ensure!(
         updated_receipt(&original, after_env)? == candidate,
-        "重配置事务修改了初始化身份或记录"
-    );
+        "{}", t!("install.reconfigure.txn.identity_changed"));
     Ok(())
 }
 
@@ -629,8 +601,7 @@ impl Pending {
         private_dir(&base)?;
         ensure!(
             !exists(&pending_path(&snapshot.home)),
-            "存在未完成的重配置，请先恢复"
-        );
+            "{}", t!("install.reconfigure.txn.pending"));
         let id = uuid::Uuid::new_v4().to_string();
         let staging = base.join(format!(".prepare-{id}"));
         private_dir(&staging)?;
@@ -678,8 +649,7 @@ impl Pending {
                     journal.phase.as_str(),
                     "prepared" | "committed" | "rolled_back"
                 ),
-            "重配置恢复记录无效"
-        );
+            "{}", t!("install.reconfigure.txn.record_invalid"));
         let before_env = private_bytes(&directory.join("before.env"))?;
         let after_env = private_bytes(&directory.join("after.env"))?;
         let before_receipt = private_bytes(&directory.join("before-setup.json"))?;
@@ -689,8 +659,7 @@ impl Pending {
                 && bytes_digest(&after_env) == journal.after_env
                 && bytes_digest(&before_receipt) == journal.before_receipt
                 && bytes_digest(&after_receipt) == journal.after_receipt,
-            "重配置备份或候选文件被修改；不会恢复"
-        );
+            "{}", t!("install.reconfigure.txn.backup_modified"));
         verify_transition(
             home,
             &before_env,
@@ -715,15 +684,12 @@ impl Pending {
             &serde_json::to_vec_pretty(&self.journal)?,
         )?;
         let archive = self.directory.parent().unwrap().join(&self.journal.id);
-        ensure!(!exists(&archive), "重配置归档路径已经存在，保留恢复记录");
+        ensure!(!exists(&archive), "{}", t!("install.reconfigure.txn.archive_exists"));
         fs::rename(&self.directory, &archive)?;
         File::open(archive.parent().unwrap())?
             .sync_all()
             .with_context(|| {
-                format!(
-                    "事务已归档至 {}，目录同步失败；请保留记录并核验",
-                    archive.display()
-                )
+                t!("install.reconfigure.txn.archive_sync_failed", archive = archive.display())
             })?;
         Ok(archive)
     }
@@ -735,17 +701,13 @@ fn replace_if(path: &Path, expected: &[u8], candidate: &[u8]) -> Result<()> {
     // writers, so this is intentionally not described as a filesystem-wide atomic CAS.
     ensure!(
         private_bytes(path)? == expected,
-        "文件被其他操作修改，未覆盖：{}",
-        path.display()
-    );
+        "{}", t!("install.reconfigure.txn.file_changed", path = path.display()));
     if expected != candidate {
         atomic(path, candidate)?;
     }
     ensure!(
         private_bytes(path)? == candidate,
-        "写入回读不一致，保留恢复记录：{}",
-        path.display()
-    );
+        "{}", t!("install.reconfigure.txn.readback_mismatch", path = path.display()));
     Ok(())
 }
 
@@ -754,8 +716,7 @@ fn apply(pending: Pending, after_write: impl Fn(&str) -> Result<()>) -> Result<P
     verify_guards(&pending.journal.guards)?;
     ensure!(
         private_bytes(&home.join("setup.json"))? == pending.before_receipt,
-        "初始化收据被其他操作修改，未覆盖"
-    );
+        "{}", t!("install.reconfigure.txn.receipt_changed"));
     replace_if(
         &home.join("steve.env"),
         &pending.before_env,
@@ -765,8 +726,7 @@ fn apply(pending: Pending, after_write: impl Fn(&str) -> Result<()>) -> Result<P
     verify_guards(&pending.journal.guards)?;
     ensure!(
         private_bytes(&home.join("steve.env"))? == pending.after_env,
-        "环境配置被其他操作修改，未覆盖收据"
-    );
+        "{}", t!("install.reconfigure.txn.env_changed"));
     replace_if(
         &home.join("setup.json"),
         &pending.before_receipt,
@@ -777,8 +737,7 @@ fn apply(pending: Pending, after_write: impl Fn(&str) -> Result<()>) -> Result<P
     ensure!(
         private_bytes(&home.join("steve.env"))? == pending.after_env
             && private_bytes(&home.join("setup.json"))? == pending.after_receipt,
-        "提交期间配置或收据被修改，保留恢复记录"
-    );
+        "{}", t!("install.reconfigure.txn.changed_during_commit"));
     pending.archive("committed")
 }
 
@@ -792,28 +751,25 @@ fn recover(home: &Path) -> Result<(PathBuf, bool)> {
     if pending.journal.phase == "committed" {
         ensure!(
             env == pending.after_env && receipt == pending.after_receipt,
-            "已提交配置被其他操作修改；未覆盖"
-        );
+            "{}", t!("install.reconfigure.txn.committed_changed"));
         return Ok((pending.archive("committed")?, true));
     }
     ensure!(
         (env == pending.before_env || env == pending.after_env)
             && (receipt == pending.before_receipt || receipt == pending.after_receipt),
-        "重配置后存在外部编辑；不会用备份覆盖，保留 pending 恢复记录"
-    );
+        "{}", t!("install.reconfigure.txn.external_edit"));
     replace_if(&env_path, &env, &pending.before_env)?;
     verify_guards(&pending.journal.guards)?;
     ensure!(
         private_bytes(&env_path)? == pending.before_env,
-        "恢复期间环境被其他操作修改，未覆盖收据"
-    );
+        "{}", t!("install.reconfigure.txn.env_changed_recovering"));
     replace_if(&receipt_path, &receipt, &pending.before_receipt)?;
     verify_guards(&pending.journal.guards)?;
     Ok((pending.archive("rolled_back")?, false))
 }
 
 pub(super) fn run(options: &Options, input: &mut dyn Prompts) -> Result<()> {
-    crate::ui::intro("重新配置 Hub");
+    crate::ui::intro(&t!("install.reconfigure.intro"));
     run_with(options, input, inspect, check)?;
     crate::ui::outro("");
     Ok(())
@@ -829,39 +785,29 @@ fn run_with(
         options.role.as_deref().is_none_or(|role| role == "hub")
             && options.hub.is_none()
             && options.pin.is_none(),
-        "--reconfigure 仅维护已有 Hub 的网络和 OIDC 配置；Node 配对与身份保持不变"
-    );
+        "{}", t!("install.reconfigure.hub_only"));
     let home = canonical(&options.home.clone().unwrap_or(user_home()?.join(".steve")))?;
-    owned(&home, true).context("重配置需要已有 Hub 目录；不会创建或接管目录")?;
+    owned(&home, true).context(t!("install.reconfigure.no_home"))?;
     if exists(&pending_path(&home)) {
         let pending = Pending::load(&home)?;
-        crate::ui::info(&format!(
-            "发现未完成的配置事务：{}。恢复会保留已提交的配置，或将未提交的配置回退到原文件。",
-            pending.directory.display()
-        ));
-        if !confirm(input, "现在恢复上次配置事务？[y/N]")? {
-            crate::ui::info(&format!("已取消恢复；没有写入任何文件。"));
+        crate::ui::info(&t!("install.reconfigure.pending_found", pending = pending.directory.display()));
+        if !confirm(input, &t!("install.reconfigure.recover_question"))? {
+            crate::ui::info(&t!("install.reconfigure.recover_cancelled"));
             return Ok(());
         }
         let _locks = locks(&home)?;
         // Also recheck the actual installation, rather than trusting paths in a journal alone.
         inspect(&home)?;
         let (archive, committed) = recover(&home)?;
-        crate::ui::info(&format!(
-            "{}；记录：{}。需要新的修改时再次运行 steve setup --reconfigure。",
-            if committed {
-                "已核验上次配置提交"
+        crate::ui::info(&t!("install.reconfigure.recovered", outcome = if committed {
+                t!("install.reconfigure.recovered_committed")
             } else {
-                "已恢复上次配置修改前的文件"
-            },
-            archive.display()
-        ));
+                t!("install.reconfigure.recovered_reverted")
+            }, archive = archive.display()));
         return Ok(());
     }
     let snapshot = Snapshot::read(&home, &inspect)?;
-    crate::ui::info(&format!(
-        "维护已有 Hub 网络和 OIDC 配置。OIDC secret 保留原文件及内容；本次不修改身份或服务状态。"
-    ));
+    crate::ui::info(&t!("install.reconfigure.scope"));
     let changes = changes(&snapshot, options, input)?;
     let candidate = snapshot.document.update(&changes)?;
     let record = updated_receipt(&snapshot.record, &candidate)?;
@@ -872,21 +818,21 @@ fn run_with(
     };
     snapshot.verify()?;
     if candidate == snapshot.env && candidate_receipt == snapshot.receipt {
-        crate::ui::info(&format!("配置与收据已经一致，无需修改。"));
+        crate::ui::info(&t!("install.reconfigure.nothing_to_do"));
         return Ok(());
     }
-    crate::ui::info(&format!("准备保存以下配置："));
+    crate::ui::info(&t!("install.reconfigure.about_to_save"));
     for (name, new) in &changes {
         if snapshot.document.values().get(name) != Some(new) {
             crate::ui::info(&format!("  {name} = {new}"));
         }
     }
     if changes.is_empty() {
-        crate::ui::info(&format!("  仅将初始化收据同步到当前 steve.env，保留现有配置。"));
+        crate::ui::info(&t!("install.reconfigure.sync_receipt_only"));
     }
-    crate::ui::info(&format!("  OIDC secret：保留原路径及内容"));
-    if !confirm(input, "确认保存并备份现有配置？[y/N]")? {
-        crate::ui::info(&format!("已取消重配置；没有写入任何文件。"));
+    crate::ui::info(&t!("install.reconfigure.secret_kept"));
+    if !confirm(input, &t!("install.reconfigure.save_question"))? {
+        crate::ui::info(&t!("install.reconfigure.cancelled"));
         return Ok(());
     }
     let _locks = locks(&home)?;
@@ -900,8 +846,7 @@ fn run_with(
                 .guards
                 .get(path)
                 == Some(guard)),
-        "安装状态在填写期间发生变化；请重新运行"
-    );
+        "{}", t!("install.reconfigure.state_changed_asking"));
     let values = EnvDocument::parse(&candidate)?;
     check(&snapshot.runtime, &home, values.values())?;
     snapshot.verify()?;
@@ -910,31 +855,15 @@ fn run_with(
         Ok(archive) => archive,
         Err(error) => {
             return match recover(&home) {
-                Ok((archive, false)) => Err(error.context(format!(
-                    "保存没有完成，已恢复原配置；备份与恢复记录：{}",
-                    archive.display()
-                ))),
-                Ok((archive, true)) => Err(error.context(format!(
-                    "配置已提交，恢复记录已归档：{}；请核验配置后显式重启",
-                    archive.display()
-                ))),
-                Err(recovery) => Err(error.context(format!(
-                    "存在未完成的写入，未覆盖外部修改。恢复记录：{}；恢复失败：{recovery:#}",
-                    pending_path(&home).display()
-                ))),
+                Ok((archive, false)) => Err(error.context(t!("install.reconfigure.save_reverted", archive = archive.display()))),
+                Ok((archive, true)) => Err(error.context(t!("install.reconfigure.committed_archived", archive = archive.display()))),
+                Err(recovery) => Err(error.context(t!("install.reconfigure.write_unfinished", pending = pending_path(&home).display(), recovery = format!("{:#}", recovery)))),
             };
         }
     };
-    crate::ui::info(&format!(
-        "配置与收据已保存，本机配置检查通过。备份：{}",
-        archive.display()
-    ));
-    crate::ui::info(&format!(
-        "运行中的 Hub 仍使用启动时的配置；准备好后执行 steve hub restart --home {} --label {}。",
-        shell_quote(home.to_str().context("路径必须为 UTF-8")?)?,
-        shell_quote(&snapshot.runtime.label)?
-    ));
-    crate::ui::info(&format!("重启后再验证浏览器访问和 OIDC 登录；本次没有验证网络可达或登录。"));
+    crate::ui::info(&t!("install.reconfigure.saved", archive = archive.display()));
+    crate::ui::info(&t!("install.reconfigure.restart_hint", home = shell_quote(home.to_str().context(t!("install.reconfigure.path_not_utf8"))?)?, label = shell_quote(&snapshot.runtime.label)?));
+    crate::ui::info(&t!("install.reconfigure.verify_later"));
     Ok(())
 }
 

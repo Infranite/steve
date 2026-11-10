@@ -3,6 +3,7 @@
 use serde_json::Value;
 use std::fmt::Write;
 use std::path::Path;
+use steve_i18n::t;
 
 fn visible(text: &str) -> String {
     text.chars()
@@ -17,17 +18,14 @@ fn visible(text: &str) -> String {
 }
 
 fn line(out: &mut String, label: &str, value: &str) {
-    let _ = writeln!(out, "{label}：{}", visible(value));
+    let _ = writeln!(out, "{label}{}{}", t!("install.status.label_separator"), visible(value));
 }
 
 fn build(value: &Value) -> Option<String> {
     let version = value["version"].as_str().filter(|s| !s.is_empty())?;
     let commit = value["commit"].as_str().filter(|s| !s.is_empty());
     Some(match commit {
-        Some(commit) => format!(
-            "{version}（{}）",
-            commit.chars().take(12).collect::<String>()
-        ),
+        Some(commit) => t!("install.status.build", version = version, commit = commit.chars().take(12).collect::<String>()),
         None => version.to_owned(),
     })
 }
@@ -42,18 +40,18 @@ fn command(role: &str, action: &str, home: &Path, label: Option<&str>) -> Option
     Some(command)
 }
 
-fn diagnostic(text: &str) -> &str {
+fn diagnostic(text: &str) -> String {
     match text {
-        "service is not installed" => "服务尚未注册",
-        "service is stopped or state is unknown" => "服务已停止，或服务管理器无法确认状态",
+        "service is not installed" => t!("install.status.diag.not_installed"),
+        "service is stopped or state is unknown" => t!("install.status.diag.stopped_or_unknown"),
         "Node is not paired; install never creates or approves a pairing" => {
-            "Node 尚未配对；安装服务不会自动配对或批准设备"
+            t!("install.status.diag.node_unpaired")
         }
-        "Node identity is missing" => "Node 身份文件缺失",
+        "Node identity is missing" => t!("install.status.diag.node_identity_missing"),
         "connection and active sessions require Hub Devices verification" => {
-            "连接和活动会话需要在 Hub 的设备页核验"
+            t!("install.status.diag.verify_in_hub")
         }
-        _ => text,
+        _ => text.to_owned(),
     }
 }
 
@@ -66,14 +64,14 @@ pub fn service(
 ) -> String {
     let name = if role == "hub" { "Hub" } else { "Node" };
     let title = match action {
-        "doctor" => "检查",
-        "install" => "安装",
-        "update" => "更新",
-        "uninstall" => "注销",
-        "start" => "启动",
-        "stop" => "停止",
-        "restart" => "重启",
-        _ => "状态",
+        "doctor" => t!("install.status.title.doctor"),
+        "install" => t!("install.status.title.install"),
+        "update" => t!("install.status.title.update"),
+        "uninstall" => t!("install.status.title.uninstall"),
+        "start" => t!("install.status.start"),
+        "stop" => t!("install.status.title.stop"),
+        "restart" => t!("install.status.title.restart"),
+        _ => t!("install.status.title.status"),
     };
     let mut out = format!("Steve {name} · {title}\n");
     let state = report.get("service").unwrap_or(report);
@@ -83,56 +81,56 @@ pub fn service(
     if action == "uninstall" {
         line(
             &mut out,
-            "服务",
-            if report["changed"] == true {
-                "已注销"
+            &t!("install.status.label.service"),
+            &if report["changed"] == true {
+                t!("install.status.unregistered_now")
             } else {
-                "未注册，无需注销"
+                t!("install.status.nothing_to_unregister")
             },
         );
         if report["home_preserved"] == true {
-            line(&mut out, "数据", "安装目录和数据已保留");
+            line(&mut out, &t!("install.status.label.data"), &t!("install.status.home_kept"));
         }
         if let Some(archive) = report["archive"].as_str() {
-            line(&mut out, "服务定义备份", archive);
+            line(&mut out, &t!("install.status.label.service_backup"), archive);
         }
     } else if matches!(action, "install" | "update") {
         line(
             &mut out,
-            "服务配置",
-            if report["changed"] == true {
-                "已更新"
+            &t!("install.status.label.service_config"),
+            &if report["changed"] == true {
+                t!("install.status.config_updated")
             } else {
-                "已是目标配置"
+                t!("install.status.config_unchanged")
             },
         );
         if report["started"] == false {
-            line(&mut out, "启动", "本次操作未启动服务");
+            line(&mut out, &t!("install.status.start"), &t!("install.status.not_started"));
         }
     } else {
         let running = match state["running"].as_bool() {
             Some(true) => match state["pid"].as_u64() {
-                Some(pid) => format!("运行中（PID {pid}）"),
-                None => "运行中".into(),
+                Some(pid) => t!("install.status.running_pid", pid = pid),
+                None => t!("install.status.running"),
             },
-            Some(false) => "已停止".into(),
-            None => "未知（服务管理器未确认）".into(),
+            Some(false) => t!("install.status.stopped"),
+            None => t!("install.status.running_unknown"),
         };
-        line(&mut out, "服务进程", &running);
+        line(&mut out, &t!("install.status.label.process"), &running);
         line(
             &mut out,
-            "服务注册",
-            match installed {
-                Some(true) => "已注册",
-                Some(false) => "未注册",
-                None => "未知",
+            &t!("install.status.label.registration"),
+            &match installed {
+                Some(true) => t!("install.status.registered"),
+                Some(false) => t!("install.status.not_registered"),
+                None => t!("install.status.unknown"),
             },
         );
         if matches!(action, "start" | "restart") {
             line(
                 &mut out,
-                "操作",
-                "服务管理器已接受请求；应用就绪情况尚未核验",
+                &t!("install.status.label.operation"),
+                &t!("install.status.request_accepted"),
             );
         }
     }
@@ -143,66 +141,66 @@ pub fn service(
             .or_else(|| report.get("build"));
         line(
             &mut out,
-            "已配置版本",
-            &configured.and_then(build).unwrap_or_else(|| "未知".into()),
+            &t!("install.status.label.configured_build"),
+            &configured.and_then(build).unwrap_or_else(|| t!("install.status.unknown")),
         );
         line(
             &mut out,
-            "运行版本",
+            &t!("install.status.label.running_build"),
             &build(&report["running_build"])
-                .unwrap_or_else(|| "未核验（不能由已配置版本或 PID 推断）".into()),
+                .unwrap_or_else(|| t!("install.status.running_build_unverified")),
         );
         if let Some(error) = report["build_error"].as_str() {
-            line(&mut out, "安装包检查", error);
+            line(&mut out, &t!("install.status.label.package_check"), error);
         }
         if let Some(release) = report["configured_release"]
             .as_str()
             .or_else(|| report["release"].as_str())
         {
-            line(&mut out, "安装包", release);
+            line(&mut out, &t!("install.status.label.package"), release);
         }
         if role == "node" {
             line(
                 &mut out,
-                "设备配对",
-                match report["pairing"]["configured"].as_bool() {
-                    Some(true) => "已配置配对（不代表已连接）",
-                    Some(false) => "尚未配置",
-                    None => "未核验",
+                &t!("install.status.label.pairing"),
+                &match report["pairing"]["configured"].as_bool() {
+                    Some(true) => t!("install.status.pairing_configured"),
+                    Some(false) => t!("install.status.pairing_missing"),
+                    None => t!("install.status.unverified"),
                 },
             );
             line(
                 &mut out,
-                "Hub 连接与活动会话",
-                "未核验；请在 Hub 的设备页查看",
+                &t!("install.status.label.hub_connection"),
+                &t!("install.status.see_devices"),
             );
         }
         if let Some(candidate) = build(&report["candidate"]["build"]) {
-            line(&mut out, "候选版本", &candidate);
+            line(&mut out, &t!("install.status.label.candidate"), &candidate);
         }
     }
-    line(&mut out, "数据目录", &home.to_string_lossy());
+    line(&mut out, &t!("install.status.label.home"), &home.to_string_lossy());
     if let Some(label) = label {
-        line(&mut out, "服务名", label);
+        line(&mut out, &t!("install.status.label.service_name"), label);
     }
 
     if action == "doctor" {
         line(
             &mut out,
-            "检查范围",
-            "本地静态检查；未探测 HTTP、OIDC 或模型可用性",
+            &t!("install.status.label.check_scope"),
+            &t!("install.status.check_scope"),
         );
         match report["diagnostics"].as_array() {
             Some(issues) if issues.is_empty() => {
-                line(&mut out, "检查结果", "本次静态检查未发现问题")
+                line(&mut out, &t!("install.status.label.check_result"), &t!("install.status.no_issues"))
             }
             Some(issues) => {
-                let _ = writeln!(out, "检查结果（{} 项）：", issues.len());
+                let _ = writeln!(out, "{}", t!("install.status.issues_heading", count = issues.len()));
                 for issue in issues.iter().filter_map(Value::as_str) {
-                    let _ = writeln!(out, "  - {}", visible(diagnostic(issue)));
+                    let _ = writeln!(out, "  - {}", visible(&diagnostic(issue)));
                 }
             }
-            None => line(&mut out, "检查结果", "未提供诊断结果"),
+            None => line(&mut out, &t!("install.status.label.check_result"), &t!("install.status.no_diagnostics")),
         }
     }
 
@@ -210,26 +208,26 @@ pub fn service(
         let next = if installed == Some(false) {
             line(
                 &mut out,
-                "恢复提示",
-                "先核对安装目录；setup 仅用于首次或续接初始化，已有数据请保留并按部署说明恢复服务注册",
+                &t!("install.status.label.recovery"),
+                &t!("install.status.recovery_hint"),
             );
             None
         } else if action == "doctor" && state["running"] == true {
             line(
                 &mut out,
-                "下一步",
-                if role == "hub" {
-                    "在配置的浏览器地址检查 /healthz 和登录；这些检查尚未执行"
+                &t!("install.status.label.next"),
+                &if role == "hub" {
+                    t!("install.status.next_hub_checks")
                 } else {
-                    "到 Hub 的设备页核对同一 Node 的连接和活动会话"
+                    t!("install.status.next_node_checks")
                 },
             );
             None
         } else if state["running"].is_null() && !matches!(action, "install" | "update") {
             line(
                 &mut out,
-                "下一步",
-                "先查看日志确认服务管理器状态；不要据此重复安装、更新或注销服务",
+                &t!("install.status.label.next"),
+                &t!("install.status.next_logs"),
             );
             None
         } else {
@@ -241,10 +239,10 @@ pub fn service(
             command(role, next, home, label)
         };
         if let Some(next) = next {
-            line(&mut out, "下一步", &next);
+            line(&mut out, &t!("install.status.label.next"), &next);
         }
         if let Some(update) = report["update_command"].as_str() {
-            line(&mut out, "更新入口", update);
+            line(&mut out, &t!("install.status.label.update_command"), update);
         }
         match report["manager"].as_str() {
             Some("systemd-user") => {
@@ -253,14 +251,14 @@ pub fn service(
                 {
                     line(
                         &mut out,
-                        "日志入口",
+                        &t!("install.status.label.log_command"),
                         &format!("journalctl --user -u {label} --no-pager -n 50"),
                     );
                 }
             }
             Some("launchd") => line(
                 &mut out,
-                "日志文件",
+                &t!("install.status.label.log_file"),
                 &home
                     .join("logs")
                     .join(format!("{role}.log"))

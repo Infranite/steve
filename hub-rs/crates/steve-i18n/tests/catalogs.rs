@@ -23,6 +23,7 @@ const EXPECTED: &[&str] = &[
     "steve-acp",
     "steve-research",
     "steve-node",
+    "steve-install",
     "steve-i18n",
 ];
 

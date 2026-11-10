@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use steve_i18n::t;
 
 mod reconfigure;
 
@@ -58,13 +59,13 @@ trait Prompts {
 
 fn typed_select<P: Prompts + ?Sized>(input: &mut P, title: &str, choices: &[Choice], initial: usize) -> Result<usize> {
     let keys: Vec<&str> = choices.iter().map(|c| c.key.as_str()).collect();
-    let title = format!("{title}（{}）", keys.join(" / "));
+    let title = t!("install.setup.typed.select_title", title = title, keys = keys.join(" / "));
     loop {
         let answer = input.line(&title, Some(keys[initial]), false)?.trim().to_lowercase();
         match keys.iter().position(|k| *k == answer) {
             Some(at) => return Ok(at),
-            None if input.interactive() => ui::warn(&format!("请选择 {}", keys.join(" / "))),
-            None => bail!("请选择 {}", keys.join(" / ")),
+            None if input.interactive() => ui::warn(&t!("install.setup.typed.choose_one", keys = keys.join(" / "))),
+            None => bail!("{}", t!("install.setup.typed.choose_one", keys = keys.join(" / "))),
         }
     }
 }
@@ -78,7 +79,7 @@ fn ticks(answer: &str, choices: &[Choice]) -> Result<Vec<bool>> {
     let wanted: Vec<&str> = answer.split(',').map(str::trim).filter(|k| !k.is_empty()).collect();
     if let Some(unknown) = wanted.iter().find(|k| !choices.iter().any(|c| c.key == **k)) {
         let keys: Vec<&str> = choices.iter().map(|c| c.key.as_str()).collect();
-        bail!("没有 {unknown}；可选：{}、all、none", keys.join("、"));
+        bail!("{}", t!("install.setup.typed.unknown_choice", unknown = unknown, keys = keys.join(&t!("install.setup.list_separator"))));
     }
     Ok(choices.iter().map(|c| wanted.contains(&c.key.as_str())).collect())
 }
@@ -91,7 +92,7 @@ fn typed_multiselect<P: Prompts + ?Sized>(input: &mut P, title: &str, choices: &
         .map(|(c, _)| c.key.as_str())
         .collect();
     let default = if default.is_empty() { "none".to_owned() } else { default.join(",") };
-    let title = format!("{title}（逗号分隔，all 或 none）");
+    let title = t!("install.setup.typed.multiselect_title", title = title);
     loop {
         let answer = input.line(&title, Some(&default), false)?;
         match ticks(&answer, choices) {
@@ -108,8 +109,8 @@ fn typed_confirm<P: Prompts + ?Sized>(input: &mut P, title: &str, initial: bool)
         match answer.trim().to_lowercase().as_str() {
             "y" | "yes" | "是" => return Ok(true),
             "n" | "no" | "否" => return Ok(false),
-            _ if input.interactive() => ui::warn("请回答 y 或 n"),
-            _ => bail!("请回答 y 或 n"),
+            _ if input.interactive() => ui::warn(&t!("install.setup.typed.answer_yes_no")),
+            _ => bail!("{}", t!("install.setup.typed.answer_yes_no")),
         }
     }
 }
@@ -140,7 +141,7 @@ impl Prompts for Terminal {
         while ui::fancy() {
             let answer = ui::input(title, default)?;
             if (!optional && answer.is_empty()) || answer.contains(['\n', '\r', '\0']) {
-                ui::warn("需要填写有效值，请重新输入。");
+                ui::warn(&t!("install.setup.input.need_value"));
                 continue;
             }
             return Ok(answer);
@@ -153,7 +154,7 @@ impl Prompts for Terminal {
             io::stdout().flush()?;
             let mut line = String::new();
             if io::stdin().read_line(&mut line)? == 0 {
-                bail!("初始化已中断；已完成步骤保留，可稍后继续。");
+                bail!("{}", t!("install.setup.input.interrupted"));
             }
             let answer = line.trim();
             let answer = if answer.is_empty() {
@@ -163,10 +164,10 @@ impl Prompts for Terminal {
             };
             if (!optional && answer.is_empty()) || answer.contains(['\n', '\r', '\0']) {
                 if self.interactive() {
-                    eprintln!("需要填写有效值，请重新输入当前字段。");
+                    eprintln!("{}", t!("install.setup.input.need_value_field"));
                     continue;
                 }
-                bail!("需要填写有效值；已完成的步骤保留。");
+                bail!("{}", t!("install.setup.input.need_value_abort"));
             }
             return Ok(answer.into());
         }
@@ -187,7 +188,7 @@ fn ask_value<T>(
         match validate(&value) {
             Ok(value) => return Ok(value),
             Err(error) if input.interactive() => {
-                ui::warn(&format!("{error}；请重新输入当前字段。"));
+                ui::warn(&t!("install.setup.input.retry_field", error = error));
             }
             Err(error) => return Err(error),
         }
@@ -198,9 +199,9 @@ fn listen_address(value: &str) -> Result<SocketAddr> {
     let address: SocketAddr = value
         .trim()
         .parse()
-        .context("监听地址应为 IP:端口，例如 0.0.0.0:8440 或 [::1]:8440")?;
+        .context(t!("install.setup.listen.format"))?;
     if address.port() == 0 {
-        bail!("服务监听端口不能是 0");
+        bail!("{}", t!("install.setup.listen.port_zero"));
     }
     Ok(address)
 }
@@ -221,7 +222,7 @@ fn node_hub_url(value: &str) -> Result<String> {
     }
     let hub = browser_url(value, "Hub")?;
     if !hub.starts_with("https://") {
-        bail!("Node 配对需要 HTTPS Hub");
+        bail!("{}", t!("install.setup.node.https_hub_required"));
     }
     Ok(hub)
 }
@@ -229,13 +230,13 @@ fn node_hub_url(value: &str) -> Result<String> {
 fn setup_role(value: &str, options: &Options) -> Result<String> {
     let role = value.trim().to_lowercase();
     if !matches!(role.as_str(), "hub" | "node") {
-        bail!("请选择 hub 或 node");
+        bail!("{}", t!("install.setup.option.role_choice"));
     }
     if role == "hub" && (options.hub.is_some() || options.pin.is_some()) {
-        bail!("--hub/--pin 只用于 Node，请选择 node");
+        bail!("{}", t!("install.setup.option.node_only"));
     }
     if role == "node" && (options.listen.is_some() || options.public_url.is_some()) {
-        bail!("--listen/--public-url 只用于 Hub，请选择 hub");
+        bail!("{}", t!("install.setup.option.hub_only"));
     }
     Ok(role)
 }
@@ -243,7 +244,7 @@ fn setup_role(value: &str, options: &Options) -> Result<String> {
 /// Reject invalid explicit arguments before prompting, inspecting a bundle or creating a home.
 fn validate_options(options: &Options) -> Result<()> {
     if options.fresh && options.reconfigure {
-        bail!("--fresh 是重新安装，不能与 --reconfigure 一起使用");
+        bail!("{}", t!("install.setup.option.fresh_vs_reconfigure"));
     }
     if let Some(role) = &options.role {
         setup_role(role, options)?;
@@ -251,20 +252,20 @@ fn validate_options(options: &Options) -> Result<()> {
     if let Some(listen) = &options.listen {
         listen_address(listen)?;
         if options.hub.is_some() || options.pin.is_some() {
-            bail!("--listen 只用于 Hub，不能与 Node 的 --hub/--pin 一起使用");
+            bail!("{}", t!("install.setup.option.listen_vs_node"));
         }
     }
     if let Some(public) = &options.public_url {
-        browser_url(public, "访问地址")?;
+        browser_url(public, &t!("install.setup.label.access_address"))?;
         if options.hub.is_some() || options.pin.is_some() {
-            bail!("--public-url 只用于 Hub，不能与 Node 的 --hub/--pin 一起使用");
+            bail!("{}", t!("install.setup.option.public_url_vs_node"));
         }
     }
     if let Some(hub) = &options.hub {
         node_hub_url(hub)?;
     }
     if let Some(label) = &options.label {
-        anyhow::ensure!(crate::signing::valid_identity(label), "--label 只能包含字母、数字和 . _ -");
+        anyhow::ensure!(crate::signing::valid_identity(label), "{}", t!("install.setup.option.label_chars"));
     }
     // one pin, or several comma-separated while the Hub's certificate is being changed
     if options.pin.as_ref().is_some_and(|v| {
@@ -272,15 +273,14 @@ fn validate_options(options: &Options) -> Result<()> {
             !p.starts_with("sha256:") || p.len() != 71 || !p[7..].bytes().all(|b| b.is_ascii_hexdigit())
         })
     }) {
-        bail!("--pin 需要 sha256: 加 64 位证书指纹（多个用逗号分隔）");
+        bail!("{}", t!("install.setup.option.pin_format"));
     }
     Ok(())
 }
 
 fn modified_setup_file(name: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "初始化文件已被修改：{name}；setup 只续接未完成的初始化，不会覆盖现有配置。请保留当前文件、setup.json 和身份密钥；先核对修改，并用对应角色的 status/doctor 确认安装进度。只有原服务已注册且配置核验通过时才显式重启；重启不能补完初始化。不要删除收据或重置数据目录来绕过检查。"
-    )
+        "{}", t!("install.setup.receipt.file_modified", name = name))
 }
 
 /// Where setup keeps the owner's first access token (`user=…`, `token=…`; mode 0600).
@@ -292,46 +292,37 @@ fn completion_lines(
     environment: &Value,
     paired: bool,
 ) -> Result<Vec<String>> {
-    let quoted_home = shell_quote(home.to_str().context("home 路径必须为 UTF-8")?)?;
-    let mut lines = vec![format!(
-        "{role} 已配置并注册服务；本次 setup 未启动或重启服务。数据目录：{}",
-        home.display()
-    )];
+    let quoted_home = shell_quote(home.to_str().context(t!("install.setup.home_not_utf8"))?)?;
+    let mut lines = vec![t!("install.setup.plain.configured", role = role, home = home.display())];
     if role == "hub" {
         let host = environment["STEVE_HOST"]
             .as_str()
-            .context("原监听地址缺失")?
+            .context(t!("install.setup.listen_host_missing"))?
             .parse()?;
         let port = environment["STEVE_PORT"]
             .as_str()
-            .context("原监听端口缺失")?
+            .context(t!("install.setup.listen_port_missing"))?
             .parse()?;
-        lines.push(format!("监听地址：{}", SocketAddr::new(host, port)));
+        lines.push(t!("install.setup.plain.listen", address = SocketAddr::new(host, port)));
         if let Some(web) = environment["STEVE_WEB_PORT"].as_str() {
-            lines.push(format!(
-                "网页端口：{web}。第一次打开网页时，输入 Hub 地址 http://<这台机器的地址>:{port}"
-            ));
+            lines.push(t!("install.setup.plain.web_port", web = web, port = port));
         }
-        lines.push(format!(
-            "浏览器地址（配置值，尚未验证可达）：{}",
-            environment["STEVE_PUBLIC_URL"].as_str().unwrap_or("")
-        ));
+        lines.push(t!("install.setup.plain.browser_address", url = environment["STEVE_PUBLIC_URL"].as_str().unwrap_or("")));
     } else if paired {
         lines.push(
-            "Node 配对信息已保存；请先在 Hub Devices 核对并确认完整指纹，再启动。初始 roots 为空。"
-                .into(),
+            t!("install.setup.plain.node_paired"),
         );
     } else {
-        lines.push("Node 尚未配对，初始 roots 为空。请先准备可达的 HTTPS Hub，再继续配对：".into());
+        lines.push(t!("install.setup.plain.node_unpaired"));
         lines.push(format!("steve setup node --home {quoted_home}"));
     }
     lines.push(if role == "node" {
-        "完成配对及 Hub 确认后启动：".into()
+        t!("install.setup.plain.start_after_pairing")
     } else {
-        "启动服务：".into()
+        t!("install.setup.plain.start_service")
     });
     lines.push(format!("steve {role} start --home {quoted_home}"));
-    lines.push("查看本机服务状态与安装检查：".into());
+    lines.push(t!("install.setup.plain.status_commands"));
     lines.push(format!("steve {role} status --home {quoted_home}"));
     lines.push(format!("steve {role} doctor --home {quoted_home}"));
     if role == "hub" {
@@ -344,20 +335,17 @@ fn completion_lines(
                         .unwrap_or("")
                         .to_string()
                 };
-                lines.push(format!("登录用户名：{}", field("user")));
-                lines.push(format!("访问 token：{}", field("token")));
-                lines.push(format!(
-                    "（token 已保存在 {}，权限 0600；需要更多 token 时运行 steve-hub --access token create）",
-                    home.join(OWNER_TOKEN).display()
-                ));
+                lines.push(t!("install.setup.plain.sign_in_user", user = field("user")));
+                lines.push(t!("install.setup.plain.access_token", token = field("token")));
+                lines.push(t!("install.setup.plain.token_saved", path = home.join(OWNER_TOKEN).display()));
             }
             Err(_) => lines.push(
-                "没有找到 owner token；在 Hub 所在机器上运行 steve-hub --access token create 签发。".into(),
+                t!("install.setup.plain.token_missing"),
             ),
         }
-        lines.push("下一步：启动后在上述浏览器地址用用户名和 token 登录，并用该 Hub 的 /healthz 核验运行版本。服务启动和本机安装检查不代表登录已通过。".into());
+        lines.push(t!("install.setup.plain.next_hub"));
     } else {
-        lines.push("下一步：在 Hub Devices 核验同一设备已连接；本机进程运行不代表已连接，也不代表可以执行任务。".into());
+        lines.push(t!("install.setup.plain.next_node"));
     }
     Ok(lines)
 }
@@ -374,8 +362,8 @@ fn oidc_issuer_url(value: &str) -> Result<String> {
 
 fn http_url(value: &str, label: &str) -> Result<String> {
     let value = value.trim();
-    let url = url::Url::parse(value).with_context(|| format!("{label}需要完整 HTTP(S) URL"))?;
-    let host = url.host_str().context("URL 缺少主机")?;
+    let url = url::Url::parse(value).with_context(|| t!("install.setup.url.full_required", label = label))?;
+    let host = url.host_str().context(t!("install.setup.url.host_missing"))?;
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
@@ -383,22 +371,22 @@ fn http_url(value: &str, label: &str) -> Result<String> {
         || url.fragment().is_some()
         || value.chars().any(|c| c.is_whitespace() || c.is_control())
     {
-        bail!("{label}不能包含账号、查询参数、片段或空白");
+        bail!("{}", t!("install.setup.url.plain_only", label = label));
     }
     if matches!(host, "0.0.0.0" | "::" | "[::]") {
-        bail!("0.0.0.0 / :: 是监听地址；{label}请填写浏览器实际可达的主机地址。");
+        bail!("{}", t!("install.setup.url.unspecified_host", label = label));
     }
     if url.scheme() != "https" && !matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1") {
-        bail!("{label}跨机器访问需要 HTTPS");
+        bail!("{}", t!("install.setup.url.https_required", label = label));
     }
     Ok(value.into())
 }
 
 fn manifest(root: &Path) -> Result<Value> {
     let value = read_json(&root.join("release.json"))?;
-    let version = value["version"].as_str().context("缺少发行版本")?;
+    let version = value["version"].as_str().context(t!("install.setup.bundle.version_missing"))?;
     let parsed = semver::Version::parse(version)?;
-    let commit = value["commit"].as_str().context("缺少发行提交")?;
+    let commit = value["commit"].as_str().context(t!("install.setup.bundle.commit_missing"))?;
     if value["format_version"] != 1
         || parsed.to_string() != version
         || !parsed.pre.is_empty()
@@ -409,7 +397,7 @@ fn manifest(root: &Path) -> Result<Value> {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         || !value["schema"].is_object()
     {
-        bail!("安装包身份无效；请使用可信的正式 Release。");
+        bail!("{}", t!("install.setup.bundle.identity_invalid"));
     }
     Ok(value)
 }
@@ -419,7 +407,7 @@ fn manifest(root: &Path) -> Result<Value> {
 pub fn adapters(role: &str, home: &Path, release: &Path, args: &[&str]) -> Result<i32> {
     let status = adapter_command(role, home, release, args)
         .status()
-        .with_context(|| format!("运行失败：{}", release.display()))?;
+        .with_context(|| t!("install.setup.run_failed", path = release.display()))?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -433,19 +421,17 @@ fn captured(
     command.args(args);
     if let Some(env) = environment.and_then(Value::as_object) {
         for (key, value) in env {
-            command.env(key, value.as_str().context("环境值必须为字符串")?);
+            command.env(key, value.as_str().context(t!("install.setup.env_value_not_string"))?);
         }
     }
     let output = command
         .output()
-        .with_context(|| format!("运行失败：{}", program.display()))?;
+        .with_context(|| t!("install.setup.run_failed", path = program.display()))?;
     if !output.status.success() {
         bail!(
-            "命令失败（{}）；已完成步骤保留。请运行 doctor 查看配置。",
-            output.status
-        );
+            "{}", t!("install.setup.command_failed", status = output.status));
     }
-    serde_json::from_slice(&output.stdout).context("命令没有返回有效 JSON")
+    serde_json::from_slice(&output.stdout).context(t!("install.setup.command_no_json"))
 }
 
 fn verify_bundle(root: &Path, expected: &Value, home: &Path) -> Result<()> {
@@ -455,17 +441,17 @@ fn verify_bundle(root: &Path, expected: &Value, home: &Path) -> Result<()> {
     for value in [&disk, &web] {
         for key in ["version", "commit"] {
             if value[key] != expected[key] {
-                bail!("安装包与 Web 身份不一致");
+                bail!("{}", t!("install.setup.bundle.web_identity_mismatch"));
             }
         }
     }
     if disk["hub_version"] != disk["version"] || disk["web_version"] != disk["version"] {
-        bail!("安装包版本不一致");
+        bail!("{}", t!("install.setup.bundle.version_mismatch"));
     }
     for role in ["hub", "node"] {
         let path = root.join(format!("bin/steve-{role}"));
         if fs::metadata(&path)?.permissions().mode() & 0o111 == 0 {
-            bail!("安装包缺少可执行 {role}");
+            bail!("{}", t!("install.setup.bundle.binary_missing", role = role));
         }
         let info = captured(&path, home, &["--build-info"], None)?;
         if info["version"] != disk["version"]
@@ -473,7 +459,7 @@ fn verify_bundle(root: &Path, expected: &Value, home: &Path) -> Result<()> {
             || info["target"] != env!("STEVE_BUILD_TARGET")
             || (role == "hub" && info["schema"] != disk["schema"]["target"])
         {
-            bail!("{role} 的版本、提交、平台或 schema 与安装包不一致");
+            bail!("{}", t!("install.setup.bundle.binary_mismatch", role = role));
         }
     }
     let html = fs::read_to_string(root.join("web/dist/index.html"))?;
@@ -482,10 +468,10 @@ fn verify_bundle(root: &Path, expected: &Value, home: &Path) -> Result<()> {
         regex::escape(disk["version"].as_str().unwrap())
     ))?;
     if !marker.is_match(&html) {
-        bail!("Web 页面版本不一致");
+        bail!("{}", t!("install.setup.bundle.web_version_mismatch"));
     }
     if cfg!(target_os = "macos") && !root.join("bin/steve-keyhelper").is_file() {
-        bail!("安装包缺少 keyhelper");
+        bail!("{}", t!("install.setup.bundle.keyhelper_missing"));
     }
     Ok(())
 }
@@ -507,7 +493,7 @@ impl<'a> Wizard<'a> {
         input: &'a mut dyn Prompts,
     ) -> Result<Self> {
         if home.starts_with(source) || source.starts_with(home) {
-            bail!("数据目录与只读安装包必须分开");
+            bail!("{}", t!("install.setup.home_inside_bundle"));
         }
         if !exists(home) {
             private_dir(home)?;
@@ -519,13 +505,13 @@ impl<'a> Wizard<'a> {
         }
         owned(home, true)?;
         // Do not create even a lock file in an unrelated, otherwise private directory.
-        owned(&home.join("setup.json"), false).context("目录没有本次初始化收据；不会接管旧数据")?;
+        owned(&home.join("setup.json"), false).context(t!("install.setup.receipt.none"))?;
         let before_lock = read_json(&home.join("setup.json"))?;
         if before_lock["format"] != 1
             || before_lock["component"] != role
             || before_lock["home"].as_str() != home.to_str()
         {
-            bail!("此目录不是本次初始化拥有的目录");
+            bail!("{}", t!("install.setup.receipt.not_owned"));
         }
         let lock_path = home.join(".setup.lock");
         let lock = OpenOptions::new()
@@ -536,9 +522,9 @@ impl<'a> Wizard<'a> {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&lock_path)?;
-        lock.try_lock().context("此目录已有初始化正在进行")?;
+        lock.try_lock().context(t!("install.setup.receipt.busy"))?;
         owned(&lock_path, false)?;
-        owned(&home.join("setup.json"), false).context("目录没有本次初始化收据；不会接管旧数据")?;
+        owned(&home.join("setup.json"), false).context(t!("install.setup.receipt.none"))?;
         let record = read_json(&home.join("setup.json"))?;
         if record["format"] != 1
             || record["component"] != role
@@ -546,11 +532,11 @@ impl<'a> Wizard<'a> {
             || !record["files"].is_object()
             || !record["steps"].is_array()
         {
-            bail!("此目录不是本次初始化拥有的目录");
+            bail!("{}", t!("install.setup.receipt.not_owned"));
         }
-        let old_version = record["version"].as_str().context("初始化版本缺失")?;
+        let old_version = record["version"].as_str().context(t!("install.setup.receipt.version_missing"))?;
         let parsed = semver::Version::parse(old_version)?;
-        let old_commit = record["commit"].as_str().context("初始化提交缺失")?;
+        let old_commit = record["commit"].as_str().context(t!("install.setup.receipt.commit_missing"))?;
         if parsed.to_string() != old_version
             || !parsed.pre.is_empty()
             || !parsed.build.is_empty()
@@ -559,7 +545,7 @@ impl<'a> Wizard<'a> {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
-            bail!("初始化收据身份无效");
+            bail!("{}", t!("install.setup.receipt.identity_invalid"));
         }
         let mut wizard = Self {
             source: source.into(),
@@ -575,12 +561,12 @@ impl<'a> Wizard<'a> {
                     .components()
                     .any(|c| matches!(c, std::path::Component::ParentDir))
             {
-                bail!("收据包含无效路径");
+                bail!("{}", t!("install.setup.receipt.path_invalid"));
             }
             let path = home.join(relative);
             if exists(&path) {
                 owned(&path, false)?;
-                if digest(&path)? != value.as_str().context("收据摘要无效")? {
+                if digest(&path)? != value.as_str().context(t!("install.setup.receipt.digest_invalid"))? {
                     return Err(modified_setup_file(name));
                 }
             }
@@ -592,8 +578,7 @@ impl<'a> Wizard<'a> {
             // the package. Only that unsigned, unpaired, unregistered setup may change versions.
             if underway(&wizard.record, home) {
                 bail!(
-                    "已有初始化或身份属于另一版本；不会覆盖，原数据已保留。要重新安装，运行 steve setup --fresh（现有目录改名保留）"
-                );
+                    "{}", t!("install.setup.receipt.other_version"));
             }
             wizard.verify_copy()?;
             let backups = home.join("setup-backups");
@@ -627,24 +612,24 @@ impl<'a> Wizard<'a> {
         let path = self.home.join(name);
         if self.record["files"].get(name).is_none() {
             if exists(&path) {
-                bail!("已有文件不属于本次初始化，不会覆盖：{}", path.display());
+                bail!("{}", t!("install.setup.receipt.foreign_file", path = path.display()));
             }
-            let bytes = data.context("初始化文件缺失")?;
+            let bytes = data.context(t!("install.setup.receipt.file_missing"))?;
             self.record["files"][name] = bytes_digest(bytes).into();
             self.save()?;
         }
         let expected = self.record["files"][name]
             .as_str()
-            .context("初始化摘要无效")?;
+            .context(t!("install.setup.receipt.file_digest_invalid"))?;
         if exists(&path) {
             owned(&path, false)?;
             if digest(&path)? != expected {
                 return Err(modified_setup_file(name));
             }
         } else {
-            let bytes = data.context("初始化中断在写文件前，需要原输入才能继续")?;
+            let bytes = data.context(t!("install.setup.receipt.input_needed"))?;
             if bytes_digest(bytes) != expected {
-                bail!("原初始化输入发生变化，不会覆盖收据");
+                bail!("{}", t!("install.setup.receipt.input_changed"));
             }
             private_dir(path.parent().unwrap())?;
             private_file(&path, bytes)?;
@@ -659,25 +644,25 @@ impl<'a> Wizard<'a> {
         let candidate = self
             .home
             .join("releases")
-            .join(self.record["version"].as_str().context("版本缺失")?);
+            .join(self.record["version"].as_str().context(t!("install.setup.release.version_missing"))?);
         if !exists(&candidate) {
             return Ok(());
         }
         if fs::symlink_metadata(&candidate)?.file_type().is_symlink() {
-            bail!("版本目录不能是链接");
+            bail!("{}", t!("install.setup.release.dir_is_link"));
         }
         let expected = self.record["bundle_files"]
             .as_object()
-            .context("复制清单缺失")?;
+            .context(t!("install.setup.release.manifest_missing"))?;
         let files = regular_tree(&candidate)?;
         if files.len() != expected.len() {
-            bail!("初始化版本目录的文件清单已改变");
+            bail!("{}", t!("install.setup.release.listing_changed"));
         }
         for path in files {
             let name = path
                 .strip_prefix(&candidate)?
                 .to_str()
-                .context("文件名必须为 UTF-8")?;
+                .context(t!("install.setup.release.name_not_utf8"))?;
             let actual = digest(&path)?;
             let wanted = if name == "bin/steve-hub" && self.record["keychain_started"] == true {
                 self.record["signed_hub_sha256"]
@@ -687,7 +672,7 @@ impl<'a> Wizard<'a> {
                 expected.get(name).and_then(Value::as_str)
             };
             if wanted != Some(actual.as_str()) {
-                bail!("初始化版本文件已改变：{name}；不会自动重新签名");
+                bail!("{}", t!("install.setup.release.file_changed", name = name));
             }
         }
         Ok(())
@@ -699,7 +684,7 @@ impl<'a> Wizard<'a> {
         let candidate = releases.join(m["version"].as_str().unwrap());
         if exists(&candidate) {
             if self.record["copy_planned"] != true {
-                bail!("已有版本目录不属于本次初始化");
+                bail!("{}", t!("install.setup.release.dir_foreign"));
             }
             self.verify_copy()?;
             verify_bundle(&candidate, m, &self.home)?;
@@ -710,7 +695,7 @@ impl<'a> Wizard<'a> {
             expected.insert(
                 path.strip_prefix(&self.source)?
                     .to_str()
-                    .context("文件名无效")?
+                    .context(t!("install.setup.release.name_invalid"))?
                     .into(),
                 digest(&path)?.into(),
             );
@@ -730,7 +715,7 @@ impl<'a> Wizard<'a> {
                     .custom_flags(libc::O_NOFOLLOW)
                     .open(&src)?;
                 if !input.metadata()?.is_file() {
-                    bail!("安装包文件已改变");
+                    bail!("{}", t!("install.setup.release.source_changed"));
                 }
                 let mode = if input.metadata()?.permissions().mode() & 0o111 != 0 {
                     0o755
@@ -746,12 +731,12 @@ impl<'a> Wizard<'a> {
                 io::copy(&mut input, &mut output)?;
                 output.sync_all()?;
                 if digest(&dest)? != hash.as_str().unwrap() {
-                    bail!("安装包复制校验失败：{name}");
+                    bail!("{}", t!("install.setup.release.copy_mismatch", name = name));
                 }
             }
             verify_bundle(&staging, m, &self.home)?;
             if exists(&candidate) {
-                bail!("版本目录在复制过程中出现，不会覆盖");
+                bail!("{}", t!("install.setup.release.dir_appeared"));
             }
             fs::rename(&staging, &candidate)?;
             File::open(&releases)?.sync_all()?;
@@ -781,19 +766,19 @@ impl<'a> Wizard<'a> {
                 let selected = listen_address(listen)?;
                 let saved_ip: std::net::IpAddr = env["STEVE_HOST"]
                     .as_str()
-                    .context("原监听地址缺失")?
+                    .context(t!("install.setup.listen_host_missing"))?
                     .parse()?;
                 let saved_port: u16 = env["STEVE_PORT"]
                     .as_str()
-                    .context("原监听端口缺失")?
+                    .context(t!("install.setup.listen_port_missing"))?
                     .parse()?;
                 if selected != SocketAddr::new(saved_ip, saved_port) {
-                    bail!("已有初始化配置不同；不会自动覆盖监听地址");
+                    bail!("{}", t!("install.setup.config.listen_differs"));
                 }
             }
             if let Some(public) = public {
-                if env["STEVE_PUBLIC_URL"].as_str() != Some(browser_url(public, "访问地址")?.as_str()) {
-                    bail!("已有初始化配置不同；不会自动覆盖浏览器访问地址");
+                if env["STEVE_PUBLIC_URL"].as_str() != Some(browser_url(public, &t!("install.setup.label.access_address"))?.as_str()) {
+                    bail!("{}", t!("install.setup.config.public_url_differs"));
                 }
             }
             self.owned_file("steve.env", Some(&env_bytes(env.as_object().unwrap())?))?;
@@ -807,17 +792,17 @@ impl<'a> Wizard<'a> {
             return Ok(env);
         }
         let custom = |input: &mut dyn Prompts| {
-            ask_value(input, "监听地址", Some("0.0.0.0:8440"), false, listen_address)
+            ask_value(input, &t!("install.setup.label.listen_address"), Some("0.0.0.0:8440"), false, listen_address)
         };
         let bind = match listen {
             Some(value) => listen_address(value)?,
             None if self.input.rich() => {
                 let choices = [
-                    Choice::new("lan", "本机 + 局域网", "监听 0.0.0.0:8440，其他设备和 Node 可以连进来"),
-                    Choice::new("local", "仅本机", "监听 127.0.0.1:8440，只有这台机器能访问"),
-                    Choice::new("custom", "自定义", "自己填监听地址和端口"),
+                    Choice::new("lan", &t!("install.setup.network.lan"), &t!("install.setup.network.lan_hint")),
+                    Choice::new("local", &t!("install.setup.network.local"), &t!("install.setup.network.local_hint")),
+                    Choice::new("custom", &t!("install.setup.network.custom"), &t!("install.setup.network.custom_hint")),
                 ];
-                match self.input.select("谁可以连接这台 Hub？", &choices, 0)? {
+                match self.input.select(&t!("install.setup.network.question"), &choices, 0)? {
                     0 => SocketAddr::from(([0, 0, 0, 0], 8440)),
                     1 => SocketAddr::from(([127, 0, 0, 1], 8440)),
                     _ => custom(&mut *self.input)?,
@@ -826,7 +811,7 @@ impl<'a> Wizard<'a> {
             None => custom(&mut *self.input)?,
         };
         /* the web client has a port of its own (A3): the Hub's port answers the API only */
-        let web_port = bind.port().checked_add(1).context("监听端口太大，网页没有可用的下一个端口")?;
+        let web_port = bind.port().checked_add(1).context(t!("install.setup.network.port_too_high"))?;
         let default_url = if bind.ip().is_unspecified() || bind.ip().is_loopback() {
             Some(format!(
                 "http://{}:{web_port}",
@@ -839,12 +824,12 @@ impl<'a> Wizard<'a> {
          * none does (a specific address of another network needs its HTTPS name), and
          * `steve setup --reconfigure` changes it later */
         let public = match (public, default_url) {
-            (Some(value), _) => browser_url(value, "访问地址")?,
+            (Some(value), _) => browser_url(value, &t!("install.setup.label.access_address"))?,
             (None, Some(url)) => url,
             (None, None) => {
-                ui::info("这个监听地址推不出网页地址：填你在浏览器里打开 Steve 用的 HTTPS 地址。");
-                ask_value(self.input, "浏览器访问地址", None, false, |value| {
-                    browser_url(value, "访问地址")
+                ui::info(&t!("install.setup.network.no_web_address"));
+                ask_value(self.input, &t!("install.setup.label.browser_address"), None, false, |value| {
+                    browser_url(value, &t!("install.setup.label.access_address"))
                 })?
             }
         };
@@ -861,17 +846,17 @@ impl<'a> Wizard<'a> {
                 (None, Some(value)) => value.to_string(),
                 (None, None) => {
                     self.input
-                        .line("Vault 密钥目录（数据目录之外，权限 0700）", None, false)?
+                        .line(&t!("install.setup.vault.dir_question"), None, false)?
                 }
             };
             let keys = canonical(Path::new(&selected))?;
             if keys.starts_with(&self.home) || self.home.starts_with(&keys) {
-                bail!("Vault 密钥目录不能与数据目录互相包含");
+                bail!("{}", t!("install.setup.vault.dir_overlaps"));
             }
             if exists(&keys) {
                 owned(&keys, true)?;
                 if self.record["key_directory"].is_null() && fs::read_dir(&keys)?.next().is_some() {
-                    bail!("密钥目录不是空目录；不会接管旧密钥");
+                    bail!("{}", t!("install.setup.vault.dir_not_empty"));
                 }
             } else {
                 private_dir(&keys)?;
@@ -951,14 +936,14 @@ fn stamp() -> String {
 /// and registering the service again restores it.
 fn set_aside(home: &Path) -> Result<PathBuf> {
     owned(home, true)?;
-    owned(&home.join("setup.json"), false).context("目录里没有 Steve 的安装收据；不会移动它")?;
+    owned(&home.join("setup.json"), false).context(t!("install.setup.aside.no_receipt"))?;
     let record = read_json(&home.join("setup.json"))?;
     let component = record["component"]
         .as_str()
         .filter(|c| matches!(*c, "hub" | "node"))
-        .context("安装收据无效；不会移动这个目录")?;
+        .context(t!("install.setup.aside.receipt_invalid"))?;
     if record["format"] != 1 || record["home"].as_str() != home.to_str() {
-        bail!("安装收据不属于这个目录；不会移动它");
+        bail!("{}", t!("install.setup.aside.receipt_elsewhere"));
     }
     let lock = OpenOptions::new()
         .read(true)
@@ -968,21 +953,21 @@ fn set_aside(home: &Path) -> Result<PathBuf> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(home.join(".setup.lock"))?;
-    lock.try_lock().context("此目录已有初始化正在进行")?;
+    lock.try_lock().context(t!("install.setup.receipt.busy"))?;
     /* the label is the one that installation registered, whatever this run was given */
     let mut service = crate::service::Service::new(component, home, None)?;
     for action in ["stop", "uninstall"] {
         let report = service
             .dispatch(action, None, 30)
-            .context("现有服务没有停下来；目录没有移动")?;
+            .context(t!("install.setup.aside.still_running"))?;
         if report["ok"] == false {
-            bail!("现有服务没有停下来；目录没有移动");
+            bail!("{}", t!("install.setup.aside.still_running"));
         }
     }
-    let name = home.file_name().and_then(|n| n.to_str()).context("home 路径必须为 UTF-8")?;
+    let name = home.file_name().and_then(|n| n.to_str()).context(t!("install.setup.home_not_utf8"))?;
     let aside = home.with_file_name(format!("{name}.bak-{}", stamp()));
     if exists(&aside) {
-        bail!("{} 已存在；稍后再试", aside.display());
+        bail!("{}", t!("install.setup.aside.target_exists", aside = aside.display()));
     }
     drop(lock);
     fs::rename(home, &aside)?;
@@ -1027,7 +1012,7 @@ fn adapter_choice(
         return Ok(Some(saved.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()));
     }
     let Some(listing) = adapter_listing(role, &wizard.home, release) else {
-        anyhow::ensure!(flag.is_none(), "这个安装包不支持 --adapters");
+        anyhow::ensure!(flag.is_none(), "{}", t!("install.setup.adapters.unsupported"));
         return Ok(None);
     };
     let text = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().to_owned();
@@ -1042,7 +1027,7 @@ fn adapter_choice(
         /* without npm nothing can be installed now: the install step says what to do */
         None if listing["npm"] != true || listing["chosen"] == true => return Ok(None),
         None if !wizard.input.rich() => return Ok(None),
-        None => wizard.input.multiselect("安装哪些 ACP 适配器？", &choices, &vec![true; choices.len()])?,
+        None => wizard.input.multiselect(&t!("install.setup.adapters.question"), &choices, &vec![true; choices.len()])?,
     };
     let chosen: Vec<String> = choices.iter().zip(on).filter(|(_, on)| *on).map(|(c, _)| c.key.clone()).collect();
     wizard.record["adapters"] = json!(chosen);
@@ -1063,7 +1048,7 @@ fn install_adapters(
         args.push("--only");
         args.extend(chosen.iter().map(String::as_str));
     }
-    let later = "ACP 适配器暂未安装；装好 Node.js 后运行 steve adapters install。";
+    let later = &t!("install.setup.adapters.postponed");
     let output = adapter_command(role, home, release, &args)
         .output()
         .map_err(|_| later.to_owned())?;
@@ -1141,7 +1126,7 @@ fn finish_hub(
     flags: &str,
 ) -> Result<()> {
     let (api, web) = hub_addresses(|key| environment[key].as_str().map(str::to_owned))
-        .context("原监听地址缺失")?;
+        .context(t!("install.setup.listen_host_missing"))?;
     let saved = fs::read_to_string(home.join(OWNER_TOKEN)).unwrap_or_default();
     let field = |key: &str| {
         saved
@@ -1151,39 +1136,39 @@ fn finish_hub(
             .to_string()
     };
     ui::gap();
-    ui::heading("安装完成");
+    ui::heading(&t!("install.setup.finish.heading"));
     ui::note(&[
-        ("网页", web.clone()),
-        ("Hub 地址", api.clone()),
-        ("用户名", field("user")),
+        (&t!("install.setup.finish.web"), web.clone()),
+        (&t!("install.setup.finish.hub_address"), api.clone()),
+        (&t!("install.setup.finish.user"), field("user")),
         ("Token", field("token")),
-        ("数据目录", home.display().to_string()),
+        (&t!("install.setup.finish.home"), home.display().to_string()),
     ]);
-    ui::info(&format!("Token 也保存在 {}", home.join(OWNER_TOKEN).display()));
+    ui::info(&t!("install.setup.finish.token_saved", path = home.join(OWNER_TOKEN).display()));
     ui::gap();
-    let how = "第一次打开网页：先填 Hub 地址，再用上面的用户名和 Token 登录。";
-    if !input.confirm("现在启动 Hub？", true)? {
-        ui::outro(&format!("准备好后运行 steve hub start{flags}。{how}"));
+    let how = &t!("install.setup.finish.first_visit");
+    if !input.confirm(&t!("install.setup.finish.start_now"), true)? {
+        ui::outro(&t!("install.setup.finish.start_later", flags = flags, how = how));
         return Ok(());
     }
-    let spinner = ui::Spinner::start("正在启动 Hub");
+    let spinner = ui::Spinner::start(&t!("install.setup.finish.starting"));
     if let Err(error) = service.dispatch("start", None, 30) {
-        spinner.fail("Hub 没有启动");
+        spinner.fail(&t!("install.setup.finish.start_failed"));
         return Err(error);
     }
     match hub_ready(&api, Duration::from_secs(45)) {
         Some(health) => spinner.done(
-            "Hub 已启动",
+            &t!("install.setup.finish.started"),
             &format!("v{} · {api}", health["version"].as_str().unwrap_or("?")),
         ),
         None => {
-            spinner.warn("Hub 已交给服务管理器，但还没有应答。");
-            ui::outro(&format!("用 steve hub status{flags} 和 steve hub doctor{flags} 查看原因。"));
+            spinner.warn(&t!("install.setup.finish.no_answer"));
+            ui::outro(&t!("install.setup.finish.see_why", flags = flags));
             return Ok(());
         }
     }
     if let Some(open) = opener() {
-        if input.confirm("在浏览器里打开？", true)? {
+        if input.confirm(&t!("install.setup.finish.open_browser"), true)? {
             let _ = std::process::Command::new(open)
                 .arg(&web)
                 .stdout(std::process::Stdio::null())
@@ -1204,8 +1189,8 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
     let rich = input.rich();
     let expected = manifest(source)?;
     let version = expected["version"].as_str().unwrap_or_default().to_owned();
-    ui::banner(&format!("自托管的 agent 协作中心 · v{version}"));
-    ui::intro("安装向导");
+    ui::banner(&t!("install.setup.banner", version = version));
+    ui::intro(&t!("install.setup.intro"));
     let role = match options.role.as_deref() {
         Some(value) => setup_role(value, &options)?,
         /* an option that belongs to one role has chosen it */
@@ -1213,14 +1198,14 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         None if rich && (options.listen.is_some() || options.public_url.is_some()) => "hub".into(),
         None if rich => {
             let choices = [
-                Choice::new("hub", "Hub", "协作中心：网页、任务和数据都在这台机器上"),
-                Choice::new("node", "Node", "执行节点：把这台机器接入一台已有的 Hub"),
+                Choice::new("hub", "Hub", &t!("install.setup.role.hub_hint")),
+                Choice::new("node", "Node", &t!("install.setup.role.node_hint")),
             ];
-            choices[input.select("安装什么？", &choices, 0)?].key.clone()
+            choices[input.select(&t!("install.setup.role.question"), &choices, 0)?].key.clone()
         }
         None => ask_value(
             &mut input,
-            "安装角色（hub / node）",
+            &t!("install.setup.role.typed_question"),
             Some("hub"),
             false,
             |value| setup_role(value, &options),
@@ -1235,7 +1220,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
     /* how the commands setup names reach this installation */
     let mut flags = String::new();
     if !default_home {
-        flags.push_str(&format!(" --home {}", shell_quote(home.to_str().context("home 路径必须为 UTF-8")?)?));
+        flags.push_str(&format!(" --home {}", shell_quote(home.to_str().context(t!("install.setup.home_not_utf8"))?)?));
     }
     if let Some(label) = &options.label {
         flags.push_str(&format!(" --label {}", shell_quote(label)?));
@@ -1248,44 +1233,38 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         } else if rich {
             let finished = found["steps"].as_array().is_some_and(|s| s.iter().any(|v| v == "installed"));
             let choices = [
-                Choice::new("fresh", "全新安装", "现有目录整个改名保留，然后重新安装"),
-                Choice::new("keep", "保留并退出", "不做任何改动"),
+                Choice::new("fresh", &t!("install.setup.existing.fresh"), &t!("install.setup.existing.fresh_hint")),
+                Choice::new("keep", &t!("install.setup.existing.keep"), &t!("install.setup.existing.keep_hint")),
             ];
-            let title = format!("{} 里已经有 {}，怎么办？", home.display(), install_name(&found));
+            let title = t!("install.setup.existing.question", home = home.display(), install = install_name(&found));
             /* a finished installation may be in use: leaving it alone is the answer to a stray Enter */
             input.select(&title, &choices, usize::from(finished))? == 0
         } else {
             bail!(
-                "{} 里已经有 {}；不会覆盖。要重新安装，运行 steve setup --fresh（现有目录改名保留）",
-                home.display(),
-                install_name(&found)
-            );
+                "{}", t!("install.setup.existing.refused", home = home.display(), install = install_name(&found)));
         };
         if !fresh {
-            ui::outro(&format!(
-                "没有改动。查看现有安装：steve {} status{flags}",
-                found["component"].as_str().unwrap_or(&role)
-            ));
+            ui::outro(&t!("install.setup.existing.kept", role = found["component"].as_str().unwrap_or(&role), flags = flags));
             return Ok(());
         }
         let aside = ui::step(
-            "正在停止并移开现有安装",
+            &t!("install.setup.existing.moving"),
             || set_aside(&home),
-            |aside| ("原安装已保留".into(), aside.display().to_string()),
+            |aside| (t!("install.setup.existing.moved"), aside.display().to_string()),
         )?;
         let _ = aside;
     }
     ui::step(
-        "正在校验安装包",
+        &t!("install.setup.step.verifying"),
         || verify_bundle(source, &expected, &home),
         |_| {
             let commit: String = expected["commit"].as_str().unwrap_or_default().chars().take(8).collect();
-            ("安装包已校验".into(), format!("{version} · {commit}"))
+            (t!("install.setup.step.verified"), format!("{version} · {commit}"))
         },
     )?;
     let mut wizard = Wizard::claim(source, &home, &role, &expected, &mut input)?;
     if wizard.record["copy_planned"] == true || wizard.record["environment"].is_object() {
-        ui::info("接着上次没有完成的安装继续。");
+        ui::info(&t!("install.setup.step.resuming"));
     }
     /* every question first, then the work runs without waiting for anyone */
     let env = if role == "hub" {
@@ -1312,7 +1291,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 Some(url) => node_hub_url(&url)?,
                 None => ask_value(
                     wizard.input,
-                    "Hub HTTPS URL 或 tailcat: 地址（留空稍后配对）",
+                    &t!("install.setup.node.hub_question"),
                     None,
                     true,
                     |value| {
@@ -1328,9 +1307,9 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
     }
     let chosen = adapter_choice(&mut wizard, &role, source, options.adapters.as_deref())?;
     let candidate = ui::step(
-        "正在准备运行目录",
+        &t!("install.setup.step.preparing"),
         || wizard.copy_bundle(&expected),
-        |candidate| ("运行目录已就绪".into(), candidate.display().to_string()),
+        |candidate| (t!("install.setup.step.prepared"), candidate.display().to_string()),
     )?;
     if role == "hub" {
         if cfg!(target_os = "macos") {
@@ -1344,9 +1323,9 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 wizard.save()?;
                 let label = options.label.as_deref().unwrap_or("io.github.infranite.steve.hub");
                 ui::step(
-                    "正在创建签名身份并签名 Hub",
+                    &t!("install.setup.step.signing"),
                     || crate::signing::setup_keychain(&home, &candidate, label),
-                    |_| ("Hub 已签名".into(), "本机专用的签名身份".into()),
+                    |_| (t!("install.setup.step.signed"), t!("install.setup.step.signed_detail")),
                 )?;
                 wizard.record["signed_hub_sha256"] =
                     digest(&candidate.join("bin/steve-hub"))?.into();
@@ -1364,15 +1343,15 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 ("signing/identity.json", "identity_sha256"),
             ] {
                 if digest(&home.join(path))?
-                    != wizard.record[key].as_str().context("签名摘要缺失")?
+                    != wizard.record[key].as_str().context(t!("install.setup.signing.digest_missing"))?
                 {
-                    bail!("原签名身份或 keyhelper 已改变，不会替换");
+                    bail!("{}", t!("install.setup.signing.changed"));
                 }
             }
         }
     } else if exists(&pairing) {
         if wizard.record["pair_started"] != true {
-            bail!("已有配对不属于本次初始化");
+            bail!("{}", t!("install.setup.node.pairing_foreign"));
         }
         let paired = read_json(&pairing)?;
         let requested_hub = options
@@ -1389,21 +1368,21 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 .as_ref()
                 .is_some_and(|v| paired["pin"] != v.to_lowercase())
         {
-            bail!("已有配对指向另一个 Hub");
+            bail!("{}", t!("install.setup.node.pairing_other_hub"));
         }
         let status = clean_command(&candidate.join("bin/steve-node"), Some(&home))
             .arg("status")
             .status()?;
         if !status.success() {
-            bail!("Node 配对状态无法确认");
+            bail!("{}", t!("install.setup.node.pairing_unknown"));
         }
     } else if !node_hub.is_empty() {
         let hub = node_hub.clone();
         if wizard.record["pair_started"] != true && exists(&home.join("node/identity.key")) {
-            bail!("已有 Node 身份不属于本次初始化");
+            bail!("{}", t!("install.setup.node.identity_foreign"));
         }
         if wizard.record["pair_started"] == true && wizard.record["hub_url"] != hub {
-            bail!("配对曾向另一个 Hub 发出，不会自动更换身份");
+            bail!("{}", t!("install.setup.node.pairing_sent_elsewhere"));
         }
         let pin = options
             .pin
@@ -1414,36 +1393,36 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         wizard.record["hub_url"] = hub.clone().into();
         wizard.record["pin"] = json!(pin);
         wizard.save()?;
-        ui::info("输入 Hub Devices 页生成的一次性配对码，随后仍需在 Hub 核对并确认完整指纹。");
+        ui::info(&t!("install.setup.node.code_question"));
         let mut command = clean_command(&candidate.join("bin/steve-node"), Some(&home));
         command.args(["pair", &hub]);
         if let Some(pin) = pin {
             command.args(["--pin", &pin]);
         }
         if !command.status()?.success() {
-            bail!("Node 配对尚未完成，原进度已保留");
+            bail!("{}", t!("install.setup.node.pairing_unfinished"));
         }
         if read_json(&pairing)?["hub_url"] != hub {
-            bail!("Node 配对回读不一致");
+            bail!("{}", t!("install.setup.node.pairing_readback"));
         }
-        ui::done("Node 已配对", &hub);
+        ui::done(&t!("install.setup.node.paired"), &hub);
     }
     /* the ACP adapters are Steve's dependencies: the chosen ones are installed now and kept up to
      * date by the Node; without npm, setup goes on and says how to add them. Before the
      * configuration check, so that it does not report them missing. */
     if chosen.as_ref().is_some_and(|c| c.is_empty()) {
         let _ = install_adapters(&role, &home, &candidate, chosen.as_deref());
-        ui::done("不安装 ACP 适配器", "之后可以用 steve adapters install <id> 添加");
+        ui::done(&t!("install.setup.adapters.none"), &t!("install.setup.adapters.none_hint"));
     } else {
-        let spinner = ui::Spinner::start("正在安装 ACP 适配器");
+        let spinner = ui::Spinner::start(&t!("install.setup.adapters.installing"));
         match install_adapters(&role, &home, &candidate, chosen.as_deref()) {
-            Ok(installed) => spinner.done("ACP 适配器已安装", &installed),
+            Ok(installed) => spinner.done(&t!("install.setup.adapters.installed"), &installed),
             Err(reason) => spinner.warn(&reason),
         }
     }
     if let Some(env) = &env {
         let check = ui::step(
-            "正在检查配置",
+            &t!("install.setup.step.checking"),
             || {
                 let check = captured(
                     &candidate.join("bin/steve-hub"),
@@ -1452,15 +1431,15 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                     Some(env),
                 )?;
                 if check["ok"] != true {
-                    bail!("Hub 配置检查失败，请用 steve hub doctor 检查");
+                    bail!("{}", t!("install.setup.step.check_failed"));
                 }
                 Ok(check)
             },
-            |_| ("配置检查通过".into(), String::new()),
+            |_| (t!("install.setup.step.checked"), String::new()),
         )?;
         if let Some(warnings) = check["warnings"].as_array() {
             for warning in warnings {
-                ui::info(warning.as_str().unwrap_or("配置警告"));
+                ui::info(warning.as_str().unwrap_or(&t!("install.setup.step.config_warning")));
             }
         }
         /* the owner's first access token, once: the Hub makes this account's user its owner */
@@ -1475,20 +1454,20 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 &["--access", "token", "create", "--user", &user, "--name", "setup", "--json"],
                 Some(env),
             )?;
-            let token = issued["token"].as_str().context("没有拿到 owner token")?;
+            let token = issued["token"].as_str().context(t!("install.setup.token.none"))?;
             let body = format!("user={}\ntoken={token}\n", issued["user"].as_str().unwrap_or(&user));
             wizard.owned_file(OWNER_TOKEN, Some(body.as_bytes()))?;
             if rich {
-                ui::done("访问 token 已签发", issued["user"].as_str().unwrap_or(&user));
+                ui::done(&t!("install.setup.token.issued"), issued["user"].as_str().unwrap_or(&user));
             }
         }
     }
     let mut service = crate::service::Service::new(&role, &home, options.label.as_deref())?;
     ui::step(
-        &format!("正在注册 {role} 服务"),
+        &t!("install.setup.step.registering", role = role),
         || service.dispatch("install", Some(&candidate), 30),
         |report| {
-            ("服务已注册".into(), report["label"].as_str().unwrap_or_default().to_owned())
+            (t!("install.setup.step.registered"), report["label"].as_str().unwrap_or_default().to_owned())
         },
     )?;
     if !wizard.record["steps"]

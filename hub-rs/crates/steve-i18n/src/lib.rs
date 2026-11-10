@@ -5,6 +5,10 @@
 //! request inside [`scope`]; [`current`] answers that language anywhere below it, and zh-CN outside a request.
 //! zh-CN is the source language, the default and the fallback.
 //!
+//! A command-line program has no request: it picks its language once at start, [`set_process`] with
+//! [`from_env`] (`STEVE_LANG`, then the locale variables, then the system's languages), and [`current`]
+//! answers that everywhere outside a request.
+//!
 //! # Adding text to a crate
 //!
 //! 1. Depend on both crates (rust-i18n's macros expand to `rust_i18n::…` paths, so the crate needs it directly):
@@ -63,9 +67,54 @@ tokio::task_local! {
     static LOCALE: &'static str;
 }
 
-/// The language of the current request; zh-CN outside one.
+static PROCESS: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// The language of the current request; outside one, the process's ([`set_process`]), else zh-CN.
 pub fn current() -> &'static str {
-    LOCALE.try_with(|l| *l).unwrap_or(ZH_CN)
+    LOCALE
+        .try_with(|l| *l)
+        .unwrap_or_else(|_| PROCESS.get().copied().unwrap_or(ZH_CN))
+}
+
+/// The language of everything this process says outside a request: for a command-line program, once
+/// at start. The first call decides.
+pub fn set_process(locale: &'static str) {
+    let _ = PROCESS.set(locale);
+}
+
+/// The language a person at this terminal reads: `STEVE_LANG`, else the first of `LC_ALL`,
+/// `LC_MESSAGES` and `LANG` that names one of ours, else (macOS) the system's preferred languages in
+/// order, else zh-CN.
+pub fn from_env() -> &'static str {
+    for name in ["STEVE_LANG", "LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Some(l) = std::env::var(name).ok().as_deref().and_then(match_tag) {
+            return l;
+        }
+    }
+    system_languages()
+        .iter()
+        .find_map(|tag| match_tag(tag))
+        .unwrap_or(ZH_CN)
+}
+
+/// What System Settings lists under preferred languages; nothing elsewhere, where the locale
+/// variables are the setting.
+fn system_languages() -> Vec<String> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    let Ok(out) = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleLanguages"])
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .split(['(', ')', ',', '\n'])
+        .map(|tag| tag.trim().trim_matches('"').to_owned())
+        .filter(|tag| !tag.is_empty())
+        .collect()
 }
 
 /// Runs `f` with `locale` as the current language.
