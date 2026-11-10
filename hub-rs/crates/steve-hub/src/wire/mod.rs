@@ -333,12 +333,11 @@ pub(crate) fn node_mode(vars: &Vars, no_resume: bool) -> Result<NodeMode, Backen
     }
 }
 
-/// Whether the local Node is switched on. It is the default (B6): an unset `STEVE_NODE_MODE`
-/// means `local`, and `off` is the rollback: sessions already bound to the Node are parked then,
-/// and nothing else runs (there is no in-process runner since B7, so a new session is refused). `STEVE_NODE=local`, how 0.2.50 spelled it, still counts as
-/// an explicit `local` when STEVE_NODE_MODE is unset. A `STEVE_NO_RESUME` copy (a DB copy that
-/// must not touch the live harnesses) resolves to off by default; an explicit `local` there is a
-/// boot error. Any other value is a boot error too, rather than a guess.
+/// Whether the Hub's own Node is switched on (in its process or as a service). It is by default;
+/// with `off`, sessions already bound to the Node are parked and a new session is refused. A
+/// `STEVE_NO_RESUME` copy (a DB copy that must not touch the live harnesses) resolves to off by
+/// default; an explicit `local` there is a boot error. Any other value is a boot error too,
+/// rather than a guess.
 pub(crate) fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, BackendError> {
     let explicit_local = match vars("STEVE_NODE_MODE")
         .map(|v| v.trim().to_ascii_lowercase())
@@ -353,10 +352,6 @@ pub(crate) fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, Back
                 )));
             }
         },
-        None if vars("STEVE_NODE").as_deref().map(str::trim) == Some("local") => {
-            tracing::warn!("STEVE_NODE=local is deprecated; set STEVE_NODE_MODE=local instead");
-            true
-        }
         // the default
         None => return Ok(!no_resume),
     };
@@ -414,15 +409,6 @@ pub(crate) fn principal_state(vars: &Vars) -> bool {
             false
         }
     }
-}
-
-/// How often sessions the boot pass left are looked at again (`STEVE_LEGACY_MOVE_EVERY_MS`, for
-/// tests); default 5 min.
-fn move_every(vars: &Vars) -> std::time::Duration {
-    vars("STEVE_LEGACY_MOVE_EVERY_MS")
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
-        .map_or(core::MOVE_EVERY, std::time::Duration::from_millis)
 }
 
 /// An attempt's deadline when set (`STEVE_NODE_TURN_LIMIT_MS`, for tests); by default none in practice.
@@ -753,15 +739,6 @@ pub fn wire_assembly(
     );
     core.models().set_harnesses(harnesses.source());
     let _ = host.core.set(core.clone());
-    if node_host.is_some() {
-        // sessions from before this boot that boot could not move to the local Node yet (B7)
-        node_jobs.push(Box::pin(core::move_legacy_later(
-            routed.clone(),
-            core.clone(),
-            steve_store::now(),
-            move_every(&vars),
-        )));
-    }
     /* an item bound to a Node has its git read there (N0e-E11b); without any Node, nothing changes */
     if node_host.is_some() || fleet.is_some() {
         core.set_node_git(Arc::new(item_git::ItemGit::new(workspaces.clone())));
@@ -1191,29 +1168,11 @@ mod tests {
                 .unwrap_err()
                 .contains("STEVE_NO_RESUME")
         );
-        assert!(mode(&[("STEVE_NODE", "local")], true).is_err());
         // a typo is not silently off (which would park every Node session) nor silently local
         assert!(
             mode(&[("STEVE_NODE_MODE", "loacl")], false)
                 .unwrap_err()
                 .contains("loacl")
         );
-    }
-
-    #[test]
-    fn local_node_mode_keeps_the_0_2_50_spelling() {
-        let mode = |kv: &'static [(&'static str, &'static str)]| {
-            local_node_mode(&vars(kv), false).unwrap()
-        };
-        assert!(mode(&[("STEVE_NODE_MODE", "local")]));
-        // a 0.2.50 config upgraded in place keeps its local Node
-        assert!(mode(&[("STEVE_NODE", "local")]));
-        // a Node.js path is not the switch (the default applies), and STEVE_NODE_MODE wins when
-        // both are set
-        assert!(mode(&[("STEVE_NODE", "/opt/x/bin/node")]));
-        assert!(!mode(&[
-            ("STEVE_NODE", "local"),
-            ("STEVE_NODE_MODE", "off")
-        ]));
     }
 }

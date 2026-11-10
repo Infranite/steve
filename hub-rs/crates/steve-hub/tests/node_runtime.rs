@@ -5022,68 +5022,6 @@ async fn a_lifecycle_cancel_never_retires_an_unknown_prepare() {
     assert_eq!(h.systems("已撤回"), 0);
 }
 
-/// B5: a session the legacy runner ran moves here opening on its own conversation (the harness's
-/// session id the legacy runner kept is the open's resume handle), hears it once, and is then
-/// an ordinary Node session. Adopting it again changes nothing.
-#[tokio::test]
-async fn an_adopted_legacy_session_opens_on_its_own_conversation_once() {
-    let h = hub();
-    let b = Binding {
-        session: S.into(),
-        resource: format!("item:{S}"),
-        prepare: PrepareKind::Scratch,
-        choice: build::choice(),
-        policy: build::policy(),
-    };
-    assert!(h.rt.adopt(&b, Some("acp-legacy-1")).unwrap());
-    assert!(
-        !h.rt.adopt(&b, Some("acp-legacy-1")).unwrap(),
-        "bound already"
-    );
-    assert_eq!(h.rt.adopted(), 1);
-    h.one_turn("hello").await;
-    assert_eq!(
-        h.methods(),
-        ["prepare_workspace", "open_session", "start_turn"],
-        "one prepare and one open"
-    );
-    let resume: Option<String> = h.q(
-        "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session'",
-    );
-    assert_eq!(resume.as_deref(), Some("acp-legacy-1"));
-    let told: i64 = h.q(
-        "SELECT COUNT(*) FROM events WHERE kind='system' AND json_extract(data,'$.adopted')=1 AND instr(json_extract(data,'$.text'),'接着原来的对话')>0",
-    );
-    assert_eq!(told, 1, "said once, in zh-CN");
-}
-
-/// B5: a legacy session that never got a conversation of its harness starts a new one, and says so.
-#[tokio::test]
-async fn an_adopted_legacy_session_without_a_conversation_starts_a_new_one() {
-    let h = hub();
-    assert!(h.rt.adopt(&on_the_item(S), None).unwrap());
-    h.one_turn("hello").await;
-    let resume: Option<String> = h.q(
-        "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session'",
-    );
-    assert_eq!(resume, None);
-    let told: i64 = h.q(
-        "SELECT COUNT(*) FROM events WHERE kind='system' AND json_extract(data,'$.adopted')=1 AND instr(json_extract(data,'$.text'),'从新对话开始')>0",
-    );
-    assert_eq!(told, 1);
-}
-
-/// B5: a stopped Node adopts nothing (the session stays where it was).
-#[tokio::test]
-async fn a_stopped_node_adopts_nothing() {
-    let h = hub();
-    h.rt.stop("tools did not connect");
-    assert!(h.rt.adopt(&on_the_item(S), Some("acp-legacy-1")).is_err());
-    let bound: i64 = h.q("SELECT COUNT(*) FROM runtime_sessions");
-    assert_eq!(bound, 0);
-    assert_eq!(h.rt.adopted(), 0);
-}
-
 /// The principal's own variables on this Node (`node_env`) go with the open, and only theirs:
 /// the Node's owner, alone in the workspace, on an item they asked for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
