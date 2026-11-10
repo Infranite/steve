@@ -37,6 +37,9 @@ pub struct Harness {
     pub efforts: Vec<String>,
     /// Steve's judgments fall back down Steve's model lists after the bot's model (declared).
     pub model_fallback: bool,
+    /// Words that name its quick, cheap models, best first (declared).
+    #[serde(skip)]
+    pub fast_models: Vec<String>,
 }
 
 impl Harness {
@@ -62,7 +65,24 @@ impl Harness {
             default_model: None,
             efforts: p.fallback_efforts.clone(),
             model_fallback: p.model_fallback,
+            fast_models: p.fast_models.clone(),
         }
+    }
+
+    /// Its quick, cheap model: of the models it offers, the first whose id contains the earliest
+    /// of its declared words. None before it has answered a probe (a declared list is not what
+    /// this installation has) or when it offers no such model.
+    pub fn fast_model(&self) -> Option<String> {
+        if self.ready != Some(true) {
+            return None;
+        }
+        self.fast_models.iter().find_map(|w| {
+            let w = w.to_ascii_lowercase();
+            self.models
+                .iter()
+                .find(|m| !w.is_empty() && m.id.to_ascii_lowercase().contains(&w))
+                .map(|m| m.id.clone())
+        })
     }
 
     /// The model ids it offers.

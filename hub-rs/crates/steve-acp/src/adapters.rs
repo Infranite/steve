@@ -153,6 +153,10 @@ pub struct AdapterProperties {
     /// Steve's judgments fall back down Steve's model lists (`STEVE_MODELS_SMART`) after the bot's
     /// model; without it they try the bot's model, else the adapter's own default.
     pub model_fallback: bool,
+    /// Words that name its quick, cheap models, best first (`haiku`): of the models the adapter
+    /// itself offers, the first whose id contains one is what Steve's cheap, frequent judgments
+    /// (routing, titles) are put on once. None: they follow Steve's model like everything else.
+    pub fast_models: Vec<String>,
 }
 
 /// Where a call's tokens are read when the adapter does not report them.
@@ -184,12 +188,13 @@ impl Default for AdapterProperties {
             fallback_models: vec![],
             fallback_efforts: vec![],
             model_fallback: false,
+            fast_models: vec![],
         }
     }
 }
 
 /// The keys of [`PropertiesPatch`] (what a manifest's `properties` may hold).
-pub const PROPERTY_KEYS: [&str; 14] = [
+pub const PROPERTY_KEYS: [&str; 15] = [
     "self_read_only",
     "nested_sandbox",
     "state",
@@ -204,6 +209,7 @@ pub const PROPERTY_KEYS: [&str; 14] = [
     "fallback_models",
     "fallback_efforts",
     "model_fallback",
+    "fast_models",
 ];
 
 /// Declared properties, each optional: what is given replaces the built-in (or default) value.
@@ -238,6 +244,8 @@ pub struct PropertiesPatch {
     pub fallback_efforts: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_fallback: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_models: Option<Vec<String>>,
 }
 
 impl PropertiesPatch {
@@ -294,6 +302,9 @@ impl PropertiesPatch {
         }
         if let Some(v) = self.model_fallback {
             p.model_fallback = v;
+        }
+        if let Some(v) = &self.fast_models {
+            p.fast_models = v.clone();
         }
     }
 }
@@ -399,6 +410,7 @@ const BUILTINS: &[Builtin] = &[
             fallback_models: strings(&["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]),
             fallback_efforts: strings(&["low", "medium", "high", "xhigh", "max"]),
             model_fallback: true,
+            fast_models: strings(&["haiku"]),
         },
     },
     Builtin {
@@ -443,6 +455,7 @@ const BUILTINS: &[Builtin] = &[
             fallback_models: vec![],
             fallback_efforts: strings(&["low", "medium", "high", "xhigh", "max", "ultra"]),
             model_fallback: false,
+            fast_models: strings(&["mini"]),
         },
     },
 ];

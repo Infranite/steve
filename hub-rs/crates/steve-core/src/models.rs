@@ -12,8 +12,9 @@
 //!
 //! Upgrade: values stored before Steve became a bot (`{"models": [...], "effort": ...}`, no harness) ran
 //! on Claude Code, so they read as Claude Code overrides. [`Models::migrate`] adds once, per workspace,
-//! the recommended overrides of the cheap high-volume purposes (route, title, disclosure, flow on the
-//! fast list), which keeps today's behaviour and cost for them.
+//! the recommended overrides of the cheap high-volume purposes (route, title, disclosure, flow): the
+//! fast list the environment names, else the quick model Steve's harness says it has, so that a
+//! routing decision does not wait for the strongest model. They are ordinary overrides afterwards.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
@@ -209,6 +210,9 @@ pub fn agent_key(harness: &str) -> String {
 
 /// Set once per workspace by [`Models::migrate`].
 pub const MIGRATED_KEY: &str = "models.v2";
+
+/// Set once per workspace by [`Models::migrate`], when the cheap purposes got their fast model.
+pub const FAST_KEY: &str = "models.v3";
 
 fn default_adapter() -> String {
     steve_acp::adapters::DEFAULT_ADAPTER.0.into()
@@ -472,8 +476,10 @@ impl Models {
         Some(c)
     }
 
-    /// The recommended override of `purpose`: the fast list on the default adapter for the cheap
-    /// high-volume purposes (today's behaviour and cost), none for the others.
+    /// The recommended override of `purpose`, for the cheap high-volume purposes only (none for the
+    /// others): the fast list on the default adapter where the environment names one, else the
+    /// quick model Steve's own harness says it has ([`Harness::fast_model`]) - without either, a
+    /// routing decision waits for the harness's strongest model.
     pub fn recommended(&self, purpose: &Purpose) -> Option<Choice> {
         if purpose.tier != Tier::Fast {
             return None;
@@ -484,7 +490,23 @@ impl Models {
         } else {
             d.fast.clone()
         };
-        (!models.is_empty()).then(|| Choice::default_adapter(models))
+        if !models.is_empty() {
+            return Some(Choice::default_adapter(models));
+        }
+        if self.named() {
+            return None;
+        }
+        let h = self.harness(&self.steve().runs_on)?;
+        Some(Choice {
+            models: vec![h.fast_model()?],
+            harness: h.id,
+            effort: None,
+        })
+    }
+
+    /// The environment names the cheap purposes' models itself (`STEVE_MODELS_FAST`, `STEVE_MODELS_CHECK`).
+    fn named(&self) -> bool {
+        !self.defaults.fast.is_empty() || !self.defaults.check.is_empty()
     }
 
     /// `models::for_purpose`: what a call for `purpose` of workspace `ws` uses.
@@ -529,26 +551,56 @@ impl Models {
         }
     }
 
-    /// Writes the recommended overrides once per workspace (`models.v2`), for purposes with nothing
-    /// stored. True when it wrote something.
+    /// Writes the recommended overrides once per workspace (`models.v3`), for purposes with nothing
+    /// stored: an override removed afterwards stays removed. True when it wrote something. Where the
+    /// recommendation comes from the harness and it has not said what it offers yet, nothing is
+    /// written or marked: asked again (the next start, the next probe).
     pub fn migrate(&self, ws: &str) -> steve_store::Result<bool> {
         let s = self.store.settings();
-        if s.get::<Option<Value>>(ws, MIGRATED_KEY, None)?.is_some() {
+        let done = |k: &str| {
+            Ok::<_, steve_store::StoreError>(s.get::<Option<Value>>(ws, k, None)?.is_some())
+        };
+        if done(FAST_KEY)? {
             return Ok(false);
         }
         let mut values = Map::new();
-        for p in &PURPOSES {
-            let stored: Option<Value> = s.get(ws, &key(p.key), None)?;
-            if stored.is_some_and(|v| !v.is_null()) {
-                continue;
+        // the environment's lists were written when `models.v2` was: not a second time
+        if !(self.named() && done(MIGRATED_KEY)?) {
+            let mut any = false;
+            for p in &PURPOSES {
+                let Some(r) = self.recommended(p) else {
+                    continue;
+                };
+                any = true;
+                let stored: Option<Value> = s.get(ws, &key(p.key), None)?;
+                if !stored.is_some_and(|v| !v.is_null()) {
+                    values.insert(key(p.key), serde_json::to_value(r)?);
+                }
             }
-            if let Some(r) = self.recommended(p) {
-                values.insert(key(p.key), serde_json::to_value(r)?);
+            if !any && !self.named() {
+                return Ok(false);
             }
         }
+        let wrote = !values.is_empty();
         values.insert(MIGRATED_KEY.into(), json!(2));
+        values.insert(FAST_KEY.into(), json!(1));
         self.write(ws, &values, "steve", "settings.models.migrate")?;
-        Ok(values.len() > 1)
+        Ok(wrote)
+    }
+
+    /// [`Models::migrate`] for every workspace (the Hub calls it when its harness list changes).
+    pub fn migrate_all(&self) {
+        let ids = match self.store.workspaces().ids() {
+            Ok(ids) => ids,
+            Err(e) => return tracing::warn!("models: workspaces not read: {e}"),
+        };
+        for ws in ids {
+            match self.migrate(&ws) {
+                Ok(true) => tracing::info!("models: recommended overrides written for {ws}"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("models: recommended overrides of {ws}: {e}"),
+            }
+        }
     }
 
     /// The model of a new agent session on `harness` for a bot that names none.
@@ -1039,7 +1091,10 @@ mod tests {
             },
         );
         // no model: the adapter's own default, shown as such (Codex takes max too)
-        assert_eq!(m.for_purpose("default", "chat"), ch(CODEX, &[], Some("max")));
+        assert_eq!(
+            m.for_purpose("default", "chat"),
+            ch(CODEX, &[], Some("max"))
+        );
         let st = m.steve();
         assert_eq!(
             (st.harness.as_str(), st.runs_on.as_str(), st.note),
@@ -1207,6 +1262,151 @@ mod tests {
             json!({"harness": "claude-code", "models": ["haiku", "sonnet"]})
         );
         assert_eq!(v["steve"]["runs_on"], json!("codex"));
+    }
+
+    /// The built-in adapters, `id` having answered a probe with `models`.
+    fn probed(m: &Models, id: &'static str, models: &'static [&'static str]) {
+        m.set_harnesses(Arc::new(move || {
+            let mut list = crate::harnesses::builtin();
+            for h in list.iter_mut().filter(|h| h.id == id) {
+                h.ready = Some(true);
+                h.models = models
+                    .iter()
+                    .map(|m| HarnessModel {
+                        id: m.to_string(),
+                        name: None,
+                        description: None,
+                    })
+                    .collect();
+            }
+            list
+        }));
+    }
+
+    #[test]
+    fn the_cheap_purposes_get_the_harness_s_quick_model_once_it_has_said_so() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        steve_bot(&s, CLAUDE_CODE, None);
+        // the environment names no model at all
+        let m = Models::new(s.clone(), Defaults::default());
+        let route = purpose_of("route").unwrap();
+        // before the adapter has answered: its declared list is not what this installation has, so
+        // nothing is recommended, written or marked
+        assert_eq!(m.recommended(route), None);
+        assert!(!m.migrate("default").unwrap());
+        assert_eq!(
+            m.for_purpose("default", "route"),
+            ch(CLAUDE_CODE, &[], None)
+        );
+        // it offers no model its declaration calls quick: still nothing
+        probed(&m, CLAUDE_CODE, &["default", "opus"]);
+        assert!(!m.migrate("default").unwrap());
+        // it does: the earliest declared word, the first model that has it, whatever the case
+        probed(
+            &m,
+            CLAUDE_CODE,
+            &["default", "opus", "Haiku", "claude-haiku-5-5"],
+        );
+        assert_eq!(
+            m.recommended(route),
+            Some(ch(CLAUDE_CODE, &["Haiku"], None))
+        );
+        assert_eq!(m.recommended(purpose_of("chat").unwrap()), None);
+        // an override made before stays as it is
+        m.apply(
+            "default",
+            &json!({"purposes": {"title": {"harness": CLAUDE_CODE, "models": ["opus"]}}}),
+            "me",
+        )
+        .unwrap();
+        assert!(m.migrate("default").unwrap());
+        for p in ["route", "disclosure", "flow", "intent"] {
+            assert_eq!(
+                m.for_purpose("default", p),
+                ch(CLAUDE_CODE, &["Haiku"], None),
+                "{p}"
+            );
+        }
+        assert_eq!(
+            m.for_purpose("default", "title"),
+            ch(CLAUDE_CODE, &["opus"], None)
+        );
+        // everything else still follows Steve
+        for p in [
+            "chat", "research", "extract", "yolo", "draft", "mail", "compose",
+        ] {
+            assert!(m.custom("default", p).is_none(), "{p}");
+        }
+        // once: put back on Steve afterwards, it stays there, on every later probe
+        m.apply("default", &json!({"purposes": {"route": null}}), "me")
+            .unwrap();
+        m.migrate_all();
+        assert!(!m.migrate("default").unwrap());
+        assert!(m.custom("default", "route").is_none());
+
+        // Steve on another harness: that harness's own quick model, on that harness
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        steve_bot(&s, CODEX, None);
+        let m = Models::new(s.clone(), Defaults::default());
+        probed(&m, CODEX, &["gpt-6-luna", "gpt-6-luna-mini"]);
+        m.migrate_all();
+        assert_eq!(
+            m.for_purpose("default", "route"),
+            ch(CODEX, &["gpt-6-luna-mini"], None)
+        );
+        // an adapter that declares no such word: nothing, and asked again later
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        steve_bot(&s, "mine", None);
+        let m = Models::new(s.clone(), Defaults::default());
+        m.set_harnesses(Arc::new(|| {
+            let mut h = Harness::declared("mine", None);
+            h.ready = Some(true);
+            h.models = vec![HarnessModel {
+                id: "x-haiku-mini".into(),
+                name: None,
+                description: None,
+            }];
+            vec![h]
+        }));
+        assert!(!m.migrate("default").unwrap());
+        assert!(m.custom("default", "route").is_none());
+
+        // a fast list in the environment that was written under `models.v2`: not written again
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        steve_bot(&s, CLAUDE_CODE, None);
+        s.settings()
+            .set(
+                "default",
+                json!({"models.v2": 2}).as_object().unwrap(),
+                "steve",
+            )
+            .unwrap();
+        let m = Models::new(s.clone(), defaults());
+        probed(&m, CLAUDE_CODE, &["haiku"]);
+        assert!(!m.migrate("default").unwrap());
+        assert!(m.custom("default", "route").is_none());
+        // an installation marked `models.v2` with no list in the environment gets the harness's
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        steve_bot(&s, CLAUDE_CODE, None);
+        s.settings()
+            .set(
+                "default",
+                json!({"models.v2": 2}).as_object().unwrap(),
+                "steve",
+            )
+            .unwrap();
+        let m = Models::new(s.clone(), Defaults::default());
+        probed(&m, CLAUDE_CODE, &["haiku"]);
+        assert!(m.migrate("default").unwrap());
+        assert_eq!(
+            m.for_purpose("default", "route"),
+            ch(CLAUDE_CODE, &["haiku"], None)
+        );
     }
 
     #[test]

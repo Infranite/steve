@@ -698,6 +698,12 @@ pub fn wire_assembly(
         core_cfg,
     );
     core.models().set_harnesses(harnesses.source());
+    // once Steve's harness has said what it offers, the cheap purposes get its quick model (once)
+    let models = core.models().clone();
+    harnesses.on_update(move || {
+        let m = models.clone();
+        tokio::task::spawn_blocking(move || m.migrate_all());
+    });
     let _ = host.core.set(core.clone());
     /* an item bound to a Node has its git read there (N0e-E11b); without any Node, nothing changes */
     if node_host.is_some() || fleet.is_some() {

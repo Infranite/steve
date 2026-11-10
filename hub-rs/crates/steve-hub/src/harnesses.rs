@@ -19,6 +19,8 @@ pub struct HubHarnesses {
     declared: BTreeMap<String, steve_acp::Declaration>,
     /// What the local Node reported last (none yet, or no Node).
     probed: RwLock<Vec<HarnessCapability>>,
+    /// Told after each answer of the Node ([`HubHarnesses::on_update`]).
+    updated: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl HubHarnesses {
@@ -27,6 +29,7 @@ impl HubHarnesses {
             ids: cfg.harness_ids(),
             declared: cfg.declared_adapters.clone(),
             probed: RwLock::new(vec![]),
+            updated: std::sync::OnceLock::new(),
         })
     }
 
@@ -47,6 +50,14 @@ impl HubHarnesses {
 
     pub fn update(&self, caps: Vec<HarnessCapability>) {
         *self.probed.write().unwrap_or_else(|e| e.into_inner()) = caps;
+        if let Some(f) = self.updated.get() {
+            f();
+        }
+    }
+
+    /// `f` runs after every answer of the Node from now on (the first one given stays).
+    pub fn on_update(&self, f: impl Fn() + Send + Sync + 'static) {
+        let _ = self.updated.set(Box::new(f));
     }
 
     /// The list as Steve's model resolver reads it.
@@ -343,5 +354,43 @@ mod tests {
             serde_json::from_value(serde_json::json!({"name": "Named"})).unwrap();
         let h = merge("mine", Some(&named), Some(&reported("mine", None)));
         assert_eq!((h.name.as_str(), h.ready), ("Named", Some(false)));
+    }
+
+    #[test]
+    fn every_answer_of_the_node_is_told() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hs = HubHarnesses {
+            ids: vec!["claude-code".into()],
+            declared: BTreeMap::new(),
+            probed: RwLock::new(vec![]),
+            updated: std::sync::OnceLock::new(),
+        };
+        // nobody listening: nothing to tell
+        hs.update(vec![]);
+        let n = Arc::new(AtomicUsize::new(0));
+        let seen = n.clone();
+        hs.on_update(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        });
+        let offer = AdapterOffer {
+            modes: vec![PermissionMode::Ask],
+            models: ["default", "haiku"]
+                .into_iter()
+                .map(|id| AdapterModel {
+                    id: id.into(),
+                    name: None,
+                    description: None,
+                })
+                .collect(),
+            default_model: Some("default".into()),
+            efforts: vec![],
+        };
+        // what a ready adapter offers is where its quick model comes from, not its declared list
+        assert_eq!(hs.list()[0].fast_model(), None);
+        hs.update(vec![reported("claude-code", Some(offer))]);
+        assert_eq!(hs.list()[0].fast_model().as_deref(), Some("haiku"));
+        hs.update(vec![]);
+        assert_eq!(hs.list()[0].fast_model(), None);
+        assert_eq!(n.load(Ordering::SeqCst), 2);
     }
 }
