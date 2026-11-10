@@ -346,22 +346,19 @@ async fn model_settings() {
         ]
     );
     assert_eq!(ps[0]["label"], "分流");
-    // Steve is a bot: the seeded Steve bot (Claude Code · claude-sonnet-5-5) makes the judgments;
-    // routing keeps its fast list as a recommended override written once at boot
+    // Steve is a bot: the seeded Steve bot (Claude Code, no model: the harness's own default)
+    // makes the judgments, and every purpose follows it; nothing is written as an override
     assert_eq!(v["steve"]["runs_on"], "claude-code");
-    assert_eq!(v["steve"]["model"], "claude-sonnet-5-5");
-    assert_eq!(
-        ps[0]["value"],
-        json!({"harness": "claude-code", "models": ["claude-haiku-5-5", "claude-sonnet-5-5"]})
-    );
-    assert_eq!(ps[0]["follows"], false);
-    assert_eq!(ps[0]["recommended"], ps[0]["value"]);
-    assert_eq!(ps[2]["follows"], true);
+    assert_eq!(v["steve"]["model"], Value::Null);
+    assert_eq!(v["steve"]["models"], json!([]));
+    assert_eq!(ps[0]["value"], Value::Null);
+    assert_eq!(ps[0]["follows"], true);
+    assert_eq!(ps[0]["recommended"], Value::Null);
     assert_eq!(
         ps[2]["effective"],
-        json!({"harness": "claude-code", "models": ["claude-sonnet-5-5", "claude-opus-5-5"]})
+        json!({"harness": "claude-code", "models": []})
     );
-    assert_eq!(v["agents"][0]["default"], "claude-opus-5-5");
+    assert_eq!(v["agents"][0]["default"], Value::Null);
     assert_eq!(v["harnesses"][0]["id"], "claude-code");
     assert_eq!(v["harnesses"][0]["efforts"][4]["key"], "max");
     assert_eq!(v["harnesses"][1]["id"], "codex");
