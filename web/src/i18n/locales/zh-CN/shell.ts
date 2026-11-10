@@ -130,6 +130,11 @@ export default {
     harness: {
       builtin: "内置",
       custom: "自定义",
+      upToDate: "适配器 {{version}} 已是最新（{{at}} 检查）",
+      updatePending: "适配器有新版本：{{from}} → {{to}}，会在这台设备没有会话运行时自动升级",
+      updateAvailable: "适配器有新版本 {{to}}：运行 steve adapters upgrade 升级",
+      updateUnchecked: "还没检查过适配器更新",
+      updateError: "检查适配器更新失败：{{error}}",
       cap: { sessions: "会话", judge: "判断", images: "图片", resume: "恢复会话", history: "历史" },
       mode: { plan: "计划", ask: "每次询问", accept_edits: "接受编辑", auto: "自动", full_access: "完全放行" },
       add: "接入 harness",

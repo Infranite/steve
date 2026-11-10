@@ -47,39 +47,13 @@ pub fn npm_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/opt/homebrew/lib/node_modules"))
 }
 
-/// Node's `process.platform` / `process.arch` names, used in codex-acp's per-platform package name.
-fn node_platform() -> (&'static str, &'static str) {
-    let os = match env::consts::OS {
-        "macos" => "darwin",
-        "windows" => "win32",
-        o => o,
-    };
-    let arch = match env::consts::ARCH {
-        "aarch64" => "arm64",
-        "x86_64" => "x64",
-        a => a,
-    };
-    (os, arch)
-}
-
 pub fn default_claude_adapter(npm_root: &Path) -> PathBuf {
     npm_root.join("@agentclientprotocol/claude-agent-acp/dist/index.js")
 }
 
-/// codex-acp's bin is a Node wrapper that spawnSync's a native binary; killing the wrapper would orphan
-/// the binary, so Steve runs the platform binary directly when it is installed.
+/// codex-acp (`@agentclientprotocol/codex-acp`): a Node program, run with [`AcpConfig::node`].
 pub fn default_codex_adapter(npm_root: &Path) -> PathBuf {
-    let pkg = npm_root.join("@zed-industries/codex-acp");
-    let (os, arch) = node_platform();
-    let native = pkg
-        .join("node_modules/@zed-industries")
-        .join(format!("codex-acp-{os}-{arch}"))
-        .join("bin/codex-acp");
-    if native.exists() {
-        native
-    } else {
-        pkg.join("bin/codex-acp.js")
-    }
+    npm_root.join("@agentclientprotocol/codex-acp/dist/index.js")
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -100,6 +74,8 @@ impl AcpConfig {
     pub fn from_env() -> Self {
         let var = |k: &str| env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
         let home = home_dir();
+        let steve_home = var("STEVE_HOME").unwrap_or_else(|| home.join(".steve"));
+        let steve_home = std::path::absolute(&steve_home).unwrap_or(steve_home);
         let mut root: Option<PathBuf> = None;
         let mut npm = || root.get_or_insert_with(npm_root).clone();
         // npm root -g only when an adapter is not named by its variable
@@ -110,18 +86,22 @@ impl AcpConfig {
         let adapters: HashMap<String, PathBuf> = named
             .into_iter()
             .map(|(id, cmd)| {
+                // Steve's own install, else a global npm one, else Steve's own path
                 let cmd = cmd.unwrap_or_else(|| {
+                    let own = crate::managed::command(&steve_home, id).unwrap_or_default();
+                    if own.exists() {
+                        return own;
+                    }
                     let root = npm();
                     crate::adapters::builtin_commands(&root)
                         .find(|(b, ..)| *b == id)
                         .map(|(.., c)| c)
-                        .unwrap_or_default()
+                        .filter(|c| c.exists())
+                        .unwrap_or(own)
                 });
                 (id.to_owned(), cmd)
             })
             .collect();
-        let steve_home = var("STEVE_HOME").unwrap_or_else(|| home.join(".steve"));
-        let steve_home = std::path::absolute(&steve_home).unwrap_or(steve_home);
         Self {
             adapters,
             declared: HashMap::new(),

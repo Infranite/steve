@@ -147,6 +147,13 @@ impl Home {
         let h = self.harness()?;
         let user_home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
         let (mut adapters, declared) = steve_acp::adapters::split_entries(h.adapters);
+        // the built-in ones harness.json does not name: this Node's own install (`steve setup
+        // node`, kept up to date by the Node), else the default adapter's command on PATH
+        for (id, _) in steve_acp::adapters::builtin_packages() {
+            if let Some(own) = steve_acp::managed::command(&self.0, id).filter(|c| c.exists()) {
+                adapters.entry(id.into()).or_insert(own);
+            }
+        }
         let (id, command) = steve_acp::adapters::DEFAULT_ADAPTER;
         adapters.entry(id.into()).or_insert_with(|| command.into());
         Ok(steve_acp::AcpConfig {

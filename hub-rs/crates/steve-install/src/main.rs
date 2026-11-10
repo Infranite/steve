@@ -5,7 +5,7 @@ use steve_install::{common, setup};
 
 mod output;
 
-const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n              [--label LABEL] [--vault-dir PATH]\n  steve setup [hub] --reconfigure [--home PATH] [--listen IP:port]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL] [--json]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n\nsetup 默认监听 0.0.0.0:8440，浏览器/OIDC 地址单独配置。\nsetup 注册服务，本次不启动服务；不导入登录凭据或授予 Node 工作目录。\n--reconfigure 只维护已安装 Hub 的网络与现有 OIDC 配置，保留 secret、身份和数据；不会自动重启。\n服务命令在终端显示摘要；管道或 --json 保持 JSON 输出。\n";
+const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n              [--label LABEL] [--vault-dir PATH]\n  steve setup [hub] --reconfigure [--home PATH] [--listen IP:port]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL] [--json]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n  steve adapters status|upgrade [hub|node] [--home PATH]\n\nsetup 默认监听 0.0.0.0:8440，浏览器/OIDC 地址单独配置。\nsetup 注册服务，本次不启动服务；不导入登录凭据或授予 Node 工作目录。\n--reconfigure 只维护已安装 Hub 的网络与现有 OIDC 配置，保留 secret、身份和数据；不会自动重启。\n服务命令在终端显示摘要；管道或 --json 保持 JSON 输出。\n";
 
 fn option(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
     let mut found = None;
@@ -155,6 +155,39 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                 );
             }
             Ok(if report["ok"] == false { 1 } else { 0 })
+        }
+        "adapters" => {
+            let selected = option(&mut args, "--home")?;
+            let action = if args.first().is_some_and(|a| !matches!(a.as_str(), "hub" | "node")) {
+                args.remove(0)
+            } else {
+                "status".into()
+            };
+            let action = if action == "upgrade" { "install".to_string() } else { action };
+            if !matches!(action.as_str(), "status" | "install") {
+                bail!("请选择 adapters status/upgrade");
+            }
+            /* hub or node: as given, else the Hub's home when there is one */
+            let role = match args.first().map(String::as_str) {
+                Some(r @ ("hub" | "node")) => {
+                    let r = r.to_string();
+                    args.remove(0);
+                    r
+                }
+                _ if selected.is_none() && !role_home("hub", None)?.join("current").exists() => {
+                    "node".into()
+                }
+                _ => "hub".into(),
+            };
+            if !args.is_empty() {
+                bail!("unknown adapters arguments");
+            }
+            let home = role_home(&role, selected)?;
+            let current = home
+                .join("current")
+                .canonicalize()
+                .with_context(|| format!("{role} 尚未初始化；请先运行 steve setup"))?;
+            setup::adapters(&role, &home, &current, &[&action])
         }
         "upgrade" => {
             let home = role_home("hub", option(&mut args, "--home")?)?;

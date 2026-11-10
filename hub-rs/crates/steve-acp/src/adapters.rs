@@ -118,8 +118,6 @@ pub enum SessionMeta {
 pub enum LaunchExtra {
     #[default]
     None,
-    /// codex-acp: a sanitized copy of the user's model catalog (`-c model_catalog_json=…`).
-    CodexCatalog,
 }
 
 /// Host integration properties of an adapter. Callers select policy by these, never by a harness
@@ -406,12 +404,13 @@ const BUILTINS: &[Builtin] = &[
     Builtin {
         id: "codex",
         name: "Codex",
-        install_hint: "@zed-industries/codex-acp",
+        install_hint: "@agentclientprotocol/codex-acp",
         command_var: "STEVE_ADAPTER_CODEX",
         default_command: crate::config::default_codex_adapter,
-        // Codex has no plan mode and its own default may be full access, so the mode is always
-        // set: read-only asks before every edit or command, auto works inside the workspace and
-        // asks before network access or writes outside it; full-access only for FullAccess.
+        // Codex's own default may be full access, so the mode is always set: read-only asks before
+        // every edit or network access; workspace-write edits the workspace and asks before
+        // writing outside it or the network; agent asks only for what it judges unsafe (Steve's
+        // auto); agent-full-access only for FullAccess.
         properties: || AdapterProperties {
             self_read_only: true,
             nested_sandbox: false,
@@ -424,9 +423,9 @@ const BUILTINS: &[Builtin] = &[
             modes: ModeMap {
                 plan: "read-only".into(),
                 ask: "read-only".into(),
-                accept_edits: "auto".into(),
-                auto: "auto".into(),
-                full_access: "full-access".into(),
+                accept_edits: "workspace-write".into(),
+                auto: "agent".into(),
+                full_access: "agent-full-access".into(),
             },
             executable_env: None,
             // none yet: codex-acp's `session/set_mode` replaces the permission profile with the
@@ -434,14 +433,15 @@ const BUILTINS: &[Builtin] = &[
             // deny-read entries, codex-core keeps a command the user approved to run outside the
             // sandbox inside it, so Ask mode could no longer write anything
             session_meta: SessionMeta::None,
-            launch_extra: LaunchExtra::CodexCatalog,
+            launch_extra: LaunchExtra::None,
             probe_initialize: true,
             tools_off_meta: None,
-            // codex-acp reports no tokens of a turn; its rollout file has them, OpenAI's way
+            // codex-acp reports a turn's tokens (OpenAI's way: input includes the cached part);
+            // its rollout file stands in when a turn's report is missing
             usage_input_includes_cache: true,
             usage_fallback: UsageFallback::CodexRollout,
             fallback_models: vec![],
-            fallback_efforts: strings(&["none", "minimal", "low", "medium", "high", "xhigh"]),
+            fallback_efforts: strings(&["low", "medium", "high", "xhigh", "max"]),
             model_fallback: false,
         },
     },
@@ -468,6 +468,12 @@ pub fn builtin_commands(
     BUILTINS
         .iter()
         .map(move |b| (b.id, b.command_var, (b.default_command)(npm_root)))
+}
+
+/// The built-in entries' npm packages: per id, the package Steve installs and keeps up to date
+/// ([`crate::managed`]).
+pub fn builtin_packages() -> impl Iterator<Item = (&'static str, &'static str)> {
+    BUILTINS.iter().map(|b| (b.id, b.install_hint))
 }
 
 /// The variable that names the default model of new sessions on the default adapter.
@@ -842,12 +848,6 @@ impl crate::AcpConfig {
         let spec = self.adapter_spec(id);
         let mut args: Vec<OsString> = match spec.properties.launch_extra {
             LaunchExtra::None => vec![],
-            LaunchExtra::CodexCatalog => {
-                crate::codex::codex_args(&self.codex_home, &self.steve_home, &self.user_home)
-                    .into_iter()
-                    .map(OsString::from)
-                    .collect()
-            }
         };
         if let Some(d) = self.declared.get(id) {
             args.extend(d.args.iter().map(OsString::from));
@@ -938,9 +938,9 @@ mod tests {
         for (m, want) in [
             (PermissionMode::Plan, "read-only"),
             (PermissionMode::Ask, "read-only"),
-            (PermissionMode::AcceptEdits, "auto"),
-            (PermissionMode::Auto, "auto"),
-            (PermissionMode::FullAccess, "full-access"),
+            (PermissionMode::AcceptEdits, "workspace-write"),
+            (PermissionMode::Auto, "agent"),
+            (PermissionMode::FullAccess, "agent-full-access"),
         ] {
             assert_eq!(c.adapter_mode("codex", m), want);
         }
@@ -992,11 +992,16 @@ mod tests {
             "bypassPermissions",
         ]);
         assert_eq!(claude.offered(Some(&all)).len(), 5);
-        // Codex's three modes cover every Steve mode through its map
+        // Codex's four modes cover every Steve mode through its map
         let codex = spec("codex", None).properties.modes;
         assert_eq!(
             codex
-                .offered(Some(&ids(&["read-only", "auto", "full-access"])))
+                .offered(Some(&ids(&[
+                    "read-only",
+                    "workspace-write",
+                    "agent",
+                    "agent-full-access"
+                ])))
                 .len(),
             5
         );

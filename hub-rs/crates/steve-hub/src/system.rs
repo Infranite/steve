@@ -244,6 +244,8 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 "path": path,
                 "version": reported.map(|h| version_of(&h.version)).unwrap_or_default(),
                 "adapter_version": adapter.and_then(|a| a.version.clone()),
+                // one Steve installed: its update check (steve_acp::managed)
+                "update": adapter.and_then(|a| a.update.clone()),
                 "models": models,
                 "default_model": session.and_then(|o| o.default_model.clone()),
                 "efforts": session.map_or_else(|| spec.properties.fallback_efforts.clone(), |o| o.efforts.clone()),
@@ -805,6 +807,7 @@ mod tests {
                     efforts: vec![],
                 }),
                 session_error: None,
+                update: None,
             }),
         };
         let mut no_session = reported.clone();

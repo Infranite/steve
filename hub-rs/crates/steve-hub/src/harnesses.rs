@@ -270,6 +270,7 @@ mod tests {
                 system_prompt: false,
                 session: offer,
                 session_error: None,
+                update: None,
             }),
         }
     }

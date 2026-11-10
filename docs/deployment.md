@@ -428,7 +428,21 @@ The Hub's own Node, which runs every session on the Hub's machine, runs as `stev
 
 ## Harness setup
 
-Run `steve-hub --check-config` in the Hub service's environment before installation or an upgrade. Missing local ACP adapters and Node.js are reported as setup warnings with the setting to fix; the Hub can still start so its settings and diagnostics remain usable. Install the adapters for the harnesses you use and set `STEVE_ADAPTER_CODEX` / `STEVE_ADAPTER_CLAUDE` to their absolute entry points. For JavaScript adapters, set `STEVE_NODE` to the Node.js executable when it is absent from the service's `PATH`. A separate Node uses its own `harness.json` and installed adapters; a successful Hub preflight does not certify a remote machine's environment.
+### The ACP adapters
+
+The built-in harnesses run through `@agentclientprotocol/claude-agent-acp` (Claude Code) and `@agentclientprotocol/codex-acp` (Codex). Both are Node.js programs, so a machine that runs sessions needs Node.js; the Homebrew formula depends on it. `steve setup` installs them with npm into `<home>/adapters` (a prefix of their own, not the global one); without npm, setup goes on and says to run `steve adapters install` once Node.js is there. No version is pinned: Steve runs their latest release.
+
+A Node asks the npm registry (as npm is configured, so a mirror works) a minute after it starts and then once a day. With `STEVE_ADAPTER_UPDATES=auto` (the default) it installs a newer release when it has no session or job running, and the next session uses it; `check` only shows it; `off` asks nothing. **Devices → runtimes** shows the installed and latest release for each. By hand:
+
+```sh
+steve adapters status            # installed and latest
+steve adapters upgrade           # install the latest now
+steve adapters status node       # a separate Node's (its home: ~/.steve-node)
+```
+
+Adapters named by `STEVE_ADAPTER_CLAUDE` / `STEVE_ADAPTER_CODEX` or by `harness.json`, or installed globally, are used as they are and left alone.
+
+Run `steve-hub --check-config` in the Hub service's environment before installation or an upgrade. Missing local ACP adapters and Node.js are reported as setup warnings with the setting to fix; the Hub can still start so its settings and diagnostics remain usable. `steve setup` installs the adapters into `<home>/adapters` (Node.js required); `steve adapters status` shows them and `steve adapters upgrade` installs the latest. `STEVE_ADAPTER_CODEX` / `STEVE_ADAPTER_CLAUDE` point at adapters installed elsewhere. For JavaScript adapters, set `STEVE_NODE` to the Node.js executable when it is absent from the service's `PATH`. A separate Node uses its own `harness.json` and installed adapters; a successful Hub preflight does not certify a remote machine's environment.
 
 `STEVE_PRINCIPAL_STATE` now defaults to `on` on the Hub. New sessions use their principal's own harness state; existing sessions retain their recorded state. The Node imports only the owner's adapter-declared settings (`config.toml` for Codex, `settings.json` for Claude Code). Codex login is never copied, and other principals begin without the owner's settings or login. The preflight and normal startup log explicitly flag this migration; Steve does not read login contents or certify authentication by checking for a file.
 

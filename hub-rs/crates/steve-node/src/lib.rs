@@ -14,6 +14,7 @@
 mod acp_job;
 mod actor;
 mod adapter_probe;
+mod adapter_updates;
 mod artifact;
 mod attachments;
 mod confine;
@@ -339,6 +340,8 @@ pub(crate) struct Inner {
     probes: history::Probes,
     /// What each adapter said to `initialize` ([`adapter_probe`]).
     adapter_probes: adapter_probe::AdapterProbes,
+    /// The adapters Steve installed, kept up to date ([`adapter_updates`]).
+    adapter_updates: adapter_updates::AdapterUpdates,
     imports: history::Imports,
     research: research::Research,
     /// The OS sandbox around what this Node starts for runs ([`confine`]).
@@ -1330,6 +1333,7 @@ impl LocalNode {
             discovery: std::sync::RwLock::new(None),
             probes: Default::default(),
             adapter_probes: Default::default(),
+            adapter_updates: Default::default(),
             imports: Default::default(),
             cfg,
             j,
@@ -1426,6 +1430,35 @@ impl LocalNode {
             })
         });
         self.0.wake.notify_one();
+    }
+
+    /// The daily adapter checks ([`adapter_updates`]), started by the first probe. Holds the Node
+    /// only while a round runs, so a shutdown does not wait out a day.
+    fn start_adapter_updates(&self) {
+        if !self.0.adapter_updates.first_start() {
+            return;
+        }
+        let weak = Arc::downgrade(&self.0);
+        tokio::spawn(async move {
+            tokio::time::sleep(adapter_updates::FIRST).await;
+            loop {
+                let Some(inner) = weak.upgrade() else { return };
+                if inner.closed.load(Ordering::SeqCst) {
+                    return;
+                }
+                let idle = || {
+                    inner.actors.lock().unwrap().is_empty()
+                        && inner.job_stops.lock().unwrap().is_empty()
+                };
+                let (waiting, installed) = inner.adapter_updates.check(&inner.cfg.acp, idle).await;
+                if installed {
+                    // the next probe asks the new release
+                    inner.adapter_probes.forget().await;
+                }
+                drop(inner);
+                tokio::time::sleep(adapter_updates::AdapterUpdates::next(waiting)).await;
+            }
+        });
     }
 
     /// False: the Node is shutting down and `work` was not started.
@@ -3750,6 +3783,7 @@ impl Discovery for LocalNode {
             .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
     }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {
+        self.start_adapter_updates();
         let binaries = async {
             match self.discovery() {
                 Ok(d) => self.0.probes.get(&d, fresh).await,
@@ -3783,6 +3817,9 @@ impl Discovery for LocalNode {
                     adapter: None,
                 };
                 adapter_probe::apply(&self.0.cfg.acp, &mut c, adapters.get(h));
+                if let Some(a) = c.adapter.as_mut() {
+                    a.update = self.0.adapter_updates.get(&self.0.cfg.acp, h);
+                }
                 c
             })
             .collect();

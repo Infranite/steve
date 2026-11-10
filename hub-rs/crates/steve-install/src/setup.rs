@@ -298,6 +298,22 @@ fn manifest(root: &Path) -> Result<Value> {
     Ok(value)
 }
 
+/// The ACP adapters of a Hub or Node at `home` (`steve_acp::managed`), through the release in
+/// `release`: `status`, `install` or `upgrade`. Their output goes straight to the terminal.
+pub fn adapters(role: &str, home: &Path, release: &Path, args: &[&str]) -> Result<i32> {
+    let (program, first) = if role == "hub" {
+        (release.join("bin/steve-hub"), "--adapters")
+    } else {
+        (release.join("bin/steve-node"), "adapters")
+    };
+    let status = clean_command(&program, Some(home))
+        .arg(first)
+        .args(args)
+        .status()
+        .with_context(|| format!("运行失败：{}", program.display()))?;
+    Ok(status.code().unwrap_or(1))
+}
+
 fn captured(
     program: &Path,
     home: &Path,
@@ -931,6 +947,12 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 }
             }
         }
+    }
+    /* the ACP adapters are Steve's dependencies: installed now, kept up to date by the Node; without
+     * npm, setup goes on and says how to add them */
+    match adapters(&role, &home, &candidate, &["install"]) {
+        Ok(0) => {}
+        Ok(_) | Err(_) => println!("ACP 适配器暂未安装；装好 Node.js 后运行 steve adapters install。"),
     }
     let mut service = crate::service::Service::new(&role, &home, options.label.as_deref())?;
     println!("正在注册 {role} 服务…");

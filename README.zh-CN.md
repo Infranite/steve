@@ -281,15 +281,15 @@ npm run build:web
 cargo build --locked --manifest-path hub-rs/Cargo.toml -p steve-hub
 ```
 
-### 2. 安装智能体适配器（可选）
+### 2. 安装适配器
 
-Steve 通过 ACP 适配器调用 harness，默认在 npm 全局目录里找：
+Steve 通过 ACP 适配器调用 harness：`@agentclientprotocol/claude-agent-acp` 和 `@agentclientprotocol/codex-acp`，需要 Node.js（npm）。`steve setup` 会把它们装进安装目录下的 `adapters`，之后由 Node 保持最新；开发用的 Hub 也这样装：
 
 ```sh
-npm install -g @agentclientprotocol/claude-agent-acp @zed-industries/codex-acp
+STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install
 ```
 
-用哪个装哪个。`claude` 不在 `/opt/homebrew/bin/claude` 时设置 `CLAUDE_CODE_EXECUTABLE`；适配器装在别处时设置 `STEVE_ADAPTER_CLAUDE` / `STEVE_ADAPTER_CODEX`。
+安装目录里没有时，也会用 npm 全局安装的。`claude` 不在 `/opt/homebrew/bin/claude` 时设置 `CLAUDE_CODE_EXECUTABLE`；适配器装在别处时设置 `STEVE_ADAPTER_CLAUDE` / `STEVE_ADAPTER_CODEX`。
 
 ### 3. 运行
 
@@ -333,6 +333,7 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | `STEVE_NODE_HANDOFF_MIN` | 设备离线、又有消息在等它的会话时，过多少分钟后 Steve 在别处开新会话继续事项（默认 30；`0` 表示不转移） |
 | `STEVE_TAILCAT`、`STEVE_TAILCAT_PORT` | 经 tailcat 接入远程 Node（可选，在“设备”页开启）：`tailcat` 不在 `PATH` 上时指定程序位置，以及只提供 Node 接口的本机端口（默认 Hub 端口 + 2） |
 | `STEVE_NODE_INSTALLERS` | 远程安装 Node 时使用的本地目录，里面放发布的 `steve-installer.json` 和安装包，供访问不了 GitHub 的 Hub 使用 |
+| `STEVE_ADAPTER_UPDATES` | Node 怎么对待 Steve 安装的 ACP 适配器的新版本：`auto`（默认：每天检查，没有会话运行时升级）、`check`（只显示）、`off` |
 
 > [!IMPORTANT]
 > 把监听地址暴露到本机以外之前，请先检查认证配置。Steve 下运行的智能体拥有你本机用户的权限。
