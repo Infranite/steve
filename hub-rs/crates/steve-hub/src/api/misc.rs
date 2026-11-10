@@ -306,6 +306,7 @@ pub async fn workspace_switch(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> ApiResult {
     let i = id.clone();
     if !st
@@ -321,7 +322,7 @@ pub async fn workspace_switch(
         &id,
         "/",
         365 * 24 * 3600,
-        st.cfg.secure_cookies(),
+        crate::access::secure_request(&st.cfg, &headers),
     );
     let mut res = ok_true()?;
     if let Ok(v) = cookie.parse() {
