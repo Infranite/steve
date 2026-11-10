@@ -51,7 +51,6 @@ sha2 = "=0.11.1"
 hex = "=0.4.3"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "process", "signal", "time", "fs", "sync", "io-util", "net"] }
-tokio-stream = { version = "=0.1.19", features = ["sync"] }
 tokio-util = { version = "=0.7.20", features = ["io"] }
 tower = { version = "=0.5.3", features = ["util"] }
 # gzip for the web assets and JSON answers (SSE is never compressed: its default predicate excludes event streams)
@@ -68,7 +67,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "=1.54.1", features = ["test-util"] }
-tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake"] }
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream"] }
 tempfile = "=3.27.0"

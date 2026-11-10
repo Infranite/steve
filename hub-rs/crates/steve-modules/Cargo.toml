@@ -58,5 +58,4 @@ steve-mail = { path = "../steve-mail", features = ["fake"] }
 steve-github = { path = "../steve-github", features = ["fake"] }
 jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto", "use_pem"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt"] }
-http-body-util = "=0.1.5"
 tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }

@@ -246,7 +246,7 @@ decl feishu_app platform 1ms
 decl feishu_user platform 1ms
 event_source github_app
 event_source github_pat
-jobs 15
+jobs 14
 lifecycle ext_ws
 lifecycle feishu_app
 lifecycle feishu_user
