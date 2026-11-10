@@ -105,6 +105,7 @@ mod tests {
             recent: vec![("用户".into(), "你好".into())],
             question: "知识系统怎么运作？".into(),
             ui: "界面：```a2ui".into(),
+            full: false,
         });
         assert!(!s.contains("{{"));
         assert!(s.trim_end().ends_with("界面：```a2ui"));
@@ -113,5 +114,19 @@ mod tests {
         assert!(s.contains("用户：你好"));
         assert!(s.contains("OFFER:"));
         assert!(render(&PromptInput::default()).contains("（无）"));
+    }
+
+    #[test]
+    fn says_what_the_run_may_do() {
+        let read_only = render(&PromptInput::default());
+        assert!(read_only.contains(READ_ONLY.0) && read_only.contains(READ_ONLY.1));
+        assert!(!read_only.contains(FULL.0) && !read_only.contains(FULL.1));
+        let full = render(&PromptInput {
+            full: true,
+            ..Default::default()
+        });
+        assert!(full.contains(FULL.0) && full.contains(FULL.1));
+        assert!(!full.contains("只读研究") && !full.contains(READ_ONLY.1));
+        assert!(!full.contains("{{"));
     }
 }

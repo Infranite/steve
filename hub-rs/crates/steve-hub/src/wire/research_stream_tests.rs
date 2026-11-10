@@ -138,6 +138,7 @@ impl Test {
             ws: steve_store::WS.into(),
             mid: "message".into(),
             user: None,
+            full: false,
             question: "@wire-check".into(),
             history: vec![],
             main: steve_core::repo::Bot {
