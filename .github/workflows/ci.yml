@@ -136,7 +136,7 @@ jobs:
         id: rust-build
         run: |
           mkdir -p ci-artifacts
-          cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --no-run
+          cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --no-run --timings
           cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --message-format json > ci-artifacts/full.json
       - name: Rust tests
         id: rust-tests
@@ -156,6 +156,7 @@ jobs:
           path: |
             ci-artifacts/full.json
             hub-rs/target/nextest/ci/junit.xml
+            hub-rs/target/cargo-timings/cargo-timing.html
           retention-days: 7
           if-no-files-found: error
       # Only third-party dependencies enter the trusted cache. Workspace artifacts always come
