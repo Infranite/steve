@@ -56,8 +56,6 @@ impl Test {
                 codex_home: root.join("adapter-state"),
                 user_home: root.clone(),
                 version: "test".into(),
-                idle_release: Duration::from_secs(60),
-                retry_delays: vec![],
             },
             roots: vec![steve_node::Root {
                 id: RootId::new("project").unwrap(),

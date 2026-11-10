@@ -5404,10 +5404,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "steve-people"
-version = "0.1.0"
-
-[[package]]
 name = "steve-research"
 version = "0.1.0"
 dependencies = [

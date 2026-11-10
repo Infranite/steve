@@ -517,25 +517,6 @@ pub fn resources_of(attachments: &Value) -> Vec<ResourceRef> {
         .collect()
 }
 
-/// The resources the agent may fetch of a message (same rules as [`fetch_bound`]).
-pub fn resources_bound(
-    ch: &Channels,
-    ws: &str,
-    space_id: &str,
-    message_id: &str,
-) -> Vec<ResourceRef> {
-    ch.store()
-        .reader(|c| -> crate::ChannelResult<Vec<ResourceRef>> {
-            Ok(match load(c, message_id)? {
-                Some(r) if r.ws == ws && r.space_id == space_id && r.direction == "in" => {
-                    resources_of(&effective(c, &r).1)
-                }
-                _ => Vec::new(),
-            })
-        })
-        .unwrap_or_default()
-}
-
 // ---------------------------------------------------------------- the agent's note
 
 /// The message text with a note for each attachment Steve does not read:

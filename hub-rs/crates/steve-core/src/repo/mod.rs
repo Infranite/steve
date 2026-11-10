@@ -248,14 +248,6 @@ impl Db {
         };
         Ok(self.s.tags().create(ws, &t, by)?)
     }
-    pub fn tag_set_description(&self, id: &str, description: &str) -> Result<()> {
-        let p = steve_store::TagPatch {
-            description: Some(description.into()),
-            ..Default::default()
-        };
-        self.s.tags().patch(id, &p)?;
-        Ok(())
-    }
     pub fn tag_patch(&self, id: &str, p: &steve_store::TagPatch) -> Result<()> {
         self.s.tags().patch(id, p)?;
         Ok(())

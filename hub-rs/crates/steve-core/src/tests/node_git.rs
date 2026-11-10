@@ -81,8 +81,6 @@ impl OnNode {
                 codex_home: home.path().join("codex"),
                 user_home: home.path().into(),
                 version: "test".into(),
-                idle_release: Duration::from_secs(600),
-                retry_delays: vec![],
             },
             roots: vec![steve_node::Root {
                 id: RootId::new("home").unwrap(),

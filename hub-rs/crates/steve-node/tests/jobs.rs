@@ -152,8 +152,6 @@ impl T {
                 codex_home: self.root.join("codex-home"),
                 user_home: self.root.clone(),
                 version: "test".into(),
-                idle_release: Duration::from_secs(600),
-                retry_delays: vec![],
             },
             roots: vec![],
             capacity: Capacity {

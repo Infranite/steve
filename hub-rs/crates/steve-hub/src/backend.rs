@@ -346,10 +346,6 @@ pub trait Repo {
     fn items_all(&self, ws: &str) -> BResult<Vec<Obj>> {
         todo_backend!("items_all")
     }
-    /// Non-archived task items, updated DESC.
-    fn items_list(&self, ws: &str) -> BResult<Vec<Obj>> {
-        todo_backend!("items_list")
-    }
     fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         todo_backend!("item_get")
     }
@@ -484,9 +480,6 @@ pub trait Repo {
     /// Full queued rows of a session by created.
     fn queued_list(&self, session: &str) -> BResult<Vec<Obj>> {
         todo_backend!("queued_list")
-    }
-    fn queued_drop(&self, id: &str) -> BResult<()> {
-        todo_backend!("queued_drop")
     }
     /// Every non-null `sessions.import_key`.
     fn import_keys(&self) -> BResult<Vec<String>> {

@@ -58,7 +58,6 @@ pub mod header {
     /// 0-based part index.
     pub const SEQ: &str = "seq";
     pub const TRACE_ID: &str = "trace_id";
-    pub const INSTANCE_ID: &str = "instance_id";
     /// Handler time in ms, added to the ack.
     pub const BIZ_RT: &str = "biz_rt";
     /// Handshake failure details, as HTTP response headers of a refused upgrade.

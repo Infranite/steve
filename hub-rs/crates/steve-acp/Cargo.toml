@@ -1,6 +1,6 @@
 [package]
 name = "steve-acp"
-description = "ACP client for Steve: adapter processes over stdio (replaces hub/src/acp.ts and codex.ts)"
+description = "ACP client for Steve: adapter processes over stdio"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true

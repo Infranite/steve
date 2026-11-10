@@ -48,10 +48,6 @@ pub struct Parsed {
 }
 
 impl Parsed {
-    /// Has an attachment that is not an inline image of the body.
-    pub fn has_real_attachments(&self) -> bool {
-        self.attachments.iter().any(|a| !a.inline)
-    }
 }
 
 /// Parses a message. `header_only`: the raw bytes are only the header (very large mail), so there is

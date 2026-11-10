@@ -1,5 +1,4 @@
-# Steve Hub in Rust. Same REST/SSE API, SQLite schema and config as the TypeScript Hub in ../hub;
-# the e2e suite is hub/test/e2e.sh.
+# The Steve Hub, its Node and their libraries.
 [workspace]
 resolver = "3"
 members = ["crates/*"]

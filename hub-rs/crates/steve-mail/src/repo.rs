@@ -259,15 +259,6 @@ pub fn thread_by_key(c: &Connection, conn: &str, key: &str) -> MailResult<Option
     .optional()?)
 }
 
-pub fn threads_of(c: &Connection, conn: &str) -> MailResult<Vec<ThreadRow>> {
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {THREAD_COLS} FROM mail_threads WHERE connection_id = ? ORDER BY last_at DESC"
-    ))?;
-    Ok(st
-        .query_map([conn], thread_row)?
-        .collect::<rusqlite::Result<_>>()?)
-}
-
 pub fn insert_thread(tx: &Tx, t: &ThreadRow, now: i64) -> MailResult<()> {
     tx.prepare_cached(
         "INSERT INTO mail_threads (id, workspace_id, connection_id, thread_key, subject, last_at, count, unread,

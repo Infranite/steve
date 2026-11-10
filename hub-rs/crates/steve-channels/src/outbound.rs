@@ -111,8 +111,6 @@ pub const PROXY_MARK: &str = "（由 Steve 代发）";
 pub const TEXT_MAX: usize = 4000;
 
 pub const MSG_ALREADY_SENT: &str = "消息已经发出，不能撤销";
-pub const MSG_HANDLED: &str = "这条消息已经处理过了";
-pub const ERR_NO_AUTH: &str = "没有有效的批准或授权";
 pub const ERR_SECRET: &str = "正文里有机密值，已拦下";
 pub const ERR_NO_RECALL: &str = "这个渠道不支持撤回";
 

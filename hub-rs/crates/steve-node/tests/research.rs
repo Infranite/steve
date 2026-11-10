@@ -87,8 +87,6 @@ impl T {
                 codex_home: root.join("codex"),
                 user_home: root.clone(),
                 version: "test".into(),
-                idle_release: Duration::from_secs(600),
-                retry_delays: vec![],
             },
             roots: vec![Root {
                 id: RootId::new("work").unwrap(),

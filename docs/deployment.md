@@ -165,7 +165,7 @@ Snapshots are sampled reads, not a distributed transaction. `changed_during_read
 
 ## Several machines
 
-Steve runs work on Nodes. The Hub is always one of them: its own Node, `local`, runs in the Hub's process by default, or in a process of its own with `STEVE_NODE_MODE=service`. Any other machine can become a Node as well. A typical arrangement is an always-on Hub with other machines added as Nodes, but none is assumed: one machine on its own is a complete Steve.
+Steve runs work on Nodes. The Hub is always one of them: its own Node, `local`, runs in a process of its own by default, so a Hub restart or upgrade leaves its turns running; `STEVE_NODE_MODE=local` keeps it in the Hub's process. Any other machine can become a Node as well. A typical arrangement is an always-on Hub with other machines added as Nodes, but none is assumed: one machine on its own is a complete Steve.
 
 - **Reaching the Hub:** a Node dials the Hub, never the other way round. It can use the Hub's HTTPS address (a reverse proxy that terminates TLS, see [Remote Nodes](#remote-nodes)) or [tailcat](#remote-nodes-over-tailcat) when there is no public address or VPN.
 - **Adding a machine:** pair it from Devices with a code ([Pairing a separate Node](#pairing-a-separate-node)), or let the Hub [install it over tailcat](#installing-a-node-remotely-over-tailcat).

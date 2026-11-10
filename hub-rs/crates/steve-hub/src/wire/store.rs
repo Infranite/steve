@@ -535,9 +535,6 @@ impl Repo for StoreBackend {
     fn items_all(&self, ws: &str) -> BResult<Vec<Obj>> {
         objs(self.0.items().all(ws).map_err(err)?)
     }
-    fn items_list(&self, ws: &str) -> BResult<Vec<Obj>> {
-        objs(self.0.items().list(ws, false).map_err(err)?)
-    }
     fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.items().get(id).map_err(err)?)
     }
@@ -687,9 +684,6 @@ impl Repo for StoreBackend {
     }
     fn queued_list(&self, session: &str) -> BResult<Vec<Obj>> {
         objs(self.0.queued().list(session).map_err(err)?)
-    }
-    fn queued_drop(&self, id: &str) -> BResult<()> {
-        self.0.queued().drop(id).map_err(err)
     }
     fn import_keys(&self) -> BResult<Vec<String>> {
         Ok(self

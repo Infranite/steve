@@ -356,8 +356,6 @@ mod tests {
                     codex_home: dir.join("codex"),
                     user_home: dir.to_path_buf(),
                     version: "test".into(),
-                    idle_release: Duration::from_secs(600),
-                    retry_delays: vec![],
                 },
                 roots: vec![],
                 capacity: Capacity {

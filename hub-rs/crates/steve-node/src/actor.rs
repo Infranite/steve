@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use steve_acp::normalize::{Fact, Normalizer};
 use steve_acp::permission::{self, Asked};
 use steve_acp::rpc::{Conn, ExitReport, Incoming, RpcError, Spawn};
-use steve_acp::session::{self as acp_session, OpenConfig, Reports, Strictness};
+use steve_acp::session::{self as acp_session, OpenConfig, Reports};
 use steve_node_api::*;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -2268,7 +2268,7 @@ async fn open_harness(
             .mode_choice(&harness, row.open.policy.permissions),
     );
     let meta = inner.cfg.acp.session_meta(&harness);
-    let handshake = acp_session::open_with_meta(
+    let handshake = acp_session::open(
         &conn,
         OpenConfig {
             client_version: &inner.cfg.acp.version,
@@ -2282,7 +2282,6 @@ async fn open_harness(
         },
         meta,
         &seen,
-        Strictness::Strict,
     );
     let opened = tokio::select! {
         _ = cancelled.changed() => Err(RpcError {message: "startup cancelled".into(), data: None}),

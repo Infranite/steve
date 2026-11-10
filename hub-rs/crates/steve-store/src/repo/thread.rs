@@ -138,11 +138,6 @@ impl ThreadRun {
             ended: r.get("ended")?,
         })
     }
-
-    /// Still waiting or still reading.
-    pub fn is_active(&self) -> bool {
-        matches!(self.status.as_str(), "queued" | "running")
-    }
 }
 
 /// Fields of a new `thread_runs` row (status `queued`).

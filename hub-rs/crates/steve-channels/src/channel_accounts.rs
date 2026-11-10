@@ -25,9 +25,6 @@ pub fn default_trigger() -> Value {
     json!({"on": false, "words": ["/bot"], "where": ["*"], "mark": true})
 }
 
-/// `400` for a trigger on a bot account (only your own account speaks for you).
-pub const BOT_NO_TRIGGER: &str = "触发语只用于以你本人接入的账号";
-
 /// What the account page shows of a channel provider (`GET /channels` `providers`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProviderOut {

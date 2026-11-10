@@ -419,7 +419,7 @@ impl super::node_runtime::NodeDomain for HubHost {
 /// new one no Node takes is refused ([`steve_core::AgentRuntime::refusal`]). Holds and counts
 /// cover every Node.
 pub struct RoutedRuntime {
-    /// The local Node's coordinator (`STEVE_NODE_MODE=local`, the default).
+    /// The local Node's coordinator (`STEVE_NODE_MODE=local`).
     pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
     /// The remote Nodes' coordinators (enabled by default).
     pub fleet: Option<Arc<crate::nodes::NodeFleet>>,
@@ -1138,7 +1138,7 @@ pub struct CoreDomain {
     pub harnesses: Arc<crate::harnesses::HubHarnesses>,
     /// The runtime the core runs sessions on.
     pub routed: Arc<RoutedRuntime>,
-    /// The local Node (`STEVE_NODE_MODE=local`, the default): stopped with the Hub, its harnesses
+    /// The local Node (`STEVE_NODE_MODE=local`): stopped with the Hub, its harnesses
     /// with it.
     pub node: Option<Arc<steve_node::LocalNode>>,
     /// The connections' runs (long connections, pollers): stopped with the Hub.
@@ -2530,8 +2530,6 @@ mod prepared_dir_tests {
                 codex_home: dir.path().join("codex"),
                 user_home: dir.path().to_path_buf(),
                 version: "test".into(),
-                idle_release: Duration::from_secs(600),
-                retry_delays: vec![],
             },
             roots: vec![steve_node::Root {
                 id: RootId::new("projects").unwrap(),

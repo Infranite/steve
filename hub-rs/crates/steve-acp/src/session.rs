@@ -1,10 +1,9 @@
 //! Opening an ACP session on a started adapter: `initialize`, `session/new` or `session/load`, the
 //! permission mode, the model and the reasoning effort, for the Node's driver.
 //!
-//! What the adapter reports comes back through [`Reports`] at the moment it is known. How strict
-//! to be is the caller's [`Strictness`]: lenient logs a mode or model it could not set and goes on
-//! (how the Hub's old runner worked); a Node fails closed, since the Hub asked for a configuration
-//! and must not get another one silently.
+//! What the adapter reports comes back through [`Reports`] at the moment it is known. A mode or
+//! model that could not be set is an error: the Hub asked for a configuration and must not get
+//! another one silently.
 
 use std::time::Duration;
 
@@ -123,14 +122,6 @@ pub trait Reports: Sync {
     fn effort(&self, _effort: &str) {}
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Strictness {
-    /// A mode or model that could not be set is logged; the session opens anyway.
-    Lenient,
-    /// It is an error.
-    Strict,
-}
-
 #[derive(Debug, Clone)]
 pub struct Opened {
     pub acp_id: String,
@@ -149,36 +140,15 @@ fn err(message: String) -> RpcError {
     }
 }
 
-/// initialize + session/new|load + mode + model + effort.
+/// initialize + session/new|load + mode + model + effort, with `meta` as the `_meta` of
+/// `session/new|load` (Claude Code's adapter reads its options there,
+/// `claudeCode.options.settings` among them).
 pub async fn open(
     l: &Conn,
     c: OpenConfig<'_>,
-    reports: &dyn Reports,
-    strictness: Strictness,
-) -> Result<Opened, RpcError> {
-    open_with_meta(l, c, None, reports, strictness).await
-}
-
-/// [`open`], with `meta` as the `_meta` of `session/new|load` (Claude Code's adapter reads its
-/// options there, `claudeCode.options.settings` among them).
-pub async fn open_with_meta(
-    l: &Conn,
-    c: OpenConfig<'_>,
     meta: Option<Value>,
     reports: &dyn Reports,
-    strictness: Strictness,
 ) -> Result<Opened, RpcError> {
-    open_with(l, c, meta, reports, strictness).await
-}
-
-async fn open_with(
-    l: &Conn,
-    c: OpenConfig<'_>,
-    meta: Option<Value>,
-    reports: &dyn Reports,
-    strictness: Strictness,
-) -> Result<Opened, RpcError> {
-    let strict = strictness == Strictness::Strict;
     let init = json!({
         "protocolVersion": 1,
         "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
@@ -258,11 +228,7 @@ async fn open_with(
         None => None,
         Some(choice) => match choice.resolve(offered_modes(&r).as_deref()) {
             Ok(id) => id,
-            Err(e) if strict => return Err(err(e)),
-            Err(e) => {
-                tracing::error!("{e}");
-                None
-            }
+            Err(e) => return Err(err(e)),
         },
     };
     if let Some(mode) = &mode
@@ -274,10 +240,7 @@ async fn open_with(
             )
             .await
     {
-        if strict {
-            return Err(err(format!("权限模式 {mode} 没能生效：{}", e.message)));
-        }
-        tracing::error!("set_mode {}", e.message);
+        return Err(err(format!("权限模式 {mode} 没能生效：{}", e.message)));
     }
     let mut config = r.clone();
     if let Some(model) = model {
@@ -296,25 +259,19 @@ async fn open_with(
                 match actual {
                     Some(actual) => {
                         reports.model(actual);
-                        if strict && actual != model {
+                        if actual != model {
                             return Err(err(format!("模型没能生效：请求 {model}，实际 {actual}")));
                         }
                     }
                     // the adapter took it without saying what it runs: what was asked and accepted
-                    // is in force (strictly; leniently, what it last saw is kept)
-                    None if strict => reports.model(model),
-                    None => {}
+                    // is in force
+                    None => reports.model(model),
                 }
                 if updated.get("configOptions").is_some() {
                     config = updated;
                 }
             }
-            Err(e) => {
-                if strict {
-                    return Err(err(format!("模型 {model} 没能生效：{}", e.message)));
-                }
-                tracing::warn!("set model {model} {}", e.message);
-            }
+            Err(e) => return Err(err(format!("模型 {model} 没能生效：{}", e.message))),
         }
     }
     let effort_opt = effort_option(&config);
@@ -362,7 +319,7 @@ async fn open_with(
 /// option (`session/set_model` is -32601 there) and the model does not survive `session/load`, so
 /// this runs on every start. `session/set_model` is the fallback for adapters without the option.
 /// The adapter may map an id it does not list to a near one; that is logged here and judged by the
-/// caller (strict callers refuse it).
+/// caller (which refuses it).
 async fn apply_model(
     l: &Conn,
     acp_id: &str,

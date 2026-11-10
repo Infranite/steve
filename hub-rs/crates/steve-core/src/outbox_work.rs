@@ -1,5 +1,5 @@
 //! Work on the durable outbox: `work.item.done` is emitted in the transaction
-//! that finishes an item ([`emit_item_done`], called by [`crate::repo::Db::finish_in_one_tx`]), and
+//! that finishes an item (the closing commit in [`crate::cycle`]), and
 //! Work's own follow-up runs as a consumer of it after the commit: [`WorkTidy`] gives back the item's
 //! worktree and merged branch (git), which used to run inside `finish`.
 //!
@@ -10,35 +10,10 @@
 
 use std::sync::Arc;
 
-use steve_store::outbox::{self, ConsumeError, Consumer, Event, Since};
+use steve_store::outbox::{ConsumeError, Consumer, Event, Since};
 use steve_work_api::{ITEM_DONE, ITEM_DONE_V, ItemDone};
 
 use crate::Core;
-
-/// Emits `work.item.done` for `item` (as finished) in `tx`.
-pub fn emit_item_done(
-    tx: &steve_store::Tx,
-    item: &steve_store::Item,
-) -> crate::error::Result<Event> {
-    let p = ItemDone {
-        item_id: item.id.clone(),
-        title: item.title.clone(),
-        status: item.status.clone(),
-        bot_id: item.bot_id.clone(),
-        project_id: item.project_id.clone(),
-        source: serde_json::to_value(&item.source)?,
-        cycle: Some(item.cycle),
-        revision: Some(item.revision),
-        acceptance: item.acceptance.clone(),
-    };
-    Ok(outbox::emit(
-        tx,
-        &item.workspace_id,
-        ITEM_DONE,
-        ITEM_DONE_V,
-        &serde_json::to_value(p)?,
-    )?)
-}
 
 /// The payload of a `work.item.done` event; malformed or of an unknown version: rejected.
 pub fn item_done_of(ev: &Event) -> Result<ItemDone, ConsumeError> {

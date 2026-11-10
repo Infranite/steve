@@ -221,13 +221,6 @@ fn str_list(v: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn rules_of(s: &SourceRow) -> Rules {
-    Rules::new(
-        str_list(&s.config, "include"),
-        str_list(&s.config, "exclude"),
-    )
-}
-
 /// The title of a file without front matter: its name without the extension.
 pub fn default_title(rel: &str) -> String {
     let name = rel.rsplit('/').next().unwrap_or(rel);

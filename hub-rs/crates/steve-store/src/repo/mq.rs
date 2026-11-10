@@ -431,14 +431,6 @@ pub fn entry_landed(c: &Connection, id: &str, commit: Option<&str>, at: i64) -> 
     Ok(())
 }
 
-pub fn entry_head_set(c: &Connection, id: &str, head: &str, consent: Option<&str>) -> Result<()> {
-    c.execute(
-        "UPDATE mq_entries SET head = ?, consent = coalesce(?, consent), updated = ? WHERE id = ?",
-        params![head, consent, now(), id],
-    )?;
-    Ok(())
-}
-
 /// The entry went to the host's merge queue as pull request `pr`.
 pub fn entry_pr_set(c: &Connection, id: &str, pr: i64) -> Result<()> {
     c.execute(
@@ -644,13 +636,6 @@ pub fn step_put(c: &Connection, s: &MqStep) -> Result<()> {
         ],
     )?;
     Ok(())
-}
-
-pub fn step_get(c: &Connection, op: &str) -> Result<Option<MqStep>> {
-    Ok(
-        c.query_row("SELECT * FROM mq_steps WHERE operation_id = ?", [op], step)
-            .optional()?,
-    )
 }
 
 /// The steps of batch `no` (`train` false) or train `no`, in order.

@@ -355,9 +355,4 @@ impl GitHub {
         let base = api::api_base_or(&cx, &self.0.env.api_base).to_string();
         Ok(GhConn::on(cx, self.0.etags.clone(), &base))
     }
-
-    /// Single-use manifest states in progress (for tests and diagnostics).
-    pub fn pending_flows(&self) -> usize {
-        self.0.flows.len()
-    }
 }

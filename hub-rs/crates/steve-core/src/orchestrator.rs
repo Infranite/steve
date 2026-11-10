@@ -682,18 +682,6 @@ impl Core {
         }
         t.item(item)
     }
-    /// A termination rule decided the item failed (a module's or a flow's rule, never a guess).
-    pub fn fail_by_rule(&self, item: &str, rule: &str, why: &str) -> Result<Item> {
-        let mut t = self.tx();
-        t.db().timeline_add(
-            item,
-            "steve",
-            "sys",
-            &format!("按规则「{rule}」判定失败：{why}"),
-            None,
-        )?;
-        t.lc_stop(item, crate::cycle::FAIL, "steve", why, Some(rule))
-    }
     /// Commits every closing whose gate holds now (the periodic tick and after boot).
     pub fn lifecycle_tick(&self) -> Result<usize> {
         let n = {
