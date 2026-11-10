@@ -1,5 +1,5 @@
 name: CI
-# Compile once per platform, then run disjoint nextest partitions from that exact build.
+# One Rust job per platform compiles the workspace's tests and runs all of them on that runner.
 # cut-release.py accepts only this entire workflow's successful run: the push run on the release head, or the
 # run of the pull request that head was merged from when it tested the same tree.
 on:
@@ -65,16 +65,88 @@ jobs:
       fail-fast: false
       matrix:
         runner: [ubuntu-22.04, macos-15]
-    uses: ./.github/workflows/rust-tests.yml
-    with:
-      runner: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.99.1
+      - name: Install Linux test prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: rust-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            hub-rs/target/debug
+          key: rust-test-v1-${{ matrix.runner }}-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: rust-test-v1-${{ matrix.runner }}-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml') }}-
+      - name: Always rebuild workspace packages from this checkout
+        run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
+      - name: Install checksum-pinned nextest from the official release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/install-nextest.py
+      - name: Compile all Rust tests and record the inventory
+        id: rust-build
+        run: |
+          mkdir -p ci-artifacts
+          cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --no-run
+          cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --message-format json > ci-artifacts/full.json
+      - name: Rust tests
+        id: rust-tests
+        run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 0 --no-fail-fast
+      - name: Rust test report (first-attempt failures remain failures)
+        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
+        run: python3 scripts/nextest-summary.py hub-rs/target/nextest/ci/junit.xml
+      - name: Verify the entire test inventory ran exactly once and passed on the first try
+        run: python3 scripts/nextest-partitions.py ci-artifacts/full.json ci-artifacts/full.json --junit hub-rs/target/nextest/ci/junit.xml
+      - name: Rust doctests (reuse the compiled workspace)
+        if: ${{ !cancelled() && steps.rust-build.outcome == 'success' }}
+        run: cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace --doc
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
+        with:
+          name: rust-results-${{ matrix.runner }}
+          path: |
+            ci-artifacts/full.json
+            hub-rs/target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: error
+      # Only third-party dependencies enter the trusted cache. Workspace artifacts always come
+      # from this checkout, even when cache fingerprints or file timestamps would allow reuse.
+      # A failing test does not keep a built dependency set from being cached.
+      - name: Keep only dependency artifacts in the cache
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.rust-build.outcome == 'success' }}
+        run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            hub-rs/target/debug
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
   test:
     name: CI gate
     if: ${{ always() }}
     needs: [scripts, web, rust]
     runs-on: ubuntu-22.04
     steps:
-      - name: Require every job, including every platform and partition
+      - name: Require every job on every platform
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
@@ -84,25 +156,3 @@ jobs:
           assert set(results) == {'scripts', 'web', 'rust'}, results
           assert all(job['result'] == 'success' for job in results.values()), results
           PY
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: rust-inventory-*
-          path: ci-artifacts
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: rust-results-*
-          path: ci-artifacts
-      - name: Verify each platform ran its entire test inventory exactly once
-        run: |
-          for platform in ubuntu-22.04 macos-15; do
-            python3 scripts/nextest-partitions.py "ci-artifacts/rust-inventory-$platform/full.json" \
-              "ci-artifacts/rust-results-$platform-1/ci-artifacts/selected.json" \
-              "ci-artifacts/rust-results-$platform-2/ci-artifacts/selected.json" \
-              "ci-artifacts/rust-results-$platform-3/ci-artifacts/selected.json" \
-              "ci-artifacts/rust-results-$platform-4/ci-artifacts/selected.json" \
-              --junit "ci-artifacts/rust-results-$platform-1/hub-rs/target/nextest/ci/junit.xml" \
-              --junit "ci-artifacts/rust-results-$platform-2/hub-rs/target/nextest/ci/junit.xml" \
-              --junit "ci-artifacts/rust-results-$platform-3/hub-rs/target/nextest/ci/junit.xml" \
-              --junit "ci-artifacts/rust-results-$platform-4/hub-rs/target/nextest/ci/junit.xml"
-          done

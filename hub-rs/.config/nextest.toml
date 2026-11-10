@@ -1,4 +1,4 @@
-# Every CI test runs in its own process, from a platform-specific nextest archive.
+# Every CI test runs in its own process, on the runner that compiled it.
 # Fail the first attempt: retries must not turn a flaky release gate green.
 # scripts/nextest-summary.py preserves the failure details in the job summary.
 

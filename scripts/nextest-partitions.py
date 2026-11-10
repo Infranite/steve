@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Prove that nextest's actual partition lists cover the default suite exactly once.
+"""Prove that nextest's actual lists and reports cover the default suite exactly once.
 
+    python3 scripts/nextest-partitions.py full.json full.json --junit junit.xml
     python3 scripts/nextest-partitions.py full.json shard-1.json shard-2.json ...
+
+CI runs the whole suite in one job per platform and passes the full list as its only
+list, with the run's JUnit report: every selected test ran once and passed first try.
+A suite split across runners passes one list (and report) per shard instead.
 
 Inputs are `cargo nextest list --message-format json`, with identical build/profile
 options and only `--partition hash:M/N` added for each shard. The full list must
