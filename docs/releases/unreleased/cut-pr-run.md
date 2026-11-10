@@ -1,0 +1,1 @@
+- 发布不再为同一份代码等第二遍 CI：一个已经跟上 `main` 的 PR 以 rebase 方式合并后，`main` 末尾的提交和 PR 的提交逐个内容相同，`ops/cut-release.py cut` 会核对这一点（GitHub 记录的合并提交、逐个提交的 tree），核对通过就直接认 PR 那一遍通过的 CI，不再等 `main` 上重复的那一遍。PR 落后于 `main`、被 squash、它的 CI 没通过，或者 `main` 上那一遍已经失败时，仍按原来的规则处理。

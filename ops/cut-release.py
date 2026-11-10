@@ -15,11 +15,16 @@ someone else pushed or released first, it starts again from the new state, a few
 
 Only a tested commit is tagged: `cut` first asks GitHub (`gh`: $STEVE_GH, else on PATH, else in /opt/homebrew/bin,
 /usr/local/bin or /usr/bin, as the Hub finds it) for the CI workflow's run (`.github/workflows/
-ci.yml`) pushed to the branch at the head it is about to release (a pull request's run of the same commit
-does not count: it is not the trusted branch push). It waits while that run is queued or running (up to
-`--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and how to
-run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. `--skip-ci` releases without
-that check, on purpose (it says so). `--dry-run` does not ask.
+ci.yml`) pushed to the branch at the head it is about to release. It waits while that run is queued or running
+(up to `--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and
+how to run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. `--skip-ci` releases
+without that check, on purpose (it says so). `--dry-run` does not ask.
+
+Until the branch's own run has finished, a pull request's run counts in one case: the head is that pull
+request as GitHub merged it, and its commits are the pull request's commits with the same trees, one for one,
+on the commit they were already on (a rebase merge of an up-to-date pull request). What that run tested is then
+the very tree being released, workflow included, and a second run of it would only repeat the first. Any other
+pull request run does not count: it tested something else.
 
 A `docs/releases/X.Y.Z.md` for a version no tag has yet (written ahead the old way) is taken as the
 first fragment of that release.
@@ -129,18 +134,65 @@ def gh(*args, cwd):
     return r.stdout
 
 
-def ci_run(repo, sha, branch):
-    """The newest run of the CI workflow pushed to `branch` at `sha`, or None. Only a push run: a pull
-    request's run is not the trusted branch's push run."""
-    out = gh("api", f"repos/{{owner}}/{{repo}}/actions/workflows/{CI_WORKFLOW}/runs"
-             f"?head_sha={sha}&event=push&branch={branch}&per_page=20", cwd=repo)
+def api(repo, path):
+    out = gh("api", f"repos/{{owner}}/{{repo}}/{path}", cwd=repo)
     try:
-        runs = json.loads(out).get("workflow_runs") or []
-    except (ValueError, AttributeError):
+        return json.loads(out)
+    except ValueError:
         raise Refused(f"can't read CI from GitHub: unexpected answer {out.strip()[:200]!r}")
-    runs = [r for r in runs if r.get("head_sha") == sha and r.get("event") == "push"
-            and r.get("head_branch") in (None, branch)]
+
+
+def ci_runs(repo, sha, event, more=""):
+    """The runs of the CI workflow on `sha` for `event`."""
+    found = api(repo, f"actions/workflows/{CI_WORKFLOW}/runs?head_sha={sha}&event={event}{more}&per_page=20")
+    runs = found.get("workflow_runs") if isinstance(found, dict) else None
+    if not isinstance(runs, list):
+        raise Refused(f"can't read CI from GitHub: unexpected answer {json.dumps(found)[:200]!r}")
+    return [r for r in runs if r.get("head_sha") == sha and r.get("event") == event]
+
+
+def newest(runs):
     return max(runs, key=lambda r: (r.get("run_number") or 0, r.get("id") or 0), default=None)
+
+
+def ci_run(repo, sha, branch):
+    """The newest run of the CI workflow pushed to `branch` at `sha`, or None."""
+    return newest([r for r in ci_runs(repo, sha, "push", f"&branch={branch}")
+                   if r.get("head_branch") in (None, branch)])
+
+
+def merged_pull(repo, sha, branch):
+    """The pull request GitHub merged into `branch` as `sha`: (its number, its head commit), or None."""
+    pulls = api(repo, f"commits/{sha}/pulls?per_page=20")
+    for p in pulls if isinstance(pulls, list) else []:
+        head = (p.get("head") or {}).get("sha")
+        if (head and p.get("merged_at") and p.get("merge_commit_sha") == sha
+                and (p.get("base") or {}).get("ref") == branch):
+            return p.get("number"), head
+    return None
+
+
+def replayed(repo, sha, number, pull):
+    """`sha` is the pull request's head `pull`, replayed onto the commit that head was already on: the same
+    commits with the same trees, one for one (a rebase merge of an up-to-date pull request). The branch then
+    held nothing the pull request lacked, so the merge its run tested had the tree of `pull`, which is the
+    tree of `sha`."""
+    try:
+        if git("cat-file", "-e", f"{pull}^{{commit}}", cwd=repo, check=False).returncode != 0:
+            git("fetch", "--quiet", "origin", f"refs/pull/{number}/head", cwd=repo, check=False, timeout=NET_TIMEOUT)
+        base = git("merge-base", pull, sha, cwd=repo, check=False).stdout.strip()
+        if not base:
+            return False
+        trees = []
+        for tip in (pull, sha):
+            rows = [l.split() for l in git("log", "--topo-order", "--format=%T %P", f"{base}..{tip}",
+                                           cwd=repo).stdout.splitlines()]
+            if any(len(r) != 2 for r in rows):  # a merge in between: not a replay
+                return False
+            trees.append([r[0] for r in rows])
+        return trees[0] == trees[1]
+    except Refused:
+        return False
 
 
 def rerun_hint(run):
@@ -150,13 +202,24 @@ def rerun_hint(run):
 
 def ci_gate(repo, sha, branch, wait):
     """Return once the CI workflow passed on `sha`; refuse when it failed, is missing, or still runs after
-    `wait` seconds. This is the workflow conclusion, never a successful job or shard."""
+    `wait` seconds. This is the workflow conclusion, never a successful job."""
     short = sha[:7]
     start = time.monotonic()
     said = None
+    pull = ...  # the pull request merged as `sha` whose run tested this tree (None: there is none), once asked
     while True:
         run = ci_run(repo, sha, branch)
         waited = time.monotonic() - start
+        if run is None or run.get("status") != "completed":
+            if pull is ...:
+                pull = merged_pull(repo, sha, branch)
+                if pull and not replayed(repo, sha, *pull):
+                    pull = None
+            tested = newest(ci_runs(repo, pull[1], "pull_request")) if pull else None
+            if tested and (tested.get("status"), tested.get("conclusion")) == ("completed", "success"):
+                print(f"CI passed on pull request #{pull[0]} ({pull[1][:7]}), merged as {short} with the same "
+                      f"commits and trees: {tested.get('html_url', tested.get('id'))}", file=sys.stderr)
+                return tested
         if run is None:
             if waited >= min(wait, CI_APPEAR):
                 raise Refused(f"CI ({CI_WORKFLOW}) has no push run on {short}: only a tested commit is released "
