@@ -30,7 +30,6 @@ mail-parser = { version = "=1.0.0", features = ["full_encoding"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 rustls-native-certs = "=0.8.5"
-rustls-pki-types = "=1.15.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"

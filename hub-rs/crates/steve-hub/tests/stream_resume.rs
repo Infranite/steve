@@ -280,7 +280,8 @@ async fn state_watermark_and_resumable_stream() {
         "{theirs:?}"
     );
 
-    // reconnecting with the last id seen replays nothing
+    // reconnecting with the last id seen replays nothing (the statistics refresher's 2 s pass may
+    // land in the window: a frame after the cursor, not a replay)
     let last = got
         .iter()
         .filter_map(|f| f.id.clone())
@@ -288,7 +289,8 @@ async fn state_watermark_and_resumable_stream() {
         .expect("an id");
     let again = e.frames("default", &format!("?after={last}"), 500).await;
     assert!(
-        again.iter().all(|f| f.data["type"] == "stream.gap"),
+        again.iter().all(|f| f.data["type"] == "stream.gap"
+            || f.id.as_deref().is_some_and(|i| n_of(i) > n_of(&last))),
         "{again:?}"
     );
 
