@@ -14,3 +14,9 @@ publish = false
 # worktree builds its own `target/`, and a test build of the workspace is about 19% smaller (ST-45).
 [profile.dev]
 debug = "line-tables-only"
+
+# SQLite is C built from source, and unoptimized it is several times slower. Nearly every test opens
+# a fresh database and runs every migration on it, so that is most of what a typical test costs:
+# optimized, such a test takes about half as long. It compiles once per `target/`, in seconds.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
