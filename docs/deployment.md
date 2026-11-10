@@ -79,7 +79,7 @@ In the meeting Steve asks what to call you and what you use it for, and then, on
 
 - **Your profile.** It may read a small, recent part of what is already on the Hub's machine (the session history and global instruction files coding agents left in the home directory, the global git configuration, the projects under the home directory) and saves what it learned as your name, a short description and remembered facts and preferences under 我. It is told not to read or save secrets.
 - **The models.** It lists the models each installed harness offers and picks, per purpose, a fast one for routing and titles and the strongest for research, drafting and orchestration. Only models a harness reports are accepted. Settings · Models shows and changes the result.
-- **Bots.** From what you do, it proposes two to four Bots and creates the ones you agree to. The Bots page shows and changes them.
+- **Bots.** From what you do and the Bots there are already, it proposes two to four Bots and creates the ones you agree to. The Bots page shows and changes them.
 
 Every one of these writes goes through the same validation, audit log and setting revisions as the corresponding page, so each can be reviewed and undone there. The meeting runs as the owner's main conversation does, with the access of the OS user the Hub runs as, and it uses the model of Steve's own Bot, so it spends that harness's quota.
 

@@ -64,7 +64,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": BOTS,
-            "description": "First meeting only. Create the Bots the user agreed to. Each needs a name; `role` says what it is responsible for, `rules` how it works, `persona` how it speaks. `harness` and `model` are optional (ids from steve_onboard_models; the default is the harness Steve itself runs on with its default model). A Bot whose name exists already is skipped.",
+            "description": "First meeting only. Without arguments: lists the Bots there are already (name, what each is responsible for, its harness); look before proposing new ones. With `bots`: creates the Bots the user agreed to. Each needs a name; `role` says what it is responsible for, `rules` how it works, `persona` how it speaks. `harness` and `model` are optional (ids from steve_onboard_models; the default is the harness Steve itself runs on with its default model). A Bot whose name exists already is skipped.",
             "inputSchema": schema(json!({
                 "bots": {
                     "type": "array", "minItems": 1, "maxItems": MAX_BOTS,
@@ -81,7 +81,7 @@ pub fn tools() -> Vec<Value> {
                         "required": ["name"],
                     },
                 },
-            }), &["bots"]),
+            }), &[]),
         }),
         json!({
             "name": DONE,
@@ -341,6 +341,14 @@ fn models(core: &Core, ws: &str, user: &str, args: &Value) -> Result<String, Str
 
 fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Result<String, String> {
     let core = &x.tools.core;
+    let there = x.store.bots().list(Some(ws)).map_err(|e| e.to_string())?;
+    if args.get("bots").is_none_or(Value::is_null) {
+        let bots: Vec<Value> = there
+            .iter()
+            .map(|b| json!({"name": b.name, "role": b.role, "harness": b.harness, "main": b.main}))
+            .collect();
+        return Ok(json!({"bots": bots}).to_string());
+    }
     let list = args["bots"]
         .as_array()
         .filter(|a| !a.is_empty())
@@ -375,14 +383,7 @@ fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Result<String, String>
             ..Default::default()
         });
     }
-    let have: Vec<String> = x
-        .store
-        .bots()
-        .list(Some(ws))
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|b| b.name.to_lowercase())
-        .collect();
+    let have: Vec<String> = there.iter().map(|b| b.name.to_lowercase()).collect();
     let (mut created, mut skipped) = (vec![], vec![]);
     for b in new {
         if have.contains(&b.name.to_lowercase()) || created.contains(&b.name) {

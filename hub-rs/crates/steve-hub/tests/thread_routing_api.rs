@@ -1072,6 +1072,12 @@ async fn the_first_meeting_writes_through_its_own_tools() {
             .collect::<Vec<_>>()
     };
     let before = bots().await.len();
+    /* without arguments: the Bots there are, to see before proposing more */
+    let (said, failed) = tool("meet-token-1", "steve_onboard_bots", json!({})).await;
+    let listed: Value = serde_json::from_str(&said).expect(&said);
+    assert!(!failed && listed["bots"].as_array().unwrap().len() == before);
+    assert!(listed["bots"][0]["name"].is_string() && listed["bots"][0]["role"].is_string());
+    assert_eq!(bots().await.len(), before);
     let (said, failed) = tool(
         "meet-token-1",
         "steve_onboard_bots",
