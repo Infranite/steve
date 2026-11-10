@@ -563,7 +563,11 @@ async fn stop_takes_an_answer_not_started_yet_off_the_queue() {
     });
     let asked = k.core.say(WS, "慢慢答", &[]).unwrap();
     assert!(k.wait(|| k.core.inline_busy(WS) && !k.core.routing(WS)));
+    let next = k.core.say(WS, "这个要答", &[]).unwrap();
+    assert_eq!(k.db().message(&next).unwrap().unwrap().meta["held"], true);
     assert!(k.core.stop(WS).unwrap());
+    /* off the queue at once, not when its lane gets to it */
+    assert!(!k.core.inline_busy(WS));
     let ms = k.db().messages(WS).unwrap();
     assert_eq!(ms.last().unwrap().meta["stopped"], true);
     let run = |status: &str| -> i64 {
@@ -579,13 +583,55 @@ async fn stop_takes_an_answer_not_started_yet_off_the_queue() {
     };
     assert_eq!((run("stopped"), run("queued")), (1, 0));
     store.maintenance_set(false).unwrap();
-    /* its lane drops it and goes on: the one answer written is to the next question */
-    let next = k.core.say(WS, "这个要答", &[]).unwrap();
+    /* its lane drops it and goes on: the question that waited comes after the stop note, and the one
+    answer written is to it */
     let ms = settle(&k, 4).await;
-    let answers: Vec<_> = ms.iter().filter(|m| m.text == "答好了").collect();
-    assert_eq!(answers.len(), 1);
-    assert_eq!(answers[0].meta["origin"], next.as_str());
+    assert_eq!(
+        (ms[1].meta["stopped"].as_bool(), ms[2].id.as_str()),
+        (Some(true), next.as_str())
+    );
+    assert_eq!(
+        (ms[3].text.as_str(), &ms[3].meta["origin"]),
+        ("答好了", &json!(next))
+    );
+    assert_eq!(ms.iter().filter(|m| m.meta["stopped"] == true).count(), 1);
     assert_eq!(run("stopped"), 1);
+}
+
+/// Stop can land after a message's route is decided and before its answer is queued: the answer
+/// carries the routing's stop, and is not queued.
+#[tokio::test]
+async fn an_answer_stopped_while_its_message_was_routed_is_not_queued() {
+    use crate::thread::research::{Inline, InlineJob};
+    let k = Kit::new();
+    let asked = k.db().message_add(WS, "me", "问一下", None, None).unwrap();
+    let stop = crate::thread::Stop::default();
+    stop.stop();
+    let job = InlineJob {
+        kind: Inline::Answer,
+        origin: asked,
+        question: "问一下".into(),
+        files: vec![],
+        earlier: vec![],
+        user: None,
+        project: None,
+        route: None,
+        offer: None,
+        reply_to: None,
+        run: None,
+        stop,
+        t0: crate::util::now(),
+        resume: None,
+        space: crate::thread::MAIN.into(),
+    };
+    assert!(k.core.enqueue_inline(WS, job).unwrap());
+    assert!(!k.core.inline_busy(WS));
+    let runs: i64 = k
+        .db()
+        .store()
+        .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM thread_runs", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(runs, 0);
 }
 
 #[tokio::test]

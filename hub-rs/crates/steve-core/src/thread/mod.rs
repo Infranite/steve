@@ -26,7 +26,6 @@ pub use research::{
     ToolSeen,
 };
 
-use self::research::StoppedInline;
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{self, FocusItem, Route, RouteCtx, Said};
@@ -1468,27 +1467,7 @@ impl Core {
                 .or_else(|| inflight.get(&after_lane(ws, MAIN)))
                 .cloned()
         };
-        let inline = self.stop_inline(ws);
-        if let Some(f) = &routing {
-            f.stop();
-        }
-        if routing.is_none() && inline == StoppedInline::Nothing {
-            return Ok(false);
-        }
-        if let StoppedInline::Waiting(Some(run)) = &inline {
-            self.end_unstarted(ws, run)?;
-        }
-        /* a running answer says so itself as it ends; nothing else would */
-        if inline != StoppedInline::Running {
-            self.store().message_add(
-                ws,
-                "steve",
-                "好，停下了。要我换个方式就直接说。",
-                None,
-                Some(&json!({"stopped": true})),
-            )?;
-        }
-        Ok(true)
+        self.stop_turn(ws, routing.as_ref())
     }
 
     /// At boot: interrupt unfinished inline work and persist safe local resume intents.

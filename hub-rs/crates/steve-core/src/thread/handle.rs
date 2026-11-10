@@ -376,7 +376,9 @@ impl Core {
                     offer: d.offer.clone(),
                     reply_to: None,
                     run: None,
-                    stop: super::Stop::default(),
+                    /* one stop for the whole turn: a Stop that lands after the route is decided and
+                    before the answer is queued still reaches it */
+                    stop: flag.clone(),
                     t0: now(),
                     resume,
                     space: conv.space.clone(),
