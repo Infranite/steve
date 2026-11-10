@@ -139,6 +139,18 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(partitions.Invalid, "one --junit"):
             partitions.verify(full, parts, reports[:1])
 
+    def test_one_unpartitioned_run_is_checked_against_its_own_full_list(self):
+        full = self.files()[0]
+        first = ("pkg::first", "same_name")
+        second = ("pkg::second", "same_name")
+        result = partitions.verify(full, [full], [self.report(0, [first, second])])
+        self.assertEqual((result["partitions"], result["execution"]),
+                         ([2], "all-selected-passed-first-try"))
+        for actual in [[first], [first, second, ("pkg::first", "opt_in")]]:
+            with self.subTest(actual=actual):
+                with self.assertRaisesRegex(partitions.Invalid, "differs from selection"):
+                    partitions.verify(full, [full], [self.report(0, actual)])
+
     def test_junit_rejects_failure_skip_and_retry_history(self):
         for issue in ["failure", "error", "skipped", "flakyFailure", "flakyError", "rerunFailure", "rerunError"]:
             with self.subTest(issue=issue):
