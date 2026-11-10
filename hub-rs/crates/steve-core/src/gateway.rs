@@ -1415,7 +1415,9 @@ pub async fn route_many(
     }
 }
 
-/// Route a message; any failure gives [`Route::fallback`], which never creates an item.
+/// Route a message; any failure gives [`Route::fallback`], which never creates an item. Where Steve
+/// operates the machine ([`RouteCtx::operator`]) the fallback is research even with no project: the
+/// message may ask for something to be done there, and an answer has no tools to do it with.
 pub async fn route(
     gw: &dyn ModelGateway,
     c: &RouteCtx,
@@ -1451,6 +1453,9 @@ pub async fn route(
             .map(|p| p.id.clone())
     });
     let mut r = Route::fallback(text, project);
+    if c.operator && r.kind == "answer" {
+        r.kind = "research".into();
+    }
     if promote {
         /* “做成事项” was pressed: the user asked for an item, the router only names it */
         r.kind = "item".into();
@@ -2034,6 +2039,16 @@ mod tests {
         assert_eq!(
             route(&Gw(None), &none, "hey", &[], false).await.kind,
             "answer"
+        );
+        /* the owner's own conversation can act on the machine: a run with tools, not a bare answer */
+        let operator = RouteCtx {
+            operator: true,
+            ..none.clone()
+        };
+        let r = route(&Gw(None), &operator, "把下载目录整理一下", &[], false).await;
+        assert_eq!(
+            (r.kind.as_str(), r.fallback, r.project),
+            ("research", true, None)
         );
         /* “做成事项” was pressed: still an item */
         assert_eq!(route(&Gw(None), &c, "x", &[], true).await.kind, "item");
