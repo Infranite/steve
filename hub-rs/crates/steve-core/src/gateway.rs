@@ -396,6 +396,7 @@ impl OneModel for LocalAcp {
             resume: None,
             head,
             tools_off,
+            mode: steve_node_api::PermissionMode::Plan,
             prompt,
             mcp_servers: json!([]),
             wrap: None,
@@ -1012,6 +1013,9 @@ pub struct RouteCtx {
     /// router says whether this message needs those answers first ([`Route::after`]).
     pub pending: Vec<String>,
     pub debug: bool,
+    /// The workspace's own conversation: its research may act on the Hub's machine with the
+    /// owner's access ([`crate::thread::ResearchRequest::full`]), so work on the machine stays in it.
+    pub operator: bool,
 }
 
 fn js_json(s: &str) -> String {
@@ -1068,6 +1072,9 @@ pub fn route_prompt_for(c: &RouteCtx, texts: &[String], history: &[Said], promot
                 .unwrap_or_default()
         )
     }));
+    if c.operator {
+        head.push("In this conversation Steve also acts on the machine the Hub runs on, with the owner's own access (files anywhere, commands, the network). Looking at, organising, installing or checking things on this machine (\"看下本机的目录\", \"把下载目录里的截图归到一个文件夹\", \"装一下 ripgrep\", \"磁盘还剩多少\", \"上网搜一下…\") is research: Steve does it right in the conversation, never an item and never suggest. Changing a project's code or documents is still an item.".into());
+    }
     if let Some(s) = &c.steve_project {
         head.push(format!("Anything about Steve itself — its chat page, web UI, cards, Hub, bots, knowledge system, releases, design — is in project {s}."));
     }

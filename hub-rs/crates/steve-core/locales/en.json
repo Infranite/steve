@@ -51,7 +51,7 @@
   "core.purpose.chat.label": "Conversation replies",
   "core.purpose.chat.desc": "Answers you directly in the conversation",
   "core.purpose.research.label": "In-place research",
-  "core.purpose.research.desc": "Reads through projects and sources without changing them, then answers; moves to the next model only when one fails",
+  "core.purpose.research.desc": "Reads through projects and sources in the conversation, then answers; in your own conversation it can also act on this machine directly; moves to the next model only when one fails",
   "core.purpose.title.label": "Titles",
   "core.purpose.title.desc": "Names new projects and writes a one-line description",
   "core.purpose.extract.label": "Memory extraction",

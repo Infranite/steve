@@ -176,11 +176,13 @@ impl State {
         budget: r::Budget,
         tools: bool,
         sandboxed_shell: bool,
+        full: bool,
     ) -> bool {
         if self.stop.is_some() {
             return false;
         }
-        if let Err(v) = guard(fact, scope, tools, sandboxed_shell) {
+        // a run with the user's full access answers to no read-only rule
+        if !full && let Err(v) = guard(fact, scope, tools, sandboxed_shell) {
             self.stop = Some(r::RunStatus::Violated(v));
             return false;
         }
@@ -399,6 +401,7 @@ impl LocalNode {
                 .adapter_properties(&req.harness)
                 .self_read_only;
         let budget = cfg.budget;
+        let full = spec.run.policy.permissions == PermissionMode::FullAccess;
         let state = Mutex::new(State {
             session: plan.resume.clone(),
             ..State::default()
@@ -415,6 +418,7 @@ impl LocalNode {
                     .acp
                     .adapter_properties(&req.harness)
                     .self_read_only,
+                full,
             )
         };
         let event = |event: EventBody| {
@@ -437,7 +441,7 @@ impl LocalNode {
         let wrap = acp_job::wrap(
             prepared.profile.as_deref(),
             properties.nested_sandbox.then_some(&self.0.confine),
-            &prepared.cwd,
+            (!full).then_some(prepared.cwd.as_path()),
         );
         let mut run = Box::pin(acp_job::run(
             acp_job::Request {
@@ -449,6 +453,7 @@ impl LocalNode {
                 resume: plan.resume.as_deref(),
                 head: None,
                 tools_off: false,
+                mode: spec.run.policy.permissions,
                 prompt: prepared.prompt,
                 mcp_servers: mcp,
                 wrap: Some(&wrap),

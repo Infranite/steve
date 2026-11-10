@@ -333,7 +333,7 @@ async fn acp_think(
     let wrap = crate::acp_job::wrap(
         sandbox.as_deref(),
         properties.nested_sandbox.then_some(&inner.confine),
-        dir,
+        Some(dir),
     );
     let req = crate::acp_job::Request {
         cfg: &inner.cfg.acp,
@@ -344,6 +344,7 @@ async fn acp_think(
         resume: None,
         head: think.instructions.as_deref(),
         tools_off: think.tools == ThinkToolMode::None,
+        mode: PermissionMode::Plan,
         prompt,
         mcp_servers: json!([]),
         wrap: Some(&wrap),

@@ -968,6 +968,8 @@ pub struct ResearchAttempt {
     pub readable: Vec<RootPath>,
     pub budget: ResearchBudget,
     pub sandbox: SandboxRequirement,
+    /// The run acts with the user's full access (permission mode full_access) instead of only reading.
+    pub full: bool,
     /// Steve's read-only research tools are offered.
     pub steve_tools: bool,
     /// The run's one deadline (ms since the epoch), the same for all of its attempts.
@@ -1027,7 +1029,11 @@ impl NodeRuntime {
                 prompt,
                 policy: ExecutionPolicy {
                     revision: idv("research")?,
-                    permissions: PermissionMode::Plan,
+                    permissions: if a.full {
+                        PermissionMode::FullAccess
+                    } else {
+                        PermissionMode::Plan
+                    },
                     sandbox: a.sandbox.clone(),
                     readable: vec![],
                     network: NetworkScope::Unrestricted,

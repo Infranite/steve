@@ -9,11 +9,12 @@ pub(crate) use steve_acp::oneshot::{OneShotError, Request, run};
 /// How the adapter of a one-shot call is started: under `profile` (a seatbelt profile of the
 /// call's own, its temporary files next to it), else in the Node's sandbox when the adapter nests
 /// in one (`confine`), else as it is (the harness keeps its own sandbox, which macOS cannot nest
-/// in another).
+/// in another). `cwd` is where the Node's sandbox keeps the call's writes; `None`: only Steve's
+/// own control plane is out of reach (a call with the user's full access).
 pub(crate) fn wrap<'a>(
     profile: Option<&'a Path>,
     confine: Option<&'a crate::confine::Confine>,
-    cwd: &'a Path,
+    cwd: Option<&'a Path>,
 ) -> impl Fn(Command, &mut Env) -> Command + Send + Sync + 'a {
     move |(program, mut args), env| {
         if let Some(profile) = profile {
@@ -30,7 +31,7 @@ pub(crate) fn wrap<'a>(
             }
             (steve_research::sandbox::SANDBOX_EXEC.into(), args)
         } else if let Some(c) = confine {
-            c.wrap_in(program, args, &[], &[], Some(cwd))
+            c.wrap_in(program, args, &[], &[], cwd)
         } else {
             (program, args)
         }

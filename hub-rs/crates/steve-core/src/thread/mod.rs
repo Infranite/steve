@@ -1229,6 +1229,7 @@ impl Core {
             researching: self.researching(ws),
             pending: vec![],
             debug: self.config().debug_route,
+            operator: !guest,
         })
     }
 

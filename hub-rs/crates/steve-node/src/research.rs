@@ -140,12 +140,18 @@ impl LocalNode {
         }
         let model = run.choice.model.clone().unwrap_or_default();
         let p = &run.policy;
-        if p.permissions != PermissionMode::Plan {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "a research job only reads: permissions plan",
-            ));
-        }
+        // a research job only reads (plan), or acts for the user with the user's own access
+        // (full_access: no read-only sandbox, no guard; the Node's ceiling was checked on accept)
+        let full = match p.permissions {
+            PermissionMode::Plan => false,
+            PermissionMode::FullAccess if p.sandbox == SandboxRequirement::None => true,
+            _ => {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "a research job's permissions are plan, or full_access without a sandbox",
+                ));
+            }
+        };
         if p.network != NetworkScope::Unrestricted {
             return Err(ApiError::new(
                 ErrorCode::Unsupported,
@@ -204,6 +210,10 @@ impl LocalNode {
         req.models = Some(vec![model.clone()]);
         req.effort = run.choice.effort.clone();
         req.harness = run.choice.harness.clone();
+        if full && req.cwd.is_none() {
+            // the user's own home, as a terminal opens there
+            req.cwd = Some(self.0.cfg.acp.user_home.clone());
+        }
         Ok(Plan {
             plan: r::AttemptPlan {
                 model,

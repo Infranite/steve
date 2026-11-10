@@ -139,6 +139,8 @@ pub struct Request<'a> {
     /// The call uses no tool of the harness's: the head replaces the harness's own system prompt,
     /// and an adapter that declares how its built-in tools are switched off has them off.
     pub tools_off: bool,
+    /// Steve's permission mode the session is set to: Plan for a call that only reads.
+    pub mode: PermissionMode,
     pub prompt: Vec<Value>,
     pub mcp_servers: Value,
     /// Wraps the adapter's command (the caller's sandbox); `None`: it runs as it is.
@@ -362,8 +364,8 @@ pub async fn run(
         let mut out = Output::default();
         let cwd = req.cwd.to_string_lossy();
         let reports = SessionReports(req.on_session);
-        // a call only reads: Steve's Plan mode as the adapter spells it (asking before anything
-        // else where it has none), never what the adapter would do by default
+        // the caller's mode as the adapter spells it (a call that only reads: Plan, asking before
+        // anything else where it has none), never what the adapter would do by default
         let opening = session::open(
             &conn,
             OpenConfig {
@@ -371,7 +373,7 @@ pub async fn run(
                 cwd: &cwd,
                 resume: req.resume,
                 mcp_servers: req.mcp_servers.clone(),
-                mode: Some(req.cfg.mode_choice(req.harness, PermissionMode::Plan)),
+                mode: Some(req.cfg.mode_choice(req.harness, req.mode)),
                 model: req.model,
                 effort: req.effort,
                 system_prompt: req.head.map(|text| session::SystemPrompt {
@@ -566,6 +568,7 @@ for line in sys.stdin:
             resume: None,
             head: None,
             tools_off: true,
+            mode: PermissionMode::Plan,
             prompt: vec![json!({"type":"text","text":"answer"})],
             mcp_servers: json!([]),
             wrap: None,

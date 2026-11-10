@@ -51,7 +51,7 @@
   "core.purpose.chat.label": "对话回答",
   "core.purpose.chat.desc": "在对话里直接回答你",
   "core.purpose.research.label": "就地研究",
-  "core.purpose.research.desc": "只读地翻项目和资料后回答，前一个模型失败才换下一个",
+  "core.purpose.research.desc": "在对话里翻项目和资料后回答；你自己的对话里还能直接在本机动手，前一个模型失败才换下一个",
   "core.purpose.title.label": "起标题",
   "core.purpose.title.desc": "给新项目起名字、写一句说明",
   "core.purpose.extract.label": "记忆提取",

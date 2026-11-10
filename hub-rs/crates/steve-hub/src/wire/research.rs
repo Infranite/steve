@@ -162,6 +162,7 @@ impl ResearchAdapter {
             } else {
                 String::new()
             },
+            full: q.full,
         });
         let cwd = q.project.as_ref().map(|p| PathBuf::from(&p.path));
         /* a follow-up continues the earlier session: the question alone is the prompt */
@@ -354,6 +355,8 @@ impl ResearchAdapter {
         // the guarantee a research job asks the Node's sandbox for (sandbox-exec, files read-only)
         let fs = || vec!["fs-readonly".to_string()];
         let sandbox = match cfg.sandbox {
+            // the owner's own access: nothing is read-only
+            _ if q.full => api::SandboxRequirement::None,
             r::SandboxMode::Off => api::SandboxRequirement::None,
             r::SandboxMode::Auto => api::SandboxRequirement::AllowFallback {
                 preferred: fs(),
@@ -380,6 +383,7 @@ impl ResearchAdapter {
                     .max(1),
             },
             sandbox,
+            full: q.full,
             steve_tools: q.mcp.is_some(),
             deadline,
         };

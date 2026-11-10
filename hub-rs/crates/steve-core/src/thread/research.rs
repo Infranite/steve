@@ -106,6 +106,9 @@ pub struct ResearchRequest {
     pub models: crate::models::Choice,
     /// answered in the web's main conversation: the answer may draw an A2UI interface ([`crate::gateway::A2UI_HINT`])
     pub ui: bool,
+    /// the instance's owner asks where they alone read the answer: the run acts on the Hub's
+    /// machine with the owner's own access instead of only reading the project directories
+    pub full: bool,
 }
 
 /// A follow-up within [`RESUME_WINDOW`] of a research answer continues that run's harness session.
@@ -957,6 +960,7 @@ impl Core {
             }),
             models: models.clone(),
             ui: j.space == super::MAIN,
+            full: own && asked_by_owner(db, j.user.as_deref()),
         };
         let harness = models.harness.clone();
         let steps = Mutex::new(Steps {
@@ -1106,6 +1110,16 @@ fn mentioned_items(
     } else {
         format!("对话提到的事项（已读取）：\n{out}")
     })
+}
+
+/// The asker is the instance's owner (`users.role`); a message without a user counts where the
+/// instance has one user only.
+fn asked_by_owner(db: &crate::repo::Db, user: Option<&str>) -> bool {
+    let users = db.store().users();
+    match user {
+        Some(id) => matches!(users.get(id), Ok(Some(u)) if u.role == "owner"),
+        None => matches!(users.count(), Ok(n) if n <= 1),
+    }
 }
 
 /// Only the owner reads the answer to `origin`: Steve's own conversation, or a chat the channel marked
