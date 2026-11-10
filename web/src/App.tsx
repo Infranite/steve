@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
 import { api, signIn } from "@/api"
-import { API, hello, hubBase, hubUrl, nativeBridge, normalize, rememberHub, savedHubs, setHub } from "@/hub"
+import { API, hello, hubBase, hubUrl, nativeBridge, needsHttpsForCrossHost, normalize, rememberHub, savedHubs, setHub } from "@/hub"
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command"
 import { BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, Building2Icon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LockIcon, QrCodeIcon, UsersRoundIcon, WorkflowIcon, InboxIcon, ListTodoIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, PlugIcon, PlusIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon } from "lucide-react"
 import { st, useStore, start } from "@/store"
@@ -168,6 +168,7 @@ function ConnectHub() {
   const connectTo = async (raw: string) => {
     const base = normalize(raw)
     if (!base) { setError(t("shell:app.badAddress")); return }
+    if (!bridge && needsHttpsForCrossHost(base)) { setError(t("shell:app.needsHttps")); return }
     setBusy(true); setError("")
     try {
       const h = await hello(base)

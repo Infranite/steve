@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { api, modReq } from "@/api"
-import { API, forgetHub, hello, hubBase, nativeBridge, normalize, rememberHub, savedHubs, setHub, type SavedHub } from "@/hub"
+import { API, forgetHub, hello, hubBase, nativeBridge, needsHttpsForCrossHost, normalize, rememberHub, savedHubs, setHub, type SavedHub } from "@/hub"
 import { encodeQr, qrSvgPath } from "@/qr"
 import { toast } from "@/store"
 import { closeSheet, Group, Row, SectionLabel } from "@/ui"
@@ -54,12 +54,19 @@ const access = {
 }
 
 function QrSvg({ text, size = 216 }: { text: string; size?: number }) {
-  const { viewBox, d } = useMemo(() => qrSvgPath(encodeQr(text), 2), [text])
+  const rendered = useMemo(() => {
+    try {
+      return qrSvgPath(encodeQr(text), 2)
+    } catch {
+      return null
+    }
+  }, [text])
+  if (!rendered) return null
   return (
     <div className="inline-flex rounded-2xl border border-border bg-white p-3 shadow-xs" data-pair-qr>
-      <svg viewBox={viewBox} width={size} height={size} shapeRendering="crispEdges" role="img" aria-label="QR Code">
+      <svg viewBox={rendered.viewBox} width={size} height={size} shapeRendering="crispEdges" role="img" aria-label="QR Code">
         <rect width="100%" height="100%" fill="#ffffff" />
-        <path d={d} fill="#09090b" />
+        <path d={rendered.d} fill="#09090b" />
       </svg>
     </div>
   )
@@ -98,7 +105,7 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
         const s = await access.pairingStatus(pair.id)
         if (!live) return
         setStatus(s)
-        if (s.status === "claimed") onClaimed?.()
+        if (s.status === "claimed" && s.client != null) onClaimed?.()
       } catch {
         /* transient poll error */
       }
@@ -127,11 +134,11 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
     ...(pair.public_url ? [{ url: pair.public_url, kind: "public" as const }] : []),
     ...pair.lan_urls.map((url) => ({ url, kind: "lan" as const })),
   ]
-  const curStatus = status?.status ?? "pending"
+  const curStatus = status?.status === "claimed" && status.client != null ? "claimed" : status?.status === "expired" ? "expired" : "pending"
 
   return (
     <div className="flex flex-col items-center gap-4 text-center" data-pair-card>
-      <QrSvg text={pair.uri} />
+      {!pair.loopback_only && <QrSvg text={pair.uri} />}
 
       <div className="flex flex-wrap items-center justify-center gap-2">
         {pair.public_url ? (
@@ -190,17 +197,19 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
           <RefreshCwIcon className="size-3.5" />
           {t("pages:access.pairRefresh")}
         </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => {
-            void navigator.clipboard?.writeText(pair.uri)
-            toast(t("pages:access.copied"))
-          }}
-          data-pair-copy
-        >
-          {t("pages:access.pairCopyUri")}
-        </Button>
+        {!pair.loopback_only && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              void navigator.clipboard?.writeText(pair.uri)
+              toast(t("pages:access.copied"))
+            }}
+            data-pair-copy
+          >
+            {t("pages:access.pairCopyUri")}
+          </Button>
+        )}
       </div>
     </div>
   )
@@ -243,6 +252,10 @@ function HubSwitcherSection({ currentVersion }: { currentVersion: string }) {
     const base = normalize(rawUrl)
     if (!base) {
       toast(t("shell:app.badAddress"))
+      return
+    }
+    if (!bridge && needsHttpsForCrossHost(base)) {
+      toast(t("shell:app.needsHttps"))
       return
     }
     setBusy(true)

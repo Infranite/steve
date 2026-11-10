@@ -578,6 +578,7 @@ export default {
     hubAddress: "Hub 地址",
     connect: "连接",
     connectHint: "输入 Hub 的地址，例如 http://192.168.1.10:8440。Hub 不在这台机器上时需要 HTTPS。",
+    needsHttps: "连接其它机器上的 Hub 需要使用 HTTPS（否则浏览器无法保存登录状态）；或使用 Steve 客户端连接。",
     badAddress: "这不是一个有效的地址",
     notSteve: "这个地址上没有找到 Steve Hub",
     apiMismatch: "这个 Hub（{{version}}）与当前网页的版本不兼容",

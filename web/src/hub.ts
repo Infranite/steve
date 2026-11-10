@@ -2,7 +2,8 @@
  * native shell bridge (`window.__STEVE_NATIVE__`) injected by SteveMac / SteveIOS.
  *
  * Served by a Hub, the page talks to it (same origin, "" here); a web client served on its own asks for the Hub's
- * address once and keeps it, while allowing switching among saved Hubs at any time. */
+ * address once and keeps it, while allowing switching among saved Hubs at any time. A Hub on another host needs HTTPS:
+ * cross-site cookies require `SameSite=None; Secure`, which browsers refuse over plain HTTP. */
 
 const KEY = "steve.hub"
 const HUBS_KEY = "steve.hubs"
@@ -71,6 +72,18 @@ export const normalize = (url: string): string | null => {
     if (u.protocol !== "http:" && u.protocol !== "https:") return null
     return u.origin
   } catch { return null }
+}
+
+/** true when `targetOrigin` is on a different hostname than `pageOrigin` and uses plain `http:` (so browser cookies cannot stick) */
+export const needsHttpsForCrossHost = (targetOrigin: string, pageOrigin?: string): boolean => {
+  try {
+    const target = new URL(targetOrigin)
+    if (target.protocol !== "http:") return false
+    const here = new URL(pageOrigin ?? (typeof location !== "undefined" ? location.origin : targetOrigin))
+    return target.hostname.toLowerCase() !== here.hostname.toLowerCase()
+  } catch {
+    return false
+  }
 }
 
 /** asks `base` who it is; throws with a reason a person can act on */

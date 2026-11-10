@@ -600,6 +600,7 @@ export default {
     hubAddress: "Hub address",
     connect: "Connect",
     connectHint: "Enter the Hub's address, e.g. http://192.168.1.10:8440. A Hub on another machine needs HTTPS.",
+    needsHttps: "A Hub on another machine needs HTTPS in the browser so sign-in cookies can stick, or use the Steve app.",
     badAddress: "That is not a valid address",
     notSteve: "No Steve Hub answers at that address",
     apiMismatch: "This Hub ({{version}}) does not work with this version of the page",
