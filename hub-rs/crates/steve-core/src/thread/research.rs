@@ -173,15 +173,6 @@ pub(crate) enum Inline {
     Research,
 }
 
-/// What [`Core::stop_inline`] stopped.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum StoppedInline {
-    Running,
-    /// Not started yet; its run, once it has one.
-    Waiting(Option<String>),
-    Nothing,
-}
-
 /// An answer or research run waiting on the inline queue.
 pub(crate) struct InlineJob {
     pub kind: Inline,
@@ -200,6 +191,7 @@ pub(crate) struct InlineJob {
     /// the Steve message this answer continues (suggestion card “在这里出方案”, “改成在这里回答”)
     pub reply_to: Option<String>,
     pub run: Option<String>,
+    /// of a message just routed, the stop of that routing: stopped before it is queued, it is not queued
     pub stop: super::Stop,
     pub t0: i64,
     /// a follow-up of a recent research answer
@@ -368,26 +360,53 @@ impl Core {
         })
     }
 
-    /// Stop the running answer or research of a workspace. With none running, the first one waiting
-    /// is stopped instead: its lane has not started it yet (it was queued a moment ago, or new work
-    /// is held for maintenance), and the lane drops it when it gets there.
-    pub(crate) fn stop_inline(&self, ws: &str) -> StoppedInline {
+    /// Stop the main conversation's turn: its answer or research, and `routing`, the message being
+    /// routed. False with nothing to stop. Queueing and the lane's worker wait while this decides, so
+    /// one stop note is written, and before anything that waited on the turn goes on:
+    /// - a running answer ends with its partial text and says so itself;
+    /// - one its lane has not started (queued a moment ago, or new work is held for maintenance) is
+    ///   taken off the queue here, and its run ends;
+    /// - a message still being routed is stopped once the note is written, and what it would queue
+    ///   from then on is not queued ([`Core::enqueue_inline`]).
+    pub(crate) fn stop_turn(&self, ws: &str, routing: Option<&super::Stop>) -> Result<bool> {
         let lanes = lock(&self.0.thread.inline);
-        let Some(l) = lanes.get(ws) else {
-            return StoppedInline::Nothing;
+        let lane = lanes.get(ws);
+        let mut st = lane.map(|l| lock(&l.st));
+        let (says_so, taken) = match st.as_deref_mut() {
+            Some(LaneState {
+                running: Some(a), ..
+            }) => {
+                a.stop.stop();
+                (true, false)
+            }
+            Some(q) if !q.waiting.is_empty() => {
+                let a = q.waiting.remove(0);
+                a.stop.stop();
+                if let Some(run) = &a.run {
+                    self.end_unstarted(ws, run)?;
+                }
+                (false, true)
+            }
+            _ if routing.is_none() => return Ok(false),
+            _ => (false, false),
         };
-        let st = lock(&l.st);
-        match (&st.running, st.waiting.first()) {
-            (Some(a), _) => {
-                a.stop.stop();
-                StoppedInline::Running
-            }
-            (None, Some(a)) => {
-                a.stop.stop();
-                StoppedInline::Waiting(a.run.clone())
-            }
-            (None, None) => StoppedInline::Nothing,
+        if !says_so {
+            self.store().message_add(
+                ws,
+                "steve",
+                "好，停下了。要我换个方式就直接说。",
+                None,
+                Some(&json!({"stopped": true})),
+            )?;
         }
+        if let Some(f) = routing {
+            f.stop();
+        }
+        drop(st);
+        if let (true, Some(l)) = (taken, lane) {
+            l.idle.notify_waiters();
+        }
+        Ok(true)
     }
 
     /// A run stopped before its lane started it ends `stopped`, and its message no longer says
@@ -452,6 +471,10 @@ impl Core {
     pub(crate) fn enqueue_inline(&self, ws: &str, mut job: InlineJob) -> Result<bool> {
         /* held to the end: the job is sent under the map's lock, and an idle lane only goes under it */
         let mut lanes = lock(&self.0.thread.inline);
+        if job.stop.is_stopped() {
+            /* stopped while it was being routed, and told so already: there is nothing to answer */
+            return Ok(true);
+        }
         let key = lane_key(ws, &job.space);
         if lanes.get(&key).is_some_and(|l| l.tx.is_closed()) {
             /* its worker is gone: a new lane takes over, so the conversation is not stuck */
