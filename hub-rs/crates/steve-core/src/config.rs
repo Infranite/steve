@@ -75,7 +75,10 @@ fn env(k: &str, d: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| d.to_string())
 }
 fn list(s: &str) -> Vec<String> {
-    s.split(',').map(|x| x.to_string()).collect()
+    s.split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect()
 }
 
 /// A comma list with blanks dropped (research and check lists, as steve-research and the channels read them).
@@ -97,23 +100,23 @@ impl CoreConfig {
         let home = std::path::absolute(&home).unwrap_or(home);
         let mut c = CoreConfig::for_home(&home);
         c.port = env("STEVE_PORT", "8440").parse().unwrap_or(8440);
-        c.models_fast = list(&env(
-            "STEVE_MODELS_FAST",
-            "claude-haiku-5-5,claude-sonnet-5-5",
-        ));
-        c.models_smart = list(&env(
-            "STEVE_MODELS_SMART",
-            "claude-sonnet-5-5,claude-opus-5-5",
-        ));
+        // none by default: every call follows the harness's own default model
+        c.models_fast = list(&env("STEVE_MODELS_FAST", ""));
+        c.models_smart = list(&env("STEVE_MODELS_SMART", ""));
         let research = trimmed(&env("STEVE_MODELS_RESEARCH", ""));
         if !research.is_empty() {
             c.models_research = research;
         }
         c.models_check = trimmed(&env("STEVE_MODELS_CHECK", ""));
-        c.default_models.insert(
-            steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
-            env(steve_acp::adapters::DEFAULT_MODEL_VAR, "claude-opus-5-5"),
-        );
+        c.default_models.clear();
+        if let Some(m) = std::env::var(steve_acp::adapters::DEFAULT_MODEL_VAR)
+            .ok()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+        {
+            c.default_models
+                .insert(steve_acp::adapters::DEFAULT_ADAPTER.0.into(), m);
+        }
         c.steve_repo = std::env::var("STEVE_REPO")
             .map(PathBuf::from)
             .ok()
@@ -127,7 +130,8 @@ impl CoreConfig {
         c
     }
 
-    /// Defaults rooted at `home` (tests): no repo, port 8440, default model lists.
+    /// Rooted at `home` (tests): no repo, port 8440, and model lists as fixtures (an installation names
+    /// none by default, see [`CoreConfig::from_env`]).
     pub fn for_home(home: &Path) -> CoreConfig {
         CoreConfig {
             home: home.to_path_buf(),

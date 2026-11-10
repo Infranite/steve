@@ -2189,7 +2189,11 @@ impl Discovery for FakeNode {
         })
     }
     async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {
-        let st = self.st();
+        let mut st = self.st();
+        // `refuse_next("probe", ..)`: a Node that cannot answer (offline)
+        if let Some(i) = st.refusals.iter().position(|(m, _)| *m == "probe") {
+            return Err(st.refusals.remove(i).1);
+        }
         let capacity = st.capacity.clone().unwrap_or(Capacity {
             sessions: u32::MAX,
             jobs: u32::MAX,

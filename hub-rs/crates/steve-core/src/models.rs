@@ -176,10 +176,6 @@ pub fn purpose_desc(key: &str) -> String {
     }
 }
 
-/// The judgment model of a Steve bot that names none on an adapter that falls back down Steve's
-/// lists (`model_fallback`), when `STEVE_MODELS_SMART` names none either.
-pub const STEVE_DEFAULT_MODEL: &str = "claude-sonnet-5-5";
-
 /// At most this many models in one fallback list.
 pub const MAX_MODELS: usize = 5;
 
@@ -296,13 +292,10 @@ impl Defaults {
         }
     }
 
-    /// The models of `h` when nothing names one: Steve's smart list where the adapter falls back
-    /// down it, else none (the adapter's own default).
+    /// The models of `h` when nothing names one: Steve's smart list (`STEVE_MODELS_SMART`) where
+    /// the adapter falls back down it, else none: the adapter's own default model.
     fn harness_list(&self, h: Option<&Harness>) -> Vec<String> {
         match h {
-            Some(h) if h.model_fallback && self.smart.is_empty() => {
-                vec![STEVE_DEFAULT_MODEL.into()]
-            }
             Some(h) if h.model_fallback => self.smart.clone(),
             _ => vec![],
         }

@@ -464,7 +464,12 @@ impl Config {
                 .map(|(id, c)| (id, c.to_string_lossy().into_owned())),
         );
 
-        let split = |s: String| s.split(',').map(str::to_string).collect::<Vec<_>>();
+        let split = |s: String| {
+            s.split(',')
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .collect::<Vec<_>>()
+        };
         let idle_raw = env("STEVE_IDLE_RELEASE_MS", "600000");
         let idle = js_number(&idle_raw);
 
@@ -512,19 +517,17 @@ impl Config {
             declared_adapters,
             harness_manifest: manifest,
             models: Models {
-                fast: split(env(
-                    "STEVE_MODELS_FAST",
-                    "claude-haiku-5-5,claude-sonnet-5-5",
-                )),
-                smart: split(env(
-                    "STEVE_MODELS_SMART",
-                    "claude-sonnet-5-5,claude-opus-5-5",
-                )),
+                // none by default: every call follows the harness's own default model
+                fast: split(env("STEVE_MODELS_FAST", "")),
+                smart: split(env("STEVE_MODELS_SMART", "")),
             },
-            default_models: BTreeMap::from([(
-                steve_acp::adapters::DEFAULT_ADAPTER.0.to_string(),
-                env(steve_acp::adapters::DEFAULT_MODEL_VAR, "claude-opus-5-5"),
-            )]),
+            // a new agent session's model only when set; else the harness's own default
+            default_models: get(steve_acp::adapters::DEFAULT_MODEL_VAR)
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .map(|m| (steve_acp::adapters::DEFAULT_ADAPTER.0.to_string(), m))
+                .into_iter()
+                .collect(),
             idle_release_ms: if idle.is_finite() && idle >= 0.0 {
                 idle as u64
             } else {
@@ -619,9 +622,9 @@ mod tests {
         assert_eq!(c.public_url, "http://127.0.0.1:8440");
         assert_eq!(c.public_urls, vec!["http://127.0.0.1:8440"]);
         assert_eq!(c.claude_executable, "/opt/homebrew/bin/claude");
-        assert_eq!(c.models.fast, vec!["claude-haiku-5-5", "claude-sonnet-5-5"]);
-        assert_eq!(c.models.smart, vec!["claude-sonnet-5-5", "claude-opus-5-5"]);
-        assert_eq!(c.default_models["claude-code"], "claude-opus-5-5");
+        // no model named anywhere: the harness's own default
+        assert!(c.models.fast.is_empty() && c.models.smart.is_empty());
+        assert!(c.default_models.is_empty());
         assert_eq!(c.idle_release_ms, 600_000);
         assert_eq!(c.version, "dev");
         assert!(!c.dev_login);
