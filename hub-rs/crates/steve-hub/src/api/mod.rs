@@ -589,6 +589,10 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/sessions/{id}/queued", get(sessions::queued_list))
         .route("/sessions/{id}/resume", get(sessions::resume))
         .route(
+            "/sessions/{id}/principal-state",
+            get(sessions::principal_state),
+        )
+        .route(
             "/sessions/{id}/queued/{qid}",
             patch(sessions::queued_edit).delete(sessions::queued_remove),
         )

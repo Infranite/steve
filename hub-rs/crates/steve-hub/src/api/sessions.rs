@@ -388,6 +388,90 @@ pub async fn resume(
     ok(v)
 }
 
+/// `GET /api/sessions/:id/principal-state`: the recorded Node binding and independent harness
+/// state directory of `id` (`STEVE_PRINCIPAL_STATE=on`), for the instance owner only.
+pub async fn principal_state(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let s = own_session(&st, &c.ws, &id).await?;
+    if c.user.get("role").and_then(Value::as_str) != Some("owner") {
+        return Err(ApiError::Json(
+            403,
+            "Only the instance owner can inspect principal state directories.".into(),
+        ));
+    }
+    let store = st
+        .modules
+        .as_ref()
+        .map(|m| m.store.clone())
+        .ok_or_else(|| ApiError::Json(503, "Principal state inspection unavailable.".into()))?;
+    let harness = s
+        .get("harness")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_string);
+    let sid = id.clone();
+    let row = blocking(move || {
+        use rusqlite::OptionalExtension;
+        store
+            .reader::<_, steve_store::StoreError>(|conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT node_id, principal, state_dir FROM runtime_sessions WHERE session_id = ?1",
+                        [&sid],
+                        |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, Option<String>>(1)?,
+                                r.get::<_, Option<String>>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()?)
+            })
+            .map_err(|e| ApiError::Json(500, e.to_string()))
+    })
+    .await?;
+    let (bound, node_id, principal, raw_state_dir) = match row {
+        Some((node_id, principal, state_dir)) => (
+            true,
+            Some(node_id).filter(|v| !v.trim().is_empty()),
+            principal.filter(|v| !v.trim().is_empty()),
+            state_dir,
+        ),
+        None => (false, None, None, None),
+    };
+    let state_dir = raw_state_dir.filter(|v| !v.trim().is_empty());
+    let independent = state_dir.is_some();
+    let harness_rel_dir = state_dir.as_ref().map(|dir| format!("state/{dir}/harness"));
+    let local_harness_dir = match (&state_dir, node_id.as_deref()) {
+        (Some(dir), Some("local")) => Some(
+            st.cfg
+                .data_dir
+                .join("node")
+                .join("state")
+                .join(dir)
+                .join("harness")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        _ => None,
+    };
+    ok(json!({
+        "bound": bound,
+        "session_id": id,
+        "harness": harness,
+        "node_id": node_id,
+        "principal": principal,
+        "independent": independent,
+        "state_dir": state_dir,
+        "harness_rel_dir": harness_rel_dir,
+        "local_harness_dir": local_harness_dir,
+    }))
+}
+
 pub async fn local(State(st): State<AppState>) -> ApiResult {
     let files = match st.node.as_ref().map(|n| n.node()) {
         // the local Node on: its own list, the Hub reads no harness files
