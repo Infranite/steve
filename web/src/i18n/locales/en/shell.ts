@@ -569,6 +569,7 @@ export default {
       vault: "Vault",
       devices: "Devices",
       settings: "Settings",
+      settingsAccess: "Settings · Access & clients",
       settingsTags: "Settings · Tags",
       settingsSpace: "Settings · Space",
     },
@@ -579,6 +580,8 @@ export default {
     newItem: "New item",
     newProject: "New project",
     newBot: "New bot",
+    pairMobile: "Pair mobile app via QR code",
+    switchHub: "Switch Hub",
     toLight: "Switch to light",
     toDark: "Switch to dark",
     pages: "Pages",
@@ -601,6 +604,8 @@ export default {
     notSteve: "No Steve Hub answers at that address",
     apiMismatch: "This Hub ({{version}}) does not work with this version of the page",
     changeHub: "Use another Hub",
+    savedHubs: "Recent Hubs",
+    scanQr: "Scan QR code to pair",
   },
   office: {
     /* where a note on selected text sits (data-ann-at), shown with the note */

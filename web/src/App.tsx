@@ -8,9 +8,9 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
 import { api, signIn } from "@/api"
-import { API, hello, hubBase, hubUrl, normalize, setHub } from "@/hub"
+import { API, hello, hubBase, hubUrl, nativeBridge, normalize, rememberHub, savedHubs, setHub } from "@/hub"
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command"
-import { BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, Building2Icon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LockIcon, UsersRoundIcon, WorkflowIcon, InboxIcon, ListTodoIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, PlugIcon, PlusIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon } from "lucide-react"
+import { BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, Building2Icon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LockIcon, QrCodeIcon, UsersRoundIcon, WorkflowIcon, InboxIcon, ListTodoIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, PlugIcon, PlusIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon } from "lucide-react"
 import { st, useStore, start } from "@/store"
 import { useT } from "@/i18n"
 import { useRoute, Sidebar, MobileTabs, getSheet, resolvedTheme, openSheet, closeSheet, go, setTheme, StatusDot, ItemNo } from "@/ui"
@@ -35,6 +35,7 @@ const TagDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.Ta
 const DevicesView = lazyView(() => import("@/devices").then((m) => ({ default: m.DevicesView })))
 const DeviceView = lazyView(() => import("@/devices").then((m) => ({ default: m.DeviceView })))
 const PairDialog = lazyView(() => import("@/devices").then((m) => ({ default: m.PairDialog })))
+const MobilePairDialog = lazyView(() => import("@/access-settings").then((m) => ({ default: m.MobilePairDialog })))
 const ProjectsView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectsView })))
 const ProjectView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectView })))
 const NewProjectDialog = lazyView(() => import("@/projects").then((m) => ({ default: m.NewProjectDialog })))
@@ -85,7 +86,8 @@ function CommandMenu({ open }: { open: boolean }) {
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h)
   }, [open])
   const run = (f: () => void) => { closeSheet(); f() }
-  const pages: [string, string, any][] = [["", t("shell:cmd.page.chat"), MessageCircleIcon], ["inbox", t("shell:cmd.page.inbox"), InboxIcon], ["items", t("shell:cmd.page.items"), ListTodoIcon], ["projects", t("shell:cmd.page.projects"), FolderIcon], ["sessions", t("shell:cmd.page.sessions"), SquareTerminalIcon], ["stats", t("shell:cmd.page.stats"), ChartNoAxesColumnIcon], ["signals", t("shell:cmd.page.signals"), RadioIcon], ["auto", t("shell:cmd.page.auto"), WorkflowIcon], ["integrations", t("shell:cmd.page.integrations"), PlugIcon], ["channels", t("shell:cmd.page.channels"), MessagesSquareIcon], ["contacts", t("shell:cmd.page.contacts"), ContactRoundIcon], ["knowledge", t("shell:cmd.page.knowledge"), BookOpenIcon], ["github", "GitHub", GitPullRequestIcon], ["accounts", t("shell:cmd.page.accounts"), KeyRoundIcon], ["vault", t("shell:cmd.page.vault"), LockIcon], ["bots", "Bot", BotIcon], ["devices", t("shell:cmd.page.devices"), ServerIcon], ["settings/general", t("shell:cmd.page.settings"), SettingsIcon], ["settings/tags", t("shell:cmd.page.settingsTags"), SettingsIcon], ["settings/workspace", t("shell:cmd.page.settingsSpace"), SettingsIcon]]
+  const bridge = nativeBridge()
+  const pages: [string, string, any][] = [["", t("shell:cmd.page.chat"), MessageCircleIcon], ["inbox", t("shell:cmd.page.inbox"), InboxIcon], ["items", t("shell:cmd.page.items"), ListTodoIcon], ["projects", t("shell:cmd.page.projects"), FolderIcon], ["sessions", t("shell:cmd.page.sessions"), SquareTerminalIcon], ["stats", t("shell:cmd.page.stats"), ChartNoAxesColumnIcon], ["signals", t("shell:cmd.page.signals"), RadioIcon], ["auto", t("shell:cmd.page.auto"), WorkflowIcon], ["integrations", t("shell:cmd.page.integrations"), PlugIcon], ["channels", t("shell:cmd.page.channels"), MessagesSquareIcon], ["contacts", t("shell:cmd.page.contacts"), ContactRoundIcon], ["knowledge", t("shell:cmd.page.knowledge"), BookOpenIcon], ["github", "GitHub", GitPullRequestIcon], ["accounts", t("shell:cmd.page.accounts"), KeyRoundIcon], ["vault", t("shell:cmd.page.vault"), LockIcon], ["bots", "Bot", BotIcon], ["devices", t("shell:cmd.page.devices"), ServerIcon], ["settings/general", t("shell:cmd.page.settings"), SettingsIcon], ["settings/access", t("shell:cmd.page.settingsAccess"), KeyRoundIcon], ["settings/tags", t("shell:cmd.page.settingsTags"), SettingsIcon], ["settings/workspace", t("shell:cmd.page.settingsSpace"), SettingsIcon]]
   return (
     <CommandDialog open={open} onOpenChange={(o) => !o && closeSheet()} title={t("common:action.search")} description={t("shell:cmd.description")}>
       <Command filter={(v, q) => (v.toLowerCase().includes(q.trim().toLowerCase()) ? 1 : 0)}>
@@ -96,6 +98,8 @@ function CommandMenu({ open }: { open: boolean }) {
           <CommandItem onSelect={() => run(() => { go("#/items"); openSheet("newItem") })}><PlusIcon />{t("shell:cmd.newItem")}<CommandShortcut>N</CommandShortcut></CommandItem>
           <CommandItem onSelect={() => run(() => { go("#/projects"); openSheet("newProject") })}><FolderIcon />{t("shell:cmd.newProject")}</CommandItem>
           <CommandItem onSelect={() => run(() => { go("#/bots"); openSheet("newBot") })} data-cmd-newbot><BotIcon />{t("shell:cmd.newBot")}</CommandItem>
+          <CommandItem onSelect={() => run(() => { if (bridge?.openPairSheet) bridge.openPairSheet(); else openSheet("pairClient") })} data-cmd-pair-mobile><QrCodeIcon />{t("shell:cmd.pairMobile")}</CommandItem>
+          <CommandItem onSelect={() => run(() => { if (bridge?.openHubSwitcher) bridge.openHubSwitcher(); else go("#/settings/access") })} data-cmd-switch-hub><ServerIcon />{t("shell:cmd.switchHub")}</CommandItem>
           <CommandItem onSelect={() => run(() => setTheme(resolvedTheme() === "dark" ? "light" : "dark"))}>{resolvedTheme() === "dark" ? <SunIcon /> : <MoonIcon />}{resolvedTheme() === "dark" ? t("shell:cmd.toLight") : t("shell:cmd.toDark")}</CommandItem>
         </CommandGroup>
         <CommandSeparator />
@@ -151,32 +155,57 @@ function TokenSignIn() {
 /** a web client served on its own: which Hub it talks to (A3) */
 function ConnectHub() {
   const t = useT()
+  const bridge = nativeBridge()
   const [url, setUrl] = useState(hubBase())
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  const recent = savedHubs()
   /* served on its own port by a Hub: that Hub's address, as a suggestion to confirm */
   useEffect(() => {
     if (hubBase()) return
     fetch("/hub.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((j) => { if (typeof j?.hub === "string") setUrl((u) => u || j.hub) }, () => {})
   }, [])
-  const go = async (e: React.FormEvent) => {
-    e.preventDefault()
-    const base = normalize(url)
+  const connectTo = async (raw: string) => {
+    const base = normalize(raw)
     if (!base) { setError(t("shell:app.badAddress")); return }
     setBusy(true); setError("")
     try {
       const h = await hello(base)
       if (h.api !== API) { setError(t("shell:app.apiMismatch", { version: h.version })); setBusy(false); return }
-      setHub(base === location.origin ? null : base); location.reload()
+      rememberHub(base, { version: h.version })
+      setHub(base === location.origin ? null : base, { version: h.version }); location.reload()
     } catch { setError(t("shell:app.notSteve")); setBusy(false) }
   }
+  const go = async (e: React.FormEvent) => {
+    e.preventDefault()
+    await connectTo(url)
+  }
   return (
-    <form onSubmit={go} className="flex w-full max-w-xs flex-col gap-2 text-left" data-connect-hub>
-      <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={t("shell:app.hubAddress")} autoFocus inputMode="url" />
-      {error && <div className="type-footnote text-destructive">{error}</div>}
-      <Button type="submit" disabled={busy || !url.trim()}>{busy ? <Spinner className="size-4" /> : t("shell:app.connect")}</Button>
-      <div className="type-footnote text-muted-foreground">{t("shell:app.connectHint")}</div>
-    </form>
+    <div className="flex w-full max-w-xs flex-col gap-3 text-left">
+      <form onSubmit={go} className="flex w-full flex-col gap-2" data-connect-hub>
+        <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={t("shell:app.hubAddress")} autoFocus inputMode="url" />
+        {error && <div className="type-footnote text-destructive">{error}</div>}
+        <Button type="submit" disabled={busy || !url.trim()}>{busy ? <Spinner className="size-4" /> : t("shell:app.connect")}</Button>
+        {bridge?.openQRScanner && (
+          <Button type="button" variant="outline" onClick={() => bridge.openQRScanner?.()} data-native-scan-qr>
+            <QrCodeIcon className="size-4" />
+            {t("shell:app.scanQr")}
+          </Button>
+        )}
+        <div className="type-footnote text-muted-foreground">{t("shell:app.connectHint")}</div>
+      </form>
+      {recent.length > 0 && (
+        <div className="flex flex-col gap-1.5 border-t border-border pt-3" data-saved-hubs>
+          <div className="type-footnote text-muted-foreground">{t("shell:app.savedHubs")}</div>
+          {recent.slice(0, 4).map((h) => (
+            <Button key={h.url} variant="ghost" size="sm" className="justify-between font-normal" disabled={busy} onClick={() => void connectTo(h.url)}>
+              <span className="truncate">{h.name || h.url}</span>
+              {h.version && <span className="ml-2 shrink-0 font-mono text-[11px] text-muted-foreground">{h.version}</span>}
+            </Button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -212,7 +241,9 @@ export default function App() {
   if (st.login) return (
     <Splash><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{t("shell:app.signInToContinue")}</div></div>
       {signIn.token && <TokenSignIn />}
-      {(signIn.link || !signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => { location.href = hubUrl(signIn.link ?? st.login ?? "/auth/login") + "?back=" + encodeURIComponent(hubBase() ? location.href : location.pathname + location.hash) }} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}</Splash>
+      {(signIn.link || !signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => { location.href = hubUrl(signIn.link ?? st.login ?? "/auth/login") + "?back=" + encodeURIComponent(hubBase() ? location.href : location.pathname + location.hash) }} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}
+      {nativeBridge()?.openQRScanner && <Button variant="outline" onClick={() => nativeBridge()?.openQRScanner?.()} data-login-scan-qr><QrCodeIcon className="size-4" />{t("shell:app.scanQr")}</Button>}
+      {(hubBase() || nativeBridge()?.openHubSwitcher) && <Button variant="ghost" size="sm" onClick={() => { const nb = nativeBridge(); if (nb?.openHubSwitcher) nb.openHubSwitcher(); else { setHub(null); setHubState("missing") } }} data-login-change-hub>{t("shell:app.changeHub")}</Button>}</Splash>
   )
   if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><div className="type-callout text-muted-foreground">{st.error}</div>{hubBase() && <Button variant="ghost" onClick={() => { setHub(null); setHubState("missing") }}>{t("shell:app.changeHub")}</Button>}</> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
   const view =
@@ -253,6 +284,7 @@ export default function App() {
         {sh?.kind === "import" && <ImportDialog />}
         {sh?.kind === "deleteBot" && <DeleteBotDialog k={sh.payload.k} />}
         {sh?.kind === "pair" && <PairDialog />}
+        {sh?.kind === "pairClient" && <MobilePairDialog />}
         {sh?.kind === "tag" && <TagDialog id={sh.payload?.id} item={sh.payload?.item} name={sh.payload?.name} />}
         {sh?.kind === "newProject" && <NewProjectDialog />}
         {sh?.kind === "newWorkspace" && <NewWorkspaceDialog />}

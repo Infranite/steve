@@ -547,6 +547,7 @@ export default {
       vault: "保险箱",
       devices: "设备",
       settings: "设置",
+      settingsAccess: "设置 · 访问与客户端",
       settingsTags: "设置 · 标签",
       settingsSpace: "设置 · 工作空间",
     },
@@ -557,6 +558,8 @@ export default {
     newItem: "新事项",
     newProject: "新建项目",
     newBot: "新建 Bot",
+    pairMobile: "手机扫码配对",
+    switchHub: "切换 Hub",
     toLight: "切换到浅色",
     toDark: "切换到深色",
     pages: "页面",
@@ -579,6 +582,8 @@ export default {
     notSteve: "这个地址上没有找到 Steve Hub",
     apiMismatch: "这个 Hub（{{version}}）与当前网页的版本不兼容",
     changeHub: "换一个 Hub",
+    savedHubs: "最近连接过的 Hub",
+    scanQr: "扫码配对连接",
   },
   /* office.tsx: docx/xlsx/pptx read in the page */
   office: {
