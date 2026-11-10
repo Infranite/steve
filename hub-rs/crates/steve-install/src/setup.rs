@@ -1513,6 +1513,31 @@ mod tests {
             Ok(self.0.remove(0))
         }
     }
+    /// A terminal with widgets: each `select` takes the next pick, lines are typed as in `Answers`.
+    struct Widgets {
+        picks: Vec<usize>,
+        lines: Vec<String>,
+        asked: Vec<String>,
+    }
+    impl Prompts for Widgets {
+        fn interactive(&self) -> bool {
+            true
+        }
+        fn rich(&self) -> bool {
+            true
+        }
+        fn select(&mut self, title: &str, choices: &[Choice], _: usize) -> Result<usize> {
+            self.asked.push(format!("{title} {}", choices.iter().map(|c| c.key.as_str()).collect::<Vec<_>>().join("/")));
+            Ok(self.picks.remove(0))
+        }
+        fn line(&mut self, title: &str, _: Option<&str>, _: bool) -> Result<String> {
+            self.asked.push(title.to_owned());
+            if self.lines.is_empty() {
+                bail!("fixture input exhausted");
+            }
+            Ok(self.lines.remove(0))
+        }
+    }
     fn meta(version: &str) -> Value {
         json!({"version":version,"commit":"a".repeat(40)})
     }
@@ -1636,7 +1661,38 @@ mod tests {
                     listen: Some("0.0.0.0:8440".into()),
                     ..Default::default()
                 },
-                "--listen 只用于 Hub",
+                "--listen/--public-url 只用于 Hub",
+            ),
+            (
+                Options {
+                    role: Some("node".into()),
+                    public_url: Some("https://hub.example".into()),
+                    ..Default::default()
+                },
+                "--listen/--public-url 只用于 Hub",
+            ),
+            (
+                Options {
+                    public_url: Some("https://hub.example".into()),
+                    pin: Some(format!("sha256:{}", "a".repeat(64))),
+                    ..Default::default()
+                },
+                "--public-url 只用于 Hub",
+            ),
+            (
+                Options {
+                    public_url: Some("http://0.0.0.0:8441".into()),
+                    ..Default::default()
+                },
+                "访问地址",
+            ),
+            (
+                Options {
+                    fresh: true,
+                    reconfigure: true,
+                    ..Default::default()
+                },
+                "--fresh 是重新安装",
             ),
         ] {
             let home = temp.path().join("must-not-exist");
@@ -1752,7 +1808,8 @@ mod tests {
         private_dir(&source).unwrap();
         let home = temp.path().join("home");
         let keys = temp.path().join("keys");
-        let mut answers = vec!["https://hub.example/".into()];
+        // the browser address follows from the listen address: nothing is asked for it
+        let mut answers = vec![];
         if cfg!(target_os = "linux") {
             answers.push(keys.to_str().unwrap().into());
         }
@@ -1761,7 +1818,7 @@ mod tests {
         let env = wizard.hub_config(Some("0.0.0.0:8440")).unwrap();
         assert_eq!(env["STEVE_HOST"], "0.0.0.0");
         assert_eq!(env["STEVE_ALLOW_ANY_HOST"], "1");
-        assert_eq!(env["STEVE_PUBLIC_URL"], "https://hub.example");
+        assert_eq!(env["STEVE_PUBLIC_URL"], "http://127.0.0.1:8441");
         assert_eq!(env["STEVE_WEB_PORT"], "8441", "the web client on a port of its own");
         assert!(env.get("STEVE_OIDC_ISSUER").is_none());
         let bytes = fs::read_to_string(home.join("steve.env")).unwrap();
@@ -1772,6 +1829,188 @@ mod tests {
         let mut input = Answers(vec![]);
         let mut wizard = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input).unwrap();
         assert_eq!(wizard.hub_config(None).unwrap(), env);
+        // the same options again are the saved configuration; other ones are never written over it
+        assert_eq!(wizard.hub_config_with(Some("0.0.0.0:8440"), Some("http://127.0.0.1:8441/"), None).unwrap(), env);
+        let differs = |error: anyhow::Error| error.to_string().contains("已有初始化配置不同");
+        assert!(differs(wizard.hub_config_with(None, Some("https://hub.example"), None).unwrap_err()));
+        assert!(differs(wizard.hub_config(Some("127.0.0.1:8440")).unwrap_err()));
+    }
+
+    /// One new Hub configuration in a home of its own: (the environment, what was asked).
+    fn configured(
+        picks: Option<Vec<usize>>,
+        lines: &[&str],
+        listen: Option<&str>,
+        public: Option<&str>,
+    ) -> Result<(Value, Vec<String>)> {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("package");
+        private_dir(&source).unwrap();
+        let home = temp.path().join("home");
+        let keys = temp.path().join("keys");
+        let lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        match picks {
+            Some(picks) => {
+                let mut input = Widgets { picks, lines, asked: vec![] };
+                let env = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input)?
+                    .hub_config_with(listen, public, Some(&keys))?;
+                Ok((env, input.asked))
+            }
+            None => {
+                let mut input = Answers(lines);
+                let env = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input)?
+                    .hub_config_with(listen, public, Some(&keys))?;
+                Ok((env, vec![]))
+            }
+        }
+    }
+
+    #[test]
+    fn the_wizard_asks_who_can_reach_the_hub_and_derives_the_browser_address() {
+        // other devices too: every interface
+        let (env, asked) = configured(Some(vec![0]), &[], None, None).unwrap();
+        assert_eq!((env["STEVE_HOST"].as_str(), env["STEVE_PORT"].as_str()), (Some("0.0.0.0"), Some("8440")));
+        assert_eq!(env["STEVE_ALLOW_ANY_HOST"], "1");
+        assert_eq!(env["STEVE_PUBLIC_URL"], "http://127.0.0.1:8441");
+        assert_eq!(asked, ["谁可以连接这台 Hub？ lan/local/custom"]);
+        // this machine only
+        let (env, asked) = configured(Some(vec![1]), &[], None, None).unwrap();
+        assert_eq!(env["STEVE_HOST"], "127.0.0.1");
+        assert!(env.get("STEVE_ALLOW_ANY_HOST").is_none());
+        assert_eq!(env["STEVE_PUBLIC_URL"], "http://127.0.0.1:8441");
+        assert_eq!(asked.len(), 1);
+        // an address of one's own: IPv6 loopback has a browser address too
+        let (env, asked) = configured(Some(vec![2]), &["[::1]:9000"], None, None).unwrap();
+        assert_eq!((env["STEVE_HOST"].as_str(), env["STEVE_PORT"].as_str()), (Some("::1"), Some("9000")));
+        assert_eq!(env["STEVE_PUBLIC_URL"], "http://[::1]:9001");
+        assert_eq!(env["STEVE_WEB_PORT"], "9001");
+        assert_eq!(asked[1..], ["监听地址"]);
+        // --listen answers the question
+        let (env, asked) = configured(Some(vec![]), &[], Some("127.0.0.1:18440"), None).unwrap();
+        assert_eq!(env["STEVE_PUBLIC_URL"], "http://127.0.0.1:18441");
+        assert!(asked.is_empty());
+        // --public-url names another browser address
+        let (env, asked) = configured(Some(vec![]), &[], Some("0.0.0.0:8440"), Some("https://hub.example/")).unwrap();
+        assert_eq!(env["STEVE_PUBLIC_URL"], "https://hub.example");
+        assert!(asked.is_empty());
+        // one specific address of another network: no browser address follows, so it is asked
+        let (env, asked) = configured(Some(vec![]), &["https://hub.example/"], Some("192.0.2.20:8440"), None).unwrap();
+        assert_eq!(env["STEVE_PUBLIC_URL"], "https://hub.example");
+        assert_eq!(asked, ["浏览器访问地址"]);
+        // typed, off a terminal with widgets: the listen address itself is asked
+        let (env, _) = configured(None, &["127.0.0.1:8440"], None, None).unwrap();
+        assert_eq!(env["STEVE_HOST"], "127.0.0.1");
+        // the web client's port is the next one: the last port has none
+        let error = configured(None, &[], Some("127.0.0.1:65535"), None).unwrap_err();
+        assert!(error.to_string().contains("监听端口太大"), "{error:#}");
+    }
+
+    #[test]
+    fn typed_choices_take_keys_and_ask_again_on_a_terminal() {
+        let choices = [Choice::new("hub", "Hub", ""), Choice::new("node", "Node", "")];
+        let mut input = Answers(vec!["both".into(), " NODE ".into()]);
+        assert_eq!(typed_select(&mut input, "role", &choices, 0).unwrap(), 1);
+        let mut input = Answers(vec!["codex".into(), "all".into()]);
+        assert_eq!(typed_multiselect(&mut input, "which", &choices, &[true, false]).unwrap(), [true, true]);
+        assert!(input.0.is_empty());
+        assert_eq!(ticks("all", &choices).unwrap(), [true, true]);
+        assert_eq!(ticks("none", &choices).unwrap(), [false, false]);
+        assert_eq!(ticks(" Node ", &choices).unwrap(), [false, true]);
+        assert_eq!(ticks("node,hub", &choices).unwrap(), [true, true]);
+        assert!(ticks("codex", &choices).unwrap_err().to_string().contains("没有 codex"));
+        let mut input = Answers(vec!["maybe".into(), "是".into(), "N".into()]);
+        assert!(typed_confirm(&mut input, "start", false).unwrap());
+        assert!(!typed_confirm(&mut input, "start", true).unwrap());
+        // off a terminal a wrong answer is the end, not another question
+        struct Piped(Vec<String>);
+        impl Prompts for Piped {
+            fn interactive(&self) -> bool {
+                false
+            }
+            fn line(&mut self, _: &str, _: Option<&str>, _: bool) -> Result<String> {
+                Ok(self.0.remove(0))
+            }
+        }
+        let mut input = Piped(vec!["both".into(), "node".into()]);
+        assert!(typed_select(&mut input, "role", &choices, 0).is_err());
+        assert_eq!(input.0, ["node"]);
+        assert!(typed_multiselect(&mut Piped(vec!["codex".into()]), "which", &choices, &[true, true]).is_err());
+        assert!(typed_confirm(&mut Piped(vec!["maybe".into()]), "start", true).is_err());
+    }
+
+    #[test]
+    fn hub_addresses_are_where_the_hub_answers_and_where_the_web_client_is() {
+        let of = |host: &str, port: &str| {
+            let env = json!({"STEVE_HOST":host,"STEVE_PORT":port,"STEVE_PUBLIC_URL":"https://hub.example"});
+            hub_addresses(|key| env[key].as_str().map(str::to_owned))
+        };
+        let web = "https://hub.example".to_string();
+        // every interface is reached on loopback
+        assert_eq!(of("0.0.0.0", "8440"), Some(("http://127.0.0.1:8440".into(), web.clone())));
+        assert_eq!(of("::", "8440"), Some(("http://[::1]:8440".into(), web.clone())));
+        assert_eq!(of("192.0.2.20", "9000"), Some(("http://192.0.2.20:9000".into(), web)));
+        assert_eq!(of("hub.example", "8440"), None);
+        assert_eq!(hub_addresses(|_| None), None);
+        // the installed Hub's own file
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(hub_urls(temp.path()), None);
+        fs::write(
+            temp.path().join("steve.env"),
+            "STEVE_HOST=0.0.0.0\nSTEVE_PORT=18440\nSTEVE_PUBLIC_URL=http://127.0.0.1:18441\n",
+        )
+        .unwrap();
+        assert_eq!(
+            hub_urls(temp.path()),
+            Some(("http://127.0.0.1:18440".into(), "http://127.0.0.1:18441".into()))
+        );
+    }
+
+    #[test]
+    fn an_installation_of_another_version_or_role_is_never_continued() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap().join("home");
+        // nothing there, or a directory that is not an installation: not this question
+        assert!(other_install(&home, "hub", &meta("1.0.1")).is_none());
+        private_dir(&home).unwrap();
+        assert!(other_install(&home, "hub", &meta("1.0.1")).is_none());
+        let receipt = |version: &str, component: &str, steps: Value| {
+            let record = json!({"format":1,"home":home,"component":component,"version":version,
+                "commit":"a".repeat(40),"steps":steps});
+            atomic_json(&home.join("setup.json"), &record).unwrap();
+        };
+        // this version's own setup, however far it got, goes on
+        receipt("1.0.1", "hub", json!(["keychain", "installed"]));
+        assert!(other_install(&home, "hub", &meta("1.0.1")).is_none());
+        // another version that only asked its questions is resumed (Wizard::claim takes it over)
+        receipt("1.0.0", "hub", json!([]));
+        assert!(other_install(&home, "hub", &meta("1.0.1")).is_none());
+        // another version under way: a step done, an identity, a database, a service
+        receipt("1.0.0", "hub", json!(["installed"]));
+        let found = other_install(&home, "hub", &meta("1.0.1")).unwrap();
+        assert_eq!(install_name(&found), format!("Hub 1.0.0 · {}", "a".repeat(8)));
+        receipt("1.0.0", "hub", json!([]));
+        private_dir(&home.join("data")).unwrap();
+        assert!(other_install(&home, "hub", &meta("1.0.1")).is_none());
+        fs::write(home.join("data/steve.sqlite3"), b"").unwrap();
+        assert!(other_install(&home, "hub", &meta("1.0.1")).is_some());
+        fs::remove_file(home.join("data/steve.sqlite3")).unwrap();
+        let mut record = read_json(&home.join("setup.json")).unwrap();
+        record["keychain_started"] = true.into();
+        atomic_json(&home.join("setup.json"), &record).unwrap();
+        assert!(other_install(&home, "hub", &meta("1.0.1")).is_some());
+        // the other role's, whatever its version
+        receipt("1.0.1", "node", json!([]));
+        let found = other_install(&home, "hub", &meta("1.0.1")).unwrap();
+        assert!(install_name(&found).starts_with("Node 1.0.1"));
+        // a receipt written for another directory is not this installation's
+        let mut record = read_json(&home.join("setup.json")).unwrap();
+        record["home"] = json!(temp.path().join("elsewhere"));
+        atomic_json(&home.join("setup.json"), &record).unwrap();
+        assert!(other_install(&home, "hub", &meta("1.0.1")).is_none());
+        // what a directory set aside is named after: 20261111-011243
+        let stamp = stamp();
+        assert!(stamp.len() == 15 && stamp.as_bytes()[8] == b'-', "{stamp}");
+        assert!(stamp.bytes().enumerate().all(|(at, b)| at == 8 || b.is_ascii_digit()), "{stamp}");
     }
 
     #[test]

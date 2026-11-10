@@ -10,8 +10,52 @@ fn invoke(home: &Path, args: &[&str]) -> Output {
         .env_clear()
         .env("HOME", home)
         .env("PATH", home.join("no-executables"))
+        .env("STEVE_LANG", "zh-CN")
         .output()
         .unwrap()
+}
+
+/// The first line of `steve --help` under these language settings.
+fn help_in(args: &[&str], env: &[(&str, &str)]) -> String {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_steve"))
+        .args(args)
+        .arg("--help")
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", home.path().join("no-executables"))
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn the_language_is_the_flag_then_steve_lang_then_the_locale() {
+    let zh = help_in(&[], &[("STEVE_LANG", "zh-CN")]);
+    let en = help_in(&[], &[("STEVE_LANG", "en")]);
+    assert_ne!(zh, en);
+    assert!(zh.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "{zh}");
+    assert!(!en.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "{en}");
+    // --lang wins over every variable, and any tag of a language chooses it
+    assert_eq!(help_in(&["--lang", "en"], &[("STEVE_LANG", "zh-CN")]), en);
+    assert_eq!(help_in(&["--lang", "zh-Hans"], &[("STEVE_LANG", "en"), ("LANG", "en_US.UTF-8")]), zh);
+    // STEVE_LANG, then LC_ALL, LC_MESSAGES, LANG: the first that names one of ours
+    assert_eq!(help_in(&[], &[("STEVE_LANG", "en"), ("LC_ALL", "zh_CN.UTF-8")]), en);
+    assert_eq!(help_in(&[], &[("LC_ALL", "zh_CN.UTF-8"), ("LANG", "en_US.UTF-8")]), zh);
+    assert_eq!(help_in(&[], &[("LC_ALL", "C"), ("LC_MESSAGES", "en_GB"), ("LANG", "zh_CN.UTF-8")]), en);
+    assert_eq!(help_in(&[], &[("LANG", "zh_TW.UTF-8")]), zh);
+    // a language Steve has no texts in is an error, not a guess
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_steve"))
+        .args(["--lang", "fr", "--help"])
+        .env_clear()
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--lang fr"));
 }
 
 #[test]

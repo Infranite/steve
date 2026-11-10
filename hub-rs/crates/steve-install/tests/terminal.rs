@@ -146,21 +146,11 @@ fn executable(path: &Path, content: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-#[test]
-fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = temporary.path().canonicalize().unwrap();
-    let account = root.join("account");
+/// A 1.2.3 installer under `root` whose programs cannot initialize a keychain or start a service;
+/// returns its `steve`.
+fn installer(root: &Path) -> PathBuf {
     let package = root.join("installer");
-    let empty_path = root.join("empty-path");
-    let install = account.join(".steve");
-    for path in [
-        account.clone(),
-        empty_path.clone(),
-        package.join("bin"),
-        package.join("ops"),
-        package.join("web/dist"),
-    ] {
+    for path in [package.join("bin"), package.join("ops"), package.join("web/dist")] {
         fs::create_dir_all(path).unwrap();
     }
     let cli = package.join("bin/steve");
@@ -202,13 +192,54 @@ fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
     ] {
         executable(&package.join(relative), "#!/bin/sh\nexit 95\n");
     }
+    cli
+}
+
+/// A service manager in `bin` that knows of no service (or of a running one) and refuses, and
+/// records, anything but being asked.
+fn manager(bin: &Path, calls: &Path, running: bool) {
+    let calls = steve_install::common::shell_quote(calls.to_str().unwrap()).unwrap();
+    let (name, permitted, absent, present) = if cfg!(target_os = "macos") {
+        (
+            "launchctl",
+            "[ \"$1\" = print ]",
+            "printf '%s\\n' 'Could not find service' >&2; exit 113",
+            "printf '%s\\n' 'state = running' 'pid = 4242'",
+        )
+    } else {
+        (
+            "systemctl",
+            "[ \"$1\" = --user ] && [ \"$2\" = show ]",
+            "printf '%s\\n' 'LoadState=not-found' 'ActiveState=inactive' 'MainPID=0' 'ExecMainStatus=0'",
+            "printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' 'MainPID=4242' 'ExecMainStatus=0'",
+        )
+    };
+    let output = if running { present } else { absent };
+    executable(
+        &bin.join(name),
+        &format!("#!/bin/sh\n{permitted} || {{ printf 'changed\\n' >> {calls}; exit 97; }}\nprintf 'read\\n' >> {calls}\n{output}\n"),
+    );
+}
+
+#[test]
+fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let account = root.join("account");
+    let empty_path = root.join("empty-path");
+    let install = account.join(".steve");
+    for path in [account.clone(), empty_path.clone()] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let cli = installer(&root);
 
     let mut pty = Pty::open().unwrap();
     let before = pty.attributes();
     let mut command = Command::new(&cli);
     command
-        .args(["setup", "hub", "--listen", "0.0.0.0:8440"])
+        .args(["setup", "hub"])
         .env_clear()
+        .env("STEVE_LANG", "zh-CN")
         .env("HOME", &account)
         .env("PATH", &empty_path)
         .env("TMPDIR", &root)
@@ -218,10 +249,11 @@ fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
         .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
         .process_group(0);
     let mut process = Process(command.spawn().unwrap());
-    // an address a browser can't use is asked again; then the person gives up (end of input)
-    pty.wait_prompt(&mut process.0, "浏览器访问地址 [http://127.0.0.1:8441]: ");
-    pty.master.write_all(b"http://0.0.0.0:8440\n").unwrap();
-    pty.wait_prompt(&mut process.0, "浏览器访问地址 [http://127.0.0.1:8441]: ");
+    // without TERM the wizard types its questions. An address nothing can listen on is asked
+    // again; then the person gives up (end of input)
+    pty.wait_prompt(&mut process.0, "监听地址 [0.0.0.0:8440]: ");
+    pty.master.write_all(b"localhost:8440\n").unwrap();
+    pty.wait_prompt(&mut process.0, "监听地址 [0.0.0.0:8440]: ");
     pty.master.write_all(&[4]).unwrap();
     let status = pty.wait_exit(&mut process.0);
     assert_eq!(status.code(), Some(1), "end of input is handled as cancellation");
@@ -229,13 +261,11 @@ fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
     assert_eq!(after.c_lflag, before.c_lflag, "terminal flags are unchanged");
     assert_eq!(after.c_cc, before.c_cc, "terminal input controls are unchanged");
     let output = String::from_utf8_lossy(&pty.output);
-    assert_eq!(
-        output.matches("浏览器访问地址 [http://127.0.0.1:8441]: ").count(),
-        2,
-        "{output}"
-    );
+    assert_eq!(output.matches("监听地址 [0.0.0.0:8440]: ").count(), 2, "{output}");
     assert!(output.contains("初始化已中断"), "{output}");
     assert!(!output.contains("OIDC"), "setup asks for no OIDC: {output}");
+    assert!(!output.contains("浏览器访问地址"), "setup asks for no browser address: {output}");
+    assert!(!output.contains('\x1b'), "plain output has no escape sequence: {output:?}");
 
     let receipt_bytes = fs::read(install.join("setup.json")).unwrap();
     let receipt: Value = serde_json::from_slice(&receipt_bytes).unwrap();
@@ -286,32 +316,12 @@ fn service_output_uses_stdout_terminal_and_preserves_json_for_automation() {
     let bin = temporary.path().join("bin");
     fs::create_dir_all(&account).unwrap();
     fs::create_dir(&bin).unwrap();
-    let called = temporary.path().join("manager-calls");
-    let called = steve_install::common::shell_quote(called.to_str().unwrap()).unwrap();
-    let (manager, output, permitted) = if cfg!(target_os = "macos") {
-        (
-            "launchctl",
-            "printf '%s\\n' 'Could not find service' >&2; exit 113",
-            "[ \"$1\" = print ]",
-        )
-    } else {
-        (
-            "systemctl",
-            "printf '%s\\n' 'LoadState=not-found' 'ActiveState=inactive' 'MainPID=0' 'ExecMainStatus=0'",
-            "[ \"$1\" = --user ] && [ \"$2\" = show ]",
-        )
-    };
-    let manager = bin.join(manager);
-    fs::write(
-        &manager,
-        format!("#!/bin/sh\n{permitted} || exit 97\nprintf 'read\\n' >> {called}\n{output}\n"),
-    )
-    .unwrap();
-    fs::set_permissions(&manager, fs::Permissions::from_mode(0o755)).unwrap();
+    manager(&bin, &temporary.path().join("manager-calls"), false);
     let command = |args: &[&str]| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_steve"));
         cmd.args(args)
             .env_clear()
+            .env("STEVE_LANG", "zh-CN")
             .env("HOME", &account)
             .env("PATH", &bin);
         cmd
@@ -361,6 +371,150 @@ fn service_output_uses_stdout_terminal_and_preserves_json_for_automation() {
         fs::read_to_string(temporary.path().join("manager-calls")).unwrap(),
         "read\n".repeat(5)
     );
+}
+
+/// Answers every request on a loopback port with `body`, as a Hub's `/healthz` would.
+fn health_server(body: &'static str) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    port
+}
+
+#[test]
+fn hub_status_names_the_version_the_running_hub_reports() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let (account, bin, home) = (root.join("account"), root.join("bin"), root.join("account/.steve"));
+    for path in [&bin, &home] {
+        fs::create_dir_all(path).unwrap();
+    }
+    manager(&bin, &root.join("manager-calls"), true);
+    let port = health_server(r#"{"ok":true,"version":"9.8.7","build_commit":"c0ffee0123456789"}"#);
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let address = |port: u16| {
+        private_fixture_file(
+            &home.join("steve.env"),
+            format!("STEVE_HOST=0.0.0.0\nSTEVE_PORT={port}\nSTEVE_PUBLIC_URL=http://127.0.0.1:1\n"),
+        )
+    };
+    let command = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_steve"));
+        cmd.args(args).env_clear().env("STEVE_LANG", "zh-CN").env("HOME", &account).env("PATH", &bin);
+        cmd
+    };
+    address(port);
+    for action in ["status", "doctor"] {
+        let (status, human) = terminal_output(&mut command(&["hub", action]));
+        assert!(status.success(), "{human}");
+        assert!(human.contains("服务进程：运行中"), "{human}");
+        // twelve characters of the commit the Hub itself answered with
+        assert!(human.contains("运行版本：9.8.7（c0ffee012345）"), "{human}");
+    }
+    // what automation reads does not depend on whether the Hub answered
+    let (status, json) = terminal_output(&mut command(&["hub", "status", "--json"]));
+    assert!(status.success());
+    let report: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["service"]["running"], true);
+    assert!(report["running_build"].is_null());
+    assert_eq!(command(&["hub", "status"]).output().unwrap().stdout, json.as_bytes());
+    // a process that does not answer is not given the configured version
+    address(silent);
+    let (status, human) = terminal_output(&mut command(&["hub", "status"]));
+    assert!(status.success());
+    assert!(human.contains("运行版本：未核验"), "{human}");
+    assert!(!human.contains("9.8.7"), "{human}");
+    let calls = fs::read_to_string(root.join("manager-calls")).unwrap();
+    assert!(calls.lines().all(|call| call == "read"), "{calls}");
+}
+
+#[test]
+fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let (account, bin, home) = (root.join("account"), root.join("bin"), root.join("account/.steve"));
+    for directory in [&account, &bin, &home, &home.join("data")] {
+        fs::create_dir_all(directory).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let cli = installer(&root);
+    manager(&bin, &root.join("manager-calls"), false);
+    // 1.2.2 finished installing here; the installer is 1.2.3
+    let receipt = serde_json::to_vec(&json!({
+        "format":1,"component":"hub","home":home,"version":"1.2.2","commit":"b".repeat(40),
+        "steps":["environment","verified","installed"],"files":{}
+    }))
+    .unwrap();
+    private_fixture_file(&home.join("setup.json"), &receipt);
+    private_fixture_file(&home.join("data/steve.sqlite3"), b"the database of the installation in use");
+    let before = installation_tree(&account);
+    let setup = |args: &[&str]| {
+        Command::new(&cli)
+            .arg("setup")
+            .args(args)
+            .env_clear()
+            .env("STEVE_LANG", "zh-CN")
+            .env("HOME", &account)
+            .env("PATH", &bin)
+            .env("TMPDIR", &root)
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let home_text = home.to_str().unwrap();
+    for args in [&["hub"][..], &["hub", "--listen", "127.0.0.1:8440"], &["node", "--home", home_text]] {
+        let refused = setup(args);
+        let said = String::from_utf8_lossy(&refused.stderr);
+        assert_eq!(refused.status.code(), Some(1), "{args:?}: {said}");
+        assert!(said.contains("Hub 1.2.2 · bbbbbbbb；不会覆盖"), "{args:?}: {said}");
+        assert!(said.contains("steve setup --fresh"), "{args:?}: {said}");
+        assert_eq!(installation_tree(&account), before, "{args:?} changed the installation");
+    }
+    assert!(!root.join("manager-calls").exists(), "a refusal asks the service manager nothing");
+
+    // --fresh: the directory is kept whole under another name, then setup starts over (and here
+    // ends at its first question, with no one to answer)
+    let fresh = setup(&["hub", "--fresh"]);
+    let said = format!("{}{}", String::from_utf8_lossy(&fresh.stdout), String::from_utf8_lossy(&fresh.stderr));
+    assert_eq!(fresh.status.code(), Some(1), "{said}");
+    assert!(said.contains("初始化已中断"), "{said}");
+    let aside: Vec<PathBuf> = fs::read_dir(&account)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path != &home)
+        .collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    let name = aside[0].file_name().unwrap().to_str().unwrap();
+    assert!(name.starts_with(".steve.bak-2") && name.len() == ".steve.bak-".len() + 15, "{name}");
+    assert!(said.contains(aside[0].to_str().unwrap()), "setup says where the installation went: {said}");
+    assert_eq!(fs::read(aside[0].join("setup.json")).unwrap(), receipt);
+    let mut kept = installation_tree(&aside[0]);
+    kept.remove(Path::new(".setup.lock"));
+    let was: BTreeMap<PathBuf, TreeEntry> = before
+        .into_iter()
+        .filter_map(|(path, entry)| Some((path.strip_prefix(".steve").ok()?.to_owned(), entry)))
+        .filter(|(path, _)| !path.as_os_str().is_empty())
+        .collect();
+    assert_eq!(kept, was, "nothing in the installation set aside changed");
+    let started: Value = serde_json::from_slice(&fs::read(home.join("setup.json")).unwrap()).unwrap();
+    assert_eq!(started["version"], "1.2.3");
+    assert_eq!(started["steps"], json!([]));
+    assert!(!home.join("data").exists());
+    // the service was asked whether it runs; nothing was there to stop or remove
+    let calls = fs::read_to_string(root.join("manager-calls")).unwrap();
+    assert!(!calls.is_empty() && calls.lines().all(|call| call == "read"), "{calls}");
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -523,6 +677,7 @@ fn actual_reconfigure_preserves_installation_and_supports_noop_and_eof() {
                 .args(["--force", "--sign", "-", "--identifier", &identifier])
                 .arg(&binary)
                 .env_clear()
+                .env("STEVE_LANG", "zh-CN")
                 .env("HOME", &account)
                 .env("PATH", &deny_bin)
                 .env("TMPDIR", &root)
@@ -633,6 +788,7 @@ fn actual_reconfigure_preserves_installation_and_supports_noop_and_eof() {
                 .args(["setup", "hub", "--reconfigure", "--home"])
                 .arg(&home)
                 .env_clear()
+                .env("STEVE_LANG", "zh-CN")
                 .env("HOME", &account)
                 .env("PATH", &deny_bin)
                 .env("TMPDIR", &root)

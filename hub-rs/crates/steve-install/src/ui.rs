@@ -838,3 +838,45 @@ pub fn summary(text: &str) -> String {
     styled.push('\n');
     styled
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn width_counts_columns_not_bytes_or_escapes() {
+        assert_eq!(width("Hub"), 3);
+        assert_eq!(width("仅本机"), 6);
+        assert_eq!(width("本机 + LAN"), 10);
+        assert_eq!(width("\x1b[1m\x1b[38;2;167;139;250m安装\x1b[0m ok"), 7);
+        assert_eq!(width("e\u{301}"), 1, "a combining mark takes no column");
+        assert_eq!(pad("中", 5), "中   ");
+        assert_eq!(pad("too long", 3), "too long");
+    }
+
+    #[test]
+    fn clip_keeps_text_within_its_columns() {
+        assert_eq!(clip("short", 10), "short");
+        assert_eq!(clip("0123456789", 10), "0123456789");
+        assert_eq!(clip("0123456789ab", 10), "012345678…");
+        let cut = clip("监听 0.0.0.0:8440，其他设备和 Node 可以连进来", 20);
+        assert!(cut.ends_with('…') && width(&cut) <= 20, "{cut}");
+        // a wide character that would straddle the edge is left out whole
+        assert_eq!(clip("一二三四五六", 6), "一二…");
+    }
+
+    #[test]
+    fn wrap_breaks_at_spaces_and_between_chinese_characters() {
+        let lines = wrap("the quick brown fox jumps over the lazy dog", 16);
+        assert!(lines.iter().all(|l| width(l) <= 16), "{lines:?}");
+        assert_eq!(lines.join(" "), "the quick brown fox jumps over the lazy dog");
+        let text = "这个监听地址推不出网页地址：填你在浏览器里打开用的地址。";
+        let lines = wrap(text, 20);
+        assert!(lines.len() > 1 && lines.iter().all(|l| width(l) <= 20), "{lines:?}");
+        assert_eq!(lines.concat(), text, "nothing is lost where there is no space to break at");
+        assert_eq!(wrap("one\ntwo", 40), ["one", "two"]);
+        assert_eq!(wrap("", 40), Vec::<String>::new());
+        // a width too small to be a terminal is treated as ten columns
+        assert!(wrap("0123456789abcdef", 2).iter().all(|l| width(l) <= 10));
+    }
+}
