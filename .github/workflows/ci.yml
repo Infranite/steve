@@ -107,6 +107,10 @@ jobs:
       - name: Install Linux test prerequisites
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
+      # The key names everything that decides how dependencies are built: platform, toolchain, lockfile,
+      # every manifest (profiles, features) and this file (its env sets profile options). main saves a
+      # cache only for a key that has none, and starts that one from nothing so it holds no leftovers.
+      # A pull request whose key has no cache yet starts from main's newest one for its platform.
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: rust-cache
         with:
@@ -114,8 +118,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             hub-rs/target/debug
-          key: rust-test-v1-${{ matrix.runner }}-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml') }}-${{ github.sha }}
-          restore-keys: rust-test-v1-${{ matrix.runner }}-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml') }}-
+          key: rust-test-v1-${{ matrix.runner }}-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml', 'hub-rs/crates/*/Cargo.toml', '.github/workflows/ci.yml') }}
+          restore-keys: ${{ github.event_name == 'pull_request' && format('rust-test-v1-{0}-{1}-1.99.1-', matrix.runner, runner.arch) || '' }}
       - name: Always rebuild workspace packages from this checkout
         run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
       - name: Install checksum-pinned nextest from the official release
@@ -152,7 +156,7 @@ jobs:
       # from this checkout, even when cache fingerprints or file timestamps would allow reuse.
       # A failing test does not keep a built dependency set from being cached.
       - name: Keep only dependency artifacts in the cache
-        if: ${{ !cancelled() && github.event_name == 'push' && steps.rust-build.outcome == 'success' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
         run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: ${{ !cancelled() && github.event_name == 'push' && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
