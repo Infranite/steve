@@ -167,4 +167,69 @@ mod tests {
         );
         assert_eq!(managed_home(Path::new("claude-code-acp")), None);
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_adapter_left_out_at_setup_is_not_installed_by_the_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        // an npm that answers 9.9.9 for every package and "installs" by writing its manifest
+        let (npm, log) = (temp.path().join("npm"), temp.path().join("npm.log"));
+        std::fs::write(
+            &npm,
+            format!(
+                r#"#!/bin/sh
+echo "$*" >> '{}'
+case "$1" in
+  view) echo '"9.9.9"' ;;
+  install)
+    for a in "$@"; do
+      case "$a" in *@latest)
+        p="$3/node_modules/${{a%@latest}}"; mkdir -p "$p"; echo '{{"version": "9.9.9"}}' > "$p/package.json" ;;
+      esac
+    done ;;
+esac
+"#,
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ids: Vec<&str> = steve_acp::adapters::builtin_ids().collect();
+        let (kept, left_out) = (ids[0], ids[1]);
+        let cfg = AcpConfig {
+            adapters: ids
+                .iter()
+                .map(|id| (id.to_string(), managed::command(&home, id).unwrap()))
+                .chain([("elsewhere".to_string(), PathBuf::from("/opt/tools/elsewhere-acp"))])
+                .collect(),
+            declared: HashMap::new(),
+            node: temp.path().join("node"),
+            claude_executable: PathBuf::new(),
+            steve_home: home.clone(),
+            codex_home: PathBuf::new(),
+            user_home: PathBuf::new(),
+            version: "test".into(),
+        };
+        std::fs::create_dir_all(managed::dir(&home)).unwrap();
+        std::fs::write(managed::dir(&home).join("selected.json"), format!("[\"{kept}\"]\n")).unwrap();
+
+        let updates = AdapterUpdates::default();
+        // something runs: the newer release waits
+        assert_eq!(updates.check(&cfg, || false).await, (true, false));
+        assert!(updates.get(&cfg, kept).unwrap().pending);
+        // idle: the chosen one is installed, the other is neither asked about nor installed
+        assert_eq!(updates.check(&cfg, || true).await, (false, true));
+        let package = |id: &str| managed::package(id).unwrap();
+        assert_eq!(managed::installed(&home, package(kept)).as_deref(), Some("9.9.9"));
+        assert_eq!(managed::installed(&home, package(left_out)), None);
+        let asked = std::fs::read_to_string(&log).unwrap();
+        assert!(asked.contains(package(kept)) && !asked.contains(package(left_out)), "{asked}");
+        let found = updates.get(&cfg, kept).unwrap();
+        assert_eq!((found.installed.as_deref(), found.latest.as_deref(), found.pending), (Some("9.9.9"), Some("9.9.9"), false));
+        assert_eq!(updates.get(&cfg, left_out).unwrap().latest, None, "nothing was asked about it");
+        assert!(updates.get(&cfg, "elsewhere").is_none(), "an adapter installed otherwise is left alone");
+        // up to date: nothing more to install
+        assert_eq!(updates.check(&cfg, || true).await, (false, false));
+    }
 }

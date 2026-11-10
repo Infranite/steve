@@ -1086,6 +1086,54 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_access_job_acts_with_the_users_own_access() {
+    let t = T::new();
+    let n = t.node();
+    // outside every root, and an edit on the way: what ends a read-only job
+    // (a_write_is_a_violation_and_the_harness_dies_with_it)
+    let made = t.root.join("made-by-the-job");
+    let script = format!(
+        "q\n@msg m1\n@say 动手\n@asking edit keep.txt\n@asking execute rm -rf build\n@touch {}\n@msg m2\n@say 做完了",
+        made.display()
+    );
+    let mut spec = scripted("a_1", "m", &script);
+    spec.run.policy.permissions = PermissionMode::FullAccess;
+    research(&mut spec).cwd = None;
+    research(&mut spec).readable = vec![];
+    n.start_job(now_cmd("op_j", spec)).await.unwrap();
+    let c = t.end_of(&n, "op_j").await;
+    assert_eq!(c.outcome, Outcome::Succeeded, "{c:?}");
+    assert_eq!(c.job.as_ref().unwrap().end, JobEnd::Done, "{c:?}");
+    assert!(made.exists(), "no read-only sandbox around it");
+    assert!(
+        c.result.iter().any(|p| matches!(p, Part::Text { text } if text.contains("做完了"))),
+        "{c:?}"
+    );
+    // it starts where a terminal would: the user's home
+    let new: serde_json::Value = serde_json::from_str(&t.read("new")).unwrap();
+    assert_eq!(new["cwd"], t.root.to_str().unwrap());
+
+    // a Node whose owner allows less refuses it, before anything runs
+    let t = T::new();
+    let mut cfg = t.scripted_config(2);
+    cfg.ceiling = steve_node::PolicyCeiling {
+        jobs: true,
+        ..Default::default()
+    };
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), Some(Arc::new(Files::default())));
+    n.enable_research(t.research());
+    let mut spec = scripted("a_1", "m", "q\n@msg m1\n@say 好");
+    n.start_job(now_cmd("op_p", spec.clone())).await.unwrap();
+    assert_eq!(t.end_of(&n, "op_p").await.outcome, Outcome::Succeeded, "it still researches");
+    spec.run.attempt = AttemptId::new("a_2").unwrap();
+    spec.run.policy.permissions = PermissionMode::FullAccess;
+    let e = n.start_job(now_cmd("op_f", spec)).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    assert_eq!(t.spawns(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
     // not enabled, or no job capacity
     let t = T::new();
@@ -1150,6 +1198,21 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
         (
             refused(|s| research(s).steve_tools = true),
             ErrorCode::Unsupported,
+        ),
+        // the user's own access is given whole or not at all: never inside a sandbox
+        (
+            refused(|s| {
+                s.run.policy.permissions = PermissionMode::FullAccess;
+                s.run.policy.sandbox = SandboxRequirement::AllowFallback {
+                    preferred: vec!["fs-readonly".into()],
+                    acceptable: vec![],
+                }
+            }),
+            ErrorCode::Invalid,
+        ),
+        (
+            refused(|s| s.run.policy.permissions = PermissionMode::Auto),
+            ErrorCode::Invalid,
         ),
     ];
     for (i, (spec, code)) in cases.into_iter().enumerate() {

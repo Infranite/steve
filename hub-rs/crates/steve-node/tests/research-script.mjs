@@ -106,7 +106,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     else if (!probing) put("new", JSON.stringify(p))
     mcp = p.mcpServers ?? []
     reply(m.id, { sessionId: sid, modes: { currentModeId: "default",
-      availableModes: ["default", "plan", "acceptEdits"].map((id) => ({ id, name: id })) }, configOptions: options() })
+      availableModes: ["default", "plan", "acceptEdits", "bypassPermissions"].map((id) => ({ id, name: id })) }, configOptions: options() })
   } else if (m.method === "session/set_config_option") {
     state[p.configId] = p.value
     if (!probing) put("config", `${p.configId}=${p.value}\n`, true)

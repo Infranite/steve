@@ -406,4 +406,133 @@ mod tests {
         assert!(!s[0].outdated(), "nothing asked: not outdated");
         assert!(s[1].outdated(), "not installed: to install");
     }
+
+    fn add(home: &Path, id: &str, version: &str) {
+        let pkg = root(home).join(package(id).unwrap());
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("package.json"), format!(r#"{{"version": "{version}"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn what_setup_chose_is_what_a_home_keeps() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let ids: Vec<&str> = crate::adapters::builtin_ids().collect();
+        let (first, second) = (ids[0], ids[1]);
+        // nothing was ever chosen: all of them
+        assert_eq!(selection(home), None);
+        assert!(ids.iter().all(|id| wanted(home, id)));
+        select(home, &[first]).unwrap();
+        assert_eq!(selection(home), Some(vec![first.to_string()]));
+        assert!(wanted(home, first) && !wanted(home, second));
+        // one installed by hand is kept whatever was chosen
+        add(home, second, "1.0.0");
+        assert!(wanted(home, second));
+        // "none" is a choice too
+        let bare = tempfile::tempdir().unwrap();
+        select(bare.path(), &[]).unwrap();
+        assert_eq!(selection(bare.path()), Some(vec![]));
+        assert!(!ids.iter().any(|id| wanted(bare.path(), id)));
+        // a file that is not a list is no choice
+        std::fs::write(selection_file(bare.path()), "{").unwrap();
+        assert_eq!(selection(bare.path()), None);
+    }
+
+    #[test]
+    fn the_home_of_an_adapter_is_the_one_it_is_installed_in() {
+        let home = Path::new("/u/.steve");
+        for id in crate::adapters::builtin_ids() {
+            assert_eq!(home_of(&command(home, id).unwrap()).as_deref(), Some(home));
+        }
+        assert_eq!(home_of(&root(home)).as_deref(), Some(home));
+        // a global install, a bare command, and an `adapters` that is not a prefix
+        assert_eq!(home_of(Path::new("/opt/homebrew/lib/node_modules/x/dist/index.js")), None);
+        assert_eq!(home_of(Path::new("some-acp")), None);
+        assert_eq!(home_of(Path::new("/u/.steve/adapters/x/index.js")), None);
+    }
+
+    /// An `npm` beside a `node` that answers `view` with 9.9.9, "installs" by writing each
+    /// package's manifest under the prefix, and records what it was asked.
+    fn fake_npm(dir: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let (npm, log) = (dir.join("npm"), dir.join("npm.log"));
+        let script = format!(
+            r#"#!/bin/sh
+echo "$*" >> '{log}'
+case "$1" in
+  view) echo '"9.9.9"' ;;
+  install)
+    for a in "$@"; do
+      case "$a" in *@latest)
+        p="$3/node_modules/${{a%@latest}}"; mkdir -p "$p"; echo '{{"version": "9.9.9"}}' > "$p/package.json" ;;
+      esac
+    done ;;
+  *) exit 64 ;;
+esac
+"#,
+            log = log.display()
+        );
+        std::fs::write(&npm, script).unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir.join("node"), log)
+    }
+
+    #[test]
+    fn the_command_installs_what_is_named_and_records_the_choice() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let (node, log) = fake_npm(temp.path());
+        let ids: Vec<&str> = crate::adapters::builtin_ids().collect();
+        let (first, second) = (ids[0], ids[1]);
+        let run = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            cli(&home, Some(&node), &args)
+        };
+        let asked = || std::fs::read_to_string(&log).unwrap_or_default();
+        let version = |id: &str| installed(&home, package(id).unwrap());
+
+        // an unknown id changes nothing
+        assert_eq!(run(&["install", "no-such-adapter"]), 2);
+        assert_eq!(run(&["frobnicate"]), 2);
+        assert!(!home.exists() && asked().is_empty());
+
+        // --only: exactly these are the choice (what setup runs)
+        assert_eq!(run(&["install", "--only", second]), 0);
+        assert_eq!(selection(&home), Some(vec![second.to_string()]));
+        assert_eq!((version(first), version(second)), (None, Some("9.9.9".into())));
+        assert_eq!(asked().lines().count(), 1, "{}", asked());
+        assert!(asked().contains(&format!("{}@latest", package(second).unwrap())));
+        assert!(!asked().contains(package(first).unwrap()));
+
+        // without ids, what the home keeps is brought up to date: the other one stays out
+        assert_eq!(run(&["upgrade"]), 0);
+        assert_eq!(version(first), None);
+
+        // a named id joins the choice, in the built-in order
+        assert_eq!(run(&["install", first]), 0);
+        assert_eq!(selection(&home), Some(vec![first.to_string(), second.to_string()]));
+        assert_eq!(version(first).as_deref(), Some("9.9.9"));
+
+        // --only without ids: none, and npm is not asked
+        let none = temp.path().join("none");
+        let before = asked();
+        let args = ["install".to_string(), "--only".to_string()];
+        assert_eq!(cli(&none, Some(&node), &args), 0);
+        assert_eq!(selection(&none), Some(vec![]));
+        assert_eq!(asked(), before);
+        assert!(!root(&none).exists());
+
+        // a home where nothing was chosen gets all of them, and still records no choice
+        let all = temp.path().join("all");
+        assert_eq!(cli(&all, Some(&node), &["install".to_string()]), 0);
+        assert_eq!(selection(&all), None);
+        assert!(ids.iter().all(|id| installed(&all, package(id).unwrap()).is_some()));
+
+        // status and list ask the registry or nothing, and change nothing
+        let before = asked();
+        assert_eq!(run(&["status", "--json"]), 0);
+        assert_eq!(run(&["list", "--json"]), 0);
+        assert_eq!(asked().lines().count(), before.lines().count() + ids.len(), "status asks for each latest");
+        assert!(!asked()[before.len()..].contains("install"));
+    }
 }

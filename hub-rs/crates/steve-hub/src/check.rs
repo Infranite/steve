@@ -282,6 +282,31 @@ mod tests {
     }
 
     #[test]
+    fn an_adapter_left_out_at_setup_is_not_reported_missing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().to_string_lossy().into_owned();
+        // where Steve itself would have installed it; nothing is there
+        let own = steve_acp::managed::command(tmp.path(), "codex").expect("built in");
+        let own = own.to_string_lossy().into_owned();
+        let missing = |r: &Report| r.warnings.iter().any(|w| w.contains("ACP adapter codex"));
+        let own_install = || run(&[("STEVE_HOME", home.as_str()), ("STEVE_ADAPTER_CODEX", own.as_str())]);
+        assert!(missing(&own_install()), "nothing was ever chosen: all of them are expected");
+        let chosen = steve_acp::managed::dir(tmp.path()).join("selected.json");
+        std::fs::create_dir_all(chosen.parent().expect("dir")).expect("dir");
+        std::fs::write(&chosen, r#"["codex"]"#).expect("choice");
+        assert!(missing(&own_install()), "chosen and not there");
+        std::fs::write(&chosen, r#"["claude-code"]"#).expect("choice");
+        let r = own_install();
+        assert!(r.ok && !missing(&r), "{r:?}");
+        // the same choice does not hide an adapter configured somewhere else
+        let r = run(&[
+            ("STEVE_HOME", home.as_str()),
+            ("STEVE_ADAPTER_CODEX", "/nonexistent/steve-test/codex-acp"),
+        ]);
+        assert!(missing(&r), "{r:?}");
+    }
+
+    #[test]
     fn the_other_startup_refusals_are_found_too() {
         let r = run(&[("STEVE_NODE_PROXY_PEERS", "192.0.2.0/24")]);
         assert!(
