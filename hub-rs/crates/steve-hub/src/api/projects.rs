@@ -1067,10 +1067,10 @@ mod tests {
 
     #[test]
     fn a_path_is_shown_from_the_home_directory() {
-        assert_eq!(shown("/home/lee", "/home/lee"), "~");
-        assert_eq!(shown("/home/lee/code/app", "/home/lee"), "~/code/app");
-        assert_eq!(shown("/home/leeway/code", "/home/lee"), "/home/leeway/code");
-        assert_eq!(shown("/srv/app", "/home/lee"), "/srv/app");
+        assert_eq!(shown("/home/user", "/home/user"), "~");
+        assert_eq!(shown("/home/user/code/app", "/home/user"), "~/code/app");
+        assert_eq!(shown("/home/username", "/home/user"), "/home/username");
+        assert_eq!(shown("/srv/app", "/home/user"), "/srv/app");
     }
 
     #[test]
