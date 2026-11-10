@@ -75,6 +75,7 @@
   "core.effort.high": "High",
   "core.effort.xhigh": "Very high",
   "core.effort.max": "Maximum",
+  "core.effort.ultra": "Ultra",
   "core.models.default_model": "Default model",
   "core.models.note.bot_default": "The bot names no model, so the judgment default is used",
   "core.models.invalid.not_object": "Expected an object",

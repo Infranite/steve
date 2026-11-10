@@ -114,6 +114,7 @@ pub fn effort_label(e: &str) -> Option<&'static str> {
         "high" => "高",
         "xhigh" => "很高",
         "max" => "最高",
+        "ultra" => "极致",
         _ => return None,
     })
 }
@@ -128,6 +129,7 @@ pub fn effort_shown(e: &str) -> Option<String> {
         "high" => steve_i18n::t!("core.effort.high"),
         "xhigh" => steve_i18n::t!("core.effort.xhigh"),
         "max" => steve_i18n::t!("core.effort.max"),
+        "ultra" => steve_i18n::t!("core.effort.ultra"),
         _ => return None,
     })
 }
@@ -1020,13 +1022,13 @@ mod tests {
             BotPatch {
                 harness: Some(CODEX.into()),
                 model: Some(Some("gpt-6-luna".into())),
-                reasoning_effort: Some(Some("minimal".into())),
+                reasoning_effort: Some(Some("ultra".into())),
                 ..BotPatch::default()
             },
         );
         assert_eq!(
             m.for_purpose("default", "route"),
-            ch(CODEX, &["gpt-6-luna"], Some("minimal"))
+            ch(CODEX, &["gpt-6-luna"], Some("ultra"))
         );
         patch_bot(
             &s,
@@ -1036,8 +1038,8 @@ mod tests {
                 ..BotPatch::default()
             },
         );
-        // no model: the adapter's own default, shown as such
-        assert_eq!(m.for_purpose("default", "chat"), ch(CODEX, &[], None));
+        // no model: the adapter's own default, shown as such (Codex takes max too)
+        assert_eq!(m.for_purpose("default", "chat"), ch(CODEX, &[], Some("max")));
         let st = m.steve();
         assert_eq!(
             (st.harness.as_str(), st.runs_on.as_str(), st.note),
@@ -1073,7 +1075,7 @@ mod tests {
             "default",
             &json!({"purposes": {
                 "route": {"harness": "claude-code", "models": ["opus", "haiku"], "effort": "low"},
-                "chat": {"harness": "codex", "models": ["gpt-6-sol"], "effort": "minimal"},
+                "chat": {"harness": "codex", "models": ["gpt-6-sol"], "effort": "ultra"},
                 "draft": {"harness": "codex"},
                 "title": {"harness": "claude-code", "effort": "max"},
             }}),
@@ -1091,7 +1093,7 @@ mod tests {
         );
         assert_eq!(
             m.for_purpose("default", "chat"),
-            ch(CODEX, &["gpt-6-sol"], Some("minimal"))
+            ch(CODEX, &["gpt-6-sol"], Some("ultra"))
         );
         // a harness alone: that harness's default model (not Steve's, which is another harness's)
         assert_eq!(m.for_purpose("default", "draft"), ch(CODEX, &[], None));
@@ -1287,9 +1289,8 @@ mod tests {
             json!({"purposes": {"route": {"models": ["a"], "effort": "huge"}}}),
             json!({"purposes": {"route": {"models": ["a"], "tier": "fast"}}}),
             json!({"purposes": {"route": {"harness": "gemini"}}}),
-            // effort of the other harness
-            json!({"purposes": {"route": {"harness": "codex", "effort": "max"}}}),
-            json!({"purposes": {"route": {"harness": "claude-code", "effort": "minimal"}}}),
+            // an effort only the other harness has
+            json!({"purposes": {"route": {"harness": "claude-code", "effort": "ultra"}}}),
             json!({"agents": {"gemini": "x"}}),
             json!({"agents": {"codex": 3}}),
         ];
@@ -1301,7 +1302,7 @@ mod tests {
             &json!({"purposes": {
             "research": {"models": [" claude-opus-5-5[1m] ", "us.anthropic.claude-x-v1:0"], "effort": "xhigh"},
             "chat": {"models": []},
-            "route": {"harness": "codex", "effort": "minimal"},
+            "route": {"harness": "codex", "effort": "ultra"},
         }, "agents": {"codex": "gpt-6-sol"}}),
             &hs,
         )
@@ -1311,7 +1312,7 @@ mod tests {
             json!({
                 "models.research": {"harness": "claude-code", "models": ["claude-opus-5-5[1m]", "us.anthropic.claude-x-v1:0"], "effort": "xhigh"},
                 "models.chat": null,
-                "models.route": {"harness": "codex", "models": [], "effort": "minimal"},
+                "models.route": {"harness": "codex", "models": [], "effort": "ultra"},
                 "models.agent.codex": "gpt-6-sol",
             })
         );
@@ -1368,6 +1369,6 @@ mod tests {
         assert_eq!(y["value"]["models"], json!(["g"]));
         assert_eq!(y["effective"]["harness"], json!("codex"));
         assert_eq!(v["purposes"].as_array().unwrap().len(), 11);
-        assert_eq!(v["harnesses"][1]["efforts"][0]["key"], json!("none"));
+        assert_eq!(v["harnesses"][1]["efforts"][0]["key"], json!("low"));
     }
 }

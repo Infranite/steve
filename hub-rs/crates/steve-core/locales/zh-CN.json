@@ -75,6 +75,7 @@
   "core.effort.high": "高",
   "core.effort.xhigh": "很高",
   "core.effort.max": "最高",
+  "core.effort.ultra": "极致",
   "core.models.default_model": "默认模型",
   "core.models.note.bot_default": "Bot 没选模型，判断用的默认",
   "core.models.invalid.not_object": "要一个对象",
