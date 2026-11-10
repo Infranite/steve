@@ -207,8 +207,9 @@ fn lock(p: &Path) -> std::io::Result<fs::File> {
 
 /// Moves `signing/keychain-pass` into `store`: written, read back, then (with `kc`) the keychain's
 /// password changed, then the file removed. A file whose password the key store already holds is
-/// removed; one that differs from what the store holds, or is not of the storable form, stays. The
-/// file goes even when the change fails: it is the copy every agent can read.
+/// removed; one that is not of the storable form stays, and so does one that differs from what the
+/// store holds, unless it opens the keychain: then the store's is an earlier installation's and is
+/// replaced. The file goes even when the change fails: it is the copy every agent can read.
 pub fn migrate(home: &Path, store: &dyn KeyStore, kc: Option<&dyn Keychain>) -> Moved {
     let file = home.join(FILE);
     let text = match fs::read_to_string(&file) {
@@ -220,6 +221,13 @@ pub fn migrate(home: &Path, store: &dyn KeyStore, kc: Option<&dyn Keychain>) -> 
     }
     match signing::get(store) {
         Ok(Some(p)) if p.as_str() == text.trim() => {}
+        // an earlier installation's password, left in the key store: this keychain is a new one, and
+        // the file's password is the one that opens it
+        Ok(Some(_)) if kc.is_some_and(|kc| kc.opens(text.trim())) => {
+            if let Err(e) = signing::set(store, &text) {
+                return Moved::Kept(e.to_string());
+            }
+        }
         Ok(Some(_)) => return Moved::Kept("the key store holds a different password".into()),
         Ok(None) => {
             if let Err(e) = signing::set(store, &text) {

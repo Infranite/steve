@@ -26,6 +26,8 @@ pub struct Options {
     /// `none`; without it, asked on a terminal and all of them elsewhere.
     pub adapters: Option<String>,
     pub reconfigure: bool,
+    /// Set an existing installation in the home aside (renamed, kept whole) and install anew.
+    pub fresh: bool,
     /// The service label (`--label`): another installation next to the usual one, under the same
     /// user (its own launchd job or systemd unit and signing identity).
     pub label: Option<String>,
@@ -240,6 +242,9 @@ fn setup_role(value: &str, options: &Options) -> Result<String> {
 
 /// Reject invalid explicit arguments before prompting, inspecting a bundle or creating a home.
 fn validate_options(options: &Options) -> Result<()> {
+    if options.fresh && options.reconfigure {
+        bail!("--fresh 是重新安装，不能与 --reconfigure 一起使用");
+    }
     if let Some(role) = &options.role {
         setup_role(role, options)?;
     }
@@ -585,17 +590,10 @@ impl<'a> Wizard<'a> {
         {
             // A user may have interrupted the previous setup at its first prompt before upgrading
             // the package. Only that unsigned, unpaired, unregistered setup may change versions.
-            if !wizard.record["steps"].as_array().unwrap().is_empty()
-                || wizard.record["keychain_started"] == true
-                || wizard.record["pair_started"] == true
-                || exists(&home.join("current"))
-                || exists(&home.join("signing/identity.json"))
-                || exists(&home.join("node/identity.key"))
-                || exists(&home.join("data/steve.sqlite3"))
-                || exists(&home.join("services/hub.json"))
-                || exists(&home.join("services/node.json"))
-            {
-                bail!("已有初始化或身份属于另一版本；不会覆盖，原数据已保留");
+            if underway(&wizard.record, home) {
+                bail!(
+                    "已有初始化或身份属于另一版本；不会覆盖，原数据已保留。要重新安装，运行 steve setup --fresh（现有目录改名保留）"
+                );
             }
             wizard.verify_copy()?;
             let backups = home.join("setup-backups");
@@ -891,6 +889,106 @@ impl<'a> Wizard<'a> {
     }
 }
 
+/// Whether a setup recorded in `record` got as far as making something a later version must not
+/// take over: a step done, an identity, a database, a service.
+fn underway(record: &Value, home: &Path) -> bool {
+    record["steps"].as_array().is_some_and(|steps| !steps.is_empty())
+        || record["keychain_started"] == true
+        || record["pair_started"] == true
+        || [
+            "current",
+            "signing/identity.json",
+            "node/identity.key",
+            "data/steve.sqlite3",
+            "services/hub.json",
+            "services/node.json",
+        ]
+        .iter()
+        .any(|name| exists(&home.join(name)))
+}
+
+/// The receipt of the installation already in `home`, when this setup cannot continue it: it is the
+/// other role's, or another version's and under way.
+fn other_install(home: &Path, role: &str, expected: &Value) -> Option<Value> {
+    owned(home, true).ok()?;
+    owned(&home.join("setup.json"), false).ok()?;
+    let record = read_json(&home.join("setup.json")).ok()?;
+    if record["format"] != 1 || record["home"].as_str() != home.to_str() {
+        return None;
+    }
+    let same = record["version"] == expected["version"] && record["commit"] == expected["commit"];
+    (record["component"] != role || (!same && underway(&record, home))).then_some(record)
+}
+
+/// `Hub 0.2.97 · a74c8da9`, from a receipt.
+fn install_name(record: &Value) -> String {
+    let commit: String = record["commit"].as_str().unwrap_or_default().chars().take(8).collect();
+    format!(
+        "{} {} · {commit}",
+        if record["component"] == "node" { "Node" } else { "Hub" },
+        record["version"].as_str().unwrap_or("?")
+    )
+}
+
+/// `20261111-011243`, local time: what a directory set aside is named after.
+fn stamp() -> String {
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now, &mut tm) };
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
+}
+
+/// Moves the installation in `home` out of the way, whole: its service is stopped and unregistered
+/// and the directory renamed next to itself. Nothing in it is changed or deleted, so moving it back
+/// and registering the service again restores it.
+fn set_aside(home: &Path) -> Result<PathBuf> {
+    owned(home, true)?;
+    owned(&home.join("setup.json"), false).context("目录里没有 Steve 的安装收据；不会移动它")?;
+    let record = read_json(&home.join("setup.json"))?;
+    let component = record["component"]
+        .as_str()
+        .filter(|c| matches!(*c, "hub" | "node"))
+        .context("安装收据无效；不会移动这个目录")?;
+    if record["format"] != 1 || record["home"].as_str() != home.to_str() {
+        bail!("安装收据不属于这个目录；不会移动它");
+    }
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(home.join(".setup.lock"))?;
+    lock.try_lock().context("此目录已有初始化正在进行")?;
+    /* the label is the one that installation registered, whatever this run was given */
+    let mut service = crate::service::Service::new(component, home, None)?;
+    for action in ["stop", "uninstall"] {
+        let report = service
+            .dispatch(action, None, 30)
+            .context("现有服务没有停下来；目录没有移动")?;
+        if report["ok"] == false {
+            bail!("现有服务没有停下来；目录没有移动");
+        }
+    }
+    let name = home.file_name().and_then(|n| n.to_str()).context("home 路径必须为 UTF-8")?;
+    let aside = home.with_file_name(format!("{name}.bak-{}", stamp()));
+    if exists(&aside) {
+        bail!("{} 已存在；稍后再试", aside.display());
+    }
+    drop(lock);
+    fs::rename(home, &aside)?;
+    Ok(aside)
+}
+
 pub fn reconfigure_existing(options: Options) -> Result<()> {
     validate_options(&options)?;
     reconfigure::run(&options, &mut Terminal)
@@ -1141,6 +1239,41 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
     }
     if let Some(label) = &options.label {
         flags.push_str(&format!(" --label {}", shell_quote(label)?));
+    }
+    /* an installation this run cannot continue: set aside on request, never taken over */
+    if exists(&home) && (options.fresh || other_install(&home, &role, &expected).is_some()) {
+        let found = read_json(&home.join("setup.json")).unwrap_or_default();
+        let fresh = if options.fresh {
+            true
+        } else if rich {
+            let finished = found["steps"].as_array().is_some_and(|s| s.iter().any(|v| v == "installed"));
+            let choices = [
+                Choice::new("fresh", "全新安装", "现有目录整个改名保留，然后重新安装"),
+                Choice::new("keep", "保留并退出", "不做任何改动"),
+            ];
+            let title = format!("{} 里已经有 {}，怎么办？", home.display(), install_name(&found));
+            /* a finished installation may be in use: leaving it alone is the answer to a stray Enter */
+            input.select(&title, &choices, usize::from(finished))? == 0
+        } else {
+            bail!(
+                "{} 里已经有 {}；不会覆盖。要重新安装，运行 steve setup --fresh（现有目录改名保留）",
+                home.display(),
+                install_name(&found)
+            );
+        };
+        if !fresh {
+            ui::outro(&format!(
+                "没有改动。查看现有安装：steve {} status{flags}",
+                found["component"].as_str().unwrap_or(&role)
+            ));
+            return Ok(());
+        }
+        let aside = ui::step(
+            "正在停止并移开现有安装",
+            || set_aside(&home),
+            |aside| ("原安装已保留".into(), aside.display().to_string()),
+        )?;
+        let _ = aside;
     }
     ui::step(
         "正在校验安装包",

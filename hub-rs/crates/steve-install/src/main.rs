@@ -5,7 +5,7 @@ use steve_install::{common, setup, ui};
 
 mod output;
 
-const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440] [--public-url URL]\n              [--adapters ID,ID|all|none]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n              [--label LABEL] [--vault-dir PATH]\n  steve setup [hub] --reconfigure [--home PATH] [--listen IP:port]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL] [--json]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n  steve adapters status|upgrade [hub|node] [--home PATH]\n  steve adapters install ID [ID...] [hub|node] [--home PATH]\n\nsetup 在终端里是向导：选角色、网络和要装的 ACP 适配器，装完可以直接启动 Hub。\nsetup 默认监听 0.0.0.0:8440，网页地址随监听地址推出（--public-url 指定，--reconfigure 以后再改）。\n非终端（管道、TERM=dumb、STEVE_PLAIN=1）下 setup 只注册服务，不启动；不导入登录凭据或授予 Node 工作目录。\n--reconfigure 只维护已安装 Hub 的网络与现有 OIDC 配置，保留 secret、身份和数据；不会自动重启。\n服务命令在终端显示摘要；管道或 --json 保持 JSON 输出。\n";
+const HELP: &str = "Steve 原生管理 CLI\n\n  steve setup [hub|node] [--home PATH] [--listen 0.0.0.0:8440] [--public-url URL]\n              [--adapters ID,ID|all|none]\n              [--hub https://hub.example] [--pin sha256:FINGERPRINT]\n              [--label LABEL] [--vault-dir PATH] [--fresh]\n  steve setup [hub] --reconfigure [--home PATH] [--listen IP:port]\n  steve hub|node start|stop|restart|status|doctor|uninstall [--home PATH] [--label LABEL] [--json]\n  steve hub|node install --release PATH [--home PATH] [--label LABEL]\n  steve node update --release PATH [--wait SECONDS]\n  steve upgrade check|request|status|watch [--home PATH] [options]\n  steve adapters status|upgrade [hub|node] [--home PATH]\n  steve adapters install ID [ID...] [hub|node] [--home PATH]\n\nsetup 在终端里是向导：选角色、网络和要装的 ACP 适配器，装完可以直接启动 Hub。\nsetup 默认监听 0.0.0.0:8440，网页地址随监听地址推出（--public-url 指定，--reconfigure 以后再改）。\n数据目录里已有另一版本的安装时，向导会问是否全新安装；--fresh 直接这样做：停掉并注销原服务，\n原目录整个改名为 <目录>.bak-<时间> 保留，不删除任何数据。\n非终端（管道、TERM=dumb、STEVE_PLAIN=1）下 setup 只注册服务，不启动；不导入登录凭据或授予 Node 工作目录。\n--reconfigure 只维护已安装 Hub 的网络与现有 OIDC 配置，保留 secret、身份和数据；不会自动重启。\n服务命令在终端显示摘要；管道或 --json 保持 JSON 输出。\n";
 
 fn option(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
     let mut found = None;
@@ -89,6 +89,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
         "setup" => {
             let options = setup::Options {
                 reconfigure: flag(&mut args, "--reconfigure")?,
+                fresh: flag(&mut args, "--fresh")?,
                 home: option(&mut args, "--home")?.map(PathBuf::from),
                 hub: option(&mut args, "--hub")?,
                 pin: option(&mut args, "--pin")?,
