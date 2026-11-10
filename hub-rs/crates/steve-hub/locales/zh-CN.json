@@ -201,5 +201,7 @@
   "hub.harness.bad_properties": "声明的属性不对：%{error}",
   "hub.harness.unknown_property": "不认识的属性：%{key}",
   "hub.harness.manifest_unreadable": "读不了 harness 清单：%{error}",
-  "hub.harness.manifest_unwritable": "写不了 harness 清单：%{error}"
+  "hub.harness.manifest_unwritable": "写不了 harness 清单：%{error}",
+  "hub.project.node_remote_unsupported": "项目暂时只能建在 Hub 内置的 Node 上：其他 Node 上还不能运行会话",
+  "hub.project.browse_owner_only": "仅实例管理员可以浏览这台机器的目录"
 }

@@ -1,4 +1,4 @@
-//! `/api/projects*` and `/api/fs/dirs`.
+//! `/api/projects*`, `/api/fs/dirs` and `/api/fs/browse`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path as FsPath, PathBuf};
@@ -64,10 +64,11 @@ pub fn join(a: &str, b: &str) -> String {
     normalize(&joined)
 }
 
-/// `~/x` → `$HOME/x`; anything else unchanged.
+/// `~` and `~/x` → `$HOME` and `$HOME/x`; anything else unchanged.
 pub fn expand(p: &str) -> String {
     match p.strip_prefix("~/") {
         Some(rest) => join(&home_dir().to_string_lossy(), rest),
+        None if p == "~" => home_dir().to_string_lossy().into_owned(),
         None => p.to_string(),
     }
 }
@@ -98,7 +99,8 @@ With the local Node on (`STEVE_NODE_MODE=local`) a directory under one of its ro
 its files face, and `dirs` browses only toward those roots (D11: no "anywhere under ~"). A directory
 under none of them is one being made a project, so a new root: no Node allows it yet, and the Hub
 checks it on its own disk (the machine is the same; the root follows once the project exists).
-Without the local Node the Hub reads its own disk as always. */
+Without the local Node the Hub reads its own disk as always. `browse`, the chooser of a new project's
+directory, reads the disk the same way wherever it is asked, for the instance owner only. */
 
 /// Who reads a directory of the Hub's own device.
 enum Via {
@@ -332,7 +334,9 @@ pub async fn create(
         Some(Some(b)) => Some(b),
         _ => None,
     };
+    let node = k.opt_str("node", Str::ANY);
     k.finish()?;
+    on_builtin_node(node.as_deref())?;
     if let Some(bot) = default_bot.clone().filter(|b| !b.is_empty()) {
         let ws = c.ws.clone();
         st.read(move |r| Ok(own_bot(r, &bot, &ws)?)).await?;
@@ -833,6 +837,98 @@ pub async fn dirs(
     })
     .await?;
     ok(json!(out))
+}
+
+/// The Node a project is being made on: only the Hub's built-in one runs sessions so far.
+fn on_builtin_node(node: Option<&str>) -> Result<(), ApiError> {
+    match node {
+        None | Some("" | "hub") => Ok(()),
+        Some(_) => Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.project.node_remote_unsupported"
+        ))),
+    }
+}
+
+/// A path as the browser shows it: the home directory as `~`.
+fn shown(path: &str, home: &str) -> String {
+    match path.strip_prefix(home) {
+        Some("") => "~".into(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+/// How many directories `browse` lists of one directory.
+const BROWSE_MAX: usize = 500;
+
+/// One directory of the built-in Node's machine and the directories in it, read off the disk.
+fn browse_dir(raw: &str) -> Value {
+    let home = home_dir().to_string_lossy().into_owned();
+    let asked = match raw.trim() {
+        "" => home.clone(),
+        p => expand(p),
+    };
+    let mut path = normalize(&asked);
+    if path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+    let parent = FsPath::new(&path)
+        .parent()
+        .map(|p| shown(&p.to_string_lossy(), &home));
+    let mut out = json!({
+        "path": shown(&path, &home),
+        "parent": parent,
+        "exists": false,
+        "denied": false,
+        "git": false,
+        "dirs": [],
+        "more": false,
+    });
+    if !path.starts_with('/') || !is_dir(&path) {
+        return out;
+    }
+    out["exists"] = json!(true);
+    out["git"] = json!(exists(&join(&path, ".git")));
+    let Ok(read) = std::fs::read_dir(&path) else {
+        // macOS keeps Desktop, Documents and Downloads from a service until the user allows it
+        out["denied"] = json!(true);
+        return out;
+    };
+    let mut names: Vec<String> = read
+        .filter_map(|e| e.ok())
+        // a link to a directory is a directory here: checkouts are often linked into place
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    out["more"] = json!(names.len() > BROWSE_MAX);
+    out["dirs"] = names
+        .into_iter()
+        .take(BROWSE_MAX)
+        .map(|n| {
+            let p = join(&path, &n);
+            json!({ "name": n, "path": shown(&p, &home), "git": exists(&join(&p, ".git")) })
+        })
+        .collect();
+    out
+}
+
+/// The directory chooser of a new project: any directory of the built-in Node's machine, whether
+/// or not a root holds it yet. It shows what is on the disk, so it answers the instance owner only.
+pub async fn browse(
+    Extension(c): Extension<Ctx>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult {
+    if c.user.get("role").and_then(Value::as_str) != Some("owner") {
+        return Err(ApiError::Json(
+            403,
+            steve_i18n::t!("hub.project.browse_owner_only"),
+        ));
+    }
+    on_builtin_node(q.get("node").map(String::as_str))?;
+    let raw = q.get("path").cloned().unwrap_or_default();
+    ok(blocking(move || Ok(browse_dir(&raw))).await?)
 }
 
 #[cfg(test)]

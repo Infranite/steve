@@ -95,6 +95,9 @@ export type RKindReview = { id: string; kind: string; why: string }
 export type RKindBackfill = { checked: number; kept: number; dry: boolean; filled: { id: string; title: string; kind: string; by: "model" | "rule"; confidence: number; uncertain: boolean; why: string; had?: string[] }[] }
 export type RMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
 export type RDevice = { id: string; name: string; roles: string[]; os: string; version: string; status: string; max_sessions: number; seen: number; created: number }
+/** one directory of a Node's machine, for choosing a project's directory: `path` and `parent` show the home directory as `~`;
+ *  `denied`: it exists but the Hub is not allowed to read it */
+export type RBrowse = { path: string; parent: string | null; exists: boolean; denied: boolean; git: boolean; dirs: { name: string; path: string; git: boolean }[]; more: boolean }
 export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null }
 /** a Node machine's day (B3): the latest sample, and load per CPU, memory in use (0..1) and round trip over time */
 export type RVitals = { latest: { at: number; cpus?: number; load?: [number, number, number]; mem_total?: number; mem_available?: number; roots?: { root: string; display?: string; free: number; total: number; inodes_free?: number }[]; sessions?: number; rtt_ms?: number | null }; series: { at: number; load: number | null; mem: number | null; rtt: number | null }[] }
@@ -274,12 +277,13 @@ export const api = {
   botWorkspaces: (id: string, ids: string[]) => req("PUT", `/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
   botPrompt: (id: string) => get<{ generated: string; custom: string | null }>(`/bots/${id}/prompt`), memories: (id: string) => get<{ id: string; text: string; source: string; created: number }[]>(`/bots/${id}/memories`),
   addMemory: (id: string, text: string) => post(`/bots/${id}/memories`, { text }), editMemory: (id: string, text: string) => patch(`/memories/${id}`, { text }), deleteMemory: (id: string) => del(`/memories/${id}`), clearMemories: () => del("/memories"),
-  newProject: (p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) => post<RProject>("/projects", p), patchProject: (id: string, p: Partial<RProject>) => patch<RProject>("/projects/" + id, p),
+  newProject: (p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; node?: string }) => post<RProject>("/projects", p), patchProject: (id: string, p: Partial<RProject>) => patch<RProject>("/projects/" + id, p),
   lane: (id: string) => get<RLane>(`/projects/${encodeURIComponent(id)}/lane`),
   lanePolicy: (id: string, p: { window_min: number | null; max_members: number | null }) => patch<{ lane: RLaneState | null }>(`/projects/${encodeURIComponent(id)}/lane`, p),
   laneNow: (id: string) => post<{ closed: boolean; lane: RLaneState | null }>(`/projects/${encodeURIComponent(id)}/lane/now`),
   queueAct: (id: string, act: RQueueAct) => post<{ queue: RQueue | null }>(`/projects/${encodeURIComponent(id)}/queue`, act),
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }), dirs: (path: string) => get<string[]>(`/fs/dirs?path=${encodeURIComponent(path)}`),
+  browse: (path: string, node = "hub") => get<RBrowse>(`/fs/browse?path=${encodeURIComponent(path)}&node=${encodeURIComponent(node)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),
   kindsReview: () => get<RKindReview[]>("/tags/kinds/review"), kindsReviewed: (ids: string[]) => post<RKindReview[]>("/tags/kinds/review", { ids }),
   kindsBackfill: (dry = false) => post<RKindBackfill>("/tags/kinds/backfill", { dry }),

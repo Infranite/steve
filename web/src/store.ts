@@ -1068,7 +1068,7 @@ export async function switchWorkspace(id: string) {
   try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); watermark = null; st.thinking = false; st.draft = null; closeStream(); await refresh(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })) } catch (e) { fail(e) }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
-export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
+export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
 export function patchProject(id: string, p: Partial<RProject>, msg = t("common:state.saved")) { void call(api.patchProject(id, p), msg) }
 
 /* ───────── tags ───────── */

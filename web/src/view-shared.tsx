@@ -25,11 +25,11 @@ export function ProjectChip({ id, className, plain }: { id: string | null; class
   return <a href={"#/projects/" + p.id} onClick={(e) => e.stopPropagation()} className={cn("inline-flex items-center gap-1 text-foreground/80 hover:text-foreground hover:underline", className)} data-project-chip={p.id}><FolderIcon className="size-3.5" strokeWidth={1.75} />{p.name}</a>
 }
 
-export function Select({ value, options, onChange, align = "start", testId, quiet, className }: { value: string; options: { v: string; l: ReactNode }[]; onChange: (v: string) => void; align?: "start" | "end"; testId?: string; quiet?: boolean; className?: string }) {
+export function Select({ value, options, onChange, align = "start", testId, quiet, className }: { value: string; options: { v: string; l: ReactNode; disabled?: boolean }[]; onChange: (v: string) => void; align?: "start" | "end"; testId?: string; quiet?: boolean; className?: string }) {
   return (
     <UISelect items={Object.fromEntries(options.map((o) => [o.v, o.l]))} value={value} onValueChange={(v) => v != null && onChange(String(v))}>
       <SelectTrigger size="sm" className={cn("rounded-lg bg-transparent font-normal", quiet ? "-ml-px max-w-full border-transparent px-2 hover:bg-accent [&>svg]:opacity-0 hover:[&>svg]:opacity-100" : "border-border", className)} data-select={testId}><SelectValue /></SelectTrigger>
-      <SelectContent align={align === "end" ? "end" : "start"} className="min-w-44">{options.map((o) => <SelectItem key={o.v} value={o.v}>{o.l}</SelectItem>)}</SelectContent>
+      <SelectContent align={align === "end" ? "end" : "start"} className="min-w-44">{options.map((o) => <SelectItem key={o.v} value={o.v} disabled={o.disabled}>{o.l}</SelectItem>)}</SelectContent>
     </UISelect>
   )
 }

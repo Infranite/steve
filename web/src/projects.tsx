@@ -1,5 +1,5 @@
 /* 工作空间与项目：工作空间是数据边界，切换后所有页面只显示这个空间的内容；一个工作空间管理多个项目，每个项目一个独立目录 */
-import { api } from "@/api"
+import { api, type RBrowse, type RNode } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
@@ -16,8 +16,8 @@ import { BotName, closeSheet, Empty, go, Group, Meta, openSheet, Page, Row, Sect
 import { ItemRowExport as ItemRow, Select } from "@/view-shared"
 import { YoloProjectSelect } from "@/yolo/badges"
 import { cn } from "cn"
-import { ArchiveIcon, ChevronRightIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
-import { useEffect, useState } from "react"
+import { ArchiveIcon, ChevronRightIcon, CornerLeftUpIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
+import { Fragment, useEffect, useRef, useState } from "react"
 import { useT } from "@/i18n"
 
 const home = (p: string) => p.replace(/^\/Users\/[^/]+/, "~")
@@ -101,29 +101,87 @@ export function ProjectView({ id }: { id: string }) {
   )
 }
 
+/** `~/a/b` or `/a/b` as the steps down to it */
+const crumbs = (p: string) => {
+  const abs = p.startsWith("/"), segs = p.split("/").filter(Boolean)
+  return [...(abs ? [{ name: "/", path: "/" }] : []), ...segs.map((name, i) => ({ name, path: (abs ? "/" : "") + segs.slice(0, i + 1).join("/") }))]
+}
+
+/** the directory chooser of a new project: the directories of where `path` is on the Node's machine; a click goes
+ *  into one, and the directory you are in is the project's. A path still being typed narrows its parent's list */
+function DirBrowser({ path, node, onPick, onSeen }: { path: string; node: string; onPick: (p: string) => void; onSeen: (git: boolean | null) => void }) {
+  const t = useT()
+  const [at, setAt] = useState<RBrowse | null>(null), [typed, setTyped] = useState(""), [err, setErr] = useState("")
+  // a click goes there at once, so the list under the pointer is never the one just left; typing waits for a pause
+  const clicked = useRef(false), go = (p: string) => { clicked.current = true; onPick(p) }
+  useEffect(() => {
+    let live = true
+    const timer = setTimeout(async () => {
+      try {
+        let b = await api.browse(path.trim(), node), tail = ""
+        if (!b.exists && b.parent != null) { tail = b.path.slice(b.path.lastIndexOf("/") + 1); b = await api.browse(b.parent, node) }
+        if (!live) return
+        setAt(b); setTyped(tail); setErr(""); onSeen(path.trim() && !tail && b.exists ? b.git : null)
+      } catch (e) { if (live) { setAt(null); setErr((e as Error).message) } }
+    }, at && !clicked.current ? 150 : 0)
+    clicked.current = false
+    return () => { live = false; clearTimeout(timer) }
+  }, [path, node])
+  if (err) return <FieldDescription className="type-footnote" data-dir-browser-error>{err}</FieldDescription>
+  if (!at) return <div className="flex h-24 items-center justify-center rounded-lg border border-border"><Spinner className="size-4" /></div>
+  const cs = crumbs(at.path), abs = at.path.startsWith("/"), shown = at.dirs.filter((x) => x.name.toLowerCase().startsWith(typed.toLowerCase()))
+  const note = !at.exists ? t("pages:projects.browseMissing") : at.denied ? t("pages:projects.browseDenied") : !at.dirs.length ? t("pages:projects.browseEmpty") : !shown.length ? t("pages:projects.browseNoMatch", { text: typed }) : ""
+  return (
+    <div className="overflow-hidden rounded-lg border border-border" data-dir-browser>
+      <div className="flex items-center gap-1 border-b border-border bg-muted/40 py-1 pr-2.5 pl-1">
+        <Button type="button" size="icon-xs" variant="ghost" className="shrink-0 text-muted-foreground" disabled={at.parent == null} onClick={() => at.parent != null && go(at.parent)} title={t("pages:projects.browseUp")} data-dir-up><CornerLeftUpIcon /></Button>
+        <div className="flex min-w-0 flex-1 items-center overflow-x-auto whitespace-nowrap font-mono text-[12px] text-muted-foreground">
+          {cs.map((c, i) => <Fragment key={c.path}>{i > (abs ? 1 : 0) && <span className="px-0.5 text-tertiary">/</span>}
+            <button type="button" onClick={() => go(c.path)} className={cn("rounded px-1 py-0.5 hover:bg-accent hover:text-foreground", i === cs.length - 1 && !typed && "text-foreground")}>{c.name}</button></Fragment>)}
+        </div>
+        {at.git && !typed && <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 type-footnote text-muted-foreground">git</span>}
+      </div>
+      <div className="h-44 overflow-y-auto py-1">
+        {note ? <div className="px-3 py-4 text-center type-footnote text-muted-foreground">{note}</div>
+          : shown.map((x) => { const I = x.git ? FolderGit2Icon : FolderIcon; return (
+            <button key={x.path} type="button" onClick={() => go(x.path)} className="flex w-full items-center gap-2 px-2.5 py-1 text-left text-[13px] hover:bg-accent" data-dir={x.name}>
+              <I className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /><span className="min-w-0 flex-1 truncate">{x.name}</span>
+              {x.git && <span className="type-footnote text-muted-foreground">git</span>}<ChevronRightIcon className="size-3.5 shrink-0 text-tertiary" /></button>) })}
+        {at.more && !note && <div className="px-3 py-1.5 type-footnote text-muted-foreground">{t("pages:projects.browseMore", { count: at.dirs.length })}</div>}
+      </div>
+    </div>
+  )
+}
+
 export function NewProjectDialog() {
   const t = useT()
   const [path, setPath] = useState(""), [n, setN] = useState(""), [d, setD] = useState(""), [bot, setBot] = useState("none"), [git, setGit] = useState<boolean | null>(null), [wt, setWt] = useState(true)
-  const [dirs, setDirs] = useState<string[]>([]), [busy, setBusy] = useState(false)
-  useEffect(() => {
-    const base = path.endsWith("/") ? path : path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "~/"
-    const t = setTimeout(() => { api.dirs(base).then((xs) => setDirs(xs.filter((x) => x.toLowerCase().startsWith(path.toLowerCase())).slice(0, 8))).catch(() => setDirs([])) }, 200)
-    return () => clearTimeout(t)
-  }, [path])
+  const [named, setNamed] = useState(false), [busy, setBusy] = useState(false), [nodes, setNodes] = useState<RNode[]>([])
+  // the Nodes are the owner's to list: anyone else is offered the Hub's own
+  useEffect(() => { api.nodes().then((r) => setNodes([...new Map(r.nodes.map((x) => [x.node_id, x])).values()])).catch(() => {}) }, [])
+  // the built-in Node's own name says it is the Hub's; without the list, the Hub's device stands for it
+  const here = nodes.find((x) => x.local)?.name ?? t("pages:projects.nodeBuiltin", { name: st.devices.find((x) => x.roles.includes("Hub"))?.name ?? "Hub" })
+  // a project's sessions run on the Hub's own Node only, so the others are shown and not offered
+  const nodeOptions = [{ v: "hub", l: here }, ...nodes.filter((x) => !x.local && x.state !== "revoked").map((x) => ({ v: x.node_id, l: t("pages:projects.nodeRemoteSoon", { name: x.name }), disabled: true }))]
+  const pick = (p: string) => { setPath(p); setGit(null); const base = p.slice(p.lastIndexOf("/") + 1); if (!named && base && base !== "~") setN(base.slice(0, 40)) }
   const draft = async () => {
     if (!path.trim()) return; setBusy(true)
     try { const r = await api.describeProject(path.trim()); if (!n) setN(r.name); setD(r.description); setGit(r.git) } catch (e) { toast((e as Error).message) } finally { setBusy(false) }
   }
   return (
     <Dialog open onOpenChange={(o) => !o && closeSheet()}>
-      <DialogContent className="gap-4 rounded-2xl sm:max-w-[520px]" data-new-project-dialog>
+      <DialogContent className="max-h-[92vh] gap-4 overflow-y-auto rounded-2xl sm:max-w-[560px]" data-new-project-dialog>
         <DialogHeader><DialogTitle className="type-headline">{t("pages:projects.newProject")}</DialogTitle><DialogDescription className="type-callout">{t("pages:projects.newProjectDesc")}</DialogDescription></DialogHeader>
         <FieldGroup className="gap-4">
+          <Field className="gap-1.5"><div className="flex items-center justify-between gap-3"><FieldLabel>{t("pages:projects.node")}</FieldLabel>
+            <Select align="end" testId="project-node" value="hub" onChange={() => {}} options={nodeOptions} /></div>
+            {nodeOptions.length > 1 && <FieldDescription className="type-footnote">{t("pages:projects.nodeHint")}</FieldDescription>}</Field>
           <Field className="gap-1.5"><FieldLabel htmlFor="pj-path">{t("pages:projects.dir")}</FieldLabel>
             <Input id="pj-path" autoFocus className="rounded-lg font-mono text-[13px]" value={path} onChange={(e) => { setPath(e.target.value); setGit(null) }} placeholder="~/code/my-project" data-project-path />
-            {dirs.length > 0 && !dirs.includes(path) && <div className="flex flex-wrap gap-1">{dirs.map((x) => <button key={x} type="button" onClick={() => setPath(x)} className="rounded-md bg-muted px-2 py-0.5 font-mono text-[12px] text-muted-foreground hover:text-foreground">{x}</button>)}</div>}
+            <DirBrowser path={path} node="hub" onPick={pick} onSeen={setGit} />
+            <FieldDescription className="type-footnote">{t("pages:projects.browseHere")}</FieldDescription>
           </Field>
-          <Field className="gap-1.5"><FieldLabel htmlFor="pj-n">{t("pages:projects.name")}</FieldLabel><Input id="pj-n" className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} placeholder={t("pages:projects.projectNamePh")} /></Field>
+          <Field className="gap-1.5"><FieldLabel htmlFor="pj-n">{t("pages:projects.name")}</FieldLabel><Input id="pj-n" className="rounded-lg" value={n} onChange={(e) => { setN(e.target.value); setNamed(true) }} placeholder={t("pages:projects.projectNamePh")} /></Field>
           <Field className="gap-1.5"><div className="flex items-center justify-between"><FieldLabel htmlFor="pj-d">{t("pages:projects.desc")}</FieldLabel>
             <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={!path.trim() || busy} onClick={() => void draft()} data-describe>{busy ? <Spinner className="size-3" /> : <SparklesIcon />}{t("pages:projects.draft")}</Button></div>
             <Textarea id="pj-d" className="min-h-20 rounded-lg" value={d} onChange={(e) => setD(e.target.value)} placeholder={t("pages:projects.projectDescPh")} /></Field>
@@ -132,7 +190,7 @@ export function NewProjectDialog() {
           {git && <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("pages:projects.worktree")}</FieldLabel><FieldDescription className="type-footnote">{t("pages:projects.gitDetected")}</FieldDescription></div><Switch checked={wt} onCheckedChange={setWt} /></Field>}
         </FieldGroup>
         <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button>
-          <Button disabled={!path.trim() || !n.trim()} className={cn()} data-testid="project-go" onClick={async () => { const id = await newProject({ name: n.trim(), path: path.trim(), description: d.trim(), worktree: wt, default_bot: bot === "none" ? null : bot }); if (id) { closeSheet(); go("#/projects/" + id) } }}>{t("pages:projects.create")}</Button></DialogFooter>
+          <Button disabled={!path.trim() || !n.trim()} className={cn()} data-testid="project-go" onClick={async () => { const id = await newProject({ name: n.trim(), path: path.trim(), description: d.trim(), worktree: wt, default_bot: bot === "none" ? null : bot, node: "hub" }); if (id) { closeSheet(); go("#/projects/" + id) } }}>{t("pages:projects.create")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )

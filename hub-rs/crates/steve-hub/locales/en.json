@@ -201,5 +201,7 @@
   "hub.harness.bad_properties": "The declared properties are wrong: %{error}",
   "hub.harness.unknown_property": "Unknown property: %{key}",
   "hub.harness.manifest_unreadable": "Cannot read the harness manifest: %{error}",
-  "hub.harness.manifest_unwritable": "Cannot write the harness manifest: %{error}"
+  "hub.harness.manifest_unwritable": "Cannot write the harness manifest: %{error}",
+  "hub.project.node_remote_unsupported": "A project can only be created on the Hub's built-in Node for now: sessions do not run on other Nodes yet",
+  "hub.project.browse_owner_only": "Only the instance owner can browse this machine's directories"
 }
