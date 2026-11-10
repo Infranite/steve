@@ -170,6 +170,23 @@ pub const COOKIE: &str = "steve_client";
 /// How long that cookie lasts: a year (the client is revoked, not the cookie timed out).
 const COOKIE_AGE: i64 = 365 * 24 * 3600;
 
+/// Whether a cookie set in answer to this request gets `Secure`: the request came over TLS (a
+/// proxy's `X-Forwarded-Proto: https`), or to the host of an https `STEVE_PUBLIC_URL` (a proxy that
+/// does not say). Not for plain http to this machine or the local network, whatever the public URL
+/// is: the browser drops a `Secure` cookie there, and the sign-in never sticks.
+pub fn secure_request(cfg: &crate::config::Config, headers: &HeaderMap) -> bool {
+    let tls = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|p| p.eq_ignore_ascii_case("https"));
+    tls || (cfg.public_url.starts_with("https://")
+        && headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| host_of(&format!("http://{h}")))
+            .is_some_and(|h| host_of(&cfg.public_url) == Some(h)))
+}
+
 fn client_cookie(value: &str, max_age: i64, secure: bool, cross_site: bool) -> String {
     format!(
         "{COOKIE}={value}; Max-Age={max_age}; Path=/; HttpOnly{}; SameSite={}",
@@ -231,6 +248,7 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
         .and_then(|v| v.to_str().ok())
         .map(|o| o.trim_end_matches('/').to_string());
     let origin_seen = origin.clone();
+    let headers = req.headers().clone();
     let host = req
         .headers()
         .get(axum::http::header::HOST)
@@ -307,7 +325,7 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
                 }),
             );
             if b.cookie {
-                let secure = route.ends_with("+tls") || st.cfg.public_url.starts_with("https://");
+                let secure = secure_request(&st.cfg, &headers);
                 /* a page on another host (not only another port) is another site: its requests carry
                  * the cookie only as SameSite=None, which browsers take over TLS only */
                 let cross_site = origin_seen.as_deref().is_some_and(|o| {
@@ -547,6 +565,39 @@ mod tests {
             m.insert(*k, v.parse().unwrap());
         }
         m
+    }
+
+    #[test]
+    fn cookies_are_secure_over_tls_or_on_the_public_host_only() {
+        let cfg = |url: &str| {
+            let url = url.to_string();
+            crate::config::Config::from_vars(move |k| match k {
+                "STEVE_HOME" => Some("/tmp/steve-secure-test".into()),
+                "STEVE_PUBLIC_URL" => Some(url.clone()),
+                _ => None,
+            })
+            .expect("config")
+        };
+        let public = cfg("https://steve.example");
+        // plain http on the local network or this machine: the browser would drop a Secure cookie
+        assert!(!secure_request(
+            &public,
+            &h(&[("host", "192.168.0.33:8440")])
+        ));
+        assert!(!secure_request(&public, &h(&[("host", "127.0.0.1:8440")])));
+        // the public host, through a proxy that says https or not
+        assert!(secure_request(&public, &h(&[("host", "steve.example")])));
+        assert!(secure_request(
+            &public,
+            &h(&[("host", "127.0.0.1:8440"), ("x-forwarded-proto", "https")])
+        ));
+        // no https public URL: only TLS the proxy reports
+        let plain = cfg("http://127.0.0.1:8441");
+        assert!(!secure_request(&plain, &h(&[("host", "127.0.0.1:8440")])));
+        assert!(secure_request(
+            &plain,
+            &h(&[("host", "steve.example"), ("x-forwarded-proto", "https")])
+        ));
     }
 
     #[test]
@@ -1134,8 +1185,10 @@ pub async fn oidc_delete(
 /// Notes which client a decision was answered from (A4c): `result.via` on the decision, and the audit.
 /// Off the request; a browser session (no client) notes nothing.
 pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
-    let (Some(client), Some(store)) = (c.client.clone(), st.modules.as_ref().map(|m| m.store.clone()))
-    else {
+    let (Some(client), Some(store)) = (
+        c.client.clone(),
+        st.modules.as_ref().map(|m| m.store.clone()),
+    ) else {
         return;
     };
     let (id, me) = (decision.to_string(), c.me.clone());
@@ -1152,7 +1205,13 @@ pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
             tracing::warn!("decision {id} via: {e}");
         }
         store
-            .audit(&me, "decision.resolve", &id, &json!({"via": via}), steve_store::WS)
+            .audit(
+                &me,
+                "decision.resolve",
+                &id,
+                &json!({"via": via}),
+                steve_store::WS,
+            )
             .ok();
     });
 }
