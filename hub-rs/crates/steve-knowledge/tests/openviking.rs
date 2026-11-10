@@ -4,7 +4,8 @@
 //! is down leaves the keyword passes (flagged as such), and is skipped for a while after a failure.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::{Query as AxQuery, State};
 use axum::http::HeaderMap;
@@ -18,9 +19,18 @@ use steve_knowledge::retrieve::{Purpose, Query, SEMANTIC_DOWN_NOTE, retrieve, re
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
 use steve_store::base::Viewer;
 use steve_store::outbox::Dispatcher;
+use tokio::sync::oneshot;
+
+struct BatchGate {
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
 
 #[derive(Default)]
-struct Files(Mutex<BTreeMap<String, (String, Vec<String>)>>);
+struct Files {
+    entries: Mutex<BTreeMap<String, (String, Vec<String>)>>,
+    batch_gate: Mutex<Option<BatchGate>>,
+}
 
 type S = Arc<Files>;
 
@@ -38,14 +48,22 @@ async fn mkdir() -> Json<Value> {
 
 async fn rm(State(s): State<S>, AxQuery(q): AxQuery<BTreeMap<String, String>>) -> Json<Value> {
     let uri = q.get("uri").cloned().unwrap_or_default();
-    s.0.lock().unwrap().retain(|k, _| !k.starts_with(&uri));
+    s.entries
+        .lock()
+        .unwrap()
+        .retain(|k, _| !k.starts_with(&uri));
     Json(json!({"status": "ok"}))
 }
 
 async fn batch(State(s): State<S>, h: HeaderMap, Json(b): Json<Value>) -> Json<Value> {
     assert!(authed(&h));
     assert_eq!(b["processing_mode"], "vectors_only");
-    let mut f = s.0.lock().unwrap();
+    let gate = s.batch_gate.lock().unwrap().take();
+    if let Some(gate) = gate {
+        let _ = gate.entered.send(());
+        let _ = gate.release.await;
+    }
+    let mut f = s.entries.lock().unwrap();
     for op in b["operations"].as_array().unwrap() {
         let tags = op["tags"]
             .as_array()
@@ -78,7 +96,7 @@ async fn find(State(s): State<S>, h: HeaderMap, Json(b): Json<Value>) -> Json<Va
         .map(|t| t.as_str().unwrap().into())
         .collect();
     let min = b["score_threshold"].as_f64().unwrap();
-    let f = s.0.lock().unwrap();
+    let f = s.entries.lock().unwrap();
     let mut out: Vec<Value> = f
         .iter()
         .filter(|(u, (_, tags))| u.starts_with(root) && want.iter().all(|w| tags.contains(w)))
@@ -178,7 +196,7 @@ impl H {
     }
 
     fn files(&self) -> BTreeMap<String, (String, Vec<String>)> {
-        self.files.0.lock().unwrap().clone()
+        self.files.entries.lock().unwrap().clone()
     }
 
     fn search(&self, who: &str, q: &str) -> Vec<String> {
@@ -384,4 +402,116 @@ async fn a_server_that_is_down_leaves_the_keywords_flagged_and_is_skipped_for_a_
         chat.ctx.text
     );
     let _ = TOPIC;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mirror_releases_reader_connection_before_batch_write() {
+    let h = setup().await;
+    let doc = h
+        .note(
+            ME,
+            "慢嵌入验证",
+            "镜像写入阻塞在向量计算时，不能占用 SQLite 读连接池。",
+            json!({}),
+        )
+        .await;
+
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    *h.files.batch_gate.lock().unwrap() = Some(BatchGate {
+        entered: entered_tx,
+        release: release_rx,
+    });
+
+    let (dispatcher, store) = (h.dispatcher.clone(), h.env.store().clone());
+    let mirror_task =
+        tokio::task::spawn_blocking(move || dispatcher.pump(&store, steve_store::now()).unwrap());
+
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("Mirror did not reach /api/v1/content/batch-write in time")
+        .expect("batch-write gate closed unexpectedly");
+
+    // `Store::open` sizes its r2d2 reader pool to `available_parallelism().clamp(4, 16)`.
+    // If `Mirror::effect` still held a reader connection across `batch-write`, at most
+    // `pool_size - 1` concurrent `store.reader(...)` calls could hold connections at once.
+    let pool_size = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(4, 16);
+
+    struct Probe {
+        held: usize,
+        timed_out: bool,
+    }
+    let sync = Arc::new((
+        Mutex::new(Probe {
+            held: 0,
+            timed_out: false,
+        }),
+        Condvar::new(),
+    ));
+
+    let probe_store = h.env.store().clone();
+    let held_simultaneously = tokio::task::spawn_blocking(move || {
+        let mut handles = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            let store = probe_store.clone();
+            let sync = sync.clone();
+            handles.push(std::thread::spawn(move || {
+                store
+                    .reader(|c| -> steve_store::Result<()> {
+                        let one: i64 = c.query_row("SELECT 1", [], |r| r.get(0))?;
+                        assert_eq!(one, 1);
+                        let (lock, cv) = &*sync;
+                        let mut g = lock.lock().unwrap();
+                        if !g.timed_out {
+                            g.held += 1;
+                            if g.held == pool_size {
+                                cv.notify_all();
+                            }
+                            let deadline = Instant::now() + Duration::from_secs(2);
+                            while g.held < pool_size && !g.timed_out {
+                                let now = Instant::now();
+                                if now >= deadline {
+                                    g.timed_out = true;
+                                    cv.notify_all();
+                                    break;
+                                }
+                                let (ng, _) = cv.wait_timeout(g, deadline - now).unwrap();
+                                g = ng;
+                            }
+                        }
+                        Ok(())
+                    })
+                    .expect("reader checkout")
+            }));
+        }
+        for th in handles {
+            th.join().expect("reader thread panicked");
+        }
+        let g = sync.0.lock().unwrap();
+        (g.held, g.timed_out)
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !mirror_task.is_finished(),
+        "batch-write must still be blocked while probing reader pool"
+    );
+    let _ = release_tx.send(());
+    let pumped = mirror_task.await.unwrap();
+
+    assert_eq!(
+        held_simultaneously,
+        (pool_size, false),
+        "all {pool_size} reader pool connections must be simultaneously available while batch-write blocks"
+    );
+    assert_eq!(pumped.done, 1);
+    assert!(
+        h.files()
+            .keys()
+            .any(|k| k.contains(&format!("/{doc}/0.md"))),
+        "mirrored chunk written once batch-write unblocks"
+    );
 }

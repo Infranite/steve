@@ -48,6 +48,18 @@ pub struct OpenVikingConfig {
     pub account: String,
 }
 
+/// One indexed chunk of an object to mirror to OpenViking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectChunk {
+    pub seq: i64,
+    pub heading: String,
+    pub text: String,
+    pub visibility: String,
+    pub level: String,
+    pub created_by: String,
+    pub source_kind: String,
+}
+
 /// The client: search ([`KnowledgeStore`]) and mirroring ([`OpenViking::sync_object`]).
 pub struct OpenViking {
     cfg: OpenVikingConfig,
@@ -157,36 +169,43 @@ impl OpenViking {
         }
     }
 
-    /// Makes the store hold exactly what the Hub's index holds for one object: removed when it has
-    /// no chunks (or only `never` ones), else rewritten. `ws` is where it was (from the event).
-    pub fn sync_object(
-        &self,
+    /// Reads the non-`never` chunks of one object from the Hub's index, ordered by `seq`.
+    pub fn load_object_chunks(
         c: &Connection,
         ws: &str,
         obj_type: &str,
         obj_id: &str,
-    ) -> std::result::Result<usize, String> {
-        let rows: Vec<(i64, String, String, String, String, String, String)> = {
-            let mut st = c
-                .prepare_cached(
-                    "SELECT seq, heading, text, visibility, level, created_by, source_kind FROM kb_chunks
-                      WHERE workspace_id = ? AND obj_type = ? AND obj_id = ? AND level <> 'never' ORDER BY seq",
-                )
-                .map_err(|e| e.to_string())?;
-            st.query_map(params![ws, obj_type, obj_id], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
+    ) -> std::result::Result<Vec<ObjectChunk>, String> {
+        let mut st = c
+            .prepare_cached(
+                "SELECT seq, heading, text, visibility, level, created_by, source_kind FROM kb_chunks
+                  WHERE workspace_id = ? AND obj_type = ? AND obj_id = ? AND level <> 'never' ORDER BY seq",
+            )
+            .map_err(|e| e.to_string())?;
+        st.query_map(params![ws, obj_type, obj_id], |r| {
+            Ok(ObjectChunk {
+                seq: r.get(0)?,
+                heading: r.get(1)?,
+                text: r.get(2)?,
+                visibility: r.get(3)?,
+                level: r.get(4)?,
+                created_by: r.get(5)?,
+                source_kind: r.get(6)?,
             })
-            .and_then(|it| it.collect::<rusqlite::Result<Vec<_>>>())
-            .map_err(|e| e.to_string())?
-        };
+        })
+        .and_then(|it| it.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(|e| e.to_string())
+    }
+
+    /// Rewrites one object's directory on the OpenViking server from `rows` (removing it when
+    /// `rows` is empty) without holding a Hub database connection.
+    pub fn push_object_chunks(
+        &self,
+        ws: &str,
+        obj_type: &str,
+        obj_id: &str,
+        rows: &[ObjectChunk],
+    ) -> std::result::Result<usize, String> {
         let dir = object_dir(ws, obj_type, obj_id);
         self.delete(&dir)?;
         if rows.is_empty() {
@@ -195,17 +214,22 @@ impl OpenViking {
         self.post(&self.write, "/api/v1/fs/mkdir", &json!({ "uri": dir }))?;
         let ops: Vec<Value> = rows
             .iter()
-            .map(|(seq, heading, text, vis, lvl, by, kind)| {
-                let content = if heading.is_empty() {
-                    text.clone()
+            .map(|row| {
+                let content = if row.heading.is_empty() {
+                    row.text.clone()
                 } else {
-                    format!("{heading}\n\n{text}")
+                    format!("{}\n\n{}", row.heading, row.text)
                 };
                 json!({
-                    "uri": format!("{dir}/{seq}.md"),
+                    "uri": format!("{dir}/{}.md", row.seq),
                     "content": content,
                     "mode": "upsert",
-                    "tags": [tag("vis", vis), tag("by", by), tag("lvl", lvl), tag("kind", kind)],
+                    "tags": [
+                        tag("vis", &row.visibility),
+                        tag("by", &row.created_by),
+                        tag("lvl", &row.level),
+                        tag("kind", &row.source_kind),
+                    ],
                 })
             })
             .collect();
@@ -221,6 +245,19 @@ impl OpenViking {
             }),
         )?;
         Ok(n)
+    }
+
+    /// Makes the store hold exactly what the Hub's index holds for one object: removed when it has
+    /// no chunks (or only `never` ones), else rewritten. `ws` is where it was (from the event).
+    pub fn sync_object(
+        &self,
+        c: &Connection,
+        ws: &str,
+        obj_type: &str,
+        obj_id: &str,
+    ) -> std::result::Result<usize, String> {
+        let rows = Self::load_object_chunks(c, ws, obj_type, obj_id)?;
+        self.push_object_chunks(ws, obj_type, obj_id, &rows)
     }
 
     /// `uri → score` of the chunk files found for `text` among those tagged `tags`.
@@ -252,6 +289,16 @@ impl OpenViking {
             })
             .unwrap_or_default())
     }
+}
+
+/// Reads the non-`never` chunks of one object from the Hub's index ([`OpenViking::load_object_chunks`]).
+pub fn load_object_chunks(
+    c: &Connection,
+    ws: &str,
+    obj_type: &str,
+    obj_id: &str,
+) -> std::result::Result<Vec<ObjectChunk>, String> {
+    OpenViking::load_object_chunks(c, ws, obj_type, obj_id)
 }
 
 impl KnowledgeStore for OpenViking {
@@ -420,14 +467,19 @@ impl Consumer for Mirror {
                 ev.topic, ev.payload
             )));
         };
-        self.store
+        // Read the object's chunks on a pooled reader and return the connection before any
+        // OpenViking HTTP calls (`delete`, `mkdir`, `batch-write`), so slow embedding never
+        // starves the Hub's read pool or pins a WAL snapshot.
+        let rows = self
+            .store
             .reader(|c| {
-                self.ov
-                    .sync_object(c, &ev.workspace_id, t, id)
-                    .map_err(StoreError::Hook)
+                OpenViking::load_object_chunks(c, &ev.workspace_id, t, id).map_err(StoreError::Hook)
             })
+            .map_err(|e| ConsumeError::Retry(e.to_string()))?;
+        self.ov
+            .push_object_chunks(&ev.workspace_id, t, id, &rows)
             .map(|_| ())
-            .map_err(|e| ConsumeError::Retry(e.to_string()))
+            .map_err(ConsumeError::Retry)
     }
 
     fn apply(&self, _tx: &Tx, ev: &Event) -> std::result::Result<Applied, ConsumeError> {
