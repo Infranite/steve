@@ -78,12 +78,12 @@ pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> 
     };
     let mut cached = slot.lock().await;
     if let Some(x) = cached.as_ref()
-        && x.generation == st.bus.generation()
+        && x.generation == st.bus.generation_for(&c.ws)
         && x.at.elapsed() < STATE_TTL
     {
         return Ok(state_response(x.body.clone(), &x.cursor));
     }
-    let generation = st.bus.generation();
+    let generation = st.bus.generation_for(&c.ws);
     let cursor = st.bus.cursor().to_string();
     let at = std::time::Instant::now();
     let v = compute_state(&st, c).await?;

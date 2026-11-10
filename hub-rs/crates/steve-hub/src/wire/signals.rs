@@ -190,7 +190,7 @@ fn connections(flow: &FlowCx) -> Vec<(String, String, String, String, String)> {
 /// “邮件分诊” template (E4; idempotent). Channel connections are followed by the connection
 /// runtime (`steve_channels::lifecycle`).
 pub async fn watch_mailboxes(
-    mut changes: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    mut changes: tokio::sync::mpsc::Receiver<serde_json::Value>,
     flow: Arc<FlowCx>,
     mail: steve_mail::Mail,
 ) {

@@ -322,7 +322,7 @@ impl ConnectionRuntime {
     /// Starts every wanted run, then follows `events` (the Hub bus's `connection` events, tapped
     /// before this call) until they end or the runtime is shut down. Returns at once; the work is
     /// a task of its own.
-    pub fn start(&self, mut events: mpsc::UnboundedReceiver<Value>) -> JoinHandle<()> {
+    pub fn start(&self, mut events: mpsc::Receiver<Value>) -> JoinHandle<()> {
         let me = self.clone();
         tokio::spawn(async move {
             me.start_all();

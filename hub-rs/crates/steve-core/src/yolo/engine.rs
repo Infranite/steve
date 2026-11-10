@@ -645,7 +645,7 @@ impl Engine {
     }
 
     /// Looks at every decision a `{type:"decision", id}` event names. Runs until the sender is gone.
-    pub async fn run_events(self, mut rx: tokio::sync::mpsc::UnboundedReceiver<Value>) {
+    pub async fn run_events(self, mut rx: tokio::sync::mpsc::Receiver<Value>) {
         while let Some(v) = rx.recv().await {
             if v["type"] == "yolo" {
                 // the switch or a scope changed: running sessions hear of it with their next message

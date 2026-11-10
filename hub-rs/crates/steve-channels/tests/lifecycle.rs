@@ -199,8 +199,8 @@ struct H {
     ch: Channels,
     probe: Arc<Probe>,
     rt: ConnectionRuntime,
-    tx: mpsc::UnboundedSender<Value>,
-    rx: Option<mpsc::UnboundedReceiver<Value>>,
+    tx: mpsc::Sender<Value>,
+    rx: Option<mpsc::Receiver<Value>>,
 }
 
 fn setup(timing: Timing) -> H {
@@ -258,7 +258,7 @@ fn setup(timing: Timing) -> H {
         )
         .timing(timing)
         .build();
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(256);
     H {
         env,
         _keys: keys,
@@ -312,7 +312,7 @@ impl H {
     fn event(&self, id: &str) {
         let _ = self
             .tx
-            .send(json!({"type": "connection", "id": id, "ws": WS}));
+            .try_send(json!({"type": "connection", "id": id, "ws": WS}));
     }
 
     fn start(&mut self) {

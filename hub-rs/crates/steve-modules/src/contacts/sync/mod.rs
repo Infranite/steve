@@ -395,7 +395,7 @@ impl DirectorySync {
     /// [`DirectorySync::connection_changed`] until the sender goes away.
     pub fn spawn_watch(
         self: &Arc<Self>,
-        mut rx: mpsc::UnboundedReceiver<serde_json::Value>,
+        mut rx: mpsc::Receiver<serde_json::Value>,
     ) -> tokio::task::JoinHandle<()> {
         let me = self.clone();
         tokio::spawn(async move {

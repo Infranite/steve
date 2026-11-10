@@ -1,6 +1,7 @@
 //! In-process domain events (bus.ts). Store writes and the orchestrator publish here; every SSE stream subscribes.
 
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -134,6 +135,15 @@ const TRANSIENT: &[&str] = &["event", "steve.draft"];
 pub const RING_FRAMES: usize = 16_384;
 /// ... and at most this many bytes of them (the oldest go first).
 pub const RING_BYTES: usize = 32 << 20;
+/// Bounded channel capacity per [`Bus::tap`] subscriber.
+pub const TAP_CAPACITY: usize = 1024;
+/// Maximum pending/coalesced overflow entries per [`Bus::tap`] subscriber when its channel is full.
+pub const TAP_OVERFLOW_MAX: usize = 512;
+
+const TAP_DRAIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+const TAP_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const SESSION_CACHE_HALF: usize = 50_000;
+const WS_GENERATION_MAX: usize = 10_000;
 
 /// A position in the change log: the Bus's epoch (random per process, so a Hub restart never matches) and
 /// the id of the last frame seen. On the wire it is `<epoch>:<n>`.
@@ -220,12 +230,175 @@ struct Log {
 }
 
 type Resolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
-type Taps = Arc<Mutex<Vec<(Vec<String>, tokio::sync::mpsc::UnboundedSender<Value>)>>>;
+type Taps = Arc<Mutex<Vec<TapSlot>>>;
+
+struct TapSlot {
+    types: Vec<String>,
+    tx: tokio::sync::mpsc::Sender<Value>,
+    overflow: VecDeque<(Option<u64>, Value)>,
+    evicted_since_warn: u64,
+    last_warn: Option<std::time::Instant>,
+}
+
+impl TapSlot {
+    fn new(types: Vec<String>, tx: tokio::sync::mpsc::Sender<Value>) -> Self {
+        Self {
+            types,
+            tx,
+            overflow: VecDeque::new(),
+            evicted_since_warn: 0,
+            last_warn: None,
+        }
+    }
+
+    fn matches(&self, ty: &str) -> bool {
+        self.types.iter().any(|t| t == ty)
+    }
+
+    /// Flushes queued overflow items into `tx` in FIFO order without blocking.
+    /// Returns `false` once the receiver has closed so the caller drops this tap.
+    fn flush(&mut self) -> bool {
+        if self.tx.is_closed() {
+            return false;
+        }
+        while let Some((h, v)) = self.overflow.pop_front() {
+            match self.tx.try_send(v) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(v)) => {
+                    self.overflow.push_front((h, v));
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Delivers `v` without blocking. Returns `false` if the receiver disconnected.
+    fn deliver(&mut self, v: Value, now: std::time::Instant) -> bool {
+        if !self.flush() {
+            return false;
+        }
+        if !self.overflow.is_empty() {
+            self.push_overflow(v, now);
+            return true;
+        }
+        match self.tx.try_send(v) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(v)) => {
+                self.push_overflow(v, now);
+                true
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    }
+
+    fn push_overflow(&mut self, v: Value, now: std::time::Instant) {
+        let (h, dup_pos) = match tap_key_fields(&v) {
+            Some(k) => {
+                let h = hash_tap_key(k);
+                let pos = self
+                    .overflow
+                    .iter()
+                    .position(|(eh, ev)| *eh == Some(h) && tap_key_fields(ev) == Some(k));
+                (Some(h), pos)
+            }
+            None => (None, None),
+        };
+        if let Some(pos) = dup_pos {
+            self.overflow.remove(pos);
+            self.overflow.push_back((h, v));
+            return;
+        }
+        while self.overflow.len() >= TAP_OVERFLOW_MAX {
+            self.overflow.pop_front();
+            self.evicted_since_warn += 1;
+            if self
+                .last_warn
+                .is_none_or(|t| now.duration_since(t) >= TAP_WARN_INTERVAL)
+            {
+                tracing::warn!(
+                    types = ?self.types,
+                    evicted = self.evicted_since_warn,
+                    overflow_max = TAP_OVERFLOW_MAX,
+                    "bus tap consumer lagging; evicted oldest overflow event(s)"
+                );
+                self.evicted_since_warn = 0;
+                self.last_warn = Some(now);
+            }
+        }
+        self.overflow.push_back((h, v));
+    }
+}
+
+fn tap_key_fields(v: &Value) -> Option<(&str, &str, &str)> {
+    let ty = v.get("type").and_then(Value::as_str)?;
+    if ty == "event" {
+        return None;
+    }
+    let ws = v.get("ws").and_then(Value::as_str).unwrap_or_default();
+    let id = v.get("id").and_then(Value::as_str).unwrap_or_default();
+    Some((ty, ws, id))
+}
+
+fn hash_tap_key(k: (&str, &str, &str)) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    k.hash(&mut h);
+    h.finish()
+}
+
+/// Two-generation session -> workspace cache (at most `2 * half_cap` entries). Rotating `hot` into
+/// `cold` evicts at most half the cache at once while promoting active `cold` sessions back into `hot`.
+struct SessionWsCache {
+    hot: HashMap<String, String>,
+    cold: HashMap<String, String>,
+    half_cap: usize,
+}
+
+impl SessionWsCache {
+    fn new(half_cap: usize) -> Self {
+        Self {
+            hot: HashMap::new(),
+            cold: HashMap::new(),
+            half_cap: half_cap.max(1),
+        }
+    }
+
+    fn get(&mut self, sid: &str) -> Option<String> {
+        if let Some(ws) = self.hot.get(sid) {
+            return Some(ws.clone());
+        }
+        if let Some((sid, ws)) = self.cold.remove_entry(sid) {
+            self.insert(sid, ws.clone());
+            return Some(ws);
+        }
+        None
+    }
+
+    fn insert(&mut self, sid: String, ws: String) {
+        if !self.hot.contains_key(&sid) && self.hot.len() >= self.half_cap {
+            self.cold = std::mem::take(&mut self.hot);
+        }
+        self.cold.remove(&sid);
+        self.hot.insert(sid, ws);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.hot.len() + self.cold.len()
+    }
+}
 
 struct Inner {
     /// bumped by every publish that can change `/api/state`, synchronously: anything computed from the database
     /// before a write is stale after it
     generation: std::sync::atomic::AtomicU64,
+    /// bumped by non-`STATELESS` global events (`Scope::All`) and monotonic `ws_generations` prunes
+    global_generation: AtomicU64,
+    /// per-workspace counters bumped only when a non-`STATELESS` event carries a non-empty `"ws"`
+    ws_generations: Mutex<HashMap<String, u64>>,
     /// bumped by every `stats` event before it is coalesced: cached statistics older than this are stale
     stats_generation: std::sync::atomic::AtomicU64,
     tx: std::sync::mpsc::Sender<Value>,
@@ -257,6 +430,8 @@ impl Default for Bus {
 
 impl Bus {
     pub const CAPACITY: usize = 4096;
+    pub const TAP_CAPACITY: usize = TAP_CAPACITY;
+    pub const TAP_OVERFLOW_MAX: usize = TAP_OVERFLOW_MAX;
 
     pub fn new() -> Self {
         Self::with_window(RING_FRAMES, RING_BYTES)
@@ -282,6 +457,8 @@ impl Bus {
         }
         Bus(Arc::new(Inner {
             generation: std::sync::atomic::AtomicU64::new(0),
+            global_generation: AtomicU64::new(0),
+            ws_generations: Mutex::new(HashMap::new()),
             stats_generation: std::sync::atomic::AtomicU64::new(0),
             tx,
             out,
@@ -293,10 +470,13 @@ impl Bus {
 
     /// Every published event whose `type` is one of `types`, as JSON, in publish order (module jobs that
     /// react to store changes, e.g. steve-knowledge's `sync::on_event`).
-    pub fn tap(&self, types: &[&str]) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    pub fn tap(&self, types: &[&str]) -> tokio::sync::mpsc::Receiver<Value> {
+        let (tx, rx) = tokio::sync::mpsc::channel(Self::TAP_CAPACITY);
         let mut t = self.0.taps.lock().unwrap_or_else(|e| e.into_inner());
-        t.push((types.iter().map(|s| s.to_string()).collect(), tx));
+        t.push(TapSlot::new(
+            types.iter().map(|s| s.to_string()).collect(),
+            tx,
+        ));
         rx
     }
 
@@ -322,6 +502,32 @@ impl Bus {
             self.0
                 .generation
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match v.get("ws") {
+                Some(Value::String(w)) if !w.is_empty() => {
+                    let mut map = self
+                        .0
+                        .ws_generations
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if let Some(g) = map.get_mut(w.as_str()) {
+                        *g = g.wrapping_add(1);
+                    } else {
+                        if map.len() >= WS_GENERATION_MAX {
+                            let max_evicted = map.values().copied().max().unwrap_or(0);
+                            self.0
+                                .global_generation
+                                .fetch_add(max_evicted, Ordering::SeqCst);
+                            map.clear();
+                        }
+                        map.insert(w.clone(), 1);
+                    }
+                }
+                Some(_) => {}
+                None if steve_modules::sse::requires_workspace(ty.unwrap_or_default()) => {}
+                None => {
+                    self.0.global_generation.fetch_add(1, Ordering::SeqCst);
+                }
+            }
         }
         if ty == Some("stats") {
             self.0
@@ -334,6 +540,19 @@ impl Bus {
     /// How many events were published so far.
     pub fn generation(&self) -> u64 {
         self.0.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// State generation visible to `ws`: bumped by global state changes and changes scoped to `ws`,
+    /// while leaving other workspaces untouched.
+    pub fn generation_for(&self, ws: &str) -> u64 {
+        let map = self
+            .0
+            .ws_generations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let ws_gen = map.get(ws).copied().unwrap_or(0);
+        let global = self.0.global_generation.load(Ordering::SeqCst);
+        global.wrapping_add(ws_gen)
     }
 
     /// How many `stats` events were published so far (before coalescing).
@@ -400,10 +619,18 @@ fn dispatch(
         log,
         next_id: 0,
     };
-    let mut seen: HashMap<String, String> = HashMap::new();
+    let mut seen = SessionWsCache::new(SESSION_CACHE_HALF);
     let mut stats = StatsThrottle::default();
+    let mut tap_overflow = false;
     loop {
-        let next = match stats.deadline() {
+        let tap_due = tap_overflow.then(|| std::time::Instant::now() + TAP_DRAIN_INTERVAL);
+        let deadline = match (stats.deadline(), tap_due) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let next = match deadline {
             None => rx
                 .recv()
                 .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
@@ -412,7 +639,13 @@ fn dispatch(
         let mut v = match next {
             Ok(v) => v,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                for v in stats.due(std::time::Instant::now()) {
+                let now = std::time::Instant::now();
+                if tap_overflow {
+                    let mut t = taps.lock().unwrap_or_else(|e| e.into_inner());
+                    t.retain_mut(TapSlot::flush);
+                    tap_overflow = t.iter().any(|s| !s.overflow.is_empty());
+                }
+                for v in stats.due(now) {
                     out.send(&v, Scope::Ws(ws_of(&v)));
                 }
                 continue;
@@ -425,9 +658,16 @@ fn dispatch(
             .unwrap_or_default()
             .to_string();
         {
-            // a closed receiver drops its tap
+            let now = std::time::Instant::now();
             let mut t = taps.lock().unwrap_or_else(|e| e.into_inner());
-            t.retain(|(types, tx)| !types.contains(&ty) || tx.send(v.clone()).is_ok());
+            t.retain_mut(|slot| {
+                if slot.matches(&ty) {
+                    slot.deliver(v.clone(), now)
+                } else {
+                    slot.flush()
+                }
+            });
+            tap_overflow = t.iter().any(|s| !s.overflow.is_empty());
         }
         if ty == "stats" {
             // at most one per workspace every 5 s: the first at once, the rest merged into one at the window's end
@@ -443,13 +683,10 @@ fn dispatch(
                 .unwrap_or_default()
                 .to_string();
             let ws = match seen.get(&sid) {
-                Some(w) => Some(w.clone()),
+                Some(w) => Some(w),
                 None => {
                     let w = resolver.get().and_then(|f| f(&sid));
                     if let Some(w) = &w {
-                        if seen.len() > 100_000 {
-                            seen.clear();
-                        }
                         seen.insert(sid, w.clone());
                     }
                     w
@@ -749,6 +986,230 @@ mod tests {
         );
         let f = a.recv().await.expect("5");
         assert_eq!(f.scope, Scope::Ws("w1".into()));
+    }
+
+    #[test]
+    fn generation_for_isolates_workspaces_and_keeps_global_monotonicity() {
+        let bus = Bus::new();
+        assert_eq!(bus.generation(), 0);
+        assert_eq!(bus.generation_for("w1"), 0);
+        assert_eq!(bus.generation_for("w2"), 0);
+
+        // STATELESS events touch neither global nor workspace generations.
+        for ev in [
+            json!({"type": "event", "session_id": "s1", "seq": 1, "kind": "k", "data": {}}),
+            json!({"type": "steve.draft", "ws": "w1", "mid": "m", "thought": "", "text": "x"}),
+            json!({"type": "steve.tool", "ws": "w1"}),
+            json!({"type": "stats", "ws": "w1"}),
+        ] {
+            bus.publish_value(ev);
+        }
+        assert_eq!(bus.generation(), 0);
+        assert_eq!(bus.generation_for("w1"), 0);
+        assert_eq!(bus.generation_for("w2"), 0);
+
+        // Workspace-scoped events in w1 bump w1 (and legacy generation()), leaving w2 untouched.
+        for ev in [
+            json!({"type": "party", "id": "p1", "ws": "w1"}),
+            json!({"type": "mm", "id": "m1", "ws": "w1"}),
+            json!({"type": "yolo", "ws": "w1"}),
+            json!({"type": "yolo_action", "id": "ya1", "ws": "w1"}),
+            json!({"type": "thread.run", "id": "tr1", "ws": "w1"}),
+            json!({"type": "steve.thinking", "on": true, "ws": "w1"}),
+        ] {
+            bus.publish_value(ev);
+        }
+        assert_eq!(bus.generation(), 6);
+        assert_eq!(bus.generation_for("w1"), 6);
+        assert_eq!(bus.generation_for("w2"), 0);
+
+        // Workspace-scoped events in w2 bump w2, leaving w1 untouched.
+        bus.publish_value(json!({"type": "connection", "id": "c1", "ws": "w2"}));
+        assert_eq!(bus.generation(), 7);
+        assert_eq!(bus.generation_for("w1"), 6);
+        assert_eq!(bus.generation_for("w2"), 1);
+
+        // Malformed/empty/missing ws on workspace-required types map to Scope::Nobody and do not
+        // invalidate other workspaces via generation_for.
+        for ev in [
+            json!({"type": "party"}),
+            json!({"type": "party", "ws": ""}),
+            json!({"type": "party", "ws": null}),
+            json!({"type": "plugin.custom"}),
+        ] {
+            bus.publish_value(ev);
+        }
+        assert_eq!(bus.generation(), 11);
+        assert_eq!(bus.generation_for("w1"), 6);
+        assert_eq!(bus.generation_for("w2"), 1);
+
+        // Global events (no ws, Scope::All) bump every workspace's generation_for.
+        bus.publish(HubEvent::Item { id: "ST-1".into() });
+        bus.publish(HubEvent::Session {
+            id: "s1".into(),
+            item_id: None,
+        });
+        assert_eq!(bus.generation(), 13);
+        assert_eq!(bus.generation_for("w1"), 8);
+        assert_eq!(bus.generation_for("w2"), 3);
+        assert_eq!(bus.generation_for("w3"), 2);
+
+        // Exceeding WS_GENERATION_MAX prunes safely while keeping generation_for strictly monotonic.
+        let before_w1 = bus.generation_for("w1");
+        let before_w2 = bus.generation_for("w2");
+        for i in 0..(WS_GENERATION_MAX + 50) {
+            bus.publish_value(json!({"type": "mm", "id": "m", "ws": format!("wx-{i}")}));
+        }
+        assert!(bus.0.ws_generations.lock().unwrap().len() <= WS_GENERATION_MAX);
+        let after_w1 = bus.generation_for("w1");
+        let after_w2 = bus.generation_for("w2");
+        assert!(after_w1 >= before_w1, "{after_w1} < {before_w1}");
+        assert!(after_w2 >= before_w2, "{after_w2} < {before_w2}");
+        bus.publish_value(json!({"type": "mm", "id": "m2", "ws": "w1"}));
+        assert_eq!(bus.generation_for("w1"), after_w1 + 1);
+        assert_eq!(bus.generation_for("w2"), after_w2);
+    }
+
+    #[test]
+    fn session_ws_cache_evicts_generationally_without_clear_cliff() {
+        let mut cache = SessionWsCache::new(4);
+        for i in 0..4 {
+            cache.insert(format!("s{i}"), format!("w{i}"));
+        }
+        assert_eq!(cache.len(), 4);
+        // Trigger rotation: s0..s3 move to cold, s4 enters hot (no full clear).
+        cache.insert("s4".into(), "w4".into());
+        assert_eq!(cache.len(), 5);
+        // Hot lookup on active cold entry s1 promotes s1 into hot.
+        assert_eq!(cache.get("s1").as_deref(), Some("w1"));
+        // Fill hot and trigger another rotation: promoted s1 survives, stale cold entries s0/s2/s3 evict.
+        cache.insert("s5".into(), "w5".into());
+        cache.insert("s6".into(), "w6".into());
+        cache.insert("s7".into(), "w7".into());
+        assert!(cache.len() <= 8, "bounded at 2 * half_cap: {}", cache.len());
+        assert_eq!(cache.get("s1").as_deref(), Some("w1"));
+        assert_eq!(cache.get("s0"), None);
+        assert_eq!(cache.get("s2"), None);
+        assert_eq!(cache.get("s3"), None);
+    }
+
+    #[tokio::test]
+    async fn tap_overflow_coalesces_same_key_and_drains_without_new_publishes() {
+        let bus = Bus::new();
+        let mut tap = bus.tap(&["connection"]);
+        let mut sse = bus.subscribe();
+
+        // Fill the tap's bounded channel (TAP_CAPACITY).
+        for i in 0..TAP_CAPACITY {
+            bus.publish_value(json!({"type": "connection", "ws": "w1", "id": format!("c-{i}")}));
+            let _ = sse.recv().await.expect("sse");
+        }
+        assert_eq!(bus.0.taps.lock().unwrap()[0].overflow.len(), 0);
+
+        // Publish repeated updates for 3 distinct (type, ws, id) keys while consumer is stalled.
+        for rev in 1..=40 {
+            bus.publish_value(json!({"type": "connection", "ws": "w1", "id": "alpha", "rev": rev}));
+        }
+        for rev in 1..=25 {
+            bus.publish_value(json!({"type": "connection", "ws": "w1", "id": "beta", "rev": rev}));
+        }
+        for rev in 1..=15 {
+            bus.publish_value(json!({"type": "connection", "ws": "w2", "id": "alpha", "rev": rev}));
+        }
+        for _ in 0..(40 + 25 + 15) {
+            let _ = sse.recv().await.expect("sse");
+        }
+
+        // All 80 overflow events coalesced into just 3 pending entries.
+        assert_eq!(bus.0.taps.lock().unwrap()[0].overflow.len(), 3);
+
+        // With NO further publishes, draining the receiver flushes the overflow via TAP_DRAIN_INTERVAL.
+        for i in 0..TAP_CAPACITY {
+            let v = tokio::time::timeout(std::time::Duration::from_secs(2), tap.recv())
+                .await
+                .expect("in time")
+                .expect("event");
+            assert_eq!(v["id"], format!("c-{i}"));
+        }
+        let mut coalesced = Vec::new();
+        for _ in 0..3 {
+            let v = tokio::time::timeout(std::time::Duration::from_secs(2), tap.recv())
+                .await
+                .expect("overflow drained")
+                .expect("event");
+            coalesced.push((
+                v["ws"].as_str().unwrap().to_string(),
+                v["id"].as_str().unwrap().to_string(),
+                v["rev"].as_i64().unwrap(),
+            ));
+        }
+        assert_eq!(
+            coalesced,
+            vec![
+                ("w1".into(), "alpha".into(), 40),
+                ("w1".into(), "beta".into(), 25),
+                ("w2".into(), "alpha".into(), 15),
+            ]
+        );
+        assert!(bus.0.taps.lock().unwrap()[0].overflow.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tap_flood_never_blocks_bounds_memory_evicts_oldest_and_drops_closed_tap() {
+        let bus = Bus::new();
+        let mut tap = bus.tap(&["mm"]);
+        let mut sse = bus.subscribe();
+
+        for i in 0..TAP_CAPACITY {
+            bus.publish_value(json!({"type": "mm", "ws": "w1", "id": format!("init-{i}")}));
+            let _ = sse.recv().await.expect("sse");
+        }
+
+        // Flood TAP_OVERFLOW_MAX + 200 distinct events; publisher never blocks and overflow stays capped.
+        let extra = 200usize;
+        let flood = TAP_OVERFLOW_MAX + extra;
+        for i in 0..flood {
+            bus.publish_value(json!({"type": "mm", "ws": "w1", "id": format!("ov-{i}"), "seq": i}));
+            let _ = sse.recv().await.expect("sse");
+        }
+        assert_eq!(
+            bus.0.taps.lock().unwrap()[0].overflow.len(),
+            TAP_OVERFLOW_MAX
+        );
+
+        // Drain channel + bounded overflow: oldest `extra` overflow items were evicted, newest kept in order.
+        for i in 0..TAP_CAPACITY {
+            let v = tokio::time::timeout(std::time::Duration::from_secs(2), tap.recv())
+                .await
+                .expect("channel item")
+                .expect("value");
+            assert_eq!(v["id"], format!("init-{i}"));
+        }
+        for i in extra..flood {
+            let v = tokio::time::timeout(std::time::Duration::from_secs(2), tap.recv())
+                .await
+                .expect("overflow item")
+                .expect("value");
+            assert_eq!(v["seq"], i);
+        }
+
+        // Now create a second tap, overflow it, drop its receiver with NO new publishes, and verify cleanup.
+        let tap2 = bus.tap(&["mm"]);
+        assert_eq!(bus.0.taps.lock().unwrap().len(), 2);
+        for i in 0..(TAP_CAPACITY + 32) {
+            bus.publish_value(json!({"type": "mm", "ws": "w1", "id": format!("drop-{i}")}));
+            let _ = sse.recv().await.expect("sse");
+        }
+        drop(tap2);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while bus.0.taps.lock().unwrap().len() > 1 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "closed tap with overflow was not dropped"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(bus.0.taps.lock().unwrap().len(), 1);
     }
 }
 

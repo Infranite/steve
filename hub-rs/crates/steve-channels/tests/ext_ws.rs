@@ -135,7 +135,7 @@ impl H {
     }
 
     /// The connection runtime with the feed, every event so far published.
-    fn runtime(&self) -> (ConnectionRuntime, mpsc::UnboundedSender<Value>) {
+    fn runtime(&self) -> (ConnectionRuntime, mpsc::Sender<Value>) {
         let rt = ConnectionRuntime::builder(self.ch.clone())
             .hook(
                 ext_ws::ADAPTER,
@@ -143,15 +143,15 @@ impl H {
                 Arc::new(ExtWsHook::new(self.ch.clone(), self.ext.clone())),
             )
             .build();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(256);
         drop(rt.start(rx));
         self.publish(&tx);
         (rt, tx)
     }
 
-    fn publish(&self, tx: &mpsc::UnboundedSender<Value>) {
+    fn publish(&self, tx: &mpsc::Sender<Value>) {
         for e in self.env.take_events() {
-            let _ = tx.send(serde_json::to_value(e).expect("json"));
+            let _ = tx.try_send(serde_json::to_value(e).expect("json"));
         }
     }
 

@@ -478,7 +478,7 @@ pub struct BusTap(Bus);
 
 impl BusTap {
     /// The events whose `type` is one of `types`.
-    pub fn tap(&self, types: &[&str]) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+    pub fn tap(&self, types: &[&str]) -> tokio::sync::mpsc::Receiver<Value> {
         self.0.tap(types)
     }
 }

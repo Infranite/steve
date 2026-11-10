@@ -814,7 +814,7 @@ async fn members_of_your_own_spaces_are_yours_alone() {
 // The runtime.
 
 /// The connection runtime with the built-in Feishu hooks, and the sender its events come on.
-fn runtime(h: &H) -> (ConnectionRuntime, mpsc::UnboundedSender<Value>) {
+fn runtime(h: &H) -> (ConnectionRuntime, mpsc::Sender<Value>) {
     let rt = ConnectionRuntime::builder(h.ch.clone())
         .hook(
             "feishu_app",
@@ -831,15 +831,15 @@ fn runtime(h: &H) -> (ConnectionRuntime, mpsc::UnboundedSender<Value>) {
             Arc::new(SelfPollHook::new(h.ch.clone(), h.user.clone())),
         )
         .build();
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(256);
     drop(rt.start(rx));
     (rt, tx)
 }
 
 /// The change events published since the last call, as the Hub's bus hands them to the runtime.
-fn publish(h: &H, tx: &mpsc::UnboundedSender<Value>) {
+fn publish(h: &H, tx: &mpsc::Sender<Value>) {
     for e in h.env.take_events() {
-        let _ = tx.send(serde_json::to_value(e).expect("json"));
+        let _ = tx.try_send(serde_json::to_value(e).expect("json"));
     }
 }
 
@@ -891,7 +891,7 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
 
     // repeated events change nothing
     publish(&h, &tx);
-    let _ = tx.send(json!({"type": "connection", "id": con, "ws": WS}));
+    let _ = tx.try_send(json!({"type": "connection", "id": con, "ws": WS}));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(h.fake.ws_connects_total(), 1);
 

@@ -335,7 +335,7 @@ impl Workspaces {
 
     /// Keeps the local roots in step with projects and knowledge sources: `events` are the bus's
     /// `project` and `kb` events. A burst is one rebuild.
-    pub async fn follow(self: Arc<Self>, mut events: tokio::sync::mpsc::UnboundedReceiver<Value>) {
+    pub async fn follow(self: Arc<Self>, mut events: tokio::sync::mpsc::Receiver<Value>) {
         while events.recv().await.is_some() {
             while events.try_recv().is_ok() {}
             let me = self.clone();
@@ -942,7 +942,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_project_added_after_boot_is_prepared_without_a_restart() {
         let t = local(false);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
         tokio::spawn(t.ws.clone().follow(rx));
         let p = t.dir.path().join("later");
         std::fs::create_dir_all(&p).unwrap();
@@ -954,7 +954,7 @@ mod tests {
             ErrorCode::Denied
         );
         // the project event rebuilds them
-        tx.send(serde_json::json!({"type": "project", "id": "p9"}))
+        tx.try_send(serde_json::json!({"type": "project", "id": "p9"}))
             .unwrap();
         let mut taken = false;
         for i in 0..200 {

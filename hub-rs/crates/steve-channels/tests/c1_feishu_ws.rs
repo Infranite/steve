@@ -377,7 +377,7 @@ async fn the_bot_run_reports_the_connection_healthy_once_connected() {
             Arc::new(BotHook::new(h.ch.clone())),
         )
         .build();
-    let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_tx, rx) = tokio::sync::mpsc::channel(16);
     drop(rt.start(rx));
     let t0 = std::time::Instant::now();
     while status(&h) != json!("ok") {
