@@ -424,6 +424,7 @@ fn request(w: &World, run: &str, ws: &str, question: &str) -> ResearchRequest {
         mid: "msg_1".into(),
         user: None,
         full: false,
+        brief: String::new(),
         question: question.into(),
         history: vec![],
         main: bot(),

@@ -163,6 +163,7 @@ impl ResearchAdapter {
                 String::new()
             },
             full: q.full,
+            brief: q.brief.clone(),
         });
         let cwd = q.project.as_ref().map(|p| PathBuf::from(&p.path));
         /* a follow-up continues the earlier session: the question alone is the prompt */

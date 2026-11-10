@@ -440,5 +440,6 @@
   "core.mq.policy_bad": "The merge queue's settings are not valid: %{why}",
   "core.mq.node_gone": "This batch's Node has been unreachable for %{minutes} min: %{why}. Wait for it (run again) or send the batch back",
   "core.models.note.harness_missing": "Steve's harness \"%{harness}\" has no adapter available now: judgments fail until it is installed or another harness is chosen",
-  "core.models.note.adapter_default": "the harness's own default model"
+  "core.models.note.adapter_default": "the harness's own default model",
+  "core.onboard.welcome": "Hi, I'm Steve. This is our first conversation, so let's get to know each other: what should I call you, what do you mostly work on, and what do you plan to use me for?\n\nAlong the way I will ask before doing three things: learning about you from the history already on this machine and saving it to your profile; choosing the default model for each purpose from the models available here; and creating a few Bots that fit your work. You can say no to any of them, or say \"skip\" at any time."
 }

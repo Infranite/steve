@@ -13,6 +13,7 @@ mod eval;
 pub mod flowback;
 mod handle;
 mod offer;
+pub mod onboard;
 mod reroute;
 pub mod research;
 mod suggest;

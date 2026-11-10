@@ -274,10 +274,27 @@ impl Core {
         }
         let history = self.history_before(ws, mid)?;
         let routed = super::routed_text(text, files);
+        /* the first meeting is a conversation with Steve itself: no router, which a fresh installation
+        has not given a fast model yet, unless the message names a Bot or an item in so many words */
+        let meeting = !guest
+            && conv.space == super::MAIN
+            && ahead.is_none()
+            && !decide::names_work(text)
+            && super::research::asked_by_owner(db, user)
+            && self.meeting(ws)?;
         /* a plain question needs no router: its kind is known (#52); one routed ahead of an answer is not plain */
         let plain = match decide::without_router(text, !files.is_empty(), guest, &[])
-            .filter(|_| ahead.is_none())
+            .filter(|_| ahead.is_none() && !meeting)
         {
+            _ if meeting => Some(
+                Route {
+                    kind: "research".into(),
+                    confidence: 1.0,
+                    why: "初次见面，没有问路由".into(),
+                    ..Route::fallback(text, None)
+                }
+                .plain(),
+            ),
             Some(_) => {
                 let c = self.route_ctx_in(ws, guest)?;
                 decide::without_router(text, !files.is_empty(), guest, &c.focus).map(|kind| {
@@ -337,7 +354,7 @@ impl Core {
         }
         d = decide::for_owner(d, conv.owner_only && conv.research);
         if plain.is_some() {
-            d.guard = Some("q");
+            d.guard = Some(if meeting { "meet" } else { "q" });
         }
         lock(steps).route = Some(route_step(&r, Some(&d), ms));
         self.store().store().thread().route_add(&NewRouteLog {

@@ -111,6 +111,9 @@ pub struct ResearchRequest {
     /// the instance's owner asks where they alone read the answer: the run acts on the Hub's
     /// machine with the owner's own access instead of only reading the project directories
     pub full: bool,
+    /// what this run is for besides the question, in the prompt's own words: the first meeting's
+    /// brief ([`super::onboard::BRIEF`]) while it is on, else empty
+    pub brief: String,
 }
 
 /// A follow-up within [`RESUME_WINDOW`] of a research answer continues that run's harness session.
@@ -960,6 +963,7 @@ impl Core {
             format!("{context}\n\n{named}")
         };
         let models = self.models().for_purpose(ws, "research");
+        let full = own && asked_by_owner(db, j.user.as_deref());
         let req = ResearchRequest {
             run: run.clone(),
             ws: ws.into(),
@@ -982,7 +986,12 @@ impl Core {
             }),
             models: models.clone(),
             ui: j.space == super::MAIN,
-            full: own && asked_by_owner(db, j.user.as_deref()),
+            full,
+            brief: if full && j.space == super::MAIN && self.meeting(ws)? {
+                super::onboard::BRIEF.trim().to_string()
+            } else {
+                String::new()
+            },
         };
         let harness = models.harness.clone();
         let steps = Mutex::new(Steps {
@@ -1136,7 +1145,7 @@ fn mentioned_items(
 
 /// The asker is the instance's owner (`users.role`); a message without a user counts where the
 /// instance has one user only.
-fn asked_by_owner(db: &crate::repo::Db, user: Option<&str>) -> bool {
+pub(crate) fn asked_by_owner(db: &crate::repo::Db, user: Option<&str>) -> bool {
     let users = db.store().users();
     match user {
         Some(id) => matches!(users.get(id), Ok(Some(u)) if u.role == "owner"),

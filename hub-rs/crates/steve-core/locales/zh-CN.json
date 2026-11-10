@@ -440,5 +440,6 @@
   "core.mq.policy_bad": "合并队列的设置不对：%{why}",
   "core.mq.node_gone": "这一批的 Node 已经 %{minutes} 分钟连不上了：%{why}。可以继续等（重跑）或退回",
   "core.models.note.harness_missing": "Steve 的 harness「%{harness}」现在没有可用的适配器：判断会失败，直到它装好或换一个 harness",
-  "core.models.note.adapter_default": "该 harness 自己的默认模型"
+  "core.models.note.adapter_default": "该 harness 自己的默认模型",
+  "core.onboard.welcome": "你好，我是 Steve。第一次见面，先互相认识一下：怎么称呼你？平时主要做什么，打算用我来做哪些事？\n\n聊的过程中，我会先征得你的同意再做三件事：从这台机器上已有的记录里了解你并写进你的资料；按这里可用的模型调好各用途的默认模型；按你做的事建几个合适的 Bot。每一件你都可以拒绝，也可以随时说“跳过”。"
 }

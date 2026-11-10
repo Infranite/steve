@@ -26,6 +26,8 @@ pub struct PromptInput {
     pub ui: String,
     /// The run acts with the user's full access on the Hub's machine; otherwise it only reads `dirs`.
     pub full: bool,
+    /// What this run is for besides the question (the first meeting's brief), or empty.
+    pub brief: String,
 }
 
 /// What a read-only run may do, and the heading of its directories.
@@ -84,6 +86,7 @@ pub fn render(p: &PromptInput) -> String {
         .replace("{{context}}", &or_none(p.context.clone()))
         .replace("{{recent}}", &or_none(recent))
         .replace("{{question}}", p.question.trim())
+        .replace("{{brief}}", p.brief.trim())
         .replace("{{ui}}", p.ui.trim())
 }
 
@@ -106,6 +109,7 @@ mod tests {
             question: "知识系统怎么运作？".into(),
             ui: "界面：```a2ui".into(),
             full: false,
+            brief: String::new(),
         });
         assert!(!s.contains("{{"));
         assert!(s.trim_end().ends_with("界面：```a2ui"));
@@ -128,5 +132,21 @@ mod tests {
         assert!(full.contains(FULL.0) && full.contains(FULL.1));
         assert!(!full.contains("只读研究") && !full.contains(READ_ONLY.1));
         assert!(!full.contains("{{"));
+    }
+
+    #[test]
+    fn a_brief_comes_after_the_rules() {
+        let s = render(&PromptInput {
+            brief: "【初次见面】先互相认识。".into(),
+            ui: "界面：```a2ui".into(),
+            ..Default::default()
+        });
+        let (rules, brief, ui) = (
+            s.find("怎么答：").unwrap(),
+            s.find("【初次见面】").unwrap(),
+            s.find("界面：").unwrap(),
+        );
+        assert!(rules < brief && brief < ui);
+        assert!(!render(&PromptInput::default()).contains("{{brief}}"));
     }
 }

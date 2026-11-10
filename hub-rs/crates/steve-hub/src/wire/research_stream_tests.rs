@@ -139,6 +139,7 @@ impl Test {
             mid: "message".into(),
             user: None,
             full: false,
+            brief: String::new(),
             question: "@wire-check".into(),
             history: vec![],
             main: steve_core::repo::Bot {

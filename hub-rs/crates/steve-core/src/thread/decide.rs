@@ -189,6 +189,13 @@ fn needs_router(text: &str, files: bool, focus: &[FocusItem]) -> bool {
         })
 }
 
+/// The message names a Bot or an item in so many words (`@Bot …`, “建个事项”, `ST-12`): the router
+/// decides even where a conversation is otherwise not routed (the first meeting).
+pub fn names_work(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with('@') || explicit_item(t) || ITEM_REF.is_match(t)
+}
+
 /// The longest guest question (in characters) answered without the router: “短句” in the decision. A
 /// longer one goes to the router, which may still pick research where the space allows it.
 pub const GUEST_SHORT: usize = 30;

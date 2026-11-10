@@ -21,6 +21,7 @@ mod mq_drive;
 mod mq_exec;
 mod new_cycle;
 mod node_git;
+mod onboard;
 mod outbox;
 mod queued;
 mod refused;
