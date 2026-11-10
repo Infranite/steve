@@ -15,17 +15,34 @@ ENV = dict({k: v for k, v in os.environ.items() if k != "STEVE_GH"}, GIT_AUTHOR_
 
 # GitHub's answer for the CI workflow's runs on a commit, from $FAKE_GH_CI: {"conclusion": ..., "status": ...}
 # for the push run of every commit, or {"none": true} (only a pull request's run); each call is logged to
-# $FAKE_GH_LOG.
+# $FAKE_GH_LOG. With {"pull": {"number": N, "head": sha, ...}} every commit asked about is that pull request
+# as merged ("merged_as": another commit instead; "base": its target), and its head has one pull-request run
+# ("conclusion", "status").
 FAKE_GH = r"""#!/usr/bin/env python3
 import json, os, re, sys
-open(os.environ["FAKE_GH_LOG"], "a").write(" ".join(sys.argv[1:]) + "\n")
+args = " ".join(sys.argv[1:])
+open(os.environ["FAKE_GH_LOG"], "a").write(args + "\n")
 ci = json.load(open(os.environ["FAKE_GH_CI"]))
-m = re.search(r"workflows/ci\.yml/runs\?head_sha=([0-9a-f]{40})&event=push&branch=main&", " ".join(sys.argv[1:]))
-if sys.argv[1:2] != ["api"] or not m:
-    sys.exit("fake gh: unexpected " + " ".join(sys.argv[1:]))
+pull = ci.get("pull")
+m = re.search(r"workflows/ci\.yml/runs\?head_sha=([0-9a-f]{40})&event=push&branch=main&", args)
+merged = re.search(r"/commits/([0-9a-f]{40})/pulls\?", args)
+tested = re.search(r"workflows/ci\.yml/runs\?head_sha=([0-9a-f]{40})&event=pull_request&", args)
+if sys.argv[1:2] != ["api"] or not (m or merged or tested):
+    sys.exit("fake gh: unexpected " + args)
 if ci.get("down"):
     sys.exit("HTTP 502")
-# a green pull-request run of the same commit (Linux only) is always there, and newer: it never counts
+if merged:
+    print(json.dumps([{"number": pull["number"], "merged_at": "2026-01-01T00:00:00Z",
+                       "merge_commit_sha": pull.get("merged_as", merged.group(1)),
+                       "head": {"sha": pull["head"]}, "base": {"ref": pull.get("base", "main")}}] if pull else []))
+    sys.exit(0)
+if tested:
+    runs = [{"id": 77, "run_number": 5, "head_sha": pull["head"], "event": "pull_request", "head_branch": "pr",
+             "status": pull.get("status", "completed"), "conclusion": pull.get("conclusion", "success"),
+             "html_url": "https://github.example/runs/77"}] if pull and pull["head"] == tested.group(1) else []
+    print(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
+    sys.exit(0)
+# a green pull-request run of the same commit (Linux only) is always there, and newer: by itself it never counts
 pr = {"id": 99, "run_number": 3, "head_sha": m.group(1), "event": "pull_request", "head_branch": "feature",
       "status": "completed", "conclusion": "success", "html_url": "https://github.example/runs/99"}
 runs = [pr] if ci.get("none") else [
@@ -328,6 +345,55 @@ def main():
         assert git(b, "tag", "-l", "v0.2.32") == "" and git(origin, "tag", "-l", "v0.2.32") == ""
         assert len(git(b, "worktree", "list").splitlines()) == 1, git(b, "worktree", "list")
         ok("a push that did not land leaves no tag and no worktree behind")
+
+        # a pull request, rebase-merged: GitHub replays its commits onto the branch, under new ids
+        def pull_request(number, files):
+            git(b, "fetch", "-q", "origin")
+            git(b, "checkout", "-q", "-B", "pr", "origin/main")
+            for n, (f, text) in enumerate(files.items()):
+                commit(b, {f: text}, f"pr {number}.{n}")
+            git(b, "push", "-q", "origin", f"HEAD:refs/pull/{number}/head")
+            return git(b, "rev-parse", "HEAD")
+
+        def rebase_merge(count):
+            git(b, "checkout", "-q", "-B", "main", "origin/main")
+            subprocess.run(["git", "-C", str(b), "cherry-pick", f"pr~{count}..pr"], check=True, capture_output=True,
+                           env=dict(ENV, GIT_COMMITTER_NAME="merger"))
+            git(b, "push", "-q", "origin", "main")
+            return git(b, "rev-parse", "HEAD")
+
+        def refused(why, **state):
+            set_ci(**state)
+            r = cut(a, "cut", "--ci-wait", "0")
+            assert r.returncode == 1 and why in r.stderr, r
+            assert git(origin, "tag", "-l", "v0.2.32") == ""
+
+        # the branch moved on before the merge: the pull request's run tested less than what is released
+        behind = pull_request(7, {"src/p7.txt": "7\n", "docs/releases/unreleased/ST-9.md": "- Ninth.\n"})
+        git(b, "checkout", "-q", "-B", "main", "origin/main")
+        commit(b, {"src/meanwhile.txt": "m\n"}, "meanwhile")
+        git(b, "push", "-q", "origin", "main")
+        assert rebase_merge(2) != behind
+        refused("has no push run on", none=True, pull={"number": 7, "head": behind})
+        ok("a pull request merged onto a branch that had moved: its run does not count")
+
+        head = pull_request(8, {"src/p8.txt": "8\n", "src/p8b.txt": "8b\n"})
+        merged = rebase_merge(2)
+        assert merged != head and git(b, "rev-parse", f"{merged}^{{tree}}") == git(b, "rev-parse", f"{head}^{{tree}}")
+        pull = {"number": 8, "head": head}
+        refused("has no push run on", none=True, pull=dict(pull, conclusion="failure"))
+        refused("has no push run on", none=True, pull=dict(pull, status="in_progress", conclusion=None))
+        refused("has no push run on", none=True, pull=dict(pull, merged_as=head))
+        refused("has no push run on", none=True, pull=dict(pull, base="other"))
+        refused(f"failure on {merged[:7]}", conclusion="failure", pull=pull)
+        ok("a pull request's run that did not pass, another merge or target, or a red run on the head: no release")
+        set_ci(status="in_progress", pull=pull)
+        r = cut(a, "cut", "--ci-wait", "0")
+        assert r.returncode == 0 and "released v0.2.32" in r.stdout, r
+        assert f"CI passed on pull request #8 ({head[:7]}), merged as {merged[:7]}" in r.stderr and "runs/77" in r.stderr, r.stderr
+        assert git(origin, "rev-parse", "v0.2.32^{commit}^") == merged
+        set_ci(conclusion="success")
+        ok("an up-to-date pull request, rebase-merged: its green run releases the head without a second run")
 
         # origin unreachable: an error, not "no tags"
         git(a, "remote", "set-url", "origin", str(Path(tmp, "gone.git")))

@@ -1,6 +1,7 @@
 name: CI
 # Compile once per platform, then run disjoint nextest partitions from that exact build.
-# cut-release.py accepts only this entire workflow's successful push run on the release head.
+# cut-release.py accepts only this entire workflow's successful run: the push run on the release head, or the
+# run of the pull request that head was merged from when it tested the same tree.
 on:
   pull_request:
   push:
