@@ -190,7 +190,18 @@ export default function App() {
   const t = useT()
   /* whether this page has a Hub to talk to: the one that served it, or the one it was pointed at */
   const [hub, setHubState] = useState<"checking" | "ok" | "missing">("checking")
-  useEffect(() => { hello(hubBase()).then(() => setHubState("ok"), () => setHubState("missing")) }, [])
+  useEffect(() => {
+    hello(hubBase()).then(() => setHubState("ok"), async () => {
+      /* served on its own port by a Hub (/hub.json): that Hub, when it answers, without asking */
+      if (!hubBase()) {
+        try {
+          const j = await fetch("/hub.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null))
+          if (typeof j?.hub === "string" && (await hello(j.hub)).api === API) { setHub(j.hub); setHubState("ok"); return }
+        } catch { /* ask */ }
+      }
+      setHubState("missing")
+    })
+  }, [])
   useEffect(() => { if (hub === "ok") return start() }, [hub])
   const [a = "", b, c] = useRoute()
   /* an “撤销” toast belongs to the page it was raised on */

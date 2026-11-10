@@ -31,7 +31,8 @@ export const normalize = (url: string): string | null => {
 
 /** asks `base` who it is; throws with a reason a person can act on */
 export async function hello(base: string): Promise<Hello> {
-  const r = await fetch(base + "/auth/hello", { credentials: "include", cache: "no-store", signal: AbortSignal.timeout(8000) })
+  /* not followed: a web client on its own port sends /auth/… on to its Hub, and must not pass for one */
+  const r = await fetch(base + "/auth/hello", { credentials: "include", cache: "no-store", redirect: "manual", signal: AbortSignal.timeout(8000) })
   const j = await r.json().catch(() => null)
   if (!r.ok || !j || j.name !== "steve") throw new Error("not-steve")
   return j as Hello
