@@ -1,5 +1,7 @@
 name: CI
 # One Rust job per platform compiles the workspace's tests and runs all of them on that runner.
+# Every job has a time limit of two to several times its longest run, so one that hangs is stopped
+# there instead of holding a runner for GitHub's six hours.
 # cut-release.py accepts only this entire workflow's successful run: the push run on the release head, or the
 # run of the pull request that head was merged from when it tested the same tree.
 on:
@@ -18,6 +20,7 @@ jobs:
       matrix:
         runner: [ubuntu-22.04, macos-15]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -53,6 +56,7 @@ jobs:
       matrix:
         runner: [ubuntu-22.04, macos-15]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -67,6 +71,7 @@ jobs:
   changes:
     if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-22.04
+    timeout-minutes: 45 # the script itself stops waiting after 40
     permissions:
       actions: read
       contents: read
@@ -88,6 +93,7 @@ jobs:
       matrix:
         runner: [ubuntu-22.04, macos-15]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     env:
       MACOSX_DEPLOYMENT_TARGET: '14.0'
       CARGO_INCREMENTAL: '0'
@@ -171,6 +177,7 @@ jobs:
     if: ${{ always() }}
     needs: [changes, scripts, web, rust]
     runs-on: ubuntu-22.04
+    timeout-minutes: 5
     steps:
       - name: Require every job on every platform
         env:
