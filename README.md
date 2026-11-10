@@ -105,7 +105,7 @@ Configuration done through chat, corrections to automations, contact merges and 
 
 Each message is sorted into one of nine routes: answer, research, item, suggest, ask, supplement, status, config or reroute. Code-level guards can overrule the model, and CI runs a routing eval built from real messages. When Steve can't tell whether a message is new work or belongs to an existing item, it asks.
 
-- **Inline research** answers questions about your code and documents in the chat, citing `path:line`. Read-only is enforced three times: a tool allowlist (Read, Grep, Glob), a Hub guard that stops the run at the first non-read tool, and a `sandbox-exec` profile on macOS.
+- **Inline research** answers questions about your code and documents in the chat, citing `path:line`. Read-only is enforced three times: a tool allowlist (Read, Grep, Glob), a Hub guard that stops the run at the first non-read tool, and a `sandbox-exec` profile on macOS. The instance owner's own main conversation is the exception: asked to look at, tidy, install or fix something on the Hub's machine, Steve does it with that OS user's access, while its own keys, database and programs stay out of reach.
 - An answer can end with *"Make it an item: …"*. Click it or just reply "do it".
 - Each item has one card in the chat. It updates in place (running, waiting, delivered, released) and only moves to the bottom when it needs you.
 - You can configure Steve by talking to it: *"Use Opus for the frontend bot, and switch on YOLO except for billing-api."* It drafts field-level changes to bots, projects, models, tags, flows and contacts. You apply them with one click and can undo for 24 hours.
@@ -273,7 +273,7 @@ brew install infranite/tap/steve
 steve setup
 ```
 
-The setup wizard asks whether this machine is a Hub or Node. For a Hub it defaults to listening on `0.0.0.0:8440`, asks separately for the browser URL, prepares its private runtime directory and macOS signing identity, checks the configuration, issues the owner's first access token, and registers a user service. For a Node it accepts the Hub's HTTPS address and reads the one-time pairing code from stdin; confirm the fingerprint in Hub **Devices**. Then start the role you configured:
+On a terminal, setup is a wizard: it asks whether this machine is a Hub or Node, who may reach the Hub (it listens on `0.0.0.0:8440` by default and derives the browser URL from that; `--public-url` names another) and which ACP adapters to install, then prepares the private runtime directory and macOS signing identity, checks the configuration, issues the owner's first access token, registers a user service, and offers to start the Hub and open the browser. For a Node it accepts the Hub's HTTPS address and reads the one-time pairing code from stdin; confirm the fingerprint in Hub **Devices**. The wizard and every `steve` command speak Chinese or English (`--lang zh-CN|en`, else `STEVE_LANG`, the locale, then the system language). Off a terminal (a pipe, `TERM=dumb`, `STEVE_PLAIN=1`) setup prints plain lines and only registers the service; start the role you configured:
 
 ```sh
 steve hub start       # on the Hub
