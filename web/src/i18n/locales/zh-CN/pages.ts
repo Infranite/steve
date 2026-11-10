@@ -339,6 +339,11 @@ export default {
       sub: "首次引导 · {{n}}/{{total}} · {{step}}",
       done: "引导完成",
       skip: "跳过引导",
+      meet: "最后，我们互相认识一下：我会问问怎么称呼你、平时用 Steve 做什么。你同意的话，我再从这台机器上已有的信息里整理你的资料、按可用的模型调好默认配置、建几个适合你的 Bot。每一步都先问你。",
+      meetStep: "互相认识",
+      meetGo: "开始认识",
+      later: "以后再说",
+      meetSkip: "跳过认识",
     },
     digest: {
       more_other: "还有 {{count}} 件",

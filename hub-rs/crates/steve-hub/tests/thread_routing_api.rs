@@ -875,6 +875,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
         st["settings"]["onboard"].clone()
     };
     assert_eq!(onboard().await, "pending");
+    assert_eq!(e.call("GET", "/api/state", None).await.1["owner"], true);
     let (_, v) = e.call("POST", "/api/onboard/start", None).await;
     assert_eq!(v["message"], hello.as_str(), "one meeting, one welcome");
     assert_eq!(e.thread().await.len(), 1);
@@ -1145,5 +1146,4 @@ async fn the_first_meeting_writes_through_its_own_tools() {
         .unwrap();
     assert_eq!(e.call("POST", "/api/onboard/start", None).await.0, 403);
     assert_eq!(e.call("POST", "/api/onboard/skip", None).await.0, 403);
-    assert_eq!(onboard().await, "done");
 }

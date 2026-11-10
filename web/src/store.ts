@@ -46,6 +46,8 @@ export type Bot = { id: string; main?: boolean; n: string; a: string; role: stri
   reasoningEffort?: string | null; mem: [string, string, string][]; memCount: number; memLoaded: boolean; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string }; cites?: Cite[]
+  /** Steve's welcome that opened the first meeting */
+  meet?: boolean
   /* thread routing (§3.4, §5.2): the offer under an answer, a suggestion card, ask options, a user message waiting in the
    * queue, the message this one answers or quotes, flow-back from an item, a research cut off by a restart */
   offer?: Offer; suggest?: Suggest; ask?: { options: string[] }; queued?: { run?: string | null }; replyTo?: string; origin?: string; answer?: string
@@ -146,7 +148,7 @@ export const st = {
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>, devices: [] as State["devices"], runtimes: [] as State["runtimes"],
   /* YOLO (Rust Hub): the switch, and the current window's ledger by decision id; null where the Hub has none */
   yolo: null as RYolo | null, yoloActs: {} as Record<string, RYoloAction>,
-  localSessions: [] as LocalSession[], hold: null as RHold | null, thinking: false, onboard: -1, prefix: "ST", noSeq: 0,
+  localSessions: [] as LocalSession[], hold: null as RHold | null, thinking: false, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST", noSeq: 0,
   notices: [] as RNotice[], noticeSeen: 0, phase: "" as string, orphans: [] as Orphan[],
   /* the chat answer being written (steve.draft), until the stored reply replaces it; `drafted` is that reply's id */
   draft: null as Draft | null, drafted: "",
@@ -453,7 +455,7 @@ export function msgOf(m: State["thread"][number]): Msg {
   const ps: Proposal[] = Array.isArray(x.proposals) ? x.proposals : x.proposal ? [x.proposal] : []
   const cfgs = ps.map((p) => proposalOf(p, x.cfg_state?.[p.id] ?? (x.applied ? "applied" : x.dropped ? "dropped" : "draft")))
   return { id: m.id, k: m.author, t: m.text, item: m.item_id ?? undefined, chat: x.chat, files: x.files, created: m.created, steps: x.steps, notice: x.notice, cites: x.cites, cfgs: cfgs.length ? cfgs : undefined,
-    held: !!x.held || undefined, stopped: !!x.stopped || undefined,
+    held: !!x.held || undefined, stopped: !!x.stopped || undefined, meet: x.onboard === true || undefined,
     offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
     card: x.card?.item ? itemCard(x.card) : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
@@ -513,7 +515,9 @@ function build() {
     via: typeof d.result?.via?.name === "string" ? d.result.via.name : undefined }))
   st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
   st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
-  if (st.onboard < 0 && !s.thread.length && !s.items.length && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
+  st.owner = !!s.owner
+  /* the tour shows on an empty instance until this browser finished it, or the owner met Steve or said no (the Hub remembers that) */
+  if (st.onboard < 0 && !s.thread.length && !s.items.length && !s.settings.onboard && localStorage.getItem("steve-onboarded") !== "1") st.onboard = 0
   st.ready = true
 }
 /* the view model holds labels (status words, "默认模型", transcript lines): map it again in the new language */
@@ -860,6 +864,14 @@ export async function promote(m: Msg) {
   try { const r = await call(api.promote(m.id)); if (r) toast(t("core:toast.madeItem", { id: r.id })) } finally { promoting.delete(m.id); emit() }
 }
 export function finishOnboarding() { localStorage.setItem("steve-onboarded", "1"); st.onboard = -1; emit() }
+/** The first meeting is on: the owner and Steve are getting to know each other in the main conversation. */
+export const meeting = () => st.settings?.onboard === "pending"
+/** The tour's last step for the instance's owner: Steve opens the first meeting in the conversation. */
+export async function meet() { finishOnboarding(); await call(api.onboardStart()) }
+/** No tour; for the owner no first meeting either, which the Hub remembers for every browser. */
+export function skipOnboarding() { finishOnboarding(); if (st.owner) void call(api.onboardSkip()) }
+/** Ends the first meeting that is on. */
+export const endMeeting = () => call(api.onboardSkip(), t("core:toast.meetingSkipped"))
 
 /* ───────── actions: decisions ───────── */
 /** when a snoozed card comes back; the Hub keeps the label it is given and shows it */

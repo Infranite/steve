@@ -15,7 +15,7 @@ const code = ts.transpileModule(readFileSync(new URL("../src/store.ts", import.m
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
 const defer = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
 const session = (id) => ({ id, no: 1, item_id: null, status: "running", created: 1, updated: 2, queued: [], harness: "codex" })
-function harness() {
+function harness(local = { getItem: () => "1" }) {
   const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], items: [], bots: [], allBots: [], projects: [], sessions: [session("a"), session("b")], decisions: [], recent: [], thread: [], tags: [], tagUses: {}, settings: {}, devices: [], runtimes: [] }
   let onEvent, onOpen, cursorFn, opens = 0, closes = 0
   const marks = new WeakMap(), wm = { cursor: null }
@@ -37,7 +37,7 @@ function harness() {
       if (id === "react") return {}
       if (id === "./api/yolo") return { yoloApi: { status: async () => null, actions: async () => ({ windows: [] }) } }
       throw new Error(id)
-    }, window: {}, document: { querySelector: () => null }, localStorage: { getItem: () => "1" }, location: {},
+    }, window: {}, document: { querySelector: () => null }, localStorage: local, location: {},
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
     requestAnimationFrame: (f) => { timers.push({ f, ms: 0 }); return 1 }, crypto: { randomUUID: () => "client-1" },
   })
@@ -386,4 +386,44 @@ test("sends carry their idempotency key: the composer's on every retry, a fresh 
   await s.newItem("目标", undefined, undefined, "start", "form-1")
   await s.newItem("目标")
   assert.equal(made[0], "form-1"); assert.ok(made[1] && made[1] !== "form-1")
+})
+
+/* a browser's localStorage that starts empty */
+const browser = () => { const kept = new Map(); return { kept, getItem: (k) => kept.get(k) ?? null, setItem: (k, v) => { kept.set(k, v) }, removeItem: (k) => { kept.delete(k) } } }
+
+test("the owner's tour ends in the first meeting, which the welcome's skip ends", async () => {
+  const local = browser(), h = harness(local), s = h.store, calls = []
+  h.state.owner = true; h.state.sessions = []
+  h.api.onboardStart = async () => { calls.push("start"); h.state.settings = { onboard: "pending", onboardFrom: "hello" }; h.state.thread = [{ id: "hello", author: "steve", text: "你好，我是 Steve。", created: 1, item_id: null, meta: { onboard: true } }]; return { message: "hello" } }
+  h.api.onboardSkip = async () => { calls.push("skip"); h.state.settings = { onboard: "done", onboardFrom: "hello" } }
+  s.start(); await flush()
+  assert.equal(s.st.onboard, 0); assert.equal(s.st.owner, true); assert.equal(s.meeting(), false)
+  await s.meet()
+  assert.deepEqual(calls, ["start"]); assert.equal(s.st.onboard, -1); assert.equal(local.kept.get("steve-onboarded"), "1")
+  assert.equal(s.meeting(), true); assert.equal(s.st.thread.find((m) => m.id === "hello").meet, true)
+  await s.endMeeting()
+  assert.deepEqual(calls, ["start", "skip"]); assert.equal(s.meeting(), false); assert.equal(h.notices.length, 1)
+})
+
+test("the Hub remembers the owner's answer for every browser; anyone else's tour is this browser's", async () => {
+  /* the owner met Steve or said no: a new browser on the still empty instance shows no tour */
+  const met = harness(browser())
+  met.state.owner = true; met.state.sessions = []; met.state.settings = { onboard: "done" }
+  met.store.start(); await flush()
+  assert.equal(met.store.st.onboard, -1)
+  /* the owner's skip is the Hub's to remember */
+  const local = browser(), h = harness(local), s = h.store, calls = []
+  h.state.owner = true; h.state.sessions = []
+  h.api.onboardSkip = async () => { calls.push("skip"); h.state.settings = { onboard: "done" } }
+  s.start(); await flush()
+  assert.equal(s.st.onboard, 0)
+  s.skipOnboarding(); await flush()
+  assert.deepEqual(calls, ["skip"]); assert.equal(s.st.onboard, -1); assert.equal(s.st.settings.onboard, "done")
+  /* a member has no first meeting: the tour and its skip stay in the browser */
+  const theirs = browser(), m = harness(theirs)
+  m.state.sessions = []; m.api.onboardSkip = async () => { calls.push("member") }
+  m.store.start(); await flush()
+  assert.equal(m.store.st.onboard, 0); assert.equal(m.store.st.owner, false)
+  m.store.skipOnboarding(); await flush()
+  assert.deepEqual(calls, ["skip"]); assert.equal(m.store.st.onboard, -1); assert.equal(theirs.kept.get("steve-onboarded"), "1")
 })

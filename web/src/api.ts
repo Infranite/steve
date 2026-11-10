@@ -122,7 +122,7 @@ export type LocalSession = { key: string; harness: string; title: string; cwd: s
 /** a newer Steve release the Hub's last version check found (`owner`: this user may install it) */
 export type StateUpdate = { version: string; owner: boolean }
 export type State = {
-  version: string; web_version: string; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; items: RItem[]; decisions: RDecision[]; recent: RDecision[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
+  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; items: RItem[]; decisions: RDecision[]; recent: RDecision[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
   projects: RProject[]; tags: RTag[]; tagUses: Record<string, number>; thread: RMessage[]; settings: Record<string, string>; sessions: RSession[]; devices: RDevice[]; runtimes: RRuntime[]
   /* notifications (release results, auto-archive, system notices), newest first; notifySeen = read cursor (ms) */
   notifications?: RNotice[]; notifySeen?: number
@@ -233,6 +233,8 @@ export const api = {
   threadQueuedEdit: (msg: string, text: string) => patch<{ ok: boolean }>(`/thread/queued/${msg}`, { text }),
   threadQueuedWithdraw: (msg: string) => del<{ text: string; files: RFile[] }>(`/thread/queued/${msg}`),
   promote: (msg: string) => post<RItem>(`/thread/${msg}/promote`),
+  /* the first meeting (the instance owner's): Steve's welcome opens it in the main conversation; skip ends it or says there is none */
+  onboardStart: () => post<{ message: string }>("/onboard/start"), onboardSkip: () => post("/onboard/skip"),
   /* thread routing (§3.4–3.5, §7.2): offers, suggestion cards, corrections, research runs */
   offer: (msg: string, take: boolean) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/offer`, { take }),
   suggest: (msg: string, choice: SuggestChoice) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/suggest`, { choice }),

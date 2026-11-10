@@ -130,9 +130,11 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
         let mut out = Map::new();
         out.insert("version".into(), json!(version));
         out.insert("web_version".into(), json!(web_version));
+        // the instance's owner: who the first meeting is offered to
+        let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
+        out.insert("owner".into(), json!(owner));
         // a newer release the last version check found: the page's update notice
         if let Some(version) = update {
-            let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
             out.insert(
                 "update".into(),
                 json!({ "version": version, "owner": owner }),

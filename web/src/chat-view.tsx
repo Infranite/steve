@@ -17,7 +17,7 @@ import { draftKey } from "@/composer-draft"
 import { ProposalCard } from "@/config-ui"
 import { Cites, linkCites } from "@/knowledge/parts"
 import { Robot } from "@/robot"
-import { chatBusy, chatSend, emit, finishOnboarding, focusItem, isPromoting, isThinking, makeItem, pending, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, WACT, WT, type Item, type Msg } from "@/store"
+import { chatBusy, chatSend, emit, endMeeting, finishOnboarding, focusItem, meet, meeting, skipOnboarding, isPromoting, isThinking, makeItem, pending, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, WACT, WT, type Item, type Msg } from "@/store"
 import { ChatQueue } from "@/queue"
 import { Spinner } from "@/components/ui/spinner"
 import { fillTo, historyState, loadOlder, mainThread, onJump, useHistory } from "@/thread/history"
@@ -132,20 +132,21 @@ function Onboarding() {
   if (n < 0) return null
   const rt = st.runtimes.filter((r) => r.ok).map((r) => r.name)
   /* each step: what Steve says, the step's name, and the answers offered (by id) */
-  type Opt = "ok" | "devices" | "seeProjects" | "finish"
+  type Opt = "ok" | "devices" | "seeProjects" | "finish" | "meetGo" | "later"
   const steps: [string, string, Opt[]][] = [
     [t("pages:chat.onboard.hello"), t("pages:chat.onboard.start"), ["ok"]],
     [rt.length ? t("pages:chat.onboard.runtimes", { list: rt.join(t("pages:listSep")), first: rt[0] }) : t("pages:chat.onboard.noRuntime"), t("pages:chat.onboard.runtime"), ["ok", "devices"]],
     [t("pages:chat.onboard.projects", { space: st.workspace?.name, count: st.projects.length }), t("pages:chat.onboard.project"), ["ok", "seeProjects"]],
-    [t("pages:chat.onboard.first"), t("pages:chat.onboard.firstTask"), ["finish"]],
+    /* the instance's owner ends with the first meeting; anyone else with a first task */
+    st.owner ? [t("pages:chat.onboard.meet"), t("pages:chat.onboard.meetStep"), ["meetGo", "later"]] : [t("pages:chat.onboard.first"), t("pages:chat.onboard.firstTask"), ["finish"]],
   ]
   return <>
     {steps.slice(0, n + 1).map(([q, step, opts], j) => (
       <div key={j} className="flex flex-col gap-2" data-onboard={j}>
         <SteveSays sub={t("pages:chat.onboard.sub", { n: j + 1, total: steps.length, step })}>{q}</SteveSays>
         {j === n && <div className="flex flex-wrap gap-2 self-start">{opts.map((o) => <Button key={o} size="sm" variant="outline" className="rounded-full" data-onboard-opt={o}
-          onClick={() => { if (o === "devices") { go("#/devices"); return } if (o === "seeProjects") { go("#/projects"); return } if (j === steps.length - 1) { finishOnboarding(); toast(t("pages:chat.onboard.done")); return } st.onboard = j + 1; emit() }}>{t(`pages:chat.onboard.${o}`)}</Button>)}
-          <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={finishOnboarding}>{t("pages:chat.onboard.skip")}</Button></div>}
+          onClick={() => { if (o === "devices") { go("#/devices"); return } if (o === "seeProjects") { go("#/projects"); return } if (o === "meetGo") { void meet(); return } if (o === "later") { skipOnboarding(); return } if (j === steps.length - 1) { finishOnboarding(); toast(t("pages:chat.onboard.done")); return } st.onboard = j + 1; emit() }}>{t(`pages:chat.onboard.${o}`)}</Button>)}
+          <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={skipOnboarding} data-onboard-skip>{t("pages:chat.onboard.skip")}</Button></div>}
       </div>))}
   </>
 }
@@ -346,7 +347,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
             if (m.notice) return <Fragment key={key}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>
             return <Fragment key={key}>{dayLabel}<div className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 transition-colors duration-500", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}>
               <div className="flex min-w-0 items-center gap-2 px-1 type-footnote text-muted-foreground" data-chat-author><span className="truncate font-medium text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>
-              <QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}{m.stopped && <div className="mt-2 flex items-center gap-1.5 type-footnote text-muted-foreground" data-stopped><CircleStopIcon className="size-3.5" aria-hidden />{t("pages:chat.stopped")}</div>}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
+              <QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}{m.stopped && <div className="mt-2 flex items-center gap-1.5 type-footnote text-muted-foreground" data-stopped><CircleStopIcon className="size-3.5" aria-hidden />{t("pages:chat.stopped")}</div>}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.meet && meeting() && m.id === st.settings.onboardFrom && <Button size="sm" variant="ghost" className="-mt-1 self-start text-muted-foreground" onClick={() => void endMeeting()} data-meet-skip>{t("pages:chat.onboard.meetSkip")}</Button>}{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
           })}
           {!conv && away > 0 && <><SteveSays sub={t("pages:chat.digest.sub")}>{t("pages:chat.digest.lead")}</SteveSays><Digest from={away} /></>}
           {!conv && <Onboarding />}

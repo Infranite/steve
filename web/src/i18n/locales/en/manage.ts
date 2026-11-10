@@ -242,7 +242,7 @@ export default {
     awaySub: "When you've been away this long, Steve sums up first when you open the conversation",
     awayNever: "Never",
     onboard: "Onboarding",
-    onboardSub: "Runtime, projects, your first task",
+    onboardSub: "Runtime, projects, introductions with Steve",
     restart: "Start over",
     shortcuts: "Shortcuts",
     shortcutsSub: "⌘K search · # reference an item · @ pick a bot · / commands",

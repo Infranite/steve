@@ -341,6 +341,11 @@ export default {
       sub: "Getting started · {{n}}/{{total}} · {{step}}",
       done: "All set",
       skip: "Skip",
+      meet: "Last, let's get to know each other: I'll ask what to call you and what you use Steve for. If you agree, I'll then put together your profile from what is already on this machine, tune the default models to the ones available, and create a few bots that fit your work. I ask before each step.",
+      meetStep: "Introductions",
+      meetGo: "Let's start",
+      later: "Later",
+      meetSkip: "Skip introductions",
     },
     digest: {
       more_one: "{{count}} more",

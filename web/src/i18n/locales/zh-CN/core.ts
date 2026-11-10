@@ -120,6 +120,7 @@ export default {
   toast: {
     updateAvailable: "Steve 有新版本 {{version}}",
     updateView: "去升级",
+    meetingSkipped: "已跳过。想重新认识，到 设置 · 通用 重新开始首次引导",
     undo: "撤销",
     undone: "已撤销",
     undoneKept: "已撤销；{{fields}}之后又改过，保留现在的值",

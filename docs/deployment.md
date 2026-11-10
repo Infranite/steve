@@ -3,6 +3,7 @@
 [README](../README.md) describes the Homebrew installation and source-based development setup. This page covers first-time configuration, user services, managed releases and upgrades.
 
 - [Homebrew installation](#homebrew-installation)
+- [The first meeting](#the-first-meeting)
 - [Reconfiguring an installed Hub](#reconfiguring-an-installed-hub)
 - [Hub and Node service commands](#hub-and-node-service-commands)
 - [Source-based macOS service installation](#source-based-macos-service-installation)
@@ -69,6 +70,22 @@ steve setup hub --home ~/steve-trial --listen 127.0.0.1:18440 \
 ```
 
 Manage it with the same `--home` and `--label`, as in `steve hub status --home ~/steve-trial --label io.github.infranite.steve-trial.hub`.
+
+## The first meeting
+
+The first time the instance's owner opens an empty Hub in the browser, a short tour ends by offering a first meeting. Accepting it makes Steve open a conversation in its own main conversation; declining it, or skipping the tour, is remembered by the Hub for every browser. Other users only see the tour.
+
+In the meeting Steve asks what to call you and what you use it for, and then, one at a time and only after you agree in the conversation:
+
+- **Your profile.** It may read a small, recent part of what is already on the Hub's machine (the session history and global instruction files coding agents left in the home directory, the global git configuration, the projects under the home directory) and saves what it learned as your name, a short description and remembered facts and preferences under 我. It is told not to read or save secrets.
+- **The models.** It lists the models each installed harness offers and picks, per purpose, a fast one for routing and titles and the strongest for research, drafting and orchestration. Only models a harness reports are accepted. Settings · Models shows and changes the result.
+- **Bots.** From what you do, it proposes two to four Bots and creates the ones you agree to. The Bots page shows and changes them.
+
+Every one of these writes goes through the same validation, audit log and setting revisions as the corresponding page, so each can be reviewed and undone there. The meeting runs as the owner's main conversation does, with the access of the OS user the Hub runs as, and it uses the model of Steve's own Bot, so it spends that harness's quota.
+
+The meeting ends when Steve finishes it, when you say you want to skip it or press **Skip introductions** under its welcome, or by itself after twelve of your messages. Until then, what you say in the main conversation goes straight to Steve without the routing step, except a message that names a Bot or an item. After it, changes go through the usual pages and change cards; its tools no longer exist. Settings · General · Onboarding starts the tour, and with it a new meeting, again.
+
+A Hub driven without the web client can use `POST /api/onboard/start` and `POST /api/onboard/skip` (the owner's access token) for the same two actions.
 
 ## Reconfiguring an installed Hub
 

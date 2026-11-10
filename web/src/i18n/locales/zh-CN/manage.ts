@@ -242,7 +242,7 @@ export default {
     awaySub: "离开超过这么久再打开对话时，Steve 先汇报",
     awayNever: "不汇报",
     onboard: "首次引导",
-    onboardSub: "运行环境、项目、交代第一件事",
+    onboardSub: "运行环境、项目、和 Steve 互相认识",
     restart: "重新开始",
     shortcuts: "快捷键",
     shortcutsSub: "⌘K 搜索 · # 引用事项 · @ 指定 Bot · / 命令",

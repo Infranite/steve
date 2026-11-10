@@ -105,6 +105,7 @@ export default {
   toast: {
     updateAvailable: "Steve {{version}} is available",
     updateView: "Upgrade",
+    meetingSkipped: "Skipped. To meet again, restart onboarding in Settings · General",
     undo: "Undo",
     undone: "Undone",
     undoneKept: "Undone; {{fields}} changed again since and keeps its current value",
