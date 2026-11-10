@@ -455,11 +455,7 @@ impl Workflows<'_> {
         self.0.read(|c| {
             // Header, units and history are one read snapshot even if another Hub process commits a
             // new plan between these SELECTs. Free get() remains usable inside an existing Tx.
-            let tx =
-                rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Deferred)?;
-            let out = get(&tx, parent)?;
-            tx.commit()?;
-            Ok(out)
+            crate::read_snapshot(c, |tx| get(tx, parent))
         })
     }
 

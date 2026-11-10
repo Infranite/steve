@@ -131,17 +131,17 @@ struct Inner {
 /// The write connection plus the publisher, handed to write closures so events go out under the lock.
 pub(crate) struct W<'a> {
     pub c: &'a Connection,
-    bus: &'a dyn Publisher,
+    store: &'a Store,
 }
 
 impl W<'_> {
     pub fn publish(&self, e: ChangeEvent) {
-        self.bus.publish(e)
+        self.store.emit_event(e)
     }
 
-    /// A write transaction on the write connection, see [`immediate`].
-    pub fn tx(&self) -> rusqlite::Result<rusqlite::Transaction<'_>> {
-        immediate(self.c)
+    /// A write transaction on the write connection (or a nested `SAVEPOINT` inside [`Store::atomic`]).
+    pub fn tx(&self) -> rusqlite::Result<tx::WriteTx<'_>> {
+        tx::WriteTx::begin(self.c)
     }
 }
 
@@ -212,25 +212,32 @@ impl Store {
         &self.inner.path
     }
 
-    /// Publishes an event that is not tied to a store write (`steve.thinking`, imports finishing).
-    pub fn publish(&self, e: ChangeEvent) {
-        self.inner.bus.publish(e)
+    pub(crate) fn inner_id(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
     }
 
-    fn lock(&self) -> MutexGuard<'_, Connection> {
+    /// Publishes an event that is not tied to a store write (`steve.thinking`, imports finishing).
+    pub fn publish(&self, e: ChangeEvent) {
+        self.emit_event(e)
+    }
+
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Connection> {
         // A panic mid-write leaves SQLite consistent (the transaction rolls back), so poisoning is ignored.
         self.inner.writer.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub(crate) fn write<T>(&self, f: impl FnOnce(&W) -> Result<T>) -> Result<T> {
+        if let Some(c) = self.active_conn() {
+            return f(&W { c, store: self });
+        }
         let c = self.lock();
-        f(&W {
-            c: &c,
-            bus: self.inner.bus.as_ref(),
-        })
+        f(&W { c: &c, store: self })
     }
 
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        if let Some(c) = self.active_conn() {
+            return f(c);
+        }
         let c = self.inner.readers.get()?;
         f(&c)
     }
@@ -238,13 +245,35 @@ impl Store {
     /// Refreshes the query planner's statistics where they went stale (`PRAGMA optimize`, bounded), on
     /// the write connection. Cheap when nothing changed; meant for an hourly housekeeping pass.
     pub fn optimize(&self) -> Result<()> {
+        if let Some(c) = self.active_conn() {
+            return Ok(db::optimize(c, false)?);
+        }
         Ok(db::optimize(&self.lock(), false)?)
     }
 
     /// Runs `f` on the write connection under the write lock, for one-off maintenance and tests.
     /// Prefer a repository method; this exists so callers never need a second connection.
     pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        if let Some(c) = self.active_conn() {
+            return f(c);
+        }
         let c = self.lock();
         f(&c)
     }
+}
+
+/// Runs a multi-statement read under a single snapshot. When `c` is already inside an active
+/// transaction (such as a read inside [`Store::atomic`]), reuses that transaction instead of
+/// starting a nested `BEGIN DEFERRED`.
+pub(crate) fn read_snapshot<T>(
+    c: &Connection,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    if !c.is_autocommit() {
+        return f(c);
+    }
+    let tx = rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Deferred)?;
+    let out = f(&tx)?;
+    tx.commit()?;
+    Ok(out)
 }

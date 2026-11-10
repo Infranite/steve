@@ -261,7 +261,9 @@ pub fn vitals_since(
         "SELECT at, rtt_ms, data FROM node_vitals WHERE node_id=? AND at>=? ORDER BY at",
     )?;
     let rows = st
-        .query_map(params![node_id, since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map(params![node_id, since], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -272,8 +274,7 @@ pub fn tag_of(raw: &str) -> Option<String> {
     let t = raw.trim().to_lowercase();
     (!t.is_empty()
         && t.chars().count() <= 40
-        && t
-            .chars()
+        && t.chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')))
     .then_some(t)
 }
@@ -315,13 +316,12 @@ pub fn with_tag(c: &Connection, tag: &str) -> Result<Vec<String>> {
 
 /// The tag `item_id` asks of the Node its sessions run on.
 pub fn item_tag(c: &Connection, item_id: &str) -> Result<Option<String>> {
-    Ok(c
-        .query_row(
-            "SELECT tag FROM item_node_tags WHERE item_id = ?",
-            [item_id],
-            |r| r.get(0),
-        )
-        .optional()?)
+    Ok(c.query_row(
+        "SELECT tag FROM item_node_tags WHERE item_id = ?",
+        [item_id],
+        |r| r.get(0),
+    )
+    .optional()?)
 }
 
 /// Sets (`Some`) or clears (`None`) the tag `item_id` asks for; `false` for an invalid tag.
@@ -332,7 +332,9 @@ pub fn set_item_tag(tx: &Tx<'_>, item_id: &str, tag: Option<&str>) -> Result<boo
             Ok(true)
         }
         Some(raw) => {
-            let Some(t) = tag_of(raw) else { return Ok(false) };
+            let Some(t) = tag_of(raw) else {
+                return Ok(false);
+            };
             tx.execute(
                 "INSERT INTO item_node_tags(item_id, tag) VALUES (?, ?) ON CONFLICT(item_id) DO UPDATE SET tag = excluded.tag",
                 params![item_id, t],

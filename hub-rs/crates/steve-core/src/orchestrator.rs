@@ -1374,55 +1374,58 @@ impl Tx<'_> {
     }
 
     pub(crate) fn fail(&mut self, item_id: &str, why: &str) -> Result<()> {
-        let i = self.item(item_id)?;
-        /* one card per trouble: the same one still open is not asked again; an older stop card gives way
-         * to the new one (a card about an effect nobody knows stays, it waits on you) */
-        let open = self.db().decisions_of_item(item_id)?;
-        if open
-            .iter()
-            .any(|d| d.status == "open" && d.kind == "fail" && d.question == why)
-        {
-            return settle(self.db(), item_id);
-        }
-        crate::lifecycle::supersede_where(
-            self.db(),
-            item_id,
-            |d| {
-                d.kind == "fail"
-                    && matches!(d.subject_type.as_str(), "item" | crate::stall::STALL)
-                    && !crate::cycle::unknown_effect_card(d)
-                    && !d.options.iter().any(|o| o.starts_with("release_"))
-            },
-            "有了新的情况",
-        )?;
-        let mut opts: Vec<String> = vec!["continue".into(), "delivered".into(), "look".into()];
-        if i.bot_id.as_deref() != Some("steve") {
-            opts.push("tosteve".into());
-        }
-        let d = self.db().decision_create(NewDecision {
-            workspace_id: i.workspace_id.clone(),
-            kind: "fail".into(),
-            subject_type: "item".into(),
-            subject_id: item_id.into(),
-            item_id: Some(item_id.into()),
-            question: why.into(),
-            options: Some(opts),
-            requested_by: "steve".into(),
-            ..Default::default()
-        })?;
-        self.mark_fail(&i.workspace_id, item_id, why, &d.id); // stats (ST3)
-        self.db().timeline_add(item_id, "steve", "sys", why, None)?;
-        flow_quiet(
-            self.db(),
-            item_id,
-            Update {
-                kind: "fail",
-                text: format!("{item_id} 卡住了：{why}"),
-                decision: Some(d.id),
+        let db = self.db().clone();
+        db.atomic(|| {
+            let i = self.item(item_id)?;
+            /* one card per trouble: the same one still open is not asked again; an older stop card gives way
+             * to the new one (a card about an effect nobody knows stays, it waits on you) */
+            let open = self.db().decisions_of_item(item_id)?;
+            if open
+                .iter()
+                .any(|d| d.status == "open" && d.kind == "fail" && d.question == why)
+            {
+                return settle(self.db(), item_id);
+            }
+            crate::lifecycle::supersede_where(
+                self.db(),
+                item_id,
+                |d| {
+                    d.kind == "fail"
+                        && matches!(d.subject_type.as_str(), "item" | crate::stall::STALL)
+                        && !crate::cycle::unknown_effect_card(d)
+                        && !d.options.iter().any(|o| o.starts_with("release_"))
+                },
+                "有了新的情况",
+            )?;
+            let mut opts: Vec<String> = vec!["continue".into(), "delivered".into(), "look".into()];
+            if i.bot_id.as_deref() != Some("steve") {
+                opts.push("tosteve".into());
+            }
+            let d = self.db().decision_create(NewDecision {
+                workspace_id: i.workspace_id.clone(),
+                kind: "fail".into(),
+                subject_type: "item".into(),
+                subject_id: item_id.into(),
+                item_id: Some(item_id.into()),
+                question: why.into(),
+                options: Some(opts),
+                requested_by: "steve".into(),
                 ..Default::default()
-            },
-        );
-        settle(self.db(), item_id)
+            })?;
+            self.mark_fail(&i.workspace_id, item_id, why, &d.id); // stats (ST3)
+            self.db().timeline_add(item_id, "steve", "sys", why, None)?;
+            flow_quiet(
+                self.db(),
+                item_id,
+                Update {
+                    kind: "fail",
+                    text: format!("{item_id} 卡住了：{why}"),
+                    decision: Some(d.id),
+                    ..Default::default()
+                },
+            );
+            settle(self.db(), item_id)
+        })
     }
     /* ── Steve tools ── */
     fn by(s: &Session) -> String {
@@ -1433,6 +1436,8 @@ impl Tx<'_> {
         let Some(item) = s.item_id.as_deref() else {
             return Ok(());
         };
+        let db = self.db().clone();
+        db.atomic(|| {
         let i = self.item(item)?;
         if i.phase == crate::cycle::CLOSED {
             /* the cycle is over: a plan sent after it is noted, never rewrites what closed */
@@ -1485,6 +1490,7 @@ impl Tx<'_> {
             self.lc_invalidate(item, "计划里又有没做完的步骤")?;
         }
         Ok(())
+        })
     }
 
     pub(crate) fn tool_ask(
@@ -1514,32 +1520,36 @@ impl Tx<'_> {
             self.mark(&s.id, Mark::Asked);
             return Ok(());
         };
-        supersede(self.db(), item, &["ask", "fail"], "Bot 提了新的问题")?;
-        let d = self.db().decision_create(NewDecision {
-            workspace_id: s.workspace_id.clone(),
-            kind: "ask".into(),
-            subject_type: "question".into(),
-            subject_id: s.id.clone(),
-            item_id: Some(item.into()),
-            session_id: Some(s.id.clone()),
-            question: question.into(),
-            options: Some(options.to_vec()),
-            draft,
-            requested_by: Self::by(s),
+        let db = self.db().clone();
+        db.atomic(|| {
+            supersede(&db, item, &["ask", "fail"], "Bot 提了新的问题")?;
+            let d = db.decision_create(NewDecision {
+                workspace_id: s.workspace_id.clone(),
+                kind: "ask".into(),
+                subject_type: "question".into(),
+                subject_id: s.id.clone(),
+                item_id: Some(item.into()),
+                session_id: Some(s.id.clone()),
+                question: question.into(),
+                options: Some(options.to_vec()),
+                draft,
+                requested_by: Self::by(s),
+            })?;
+            db.item_patch(item, patch![now: "在等你回答"])?;
+            flow_quiet(
+                &db,
+                item,
+                Update {
+                    kind: "ask",
+                    text: question.into(),
+                    decision: Some(d.id),
+                    ..Default::default()
+                },
+            );
+            settle(&db, item)
         })?;
-        self.db().item_patch(item, patch![now: "在等你回答"])?;
-        flow_quiet(
-            self.db(),
-            item,
-            Update {
-                kind: "ask",
-                text: question.into(),
-                decision: Some(d.id),
-                ..Default::default()
-            },
-        );
         self.mark(&s.id, Mark::Asked);
-        settle(self.db(), item)
+        Ok(())
     }
 
     pub(crate) fn tool_request_approval(
@@ -1564,32 +1574,36 @@ impl Tx<'_> {
             self.mark(&s.id, Mark::Approval);
             return Ok(());
         };
-        supersede(self.db(), item, &["ask", "fail"], "Bot 继续往下做了")?;
-        let d = self.db().decision_create(NewDecision {
-            workspace_id: s.workspace_id.clone(),
-            kind: "approve".into(),
-            subject_type: "action".into(),
-            subject_id: s.id.clone(),
-            item_id: Some(item.into()),
-            session_id: Some(s.id.clone()),
-            question: action.into(),
-            draft: Some(detail.into()),
-            options: Some(vec!["yes".into(), "no".into()]),
-            requested_by: Self::by(s),
+        let db = self.db().clone();
+        db.atomic(|| {
+            supersede(&db, item, &["ask", "fail"], "Bot 继续往下做了")?;
+            let d = db.decision_create(NewDecision {
+                workspace_id: s.workspace_id.clone(),
+                kind: "approve".into(),
+                subject_type: "action".into(),
+                subject_id: s.id.clone(),
+                item_id: Some(item.into()),
+                session_id: Some(s.id.clone()),
+                question: action.into(),
+                draft: Some(detail.into()),
+                options: Some(vec!["yes".into(), "no".into()]),
+                requested_by: Self::by(s),
+            })?;
+            db.item_patch(item, patch![now: "在等你批准"])?;
+            flow_quiet(
+                &db,
+                item,
+                Update {
+                    kind: "ask",
+                    text: format!("要你批准：{action}"),
+                    decision: Some(d.id),
+                    ..Default::default()
+                },
+            );
+            settle(&db, item)
         })?;
-        self.db().item_patch(item, patch![now: "在等你批准"])?;
-        flow_quiet(
-            self.db(),
-            item,
-            Update {
-                kind: "ask",
-                text: format!("要你批准：{action}"),
-                decision: Some(d.id),
-                ..Default::default()
-            },
-        );
         self.mark(&s.id, Mark::Approval);
-        settle(self.db(), item)
+        Ok(())
     }
 
     pub(crate) fn tool_deliver(
@@ -2409,30 +2423,35 @@ impl Tx<'_> {
     }
 
     pub(crate) fn add_dep(&mut self, item_id: &str, dep: &str) -> Result<()> {
-        if item_id == dep || self.db().deps_of(item_id)?.iter().any(|d| d == dep) {
-            return Ok(());
-        }
-        if self.reaches(dep, item_id, &mut HashSet::new())? {
-            return Err(msg(steve_i18n::t!("core.item.dep_cycle")));
-        }
-        self.db().dep_add(item_id, dep)?;
-        self.db()
-            .timeline_add(item_id, "me", "sys", &format!("添加前置事项 {dep}"), None)?;
-        let i = self.item(item_id)?;
-        let busy = self
-            .active_session(item_id)?
-            .is_some_and(|s| self.busy(&s.id));
-        if self.item(dep)?.status != "done" && status_in(&i, &["run", "prop", "pause"]) && !busy {
-            self.db()
-                .item_patch(item_id, patch![status: "block", now: "等待前置事项完成"])?;
-        }
-        Ok(())
+        let db = self.db().clone();
+        db.atomic(|| {
+            if item_id == dep || db.deps_of(item_id)?.iter().any(|d| d == dep) {
+                return Ok(());
+            }
+            if self.reaches(dep, item_id, &mut HashSet::new())? {
+                return Err(msg(steve_i18n::t!("core.item.dep_cycle")));
+            }
+            db.dep_add(item_id, dep)?;
+            db.timeline_add(item_id, "me", "sys", &format!("添加前置事项 {dep}"), None)?;
+            let i = self.item(item_id)?;
+            let busy = self
+                .active_session(item_id)?
+                .is_some_and(|s| self.busy(&s.id));
+            if self.item(dep)?.status != "done" && status_in(&i, &["run", "prop", "pause"]) && !busy
+            {
+                db.item_patch(item_id, patch![status: "block", now: "等待前置事项完成"])?;
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn rm_dep(&mut self, item_id: &str, dep: &str) -> Result<()> {
-        self.db().dep_remove(item_id, dep)?;
-        self.db()
-            .timeline_add(item_id, "me", "sys", &format!("移除前置事项 {dep}"), None)?;
+        let db = self.db().clone();
+        db.atomic(|| {
+            db.dep_remove(item_id, dep)?;
+            db.timeline_add(item_id, "me", "sys", &format!("移除前置事项 {dep}"), None)?;
+            Ok(())
+        })?;
         self.check_blocked(item_id)
     }
     /* ── decisions ── */
@@ -3267,22 +3286,24 @@ impl Tx<'_> {
             .decision(id)?
             .filter(|d| d.status == "open")
             .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))?;
-        self.db()
-            .audit(actor, "decision.dismiss", id, &json!({}), &d.workspace_id)?;
+        let is_tool_perm = d.kind == "approve" && d.subject_type == "tool_call";
+        if is_tool_perm {
+            self.rt().answer_permission(id, None)?;
+        }
+        let db = self.db().clone();
+        db.atomic(|| {
+        db.audit(actor, "decision.dismiss", id, &json!({}), &d.workspace_id)?;
         let i = match &d.item_id {
-            Some(i) => self.db().item(i)?,
+            Some(i) => db.item(i)?,
             None => None,
         };
-        if d.kind == "approve" && d.subject_type == "tool_call" {
-            self.rt().answer_permission(id, None)?;
-            self.db()
-                .decision_resolve(id, json!({"dismissed": true}), "resolved", None)?;
+        if is_tool_perm {
+            db.decision_resolve(id, json!({"dismissed": true}), "resolved", None)?;
         } else {
             let undo = i
                 .as_ref()
                 .map(|i| json!({"status": i.status, "now": i.now}));
-            self.db()
-                .decision_resolve(id, json!({"dismissed": true}), "resolved", undo)?;
+            db.decision_resolve(id, json!({"dismissed": true}), "resolved", undo)?;
         }
         if let Some(i) = i {
             self.db().timeline_add(
@@ -3310,9 +3331,9 @@ impl Tx<'_> {
                 settle(self.db(), &i.id)?;
             }
         }
-        self.db()
-            .decision(id)?
+        db.decision(id)?
             .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))
+        })
     }
 
     /* ── user actions on items and sessions ── */
@@ -3627,10 +3648,13 @@ impl Tx<'_> {
     }
 
     pub(crate) fn revise_goal(&mut self, id: &str, text: &str) -> Result<()> {
-        self.lc_guard_open(id)?;
-        let v = self.db().add_goal(id, text)?;
-        self.db()
-            .timeline_add(id, "me", "sys", &format!("目标更新为 v{v}"), None)?;
+        let db = self.db().clone();
+        let v = db.atomic(|| {
+            self.lc_guard_open(id)?;
+            let v = db.add_goal(id, text)?;
+            db.timeline_add(id, "me", "sys", &format!("目标更新为 v{v}"), None)?;
+            Ok(v)
+        })?;
         let Some(s) = self.active_session(id)? else {
             return Ok(());
         };
@@ -3867,12 +3891,15 @@ impl Tx<'_> {
             .db()
             .session(sid)?
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
-        self.mark(&s.id, Mark::Approval);
         if let Some(item) = s.item_id.as_deref() {
-            supersede(self.db(), item, &["ask", "fail"], "Bot 继续往下做了")?;
-            self.db().item_patch(item, patch![now: "在等你批准"])?;
-            settle(self.db(), item)?;
+            let db = self.db().clone();
+            db.atomic(|| {
+                supersede(&db, item, &["ask", "fail"], "Bot 继续往下做了")?;
+                db.item_patch(item, patch![now: "在等你批准"])?;
+                settle(&db, item)
+            })?;
         }
+        self.mark(&s.id, Mark::Approval);
         Ok(())
     }
 

@@ -344,16 +344,16 @@ impl Events<'_> {
     pub fn after(&self, session_id: &str, after: i64, limit: i64) -> Result<Vec<Event>> {
         self.0.read(|c| {
             // Keep inline rows and their payload refs in the same read snapshot.
-            let tx = c.unchecked_transaction()?;
-            let mut events: Vec<Event> = all(
-                &tx,
-                "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
-                params![session_id, after, limit],
-                event_row,
-            )?;
-            for e in &mut events { hydrate_event(&tx, session_id, e)?; }
-            tx.commit()?;
-            Ok(events)
+            crate::read_snapshot(c, |tx| {
+                let mut events: Vec<Event> = all(
+                    tx,
+                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+                    params![session_id, after, limit],
+                    event_row,
+                )?;
+                for e in &mut events { hydrate_event(tx, session_id, e)?; }
+                Ok(events)
+            })
         })
     }
 
@@ -365,24 +365,24 @@ impl Events<'_> {
             return Ok(vec![]);
         }
         self.0.read(|c| {
-            let tx = c.unchecked_transaction()?;
-            let start: i64 = tx
-                .query_row(
-                    "SELECT seq FROM events WHERE session_id = ? AND seq <= ? AND kind = 'user' ORDER BY seq DESC LIMIT 1",
-                    params![session_id, after],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .unwrap_or(0);
-            let mut events: Vec<Event> = all(
-                &tx,
-                "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? AND seq <= ? AND kind IN ('tool_call', 'tool_call_update') ORDER BY seq",
-                params![session_id, start, after],
-                event_row,
-            )?;
-            for e in &mut events { hydrate_event(&tx, session_id, e)?; }
-            tx.commit()?;
-            Ok(events)
+            crate::read_snapshot(c, |tx| {
+                let start: i64 = tx
+                    .query_row(
+                        "SELECT seq FROM events WHERE session_id = ? AND seq <= ? AND kind = 'user' ORDER BY seq DESC LIMIT 1",
+                        params![session_id, after],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(0);
+                let mut events: Vec<Event> = all(
+                    tx,
+                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? AND seq <= ? AND kind IN ('tool_call', 'tool_call_update') ORDER BY seq",
+                    params![session_id, start, after],
+                    event_row,
+                )?;
+                for e in &mut events { hydrate_event(tx, session_id, e)?; }
+                Ok(events)
+            })
         })
     }
 
@@ -452,18 +452,18 @@ impl Events<'_> {
         let mut changed = 0;
         loop {
             let page: Vec<Event> = self.0.read(|c| {
-                let tx = c.unchecked_transaction()?;
-                let mut events: Vec<Event> = all(
-                    &tx,
-                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?",
-                    params![session_id, after, upto, COMPACT_PAGE],
-                    event_row,
-                )?;
-                for e in &mut events {
-                    hydrate_event(&tx, session_id, e)?;
-                }
-                tx.commit()?;
-                Ok(events)
+                crate::read_snapshot(c, |tx| {
+                    let mut events: Vec<Event> = all(
+                        tx,
+                        "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?",
+                        params![session_id, after, upto, COMPACT_PAGE],
+                        event_row,
+                    )?;
+                    for e in &mut events {
+                        hydrate_event(tx, session_id, e)?;
+                    }
+                    Ok(events)
+                })
             })?;
             let Some(last) = page.last().map(|e| e.seq) else {
                 break;
@@ -537,11 +537,11 @@ impl Events<'_> {
     /// Events with `seq <= seq` (the history a fork starts from).
     pub fn up_to(&self, session_id: &str, seq: i64) -> Result<Vec<Event>> {
         self.0.read(|c| {
-            let tx = c.unchecked_transaction()?;
-            let mut events: Vec<Event> = all(&tx, "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq <= ? ORDER BY seq", params![session_id, seq], event_row)?;
-            for e in &mut events { hydrate_event(&tx, session_id, e)?; }
-            tx.commit()?;
-            Ok(events)
+            crate::read_snapshot(c, |tx| {
+                let mut events: Vec<Event> = all(tx, "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq <= ? ORDER BY seq", params![session_id, seq], event_row)?;
+                for e in &mut events { hydrate_event(tx, session_id, e)?; }
+                Ok(events)
+            })
         })
     }
 }

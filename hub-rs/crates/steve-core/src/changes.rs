@@ -1817,162 +1817,167 @@ impl Core {
             Some(p) if p.ws == ws => p.clone(),
             _ => return Err(msg(steve_i18n::t!("core.draft.stale"))),
         };
-        t.st.drafts.remove(id);
-        let db = t.db();
-        let mut before = Map::new();
-        let mut after = Map::new();
-        let tid = p.target.id.clone().unwrap_or_default();
-        match p.target.kind.as_str() {
-            "bot" if new_bot_name(&tid).is_some() => {
-                let mut nb = p.patch.clone();
-                nb.insert(
-                    "harness".into(),
-                    json!(steve_acp::adapters::DEFAULT_ADAPTER.0),
-                );
-                let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
-                before.insert("created".into(), json!(b.id));
-            }
-            "bot" => {
-                let b = serde_json::to_value(
-                    db.bot(&tid)?
-                        .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?,
-                )?;
-                for k in p.patch.keys() {
-                    before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
-                }
-                db.bot_patch(&tid, &p.patch, actor)?;
-                if let Some(b) = db.bot(&tid)? {
-                    let b = serde_json::to_value(b)?;
-                    for k in p.patch.keys() {
-                        after.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
+        let db = t.db().clone();
+        let (before, after) =
+            db.atomic(|| -> Result<(Map<String, Value>, Map<String, Value>)> {
+                let db = &db;
+                let mut before = Map::new();
+                let mut after = Map::new();
+                let tid = p.target.id.clone().unwrap_or_default();
+                match p.target.kind.as_str() {
+                    "bot" if new_bot_name(&tid).is_some() => {
+                        let mut nb = p.patch.clone();
+                        nb.insert(
+                            "harness".into(),
+                            json!(steve_acp::adapters::DEFAULT_ADAPTER.0),
+                        );
+                        let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
+                        before.insert("created".into(), json!(b.id));
                     }
-                }
-            }
-            "project" => {
-                let x = serde_json::to_value(
-                    db.project(Some(&tid))?
-                        .ok_or_else(|| msg(steve_i18n::t!("core.project.not_found")))?,
-                )?;
-                for k in p.patch.keys() {
-                    before.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
-                }
-                db.project_patch(&tid, &p.patch, actor)?;
-                if let Some(x) = db.project(Some(&tid))? {
-                    let x = serde_json::to_value(x)?;
-                    for k in p.patch.keys() {
-                        after.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
+                    "bot" => {
+                        let b = serde_json::to_value(
+                            db.bot(&tid)?
+                                .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?,
+                        )?;
+                        for k in p.patch.keys() {
+                            before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
+                        }
+                        db.bot_patch(&tid, &p.patch, actor)?;
+                        if let Some(b) = db.bot(&tid)? {
+                            let b = serde_json::to_value(b)?;
+                            for k in p.patch.keys() {
+                                after.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
+                            }
+                        }
                     }
-                }
-            }
-            "settings" => {
-                let mut cur = setting_defaults();
-                cur.extend(db.settings_all(&p.ws)?);
-                let mut rest = p.patch.clone();
-                let prefix = rest.remove("item_prefix");
-                for k in rest.keys() {
-                    before.insert(k.clone(), cur.get(k).cloned().unwrap_or(Value::Null));
-                }
-                if !rest.is_empty() {
-                    db.settings_set(&p.ws, &rest, actor)?;
-                    let mut now = setting_defaults();
-                    now.extend(db.settings_all(&p.ws)?);
-                    for k in rest.keys() {
-                        after.insert(k.clone(), now.get(k).cloned().unwrap_or(Value::Null));
+                    "project" => {
+                        let x = serde_json::to_value(
+                            db.project(Some(&tid))?
+                                .ok_or_else(|| msg(steve_i18n::t!("core.project.not_found")))?,
+                        )?;
+                        for k in p.patch.keys() {
+                            before.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
+                        }
+                        db.project_patch(&tid, &p.patch, actor)?;
+                        if let Some(x) = db.project(Some(&tid))? {
+                            let x = serde_json::to_value(x)?;
+                            for k in p.patch.keys() {
+                                after.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
+                            }
+                        }
                     }
-                }
-                if let Some(pre) = prefix.filter(truthy) {
-                    let w = db
-                        .workspace(&p.ws)?
-                        .ok_or_else(|| msg(steve_i18n::t!("core.space.not_found")))?;
-                    before.insert("item_prefix".into(), json!(w.item_prefix));
-                    db.workspace_patch(&p.ws, patch![item_prefix: jstr(&pre)])?;
-                    if let Some(w) = db.workspace(&p.ws)? {
-                        after.insert("item_prefix".into(), json!(w.item_prefix));
+                    "settings" => {
+                        let mut cur = setting_defaults();
+                        cur.extend(db.settings_all(&p.ws)?);
+                        let mut rest = p.patch.clone();
+                        let prefix = rest.remove("item_prefix");
+                        for k in rest.keys() {
+                            before.insert(k.clone(), cur.get(k).cloned().unwrap_or(Value::Null));
+                        }
+                        if !rest.is_empty() {
+                            db.settings_set(&p.ws, &rest, actor)?;
+                            let mut now = setting_defaults();
+                            now.extend(db.settings_all(&p.ws)?);
+                            for k in rest.keys() {
+                                after.insert(k.clone(), now.get(k).cloned().unwrap_or(Value::Null));
+                            }
+                        }
+                        if let Some(pre) = prefix.filter(truthy) {
+                            let w = db
+                                .workspace(&p.ws)?
+                                .ok_or_else(|| msg(steve_i18n::t!("core.space.not_found")))?;
+                            before.insert("item_prefix".into(), json!(w.item_prefix));
+                            db.workspace_patch(&p.ws, patch![item_prefix: jstr(&pre)])?;
+                            if let Some(w) = db.workspace(&p.ws)? {
+                                after.insert("item_prefix".into(), json!(w.item_prefix));
+                            }
+                        }
                     }
-                }
-            }
-            "tags" => {
-                let mut made = vec![];
-                for x in p
-                    .patch
-                    .get("create")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    made.push(
-                        db.tag_create(
-                            &p.ws,
-                            &jstr(&x["name"]),
-                            &jstr(&x["cat"]),
-                            &x.get("description").map(jstr).unwrap_or_default(),
-                            "Steve",
-                        )?
-                        .id,
-                    );
-                }
-                let mut edits = Map::new();
-                for e in p
-                    .patch
-                    .get("edit")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    let Some(tag) = db.tag_by_name(&p.ws, &jstr(&e["name"]))? else {
-                        continue;
-                    };
-                    let s = |k: &str| e.get(k).filter(|v| truthy(v)).map(jstr);
-                    let to = steve_store::TagPatch {
-                        name: s("newName"),
-                        cat: s("cat"),
-                        description: s("description"),
-                    };
-                    edits.insert(
+                    "tags" => {
+                        let mut made = vec![];
+                        for x in p
+                            .patch
+                            .get("create")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                        {
+                            made.push(
+                                db.tag_create(
+                                    &p.ws,
+                                    &jstr(&x["name"]),
+                                    &jstr(&x["cat"]),
+                                    &x.get("description").map(jstr).unwrap_or_default(),
+                                    "Steve",
+                                )?
+                                .id,
+                            );
+                        }
+                        let mut edits = Map::new();
+                        for e in p
+                            .patch
+                            .get("edit")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                        {
+                            let Some(tag) = db.tag_by_name(&p.ws, &jstr(&e["name"]))? else {
+                                continue;
+                            };
+                            let s = |k: &str| e.get(k).filter(|v| truthy(v)).map(jstr);
+                            let to = steve_store::TagPatch {
+                                name: s("newName"),
+                                cat: s("cat"),
+                                description: s("description"),
+                            };
+                            edits.insert(
                         tag.id.clone(),
                         json!({"name": tag.name, "cat": tag.cat, "description": tag.description}),
                     );
-                    db.tag_patch(&tag.id, &to)?;
-                }
-                let mut removed = vec![];
-                for n in p
-                    .patch
-                    .get("remove")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    /* used since the draft: kept */
-                    let Some(tag) = db.tag_by_name(&p.ws, &jstr(n))? else {
-                        continue;
-                    };
-                    if db.tag_used(&tag.id)? > 0 {
-                        continue;
-                    }
-                    removed.push(
+                            db.tag_patch(&tag.id, &to)?;
+                        }
+                        let mut removed = vec![];
+                        for n in p
+                            .patch
+                            .get("remove")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                        {
+                            /* used since the draft: kept */
+                            let Some(tag) = db.tag_by_name(&p.ws, &jstr(n))? else {
+                                continue;
+                            };
+                            if db.tag_used(&tag.id)? > 0 {
+                                continue;
+                            }
+                            removed.push(
                         json!({"name": tag.name, "cat": tag.cat, "description": tag.description}),
                     );
-                    db.tag_remove(&tag.id)?;
+                            db.tag_remove(&tag.id)?;
+                        }
+                        before.insert("made".into(), json!(made));
+                        before.insert("edits".into(), Value::Object(edits));
+                        before.insert("removed".into(), json!(removed));
+                    }
+                    "models" => {
+                        before = self.models().stored(&p.ws, &p.patch);
+                        self.models()
+                            .write(&p.ws, &p.patch, actor, "settings.models")?;
+                        after = self.models().stored(&p.ws, &p.patch);
+                    }
+                    _ => {}
                 }
-                before.insert("made".into(), json!(made));
-                before.insert("edits".into(), Value::Object(edits));
-                before.insert("removed".into(), json!(removed));
-            }
-            "models" => {
-                before = self.models().stored(&p.ws, &p.patch);
-                self.models()
-                    .write(&p.ws, &p.patch, actor, "settings.models")?;
-                after = self.models().stored(&p.ws, &p.patch);
-            }
-            _ => {}
-        }
-        db.audit(
-            actor,
-            "config.apply",
-            id,
-            &json!({"target": p.target, "patch": p.patch}),
-            &p.ws,
-        )?;
+                db.audit(
+                    actor,
+                    "config.apply",
+                    id,
+                    &json!({"target": p.target, "patch": p.patch}),
+                    &p.ws,
+                )?;
+                Ok((before, after))
+            })?;
+        t.st.drafts.remove(id);
         let mut r = json!({"ok": true, "undo": id});
         if let Some(b) = before.get("created") {
             r["bot"] = b.clone();
@@ -2002,7 +2007,6 @@ impl Core {
             Some(a) if a.ws == ws => a.clone(),
             _ => return Err(msg(steve_i18n::t!("core.draft.not_undoable"))),
         };
-        t.st.applied.remove(id);
         let tid = a.target.id.clone().unwrap_or_default();
         /* a bot made by the draft goes again; work it took meanwhile goes to the main bot */
         if a.target.kind == "bot" && new_bot_name(&tid).is_some() {
@@ -2010,7 +2014,9 @@ impl Core {
             let main = t.db().main_bot()?.id;
             t.delete_bot(&made, &main, actor)?;
         }
-        let db = t.db();
+        let db = t.db().clone();
+        let r = db.atomic(|| -> Result<Value> {
+        let db = &db;
         /* only what still holds the value this change wrote goes back: an edit made since is kept */
         let now: Map<String, Value> = match a.target.kind.as_str() {
             "bot" if new_bot_name(&tid).is_some() => Map::new(),
@@ -2110,6 +2116,9 @@ impl Core {
                     .collect::<Vec<_>>()
             );
         }
+        Ok(r)
+        })?;
+        t.st.applied.remove(id);
         Ok(r)
     }
 }

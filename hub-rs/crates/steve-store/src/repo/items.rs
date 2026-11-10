@@ -153,7 +153,8 @@ impl Items<'_> {
             } else {
                 p.tags.clone()
             };
-            let no = if task { next_counter(w.c, &format!("item:{prefix}"))? } else { 0 };
+            let tx = w.tx()?;
+            let no = if task { next_counter(&tx, &format!("item:{prefix}"))? } else { 0 };
             let id = if task { format!("{prefix}-{no}") } else { uid("chat") };
             let t = now();
             let source = match &p.source {
@@ -161,7 +162,7 @@ impl Items<'_> {
                 None => r#"["对话","chat"]"#.to_string(),
             };
             let parent = p.parent.as_ref().map(to_json).transpose()?;
-            w.c.run(
+            tx.run(
                 "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, bot_id, project_id, source, parent, created, updated, requested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     id,
@@ -180,14 +181,16 @@ impl Items<'_> {
                     p.requested_by
                 ],
             )?;
-            super::put_item_tags(w.c, &id, &tags)?;
-            w.c.run("INSERT INTO item_goals (item_id, version, text, created) VALUES (?, 1, ?, ?)", params![id, p.goal, t])?;
+            super::put_item_tags(&tx, &id, &tags)?;
+            tx.run("INSERT INTO item_goals (item_id, version, text, created) VALUES (?, 1, ?, ?)", params![id, p.goal, t])?;
             if task {
                 // stats: the item's first status
-                status_mark(w.c, ws, &id, t, None, p.status.as_deref().unwrap_or("run"))?;
+                status_mark(&tx, ws, &id, t, None, p.status.as_deref().unwrap_or("run"))?;
             }
-            if let Some(until) = crate::diagnostics::capture_created(w.c, ws, &id, t) {
-                self.0.diagnostics().activate_until(until);
+            let until = crate::diagnostics::capture_created(&tx, ws, &id, t);
+            tx.commit()?;
+            if let Some(until) = until {
+                self.0.stage_diagnostic_until(until);
             }
             w.publish(ChangeEvent::Item { id: id.clone() });
             one(w.c, ITEM, [&id], Item::from_row)
@@ -246,16 +249,16 @@ impl Items<'_> {
                 .optional()?
             };
             tx.run("DELETE FROM items WHERE id = ?", [id])?;
-            let mut extra = Vec::new();
+            let mut hooked = None;
             if let (Some(hook), Some(ws)) = (self.0.item_deleted_hook(), ws) {
                 let t = crate::Tx::wrap(&tx);
                 hook(&t, &ws, id).map_err(crate::StoreError::Hook)?;
-                extra = t.take_events();
+                hooked = Some(t.into_effects());
             }
             tx.commit()?;
             w.publish(ChangeEvent::Item { id: id.into() });
-            for e in extra {
-                w.publish(e);
+            if let Some(fx) = hooked {
+                fx.flush(self.0);
             }
             Ok(())
         })

@@ -80,6 +80,12 @@ impl Db {
         self.s.publish(e)
     }
 
+    /// Runs `f` inside one re-entrant SQLite transaction on the underlying store; all repository
+    /// writes and their `ChangeEvent`s commit or roll back together.
+    pub fn atomic<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.s.atomic(f)
+    }
+
     /// Raw SQL on the write connection (tests).
     pub fn exec(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<usize> {
         Ok(self.s.with_conn(|c| Ok(c.execute(sql, p)?))?)

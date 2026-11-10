@@ -504,17 +504,17 @@ pub fn dead(c: &Connection) -> Result<Vec<DeadGroup>> {
 /// Sends the dead deliveries (of `consumer`, or all) again: attempts and the failure clock start
 /// over, so a delivery that keeps failing has another [`DEAD_AFTER_MS`]. Returns how many.
 pub fn revive(store: &Store, consumer: Option<&str>) -> Result<usize> {
-    let n = store.transaction(|tx| -> Result<usize> {
-        Ok(tx.execute(
+    store.transaction(|tx| -> Result<usize> {
+        let n = tx.execute(
             "UPDATE outbox_leases SET dead = 0, attempts = 0, next_at = 0, failing_since = NULL, updated = ?1
               WHERE dead = 1 AND (?2 IS NULL OR consumer_id = ?2)",
             params![crate::now(), consumer],
-        )?)
-    })?;
-    if n > 0 {
-        store.outbox_wake().notify_one();
-    }
-    Ok(n)
+        )?;
+        if n > 0 {
+            tx.mark_outbox();
+        }
+        Ok(n)
+    })
 }
 
 /// Whether consumer `id` was ever registered (and not unregistered).

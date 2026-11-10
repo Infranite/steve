@@ -332,8 +332,7 @@ impl Diagnostics<'_> {
                     queued: r.pending.load(Ordering::Acquire),
                     loss_epoch: r.loss_epoch.load(Ordering::Acquire),
                 });
-            let tx = c.unchecked_transaction()?;
-            read(&tx, counters)
+            crate::read_snapshot(c, |tx| read(tx, counters))
         })
     }
 

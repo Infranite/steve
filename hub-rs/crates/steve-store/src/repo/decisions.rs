@@ -20,7 +20,11 @@ pub(crate) fn message_insert(
     space: &str,
 ) -> Result<String> {
     let id = uid("msg");
-    let meta = if truthy(meta) { Some(to_json(meta)?) } else { None };
+    let meta = if truthy(meta) {
+        Some(to_json(meta)?)
+    } else {
+        None
+    };
     // strictly after the last message of its conversation: listings and their cursors go by `created` alone,
     // and two messages written in the same millisecond would otherwise list in either order
     c.run(
@@ -198,8 +202,7 @@ impl Decisions<'_> {
         })?;
         if let Some(d) = &result {
             self.0
-                .diagnostics()
-                .record(crate::diagnostics::decision_event(d, "created", None));
+                .stage_diagnostic(crate::diagnostics::decision_event(d, "created", None));
         }
         Ok(result)
     }
@@ -224,13 +227,11 @@ impl Decisions<'_> {
         if changed_rows > 0
             && let Some(d) = &result
         {
-            self.0
-                .diagnostics()
-                .record(crate::diagnostics::decision_event(
-                    d,
-                    "resolved",
-                    Some("open"),
-                ));
+            self.0.stage_diagnostic(crate::diagnostics::decision_event(
+                d,
+                "resolved",
+                Some("open"),
+            ));
         }
         Ok(result)
     }
@@ -269,13 +270,11 @@ impl Decisions<'_> {
         if before.as_deref().is_some_and(|status| status != "open")
             && let Some(d) = &result
         {
-            self.0
-                .diagnostics()
-                .record(crate::diagnostics::decision_event(
-                    d,
-                    "reopened",
-                    before.as_deref(),
-                ));
+            self.0.stage_diagnostic(crate::diagnostics::decision_event(
+                d,
+                "reopened",
+                before.as_deref(),
+            ));
         }
         Ok(result)
     }
