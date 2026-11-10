@@ -1481,7 +1481,6 @@ impl Core {
 
     /// At boot: interrupt unfinished inline work and persist safe local resume intents.
     /// External guest replies retain explicit rerun; local answers wait for `thread_ready`.
-    /// Also performs the one-time `thread_items` backfill.
     pub fn thread_recover(&self) -> Result<()> {
         let th = self.store().store().thread();
         let resume = !self.config().no_resume;
@@ -1536,13 +1535,6 @@ impl Core {
             )?;
         }
         self.thread_postback()?;
-        for w in self.store().store().workspaces().all()? {
-            let linked = th.backfill(&w.id)?;
-            if !linked.is_empty() {
-                tracing::info!(ws = w.id, ?linked, "thread items backfilled");
-            }
-        }
-        /* after the backfill, so backfilled items get their card too */
         for w in self.store().store().workspaces().all()? {
             let hid = flowback::cleanup(self.store(), &w.id)?;
             if !hid.is_empty() {

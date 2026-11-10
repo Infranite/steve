@@ -92,13 +92,13 @@ pub struct TurnFinish {
     pub usage: Vec<ModelUsage>,
 }
 
-/// A token record outside a turn: a gateway call, an autonomous adapter turn, a backfilled session.
+/// A token record outside a turn: a gateway call, an autonomous adapter turn.
 #[derive(Debug, Clone)]
 pub struct NewUsage {
     pub workspace_id: String,
     pub ts: i64,
     pub day: String,
-    /// agent | gateway | backfill
+    /// agent | gateway
     pub source: String,
     pub purpose: String,
     pub harness: String,
@@ -128,7 +128,6 @@ pub struct NewMark {
     pub actor: String,
     pub r#ref: Option<String>,
     pub detail: serde_json::Value,
-    pub backfill: bool,
 }
 
 impl Stats<'_> {
@@ -245,7 +244,7 @@ impl Stats<'_> {
 
 /// The `fail` mark's reason code for a fail card's text: `restart` (Hub restart),
 /// `stall` (the agent stopped without delivering or asking), `error` (the session failed), `release`
-/// (anything about a release), else `other`. Shared by the live hooks and the backfill.
+/// (anything about a release), else `other`.
 pub fn fail_reason(why: &str) -> &'static str {
     let w = why.trim_start();
     if w.starts_with("Hub 重启") {
@@ -264,8 +263,8 @@ pub fn fail_reason(why: &str) -> &'static str {
 /// [`Stats::mark_add`] inside a transaction the caller holds (item status changes, slice ST3).
 pub(crate) fn mark_in(c: &Connection, m: &NewMark) -> Result<i64> {
     c.run(
-        "INSERT INTO item_marks (workspace_id, item_id, ts, kind, from_v, to_v, actor, ref, detail, backfill) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![m.workspace_id, m.item_id, m.ts, m.kind, m.from_v, m.to_v, m.actor, m.r#ref, detail_json(&m.detail)?, m.backfill],
+        "INSERT INTO item_marks (workspace_id, item_id, ts, kind, from_v, to_v, actor, ref, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![m.workspace_id, m.item_id, m.ts, m.kind, m.from_v, m.to_v, m.actor, m.r#ref, detail_json(&m.detail)?],
     )?;
     let id = c.last_insert_rowid();
     dirty_in(c, &m.item_id)?;

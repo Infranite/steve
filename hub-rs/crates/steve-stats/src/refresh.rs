@@ -1,6 +1,5 @@
 //! Keeping the derived tables current: the `item_stats` refresh every 2 seconds and the
-//! full `rebuild` of `stat_daily` from the detail rows (needed after `stats.tz` changes, and after the
-//! backfill).
+//! full `rebuild` of `stat_daily` from the detail rows (needed after `stats.tz` changes).
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -130,7 +129,7 @@ pub fn refresh_dirty_in(c: &Connection, limit: usize, at: i64) -> Result<usize> 
     Ok(ids.len())
 }
 
-/// Recomputes every dirty row (after a rebuild or the backfill).
+/// Recomputes every dirty row (after a rebuild).
 pub fn refresh_all(store: &Store) -> Result<usize> {
     let mut total = 0;
     loop {

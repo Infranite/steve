@@ -5,16 +5,14 @@
 //! convention ([`normalize`]), the price table and model matching ([`prices`]) with the prices synced
 //! from Models.dev ([`catalog`]), and which local day a
 //! timestamp belongs to ([`day`]). On top of the stored rows: the per-item facts ([`items`]), their
-//! refresh and the cube rebuild ([`refresh`]), the one-off backfill from the older tables ([`backfill`])
-//! and every metric ([`metrics`]).
+//! refresh and the cube rebuild ([`refresh`]) and every metric ([`metrics`]).
 //!
-//! Hub wiring (slice ST5): at boot `backfill::spawn(store)` and `tokio::spawn(Refresher::new().run(store))`;
+//! Hub wiring (slice ST5): at boot `tokio::spawn(Refresher::new().run(store))`;
 //! `POST /api/stats/rebuild` calls `refresh::rebuild`; the REST reads call `metrics::summary` /
 //! `metrics::breakdown` on a read connection.
 
 steve_i18n::init!();
 
-pub mod backfill;
 pub mod catalog;
 pub mod day;
 pub mod items;

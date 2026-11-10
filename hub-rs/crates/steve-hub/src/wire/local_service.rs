@@ -306,11 +306,11 @@ pub async fn run(cfg: &Config) -> anyhow::Result<()> {
         node_id.clone(),
         home.clone(),
         roots,
-        super::NodeJobs::default(),
+        false,
     ))
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     node.follow_roots_file(roots_file);
-    super::local_node_extras(&node, cfg, super::NodeJobs::default());
+    super::local_node_extras(&node, cfg, false);
     let pairing = steve_node_cli::config::Pairing {
         hub_url: link["hub_url"].as_str().context("hub_url")?.to_string(),
         node_id: NODE_ID.into(),

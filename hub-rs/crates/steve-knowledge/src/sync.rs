@@ -54,36 +54,6 @@ pub fn mem_title(label: &str) -> &str {
         .unwrap_or(label)
 }
 
-/// Once per workspace (ST-41): index labels written before the four kinds of record were named —
-/// “事项 · ”, “对话 · ”, “记忆” — get the names the pages use now. Labels are not searched, so the
-/// rows are updated in place. Returns how many changed.
-pub fn relabel_once(tx: &Tx, ws: &str, now: i64) -> Result<usize> {
-    const MARK: &str = "relabel:records";
-    if repo::mark(tx, ws, MARK)?.is_some() {
-        return Ok(0);
-    }
-    let mut n = 0;
-    for (kind, old, new) in [("items", "事项", "事项记录"), ("chat", "对话", "会话记录")]
-    {
-        n += tx
-            .prepare_cached(
-                "UPDATE kb_chunks SET label = ?3 || substr(label, 3)
-                  WHERE workspace_id = ?1 AND source_kind = ?2 AND obj_type = 'chunk' AND label LIKE ?4",
-            )?
-            .execute(params![ws, kind, new, format!("{old} · %")])?;
-    }
-    n += tx
-        .prepare_cached(
-            "UPDATE kb_chunks SET label = (SELECT CASE WHEN m.kind IN ('preference', 'rule') THEN '长期记忆' ELSE '知识条目' END
-                                             FROM mems m WHERE m.id = kb_chunks.obj_id) || substr(label, 3)
-              WHERE workspace_id = ?1 AND obj_type = 'mem' AND (label = '记忆' OR label LIKE '记忆 · %')
-                AND EXISTS (SELECT 1 FROM mems m WHERE m.id = kb_chunks.obj_id)",
-        )?
-        .execute([ws])?;
-    repo::set_mark(tx, ws, MARK, "done", now)?;
-    Ok(n)
-}
-
 /// Does this memory belong in the index? Confirmed, not `never`, not expired.
 fn usable(m: &Mem, now: i64) -> bool {
     m.status == "confirmed" && m.level != Level::Never && m.valid_until.is_none_or(|v| v > now)
@@ -135,7 +105,6 @@ pub fn sync_mem(tx: &Tx, id: &str, now: i64) -> Result<bool> {
 
 /// Memories of `ws` changed since the last sweep, plus index entries whose memory is gone or expired.
 pub fn sweep_mems(tx: &Tx, ws: &str, now: i64) -> Result<usize> {
-    relabel_once(tx, ws, now)?;
     let since: i64 = repo::mark(tx, ws, "sync:mems")?
         .and_then(|v| v.parse().ok())
         .unwrap_or(-1);

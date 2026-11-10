@@ -186,7 +186,7 @@ enum Until {
     /// an item whose sessions all ended on the legacy runner before B7 removed it. They go with
     /// the off mode. No session runs without a Node any more.
     NoNode,
-    /// In-process think and research: `STEVE_NODE_JOBS=off`, and research whose directories the
+    /// In-process think and research: a Hub with the Node off, and research whose directories the
     /// Node does not hold (N0d).
     N0d,
     /// A named follow-up moves it onto the Node.

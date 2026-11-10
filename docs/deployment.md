@@ -171,7 +171,7 @@ Steve runs work on Nodes. The Hub is always one of them: its own Node, `local`, 
 - **Adding a machine:** pair it from Devices with a code ([Pairing a separate Node](#pairing-a-separate-node)), or let the Hub [install it over tailcat](#installing-a-node-remotely-over-tailcat).
 - **What runs where:**
   - A project's work runs on the Node whose machine has the project.
-  - Work without a project stays on the Hub's own Node. `STEVE_NODE_BIND` names another Node for it, and `STEVE_NODE_PLACEMENT=spread` sends it to a clearly less loaded one.
+  - Work without a project stays on the Hub's own Node. `STEVE_NODE_BIND` names another Node for it; without it, a clearly less loaded linked Node takes it (`STEVE_NODE_PLACEMENT=local` turns that off).
   - Tags on Nodes let an item ask for a kind of machine.
   - A remote Node runs only its owner's work, and commands only if its own `policy.json` allows them.
 - **When a machine is away:** its sessions wait. After `STEVE_NODE_HANDOFF_MIN` minutes with messages waiting, the item goes on in a new session elsewhere. Work on that machine that was never pushed stays there.
@@ -218,7 +218,7 @@ Registration alone does not move existing projects or change scheduling. Do not 
 Where new sessions go:
 
 - `STEVE_NODE_BIND` names one Node for every eligible session.
-- `STEVE_NODE_PLACEMENT=spread` sends a new session (for an item without a project) to the linked remote Node that is clearly less loaded than the Hub's machine. Load per CPU, from the devices' vitals, must be lower by 0.25. Otherwise the session stays on the Hub's machine (`local`, the default).
+- `STEVE_NODE_PLACEMENT=spread` (the default) sends a new session (for an item without a project) to the linked remote Node that is clearly less loaded than the Hub's machine. Load per CPU, from the devices' vitals, must be lower by 0.25. Otherwise the session stays on the Hub's machine. `STEVE_NODE_PLACEMENT=local` keeps every such session on the Hub's machine.
 - A remote Node runs only its owner's work, whichever way it is chosen.
 
 Every Node can carry tags (Devices → a device → Tags), the Hub's own Node (`local`) included. An item may ask for a tag in several ways:

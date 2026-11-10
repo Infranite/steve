@@ -1,15 +1,11 @@
 //! Notifications (notify.ts): things that happened (a release went out, items were archived) rather than
 //! conversation. They are `messages` rows in space `notify`; a failure also leaves one line in the
-//! conversation pointing back at it. Release results from before this were plain Steve messages in the
-//! conversation: those are recognised by their text, listed here too, and the successful ones are left out
-//! of the conversation.
+//! conversation pointing back at it.
 //! A failure stops asking for attention once it is closed: the user dismissed it, or a later release notice
 //! of the same item (it went out, or failed again) took its place. Its line then leaves the conversation.
 
 use std::collections::HashSet;
-use std::sync::LazyLock;
 
-use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::backend::{BResult, Obj, Repo};
@@ -20,19 +16,6 @@ const SEEN: &str = "notifySeen";
 const DISMISSED: &str = "noticeDismissed";
 /// notify rows looked at when deciding what is closed, and dismissed ids kept
 const WINDOW: i64 = 500;
-static LEGACY_OK: LazyLock<Regex> = LazyLock::new(|| Regex::new("^已发布新版本 ").expect("regex"));
-static LEGACY_FAIL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new("^发布 .*失败，已回到 ").expect("regex"));
-
-fn text(m: &Obj) -> &str {
-    m.get("text").and_then(Value::as_str).unwrap_or_default()
-}
-
-fn legacy(m: &Obj) -> bool {
-    m.get("author").and_then(Value::as_str) == Some("steve")
-        && !crate::js::truthy(m.get("meta"))
-        && (LEGACY_OK.is_match(text(m)) || LEGACY_FAIL.is_match(text(m)))
-}
 
 fn str_of<'a>(m: &'a Obj, k: &str) -> Option<&'a str> {
     m.get(k).and_then(Value::as_str)
@@ -139,7 +122,6 @@ pub fn list(r: &dyn Repo, ws: &str, limit: i64) -> BResult<Vec<Value>> {
     let shut = closed(r, ws, &all)?;
     let skip = all.len().saturating_sub(limit.max(0) as usize);
     let mut rows = all[skip..].to_vec();
-    rows.extend(r.messages_in(ws, "steve", 500)?.into_iter().filter(legacy));
     rows.reverse();
     let created = |m: &Obj| m.get("created").and_then(Value::as_f64).unwrap_or(0.0);
     rows.sort_by(|a, b| {
@@ -157,15 +139,14 @@ pub fn list(r: &dyn Repo, ws: &str, limit: i64) -> BResult<Vec<Value>> {
                 .and_then(|n| n.get("level"))
                 .filter(|x| !x.is_null())
                 .cloned()
-                .unwrap_or_else(|| json!(if LEGACY_FAIL.is_match(text(&m)) { "fail" } else { "success" }));
+                .unwrap_or_else(|| json!("success"));
             let closed = str_of(&m, "id").is_some_and(|id| shut.contains(id));
             json!({ "id": m.get("id"), "kind": kind, "level": level, "text": m.get("text"), "item_id": m.get("item_id"), "created": m.get("created"), "closed": closed })
         })
         .collect())
 }
 
-/// The conversation without the notices that used to be written into it (successful releases) and without
-/// the lines of closed failures.
+/// The conversation without the lines of closed failures.
 pub fn thread(r: &dyn Repo, ws: &str) -> BResult<Vec<Obj>> {
     let msgs = r.messages_list(ws)?;
     visible(r, ws, msgs)
@@ -193,7 +174,6 @@ fn visible(r: &dyn Repo, ws: &str, msgs: Vec<Obj>) -> BResult<Vec<Obj>> {
     let shut = closed(r, ws, &r.messages_in(ws, SPACE, WINDOW)?)?;
     Ok(msgs
         .into_iter()
-        .filter(|m| !(legacy(m) && LEGACY_OK.is_match(text(m))))
         .filter(|m| !notice_of(m, "ref").is_some_and(|id| shut.contains(id)))
         /* flow-back folded into an item's card, notices that belong to the notifications */
         .filter(|m| {
@@ -286,7 +266,7 @@ mod tests {
         thread(r, "w")
             .expect("thread")
             .iter()
-            .map(|m| text(m).to_string())
+            .map(|m| str_of(m, "text").unwrap_or_default().to_string())
             .collect()
     }
     fn closed_of(r: &Fake) -> Vec<(String, bool)> {

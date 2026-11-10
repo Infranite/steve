@@ -136,7 +136,7 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
       <footer className="border-t pt-4 type-footnote text-muted-foreground" data-stats-foot>
         {t("stats:page.foot.all", {
           cost: t("stats:page.foot.cost"),
-          tokens: s.spend.by_source.backfill != null || s.usage.reported
+          tokens: s.usage.reported
             ? (since ? t("stats:page.foot.tokensSinceTotal", { since, usd: fmtUsd(s.usage.reported) }) : t("stats:page.foot.noTokensTotal", { usd: fmtUsd(s.usage.reported) }))
             : (since ? t("stats:page.foot.tokensSince", { since }) : t("stats:page.foot.noTokens")),
           gateway: s.since.gateway ? t("stats:page.foot.gatewaySince", { since: s.since.gateway }) : t("stats:page.foot.gatewayLaunch"),

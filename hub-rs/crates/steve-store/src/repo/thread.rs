@@ -4,7 +4,6 @@
 
 use rusqlite::{Row, params};
 use serde::Serialize;
-use serde_json::Value;
 
 use super::{Cached, all, must, one};
 use crate::{Result, Store, now, uid};
@@ -202,8 +201,6 @@ impl ThreadItem {
 const ROUTE_BY_MSG: &str = "SELECT * FROM route_log WHERE message_id = ?";
 const RUN: &str = "SELECT * FROM thread_runs WHERE id = ?";
 const THREAD_ITEM: &str = "SELECT * FROM thread_items WHERE item_id = ?";
-/// The settings key that marks the one-time backfill as done.
-pub const BACKFILL_KEY: &str = "thread.backfill";
 
 impl Thread<'_> {
     // ── route_log ──
@@ -552,65 +549,6 @@ impl Thread<'_> {
                 [ws],
                 ThreadItem::from_row,
             )
-        })
-    }
-
-    /// The one-time backfill: unfinished items made from the conversation get their `thread_items`
-    /// row from the message announcing them and the user message before it. Runs once per workspace
-    /// (settings `thread.backfill = "v1"`); running it again changes nothing. Returns the items linked.
-    pub fn backfill(&self, ws: &str) -> Result<Vec<String>> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
-            let done: Option<String> = one(
-                &tx,
-                "SELECT value FROM settings WHERE workspace_id = ? AND key = ?",
-                [ws, BACKFILL_KEY],
-                |r| r.get(0),
-            )?;
-            if done.is_some() {
-                return Ok(vec![]);
-            }
-            let items: Vec<(String, String)> = all(
-                &tx,
-                "SELECT id, source FROM items WHERE workspace_id = ? AND status NOT IN ('done', 'drop') ORDER BY created, rowid",
-                [ws],
-                |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default())),
-            )?;
-            let mut linked = vec![];
-            for (id, source) in items {
-                let src: Value = serde_json::from_str(&source).unwrap_or(Value::Null);
-                if src != serde_json::json!(["对话", "chat"]) {
-                    continue;
-                }
-                let reply: Option<(String, i64)> = one(
-                    &tx,
-                    "SELECT id, created FROM messages WHERE workspace_id = ? AND space = 'steve' AND author = 'steve' AND item_id = ? ORDER BY created, rowid LIMIT 1",
-                    params![ws, id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
-                let Some((reply, at)) = reply else { continue };
-                let origin: Option<String> = one(
-                    &tx,
-                    "SELECT id FROM messages WHERE workspace_id = ? AND space = 'steve' AND author = 'me' AND created <= ? ORDER BY created DESC, rowid DESC LIMIT 1",
-                    params![ws, at],
-                    |r| r.get(0),
-                )?;
-                let Some(origin) = origin else { continue };
-                if tx.run(
-                    "INSERT INTO thread_items (item_id, workspace_id, origin_msg, reply_msg, from_question, created) VALUES (?, ?, ?, ?, 0, ?)
-                     ON CONFLICT(item_id) DO NOTHING",
-                    params![id, ws, origin, reply, now()],
-                )? > 0
-                {
-                    linked.push(id);
-                }
-            }
-            tx.run(
-                "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, '\"v1\"', ?) ON CONFLICT(workspace_id, key) DO NOTHING",
-                params![ws, BACKFILL_KEY, now()],
-            )?;
-            tx.commit()?;
-            Ok(linked)
         })
     }
 }

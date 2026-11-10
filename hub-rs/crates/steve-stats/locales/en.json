@@ -1,7 +1,6 @@
 {
   "stats.label.agent": "Agent turns",
   "stats.label.gateway": "Gateway calls",
-  "stats.label.backfill": "Backfill (conversation level)",
   "stats.label.turn": "Turns",
   "stats.label.autonomous": "Background turns",
   "stats.label.route": "Routing",

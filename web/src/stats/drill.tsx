@@ -42,7 +42,7 @@ function Drill({ d }: { d: ItemDetail }) {
   return (
     <div className="flex flex-col gap-12" data-drill>
       <div className="grid grid-cols-2 gap-6 sm:grid-cols-3 lg:grid-cols-6">
-        <Kpi k="tokens" label="tokens" value={fmtN(u.total)} foot={u.hit_rate != null ? t("stats:drill.hit", { pct: fmtPct(u.hit_rate) }) : d.backfill_only ? t("stats:drill.sessionOnly") : ""} def={t("stats:drill.tokensDef")} />
+        <Kpi k="tokens" label="tokens" value={fmtN(u.total)} foot={u.hit_rate != null ? t("stats:drill.hit", { pct: fmtPct(u.hit_rate) }) : ""} def={t("stats:drill.tokensDef")} />
         <Kpi k="est" label={t("stats:word.estCost")} badge={<Est />} value={u.total ? fmtUsd(u.est) : u.reported ? "≥" + fmtUsd(u.reported) : "—"} foot={u.unpriced_tokens ? t("stats:drill.incomplete", { n: fmtN(u.unpriced_tokens) }) : u.reported ? t("stats:word.adapterQuote", { usd: fmtUsd(u.reported) }) : ""} def={t("stats:drill.estDef")} />
         <Kpi k="lead" label={t("stats:drill.lead")} value={fmtMs(f.lead_ms ?? d.age_ms)} foot={f.lead_ms != null ? t("stats:drill.leadDone") : t("stats:drill.leadOpen")} def={t("stats:drill.leadDef")} />
         <Kpi k="agent" label={t("stats:drill.agent")} value={fmtMs(f.agent_ms)} foot={t("stats:drill.turns", { count: f.turns })} def={t("stats:drill.agentDef")} />
@@ -78,7 +78,6 @@ function Drill({ d }: { d: ItemDetail }) {
           </Table>
         </section>
       )}
-      {d.backfill_only && <div className="type-footnote text-muted-foreground">{t("stats:drill.backfillNote")}</div>}
     </div>
   )
 }
@@ -122,7 +121,7 @@ function Timeline({ d }: { d: ItemDetail }) {
           <g>{ticks.map((m, i) => {
             const cx = x(m.ts), bad = m.kind === "release" && m.to_v !== "released"
             const label = m.kind === "deliver" ? (m.to_v === "auto" ? t("stats:drill.deliverAuto") : t("stats:drill.deliver")) : m.kind === "release" ? release[m.to_v ?? ""] ?? t("stats:drill.releaseMark") : m.to_v === "done" ? t("stats:drill.doneMark") : t("stats:drill.dropMark")
-            return <g key={i} onMouseEnter={() => show(m.ts, t(m.backfill ? "stats:drill.markTipBackfill" : "stats:drill.markTip", { label, time: time(m.ts) }))}>
+            return <g key={i} onMouseEnter={() => show(m.ts, t("stats:drill.markTip", { label, time: time(m.ts) }))}>
               <line x1={cx} x2={cx} y1={58} y2={72} stroke={bad ? "var(--destructive)" : "var(--muted-foreground)"} strokeWidth={2} />
               <circle cx={cx} cy={76} r={4} className={bad ? "fill-destructive" : m.kind === "status" ? "fill-foreground" : "fill-muted-foreground"} stroke="var(--background)" strokeWidth={2} />
             </g>

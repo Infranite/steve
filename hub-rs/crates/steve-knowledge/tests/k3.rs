@@ -636,33 +636,6 @@ async fn chat_days_are_documents_and_extracted_once() {
     assert!(hits[0].text.contains("我（10:00）：以后周五下午不安排部署"));
     assert!(!hits[0].text.contains("别的空间"));
 
-    // Labels written before ST-41 get the new names once, in place.
-    let label = |c: &rusqlite::Connection| -> String {
-        c.query_row(
-            "SELECT label FROM kb_chunks WHERE obj_id = ?",
-            [&doc],
-            |r| r.get(0),
-        )
-        .unwrap()
-    };
-    let relabeled = e
-        .env
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE kb_chunks SET label = '对话 · 2026-10-31 的对话' WHERE obj_id = ?",
-                [&doc],
-            )?;
-            let n = steve_knowledge::sync::relabel_once(tx, WS, 1)?;
-            let again = steve_knowledge::sync::relabel_once(tx, WS, 2)?;
-            Ok::<_, steve_store::StoreError>((n, again, label(tx)))
-        })
-        .unwrap();
-    assert_eq!(
-        relabeled,
-        (1, 0, "会话记录 · 2026-10-31 的对话".to_string())
-    );
-
     e.env.gateway.script(
         PROMPT_HEAD,
         r#"{"items":[{"kind":"rule","text":"周五下午不安排部署","about":[],"evidence":"以后周五下午不安排部署"}]}"#,

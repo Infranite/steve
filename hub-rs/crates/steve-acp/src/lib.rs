@@ -31,5 +31,4 @@ pub use config::{AcpConfig, default_claude_adapter, default_codex_adapter, npm_r
 pub use errors::{is_dead_agent, is_transient};
 pub use oneshot::{Image, OneShotError};
 pub use rollout::find as codex_rollout;
-pub use rollout::turn_usage as codex_turn_usage;
 pub use rpc::RpcError;

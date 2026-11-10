@@ -257,15 +257,6 @@ const CASES: &[(&str, &str, &str)] = &[
         "steve-stats views.rs",
         "SELECT COUNT(*) FROM agent_turns WHERE session_id = ? AND attempt = 0",
     ),
-    (
-        "usage_turn",
-        "steve-hub wire/acp_stats.rs repair_codex",
-        "SELECT t.id, t.session_id, t.started, t.ended, s.acp_session_id FROM agent_turns t
-         JOIN sessions s ON s.id = t.session_id
-         WHERE t.harness = 'codex' AND t.backfill = 0 AND t.ended IS NOT NULL AND s.acp_session_id IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM usage_records u WHERE u.turn_id = t.id)
-         ORDER BY t.started",
-    ),
     // ---------------------------------------------------------------- items
     (
         "audit_target",
@@ -410,6 +401,12 @@ fn indexes_that_need_statistics_serve_their_query_once_analyzed() {
         .unwrap();
 }
 
+/// Indexes of 035 whose query is gone (the migration itself is frozen); a later migration drops them.
+const UNQUERIED: &[&str] = &[
+    // the boot repair of Codex turns recorded without tokens
+    "usage_turn",
+];
+
 #[test]
 fn every_index_of_035_has_a_query() {
     let names: Vec<&str> = steve_store::db::MIGRATIONS[34]
@@ -420,7 +417,7 @@ fn every_index_of_035_has_a_query() {
     assert!(!names.is_empty());
     for n in names {
         assert!(
-            CASES.iter().chain(ANALYZED).any(|(i, _, _)| *i == n),
+            CASES.iter().chain(ANALYZED).any(|(i, _, _)| *i == n) || UNQUERIED.contains(&n),
             "{n} has no query in CASES"
         );
     }

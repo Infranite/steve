@@ -94,7 +94,6 @@ pub fn fixed_label(key: &str) -> Option<String> {
     Some(match key {
         "agent" => steve_i18n::t!("stats.label.agent"),
         "gateway" => steve_i18n::t!("stats.label.gateway"),
-        "backfill" => steve_i18n::t!("stats.label.backfill"),
         "turn" => steve_i18n::t!("stats.label.turn"),
         "autonomous" => steve_i18n::t!("stats.label.autonomous"),
         "route" => steve_i18n::t!("stats.label.route"),
@@ -772,7 +771,6 @@ pub struct MarkOut {
     pub to_v: Option<String>,
     pub actor: String,
     pub r#ref: Option<String>,
-    pub backfill: bool,
 }
 
 /// A decision of the drill-down.
@@ -807,8 +805,6 @@ pub struct ItemDetail {
     pub usage: Usage,
     /// Whole-life time until now (or until done / dropped).
     pub age_ms: i64,
-    /// Only token records from the backfill (session-level adapter dollars, a lower bound).
-    pub backfill_only: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turns: Option<Vec<TurnOut>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -822,14 +818,14 @@ pub struct ItemDetail {
 /// Most turns in a drill-down.
 pub const MAX_TURNS: i64 = 500;
 
-type TokenRow = (String, String, Tokens, i64, f64, String);
+type TokenRow = (String, String, Tokens, i64, f64);
 
-/// The item's token records summed per (turn, model): `(turn or "", (model, tokens, hit base, reported, source))`.
+/// The item's token records summed per (turn, model): `(turn or "", (model, tokens, hit base, reported))`.
 fn item_tokens(c: &Connection, item_id: &str) -> Result<Vec<(String, TokenRow)>> {
     Ok(c.prepare_cached(
         "SELECT COALESCE(turn_id, ''), model, day, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write),
                 COALESCE(SUM(CASE WHEN input IS NOT NULL AND cache_read IS NOT NULL THEN input + cache_read + COALESCE(cache_write, 0) END), 0),
-                COALESCE(SUM(cost_reported), 0), MIN(source)
+                COALESCE(SUM(cost_reported), 0)
          FROM usage_records WHERE item_id = ? GROUP BY turn_id, model, day",
     )?
     .query_map([item_id], |r| {
@@ -847,7 +843,6 @@ fn item_tokens(c: &Connection, item_id: &str) -> Result<Vec<(String, TokenRow)>>
                 },
                 r.get(7)?,
                 r.get(8)?,
-                r.get(9)?,
             ),
         ))
     })?
@@ -881,9 +876,7 @@ pub fn item_detail(
     let mut base = 0;
     let mut per_model: BTreeMap<String, (Usage, i64)> = BTreeMap::new();
     let mut per_turn: HashMap<String, (Usage, i64)> = HashMap::new();
-    let mut backfill_only = !tokens.is_empty();
-    for (turn, (model, day, t, hb, rep, source)) in &tokens {
-        backfill_only &= source == "backfill";
+    for (turn, (model, day, t, hb, rep)) in &tokens {
         usage.add(model, day, t, *rep, &prices);
         base += hb;
         let m = per_model.entry(model.clone()).or_default();
@@ -906,7 +899,6 @@ pub fn item_detail(
         age_ms: (end - facts.created).max(0),
         facts,
         usage,
-        backfill_only,
         turns: None,
         marks: None,
         decisions: None,
@@ -946,7 +938,7 @@ pub fn item_detail(
         .collect();
     let marks: Vec<MarkOut> = c
         .prepare_cached(
-            "SELECT ts, kind, from_v, to_v, actor, ref, backfill FROM item_marks WHERE item_id = ? ORDER BY ts, id",
+            "SELECT ts, kind, from_v, to_v, actor, ref FROM item_marks WHERE item_id = ? ORDER BY ts, id",
         )?
         .query_map([item_id], |r| {
             Ok(MarkOut {
@@ -956,7 +948,6 @@ pub fn item_detail(
                 to_v: r.get(3)?,
                 actor: r.get(4)?,
                 r#ref: r.get(5)?,
-                backfill: r.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -1021,7 +1012,7 @@ pub fn session(c: &Connection, session_id: &str) -> Result<Option<(String, Sessi
         .prepare_cached(
             "SELECT model, day, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write),
                     COALESCE(SUM(CASE WHEN input IS NOT NULL AND cache_read IS NOT NULL THEN input + cache_read + COALESCE(cache_write, 0) END), 0),
-                    COALESCE(SUM(cost_reported), 0), MIN(source)
+                    COALESCE(SUM(cost_reported), 0)
              FROM usage_records WHERE session_id = ? GROUP BY model, day",
         )?
         .query_map([session_id], |r| {
@@ -1037,13 +1028,12 @@ pub fn session(c: &Connection, session_id: &str) -> Result<Option<(String, Sessi
                 },
                 r.get(6)?,
                 r.get(7)?,
-                r.get(8)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     let mut usage = Usage::default();
     let mut base = 0;
-    for (model, day, t, hb, rep, _) in &rows {
+    for (model, day, t, hb, rep) in &rows {
         usage.add(model, day, t, *rep, &prices);
         base += hb;
     }

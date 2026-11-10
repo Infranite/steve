@@ -24,7 +24,7 @@ use crate::error::{ApiError, json_response};
 /// How long a cached answer may be served, even without a statistics change (WIP and "now" move).
 const FRESH: Duration = Duration::from_secs(5);
 const CACHE_MAX: usize = 256;
-const SOURCES: &[&str] = &["agent", "gateway", "backfill"];
+const SOURCES: &[&str] = &["agent", "gateway"];
 const GROUPS: &[&str] = &[
     "none",
     "model",

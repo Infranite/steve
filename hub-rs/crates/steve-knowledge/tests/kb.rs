@@ -432,29 +432,6 @@ async fn memories_name_what_they_are_about_and_anchors_rank_higher() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["text"], "Sarah Chen：喜欢先看结论的邮件");
     assert_eq!(hits[0]["label"], "长期记忆 · Sarah Chen");
-    // labels from before ST-41 are renamed by what each memory is, once
-    let (n, labels) = e
-        .env
-        .store()
-        .transaction(|tx| {
-            let old = tx.execute(
-                "UPDATE kb_chunks SET label = '记忆 · ' || substr(label, 8) WHERE obj_type = 'mem'",
-                [],
-            )?;
-            assert!(old > 0);
-            let n = sync::relabel_once(tx, WS, 1)?;
-            assert_eq!(n, old);
-            assert_eq!(sync::relabel_once(tx, WS, 2)?, 0);
-            let labels: Vec<String> = tx
-                .prepare("SELECT label FROM kb_chunks WHERE obj_type = 'mem' AND obj_id = ?")?
-                .query_map([&hits[0]["id"].as_str().unwrap()], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok::<_, StoreError>((n, labels))
-        })
-        .unwrap();
-    assert!(n > 0);
-    assert_eq!(labels, vec!["长期记忆 · Sarah Chen".to_string()]);
-
     let viewer = Viewer::bare(WS, ME);
     let anchors = [ObjRef::new("party", "ct_sarah")];
     let hits = e
