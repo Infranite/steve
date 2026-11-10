@@ -1066,6 +1066,81 @@ mod tests {
     }
 
     #[test]
+    fn a_path_is_shown_from_the_home_directory() {
+        assert_eq!(shown("/home/lee", "/home/lee"), "~");
+        assert_eq!(shown("/home/lee/code/app", "/home/lee"), "~/code/app");
+        assert_eq!(shown("/home/leeway/code", "/home/lee"), "/home/leeway/code");
+        assert_eq!(shown("/srv/app", "/home/lee"), "/srv/app");
+    }
+
+    #[test]
+    fn browse_lists_the_directories_of_one_directory() {
+        let d = tempfile::tempdir().expect("tmp");
+        let root = d.path().canonicalize().expect("real");
+        for dir in ["beta", "Alpha/.git", ".cache", "gamma/inner"] {
+            std::fs::create_dir_all(root.join(dir)).expect("d");
+        }
+        std::fs::write(root.join("notes.md"), "x").expect("w");
+        std::os::unix::fs::symlink(root.join("gamma"), root.join("linked")).expect("link");
+        let home = home_dir().to_string_lossy().into_owned();
+        let at = |rel: &str| shown(&join(&root.to_string_lossy(), rel), &home);
+        let here = root.to_string_lossy().into_owned();
+
+        // directories only, hidden ones left out, a link to one counts, sorted without regard to case
+        let v = browse_dir(&here);
+        assert_eq!(v["path"], at(""));
+        assert_eq!(
+            v["parent"],
+            shown(&root.parent().expect("parent").to_string_lossy(), &home)
+        );
+        assert_eq!(
+            (&v["exists"], &v["denied"], &v["git"], &v["more"]),
+            (&json!(true), &json!(false), &json!(false), &json!(false))
+        );
+        assert_eq!(
+            v["dirs"],
+            json!([
+                {"name": "Alpha", "path": at("Alpha"), "git": true},
+                {"name": "beta", "path": at("beta"), "git": false},
+                {"name": "gamma", "path": at("gamma"), "git": false},
+                {"name": "linked", "path": at("linked"), "git": false},
+            ])
+        );
+        // a trailing slash and `..` are the same directory; a checkout says so
+        assert_eq!(browse_dir(&format!("{here}/beta/../")), v);
+        let v = browse_dir(&format!("  {here}/Alpha "));
+        assert_eq!((&v["git"], &v["dirs"]), (&json!(true), &json!([])));
+        assert_eq!(v["parent"], at(""));
+
+        // half-typed, a file, or not absolute: nothing there, and the parent to list instead
+        for gone in [format!("{here}/be"), format!("{here}/notes.md")] {
+            let v = browse_dir(&gone);
+            assert_eq!(
+                (&v["exists"], &v["dirs"], &v["parent"]),
+                (&json!(false), &json!([]), &json!(at(""))),
+                "{gone}"
+            );
+        }
+        assert_eq!(browse_dir("relative/path")["exists"], false);
+
+        // nothing asked: the home directory, however it is written
+        for home in ["", "~", "~/"] {
+            assert_eq!(browse_dir(home)["path"], "~", "{home:?}");
+        }
+    }
+
+    #[test]
+    fn a_project_is_made_on_the_built_in_node_only() {
+        for node in [None, Some(""), Some("hub")] {
+            assert!(on_builtin_node(node).is_ok(), "{node:?}");
+        }
+        assert!(matches!(
+            on_builtin_node(Some("nod_laptop")),
+            Err(ApiError::Json(400, _))
+        ));
+    }
+
+    #[test]
     fn outside_the_roots_dirs_shows_the_way_down_to_them() {
         let roots = [
             PathBuf::from("/w/code/steve"),

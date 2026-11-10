@@ -288,6 +288,25 @@ mod tests {
             }),
             json!({"type": "settings", "id": "default"})
         );
+        // a finished call as before; one that runs says so, with its category
+        let tool = |kind: &str, running| ChangeEvent::SteveTool {
+            ws: "default".into(),
+            mid: "msg_1".into(),
+            run: "tr_1".into(),
+            name: "Bash".into(),
+            brief: "du -sh ~".into(),
+            ok: true,
+            kind: kind.into(),
+            running,
+        };
+        assert_eq!(
+            j(tool("", false)),
+            json!({"type": "steve.tool", "ws": "default", "mid": "msg_1", "run": "tr_1", "name": "Bash", "brief": "du -sh ~", "ok": true})
+        );
+        assert_eq!(
+            j(tool("exec", true)),
+            json!({"type": "steve.tool", "ws": "default", "mid": "msg_1", "run": "tr_1", "name": "Bash", "brief": "du -sh ~", "ok": true, "kind": "exec", "running": true})
+        );
         assert_eq!(
             serde_json::to_string(&ChangeEvent::Bot { id: "*".into() }).unwrap(),
             r#"{"type":"bot","id":"*"}"#

@@ -577,6 +577,8 @@ pub enum Step {
     Text(&'static str),
     /// a tool call finished
     Tool(&'static str, &'static str),
+    /// a tool call of this category began (name, kind, brief)
+    Running(&'static str, &'static str, &'static str),
     ToolFailure(&'static str, &'static str, &'static str),
     /// the executor stops the run with this outcome
     End(crate::thread::RunEnd),
@@ -639,6 +641,7 @@ impl crate::thread::Researcher for FakeResearch {
                     error: None,
                     ms: 3,
                 }),
+                Step::Running(name, kind, brief) => sink.tool_running(name, kind, brief),
                 Step::ToolFailure(name, brief, error) => sink.tool(&crate::thread::ToolSeen {
                     name: name.into(),
                     kind: String::new(),

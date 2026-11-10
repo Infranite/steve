@@ -341,6 +341,81 @@ async fn with_the_local_node_dirs_browses_toward_its_roots() {
     assert_eq!(v["kind"], "dir");
 }
 
+/// The chooser of a new project browses the Hub's machine for the instance owner, whether or not a
+/// root holds the directory yet; a project is made on the built-in Node only.
+#[tokio::test]
+async fn the_owner_browses_the_machine_for_a_new_projects_directory() {
+    let e = start_with(true, false).await;
+    std::fs::create_dir_all(e.home.join("private/notes/.git")).unwrap();
+    std::fs::create_dir_all(e.home.join("private/photos")).unwrap();
+    // as the Hub sees it (a temporary directory is often behind a link)
+    let private = e.home.join("private").canonicalize().unwrap();
+    let private = private.to_string_lossy().to_string();
+    let url = format!("/api/fs/browse?path={private}");
+    let (s, v) = e.call("GET", &url, None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!((&v["exists"], &v["denied"]), (&json!(true), &json!(false)));
+    let dirs: Vec<(&str, bool)> = v["dirs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["name"].as_str().unwrap(), d["git"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(dirs, [("notes", true), ("photos", false)]);
+    assert!(
+        v["dirs"][0]["path"].as_str().unwrap().ends_with("/private/notes"),
+        "{v}"
+    );
+    let (s, v) = e.call("GET", &format!("{url}/pho"), None).await;
+    assert_eq!((s, &v["exists"]), (200, &json!(false)), "{v}");
+    assert!(v["parent"].as_str().unwrap().ends_with("/private"), "{v}");
+
+    /* another Node is named, not browsed and not built on */
+    let (s, v) = e.call("GET", &format!("{url}&node=nod_laptop"), None).await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("Hub 内置的 Node"), "{v}");
+    let notes = format!("{private}/notes");
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "Notes", "path": notes, "node": "nod_laptop"})),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("Hub 内置的 Node"), "{v}");
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "Notes", "path": notes, "node": "hub"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!((&v["kind"], &v["device_id"]), (&json!("git"), &json!("hub")));
+
+    /* what is on the disk is the owner's to see */
+    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let member = store
+        .users()
+        .create("local:sam", "Sam", None, "member")
+        .unwrap();
+    store
+        .auth_sessions()
+        .create(&member, "member-session", 60_000)
+        .unwrap();
+    let r = e
+        .http
+        .get(format!("{}{url}", e.base))
+        .header("cookie", "steve_session=member-session")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"], "仅实例管理员可以浏览这台机器的目录");
+}
+
 struct Quiet;
 #[async_trait::async_trait]
 impl steve_node_wire::Handler for Quiet {

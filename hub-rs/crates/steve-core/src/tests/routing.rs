@@ -1805,3 +1805,46 @@ async fn a_burst_is_routed_in_one_call() {
     assert_eq!(route_log(&k, &b).kind, "config");
     until(|| items(&k) == before + 1).await;
 }
+
+/// A tool call is on the live line from the moment it begins: `steve.tool` with `running` and the
+/// call's category, then the finished one.
+#[tokio::test]
+async fn a_tool_call_is_shown_while_it_runs() {
+    let k = Kit::new();
+    let fr = FakeResearch::new(vec![
+        Step::Running("Bash", "exec", "du -sh ~"),
+        Step::Sleep(20),
+        Step::Tool("Bash", "du -sh ~"),
+        Step::Text("主目录 12G。"),
+    ]);
+    assert!(k.core.set_researcher(fr.clone()));
+    router(
+        &k,
+        |_| json!({"kind": "research", "confidence": 0.9, "signals": ["lookup"], "title": "", "goal": "", "bot": "steve", "project": null}),
+    );
+    let mid = k.core.say(WS, "主目录占了多少", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    let calls: Vec<(String, String, String, bool)> = k
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            HubEvent::SteveTool {
+                mid: m,
+                name,
+                brief,
+                kind,
+                running,
+                ..
+            } if *m == mid => Some((name.clone(), kind.clone(), brief.clone(), *running)),
+            _ => None,
+        })
+        .collect();
+    let call = |kind: &str, running| ("Bash".into(), kind.into(), "du -sh ~".into(), running);
+    assert_eq!(calls, [call("exec", true), call("", false)]);
+    /* only what finished is a step of the answer */
+    let tools = ms[1].meta["steps"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert_eq!(tools[0]["status"], "ok");
+}

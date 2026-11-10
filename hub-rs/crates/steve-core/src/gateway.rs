@@ -2129,6 +2129,24 @@ mod tests {
     }
 
     #[test]
+    fn the_router_hears_about_the_machine_where_steve_operates_it() {
+        const MACHINE: &str = "acts on the machine the Hub runs on";
+        let c = ctx();
+        assert!(!c.operator);
+        assert!(!route_prompt(&c, "看下本机的目录", &[], false).contains(MACHINE));
+        let c = RouteCtx {
+            operator: true,
+            ..ctx()
+        };
+        let p = route_prompt(&c, "看下本机的目录", &[], false);
+        assert!(p.contains(MACHINE), "{p}");
+        assert!(
+            p.contains("is research") && p.contains("is still an item"),
+            "{p}"
+        );
+    }
+
+    #[test]
     fn a_burst_is_one_prompt_and_one_array() {
         let c = ctx();
         let one = route_prompt(&c, "修登录页", &[], false);

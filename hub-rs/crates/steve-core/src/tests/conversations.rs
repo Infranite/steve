@@ -342,3 +342,72 @@ async fn a_shared_chat_gets_no_items_read_up_front() {
         seen[0].context
     );
 }
+
+/// A run has the owner's own access only where the instance's owner asks and they alone read the
+/// answer; the router hears about the Hub's machine in Steve's own conversation only.
+#[tokio::test]
+async fn only_the_owner_alone_gets_a_run_with_their_own_access() {
+    use crate::testkit::{FakeResearch, Step};
+    use crate::thread::MAIN;
+    const MACHINE: &str = "acts on the machine the Hub runs on";
+    let k = Kit::new();
+    let host = Arc::new(Host::default());
+    assert!(k.core.set_conv_host(host.clone()));
+    let fr = FakeResearch::new(vec![Step::Text("看过了。")]);
+    assert!(k.core.set_researcher(fr.clone()));
+    let prompts = Arc::new(Mutex::new(vec![]));
+    router(
+        &k,
+        prompts.clone(),
+        |_| json!({"kind": "research", "confidence": 0.9, "signals": ["lookup"], "title": "", "goal": "", "bot": "steve"}),
+    );
+    let full = |n: usize| fr.seen.lock().unwrap()[n].full;
+    /* what the router was told when it routed `text` (a plain question is not routed at all) */
+    let told = |text: &str| {
+        let ps = prompts.lock().unwrap();
+        ps.iter().rfind(|p| p.contains(text)).map(|p| p.contains(MACHINE))
+    };
+    let mine = || Conv {
+        owner_only: true,
+        ..guest(true, true)
+    };
+    let private = json!({"chan": {"message": "cm_me", "owner_only": true}});
+
+    /* an instance with one user: whoever writes in Steve's own conversation is the owner */
+    assert!(k.db().store().users().count().unwrap() <= 1);
+    k.core.say(WS, "把下载目录里的截图归到一个文件夹", &[]).unwrap();
+    settle(&k, MAIN, 2).await;
+    assert!(full(0));
+    assert_eq!(told("归到一个文件夹"), Some(true));
+    k.core.say_in(WS, mine(), "把桌面上的截图也归进去", &private).unwrap();
+    settle(&k, SPACE, 2).await;
+    assert!(full(1), "the owner's private chat");
+    assert_ne!(told("也归进去"), Some(true), "a chat is not Steve's own conversation");
+    turn(&k, "把服务器上的日志清一下", guest(true, true));
+    settle(&k, SPACE, 4).await;
+    assert!(!full(2), "a shared chat stays read-only");
+    assert_eq!(told("日志清一下"), Some(false));
+
+    /* several users: the owner, by role */
+    let users = k.db().store().users();
+    let owner = users.create("local:lee", "Lee", None, "owner").unwrap();
+    let member = users.create("local:sam", "Sam", None, "member").unwrap();
+    k.core
+        .say_as(WS, Some(&owner), "装一下 ripgrep", &[], &[])
+        .unwrap();
+    settle(&k, MAIN, 4).await;
+    assert!(full(3));
+    k.core
+        .say_as(WS, Some(&member), "装一下 fd", &[], &[])
+        .unwrap();
+    settle(&k, MAIN, 6).await;
+    assert!(!full(4), "a member reads, as before");
+    assert_eq!(told("装一下 fd"), Some(true), "the conversation is the same; the run is not");
+    k.core.say(WS, "装一下 jq", &[]).unwrap();
+    settle(&k, MAIN, 8).await;
+    assert!(!full(5), "nobody in particular is not the owner");
+    k.core.say_in(WS, mine(), "装一下 bat", &private).unwrap();
+    settle(&k, SPACE, 6).await;
+    assert!(!full(6));
+    assert_eq!(fr.seen.lock().unwrap().len(), 7);
+}

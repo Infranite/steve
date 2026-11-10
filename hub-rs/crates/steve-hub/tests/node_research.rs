@@ -60,6 +60,8 @@ impl Service for Tools {
 struct Seen {
     text: Mutex<Vec<String>>,
     tools: Mutex<Vec<ToolSeen>>,
+    /// calls that began: (name, kind, brief)
+    running: Mutex<Vec<(String, String, String)>>,
 }
 impl ResearchSink for Seen {
     fn text(&self, t: &str) {
@@ -67,6 +69,12 @@ impl ResearchSink for Seen {
     }
     fn tool(&self, t: &ToolSeen) {
         self.tools.lock().unwrap().push(t.clone());
+    }
+    fn tool_running(&self, name: &str, kind: &str, brief: &str) {
+        self.running
+            .lock()
+            .unwrap()
+            .push((name.into(), kind.into(), brief.into()));
     }
 }
 
@@ -218,6 +226,17 @@ struct Hub {
 
 impl Hub {
     async fn new(w: &World, name: &str, on_node: bool, max_global: usize) -> Hub {
+        Hub::with(w, name, on_node, max_global, steve_research::SandboxMode::Off).await
+    }
+
+    /// [`Hub::new`] whose research asks the Node for `sandbox`.
+    async fn with(
+        w: &World,
+        name: &str,
+        on_node: bool,
+        max_global: usize,
+        sandbox: steve_research::SandboxMode,
+    ) -> Hub {
         let base = w.root.join(name);
         let data = base.join("data");
         std::fs::create_dir_all(&data).unwrap();
@@ -227,7 +246,7 @@ impl Hub {
         cfg.models = vec!["m1".into()];
         cfg.home = w.root.join("home");
         cfg.files_root = base.join("files");
-        cfg.sandbox = steve_research::SandboxMode::Off;
+        cfg.sandbox = sandbox;
         cfg.max_global = max_global;
         let adapter = ResearchAdapter::new(
             cfg.clone(),
@@ -547,6 +566,55 @@ async fn a_violation_ends_and_is_audited() {
         "SELECT action||' '||target||' '||detail FROM audit WHERE action='thread.research_violation'",
     );
     assert!(audit.contains("execute"), "{audit}");
+}
+
+/// What ends a read-only run is what the owner's own run is for: with `full` the job is sent with
+/// full access and no read-only sandbox (a Node refuses the two together), and without a project
+/// it starts in the user's home.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_owners_own_run_acts_on_the_machine() {
+    let w = World::new();
+    let node = Hub::with(&w, "node", true, 3, steve_research::SandboxMode::Auto).await;
+    let made = w.root.join("made-by-the-run");
+    let question = format!(
+        "整理一下\n@msg m1\n@asking execute touch x\n@touch {}\n@msg m2\n@say 整理好了",
+        made.display()
+    );
+    let mut req = request(&w, "tr_f", "default", &question);
+    req.full = true;
+    let seen = Seen::default();
+    let out = node.adapter.research(req, &seen).await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    assert_eq!(out.text, "整理好了");
+    // the command is said while it runs (here it never ends): once, with its category
+    let running = seen.running.lock().unwrap().clone();
+    assert_eq!(running.len(), 1, "{running:?}");
+    assert_eq!(
+        (running[0].1.as_str(), running[0].2.as_str()),
+        ("exec", "touch x"),
+        "{running:?}"
+    );
+    assert!(tool_rows(&seen).is_empty());
+    assert!(made.exists(), "outside the project, and written");
+    let new: Value = serde_json::from_str(&w.read("new")).unwrap();
+    assert_eq!(new["cwd"], w.proj.to_str().unwrap(), "the project it is about");
+    assert_eq!(
+        q::<i64>(
+            &node.store,
+            "SELECT count(*) FROM audit WHERE action='thread.research_violation'"
+        ),
+        0
+    );
+
+    w.reset();
+    let mut req = request(&w, "tr_h", "default", "磁盘还剩多少\n@msg m1\n@say 还有一半");
+    req.full = true;
+    req.project = None;
+    req.readable = vec![];
+    let out = node.adapter.research(req, &Seen::default()).await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    let new: Value = serde_json::from_str(&w.read("new")).unwrap();
+    assert_eq!(new["cwd"], w.root.to_str().unwrap(), "the user's home");
 }
 
 /// The stop button ends the job on the Node with what it wrote, its processes gone; shutdown says

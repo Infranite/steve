@@ -224,6 +224,24 @@ test("without a cursor every open resyncs, and the stream is reopened from the s
   assert.equal(c.resyncs, 2); assert.equal(h.opens(), 2); assert.equal(h.closes(), 1); assert.equal(h.streamCursor(), "E:9")
 })
 
+test("a research tool call is on the live line while it runs, and a step once it ends", async () => {
+  const h = harness(), s = h.store
+  h.state.thread = [chatMessage("question", "me")]
+  s.start(); await flush()
+  const tool = (run, extra) => h.event({ type: "steve.tool", ws: "ws", mid: "question", run, name: "Bash", brief: "du -sh ~", ok: true, ...extra })
+  const live = () => JSON.parse(JSON.stringify({ run: s.st.live.run, now: s.st.live.now ?? null, tools: s.st.live.tools }))
+  tool("tr_1", { kind: "exec", running: true }); await h.tick(0)
+  assert.deepEqual(live(), { run: "tr_1", now: { name: "Bash", brief: "du -sh ~", kind: "exec" }, tools: [] })
+  assert.equal(s.st.thread.filter((m) => m.k === "thinking").length, 1)
+  tool("tr_1", { kind: "exec" }); await h.tick(0)
+  assert.deepEqual(live(), { run: "tr_1", now: null, tools: [{ name: "Bash", brief: "du -sh ~", ok: true, kind: "exec" }] })
+  /* a Hub that says no category, and the next run starting over */
+  tool("tr_1", {}); await h.tick(0)
+  assert.equal(live().tools.length, 2); assert.equal(live().tools[1].kind, undefined)
+  tool("tr_2", { running: true }); await h.tick(0)
+  assert.deepEqual(live(), { run: "tr_2", now: { name: "Bash", brief: "du -sh ~" }, tools: [] })
+})
+
 test("a stream opened without a cursor never resumes from a later watermark, so its live frames are not replayed", async () => {
   const h = harness(), s = h.store
   s.start(); await flush()
