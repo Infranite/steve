@@ -1,7 +1,6 @@
 {
   "stats.label.agent": "Agent 回合",
   "stats.label.gateway": "网关调用",
-  "stats.label.backfill": "回填（会话级）",
   "stats.label.turn": "回合",
   "stats.label.autonomous": "后台回合",
   "stats.label.route": "分流",

@@ -3,3 +3,8 @@
 - `STEVE_NODE_MODE` 写错时的报错、`ops/steve.env.example` 和部署文档现在都按实际默认值说明：不设置就是 `service`（Hub 自己的 Node 在独立进程里运行，Hub 重启或升级不打断正在进行的回合），`local` 才是放在 Hub 进程里。
 - `ops/run.sh` 不再回退到 TypeScript Hub 和拆分前的网页目录：`current/bin/steve-hub` 不存在时直接报错退出。一次性的 `ops/migrate-web-split.sh` 已删除。
 - 删除了只为对照 TypeScript Hub 而保留的测试和脚手架，以及一批没有任何调用方的函数、配置项和空的 `steve-people` crate。
+- 统计不再在启动时从旧事件里"回填"历史回合、用量和节点，也不再补读 Codex 旧回合的 token：数字只来自实际记录下来的回合。统计下钻里"回填"的来源标记和相关说明随之去掉，接口返回里的 `backfill_only`、`backfill` 字段和 `backfill` 来源也不再出现。
+- 删除了几处只为旧数据准备的一次性处理：把早期对话事项补挂到对话消息上、把早期写成普通对话消息的发布结果认作通知、给早期的知识库标签改名。新安装从来不会产生这些数据。
+- 环境变量 `STEVE_NODE_JOBS` 已删除。Steve 自己的判断调用和就地研究一直作为 Node 任务运行，这个变量此前已经不起作用；`ops/steve.env.example` 里的说明一并去掉。
+- 部署文档里 `STEVE_NODE_PLACEMENT` 的默认值改成和实际一致：默认是 `spread`（没有项目的事项，新会话会去明显更空闲的已连接 Node），`local` 才是全部留在 Hub 所在机器。
+- `ops/release.sh` 不再有构建 TypeScript Hub 的分支：代码里没有 `hub-rs/` 时直接报错。

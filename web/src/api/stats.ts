@@ -47,9 +47,9 @@ export type ItemFacts = {
   fails: number; stalls: number; releases: number; release_fails: number; decisions: number; yolo_decided: number
 }
 export type ItemDetail = {
-  item_id: string; no: number; title: string; status: string; facts: ItemFacts; usage: Usage; age_ms: number; backfill_only: boolean
+  item_id: string; no: number; title: string; status: string; facts: ItemFacts; usage: Usage; age_ms: number
   turns?: { id: string; session_id: string; started: number; ended: number | null; stop_reason: string | null; attempt: number; transient: boolean; tools: number; tool_errors: number; usage: Usage }[]
-  marks?: { ts: number; kind: string; from_v: string | null; to_v: string | null; actor: string; ref: string | null; backfill: boolean }[]
+  marks?: { ts: number; kind: string; from_v: string | null; to_v: string | null; actor: string; ref: string | null }[]
   decisions?: { id: string; kind: string; status: string; created: number; resolved: number | null; by: "me" | "yolo" | null; choice: string | null }[]
   by_model?: (Usage & { model: string; label: string })[]
 }

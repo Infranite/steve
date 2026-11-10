@@ -5,7 +5,7 @@
 #        database, switch `current`, restart, health-check; on failure back to the previous release, but only if it can
 #        still open the database (ops/schema_gate.py): when the new Hub migrated it past what the previous one knows, the
 #        new release stays (degraded, exit 3) and the backup is named. The release dir has the Rust Hub (bin/steve-hub,
-#        cargo build in a target dir shared by all releases, signed); a tree without hub-rs/ builds the TS Hub (hub/dist)
+#        cargo build in a target dir shared by all releases, signed)
 #   web  build only web/ into $STEVE_HOME/web/<ver>, switch the `web/current` link the Hub serves from (no drain, no
 #        restart), check that / serves the new index.html and one of its hashed assets; switch back on failure
 # What runs is decided from what changed since the deployed commits (current/release.json, web/current/release.json):
@@ -254,12 +254,7 @@ hub_release() {
     known=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["schema"])' <<<"$($DIR/bin/steve-hub --build-info 2>/dev/null)" 2>/dev/null)
     [[ $known == <-> ]] || hub_fail "Rust Hub 说不出自己的 schema（--build-info），见 $LOG"
   else
-    # a tree without hub-rs/: the TS Hub
-    step "hub: npm ci"
-    run npm ci --no-audit --no-fund || hub_fail "安装依赖失败，见 $LOG"
-    step "hub: build"
-    HUB_IMPL=ts
-    run npm run build:hub || hub_fail "Hub 构建失败，见 $LOG"
+    hub_fail "这份代码里没有 hub-rs/Cargo.toml，无法构建 Hub"
   fi
   print -r -- "   hub: ${PREV_IMPL:-none} -> $HUB_IMPL${known:+ (schema v$known)}"
   print -r -- "{\"version\":$(js "$VER"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"built_at\":$(js "$(iso)"),\"hub\":$(js $HUB_IMPL)${RUST_SHA:+,\"hub_sha256\":$(js $RUST_SHA)}${known:+,\"schema\":{\"target\":$known\}}}" >$DIR/release.json

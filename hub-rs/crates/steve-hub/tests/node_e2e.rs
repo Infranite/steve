@@ -195,7 +195,6 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .env_remove("STEVE_NODE_MODE")
         .env_remove("STEVE_NODE")
-        .env_remove("STEVE_NODE_JOBS")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_IDLE_RELEASE_MS")
         .env_remove("STEVE_NO_RESUME")

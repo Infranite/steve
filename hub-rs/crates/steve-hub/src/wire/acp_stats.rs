@@ -3,7 +3,7 @@
 //! with `steve_stats::normalize`; days are cut in the workspace's `stats.tz`.
 
 use serde_json::json;
-use steve_store::{ModelUsage, NewUsage, Session, Store, Tokens};
+use steve_store::{ModelUsage, Session, Store, Tokens};
 
 /// Session attribution of a turn: workspace, item, bot, project, and the fallback model.
 struct Owner {
@@ -54,93 +54,6 @@ fn day(store: &Store, ws: &str, ts: i64) -> String {
         .get(ws, "stats.tz", String::new())
         .unwrap_or_default();
     steve_stats::day(ts, steve_stats::tz(Some(&tz)))
-}
-
-/// Boot: turns of the adapters whose tokens come from Codex's rollout files (declared
-/// `usage_fallback: codex_rollout`, `harnesses`) that ended without tokens get them from there.
-/// codex-acp never reports usage, so every such turn before the runner read the rollout itself
-/// (ST-21, 2026-11-02) was in the statistics with no tokens; the turn's rows are added once, like
-/// at its end. The rollout counts cache reads inside the input.
-pub async fn repair_codex(
-    store: &Store,
-    codex_home: &std::path::Path,
-    harnesses: &[String],
-) -> usize {
-    if harnesses.is_empty() {
-        return 0;
-    }
-    let listed = harnesses
-        .iter()
-        .map(|h| format!("'{}'", h.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(",");
-    let turns: Vec<(String, String, i64, i64, String)> = store
-        .reader(|c| -> steve_store::Result<Vec<_>> {
-            let mut st = c.prepare(&format!(
-                "SELECT t.id, t.session_id, t.started, t.ended, s.acp_session_id FROM agent_turns t
-                 JOIN sessions s ON s.id = t.session_id
-                 WHERE t.harness IN ({listed}) AND t.backfill = 0 AND t.ended IS NOT NULL AND s.acp_session_id IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM usage_records u WHERE u.turn_id = t.id)
-                 ORDER BY t.started",
-            ))?;
-            let rows = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        })
-        .unwrap_or_default();
-    let mut added = 0;
-    for (turn, sid, started, ended, acp) in turns {
-        let Some(raw) = steve_acp::codex_turn_usage(
-            codex_home,
-            &acp,
-            started,
-            ended,
-            std::time::Duration::ZERO,
-        )
-        .await
-        else {
-            continue;
-        };
-        let Some(o) = owner(store, &sid) else {
-            continue;
-        };
-        let ws = o.s.workspace_id.clone();
-        let codex_cache: bool = store
-            .settings()
-            .get(&ws, "stats.codex_input_includes_cache", true)
-            .unwrap_or(true);
-        let r = store.stats().usage_add(&NewUsage {
-            day: day(store, &ws, ended),
-            workspace_id: ws,
-            ts: ended,
-            source: "agent".into(),
-            purpose: "turn".into(),
-            harness: o.s.harness.clone(),
-            turn_id: Some(turn.clone()),
-            session_id: Some(o.s.id.clone()),
-            item_id: o.s.item_id.clone(),
-            bot_id: o.s.bot_id.clone(),
-            project_id: o.project.clone(),
-            usage: ModelUsage {
-                model: o.model(None),
-                tokens: steve_stats::normalize(steve_stats::RawUsage::from_json(&raw), codex_cache),
-                cost_reported: None,
-                detail: json!({ "scope": "main", "from": "rollout" }),
-            },
-            duration_ms: None,
-            ok: true,
-            attempts: 1,
-        });
-        match r {
-            Ok(_) => added += 1,
-            Err(e) => tracing::error!("stats codex repair {turn}: {e}"),
-        }
-    }
-    if added > 0 {
-        tracing::info!("stats: tokens of {added} codex turns read from their rollout files");
-    }
-    added
 }
 
 /// Boot: turns still open were cut by the restart (`stop_reason = interrupted`).
@@ -369,80 +282,6 @@ mod tests {
                 started: 1_000,
             })
             .unwrap()
-    }
-
-    fn finish(t: &T, id: &str, cost: Option<f64>) {
-        let usage = cost
-            .map(|c| ModelUsage {
-                model: "m".into(),
-                tokens: Tokens::default(),
-                cost_reported: Some(c),
-                detail: json!({ "scope": "main" }),
-            })
-            .into_iter()
-            .collect();
-        t.store
-            .stats()
-            .turn_finish(&steve_store::TurnFinish {
-                turn_id: id.into(),
-                ended: 4_000,
-                day: "1970-01-01".into(),
-                model: "m".into(),
-                stop_reason: Some("end_turn".into()),
-                error: None,
-                transient: false,
-                tools: 2,
-                tool_errors: 1,
-                tool_kinds: BTreeMap::from([("execute".into(), 2)]),
-                permissions: 0,
-                usage,
-            })
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn codex_turns_without_tokens_get_them_from_the_rollout_once() {
-        let t = fresh();
-        let sid = session(&t, None, "codex");
-        db(&t)
-            .execute(
-                "UPDATE sessions SET acp_session_id = 'cx-1' WHERE id = ?",
-                [&sid],
-            )
-            .unwrap();
-        let id = begin(&t, &sid);
-        finish(&t, &id, None);
-        let home = t.dir.path().join("codex");
-        let day = home.join("sessions/1970/01/01");
-        std::fs::create_dir_all(&day).unwrap();
-        let tick = json!({"timestamp": "1970-01-01T00:00:02.000Z", "type": "event_msg", "payload": {"type": "token_count", "info": {
-            "total_token_usage": {"input_tokens": 1000, "cached_input_tokens": 900, "output_tokens": 50, "reasoning_output_tokens": 10},
-            "last_token_usage": {"input_tokens": 1000, "cached_input_tokens": 900, "output_tokens": 50, "reasoning_output_tokens": 10}}}});
-        std::fs::write(
-            day.join("rollout-1970-01-01T00-00-00-cx-1.jsonl"),
-            tick.to_string(),
-        )
-        .unwrap();
-        let codex = ["codex".to_string()];
-        assert_eq!(repair_codex(&t.store, &home, &codex).await, 1);
-        assert_eq!(repair_codex(&t.store, &home, &codex).await, 0);
-        let row: (i64, i64, Option<i64>, i64, i64) = db(&t)
-            .query_row(
-                "SELECT input, cache_read, cache_write, output, reasoning FROM usage_records WHERE turn_id = ?",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .unwrap();
-        // OpenAI's input includes the cached part; the stats keep Anthropic's convention
-        assert_eq!(row, (100, 900, None, 50, 10));
-        let (hit_base, cache_read): (i64, i64) = db(&t)
-            .query_row(
-                "SELECT SUM(hit_base), SUM(cache_read) FROM stat_daily WHERE harness = 'codex'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!((hit_base, cache_read), (1000, 900));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Steve's think calls as jobs on the local Node (N0d-7, `STEVE_NODE_JOBS=think`): the same
+//! Steve's think calls as jobs on the local Node (N0d-7): the same
 //! answers, drafts, errors and statistics rows as the in-process gateway, a dropped call cancelled
 //! on the Node with its process gone, and a Hub restart that stops what an earlier run left open
 //! without ever running it again.

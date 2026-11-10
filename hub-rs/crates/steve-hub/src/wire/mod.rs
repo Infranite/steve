@@ -178,11 +178,7 @@ fn node_runtime(
     secrets: &Arc<node_secrets::NodeSecrets>,
     jobs: &mut Vec<modules::Job>,
 ) -> Result<Option<NodeHost>, BackendError> {
-    let kinds = node_jobs(vars);
     if !local_node_mode(vars, cfg.no_resume)? {
-        if vars("STEVE_NODE_JOBS").is_some_and(|v| !v.trim().is_empty()) {
-            tracing::warn!("STEVE_NODE_JOBS is ignored while the local Node is off");
-        }
         return Ok(None);
     }
     for warning in crate::check::local_node_warnings(cfg, vars) {
@@ -201,10 +197,10 @@ fn node_runtime(
     let roots = node_binding::roots(store, &workspaces::configured(cfg))
         .map_err(|e| BackendError::msg(e.to_string()))?;
     let node = Arc::new(
-        steve_node::LocalNode::open(local_node_config(cfg, node_id.clone(), home, roots, kinds))
+        steve_node::LocalNode::open(local_node_config(cfg, node_id.clone(), home, roots, true))
             .map_err(|e| BackendError::msg(e.to_string()))?,
     );
-    local_node_extras(&node, cfg, kinds);
+    local_node_extras(&node, cfg, true);
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
     runtime.set_configured_roots(workspaces::configured(cfg));
     runtime.set_principal_state(principal_state(vars));
@@ -238,13 +234,14 @@ fn node_runtime(
 }
 
 /// The Hub's own Node as the Hub configures it (in its process, or in one of its own, B1): no
-/// ceiling, the Hub's harnesses and roots, sessions, `kinds` of jobs, flow commands.
+/// ceiling, the Hub's harnesses and roots, sessions, flow commands, and with `jobs` Steve's own
+/// model work (think and research).
 pub(crate) fn local_node_config(
     cfg: &Config,
     node: steve_node_api::NodeId,
     home: std::path::PathBuf,
     roots: Vec<steve_node::Root>,
-    kinds: NodeJobs,
+    jobs: bool,
 ) -> steve_node::NodeConfig {
     steve_node::NodeConfig {
         ceiling: steve_node::PolicyCeiling::unlimited(),
@@ -255,11 +252,7 @@ pub(crate) fn local_node_config(
         capacity: steve_node_api::Capacity {
             sessions: 64,
             // think and research jobs share it
-            jobs: if kinds.think || kinds.research {
-                LOCAL_JOB_CAPACITY
-            } else {
-                0
-            },
+            jobs: if jobs { LOCAL_JOB_CAPACITY } else { 0 },
             // flow `cmd` steps (N0e-E6)
             execs: 16,
         },
@@ -272,10 +265,10 @@ pub(crate) fn local_node_config(
     }
 }
 
-/// Research (for `kinds.research`) and discovery: the history and harnesses the Hub would read
-/// itself, its own homes and binaries.
-pub(crate) fn local_node_extras(node: &steve_node::LocalNode, cfg: &Config, kinds: NodeJobs) {
-    if kinds.research {
+/// Research (on the Node that runs jobs) and discovery: the history and harnesses the Hub would
+/// read itself, its own homes and binaries.
+pub(crate) fn local_node_extras(node: &steve_node::LocalNode, cfg: &Config, jobs: bool) {
+    if jobs {
         node.enable_research(steve_research::ResearchConfig::new(cfg.scratch.join("research")));
     }
     let homes = crate::resume::Homes::of(cfg);
@@ -364,34 +357,6 @@ pub(crate) fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, Back
 /// back instead; a start left unknown after a refused abandon would also hold its slot until the
 /// next boot.
 pub const LOCAL_JOB_CAPACITY: u32 = u32::MAX;
-
-/// Which of Steve's own model work runs as local Node jobs while the local Node is on
-/// (`STEVE_NODE_JOBS`). Unset means both, `think,research` (B6); an empty value, `off` or `none`
-/// means neither, so they run in the Hub's process as before.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NodeJobs {
-    pub(crate) think: bool,
-    pub(crate) research: bool,
-}
-
-fn node_jobs(vars: &Vars) -> NodeJobs {
-    let Some(list) = vars("STEVE_NODE_JOBS") else {
-        return NodeJobs {
-            think: true,
-            research: true,
-        };
-    };
-    let mut j = NodeJobs::default();
-    for k in list.split(',').map(str::trim).filter(|k| !k.is_empty()) {
-        match k {
-            "think" => j.think = true,
-            "research" => j.research = true,
-            "off" | "none" => {}
-            other => tracing::warn!("STEVE_NODE_JOBS: unknown job kind {other:?}"),
-        }
-    }
-    j
-}
 
 /// New sessions get their principal's own harness directory by default. An explicit `off`
 /// keeps the Node's shared harness state; existing sessions retain their recorded directory.
@@ -611,7 +576,6 @@ pub fn wire_assembly(
         });
         Arc::new(move |key| match key {
             "STEVE_NODE_MODE" => Some(if service { "service" } else { "local" }.into()),
-            "STEVE_NODE_JOBS" => Some("think,research".into()),
             _ => vars(key),
         })
     };
@@ -906,18 +870,9 @@ pub fn wire_assembly(
         extra,
         mcp_extra::layer,
     ));
-    // statistics: the one-time backfill and the item facts refresher run after boot (after recover
-    // has closed the turns the restart cut); the routes sit with the module routes behind the login
-    // (jobs already holds the module jobs and the YOLO loops)
-    let stats_db = db.clone();
-    let codex_home = cfg.codex_home.clone();
-    let rollout_usage = harnesses.rollout_usage();
-    jobs.push(Box::pin(async move {
-        if let Err(e) = steve_stats::backfill::spawn(stats_db.clone()).await {
-            tracing::error!("stats backfill task: {e}");
-        }
-        acp_stats::repair_codex(&stats_db, &codex_home, &rollout_usage).await;
-    }));
+    // statistics: the item facts refresher runs after boot (after recover has closed the turns the
+    // restart cut); the routes sit with the module routes behind the login (jobs already holds the
+    // module jobs and the YOLO loops)
     jobs.push(Box::pin(steve_stats::Refresher::new().run(db.clone())));
     let price_url = crate::price_sync::url(vars("STEVE_PRICE_CATALOG_URL").as_deref());
     jobs.push(Box::pin(crate::price_sync::run(
@@ -997,7 +952,6 @@ mod tests {
                 ("STEVE_HOME".to_string(), tmp.path().display().to_string()),
                 ("HOME".to_string(), tmp.path().display().to_string()),
                 ("STEVE_NODE_MODE".into(), "off".into()),
-                ("STEVE_NODE_JOBS".into(), "off".into()),
                 ("STEVE_VAULT_KEYSTORE".into(), "file".into()),
                 ("STEVE_ADAPTER_CLAUDE".into(), "/usr/bin/false".into()),
                 ("STEVE_ADAPTER_CODEX".into(), "/usr/bin/false".into()),
@@ -1039,48 +993,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn node_jobs_default_to_think_and_research() {
-        let both = NodeJobs {
-            think: true,
-            research: true,
-        };
-        // unset: both run on the Node (B6)
-        assert_eq!(node_jobs(&vars(&[])), both);
-        // named off: in process
-        let none: [&'static [(&str, &str)]; 4] = [
-            &[("STEVE_NODE_JOBS", "")],
-            &[("STEVE_NODE_JOBS", "off")],
-            &[("STEVE_NODE_JOBS", "none")],
-            &[("STEVE_NODE_JOBS", " , ")],
-        ];
-        for kv in none {
-            assert_eq!(node_jobs(&vars(kv)), NodeJobs::default(), "{kv:?}");
-        }
-        assert_eq!(
-            node_jobs(&vars(&[("STEVE_NODE_JOBS", "think")])),
-            NodeJobs {
-                think: true,
-                research: false
-            }
-        );
-        assert_eq!(
-            node_jobs(&vars(&[("STEVE_NODE_JOBS", " research , think,bogus")])),
-            both
-        );
-    }
-
     /// Conversation model calls use ACP on the Node even on a config that predates the Node
     /// switch. Existing agent-session routing follows its own switch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn think_streams_on_the_node_without_an_opt_in_switch() {
         steve_modules::net::forbid_in_this_process();
-        for (jobs, mode) in [
-            (Some("research"), None),
-            (Some("think"), None),
-            (None, None),
-            (None, Some("off")),
-        ] {
+        for mode in [None, Some("off")] {
             let dir = tempfile::tempdir().unwrap();
             let h = dir.path().canonicalize().unwrap();
             let adapter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1101,9 +1019,6 @@ mod tests {
             .into_iter()
             .collect();
             // the local Node by default: STEVE_NODE_MODE unset
-            if let Some(j) = jobs {
-                vars.insert("STEVE_NODE_JOBS", j.into());
-            }
             if let Some(mode) = mode {
                 vars.insert("STEVE_NODE_MODE", mode.into());
             }
@@ -1140,7 +1055,7 @@ mod tests {
                     )?)
                 })
                 .unwrap();
-            assert_eq!(n, 1, "{jobs:?}");
+            assert_eq!(n, 1, "{mode:?}");
             w.domain.shutdown().await;
         }
     }

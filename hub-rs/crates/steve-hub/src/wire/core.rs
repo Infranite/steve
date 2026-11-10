@@ -1164,7 +1164,7 @@ impl Domain for CoreDomain {
             // before anything resumes: turns left open were cut by the restart
             super::acp_stats::interrupt_open(c.store().store(), steve_store::now());
             c.recover()?;
-            /* research runs cut off by the restart, and the one-time thread_items backfill */
+            /* research runs cut off by the restart */
             c.thread_recover()
         })
         .await

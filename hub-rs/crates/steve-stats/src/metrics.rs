@@ -513,7 +513,7 @@ pub struct Spend {
     /// S4 per model.
     pub unpriced: BTreeMap<String, i64>,
     pub saved_by_cache: f64,
-    /// S5: estimate per source (agent / gateway / backfill).
+    /// S5: estimate per source (agent / gateway).
     pub by_source: BTreeMap<String, f64>,
     /// S5: the gateway estimate per purpose.
     pub gateway_by_purpose: BTreeMap<String, f64>,
@@ -1129,7 +1129,7 @@ fn yolo(c: &Connection, ws: &str, lo: i64, hi: i64, decisions: i64) -> Result<Op
 }
 
 /// WIP at the end of each day from `from` to `to` (T4 trend), replaying status marks. Days before an
-/// item's first mark count it by its creation (the backfilled marks are approximate).
+/// item's first mark count it by its creation.
 pub fn wip_by_day(c: &Connection, q: &Query) -> Result<Vec<(String, i64)>> {
     let tz = tz_of(c, &q.workspace_id)?;
     let Some(_) = bounds(&q.from, &q.to, tz) else {

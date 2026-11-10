@@ -706,47 +706,6 @@ async fn a_json_answer_splits_thought_and_text() {
     assert_eq!(ms[1].meta["steps"]["answer"]["thought"], "问的是散射");
 }
 
-#[test]
-fn notifications_and_the_read_cursor() {
-    let k = Kit::new();
-    /* a legacy release message in the conversation */
-    k.db()
-        .message_add(WS, "steve", "已发布新版本 v0", None, None)
-        .unwrap();
-    k.db().message_add(WS, "me", "你好", None, None).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(3));
-    crate::notify::notify(
-        k.db(),
-        WS,
-        "archive",
-        "info",
-        "自动归档了 1 件",
-        Some("ST-1"),
-    )
-    .unwrap();
-    let ns = k.core.notifications(WS).unwrap();
-    assert_eq!(
-        ns.iter()
-            .map(|n| (n.kind.as_str(), n.level.as_str()))
-            .collect::<Vec<_>>(),
-        vec![("archive", "info"), ("release", "success")]
-    );
-    assert_eq!(
-        k.core
-            .thread(WS)
-            .unwrap()
-            .iter()
-            .map(|m| m.text.as_str())
-            .collect::<Vec<_>>(),
-        vec!["你好"]
-    );
-    let first = k.core.notify_seen(WS).unwrap();
-    assert_eq!(k.core.notify_seen(WS).unwrap(), first, "set once");
-    assert_eq!(k.core.mark_notifications_seen(WS, Some(5)).unwrap(), 5);
-    assert_eq!(k.core.notify_seen(WS).unwrap(), 5);
-    assert!(k.core.mark_notifications_seen(WS, Some(i64::MAX)).unwrap() <= crate::util::now());
-}
-
 /// Real model calls through the Claude Code adapter (claude-haiku-5-5; the kiro route has no
 /// upstream); `cargo test -- --ignored`.
 fn real_gateway(home: &std::path::Path) -> crate::InProcess {

@@ -1,14 +1,51 @@
-//! The backfill and the metrics on a small database shaped like production: items written the
-//! way the Hub wrote them before migration 15, with the expected figures worked out by hand below.
+//! The metrics on a small database shaped like production, with the expected figures worked out
+//! by hand below.
 //!
 //! All times are minutes after 2026-11-01 00:00 UTC; the workspace's `stats.tz` is UTC.
 
 use steve_stats::metrics::{By, Query, breakdown, daily, prices_of, summary, wip_by_day};
-use steve_stats::{backfill, refresh, views};
+use steve_stats::{refresh, views};
 use steve_store::{NewBot, NoPublisher, Store, WS};
 
 const T0: i64 = 1_793_491_200_000;
 const MIN: i64 = 60_000;
+
+/// The day's turns, the sessions' own dollar figures and the items' marks (times as [`m`] gives
+/// them): what the Hub records while the items below happen.
+const RECORDED: &str = r#"
+INSERT INTO agent_turns (id, workspace_id, session_id, item_id, bot_id, harness, user_seq, attempt, started, ended, stop_reason, error, transient, tools, tool_errors, tool_kinds, permissions) VALUES
+  ('tn_1', 'default', 's1', 'ST-1', 'dev', 'claude-code', 1, 0, 1793491260000, 1793491800000, 'end_turn', NULL, 0, 1, 1, '{"execute":1,"tool:Bash":1}', 0),
+  ('tn_2', 'default', 's2', 'ST-2', 'dev', 'claude-code', 5, 0, 1793493060000, 1793493600000, 'end_turn', NULL, 0, 0, 0, '{}', 0),
+  ('tn_3', 'default', 's2', 'ST-2', 'dev', 'claude-code', 7, 0, 1793494200000, 1793494320000, 'error', '推理网关暂时不可用，5 秒后自动重试（第 1 次）', 1, 0, 0, '{}', 0),
+  ('tn_4', 'default', 's2', 'ST-2', 'dev', 'claude-code', NULL, 1, 1793494320000, 1793494800000, 'end_turn', NULL, 0, 0, 0, '{}', 0),
+  ('tn_5', 'default', 's3', 'ST-3', 'dev', 'claude-code', 10, 0, 1793497260000, 1793497500000, 'end_turn', NULL, 0, 0, 0, '{}', 0),
+  ('tn_6', 'default', 's5', 'ST-5', 'dev', 'claude-code', 12, 0, 1793509260000, 1793509260000, 'interrupted', NULL, 0, 0, 0, '{}', 0);
+INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, model, session_id, item_id, bot_id, cost_reported, ok, attempts) VALUES
+  ('default', 1793492400000, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 's1', 'ST-1', 'dev', 1.5, 1, 1),
+  ('default', 1793496300000, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 's2', 'ST-2', 'dev', 2.0, 1, 1),
+  ('default', 1793497500000, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 's3', 'ST-3', 'dev', NULL, 1, 1),
+  ('default', 1793509500000, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 's5', 'ST-5', 'dev', 0.25, 1, 1);
+INSERT INTO item_marks (workspace_id, item_id, ts, kind, from_v, to_v, actor, ref, detail) VALUES
+  ('default', 'ST-1', 1793491200000, 'status', NULL, 'run', '', NULL, '{}'),
+  ('default', 'ST-1', 1793491560000, 'fail', NULL, 'error', 'steve', 'f1', '{"why":"会话出错：boom"}'),
+  ('default', 'ST-1', 1793491800000, 'deliver', NULL, 'manual', 'dev', 'a1', '{}'),
+  ('default', 'ST-1', 1793492400000, 'status', 'run', 'done', 'usr_1', NULL, '{}'),
+  ('default', 'ST-2', 1793493000000, 'status', NULL, 'run', '', NULL, '{}'),
+  ('default', 'ST-2', 1793493600000, 'deliver', NULL, 'manual', 'dev', 'b1', '{}'),
+  ('default', 'ST-2', 1793494800000, 'deliver', NULL, 'manual', 'dev', 'b2', '{}'),
+  ('default', 'ST-2', 1793495700000, 'fail', NULL, 'release', 'steve', 'f2', '{"why":"发布  失败，已回到 v1：健康检查没有通过"}'),
+  ('default', 'ST-2', 1793495700000, 'release', NULL, 'rolled_back', 'steve', 'r1', '{}'),
+  ('default', 'ST-2', 1793496300000, 'status', 'run', 'done', 'steve', NULL, '{}'),
+  ('default', 'ST-2', 1793496300000, 'release', NULL, 'released', 'steve', 'r2', '{}'),
+  ('default', 'ST-3', 1793497200000, 'status', NULL, 'run', '', NULL, '{}'),
+  ('default', 'ST-3', 1793497500000, 'deliver', NULL, 'auto', 'dev', NULL, '{}'),
+  ('default', 'ST-3', 1793497501000, 'status', 'run', 'done', 'steve', NULL, '{}'),
+  ('default', 'ST-4', 1793503200000, 'status', NULL, 'run', '', NULL, '{}'),
+  ('default', 'ST-4', 1793503260000, 'status', 'run', 'pause', 'usr_1', NULL, '{}'),
+  ('default', 'ST-4', 1793503320000, 'status', 'pause', 'drop', 'usr_1', NULL, '{}'),
+  ('default', 'ST-5', 1793509200000, 'status', NULL, 'run', '', NULL, '{}'),
+  ('default', 'ST-5', 1793509800000, 'fail', NULL, 'stall', 'steve', 'f5', '{"why":"它停下了：会话空闲"}');
+"#;
 
 fn m(x: i64) -> i64 {
     T0 + x * MIN
@@ -294,7 +331,9 @@ fn store() -> (tempfile::TempDir, Store) {
         None,
     );
 
+    sql.push_str(RECORDED);
     s.with_conn(|c| Ok(c.execute_batch(&sql)?)).unwrap();
+    refresh::rebuild(&s, WS).unwrap();
     (dir, s)
 }
 
@@ -337,13 +376,9 @@ fn day_query() -> Query {
 }
 
 #[test]
-fn backfilled_metrics_match_the_hand_count() {
-    let (_d, s) = store();
-    let r = backfill::run(&s, false).unwrap();
-    let rep = &r[WS];
+fn metrics_match_the_hand_count() {
     // turns: ST-1 one, ST-2 three (the retry splits one), ST-3 one, ST-5 one
-    assert_eq!(rep.turns, 6);
-    assert_eq!(rep.usage, 4);
+    let (_d, s) = store();
 
     let sm = s.with_conn(|c| summary(c, &day_query())).unwrap().unwrap();
     assert_eq!(sm.tz, "UTC");
@@ -425,11 +460,11 @@ fn backfilled_metrics_match_the_hand_count() {
     assert_eq!(a.tool_error_rate, Some(1.0));
     assert_eq!(a.retry_success, Some(1.0));
 
-    // the backfill only knows the sessions' own dollar figures
+    // the sessions' own dollar figures, with no token counts
     assert!((sm.usage.reported - 3.75).abs() < 1e-9);
     assert_eq!(sm.usage.total, 0);
     assert_eq!(sm.usage.hit_rate, None);
-    assert_eq!(sm.since.tokens, None);
+    assert_eq!(sm.since.tokens.as_deref(), Some("2026-11-01"));
 
     // marks of the dropped item: run → pause → drop
     let st4: Vec<(Option<String>, Option<String>)> = s
@@ -470,52 +505,17 @@ fn backfilled_metrics_match_the_hand_count() {
 }
 
 #[test]
-fn backfill_twice_and_rebuild_change_nothing() {
+fn a_rebuild_changes_nothing() {
     let (_d, s) = store();
-    backfill::run(&s, false).unwrap();
     let a = snapshot(&s);
-    // already at v1: nothing runs
-    assert!(backfill::run(&s, false).unwrap().is_empty());
-    backfill::run(&s, true).unwrap();
-    assert_eq!(a, snapshot(&s));
     refresh::rebuild(&s, WS).unwrap();
     assert_eq!(a, snapshot(&s));
 }
 
 #[test]
-fn live_marks_win_over_the_backfill() {
-    let (_d, s) = store();
-    // ST-5 got a live mark before the backfill ran: only what came before it is backfilled
-    s.stats()
-        .mark_add(&steve_store::NewMark {
-            workspace_id: WS.into(),
-            item_id: "ST-5".into(),
-            ts: m(305),
-            kind: "status".into(),
-            from_v: Some("run".into()),
-            to_v: Some("pause".into()),
-            ..Default::default()
-        })
-        .unwrap();
-    backfill::run(&s, false).unwrap();
-    let kinds: Vec<(String, i64)> = s
-        .with_conn(|c| {
-            Ok(c.prepare(
-                "SELECT kind, backfill FROM item_marks WHERE item_id = 'ST-5' ORDER BY ts",
-            )?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?)
-        })
-        .unwrap();
-    // the create mark (m 300) is backfilled; the stall card (m 310) came after the live mark and is not
-    assert_eq!(kinds, [("status".into(), 1), ("status".into(), 0)]);
-}
-
-#[test]
 fn invariants_hold() {
     let (_d, s) = store();
-    backfill::run(&s, false).unwrap();
-    // live token records on top, for the breakdown sums
+    // token records on top, for the breakdown sums
     let t = steve_store::Tokens {
         input: Some(100),
         output: Some(50),

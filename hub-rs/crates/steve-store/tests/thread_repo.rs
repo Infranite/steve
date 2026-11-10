@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use serde_json::json;
 use steve_store::*;
 
 fn with_steve() -> T {
@@ -41,15 +40,6 @@ fn item(s: &Store, title: &str, status: &str, source: (&str, &str)) -> String {
         .unwrap()
         .unwrap()
         .id
-}
-
-fn say(s: &Store, author: &str, text: &str, item: Option<&str>) -> String {
-    let id = s
-        .messages()
-        .add(WS, author, text, item, &serde_json::Value::Null, "steve")
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2));
-    id
 }
 
 #[test]
@@ -174,45 +164,4 @@ fn conversation_items_keep_their_origin_and_go_with_the_item() {
     assert_eq!(s.thread().items(WS).unwrap().len(), 1);
     s.items().remove(&i).unwrap();
     assert!(s.thread().item(&i).unwrap().is_none());
-}
-
-#[test]
-fn backfill_links_unfinished_conversation_items_once() {
-    let t = with_steve();
-    let s = &t.store;
-    let q1 = say(s, "me", "事项页面太散了", None);
-    let open = item(s, "事项页布局", "run", ("对话", "chat"));
-    let r1 = say(s, "steve", "好，交给它了", Some(&open));
-    say(s, "me", "删掉菜单", None);
-    let done = item(s, "删菜单", "done", ("对话", "chat"));
-    say(s, "steve", "好", Some(&done));
-    let manual = item(s, "手建", "run", ("手动", "manual"));
-    let q3 = say(s, "me", "讲一下知识系统", None);
-    let waiting = item(s, "知识系统", "wait", ("对话", "chat"));
-    let r3 = say(s, "steve", "整理成事项", Some(&waiting));
-    say(s, "steve", "已发布", Some(&waiting));
-
-    let mut linked = s.thread().backfill(WS).unwrap();
-    linked.sort();
-    let mut want = vec![open.clone(), waiting.clone()];
-    want.sort();
-    assert_eq!(linked, want);
-    let a = s.thread().item(&open).unwrap().unwrap();
-    assert_eq!((a.origin_msg, a.reply_msg), (q1, Some(r1)));
-    let b = s.thread().item(&waiting).unwrap().unwrap();
-    assert_eq!((b.origin_msg, b.reply_msg), (q3, Some(r3)));
-    assert!(s.thread().item(&done).unwrap().is_none());
-    assert!(s.thread().item(&manual).unwrap().is_none());
-    assert_eq!(
-        s.settings().get(WS, BACKFILL_KEY, json!(null)).unwrap(),
-        json!("v1")
-    );
-
-    let before = s.thread().items(WS).unwrap();
-    assert!(s.thread().backfill(WS).unwrap().is_empty());
-    assert_eq!(
-        s.thread().items(WS).unwrap(),
-        before,
-        "running it again changes nothing"
-    );
 }

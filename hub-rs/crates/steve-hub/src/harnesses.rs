@@ -45,20 +45,6 @@ impl HubHarnesses {
             .collect()
     }
 
-    /// The adapters whose tokens come from Codex's rollout files (declared `usage_fallback`).
-    pub fn rollout_usage(&self) -> Vec<String> {
-        self.ids
-            .iter()
-            .filter(|id| {
-                steve_acp::adapters::spec(id, self.declared.get(*id))
-                    .properties
-                    .usage_fallback
-                    == steve_acp::adapters::UsageFallback::CodexRollout
-            })
-            .cloned()
-            .collect()
-    }
-
     pub fn update(&self, caps: Vec<HarnessCapability>) {
         *self.probed.write().unwrap_or_else(|e| e.into_inner()) = caps;
     }

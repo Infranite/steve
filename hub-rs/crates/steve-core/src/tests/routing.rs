@@ -1028,11 +1028,11 @@ async fn old_flow_back_folds_into_the_card() {
         a.meta.get("update").is_none() && !crate::thread::hidden(&a),
         "a question's answer stays a normal message"
     );
-    let shown: Vec<String> = k
-        .core
-        .thread(WS)
+    let shown: Vec<String> = db
+        .messages(WS)
         .unwrap()
         .into_iter()
+        .filter(|m| !crate::thread::hidden(m))
         .map(|m| m.id)
         .collect();
     assert!(!shown.contains(&d1) && !shown.contains(&n1) && shown.contains(&ans));
