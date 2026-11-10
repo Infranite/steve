@@ -46,6 +46,7 @@ jobs:
           bash ops/check-migration-lock.sh
           python3 scripts/test-nextest-summary.py
           python3 scripts/test-nextest-partitions.py
+          python3 scripts/test-skip-rust-jobs.py
   web:
     strategy:
       fail-fast: false
@@ -60,7 +61,28 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
+  # A push that changed only release notes (the commit cut-release.py pushes) repeats the Rust jobs of the
+  # commit before it. This job waits for CI on that commit and, when it passed, lets them be skipped.
+  # Pull requests do not run it, and always run the Rust jobs.
+  changes:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      skip: ${{ steps.decide.outputs.skip }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Skip the Rust jobs when only release notes changed and CI passed on the commit before
+        id: decide
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/skip-rust-jobs.py
   rust:
+    needs: changes
+    # Only `skip=true` from `changes` skips them: they run when it was skipped itself or did not finish.
+    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -143,7 +165,7 @@ jobs:
   test:
     name: CI gate
     if: ${{ always() }}
-    needs: [scripts, web, rust]
+    needs: [changes, scripts, web, rust]
     runs-on: ubuntu-22.04
     steps:
       - name: Require every job on every platform
@@ -153,6 +175,11 @@ jobs:
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          assert set(results) == {'scripts', 'web', 'rust'}, results
+          assert set(results) == {'changes', 'scripts', 'web', 'rust'}, results
+          changes = results.pop('changes')
+          assert changes['result'] in ('success', 'skipped'), changes
+          # The Rust jobs may be skipped only on the word of `changes`; everything else must have passed.
+          if changes['result'] == 'success' and changes['outputs'].get('skip') == 'true':
+              assert results.pop('rust')['result'] in ('success', 'skipped'), results
           assert all(job['result'] == 'success' for job in results.values()), results
           PY
