@@ -524,12 +524,16 @@ async fn stop_ends_an_answer_at_once_and_the_queue_goes_next() {
         Duration::from_secs(30),
     ));
     k.core.say(WS, "慢慢答", &[]).unwrap();
-    assert!(k.wait(|| k.core.inline_busy(WS)));
+    /* the answer is being written, not merely queued; only this one is slow */
+    assert!(k.wait(|| {
+        let calls = k.gw.calls.lock().unwrap();
+        calls.iter().any(|p| p.starts_with("You are Steve"))
+    }));
+    *k.gw.slow.lock().unwrap() = None;
     let next = k.core.say(WS, "然后呢", &[]).unwrap();
     assert_eq!(k.db().message(&next).unwrap().unwrap().meta["held"], true);
     let t0 = std::time::Instant::now();
     assert!(k.core.stop(WS).unwrap());
-    *k.gw.slow.lock().unwrap() = None;
     let ms = settle(&k, 4).await;
     assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
     assert_eq!(ms[1].text, "好，停下了。要我换个方式就直接说。");
@@ -540,6 +544,48 @@ async fn stop_ends_an_answer_at_once_and_the_queue_goes_next() {
     );
     // the answer is written before its turn lets go of the thread
     assert!(k.wait(|| !k.core.main_busy(WS).unwrap()));
+}
+
+/// Stop reaches an answer its lane has not started: here new work is held for maintenance.
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_takes_an_answer_not_started_yet_off_the_queue() {
+    let k = Kit::new();
+    let store = k.db().store().clone();
+    let (hold, once) = (store.clone(), std::sync::Once::new());
+    k.gw.set(move |p, _| {
+        if p.starts_with("You are the router of Steve") {
+            /* held from here on: the first answer is queued, and its lane cannot start it */
+            once.call_once(|| hold.maintenance_set(true).unwrap());
+            Ok(r#"{"kind":"answer","confidence":0.9}"#.into())
+        } else {
+            Ok("答好了".into())
+        }
+    });
+    let asked = k.core.say(WS, "慢慢答", &[]).unwrap();
+    assert!(k.wait(|| k.core.inline_busy(WS) && !k.core.routing(WS)));
+    assert!(k.core.stop(WS).unwrap());
+    let ms = k.db().messages(WS).unwrap();
+    assert_eq!(ms.last().unwrap().meta["stopped"], true);
+    let run = |status: &str| -> i64 {
+        store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM thread_runs WHERE message_id=? AND status=?",
+                    rusqlite::params![asked, status],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!((run("stopped"), run("queued")), (1, 0));
+    store.maintenance_set(false).unwrap();
+    /* its lane drops it and goes on: the one answer written is to the next question */
+    let next = k.core.say(WS, "这个要答", &[]).unwrap();
+    let ms = settle(&k, 4).await;
+    let answers: Vec<_> = ms.iter().filter(|m| m.text == "答好了").collect();
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0].meta["origin"], next.as_str());
+    assert_eq!(run("stopped"), 1);
 }
 
 #[tokio::test]

@@ -828,6 +828,19 @@ fn messages() {
 }
 
 #[test]
+fn messages_written_in_the_same_millisecond_list_in_the_order_written() {
+    let t = with_steve();
+    let s = &t.store;
+    let texts: Vec<String> = (0..200).map(|n| format!("m{n}")).collect();
+    for text in &texts {
+        s.messages().add(WS, "me", text, None, &Value::Null, "steve").unwrap();
+    }
+    let ms = s.messages().list(WS, "steve", 500).unwrap();
+    assert_eq!(ms.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), texts);
+    assert!(ms.windows(2).all(|w| w[0].created < w[1].created), "no two share a time");
+}
+
+#[test]
 fn readers_run_in_parallel_with_writes() {
     let t = with_steve();
     let s = t.store.clone();

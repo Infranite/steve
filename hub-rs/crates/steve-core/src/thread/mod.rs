@@ -26,6 +26,7 @@ pub use research::{
     ToolSeen,
 };
 
+use self::research::StoppedInline;
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{self, FocusItem, Route, RouteCtx, Said};
@@ -574,6 +575,13 @@ impl Core {
             }
         }
         self.answering(ws)
+    }
+
+    /// A message of the main conversation is being routed right now.
+    #[cfg(test)]
+    pub(crate) fn routing(&self, ws: &str) -> bool {
+        let inflight = lock(&self.0.thread.inflight);
+        inflight.contains_key(ws) || inflight.contains_key(&after_lane(ws, MAIN))
     }
 
     /// Steve is still answering in the main conversation: an answer or research running or waiting,
@@ -1464,10 +1472,14 @@ impl Core {
         if let Some(f) = &routing {
             f.stop();
         }
-        if routing.is_none() && !inline {
+        if routing.is_none() && inline == StoppedInline::Nothing {
             return Ok(false);
         }
-        if routing.is_some() && !inline {
+        if let StoppedInline::Waiting(Some(run)) = &inline {
+            self.end_unstarted(ws, run)?;
+        }
+        /* a running answer says so itself as it ends; nothing else would */
+        if inline != StoppedInline::Running {
             self.store().message_add(
                 ws,
                 "steve",

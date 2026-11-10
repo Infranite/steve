@@ -407,9 +407,10 @@ impl ModelGateway for FakeGateway {
         _t: Duration,
         tools: &crate::gateway::ThinkTools,
     ) -> Result<crate::gateway::Printed> {
+        /* read before the call is listed: a test that sees the call may change `slow` for the next */
+        let slow = *self.slow.lock().unwrap();
         self.calls.lock().unwrap().push(prompt.into());
         self.tools.lock().unwrap().push(tools.clone());
-        let slow = *self.slow.lock().unwrap();
         if let Some((_, d)) = slow.filter(|(head, _)| prompt.starts_with(head)) {
             tokio::time::sleep(d).await;
         }
