@@ -1,6 +1,12 @@
 import SwiftUI
 import WebKit
 
+#if canImport(AppKit)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+
 public struct SteveWebView: NSViewRepresentableFallback {
     @ObservedObject private var coordinator: SteveClientCoordinator
     private let platformName: String
@@ -47,6 +53,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
     }
     #endif
 
+    @MainActor
     private func buildWebView(bridge: BridgeCoordinator) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
@@ -66,6 +73,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = bridge
+        webView.uiDelegate = bridge
         #if os(macOS)
         webView.setValue(false, forKey: "drawsBackground")
         #endif
@@ -83,10 +91,18 @@ public struct SteveWebView: NSViewRepresentableFallback {
         if bridge.loadedNonce != coordinator.webReloadNonce || bridge.loadedGateway != gateway {
             bridge.loadedNonce = coordinator.webReloadNonce
             bridge.loadedGateway = gateway
-            webView.load(URLRequest(url: gateway))
+            let token = coordinator.proxy.proxyAuthToken
+            Self.plantProxyCookie(in: webView, gateway: gateway, token: token) { [weak webView] in
+                webView?.load(URLRequest(url: gateway))
+            }
             return
         }
 
+        applyPendingHashRouteIfNeeded(in: webView)
+    }
+
+    @MainActor
+    fileprivate func applyPendingHashRouteIfNeeded(in webView: WKWebView) {
         if let hash = coordinator.targetHashRoute {
             coordinator.consumeTargetHashRoute()
             let escaped = hash.replacingOccurrences(of: "\\", with: "\\\\")
@@ -96,10 +112,65 @@ public struct SteveWebView: NSViewRepresentableFallback {
     }
 
     @MainActor
+    private static func plantProxyCookie(
+        in webView: WKWebView,
+        gateway: URL,
+        token: String,
+        completion: @escaping @MainActor () -> Void
+    ) {
+        let props: [HTTPCookiePropertyKey: Any] = [
+            .name: HubLoopbackProxy.proxyAuthCookieName,
+            .value: token,
+            .originURL: gateway,
+            .domain: gateway.host ?? "127.0.0.1",
+            .path: "/",
+            HTTPCookiePropertyKey("HttpOnly"): "TRUE",
+            .sameSitePolicy: HTTPCookieStringPolicy.sameSiteLax,
+        ]
+        guard let cookie = HTTPCookie(properties: props) else {
+            completion()
+            return
+        }
+        webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
+            Task { @MainActor in
+                completion()
+            }
+        }
+    }
+
+    internal static func isGatewayOrigin(_ url: URL, gateway: URL) -> Bool {
+        guard let urlScheme = url.scheme?.lowercased(),
+              let gwScheme = gateway.scheme?.lowercased(),
+              urlScheme == gwScheme,
+              let urlHost = url.host?.lowercased(),
+              let gwHost = gateway.host?.lowercased(),
+              urlHost == gwHost,
+              url.port == gateway.port else {
+            return false
+        }
+        return true
+    }
+
+    internal static func rewriteExternalGatewayURL(_ url: URL, gateway: URL?, activeHubEndpoint: URL?) -> URL {
+        guard let gateway,
+              isGatewayOrigin(url, gateway: gateway),
+              let activeHubEndpoint,
+              var targetComps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let hubComps = URLComponents(url: activeHubEndpoint, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        targetComps.scheme = hubComps.scheme
+        targetComps.host = hubComps.host
+        targetComps.port = hubComps.port
+        return targetComps.url ?? url
+    }
+
+    @MainActor
     private static func makeBootstrapScript(platform: String, coordinator: SteveClientCoordinator) -> String {
         let activeJSON = encodeActiveHubJSON(coordinator: coordinator)
         return """
         (function() {
+          if (window.location.hostname !== '' && window.location.hostname !== '127.0.0.1') { return; }
           try { localStorage.removeItem('steve.hub'); } catch (_) {}
           const post = (action) => {
             try { window.webkit.messageHandlers.\(BridgeCoordinator.handlerName).postMessage({ action }); } catch (_) {}
@@ -119,7 +190,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
     private static func makeActiveHubSyncScript(platform: String, coordinator: SteveClientCoordinator) -> String {
         let activeJSON = encodeActiveHubJSON(coordinator: coordinator)
         return """
-        if (window.__STEVE_NATIVE__) {
+        if (window.__STEVE_NATIVE__ && window.location.hostname === '127.0.0.1') {
           window.__STEVE_NATIVE__.platform = '\(platform)';
           window.__STEVE_NATIVE__.activeHub = \(activeJSON);
         }
@@ -128,7 +199,9 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
     @MainActor
     private static func encodeActiveHubJSON(coordinator: SteveClientCoordinator) -> String {
-        let profile = coordinator.hubStore.activeProfile
+        guard let profile = coordinator.hubStore.currentProfile else {
+            return "null"
+        }
         let endpoint = coordinator.summary.activeEndpoint.map(URLNormalizer.canonicalOrigin) ?? profile.primaryDisplayAddress
         let dict: [String: String] = [
             "id": profile.id,
@@ -138,12 +211,12 @@ public struct SteveWebView: NSViewRepresentableFallback {
         ]
         guard let data = try? JSONEncoder().encode(dict),
               let str = String(data: data, encoding: .utf8) else {
-            return "{}"
+            return "null"
         }
         return str
     }
 
-    public final class BridgeCoordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+    public final class BridgeCoordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         public static let handlerName = "steveNative"
 
         var parent: SteveWebView
@@ -161,38 +234,123 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
         public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.name == Self.handlerName,
+                  message.frameInfo.isMainFrame,
                   let body = message.body as? [String: Any],
                   let action = body["action"] as? String else {
                 return
             }
+            let originProto = message.frameInfo.securityOrigin.`protocol`.lowercased()
+            let originHost = message.frameInfo.securityOrigin.host.lowercased()
+            let originPort = message.frameInfo.securityOrigin.port
+
             Task { @MainActor in
+                guard let gateway = self.loadedGateway ?? self.parent.coordinator.localGatewayURL,
+                      let expectedPort = gateway.port,
+                      originProto == (gateway.scheme?.lowercased() ?? "http"),
+                      originHost == (gateway.host?.lowercased() ?? "127.0.0.1"),
+                      originPort == expectedPort else {
+                    return
+                }
                 switch action {
                 case "openHubSwitcher":
-                    parent.coordinator.isHubSwitcherPresented = true
+                    self.parent.coordinator.isHubSwitcherPresented = true
                 case "openPairSheet":
-                    parent.coordinator.isPairQRPresented = true
+                    self.parent.coordinator.isPairQRPresented = true
                 case "openQRScanner":
-                    parent.coordinator.isQRScannerPresented = true
+                    self.parent.coordinator.isQRScannerPresented = true
                 default:
                     break
                 }
             }
         }
 
+        @MainActor
         public func webView(
             _ webView: WKWebView,
             decidePolicyFor navigationAction: WKNavigationAction,
             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
         ) {
-            if let url = navigationAction.request.url,
-               url.scheme?.lowercased() == "steve" {
-                Task { @MainActor in
-                    _ = try? await parent.coordinator.pairWithQRCode(uri: url.absoluteString)
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.cancel)
+                return
+            }
+
+            let scheme = url.scheme?.lowercased() ?? ""
+
+            // Never initiate pairing from web content; custom `steve:` links in web pages are ignored.
+            if scheme == "steve" {
+                decisionHandler(.cancel)
+                return
+            }
+
+            // Allow `about:blank` / `about:srcdoc` (used by sandboxed markdown/mail HTML preview iframes).
+            if scheme == "about" {
+                decisionHandler(.allow)
+                return
+            }
+
+            let gateway = loadedGateway ?? parent.coordinator.localGatewayURL
+
+            // `target="_blank"` links have `targetFrame == nil` — open http(s) targets in the system browser.
+            if navigationAction.targetFrame == nil {
+                if scheme == "http" || scheme == "https" {
+                    openInSystemBrowser(url, gateway: gateway)
                 }
                 decisionHandler(.cancel)
                 return
             }
-            decisionHandler(.allow)
+
+            // Confine in-webview http(s) navigations strictly to the loopback gateway origin.
+            if let gateway, SteveWebView.isGatewayOrigin(url, gateway: gateway) {
+                decisionHandler(.allow)
+                return
+            }
+
+            if scheme == "http" || scheme == "https" {
+                openInSystemBrowser(url, gateway: gateway)
+                decisionHandler(.cancel)
+                return
+            }
+
+            if (scheme == "blob" || scheme == "data") && navigationAction.targetFrame?.isMainFrame == false {
+                decisionHandler(.allow)
+                return
+            }
+
+            decisionHandler(.cancel)
+        }
+
+        @MainActor
+        public func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if let url = navigationAction.request.url,
+               let scheme = url.scheme?.lowercased(),
+               scheme == "http" || scheme == "https" {
+                let gateway = loadedGateway ?? parent.coordinator.localGatewayURL
+                openInSystemBrowser(url, gateway: gateway)
+            }
+            return nil
+        }
+
+        @MainActor
+        public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            parent.applyPendingHashRouteIfNeeded(in: webView)
+        }
+
+        @MainActor
+        private func openInSystemBrowser(_ url: URL, gateway: URL?) {
+            let activeHub = parent.coordinator.summary.activeEndpoint
+                ?? parent.coordinator.hubStore.currentProfile?.orderedEndpoints.first
+            let target = SteveWebView.rewriteExternalGatewayURL(url, gateway: gateway, activeHubEndpoint: activeHub)
+            #if canImport(AppKit)
+            NSWorkspace.shared.open(target)
+            #elseif canImport(UIKit)
+            UIApplication.shared.open(target)
+            #endif
         }
     }
 }

@@ -15,17 +15,38 @@ struct IOSRootView: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            if coordinator.summary.phase == .offline {
-                offlinePairingLanding
+            if !hubStore.hasProfiles {
+                onboardingPairingLanding
             } else if coordinator.localGatewayURL != nil {
                 SteveWebView(coordinator: coordinator, platformName: "ios")
                     .ignoresSafeArea(.container, edges: .bottom)
-            } else {
-                ProgressView("正在连接 Steve Hub…")
-            }
 
-            if coordinator.summary.phase != .offline {
                 floatingHubPill
+
+                if coordinator.summary.phase == .offline {
+                    offlineBanner
+                }
+            } else if let startupError = coordinator.proxyStartupError {
+                VStack(spacing: 14) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.largeTitle)
+                        .foregroundStyle(.orange)
+                    Text(L10n.tr("本地网关启动失败", "Failed to start local gateway"))
+                        .font(.headline)
+                    Text(startupError)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                    Button(L10n.tr("重试", "Retry")) {
+                        coordinator.retryGatewayStartup()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ProgressView(L10n.tr("正在连接 Steve Hub…", "Connecting to Steve Hub…"))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .sheet(isPresented: $coordinator.isHubSwitcherPresented) {
@@ -39,11 +60,46 @@ struct IOSRootView: View {
         .fullScreenCover(isPresented: $coordinator.isQRScannerPresented) {
             QRCodeScannerSheet(coordinator: coordinator)
         }
+        .alert(
+            L10n.tr("确认配对并连接到此 Hub？", "Pair and connect to this Hub?"),
+            isPresented: Binding(
+                get: { coordinator.pendingExternalPairConfirmation != nil },
+                set: { if !$0 { coordinator.cancelPendingExternalPairing() } }
+            ),
+            presenting: coordinator.pendingExternalPairConfirmation
+        ) { _ in
+            Button(L10n.tr("取消", "Cancel"), role: .cancel) {
+                coordinator.cancelPendingExternalPairing()
+            }
+            Button(L10n.tr("确认配对", "Pair")) {
+                Task { await coordinator.confirmPendingExternalPairing() }
+            }
+        } message: { pending in
+            Text(
+                L10n.tr(
+                    "名称：\(pending.displayName)\n目标地址：\n\(pending.endpointsSummary)",
+                    "Name: \(pending.displayName)\nTarget endpoints:\n\(pending.endpointsSummary)"
+                )
+            )
+        }
+        .alert(
+            L10n.tr("配对失败", "Pairing Failed"),
+            isPresented: Binding(
+                get: { coordinator.externalPairErrorMessage != nil },
+                set: { if !$0 { coordinator.externalPairErrorMessage = nil } }
+            )
+        ) {
+            Button(L10n.tr("好", "OK"), role: .cancel) {
+                coordinator.externalPairErrorMessage = nil
+            }
+        } message: {
+            Text(coordinator.externalPairErrorMessage ?? "")
+        }
     }
 
     private var floatingHubPill: some View {
         Menu {
-            Section("切换 Hub") {
+            Section(L10n.tr("切换 Hub", "Switch Hub")) {
                 ForEach(hubStore.profiles) { profile in
                     Button {
                         coordinator.switchToHub(id: profile.id)
@@ -60,17 +116,17 @@ struct IOSRootView: View {
             Button {
                 coordinator.isQRScannerPresented = true
             } label: {
-                Label("扫码配对新 Hub…", systemImage: "qrcode.viewfinder")
+                Label(L10n.tr("扫码配对新 Hub…", "Scan QR to Pair…"), systemImage: "qrcode.viewfinder")
             }
             Button {
                 coordinator.isHubSwitcherPresented = true
             } label: {
-                Label("管理与添加 Hub…", systemImage: "server.rack")
+                Label(L10n.tr("管理与添加 Hub…", "Manage & Add Hubs…"), systemImage: "server.rack")
             }
             Button {
                 coordinator.reconnectActiveHub()
             } label: {
-                Label("重新连接", systemImage: "arrow.clockwise")
+                Label(L10n.tr("重新连接", "Reconnect"), systemImage: "arrow.clockwise")
             }
         } label: {
             HStack(spacing: 5) {
@@ -93,11 +149,60 @@ struct IOSRootView: View {
         .padding(.trailing, 12)
     }
 
-    private var offlinePairingLanding: some View {
+    private var offlineBanner: some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 10) {
+                Image(systemName: "wifi.slash")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L10n.tr("无法连接 \(hubStore.activeProfile.name)", "Cannot reach \(hubStore.activeProfile.name)"))
+                        .font(.footnote.weight(.semibold))
+                        .lineLimit(1)
+                    Text(coordinator.summary.errorMessage ?? hubStore.activeProfile.primaryDisplayAddress)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Button {
+                    coordinator.isQRScannerPresented = true
+                } label: {
+                    Image(systemName: "qrcode.viewfinder")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button(L10n.tr("切换", "Switch")) {
+                    coordinator.isHubSwitcherPresented = true
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button(L10n.tr("重试", "Retry")) {
+                    coordinator.reconnectActiveHub()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var onboardingPairingLanding: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 24) {
-                    Spacer(minLength: 20)
+                    Spacer(minLength: 24)
 
                     VStack(spacing: 10) {
                         ZStack {
@@ -108,80 +213,37 @@ struct IOSRootView: View {
                                 .font(.system(size: 34, weight: .medium))
                                 .foregroundStyle(Color.accentColor)
                         }
-                        Text("连接到你的 Steve Hub")
+                        Text(L10n.tr("连接到你的 Steve Hub", "Connect to Your Steve Hub"))
                             .font(.title2.weight(.bold))
-                        Text(hubStore.activeProfile.isLocalDefault
-                             ? "当前未在本机发现运行中的 Hub（127.0.0.1:8440）。打开 Mac 或网页端「设置 · 访问与客户端」，扫描配对二维码即可连接（有公网默认走公网，无公网走内网）。"
-                             : "无法连接到「\(hubStore.activeProfile.name)」（\(hubStore.activeProfile.primaryDisplayAddress)）。")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 8)
+                        Text(
+                            L10n.tr(
+                                "打开 Mac 客户端或网页端「设置 · 访问与客户端」，扫描配对二维码即可一键登录并连接（有公网地址默认走公网连接，无公网走局域网）。",
+                                "Open Mac or Web Settings -> Access & Clients and scan the pairing QR code to sign in and connect (uses public URL by default when configured, otherwise LAN)."
+                            )
+                        )
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 8)
                     }
 
-                    VStack(spacing: 12) {
-                        Button {
-                            coordinator.isQRScannerPresented = true
-                        } label: {
-                            Label("扫码配对连接", systemImage: "qrcode.viewfinder")
-                                .font(.headline)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 6)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-
-                        Button {
-                            coordinator.reconnectActiveHub()
-                        } label: {
-                            Label("重试当前 Hub（\(hubStore.activeProfile.name)）", systemImage: "arrow.clockwise")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
+                    Button {
+                        coordinator.isQRScannerPresented = true
+                    } label: {
+                        Label(L10n.tr("扫码配对连接", "Scan Pairing QR Code"), systemImage: "qrcode.viewfinder")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
                     }
-
-                    if hubStore.profiles.count > 1 {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("已保存的 Hub")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            ForEach(hubStore.profiles) { profile in
-                                Button {
-                                    coordinator.switchToHub(id: profile.id)
-                                } label: {
-                                    HStack {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(profile.name)
-                                                .font(.body.weight(.medium))
-                                                .foregroundStyle(.primary)
-                                            Text(profile.primaryDisplayAddress)
-                                                .font(.caption.monospaced())
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        Spacer()
-                                        if profile.id == hubStore.activeHubID {
-                                            Image(systemName: "checkmark.circle.fill")
-                                                .foregroundStyle(Color.accentColor)
-                                        } else {
-                                            Image(systemName: "chevron.right")
-                                                .font(.caption)
-                                                .foregroundStyle(.tertiary)
-                                        }
-                                    }
-                                    .padding(12)
-                                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
 
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("或手动输入 Hub 地址")
+                        Text(L10n.tr("或手动输入 Hub 地址", "Or Enter Hub URL Manually"))
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(.secondary)
                         HStack(spacing: 8) {
-                            TextField("http://192.168.1.10:8440 或 https://…", text: $manualAddress)
+                            TextField("http://192.168.1.10:8440 / https://…", text: $manualAddress)
                                 .textFieldStyle(.roundedBorder)
                                 .keyboardType(.URL)
                                 .textInputAutocapitalization(.never)
@@ -192,7 +254,7 @@ struct IOSRootView: View {
                                 if isConnectingManual {
                                     ProgressView()
                                 } else {
-                                    Text("连接")
+                                    Text(L10n.tr("连接", "Connect"))
                                 }
                             }
                             .buttonStyle(.bordered)
@@ -209,15 +271,6 @@ struct IOSRootView: View {
             }
             .navigationTitle("Steve")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        coordinator.isHubSwitcherPresented = true
-                    } label: {
-                        Image(systemName: "server.rack")
-                    }
-                }
-            }
         }
     }
 

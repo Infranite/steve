@@ -4,6 +4,7 @@ import UIKit
 
 @main
 struct SteveIOSApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var coordinator: SteveClientCoordinator
 
     init() {
@@ -16,7 +17,14 @@ struct SteveIOSApp: App {
             platform: "iOS",
             version: version
         )
-        _coordinator = StateObject(wrappedValue: SteveClientCoordinator(webRoot: webRoot, clientDescriptor: descriptor))
+        let hubStore = HubStore(includeLocalDefault: false)
+        _coordinator = StateObject(
+            wrappedValue: SteveClientCoordinator(
+                hubStore: hubStore,
+                webRoot: webRoot,
+                clientDescriptor: descriptor
+            )
+        )
     }
 
     var body: some Scene {
@@ -25,11 +33,14 @@ struct SteveIOSApp: App {
                 .onAppear {
                     coordinator.startIfNeeded()
                 }
+                .onChange(of: scenePhase) { _, newPhase in
+                    if newPhase == .active {
+                        coordinator.handleAppDidBecomeActive()
+                    }
+                }
                 .onOpenURL { url in
                     if url.scheme?.lowercased() == "steve" {
-                        Task {
-                            _ = try? await coordinator.pairWithQRCode(uri: url.absoluteString)
-                        }
+                        coordinator.requestExternalPairingConfirmation(uri: url.absoluteString)
                     }
                 }
         }

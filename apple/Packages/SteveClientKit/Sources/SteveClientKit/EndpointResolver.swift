@@ -4,12 +4,24 @@ public struct HubHelloResponse: Codable, Sendable, Equatable {
     public struct LoginModes: Codable, Sendable, Equatable {
         public var token: Bool
         public var oidc: Bool
+
+        public init(token: Bool, oidc: Bool) {
+            self.token = token
+            self.oidc = oidc
+        }
     }
 
     public var name: String
     public var version: String
     public var api: Int
     public var login: LoginModes
+
+    public init(name: String, version: String, api: Int, login: LoginModes) {
+        self.name = name
+        self.version = version
+        self.api = api
+        self.login = login
+    }
 }
 
 public struct ResolvedHubEndpoint: Sendable, Equatable {
@@ -26,22 +38,32 @@ public struct ResolvedHubEndpoint: Sendable, Equatable {
     }
 }
 
-public enum EndpointResolutionError: Error, LocalizedError, Sendable {
+public enum EndpointResolutionError: Error, LocalizedError, Sendable, Equatable {
     case noCandidates
     case unreachable(tried: [URL])
+    case incompatibleAPI(version: Int)
 
     public var errorDescription: String? {
         switch self {
         case .noCandidates:
-            return "未配置可用的 Hub 地址"
+            return L10n.tr("未配置可用的 Hub 地址", "No Hub address configured")
         case .unreachable(let tried):
             let joined = tried.map(URLNormalizer.canonicalOrigin).joined(separator: ", ")
-            return "无法连接到 Hub（已尝试：\(joined)）"
+            return L10n.tr(
+                "无法连接到 Hub（已尝试：\(joined)）",
+                "Could not reach Hub (tried: \(joined))"
+            )
+        case .incompatibleAPI(let version):
+            return L10n.tr(
+                "Hub 接口版本（v\(version)）与当前客户端不兼容，请升级客户端或 Hub",
+                "Hub API version (v\(version)) is incompatible with this client"
+            )
         }
     }
 }
 
 public struct EndpointResolver: Sendable {
+    public static let supportedAPIVersion = 1
     public typealias Probe = @Sendable (URL) async throws -> HubHelloResponse
 
     private let probe: Probe
@@ -52,7 +74,7 @@ public struct EndpointResolver: Sendable {
 
     /// Resolves a `HubProfile` following the routing contract:
     /// - When `profile.publicURL` is configured, connect via `publicURL` first by default; fall back to `lanURLs` if unreachable.
-    /// - When `profile.publicURL` is absent, connect via `lanURLs`.
+    /// - When `profile.publicURL` is absent, connect via `lanURLs` (probing multiple LAN candidates concurrently, first responder wins).
     public func resolve(profile: HubProfile) async throws -> ResolvedHubEndpoint {
         try await resolve(publicURL: profile.publicURL, lanURLs: profile.lanURLs)
     }
@@ -63,39 +85,110 @@ public struct EndpointResolver: Sendable {
     }
 
     public func resolve(publicURL: URL?, lanURLs: [URL]) async throws -> ResolvedHubEndpoint {
-        var candidates: [URL] = []
+        var lanCandidates: [URL] = []
         var seen = Set<String>()
         if let pub = publicURL {
             seen.insert(URLNormalizer.canonicalOrigin(pub))
-            candidates.append(pub)
         }
         for lan in lanURLs {
             if seen.insert(URLNormalizer.canonicalOrigin(lan)).inserted {
-                candidates.append(lan)
+                lanCandidates.append(lan)
             }
         }
-        guard !candidates.isEmpty else {
+
+        let allCandidates = (publicURL.map { [$0] } ?? []) + lanCandidates
+        guard !allCandidates.isEmpty else {
             throw EndpointResolutionError.noCandidates
         }
 
-        let publicOrigin = publicURL.map(URLNormalizer.canonicalOrigin)
-        for candidate in candidates {
-            do {
-                let hello = try await probe(candidate)
-                guard hello.name == "steve" else { continue }
-                let route = HubRouteKind.classify(url: candidate, explicitPublicURL: publicURL)
-                let usedFallback = (publicOrigin != nil) && (URLNormalizer.canonicalOrigin(candidate) != publicOrigin)
-                return ResolvedHubEndpoint(
-                    url: candidate,
-                    route: route,
-                    hello: hello,
-                    usedFallbackFromPublic: usedFallback
-                )
-            } catch {
-                continue
+        var incompatibleVersion: Int?
+
+        // 1. Public URL takes strict priority when configured.
+        if let pub = publicURL {
+            if let hello = try? await probe(pub), hello.name == "steve" {
+                if hello.api == Self.supportedAPIVersion {
+                    return ResolvedHubEndpoint(
+                        url: pub,
+                        route: HubRouteKind.classify(url: pub, explicitPublicURL: pub),
+                        hello: hello,
+                        usedFallbackFromPublic: false
+                    )
+                } else {
+                    incompatibleVersion = hello.api
+                }
             }
         }
-        throw EndpointResolutionError.unreachable(tried: candidates)
+
+        // 2. Probe LAN candidates concurrently; first compatible responder wins.
+        if !lanCandidates.isEmpty {
+            let probeFn = self.probe
+            let (winner, badAPI) = await Self.raceCandidates(lanCandidates, probe: probeFn)
+            if let (url, hello) = winner {
+                return ResolvedHubEndpoint(
+                    url: url,
+                    route: HubRouteKind.classify(url: url, explicitPublicURL: publicURL),
+                    hello: hello,
+                    usedFallbackFromPublic: publicURL != nil
+                )
+            }
+            if let badAPI {
+                incompatibleVersion = badAPI
+            }
+        }
+
+        if let incompatibleVersion {
+            throw EndpointResolutionError.incompatibleAPI(version: incompatibleVersion)
+        }
+        throw EndpointResolutionError.unreachable(tried: allCandidates)
+    }
+
+    private enum ProbeOutcome: Sendable {
+        case ok(URL, HubHelloResponse)
+        case incompatible(Int)
+        case failed
+    }
+
+    private static func raceCandidates(
+        _ candidates: [URL],
+        probe: @escaping Probe
+    ) async -> ((URL, HubHelloResponse)?, Int?) {
+        if candidates.count == 1 {
+            let only = candidates[0]
+            guard let hello = try? await probe(only), hello.name == "steve" else {
+                return (nil, nil)
+            }
+            if hello.api == supportedAPIVersion {
+                return ((only, hello), nil)
+            }
+            return (nil, hello.api)
+        }
+
+        return await withTaskGroup(of: ProbeOutcome.self) { group in
+            for candidate in candidates {
+                group.addTask {
+                    guard let hello = try? await probe(candidate), hello.name == "steve" else {
+                        return .failed
+                    }
+                    if hello.api == supportedAPIVersion {
+                        return .ok(candidate, hello)
+                    }
+                    return .incompatible(hello.api)
+                }
+            }
+            var seenIncompatible: Int?
+            while let next = await group.next() {
+                switch next {
+                case .ok(let url, let hello):
+                    group.cancelAll()
+                    return ((url, hello), nil)
+                case .incompatible(let ver):
+                    seenIncompatible = ver
+                case .failed:
+                    continue
+                }
+            }
+            return (nil, seenIncompatible)
+        }
     }
 
     public static let defaultProbe: Probe = { baseURL in

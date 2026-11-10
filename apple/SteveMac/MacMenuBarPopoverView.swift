@@ -85,7 +85,7 @@ struct MacMenuBarPopoverView: View {
                     .font(.caption)
             }
             .buttonStyle(.borderless)
-            .help("刷新 Hub 状态")
+            .help(L10n.tr("刷新 Hub 状态", "Refresh Hub status"))
         }
     }
 
@@ -94,16 +94,16 @@ struct MacMenuBarPopoverView: View {
         return VStack(spacing: 8) {
             HStack(spacing: 8) {
                 MetricTile(
-                    title: "运行中会话",
+                    title: L10n.tr("运行中会话", "Active Sessions"),
                     value: summary.phase == .connected ? "\(summary.runningSessions)" : "—",
-                    subtitle: summary.steveThinking ? "Steve 正在思考" : "空闲待命",
+                    subtitle: summary.steveThinking ? L10n.tr("Steve 正在思考", "Steve is thinking") : L10n.tr("空闲待命", "Idle"),
                     icon: "terminal",
                     tint: summary.runningSessions > 0 || summary.steveThinking ? .blue : .secondary
                 )
                 MetricTile(
-                    title: "待确认事项",
+                    title: L10n.tr("待确认事项", "Open Decisions"),
                     value: summary.phase == .connected ? "\(summary.openDecisions)" : "—",
-                    subtitle: summary.openDecisions > 0 ? "等待你的拍板" : "全部已处理",
+                    subtitle: summary.openDecisions > 0 ? L10n.tr("等待你的拍板", "Awaiting decision") : L10n.tr("全部已处理", "All clear"),
                     icon: "tray.full",
                     tint: summary.openDecisions > 0 ? .orange : .secondary,
                     onTap: summary.openDecisions > 0 ? {
@@ -114,9 +114,9 @@ struct MacMenuBarPopoverView: View {
 
             HStack(spacing: 8) {
                 MetricTile(
-                    title: "在线设备 / Node",
+                    title: L10n.tr("在线设备 / Node", "Online Nodes"),
                     value: summary.phase == .connected ? "\(summary.onlineDevices)/\(max(summary.totalDevices, summary.onlineDevices))" : "—",
-                    subtitle: summary.onlineDevices > 0 ? "设备健康在线" : "未连接执行节点",
+                    subtitle: summary.onlineDevices > 0 ? L10n.tr("设备健康在线", "Healthy") : L10n.tr("未连接执行节点", "No nodes online"),
                     icon: "cpu",
                     tint: summary.onlineDevices > 0 ? .green : .secondary,
                     onTap: {
@@ -124,9 +124,9 @@ struct MacMenuBarPopoverView: View {
                     }
                 )
                 MetricTile(
-                    title: "连接路由",
+                    title: L10n.tr("连接路由", "Route"),
                     value: summary.route.displayTitle,
-                    subtitle: hubStore.activeProfile.publicURL != nil ? "公网默认" : "内网 / 本机",
+                    subtitle: hubStore.activeProfile.publicURL != nil ? L10n.tr("公网默认", "Public default") : L10n.tr("内网 / 本机", "LAN / Local"),
                     icon: routeSymbol,
                     tint: .primary
                 )
@@ -141,7 +141,7 @@ struct MacMenuBarPopoverView: View {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.up.circle.fill")
                     .foregroundStyle(.blue)
-                Text("发现新版本 \(version)，点击查看升级")
+                Text(L10n.tr("发现新版本 \(version)，点击查看升级", "Update \(version) available — click to view"))
                     .font(.caption)
                     .foregroundStyle(.primary)
                 Spacer()
@@ -159,11 +159,11 @@ struct MacMenuBarPopoverView: View {
     private var hubQuickSwitchSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("切换 Hub")
+                Text(L10n.tr("切换 Hub", "Switch Hub"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("添加 / 管理…") {
+                Button(L10n.tr("添加 / 管理…", "Manage…")) {
                     activateMainWindow(route: nil)
                     coordinator.isHubSwitcherPresented = true
                 }
@@ -183,7 +183,7 @@ struct MacMenuBarPopoverView: View {
                             .font(.callout)
                             .lineLimit(1)
                         Spacer()
-                        Text(profile.isLocalDefault ? "本机" : (profile.publicURL != nil ? "公网" : "内网"))
+                        Text(profile.isLocalDefault ? L10n.tr("本机", "Local") : (profile.publicURL != nil ? L10n.tr("公网", "Public") : L10n.tr("内网", "LAN")))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -202,7 +202,7 @@ struct MacMenuBarPopoverView: View {
                 Button {
                     activateMainWindow(route: nil)
                 } label: {
-                    Label("打开主窗口", systemImage: "macwindow")
+                    Label(L10n.tr("打开主窗口", "Open Window"), systemImage: "macwindow")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -212,7 +212,7 @@ struct MacMenuBarPopoverView: View {
                     activateMainWindow(route: nil)
                     coordinator.isPairQRPresented = true
                 } label: {
-                    Label("手机扫码配对", systemImage: "qrcode")
+                    Label(L10n.tr("手机扫码配对", "Pair Phone"), systemImage: "qrcode")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -220,7 +220,7 @@ struct MacMenuBarPopoverView: View {
             }
 
             HStack {
-                Button("设置 · 访问与客户端") {
+                Button(L10n.tr("设置 · 访问与客户端", "Settings · Access")) {
                     activateMainWindow(route: "#/settings/access")
                 }
                 .buttonStyle(.borderless)
@@ -229,7 +229,7 @@ struct MacMenuBarPopoverView: View {
 
                 Spacer()
 
-                Button("退出 Steve") {
+                Button(L10n.tr("退出 Steve", "Quit Steve")) {
                     NSApplication.shared.terminate(nil)
                 }
                 .buttonStyle(.borderless)
@@ -275,10 +275,10 @@ struct MacMenuBarPopoverView: View {
 
     private var statusText: String {
         switch coordinator.summary.phase {
-        case .connected: return "已连接"
-        case .connecting: return "连接中"
-        case .authRequired: return "待登录"
-        case .offline: return "离线"
+        case .connected: return L10n.tr("已连接", "Connected")
+        case .connecting: return L10n.tr("连接中", "Connecting")
+        case .authRequired: return L10n.tr("待登录", "Sign in")
+        case .offline: return L10n.tr("离线", "Offline")
         }
     }
 

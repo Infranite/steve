@@ -39,8 +39,6 @@
 	<string>在未配置公网地址或公网不可达时，通过局域网连接到你的 Steve Hub。</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>

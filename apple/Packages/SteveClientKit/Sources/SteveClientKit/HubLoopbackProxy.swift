@@ -1,42 +1,93 @@
+import CryptoKit
 import Foundation
 import Network
+import Security
 
-/// Serves the bundled Steve web UI on `http://127.0.0.1:<ephemeral>` and proxies `/api/*`, `/auth/*`, and
-/// `/healthz` to the currently selected Hub endpoint while injecting Keychain `Authorization: Bearer` credentials
+/// Serves the bundled Steve web UI on `http://127.0.0.1:<port>` and proxies `/api/*`, `/auth/*`, and
+/// `/healthz` to the currently selected Hub endpoint while enforcing `Host`/`Origin`/per-launch cookie
+/// authentication, isolating cookies per Hub, injecting Keychain `Authorization: Bearer` credentials,
 /// and streaming `/api/stream` Server-Sent Events without buffering.
 public final class HubLoopbackProxy: @unchecked Sendable {
+    public static let proxyAuthCookieName = "steve_proxy_key"
+
     public struct ActiveTarget: Sendable {
+        public var hubID: String
         public var baseURL: URL?
         public var credential: String?
 
-        public init(baseURL: URL? = nil, credential: String? = nil) {
+        public init(hubID: String = "", baseURL: URL? = nil, credential: String? = nil) {
+            self.hubID = hubID
             self.baseURL = baseURL
             self.credential = credential
         }
     }
 
+    private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            // Never auto-follow upstream redirects or forward Authorization headers across origins.
+            completionHandler(nil)
+        }
+    }
+
+    public let proxyAuthToken: String
+    public var authCookieHeader: String {
+        "\(Self.proxyAuthCookieName)=\(proxyAuthToken)"
+    }
+
     private let webRoot: URL?
+    private let preferredPortDefaults: UserDefaults?
+    private let preferredPortKey: String
     private let queue = DispatchQueue(label: "app.steve.client.loopback-proxy", qos: .userInitiated)
     private let lock = NSLock()
     private var target = ActiveTarget()
     private var listener: NWListener?
+    private var isListening = false
+    private var lastBoundPort: UInt16 = 0
+    private let redirectDelegate = NoRedirectDelegate()
     private let session: URLSession
 
-    public private(set) var port: UInt16 = 0
-
-    public var localOriginURL: URL? {
-        guard port > 0 else { return nil }
-        return URL(string: "http://127.0.0.1:\(port)")
+    public private(set) var port: UInt16 {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return isListening ? lastBoundPort : 0
+        }
+        set {
+            lock.lock()
+            lastBoundPort = newValue
+            lock.unlock()
+        }
     }
 
-    public init(webRoot: URL? = nil) {
+    public var localOriginURL: URL? {
+        let p = port
+        guard p > 0 else { return nil }
+        return URL(string: "http://127.0.0.1:\(p)")
+    }
+
+    public init(
+        webRoot: URL? = nil,
+        preferredPortDefaults: UserDefaults? = nil,
+        preferredPortKey: String = "steve.apple.preferredProxyPort"
+    ) {
         self.webRoot = webRoot
+        self.preferredPortDefaults = preferredPortDefaults
+        self.preferredPortKey = preferredPortKey
+        self.proxyAuthToken = Self.generateRandomHexToken()
+
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 60
         cfg.timeoutIntervalForResource = 86_400
-        cfg.httpCookieAcceptPolicy = .always
-        cfg.httpShouldSetCookies = true
-        self.session = URLSession(configuration: cfg)
+        cfg.httpCookieAcceptPolicy = .never
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieStorage = nil
+        self.session = URLSession(configuration: cfg, delegate: redirectDelegate, delegateQueue: nil)
     }
 
     public func updateTarget(_ newTarget: ActiveTarget) {
@@ -53,58 +104,119 @@ public final class HubLoopbackProxy: @unchecked Sendable {
 
     @discardableResult
     public func start() async throws -> URL {
+        try await ensureRunning()
+    }
+
+    @discardableResult
+    public func ensureRunning() async throws -> URL {
         if let existing = localOriginURL {
             return existing
         }
-        let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = true
-        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
 
-        let nwListener = try NWListener(using: params)
-        self.listener = nwListener
+        let rememberedPort: UInt16? = {
+            lock.lock()
+            let mem = lastBoundPort
+            lock.unlock()
+            if (1024...65535).contains(Int(mem)) {
+                return mem
+            }
+            if let saved = preferredPortDefaults?.integer(forKey: preferredPortKey),
+               (1024...65535).contains(saved) {
+                return UInt16(saved)
+            }
+            return nil
+        }()
 
-        let boundPort: UInt16 = try await withCheckedThrowingContinuation { continuation in
-            final class ResumeGate: @unchecked Sendable {
-                let lock = NSLock()
-                var done = false
-                func runOnce(_ block: () -> Void) {
-                    lock.lock()
-                    defer { lock.unlock() }
-                    guard !done else { return }
-                    done = true
-                    block()
-                }
-            }
-            let gate = ResumeGate()
-
-            nwListener.newConnectionHandler = { [weak self] conn in
-                self?.accept(connection: conn)
-            }
-            nwListener.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if let p = nwListener.port?.rawValue, p > 0 {
-                        gate.runOnce { continuation.resume(returning: p) }
-                    }
-                case .failed(let err):
-                    gate.runOnce { continuation.resume(throwing: err) }
-                case .cancelled:
-                    gate.runOnce { continuation.resume(throwing: CancellationError()) }
-                default:
-                    break
-                }
-            }
-            nwListener.start(queue: self.queue)
+        let bound: (NWListener, UInt16)
+        if let candidate = rememberedPort,
+           let nwPort = NWEndpoint.Port(rawValue: candidate),
+           let reused = try? await bindListener(port: nwPort) {
+            bound = reused
+        } else {
+            bound = try await bindListener(port: .any)
         }
 
-        self.port = boundPort
+        let (nwListener, boundPort) = bound
+        nwListener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .failed, .cancelled:
+                self.lock.lock()
+                if self.listener === nwListener {
+                    self.isListening = false
+                    self.listener = nil
+                }
+                self.lock.unlock()
+            default:
+                break
+            }
+        }
+
+        lock.withLock {
+            listener?.cancel()
+            listener = nwListener
+            lastBoundPort = boundPort
+            isListening = true
+        }
+
+        preferredPortDefaults?.set(Int(boundPort), forKey: preferredPortKey)
         return URL(string: "http://127.0.0.1:\(boundPort)")!
     }
 
     public func stop() {
-        listener?.cancel()
+        lock.lock()
+        let active = listener
         listener = nil
-        port = 0
+        isListening = false
+        lock.unlock()
+        active?.cancel()
+    }
+
+    private func bindListener(port requestedPort: NWEndpoint.Port) async throws -> (NWListener, UInt16) {
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = (requestedPort == .any)
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: requestedPort)
+
+        let nwListener = try NWListener(using: params)
+        do {
+            let boundPort: UInt16 = try await withCheckedThrowingContinuation { continuation in
+                final class ResumeGate: @unchecked Sendable {
+                    let lock = NSLock()
+                    var done = false
+                    func runOnce(_ block: () -> Void) {
+                        lock.lock()
+                        defer { lock.unlock() }
+                        guard !done else { return }
+                        done = true
+                        block()
+                    }
+                }
+                let gate = ResumeGate()
+
+                nwListener.newConnectionHandler = { [weak self] conn in
+                    self?.accept(connection: conn)
+                }
+                nwListener.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        if let p = nwListener.port?.rawValue, p > 0 {
+                            gate.runOnce { continuation.resume(returning: p) }
+                        }
+                    case .failed(let err):
+                        gate.runOnce { continuation.resume(throwing: err) }
+                    case .cancelled:
+                        gate.runOnce { continuation.resume(throwing: CancellationError()) }
+                    default:
+                        break
+                    }
+                }
+                nwListener.start(queue: self.queue)
+            }
+            return (nwListener, boundPort)
+        } catch {
+            nwListener.cancel()
+            throw error
+        }
     }
 
     private func accept(connection: NWConnection) {
@@ -118,13 +230,38 @@ public final class HubLoopbackProxy: @unchecked Sendable {
         }
     }
 
+    private var hasLocalWebBundle: Bool {
+        guard let root = webRoot else { return false }
+        return FileManager.default.fileExists(atPath: root.path)
+    }
+
     private func handleConnection(_ connection: NWConnection) async {
         defer { connection.cancel() }
         do {
             guard let request = try await readHTTPRequest(from: connection) else {
                 return
             }
-            if Self.isProxiedPath(request.path) {
+            let proxied = Self.isProxiedPath(request.path)
+            let requiresSecret = proxied || !hasLocalWebBundle
+            if let rejection = validateCaller(request: request, requiresSecret: requiresSecret) {
+                let body = Data("{\"error\":\"\(rejection)\"}".utf8)
+                try await sendAll(
+                    data: Self.serializeResponseHead(
+                        status: 403,
+                        reason: "Forbidden",
+                        headers: [
+                            ("Content-Type", "application/json; charset=utf-8"),
+                            ("Content-Length", "\(body.count)"),
+                            ("Cache-Control", "no-store"),
+                            ("Connection", "close"),
+                        ]
+                    ) + body,
+                    over: connection
+                )
+                return
+            }
+
+            if proxied {
                 try await forwardToHub(request: request, over: connection)
             } else {
                 try await serveStaticAsset(request: request, over: connection)
@@ -146,12 +283,198 @@ public final class HubLoopbackProxy: @unchecked Sendable {
         }
     }
 
+    private func validateCaller(request: ParsedHTTPRequest, requiresSecret: Bool) -> String? {
+        let currentPort = self.port
+        guard currentPort > 0 else { return "proxy_stopped" }
+        let expectedHost = "127.0.0.1:\(currentPort)"
+        let expectedOrigin = "http://\(expectedHost)"
+
+        let hostHeaders = request.headers.filter { $0.0.lowercased() == "host" }
+        guard hostHeaders.count == 1,
+              hostHeaders[0].1.lowercased() == expectedHost else {
+            return "forbidden_host"
+        }
+
+        for (name, value) in request.headers where name.lowercased() == "origin" {
+            if !value.isEmpty && value.lowercased() != expectedOrigin {
+                return "forbidden_origin"
+            }
+        }
+
+        for (name, value) in request.headers where name.lowercased() == "sec-fetch-site" {
+            if value.lowercased() == "cross-site" {
+                return "forbidden_fetch_site"
+            }
+        }
+
+        if requiresSecret {
+            let cookies = Self.parseRequestCookies(from: request.headers)
+            guard let supplied = cookies[Self.proxyAuthCookieName],
+                  Self.constantTimeEquals(supplied, proxyAuthToken) else {
+                return "forbidden_proxy_key"
+            }
+        }
+        return nil
+    }
+
     private static func isProxiedPath(_ pathOnly: String) -> Bool {
         pathOnly == "/api"
             || pathOnly.hasPrefix("/api/")
             || pathOnly == "/auth"
             || pathOnly.hasPrefix("/auth/")
             || pathOnly == "/healthz"
+    }
+
+    // MARK: - Cookie Isolation & Per-Launch Secret Helpers
+
+    public static func hubCookiePrefix(for hubID: String) -> String {
+        guard !hubID.isEmpty else { return "steve_h_default_" }
+        let digest = SHA256.hash(data: Data(hubID.utf8))
+        let hex12 = digest.prefix(6).map { String(format: "%02x", $0) }.joined()
+        return "steve_h_\(hex12)_"
+    }
+
+    private static func parseRequestCookies(from headers: [(String, String)]) -> [String: String] {
+        var map: [String: String] = [:]
+        for (name, value) in headers where name.lowercased() == "cookie" {
+            for pair in value.split(separator: ";") {
+                let trimmed = pair.trimmingCharacters(in: .whitespaces)
+                guard let eq = trimmed.firstIndex(of: "=") else { continue }
+                let k = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
+                let v = String(trimmed[trimmed.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+                if !k.isEmpty {
+                    map[k] = v
+                }
+            }
+        }
+        return map
+    }
+
+    /// Extracts only cookies belonging to `hubID` (unwrapping their `steve_h_<hash>_` prefix) and never forwards `steve_proxy_key` or another Hub's cookies.
+    private static func upstreamCookieHeader(from headers: [(String, String)], hubID: String) -> String? {
+        let prefix = hubCookiePrefix(for: hubID)
+        var pairs: [String] = []
+        for (name, value) in headers where name.lowercased() == "cookie" {
+            for pair in value.split(separator: ";") {
+                let trimmed = pair.trimmingCharacters(in: .whitespaces)
+                guard let eq = trimmed.firstIndex(of: "=") else { continue }
+                let k = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
+                let v = String(trimmed[trimmed.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+                if k == proxyAuthCookieName { continue }
+                guard k.hasPrefix(prefix) else { continue }
+                let unwrappedName = String(k.dropFirst(prefix.count))
+                if !unwrappedName.isEmpty {
+                    pairs.append("\(unwrappedName)=\(v)")
+                }
+            }
+        }
+        return pairs.isEmpty ? nil : pairs.joined(separator: "; ")
+    }
+
+    /// Splits a CFNetwork-folded `Set-Cookie` header value into individual cookies without breaking `Expires=Wed, 21 Oct ...` dates.
+    internal static func splitFoldedSetCookieHeader(_ headerValue: String) -> [String] {
+        let chars = Array(headerValue)
+        var results: [String] = []
+        var segmentStart = 0
+        var i = 0
+
+        while i < chars.count {
+            if chars[i] == "," {
+                var j = i + 1
+                while j < chars.count && (chars[j] == " " || chars[j] == "\t") {
+                    j += 1
+                }
+                var k = j
+                while k < chars.count && isCookieTokenChar(chars[k]) {
+                    k += 1
+                }
+                if k > j && k < chars.count && chars[k] == "=" {
+                    let piece = String(chars[segmentStart..<i]).trimmingCharacters(in: .whitespaces)
+                    if !piece.isEmpty {
+                        results.append(piece)
+                    }
+                    segmentStart = j
+                    i = k
+                    continue
+                }
+            }
+            i += 1
+        }
+        let tail = String(chars[segmentStart..<chars.count]).trimmingCharacters(in: .whitespaces)
+        if !tail.isEmpty {
+            results.append(tail)
+        }
+        return results
+    }
+
+    private static func isCookieTokenChar(_ ch: Character) -> Bool {
+        guard let scalar = ch.unicodeScalars.first, ch.unicodeScalars.count == 1 else { return false }
+        let v = scalar.value
+        if (v >= 0x30 && v <= 0x39) || (v >= 0x41 && v <= 0x5A) || (v >= 0x61 && v <= 0x7A) {
+            return true
+        }
+        switch ch {
+        case "!", "#", "$", "%", "&", "'", "*", "+", "-", ".", "^", "_", "`", "|", "~":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Namespaces upstream cookies under `steve_h_<hash>_` and strips `Secure`/`Domain=...` attributes for `http://127.0.0.1`.
+    internal static func rewriteCookieForLoopback(_ cookieHeader: String, hubID: String) -> String {
+        let prefix = hubCookiePrefix(for: hubID)
+        let parts = cookieHeader.split(separator: ";", omittingEmptySubsequences: false)
+        var kept: [String] = []
+        for (index, part) in parts.enumerated() {
+            let trimmed = part.trimmingCharacters(in: .whitespaces)
+            if index == 0 {
+                if let eq = trimmed.firstIndex(of: "=") {
+                    let rawName = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
+                    let valPart = String(trimmed[eq...])
+                    if rawName.hasPrefix(prefix) {
+                        kept.append("\(rawName)\(valPart)")
+                    } else {
+                        kept.append("\(prefix)\(rawName)\(valPart)")
+                    }
+                } else {
+                    kept.append(trimmed)
+                }
+                continue
+            }
+            let lower = trimmed.lowercased()
+            if lower == "secure" || lower.hasPrefix("domain=") {
+                continue
+            }
+            if lower.hasPrefix("samesite=none") {
+                kept.append("SameSite=Lax")
+                continue
+            }
+            kept.append(trimmed)
+        }
+        return kept.joined(separator: "; ")
+    }
+
+    private static func generateRandomHexToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        if status != errSecSuccess {
+            let fallback = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+                + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            return fallback.lowercased()
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+        let ab = Array(a.utf8)
+        let bb = Array(b.utf8)
+        guard ab.count == bb.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<ab.count {
+            diff |= ab[i] ^ bb[i]
+        }
+        return diff == 0
     }
 
     // MARK: - Static Web Bundle Serving
@@ -267,6 +590,7 @@ public final class HubLoopbackProxy: @unchecked Sendable {
         let hopByHop: Set<String> = [
             "host", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
             "te", "trailer", "transfer-encoding", "upgrade", "content-length", "origin", "referer",
+            "cookie", "accept-encoding",
         ]
         var hasAuthHeader = false
         for (name, value) in request.headers {
@@ -274,6 +598,11 @@ public final class HubLoopbackProxy: @unchecked Sendable {
             if hopByHop.contains(lower) { continue }
             if lower == "authorization" { hasAuthHeader = true }
             urlReq.setValue(value, forHTTPHeaderField: name)
+        }
+        urlReq.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+
+        if let unwrappedCookies = Self.upstreamCookieHeader(from: request.headers, hubID: active.hubID) {
+            urlReq.setValue(unwrappedCookies, forHTTPHeaderField: "Cookie")
         }
         if !hasAuthHeader, let cred = active.credential, !cred.isEmpty {
             urlReq.setValue("Bearer \(cred)", forHTTPHeaderField: "Authorization")
@@ -288,7 +617,7 @@ public final class HubLoopbackProxy: @unchecked Sendable {
             guard let http = response as? HTTPURLResponse else {
                 throw URLError(.badServerResponse)
             }
-            var outHeaders = Self.filteredUpstreamHeaders(from: http, stripContentLength: true)
+            var outHeaders = Self.filteredUpstreamHeaders(from: http, hubID: active.hubID, stripContentLength: true)
             outHeaders.append(("Cache-Control", "no-cache"))
             outHeaders.append(("Connection", "close"))
             let head = Self.serializeResponseHead(
@@ -316,7 +645,7 @@ public final class HubLoopbackProxy: @unchecked Sendable {
             guard let http = response as? HTTPURLResponse else {
                 throw URLError(.badServerResponse)
             }
-            var outHeaders = Self.filteredUpstreamHeaders(from: http, stripContentLength: true)
+            var outHeaders = Self.filteredUpstreamHeaders(from: http, hubID: active.hubID, stripContentLength: true)
             outHeaders.append(("Content-Length", "\(data.count)"))
             outHeaders.append(("Connection", "close"))
             let head = Self.serializeResponseHead(
@@ -338,7 +667,11 @@ public final class HubLoopbackProxy: @unchecked Sendable {
         return URL(string: baseStr + suffix)
     }
 
-    private static func filteredUpstreamHeaders(from http: HTTPURLResponse, stripContentLength: Bool) -> [(String, String)] {
+    private static func filteredUpstreamHeaders(
+        from http: HTTPURLResponse,
+        hubID: String,
+        stripContentLength: Bool
+    ) -> [(String, String)] {
         let blocked: Set<String> = [
             "connection", "keep-alive", "transfer-encoding", "content-encoding",
             "strict-transport-security",
@@ -350,35 +683,14 @@ public final class HubLoopbackProxy: @unchecked Sendable {
             if blocked.contains(lower) { continue }
             if stripContentLength && lower == "content-length" { continue }
             if lower == "set-cookie" {
-                out.append((k, rewriteCookieForLoopback(v)))
+                for singleCookie in splitFoldedSetCookieHeader(v) {
+                    out.append(("Set-Cookie", rewriteCookieForLoopback(singleCookie, hubID: hubID)))
+                }
             } else {
                 out.append((k, v))
             }
         }
         return out
-    }
-
-    /// Strips `Secure` and `Domain=...` attributes when proxying over `http://127.0.0.1` so WebKit keeps session cookies too.
-    private static func rewriteCookieForLoopback(_ cookieHeader: String) -> String {
-        let parts = cookieHeader.split(separator: ";", omittingEmptySubsequences: false)
-        var kept: [String] = []
-        for (index, part) in parts.enumerated() {
-            let trimmed = part.trimmingCharacters(in: .whitespaces)
-            if index == 0 {
-                kept.append(trimmed)
-                continue
-            }
-            let lower = trimmed.lowercased()
-            if lower == "secure" || lower.hasPrefix("domain=") {
-                continue
-            }
-            if lower.hasPrefix("samesite=none") {
-                kept.append("SameSite=Lax")
-                continue
-            }
-            kept.append(trimmed)
-        }
-        return kept.joined(separator: "; ")
     }
 
     // MARK: - Minimal HTTP/1.1 Parser & Serializer

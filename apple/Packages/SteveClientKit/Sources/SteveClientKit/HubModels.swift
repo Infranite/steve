@@ -1,5 +1,35 @@
 import Foundation
 
+public enum L10n {
+    public static var prefersChinese: Bool {
+        guard let primary = Locale.preferredLanguages.first?.lowercased() else {
+            return true
+        }
+        return primary.hasPrefix("zh")
+    }
+
+    public static func tr(_ zh: String, _ en: String) -> String {
+        prefersChinese ? zh : en
+    }
+
+    public static var acceptLanguageHeader: String {
+        let langs = Locale.preferredLanguages.prefix(3)
+        guard !langs.isEmpty else {
+            return "zh-CN,en;q=0.8"
+        }
+        var parts: [String] = []
+        for (idx, lang) in langs.enumerated() {
+            if idx == 0 {
+                parts.append(lang)
+            } else {
+                let q = max(0.3, 1.0 - Double(idx) * 0.2)
+                parts.append(String(format: "%@;q=%.1f", lang, q))
+            }
+        }
+        return parts.joined(separator: ",")
+    }
+}
+
 public enum HubRouteKind: String, Codable, Sendable, Equatable {
     case loopback
     case lan
@@ -10,12 +40,12 @@ public enum HubRouteKind: String, Codable, Sendable, Equatable {
 
     public var displayTitle: String {
         switch self {
-        case .loopback: return "本机"
-        case .lan: return "内网 / 局域网"
+        case .loopback: return L10n.tr("本机", "Local")
+        case .lan: return L10n.tr("内网 / 局域网", "LAN")
         case .tailnet: return "Tailnet"
-        case .publicNetwork: return "公网"
-        case .proxy: return "代理"
-        case .unknown: return "未知"
+        case .publicNetwork: return L10n.tr("公网", "Public")
+        case .proxy: return L10n.tr("代理", "Proxy")
+        case .unknown: return L10n.tr("未知", "Unknown")
         }
     }
 
@@ -168,7 +198,7 @@ public struct HubProfile: Identifiable, Codable, Sendable, Equatable {
         let loopback = URL(string: "http://127.0.0.1:\(port)")!
         return HubProfile(
             id: localDefaultID,
-            name: "本机 Hub",
+            name: L10n.tr("本机 Hub", "Local Hub"),
             publicURL: nil,
             lanURLs: [loopback],
             isLocalDefault: true

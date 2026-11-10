@@ -1,15 +1,39 @@
 import Foundation
+import WebKit
+
+public struct PendingPairConfirmation: Identifiable, Sendable, Equatable {
+    public let id: UUID
+    public let rawURI: String
+    public let payload: PairingPayload
+
+    public init(id: UUID = UUID(), rawURI: String, payload: PairingPayload) {
+        self.id = id
+        self.rawURI = rawURI
+        self.payload = payload
+    }
+
+    public var displayName: String {
+        payload.name ?? payload.orderedEndpoints.first?.host ?? "Steve Hub"
+    }
+
+    public var endpointsSummary: String {
+        payload.orderedEndpoints.map(URLNormalizer.canonicalOrigin).joined(separator: "\n")
+    }
+}
 
 @MainActor
 public final class SteveClientCoordinator: ObservableObject {
     @Published public private(set) var summary = HubRuntimeSummary()
     @Published public private(set) var localGatewayURL: URL?
+    @Published public private(set) var proxyStartupError: String?
     @Published public private(set) var webReloadNonce = UUID()
     @Published public private(set) var targetHashRoute: String?
 
     @Published public var isHubSwitcherPresented = false
     @Published public var isPairQRPresented = false
     @Published public var isQRScannerPresented = false
+    @Published public var pendingExternalPairConfirmation: PendingPairConfirmation?
+    @Published public var externalPairErrorMessage: String?
 
     public let hubStore: HubStore
     public let api: HubClientAPI
@@ -19,18 +43,20 @@ public final class SteveClientCoordinator: ObservableObject {
 
     private var monitorTask: Task<Void, Never>?
     private var started = false
+    private var activationGeneration: UInt64 = 0
 
     public init(
         hubStore: HubStore? = nil,
         api: HubClientAPI = HubClientAPI(),
         resolver: EndpointResolver = EndpointResolver(),
         webRoot: URL? = nil,
+        preferredPortDefaults: UserDefaults? = .standard,
         clientDescriptor: ClientDescriptor
     ) {
         self.hubStore = hubStore ?? HubStore()
         self.api = api
         self.resolver = resolver
-        self.proxy = HubLoopbackProxy(webRoot: webRoot)
+        self.proxy = HubLoopbackProxy(webRoot: webRoot, preferredPortDefaults: preferredPortDefaults)
         self.clientDescriptor = clientDescriptor
     }
 
@@ -39,18 +65,56 @@ public final class SteveClientCoordinator: ObservableObject {
         started = true
         Task { [weak self] in
             guard let self else { return }
-            if let url = try? await self.proxy.start() {
-                self.localGatewayURL = url
-            }
+            await self.ensureGatewayRunning()
             await self.activateCurrentHub(forceReloadWeb: true)
             self.startBackgroundPolling()
         }
     }
 
+    public func handleAppDidBecomeActive() {
+        guard started else {
+            startIfNeeded()
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            let previousURL = self.localGatewayURL
+            await self.ensureGatewayRunning()
+            let gatewayChanged = (self.localGatewayURL != previousURL)
+            await self.activateCurrentHub(forceReloadWeb: gatewayChanged)
+        }
+    }
+
+    public func retryGatewayStartup() {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.ensureGatewayRunning()
+            await self.activateCurrentHub(forceReloadWeb: true)
+        }
+    }
+
+    private func ensureGatewayRunning() async {
+        do {
+            let url = try await proxy.ensureRunning()
+            localGatewayURL = url
+            proxyStartupError = nil
+        } catch {
+            localGatewayURL = nil
+            proxyStartupError = error.localizedDescription
+            summary = HubRuntimeSummary(
+                phase: .offline,
+                errorMessage: error.localizedDescription,
+                updatedAt: Date()
+            )
+        }
+    }
+
     public func stop() {
+        activationGeneration &+= 1
         monitorTask?.cancel()
         monitorTask = nil
         proxy.stop()
+        localGatewayURL = nil
         started = false
     }
 
@@ -62,9 +126,37 @@ public final class SteveClientCoordinator: ObservableObject {
         }
     }
 
+    public func removeHub(id: String) {
+        guard let removed = hubStore.removeHub(id: id) else { return }
+        let removedID = removed.profile.id
+        let prefix = HubLoopbackProxy.hubCookiePrefix(for: removedID)
+        let cookieStore = WKWebsiteDataStore.default().httpCookieStore
+        cookieStore.getAllCookies { cookies in
+            for cookie in cookies where cookie.name.hasPrefix(prefix) {
+                cookieStore.delete(cookie, completionHandler: nil)
+            }
+        }
+        if let cred = removed.credential, !cred.isEmpty,
+           let endpoint = removed.profile.orderedEndpoints.first {
+            let clientAPI = self.api
+            Task {
+                await clientAPI.signOutClient(endpoint: endpoint, credential: cred)
+            }
+        }
+        if removed.wasActive {
+            Task { [weak self] in
+                await self?.activateCurrentHub(forceReloadWeb: true)
+            }
+        }
+    }
+
     public func reconnectActiveHub() {
         Task { [weak self] in
-            await self?.activateCurrentHub(forceReloadWeb: true)
+            guard let self else { return }
+            if self.localGatewayURL == nil {
+                await self.ensureGatewayRunning()
+            }
+            await self.activateCurrentHub(forceReloadWeb: true)
         }
     }
 
@@ -84,7 +176,35 @@ public final class SteveClientCoordinator: ObservableObject {
         await activateCurrentHub(forceReloadWeb: true)
     }
 
-    /// Pairs this device (primarily iOS) by resolving the QR payload's public-first / LAN-fallback endpoints
+    // MARK: - External `steve://pair` Confirmation Gate
+
+    public func requestExternalPairingConfirmation(uri: String) {
+        let trimmed = uri.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let payload = PairingPayload.parse(trimmed) else {
+            externalPairErrorMessage = L10n.tr(
+                "配对链接无效，请检查二维码或配对地址格式。",
+                "Invalid pairing link. Check the QR code or pairing URI."
+            )
+            return
+        }
+        pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: trimmed, payload: payload)
+    }
+
+    public func cancelPendingExternalPairing() {
+        pendingExternalPairConfirmation = nil
+    }
+
+    public func confirmPendingExternalPairing() async {
+        guard let pending = pendingExternalPairConfirmation else { return }
+        pendingExternalPairConfirmation = nil
+        do {
+            _ = try await pairWithQRCode(uri: pending.rawURI)
+        } catch {
+            externalPairErrorMessage = error.localizedDescription
+        }
+    }
+
+    /// Pairs this device by resolving the QR payload's public-first / LAN-fallback endpoints
     /// and claiming the single-use `stp_...` code for a dedicated Keychain-stored client credential.
     @discardableResult
     public func pairWithQRCode(uri: String) async throws -> HubProfile {
@@ -97,6 +217,9 @@ public final class SteveClientCoordinator: ObservableObject {
             code: payload.code,
             client: clientDescriptor
         )
+        guard let credential = claim.credential, !credential.isEmpty else {
+            throw HubClientAPIError.missingCredential
+        }
 
         let displayName = payload.name ?? resolved.url.host ?? "Steve Hub"
         let profile = HubProfile(
@@ -109,13 +232,15 @@ public final class SteveClientCoordinator: ObservableObject {
             lastKnownVersion: claim.hub.version,
             lastConnectedAt: Date()
         )
-        let saved = hubStore.upsertProfile(profile, credential: claim.credential, makeActive: true)
+        let saved = hubStore.addPairedProfile(profile, credential: credential, makeActive: true)
         await activateCurrentHub(forceReloadWeb: true)
         return saved
     }
 
     public func signInActiveHubWithToken(user: String, token: String) async throws {
-        let profile = hubStore.activeProfile
+        guard let profile = hubStore.currentProfile else {
+            throw EndpointResolutionError.noCandidates
+        }
         let resolved = try await resolver.resolve(profile: profile)
         let signed = try await api.signInWithToken(
             endpoint: resolved.url,
@@ -123,18 +248,23 @@ public final class SteveClientCoordinator: ObservableObject {
             token: token,
             client: clientDescriptor
         )
+        guard let credential = signed.credential, !credential.isEmpty else {
+            throw HubClientAPIError.missingCredential
+        }
         hubStore.updateAuthMetadata(
             id: profile.id,
             clientID: signed.client_id,
             userName: signed.user.name,
-            credential: signed.credential
+            credential: credential
         )
         hubStore.updateConnectionMetadata(id: profile.id, version: signed.hub.version)
         await activateCurrentHub(forceReloadWeb: true)
     }
 
     public func createPairingForActiveHub() async throws -> CreatedPairing {
-        let profile = hubStore.activeProfile
+        guard let profile = hubStore.currentProfile else {
+            throw EndpointResolutionError.noCandidates
+        }
         let endpoint = summary.activeEndpoint ?? profile.orderedEndpoints.first
         guard let endpoint else {
             throw EndpointResolutionError.noCandidates
@@ -146,7 +276,9 @@ public final class SteveClientCoordinator: ObservableObject {
     }
 
     public func pollPairingStatus(id: String) async throws -> PairingClaimStatus {
-        let profile = hubStore.activeProfile
+        guard let profile = hubStore.currentProfile else {
+            throw EndpointResolutionError.noCandidates
+        }
         guard let endpoint = summary.activeEndpoint ?? profile.orderedEndpoints.first else {
             throw EndpointResolutionError.noCandidates
         }
@@ -160,7 +292,25 @@ public final class SteveClientCoordinator: ObservableObject {
     // MARK: - Internal Resolution & Status Polling
 
     public func activateCurrentHub(forceReloadWeb: Bool) async {
-        let profile = hubStore.activeProfile
+        if forceReloadWeb {
+            activationGeneration &+= 1
+        }
+        let capturedGen = activationGeneration
+
+        guard let profile = hubStore.currentProfile else {
+            proxy.updateTarget(.init(hubID: "", baseURL: nil, credential: nil))
+            summary = HubRuntimeSummary(
+                phase: .offline,
+                activeEndpoint: nil,
+                route: .unknown,
+                updatedAt: Date()
+            )
+            if forceReloadWeb {
+                webReloadNonce = UUID()
+            }
+            return
+        }
+
         let credential = hubStore.credential(for: profile.id)
 
         if forceReloadWeb {
@@ -174,15 +324,22 @@ public final class SteveClientCoordinator: ObservableObject {
 
         do {
             let resolved = try await resolver.resolve(profile: profile)
-            proxy.updateTarget(.init(baseURL: resolved.url, credential: credential))
+            guard activationGeneration == capturedGen, hubStore.activeHubID == profile.id else {
+                return
+            }
+            proxy.updateTarget(.init(hubID: profile.id, baseURL: resolved.url, credential: credential))
             hubStore.updateConnectionMetadata(id: profile.id, version: resolved.hello.version)
 
-            if let liveSummary = try? await api.fetchStateSummary(
+            let liveSummary = try? await api.fetchStateSummary(
                 endpoint: resolved.url,
                 route: resolved.route,
                 helloVersion: resolved.hello.version,
                 credential: credential
-            ) {
+            )
+            guard activationGeneration == capturedGen, hubStore.activeHubID == profile.id else {
+                return
+            }
+            if let liveSummary {
                 summary = liveSummary
             } else {
                 summary = HubRuntimeSummary(
@@ -194,8 +351,11 @@ public final class SteveClientCoordinator: ObservableObject {
                 )
             }
         } catch {
+            guard activationGeneration == capturedGen, hubStore.activeHubID == profile.id else {
+                return
+            }
             // Even when offline, point the proxy at the primary candidate so user retries reach it once up
-            proxy.updateTarget(.init(baseURL: profile.orderedEndpoints.first, credential: credential))
+            proxy.updateTarget(.init(hubID: profile.id, baseURL: profile.orderedEndpoints.first, credential: credential))
             summary = HubRuntimeSummary(
                 phase: .offline,
                 activeEndpoint: profile.orderedEndpoints.first,

@@ -21,11 +21,16 @@ struct QRCodeScannerSheet: View {
                             Image(systemName: "camera.metering.unknown")
                                 .font(.largeTitle)
                                 .foregroundStyle(.secondary)
-                            Text("未授予相机权限，可在系统设置中开启，或在下方粘贴配对链接。")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 24)
+                            Text(
+                                L10n.tr(
+                                    "未授予相机权限，可在系统设置中开启，或在下方粘贴配对链接。",
+                                    "Camera access is disabled. Enable it in Settings or paste the pairing link below."
+                                )
+                            )
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 20))
@@ -58,7 +63,7 @@ struct QRCodeScannerSheet: View {
                             VStack(spacing: 10) {
                                 ProgressView()
                                     .tint(.white)
-                                Text("正在配对并连接 Hub…")
+                                Text(L10n.tr("正在配对并连接 Hub…", "Pairing and connecting to Hub…"))
                                     .font(.callout.weight(.medium))
                                     .foregroundStyle(.white)
                             }
@@ -67,10 +72,15 @@ struct QRCodeScannerSheet: View {
                 }
                 .frame(maxHeight: 380)
 
-                Text("将取景框对准 Mac 或网页端「设置 · 访问与客户端」中的配对二维码。有公网地址时默认走公网连接，否则自动走局域网连接。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                Text(
+                    L10n.tr(
+                        "将取景框对准 Mac 或网页端「设置 · 访问与客户端」中的配对二维码。有公网地址时默认走公网连接，否则自动走局域网连接。",
+                        "Point the camera at the pairing QR code in Mac or Web Settings -> Access & Clients. Connects via public URL when configured, otherwise LAN."
+                    )
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
 
                 if let errorMessage {
                     Text(errorMessage)
@@ -82,7 +92,7 @@ struct QRCodeScannerSheet: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("或粘贴配对链接（steve://pair?…）")
+                    Text(L10n.tr("或粘贴配对链接（steve://pair?…）", "Or paste pairing URI (steve://pair?…)"))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     HStack(spacing: 8) {
@@ -90,7 +100,7 @@ struct QRCodeScannerSheet: View {
                             .textFieldStyle(.roundedBorder)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                        Button("配对") {
+                        Button(L10n.tr("配对", "Pair")) {
                             Task { await handleScanned(pastedURI) }
                         }
                         .buttonStyle(.borderedProminent)
@@ -101,11 +111,11 @@ struct QRCodeScannerSheet: View {
                 Spacer(minLength: 0)
             }
             .padding(20)
-            .navigationTitle("扫码配对")
+            .navigationTitle(L10n.tr("扫码配对", "Scan QR Code"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(L10n.tr("取消", "Cancel")) { dismiss() }
                 }
             }
         }
@@ -115,7 +125,10 @@ struct QRCodeScannerSheet: View {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard PairingPayload.parse(trimmed) != nil else {
             if raw == pastedURI {
-                errorMessage = "配对链接格式无效，请扫描或粘贴有效的 steve://pair 二维码"
+                errorMessage = L10n.tr(
+                    "配对链接格式无效，请扫描或粘贴有效的 steve://pair 二维码",
+                    "Invalid pairing link. Scan or paste a valid steve://pair QR code."
+                )
             }
             return
         }

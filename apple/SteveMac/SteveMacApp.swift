@@ -7,6 +7,7 @@ struct SteveMacApp: App {
     @StateObject private var coordinator: SteveClientCoordinator
 
     init() {
+        let env = ProcessInfo.processInfo.environment
         let hostName = Host.current().localizedName ?? "Mac"
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         let webRoot = Bundle.main.resourceURL?.appendingPathComponent("WebDist", isDirectory: true)
@@ -16,7 +17,38 @@ struct SteveMacApp: App {
             platform: "macOS",
             version: version
         )
-        _coordinator = StateObject(wrappedValue: SteveClientCoordinator(webRoot: webRoot, clientDescriptor: descriptor))
+
+        let defaults: UserDefaults
+        if let suite = env["STEVE_CLIENT_DEFAULTS_SUITE"], !suite.isEmpty,
+           let customDefaults = UserDefaults(suiteName: suite) {
+            defaults = customDefaults
+        } else {
+            defaults = .standard
+        }
+
+        let credStore: CredentialStoring
+        if env["STEVE_CLIENT_KEYCHAIN_EPHEMERAL"] == "1" {
+            credStore = InMemoryCredentialStore()
+        } else if let service = env["STEVE_CLIENT_KEYCHAIN_SERVICE"], !service.isEmpty {
+            credStore = KeychainCredentialStore(service: service)
+        } else {
+            credStore = KeychainCredentialStore()
+        }
+
+        let hubStore = HubStore(
+            defaults: defaults,
+            credentials: credStore,
+            defaultProfile: LocalHubDiscovery.defaultProfile(environment: env),
+            includeLocalDefault: true
+        )
+        _coordinator = StateObject(
+            wrappedValue: SteveClientCoordinator(
+                hubStore: hubStore,
+                webRoot: webRoot,
+                preferredPortDefaults: defaults,
+                clientDescriptor: descriptor
+            )
+        )
     }
 
     var body: some Scene {
@@ -27,21 +59,19 @@ struct SteveMacApp: App {
                 }
                 .onOpenURL { url in
                     if url.scheme?.lowercased() == "steve" {
-                        Task {
-                            _ = try? await coordinator.pairWithQRCode(uri: url.absoluteString)
-                        }
+                        coordinator.requestExternalPairingConfirmation(uri: url.absoluteString)
                     }
                 }
         }
         .defaultSize(width: 1240, height: 820)
         .commands {
             CommandMenu("Hub") {
-                Button("切换 Hub…") {
+                Button(L10n.tr("切换 Hub…", "Switch Hub…")) {
                     coordinator.isHubSwitcherPresented = true
                 }
                 .keyboardShortcut("H", modifiers: [.command, .shift])
 
-                Button("手机扫码配对…") {
+                Button(L10n.tr("手机扫码配对…", "Pair Mobile App…")) {
                     coordinator.isPairQRPresented = true
                 }
                 .keyboardShortcut("P", modifiers: [.command, .shift])
@@ -62,7 +92,7 @@ struct SteveMacApp: App {
 
                 Divider()
 
-                Button("重新连接当前 Hub") {
+                Button(L10n.tr("重新连接当前 Hub", "Reconnect Current Hub")) {
                     coordinator.reconnectActiveHub()
                 }
                 .keyboardShortcut("R", modifiers: [.command, .shift])
@@ -114,13 +144,16 @@ private struct MacMenuBarIconLabel: View {
     private var tooltipText: String {
         switch summary.phase {
         case .connected:
-            return "Steve Hub 已连接 · \(summary.route.displayTitle)"
+            return L10n.tr(
+                "Steve Hub 已连接 · \(summary.route.displayTitle)",
+                "Steve Hub connected · \(summary.route.displayTitle)"
+            )
         case .connecting:
-            return "正在连接 Steve Hub…"
+            return L10n.tr("正在连接 Steve Hub…", "Connecting to Steve Hub…")
         case .authRequired:
-            return "Steve Hub 需要登录"
+            return L10n.tr("Steve Hub 需要登录", "Steve Hub requires sign-in")
         case .offline:
-            return "Steve Hub 离线"
+            return L10n.tr("Steve Hub 离线", "Steve Hub offline")
         }
     }
 }

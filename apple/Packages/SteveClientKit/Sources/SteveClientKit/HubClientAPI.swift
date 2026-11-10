@@ -18,17 +18,34 @@ public struct PairSignInResponse: Codable, Sendable, Equatable {
     public struct UserInfo: Codable, Sendable, Equatable {
         public var id: String
         public var name: String
-        public var role: String
+
+        public init(id: String, name: String) {
+            self.id = id
+            self.name = name
+        }
     }
 
     public struct HubInfo: Codable, Sendable, Equatable {
         public var version: String
+        public var api: Int?
+
+        public init(version: String, api: Int? = nil) {
+            self.version = version
+            self.api = api
+        }
     }
 
     public var client_id: String
     public var credential: String?
     public var user: UserInfo
     public var hub: HubInfo
+
+    public init(client_id: String, credential: String?, user: UserInfo, hub: HubInfo) {
+        self.client_id = client_id
+        self.credential = credential
+        self.user = user
+        self.hub = hub
+    }
 }
 
 public struct CreatedPairing: Codable, Sendable, Equatable {
@@ -56,17 +73,20 @@ public struct PairingClaimStatus: Codable, Sendable, Equatable {
     public var client: ClaimedClient?
 }
 
-public enum HubClientAPIError: Error, LocalizedError, Sendable {
+public enum HubClientAPIError: Error, LocalizedError, Sendable, Equatable {
     case invalidResponse
+    case missingCredential
     case unauthorized
     case serverError(status: Int, message: String)
 
     public var errorDescription: String? {
         switch self {
         case .invalidResponse:
-            return "Hub 返回了无法识别的响应"
+            return L10n.tr("Hub 返回了无法识别的响应", "Unrecognized response from Hub")
+        case .missingCredential:
+            return L10n.tr("Hub 未返回有效的访问凭证", "Hub did not return a client credential")
         case .unauthorized:
-            return "尚未登录或访问凭证已失效"
+            return L10n.tr("尚未登录或访问凭证已失效", "Not signed in or credential expired")
         case .serverError(_, let message):
             return message
         }
@@ -89,7 +109,7 @@ public struct HubClientAPI: Sendable {
         var req = URLRequest(url: endpoint.appendingPathComponent("auth/pair"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("zh-CN,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        req.setValue(L10n.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
         req.timeoutInterval = 10
 
         struct Body: Encodable {
@@ -107,7 +127,11 @@ public struct HubClientAPI: Sendable {
             let msg = Self.extractErrorMessage(from: data) ?? "HTTP \(http.statusCode)"
             throw HubClientAPIError.serverError(status: http.statusCode, message: msg)
         }
-        return try JSONDecoder().decode(PairSignInResponse.self, from: data)
+        let decoded = try JSONDecoder().decode(PairSignInResponse.self, from: data)
+        guard let cred = decoded.credential, !cred.isEmpty else {
+            throw HubClientAPIError.missingCredential
+        }
+        return decoded
     }
 
     /// Signs in with a user name and access token at `POST /auth/token` (`cookie: false`) to obtain a Bearer credential.
@@ -120,7 +144,7 @@ public struct HubClientAPI: Sendable {
         var req = URLRequest(url: endpoint.appendingPathComponent("auth/token"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("zh-CN,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        req.setValue(L10n.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
         req.timeoutInterval = 10
 
         struct Body: Encodable {
@@ -139,7 +163,21 @@ public struct HubClientAPI: Sendable {
             let msg = Self.extractErrorMessage(from: data) ?? "HTTP \(http.statusCode)"
             throw HubClientAPIError.serverError(status: http.statusCode, message: msg)
         }
-        return try JSONDecoder().decode(PairSignInResponse.self, from: data)
+        let decoded = try JSONDecoder().decode(PairSignInResponse.self, from: data)
+        guard let cred = decoded.credential, !cred.isEmpty else {
+            throw HubClientAPIError.missingCredential
+        }
+        return decoded
+    }
+
+    /// Best-effort revocation of a client credential on the Hub (`POST /auth/client/logout`).
+    public func signOutClient(endpoint: URL, credential: String) async {
+        guard !credential.isEmpty else { return }
+        var req = URLRequest(url: endpoint.appendingPathComponent("auth/client/logout"))
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 4
+        _ = try? await session.data(for: req)
     }
 
     /// Creates a QR pairing code on the active Hub (`POST /api/access/pairings`).
@@ -147,6 +185,7 @@ public struct HubClientAPI: Sendable {
         var req = URLRequest(url: endpoint.appendingPathComponent("api/access/pairings"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(L10n.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
         if let credential, !credential.isEmpty {
             req.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         }
@@ -172,6 +211,7 @@ public struct HubClientAPI: Sendable {
         let safeID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
         var req = URLRequest(url: endpoint.appendingPathComponent("api/access/pairings/\(safeID)"))
         req.httpMethod = "GET"
+        req.setValue(L10n.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
         if let credential, !credential.isEmpty {
             req.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         }
@@ -201,6 +241,7 @@ public struct HubClientAPI: Sendable {
         var req = URLRequest(url: endpoint.appendingPathComponent("api/state"))
         req.httpMethod = "GET"
         req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.setValue(L10n.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
         req.timeoutInterval = 8
         if let credential, !credential.isEmpty {
             req.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
