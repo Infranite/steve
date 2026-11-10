@@ -415,10 +415,9 @@ impl super::node_runtime::NodeDomain for HubHost {
 
 /// Each session runs on one backend, fixed when it is bound: the ones bound to a Node go to that
 /// Node's coordinator (`runtime_sessions.node_id`: the local Node, or a paired remote Node through
-/// the fleet). A session bound to no Node runs nowhere: the Hub's own ACP runner is gone (B7). One
-/// it left from before moves to the local Node at boot, or ends with why ([`move_legacy`]); a new
-/// one no Node takes is refused ([`steve_core::AgentRuntime::refusal`]). Holds and counts cover
-/// every Node.
+/// the fleet). A session bound to no Node runs nowhere (the Hub never runs a harness itself): a
+/// new one no Node takes is refused ([`steve_core::AgentRuntime::refusal`]). Holds and counts
+/// cover every Node.
 pub struct RoutedRuntime {
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`, the default).
     pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
@@ -764,240 +763,24 @@ impl RoutedRuntime {
         )
     }
 
-    /// Whether a session the legacy runner ran can move to the local Node now, and its binding
-    /// when it can. `Err(None)`: not now, asked again later (the Node is off or stopped, a row of
-    /// it could not be read). `Err(Some(why))`: never, as it is (stored text, zh-CN). An upgrade's
-    /// hold does not keep it: moved, it waits like any Node session ([`Self::adopt_as`]).
-    fn movable(&self, sid: &str) -> Result<super::node_runtime::Binding, Option<String>> {
-        // Boot and periodic legacy adoption reach this directly, not through prompt/created.
-        // A held or retired work unit must stay parked before inspecting or preparing its
-        // workspace. Its missing isolation is not a reason to end the recoverable session.
-        if let Err(e) = self.check_workflow_session(sid) {
-            tracing::debug!(session = sid, reason = %e, "session adoption is held");
-            return Err(None);
-        }
-        let Some(n) = &self.node else {
-            return Err(None);
-        };
-        if n.is_stopped() {
-            return Err(None);
-        }
-        let s = match self.store.sessions().get(sid) {
-            Ok(Some(s)) => s,
-            _ => return Err(None),
-        };
-        if s.status == "ended" {
-            return Err(None);
-        }
-        // it continues where it worked: a directory gone since is none the Node could open
-        if s.readonly == 0 && !s.cwd.is_empty() && !std::path::Path::new(&s.cwd).is_dir() {
-            return Err(Some(steve_i18n::stored(|| {
-                steve_i18n::t!("hub.node.unbound.missing_cwd")
-            })));
-        }
-        self.local_plan(sid)
-            .map_err(|u| steve_i18n::stored(|| unbound_why(u)))
-    }
-
-    /// Why a session the legacy runner ran can never move to the local Node, as it is (`None`:
-    /// it can, or it may later; or it is bound already). What [`move_legacy`] ends it for.
-    pub fn never_movable(&self, sid: &str) -> Option<String> {
-        if node_of_strict(&self.store, sid).ok()?.is_some() {
-            return None;
-        }
-        self.movable(sid).err().flatten()
-    }
-
-    /// A session the legacy runner ran moves to the local Node, opening on the same conversation
-    /// (`sessions.acp_session_id`, the resume handle that runner kept). Nothing runs it any more,
-    /// so this is any time it is idle on the Hub's side: at boot ([`move_legacy`]), or at a message
-    /// to one boot could not move yet. `idle`: its harness opens only once it has something to do
-    /// ([`super::node_runtime::NodeRuntime::adopt_idle`]). `None`: it stays where it is (see
-    /// [`Self::movable`], or a failed bind); a later boundary asks again.
-    fn adopt_as(&self, sid: &str, idle: bool) -> Option<Arc<super::node_runtime::NodeRuntime>> {
-        let n = self.node.clone()?;
-        let b = self.movable(sid).ok()?;
-        let resume = match self.store.sessions().get(sid) {
-            Ok(Some(s)) => s.acp_session_id,
-            _ => return None,
-        };
-        let adopted = if idle {
-            n.adopt_idle(&b, resume.as_deref())
-        } else {
-            n.adopt(&b, resume.as_deref())
-        };
-        match adopted {
-            Ok(_) => {
-                tracing::info!(
-                    session = sid,
-                    resumed = resume.is_some(),
-                    "legacy session adopted by the local Node"
-                );
-                // a message that runner had delivered goes again, to be checked, not redone
-                if let Err(e) = self
-                    .store
-                    .queued()
-                    .unwrap_resumed(sid, steve_core::RESUMED_NOTE)
-                {
-                    tracing::error!("{sid}: delivered messages to check: {e}");
-                }
-                Some(n)
-            }
-            Err(e) => {
-                tracing::error!("adopt {sid} onto the Node: {e}; not moved yet");
-                None
-            }
-        }
-    }
-
-    /// [`Self::route`], a session the legacy runner ran moving to the local Node first when it can
-    /// ([`Self::adopt_as`]).
-    fn route_adopting(&self, session_id: &str) -> Backend {
-        match self.route(session_id) {
-            // behind an upgrade's hold it opens only once the hold is over
-            Backend::Unbound => self
-                .adopt_as(session_id, self.store.maintenance())
-                .map_or(Backend::Unbound, Backend::Node),
-            b => b,
-        }
-    }
-
     /// Why nothing runs `session_id` (bound to no Node), as stored text (zh-CN).
     fn refused(&self, session_id: &str) -> String {
         steve_i18n::stored(|| {
             let why = match &self.node {
                 None => steve_i18n::t!("hub.node.unbound.off"),
                 Some(n) if n.is_stopped() => steve_i18n::t!("hub.node.unbound.stopped"),
-                Some(_) => match self.movable(session_id) {
-                    Err(Some(why)) => why,
-                    Err(None) => steve_i18n::t!("hub.node.unbound.unreadable"),
+                // a held work unit was never planned
+                Some(_) if self.check_workflow_session(session_id).is_err() => {
+                    steve_i18n::t!("hub.node.unbound.unreadable")
+                }
+                Some(_) => match self.local_plan(session_id) {
+                    Err(u) => unbound_why(u)
+                        .unwrap_or_else(|| steve_i18n::t!("hub.node.unbound.unreadable")),
                     Ok(_) => steve_i18n::t!("hub.node.unbound.bind_failed"),
                 },
             };
             steve_i18n::t!("hub.node.refused", why = why)
         })
-    }
-}
-
-/// How often sessions the legacy runner left are looked at again after boot.
-pub(crate) const MOVE_EVERY: Duration = Duration::from_secs(300);
-
-/// What one [`move_legacy`] pass did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Moved {
-    /// Moved onto the local Node.
-    pub adopted: usize,
-    /// Ended, with why: they can never run on it.
-    pub ended: usize,
-    /// Left as they are for now (the Node off or stopped, an upgrade holding, a row unreadable,
-    /// a failed bind): asked again at the next pass or at a message to them.
-    pub left: usize,
-}
-
-/// B7: the Hub's own ACP runner is gone, so no session may wait for it. At boot, before recovery
-/// (and behind the upgrade's drain, which stays on until the release lifts it), what that runner
-/// had in hand goes back to the queue, and every session it ran that has not ended (and is not an
-/// imported read-only one) moves to the local Node, to open there on the same conversation once
-/// it has something to do ([`steve_core::Core::moved_to_node`] then makes what the runner left
-/// right for it); one that can never run there ends, with why as its last event. The Hub always starts:
-/// with the local Node off (or stopped) nothing moves, and such sessions are refused when
-/// messaged. `before`: only sessions made before then (the later passes, so a session being made
-/// right now is not taken for a legacy one).
-pub fn move_legacy(routed: &RoutedRuntime, core: &Core, before: Option<i64>) -> Moved {
-    let mut m = Moved::default();
-    let Some(n) = routed.node.clone() else {
-        return m;
-    };
-    if n.is_stopped() {
-        return m;
-    }
-    match routed.store.queued().return_legacy_dispatches() {
-        Ok(0) => {}
-        Ok(k) => tracing::info!("{k} message(s) the legacy runner had in hand are queued again"),
-        Err(e) => tracing::error!("legacy dispatches: {e}"),
-    }
-    let ids = routed.store.reader(|c| {
-        let mut st = c.prepare(
-            "SELECT s.id FROM sessions s
-              WHERE s.status <> 'ended' AND s.readonly = 0 AND s.created < ?1
-                AND NOT EXISTS(SELECT 1 FROM runtime_sessions r WHERE r.session_id = s.id)
-              ORDER BY s.created",
-        )?;
-        let v = st
-            .query_map([before.unwrap_or(i64::MAX)], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok::<_, steve_store::StoreError>(v)
-    });
-    let ids = match ids {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("legacy sessions to move: {e}");
-            return m;
-        }
-    };
-    for sid in ids {
-        match routed.movable(&sid) {
-            Ok(_) => {
-                // its harness opens only when it has something to do: a boot that moves many
-                // starts none of the idle ones, and none at all behind an upgrade's hold (what
-                // is queued goes once the Node has reconciled and the hold is over)
-                if routed.adopt_as(&sid, true).is_none() {
-                    m.left += 1;
-                    continue;
-                }
-                m.adopted += 1;
-                match core.moved_to_node(&sid) {
-                    Ok(true) => {
-                        tracing::info!(session = %sid, "its cut turn continues on the Node")
-                    }
-                    Ok(false) => {}
-                    Err(e) => tracing::error!("{sid} moved to the Node: {e}"),
-                }
-                // after boot nothing else sends what it has queued (at boot, `ready` does once
-                // the listener is up): it opens now if something waits
-                if before.is_some()
-                    && let Err(e) = core.flush_moved(&sid)
-                {
-                    tracing::error!("{sid} moved to the Node, its queue: {e}");
-                }
-            }
-            Err(Some(why)) => {
-                let note = steve_i18n::stored(|| steve_i18n::t!("hub.node.retired", why = why));
-                match core.end_unmovable(&sid, &note) {
-                    Ok(true) => {
-                        n.retired_one();
-                        tracing::info!(session = %sid, "legacy session cannot run on the Node: ended ({why})");
-                        m.ended += 1;
-                    }
-                    Ok(false) => m.left += 1,
-                    Err(e) => {
-                        tracing::error!("end {sid}: {e}");
-                        m.left += 1;
-                    }
-                }
-            }
-            Err(None) => m.left += 1,
-        }
-    }
-    m
-}
-
-/// [`move_legacy`] again `every` ([`MOVE_EVERY`]) for sessions from before `boot` that the boot
-/// pass left (the Node was stopped then, a row could not be read, a bind failed); what a moved one
-/// has queued goes at once.
-pub async fn move_legacy_later(routed: Arc<RoutedRuntime>, core: Core, boot: i64, every: Duration) {
-    loop {
-        tokio::time::sleep(every).await;
-        let (r, c) = (routed.clone(), core.clone());
-        if let Ok(m) = blocking(move || Ok(move_legacy(&r, &c, Some(boot)))).await
-            && (m.adopted > 0 || m.ended > 0)
-        {
-            tracing::info!(
-                "legacy sessions: {} moved to the Node, {} ended",
-                m.adopted,
-                m.ended
-            );
-        }
     }
 }
 
@@ -1100,8 +883,8 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             }
         }
     }
-    /// A session bound to no Node (one the legacy runner left that cannot move now, or one
-    /// nothing took) is refused, said in it: the Hub never runs a harness itself.
+    /// A session bound to no Node (nothing took it) is refused, said in it: the Hub never runs
+    /// a harness itself.
     fn prompt(
         &self,
         session_id: &str,
@@ -1110,7 +893,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         files: &[steve_core::repo::FileRef],
     ) -> steve_core::Result<steve_core::Prompted> {
         self.check_workflow_session(session_id)?;
-        let n = match self.route_adopting(session_id) {
+        let n = match self.route(session_id) {
             Backend::Node(n) => Some(n),
             Backend::Parked => None,
             Backend::Unbound => {
@@ -1268,7 +1051,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             tracing::warn!(session_id, "协作队列等待隔离 Node：{e}");
             return steve_core::Flushed::Held;
         }
-        match self.route_adopting(session_id) {
+        match self.route(session_id) {
             Backend::Node(n) => match n.flush_turn(session_id, lead) {
                 Ok((Planned::Created, Some(attempt))) => {
                     steve_core::Flushed::Started(steve_core::Running {
@@ -1358,8 +1141,7 @@ pub struct CoreDomain {
     pub core: Core,
     /// The harness adapters the Hub knows, kept fresh from the local Node.
     pub harnesses: Arc<crate::harnesses::HubHarnesses>,
-    /// The runtime the core runs sessions on: boot moves the legacy runner's sessions to its
-    /// local Node ([`move_legacy`]).
+    /// The runtime the core runs sessions on.
     pub routed: Arc<RoutedRuntime>,
     /// The local Node (`STEVE_NODE_MODE=local`, the default): stopped with the Hub, its harnesses
     /// with it.
@@ -1382,20 +1164,10 @@ impl Domain for CoreDomain {
         blocking(move || c.seed()).await
     }
     async fn recover(&self) -> BResult<()> {
-        let (c, routed) = (self.core.clone(), self.routed.clone());
+        let c = self.core.clone();
         blocking(move || {
             // before anything resumes: turns left open were cut by the restart
             super::acp_stats::interrupt_open(c.store().store(), steve_store::now());
-            // B7: no session waits for the Hub's own runner, which is gone
-            let m = move_legacy(&routed, &c, None);
-            if m != Moved::default() {
-                tracing::info!(
-                    "legacy sessions at boot: {} moved to the Node, {} ended, {} left",
-                    m.adopted,
-                    m.ended,
-                    m.left
-                );
-            }
             c.recover()?;
             /* research runs cut off by the restart, and the one-time thread_items backfill */
             c.thread_recover()
@@ -2437,9 +2209,9 @@ mod routed_tests {
         ));
     }
 
-    /// A RoutedRuntime with the local Node on (a fake one), item `i1` with an idle legacy session
-    /// `s1` that ran on the legacy runner (its harness's conversation `acp-legacy-1`), working in
-    /// a scratch workspace (no directory of its own, so no root is needed).
+    /// A RoutedRuntime with the local Node on (a fake one), item `i1` with an idle session `s1`
+    /// bound to no Node, working in a scratch workspace (no directory of its own, so no root is
+    /// needed).
     fn with_node(dir: &std::path::Path) -> super::RoutedRuntime {
         let mut rt = routed(dir);
         rt.store.ensure_workspace().unwrap();
@@ -2457,7 +2229,7 @@ mod routed_tests {
         exec(
             &rt.store,
             "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'t','run','执行',1,1);
-             INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,acp_session_id,created,updated) VALUES ('s1','default','i1','claude-code','','idle','acp-legacy-1',1,1);",
+             INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,acp_session_id,created,updated) VALUES ('s1','default','i1','claude-code','','idle',NULL,1,1);",
         );
         rt
     }
@@ -2479,126 +2251,19 @@ mod routed_tests {
         ) == 1
     }
 
-    /// B5: an idle legacy session boot could not move yet moves at its next message, opening on
-    /// the same conversation; the message goes there.
+    /// With the Node off, or stopped, a message to a session no Node took is refused, said in
+    /// the session: it never runs on the Hub.
     #[tokio::test]
-    async fn an_idle_legacy_sessions_next_message_moves_it_to_the_node() {
-        let dir = tempfile::tempdir().unwrap();
-        let rt = with_node(dir.path());
-        assert!(!bound(&rt), "nothing moves before a boundary");
-        rt.prompt("s1", "接着做", "me", &[]).unwrap();
-        assert!(bound(&rt));
-        let resume: Option<String> = one(
-            &rt.store,
-            "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session'",
-        );
-        assert_eq!(resume.as_deref(), Some("acp-legacy-1"));
-        let queued: i64 = one(
-            &rt.store,
-            "SELECT COUNT(*) FROM queued WHERE session_id='s1' AND text='接着做'",
-        );
-        assert_eq!(queued, 1, "the message waits for the Node's open");
-        assert_eq!(rt.node.as_ref().unwrap().adopted(), 1);
-        assert_eq!(rt.never_movable("s1"), None, "bound: nothing to end");
-        assert_eq!(rt.refusal("s1"), None, "bound: it runs");
-    }
-
-    /// B5: a queue flushed at an idle boundary moves the session too.
-    #[tokio::test]
-    async fn a_flush_moves_an_idle_legacy_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let rt = with_node(dir.path());
-        exec(
-            &rt.store,
-            "INSERT INTO queued(id,session_id,text,via,created) VALUES ('q1','s1','排队的','me',1)",
-        );
-        let _ = rt.flush("s1", None);
-        assert!(bound(&rt));
-    }
-
-    /// B7: nothing holds a session the legacy runner left any more: what it had in hand (a
-    /// claimed or submitted dispatch, a resume after a restart, an open permission card) does
-    /// not keep it from moving; delivered messages come back to be checked. Behind an upgrade's
-    /// hold it moves without opening.
-    #[tokio::test]
-    async fn what_the_legacy_runner_left_in_hand_does_not_keep_a_session() {
-        for (what, sql) in [
-            (
-                "claimed",
-                "INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated) VALUES ('d1','s1','x','me',1,'[]','claimed',1)",
-            ),
-            (
-                "resume",
-                "INSERT INTO session_resume(session_id,created) VALUES ('s1',1)",
-            ),
-            (
-                "card",
-                "INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,session_id,question,status,requested_by,created) VALUES ('c1','default','approve','tool_call','t1','s1','?','open','agent',1)",
-            ),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let rt = with_node(dir.path());
-            exec(&rt.store, sql);
-            assert!(rt.adopt_as("s1", false).is_some(), "{what}");
-            assert!(bound(&rt), "{what}");
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let rt = with_node(dir.path());
-        exec(
-            &rt.store,
-            "INSERT INTO queued(id,session_id,text,via,created) VALUES ('q1','s1','发布一下','resumed:me',1)",
-        );
-        // behind an upgrade's hold a message moves it too, opening nothing until the hold is over
-        rt.store.maintenance_set(true).unwrap();
-        rt.prompt("s1", "升级中", "me", &[]).unwrap();
-        assert!(bound(&rt));
-        assert_eq!(
-            one::<String>(
-                &rt.store,
-                "SELECT phase FROM runtime_sessions WHERE session_id='s1'"
-            ),
-            "released"
-        );
-        assert_eq!(
-            one::<i64>(
-                &rt.store,
-                "SELECT COUNT(*) FROM node_commands WHERE retry_at<9223372036854775806 AND state='pending'"
-            ),
-            0,
-            "nothing goes to the Node yet"
-        );
-        rt.store.maintenance_set(false).unwrap();
-        let (text, via): (String, String) = rt
-            .store
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT text, via FROM queued WHERE id='q1'",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?)
-            })
-            .unwrap();
-        assert!(text.starts_with(steve_core::RESUMED_NOTE) && text.ends_with("发布一下"));
-        assert_eq!(via, "me");
-    }
-
-    /// With the Node off, or stopped, nothing moves, nothing is ended for it, and a message is
-    /// refused, said in the session: it never runs on the Hub (B7).
-    #[tokio::test]
-    async fn without_a_running_node_nothing_moves_and_a_message_is_refused() {
+    async fn without_a_running_node_a_message_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let mut rt = with_node(dir.path());
         rt.node.as_ref().unwrap().stop("tools did not connect");
-        assert!(rt.adopt_as("s1", false).is_none());
-        assert_eq!(rt.never_movable("s1"), None);
         let e = rt
             .prompt("s1", "还在吗", "me", &[])
             .unwrap_err()
             .to_string();
         assert!(e.contains("本机 Node 没有在运行"), "{e}");
         rt.node = None;
-        assert!(rt.adopt_as("s1", false).is_none());
-        assert_eq!(rt.never_movable("s1"), None);
         let e = rt
             .prompt("s1", "还在吗", "me", &[])
             .unwrap_err()
@@ -2626,50 +2291,35 @@ mod routed_tests {
         assert_eq!(rt.release("s1").unwrap(), steve_core::Released::Gone);
     }
 
-    /// B5: a session that can never run on the Node stays where it is, and says why (what it is
-    /// ended for): a mode the Node cannot express, a directory gone, a bot gone, an archived
-    /// project, an item moved away, an import. One whose row cannot be read only waits.
+    /// A session the Node cannot take says why when it is messaged: a mode the Node cannot
+    /// express, a bot gone, an archived project, an item moved away, an import.
     #[tokio::test]
-    async fn a_session_that_cannot_move_says_why() {
-        let gone = "/nonexistent-steve-b5/i1";
+    async fn a_session_no_node_can_take_says_why() {
         for (sql, why) in [
             (
-                "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,updated) VALUES ('b1','default','b','claude-code','dontAsk',1); INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('b1','default',1); UPDATE sessions SET bot_id='b1'".to_string(),
+                "INSERT INTO bots(id,workspace_id,name,harness,perm_mode,updated) VALUES ('b1','default','b','claude-code','dontAsk',1); INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('b1','default',1); UPDATE sessions SET bot_id='b1'",
                 "dontAsk",
             ),
-            (format!("UPDATE sessions SET cwd='{gone}'"), "工作目录已不存在"),
-            ("UPDATE sessions SET bot_id='nobody'".to_string(), "Bot"),
+            ("UPDATE sessions SET bot_id='nobody'", "Bot"),
             (
-                "INSERT INTO projects(id,workspace_id,name,path,kind,archived,created,updated) VALUES ('p1','default','p','/nonexistent-steve-b5','dir',1,1,1); UPDATE items SET project_id='p1'".to_string(),
+                "INSERT INTO projects(id,workspace_id,name,path,kind,archived,created,updated) VALUES ('p1','default','p','/nonexistent-steve-b5','dir',1,1,1); UPDATE items SET project_id='p1'",
                 "归档",
             ),
-            ("UPDATE sessions SET item_id=NULL".to_string(), "事项"),
-            ("UPDATE sessions SET readonly=1".to_string(), "只读"),
+            ("UPDATE sessions SET item_id=NULL", "事项"),
+            ("UPDATE sessions SET readonly=1", "只读"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let rt = with_node(dir.path());
-            exec(&rt.store, &sql);
-            let r = rt.never_movable("s1");
+            exec(&rt.store, sql);
+            let r = rt.refusal("s1");
             assert!(r.as_deref().is_some_and(|r| r.contains(why)), "{sql}: {r:?}");
-            assert!(rt.adopt_as("s1", false).is_none(), "{sql}");
-            assert!(!bound(&rt), "{sql}");
-            // a message to it says why it cannot run
             if let Err(e) = rt.prompt("s1", "还在吗", "me", &[]) {
                 assert!(e.to_string().contains(why), "{sql}: {e}");
             } else {
                 panic!("{sql}: a message to it ran");
             }
+            assert!(!bound(&rt), "{sql}");
         }
-        // an ended session is not one to retire (a message revives it, and it moves then)
-        let dir = tempfile::tempdir().unwrap();
-        let rt = with_node(dir.path());
-        exec(&rt.store, "UPDATE sessions SET status='ended'");
-        assert_eq!(rt.never_movable("s1"), None);
-        exec(&rt.store, "UPDATE sessions SET status='idle'");
-        // unreadable: maybe only for now
-        exec(&rt.store, "ALTER TABLE items RENAME TO items_gone");
-        assert_eq!(rt.never_movable("s1"), None);
-        assert!(rt.adopt_as("s1", false).is_none());
     }
 }
 
