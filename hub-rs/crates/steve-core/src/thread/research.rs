@@ -173,6 +173,15 @@ pub(crate) enum Inline {
     Research,
 }
 
+/// What [`Core::stop_inline`] stopped.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StoppedInline {
+    Running,
+    /// Not started yet; its run, once it has one.
+    Waiting(Option<String>),
+    Nothing,
+}
+
 /// An answer or research run waiting on the inline queue.
 pub(crate) struct InlineJob {
     pub kind: Inline,
@@ -359,20 +368,49 @@ impl Core {
         })
     }
 
-    /// Stop the running answer or research of a workspace; true if there was one.
-    pub(crate) fn stop_inline(&self, ws: &str) -> bool {
+    /// Stop the running answer or research of a workspace. With none running, the first one waiting
+    /// is stopped instead: its lane has not started it yet (it was queued a moment ago, or new work
+    /// is held for maintenance), and the lane drops it when it gets there.
+    pub(crate) fn stop_inline(&self, ws: &str) -> StoppedInline {
         let lanes = lock(&self.0.thread.inline);
         let Some(l) = lanes.get(ws) else {
-            return false;
+            return StoppedInline::Nothing;
         };
         let st = lock(&l.st);
-        match &st.running {
-            Some(a) => {
+        match (&st.running, st.waiting.first()) {
+            (Some(a), _) => {
                 a.stop.stop();
-                true
+                StoppedInline::Running
             }
-            None => false,
+            (None, Some(a)) => {
+                a.stop.stop();
+                StoppedInline::Waiting(a.run.clone())
+            }
+            (None, None) => StoppedInline::Nothing,
         }
+    }
+
+    /// A run stopped before its lane started it ends `stopped`, and its message no longer says
+    /// “排队中”. Nothing to do when it ended already.
+    pub(crate) fn end_unstarted(&self, ws: &str, run: &str) -> Result<()> {
+        let th = self.store().store().thread();
+        let Some(r) = th.run(run)?.filter(|r| r.status == "queued") else {
+            return Ok(());
+        };
+        th.run_patch(
+            run,
+            &RunPatch {
+                status: Some("stopped".into()),
+                ended: Some(now()),
+                ..Default::default()
+            },
+        )?;
+        self.unmark_queued(&r.message_id)?;
+        self.store().publish(HubEvent::ThreadRun {
+            id: run.into(),
+            ws: ws.into(),
+        });
+        Ok(())
     }
 
     /// Stop one research run: the running one ends with its partial answer, a queued one is taken off
@@ -405,22 +443,7 @@ impl Core {
         };
         stop.stop();
         if !running {
-            let th = self.store().store().thread();
-            if let Some(r) = th.run(run)? {
-                th.run_patch(
-                    run,
-                    &RunPatch {
-                        status: Some("stopped".into()),
-                        ended: Some(now()),
-                        ..Default::default()
-                    },
-                )?;
-                self.unmark_queued(&r.message_id)?;
-            }
-            self.store().publish(HubEvent::ThreadRun {
-                id: run.into(),
-                ws: ws.into(),
-            });
+            self.end_unstarted(ws, run)?;
         }
         Ok(true)
     }
@@ -539,6 +562,11 @@ impl Core {
                     g.waiting.retain(|a| !a.stop.same(&j.stop));
                     if j.stop.is_stopped() {
                         drop(g);
+                        if let Some(run) = &j.run
+                            && let Err(e) = core.end_unstarted(&w, run)
+                        {
+                            tracing::error!("ending a run stopped before it started: {e}");
+                        }
                         done.notify_waiters();
                         continue;
                     }

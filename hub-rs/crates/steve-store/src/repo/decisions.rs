@@ -21,8 +21,12 @@ pub(crate) fn message_insert(
 ) -> Result<String> {
     let id = uid("msg");
     let meta = if truthy(meta) { Some(to_json(meta)?) } else { None };
+    // strictly after the last message of its conversation: listings and their cursors go by `created` alone,
+    // and two messages written in the same millisecond would otherwise list in either order
     c.run(
-        "INSERT INTO messages (id, workspace_id, space, author, text, item_id, meta, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, workspace_id, space, author, text, item_id, meta, created)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, MAX(?8, COALESCE((SELECT MAX(m.created) + 1 FROM messages m
+           WHERE m.workspace_id = ?2 AND m.space = ?3), 0)))",
         params![id, ws, space, author, text, item_id, meta, now()],
     )?;
     Ok(id)
