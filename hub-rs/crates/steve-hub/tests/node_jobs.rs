@@ -244,8 +244,6 @@ impl Local {
             codex_home: root.join("codex-home"),
             user_home: root.to_path_buf(),
             version: "test".into(),
-            idle_release: Duration::from_secs(600),
-            retry_delays: vec![],
         }
     }
 

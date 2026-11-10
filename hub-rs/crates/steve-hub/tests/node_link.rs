@@ -111,8 +111,6 @@ fn local_config(root: &Path, node: &NodeId) -> (NodeConfig, PathBuf) {
                 codex_home: root.join("codex"),
                 user_home: root.to_path_buf(),
                 version: "test".into(),
-                idle_release: Duration::from_secs(600),
-                retry_delays: vec![],
             },
             roots: vec![Root {
                 id: RootId::new("work").unwrap(),

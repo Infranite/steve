@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// A deterministic stand-in harness adapter (ACP), used by contract.mjs and the Hub's tests for every
+// A deterministic stand-in harness adapter (ACP), used by the Hub's tests for every
 // adapter: canned replies chosen by prompt shape. The gateway sends a prompt's stable head as the
 // session's system prompt (or Steve's fixed one) and the rest as the prompt.
 import { serve } from "./acp-stub.mjs"

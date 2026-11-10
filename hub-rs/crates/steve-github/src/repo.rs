@@ -822,11 +822,6 @@ pub fn delivery_retry(c: &Connection, id: &str, error: &str, next_at: i64) -> Re
     Ok(())
 }
 
-pub fn delivery_exists(c: &Connection, id: &str) -> Result<bool> {
-    c.prepare_cached("SELECT EXISTS (SELECT 1 FROM gh_deliveries WHERE delivery_id = ?)")?
-        .query_row(params![id], |r| r.get(0))
-}
-
 pub fn set_delivery_result(
     c: &Connection,
     id: &str,

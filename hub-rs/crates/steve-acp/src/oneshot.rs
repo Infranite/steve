@@ -364,7 +364,7 @@ pub async fn run(
         let reports = SessionReports(req.on_session);
         // a call only reads: Steve's Plan mode as the adapter spells it (asking before anything
         // else where it has none), never what the adapter would do by default
-        let opening = session::open_with_meta(
+        let opening = session::open(
             &conn,
             OpenConfig {
                 client_version: &req.cfg.version,
@@ -381,7 +381,6 @@ pub async fn run(
             },
             req.cfg.session_meta_for(req.harness, req.tools_off),
             &reports,
-            session::Strictness::Strict,
         );
         tokio::pin!(opening);
         let opened = loop {
@@ -550,8 +549,6 @@ for line in sys.stdin:
             codex_home: root.into(),
             user_home: root.into(),
             version: "test".into(),
-            idle_release: Duration::from_secs(1),
-            retry_delays: vec![],
         }
     }
 

@@ -617,24 +617,6 @@ impl Core {
         })
     }
 
-    /// "Merge and release now" on an item: its train closes as soon as it has landed.
-    pub fn mq_merge_release_now(&self, item: &str) -> Result<bool> {
-        let s = self.store().store();
-        let Some(e) = s.reader(|c| rows::entry_live_of_item(c, item))? else {
-            return Ok(false);
-        };
-        if e.state != "landed" {
-            s.transaction(|tx| rows::entry_release_now(tx, &e.id, true))?;
-        }
-        let (id, at) = (e.id.clone(), crate::util::now());
-        self.mq_event(&e.target_id, |l, p| {
-            let ta = l.trains.apply(p, Te::NowFor { id, at });
-            l.train_out.extend(ta);
-            vec![]
-        })?;
-        Ok(true)
-    }
-
     /// What the actions do outside the rows: runs started, items told, cards opened.
     fn mq_carry(&self, t: &MqTarget, out: Vec<Qa>) {
         for a in out {

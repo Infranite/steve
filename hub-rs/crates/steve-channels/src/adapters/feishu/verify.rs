@@ -443,18 +443,6 @@ pub enum AppKind {
     Unknown,
 }
 
-/// Self-built or not: `application/v6/applications/{app_id}` `scene_type` (0 = 自建) when the app
-/// may read its own info; otherwise the long-connection endpoint, which only self-built apps get
-/// (403 = not self-built).
-pub async fn app_kind(
-    client: &FeishuClient,
-    tokens: &dyn TokenSource,
-    app_id: &str,
-    app_secret: &str,
-) -> AppKind {
-    app_info(client, tokens, app_id, app_secret).await.0
-}
-
 /// [`app_kind`] and the app's owner from the same app info: `owner.owner_id` as a `union_id` (the
 /// handle of a Feishu user account) when the owner is a member of the tenant (`owner.type` 2, or no
 /// type given). That person becomes the app bot's 负责人.

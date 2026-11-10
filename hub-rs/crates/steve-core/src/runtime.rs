@@ -2,7 +2,7 @@
 //!
 //! Every method is called while the core lock is held, so implementations must return promptly and must
 //! never call back into [`crate::Core`] synchronously: turns run on their own tasks and report through
-//! [`crate::Core::on_turn_end`] later, exactly like the async turn loop in acp.ts.
+//! [`crate::Core::on_turn_end`] later.
 
 use crate::error::Result;
 use crate::repo::FileRef;
@@ -99,7 +99,7 @@ pub enum Released {
     Busy,
 }
 
-/// A finished turn, as acp.ts hands it to the orchestrator's turn-end handler.
+/// A finished turn, as the runtime hands it to the orchestrator's turn-end handler.
 #[derive(Debug, Clone)]
 pub struct TurnEnd {
     pub session_id: String,
@@ -117,7 +117,7 @@ pub trait AgentRuntime: Send + Sync {
     /// Check a work unit before the scheduler creates a session or touches its workspace. Only a
     /// Node runtime that enforces OS sandboxing and supplies credentials/environment from the
     /// execution's own principal may opt in. ACP adapter permissions and the Node's machine owner
-    /// do not establish that isolation. Default-deny also protects legacy and newly added runtimes.
+    /// do not establish that isolation. Default-deny also protects newly added runtimes.
     fn check_workflow_execution(&self, item_id: &str) -> Result<()> {
         let _ = item_id;
         Err(crate::CoreError::Msg(
@@ -208,7 +208,7 @@ pub trait AgentRuntime: Send + Sync {
     /// Work on a Node that an upgrade drain waits for: open turns (also one waiting for a
     /// permission answer until it is answered or expires, or one with an outcome nobody can tell
     /// yet) and harnesses opening, configuring or releasing. A restart would cut it with nothing to
-    /// resume it, so the drain never seals while there is any. Legacy turns are not counted here.
+    /// resume it, so the drain never seals while there is any.
     fn node_working(&self) -> usize {
         0
     }

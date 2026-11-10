@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Shared by ops/release.sh and ops/migrate-web-split.sh (sourced, not run): log helpers, JSON helpers and the web build layout.
+# Shared by ops/release.sh (sourced, not run): log helpers, JSON helpers and the web build layout.
 #   $STEVE_HOME/web/<ver>/       one web build: the web/dist contents plus release.json {version, commit, branch, built_at}
 #   $STEVE_HOME/web/current      symlink to the build the Hub serves (STEVE_WEB_DIR); switched by an atomic rename, no restart
 #   $STEVE_HOME/logs/release/    one full, timestamped log per release run

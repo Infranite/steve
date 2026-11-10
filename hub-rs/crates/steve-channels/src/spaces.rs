@@ -130,9 +130,6 @@ pub fn chosen_voice(c: &Connection, space: &str) -> ChannelResult<Option<String>
     .flatten())
 }
 
-/// `400` for a voice that is not an identity in this space.
-pub const VOICE_NOT_HERE: &str = "这个身份不在这个群里，不能替 Steve 在这里发言";
-
 /// Sets (or, `None`, clears to automatic) the voice of a space. `400` unless that identity sees it.
 pub fn set_voice(
     tx: &Tx,

@@ -887,8 +887,6 @@ mod tests {
             codex_home: dir.join("codex"),
             user_home: dir.to_path_buf(),
             version: "t".into(),
-            idle_release: Duration::from_secs(1),
-            retry_delays: vec![],
         }
     }
 

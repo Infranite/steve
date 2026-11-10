@@ -1,0 +1,5 @@
+- 清理了 Hub 进程内旧运行器（0.2.62 已删除）留下的接管逻辑：不再有"把旧会话搬到 Node""搬不动就退役会话""重启前已送达、待核对"这几条路径，排队区里也不再出现"待核对"的行。所有会话一直都在 Node 上运行，日常使用没有变化；健康检查里 Node 部分的 `legacy` 段和环境变量 `STEVE_LEGACY_MOVE_EVERY_MS` 随之去掉。
+- `STEVE_NODE` 现在只表示运行 `.js` 适配器的 Node.js 路径。0.2.50 时期的旧写法 `STEVE_NODE=local` 不再被当成 Node 开关，请改用 `STEVE_NODE_MODE`。
+- `STEVE_NODE_MODE` 写错时的报错、`ops/steve.env.example` 和部署文档现在都按实际默认值说明：不设置就是 `service`（Hub 自己的 Node 在独立进程里运行，Hub 重启或升级不打断正在进行的回合），`local` 才是放在 Hub 进程里。
+- `ops/run.sh` 不再回退到 TypeScript Hub 和拆分前的网页目录：`current/bin/steve-hub` 不存在时直接报错退出。一次性的 `ops/migrate-web-split.sh` 已删除。
+- 删除了只为对照 TypeScript Hub 而保留的测试和脚手架，以及一批没有任何调用方的函数、配置项和空的 `steve-people` crate。

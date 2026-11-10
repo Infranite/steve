@@ -270,8 +270,6 @@ impl Hub {
                     codex_home: base.join("codex-home"),
                     user_home: w.root.clone(),
                     version: "test".into(),
-                    idle_release: Duration::from_secs(600),
-                    retry_delays: vec![],
                 },
                 roots: roots.clone(),
                 capacity: Capacity {

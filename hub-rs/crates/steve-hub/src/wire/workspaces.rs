@@ -613,8 +613,6 @@ mod tests {
                     codex_home: dir.path().join("codex"),
                     user_home: dir.path().to_path_buf(),
                     version: "test".into(),
-                    idle_release: Duration::from_secs(600),
-                    retry_delays: vec![],
                 },
                 roots: super::super::node_binding::roots(&store, &extra).unwrap(),
                 capacity: Capacity {

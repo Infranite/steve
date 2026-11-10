@@ -942,15 +942,4 @@ impl Items<'_> {
             )
         })
     }
-    /// Every operation of an item, any cycle, oldest first.
-    pub fn operations_all(&self, item_id: &str) -> Result<Vec<ItemOperation>> {
-        self.0.read(|c| {
-            all(
-                c,
-                "SELECT * FROM item_operations WHERE item_id = ? ORDER BY created, id",
-                [item_id],
-                op_row,
-            )
-        })
-    }
 }

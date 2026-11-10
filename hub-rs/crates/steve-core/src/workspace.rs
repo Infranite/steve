@@ -81,10 +81,6 @@ impl Default for DiskPolicy {
 }
 
 impl DiskPolicy {
-    pub fn from_env() -> DiskPolicy {
-        DiskPolicy::from_vars(|k| std::env::var(k).ok())
-    }
-
     /// From a variable map (the Hub's configuration); unset or invalid values keep the defaults.
     pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> DiskPolicy {
         let d = DiskPolicy::default();

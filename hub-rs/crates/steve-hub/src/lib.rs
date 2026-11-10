@@ -1,4 +1,4 @@
-//! Steve Hub: the binary that replaces hub/src/{main,api,bus,config,system,housekeeping}.ts.
+//! Steve Hub: the HTTP API, the event stream, configuration, system checks and housekeeping.
 //!
 //! The HTTP layer is written against [`backend::Backend`] (storage) and [`backend::Domain`] (steve-core);
 //! [`wire`] is where the integrator plugs in steve-store, steve-core, steve-auth and steve-mcp;

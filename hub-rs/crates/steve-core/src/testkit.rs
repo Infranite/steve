@@ -763,8 +763,6 @@ impl FakeAcp {
                 codex_home: dir.join("codex-home"),
                 user_home: dir.to_path_buf(),
                 version: "test".into(),
-                idle_release: Duration::from_secs(60),
-                retry_delays: vec![],
             },
         }
     }

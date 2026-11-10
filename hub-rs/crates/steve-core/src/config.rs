@@ -1,5 +1,5 @@
-//! The part of config.ts the domain layer reads. Built by the binary from the environment
-//! ([`CoreConfig::from_env`]) or directly in tests.
+//! The configuration the domain layer reads. Built by the Hub from its own configuration, or
+//! directly in tests.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -71,9 +71,6 @@ pub fn mq_from_env() -> bool {
     std::env::var("STEVE_MQ").is_ok_and(|v| v.trim() == "1")
 }
 
-fn env(k: &str, d: &str) -> String {
-    std::env::var(k).unwrap_or_else(|_| d.to_string())
-}
 fn list(s: &str) -> Vec<String> {
     s.split(',')
         .map(|x| x.trim().to_string())
@@ -81,57 +78,9 @@ fn list(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// A comma list with blanks dropped (research and check lists, as steve-research and the channels read them).
-fn trimmed(s: &str) -> Vec<String> {
-    s.split(',')
-        .map(str::trim)
-        .filter(|x| !x.is_empty())
-        .map(String::from)
-        .collect()
-}
-
 impl CoreConfig {
-    /// Same variables and defaults as config.ts.
-    pub fn from_env() -> CoreConfig {
-        let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-        let home = std::env::var("STEVE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| Path::new(&home_dir).join(".steve"));
-        let home = std::path::absolute(&home).unwrap_or(home);
-        let mut c = CoreConfig::for_home(&home);
-        c.port = env("STEVE_PORT", "8440").parse().unwrap_or(8440);
-        // none by default: every call follows the harness's own default model
-        c.models_fast = list(&env("STEVE_MODELS_FAST", ""));
-        c.models_smart = list(&env("STEVE_MODELS_SMART", ""));
-        let research = trimmed(&env("STEVE_MODELS_RESEARCH", ""));
-        if !research.is_empty() {
-            c.models_research = research;
-        }
-        c.models_check = trimmed(&env("STEVE_MODELS_CHECK", ""));
-        c.default_models.clear();
-        if let Some(m) = std::env::var(steve_acp::adapters::DEFAULT_MODEL_VAR)
-            .ok()
-            .map(|m| m.trim().to_string())
-            .filter(|m| !m.is_empty())
-        {
-            c.default_models
-                .insert(steve_acp::adapters::DEFAULT_ADAPTER.0.into(), m);
-        }
-        c.steve_repo = std::env::var("STEVE_REPO")
-            .map(PathBuf::from)
-            .ok()
-            .or_else(steve_checkout_of_exe)
-            .unwrap_or_default();
-        c.no_resume = std::env::var("STEVE_NO_RESUME").is_ok_and(|v| v == "1");
-        c.debug_route = std::env::var("STEVE_DEBUG_ROUTE").is_ok_and(|v| !v.is_empty());
-        c.disk = crate::workspace::DiskPolicy::from_env();
-        c.version = env("STEVE_VERSION", "dev");
-        c.mq = mq_from_env();
-        c
-    }
-
     /// Rooted at `home` (tests): no repo, port 8440, and model lists as fixtures (an installation names
-    /// none by default, see [`CoreConfig::from_env`]).
+    /// none by default, see the Hub's configuration).
     pub fn for_home(home: &Path) -> CoreConfig {
         CoreConfig {
             home: home.to_path_buf(),

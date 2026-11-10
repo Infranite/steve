@@ -5,9 +5,6 @@
 //! menu and ⌘K ([`mentions`]), the agents' MCP tools ([`mcp`]) and contact cards for prompts ([`cards`]);
 //! ownership (归属与负责人): [`stewards`] and its routes [`stewards_api`].
 //!
-//! The build plan names the crate `steve-people`; P1 and P2 landed here in steve-modules, so P3 lives next
-//! to them.
-//!
 //! - [`repo`]: the SQL (tables of migration 4, owned by steve-store);
 //! - [`service`]: the domain rules, callable from the REST handlers, MCP tools and drafts alike;
 //! - [`api`]: the REST handlers; [`routes`] is what the integrator mounts under `/api`.

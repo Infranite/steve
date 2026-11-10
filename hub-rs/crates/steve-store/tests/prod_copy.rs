@@ -4,8 +4,6 @@
 //!   STEVE_STORE_PROD_COPY=/tmp/x/steve.sqlite3 cargo test -p steve-store --test prod_copy
 //!
 //! The test copies that file again into its own temp dir, so the given copy is never written.
-//! With `STEVE_STORE_TS_DUMP` (output of tests/ts_dump.ts on another copy) it also compares the JSON
-//! of every row with what repo.ts returns.
 
 mod common;
 
@@ -13,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use common::*;
-use serde_json::{Map, Value, json};
 use steve_store::*;
 
 fn prod_copy() -> Option<(tempfile::TempDir, PathBuf)> {
@@ -192,122 +189,4 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
         n("SELECT count(*) FROM items"),
         "all plan/source JSON valid"
     );
-}
-
-/// The Rust counterpart of tests/ts_dump.ts.
-fn dump(s: &Store) -> Value {
-    let v = |x: &dyn erased::Ser| x.json();
-    let wss = s.workspaces().all().unwrap();
-    let mut per = Map::new();
-    for w in &wss {
-        let ws = w.id.as_str();
-        let items = s.items().all(ws).unwrap();
-        let mut detail = Map::new();
-        for i in &items {
-            detail.insert(
-                i.id.clone(),
-                json!({
-                    "goals": v(&s.items().goals(&i.id).unwrap()), "goal": s.items().goal(&i.id).unwrap(),
-                    "timeline": v(&s.timeline().list(&i.id).unwrap()), "artifacts": v(&s.artifacts().list(&i.id).unwrap()),
-                    "deps": s.deps().of(&i.id).unwrap(), "dependents": s.deps().dependents(&i.id).unwrap(), "tags": s.tags().of_item(&i.id).unwrap(),
-                    "decisions": v(&s.decisions().of_item(&i.id).unwrap()), "sessions": v(&s.sessions().of_item(&i.id).unwrap()),
-                }),
-            );
-        }
-        let memories: Map<String, Value> = s
-            .bots()
-            .list(None)
-            .unwrap()
-            .iter()
-            .map(|b| (b.id.clone(), v(&s.memories().list(&b.id, ws).unwrap())))
-            .collect();
-        per.insert(
-            ws.into(),
-            json!({
-                "items": v(&items), "items_open": v(&s.items().list(ws, false).unwrap()), "items_archived": v(&s.items().list(ws, true).unwrap()),
-                "item_detail": detail, "bots": v(&s.bots().list(Some(ws)).unwrap()), "projects": v(&s.projects().list(ws, false).unwrap()),
-                "projects_archived": v(&s.projects().list(ws, true).unwrap()), "tags": v(&s.tags().list(ws).unwrap()), "tag_uses": v(&s.tags().uses(ws).unwrap()),
-                "decisions_open": v(&s.decisions().open(ws).unwrap()), "decisions_recent": v(&s.decisions().recent(ws, 0).unwrap()),
-                "messages": v(&s.messages().list(ws, "steve", 100000).unwrap()), "sessions": v(&s.sessions().list(Some(ws)).unwrap()),
-                "settings": s.settings().all(ws).unwrap(), "memories": memories,
-            }),
-        );
-    }
-    let session_ids: Vec<String> = s
-        .with_conn(|c| {
-            Ok(c.prepare("SELECT id FROM sessions")?
-                .query_map([], |r| r.get(0))?
-                .collect::<Result<_, _>>()?)
-        })
-        .unwrap();
-    let user_ids: Vec<String> = s
-        .with_conn(|c| {
-            Ok(c.prepare("SELECT id FROM users")?
-                .query_map([], |r| r.get(0))?
-                .collect::<Result<_, _>>()?)
-        })
-        .unwrap();
-    let mut out = json!({
-        "workspaces": v(&wss), "devices": v(&s.devices().list().unwrap()), "bots_all": v(&s.bots().list(None).unwrap()),
-        "sessions_all": v(&s.sessions().list(None).unwrap()), "per_workspace": per,
-        "events": session_ids.iter().map(|id| (id.clone(), v(&s.events().after(id, 0, 1_000_000).unwrap()))).collect::<Map<_, _>>(),
-        "users": user_ids.iter().map(|id| v(&s.users().get(id).unwrap())).collect::<Vec<_>>(),
-        "member_workspaces": user_ids.iter().map(|id| (id.clone(), v(&s.workspaces().of_user(id).unwrap()))).collect::<Map<_, _>>(),
-        "bot_workspaces": s.bots().list(None).unwrap().iter().map(|b| (b.id.clone(), v(&s.bots().workspaces(&b.id).unwrap()))).collect::<Map<_, _>>(),
-    });
-    // TS: `rowBot(undefined)` is undefined, so the key is absent when there is no main bot.
-    if let Some(b) = s.bots().main().unwrap() {
-        out["main_bot"] = v(&b);
-    }
-    out["counter_item_st"] = json!(s.peek_counter("item:ST").unwrap());
-    out
-}
-
-mod erased {
-    pub trait Ser {
-        fn json(&self) -> serde_json::Value;
-    }
-    impl<T: serde::Serialize> Ser for T {
-        fn json(&self) -> serde_json::Value {
-            serde_json::to_value(self).unwrap()
-        }
-    }
-}
-
-/// First differing path, for a readable failure.
-fn diff(a: &Value, b: &Value, path: &str) -> Option<String> {
-    match (a, b) {
-        (Value::Object(x), Value::Object(y)) => {
-            let kx: Vec<_> = x.keys().collect();
-            let ky: Vec<_> = y.keys().collect();
-            if kx != ky {
-                return Some(format!("{path}: keys {kx:?} vs {ky:?}"));
-            }
-            x.iter()
-                .find_map(|(k, v)| diff(v, &y[k], &format!("{path}.{k}")))
-        }
-        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => x
-            .iter()
-            .zip(y)
-            .enumerate()
-            .find_map(|(i, (p, q))| diff(p, q, &format!("{path}[{i}]"))),
-        (Value::Number(x), Value::Number(y)) if x.as_f64() == y.as_f64() => None,
-        _ if a == b => None,
-        _ => Some(format!("{path}: {a} vs {b}")),
-    }
-}
-
-#[test]
-fn json_matches_ts_repo() {
-    let (Some((_dir, path)), Some(ts)) = (prod_copy(), std::env::var_os("STEVE_STORE_TS_DUMP"))
-    else {
-        eprintln!("STEVE_STORE_PROD_COPY / STEVE_STORE_TS_DUMP not set; skipped");
-        return;
-    };
-    let want: Value = serde_json::from_slice(&std::fs::read(ts).unwrap()).unwrap();
-    let s = Store::open(&path, NoPublisher).unwrap();
-    let got = dump(&s);
-    if let Some(d) = diff(&got, &want, "$") {
-        panic!("Rust vs TS differ at {d}");
-    }
 }

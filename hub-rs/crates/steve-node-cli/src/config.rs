@@ -17,7 +17,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -167,8 +166,6 @@ impl Home {
             version: option_env!("STEVE_BUILD_VERSION")
                 .unwrap_or(env!("CARGO_PKG_VERSION"))
                 .into(),
-            idle_release: Duration::from_secs(600),
-            retry_delays: vec![Duration::from_secs(20), Duration::from_secs(60)],
         })
     }
 

@@ -1,7 +1,4 @@
-//! Opening the database and the migration runner (hub/src/db.ts).
-//!
-//! The migration strings are the TS ones byte for byte (extracted from db.ts), because SQLite keeps the
-//! CREATE text in `sqlite_master` and both Hubs must be able to open the same file.
+//! Opening the database and the migration runner.
 
 use std::path::Path;
 
@@ -9,20 +6,14 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 
 use crate::{Result, StoreError};
 
-/// `MIGRATIONS` from db.ts, in order. Index `i` brings the schema from version `i` to `i + 1`.
-///
-/// Adding a TS migration (1–3 are the TS strings): only once it is on TS main, so both Hubs agree on what the version means.
-/// 1. copy the template literal byte for byte into `migrations/00N.sql` (the text between the backticks,
-///    leading newline and indentation included) and append it here;
-/// 2. regenerate `tests/fixtures/ts_schema.txt` by running the TS db.ts on an empty STEVE_HOME;
-/// 3. add the new columns to the row types; `row_types_follow_column_order` and the prod-copy JSON
-///    comparison fail until the types match.
+/// The migrations, in order. Index `i` brings the schema from version `i` to `i + 1`. A released one is
+/// frozen (`migrations/LOCK`); a change goes into a new migration, with its columns added to the row
+/// types (`row_types_follow_column_order` fails until they match).
 pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001.sql"),
     include_str!("../migrations/002.sql"),
     include_str!("../migrations/003.sql"),
-    // From here on the migrations belong to the new modules and exist only in the Rust Hub (no TS Hub may
-    // open such a database, see `migrate`; the TS Hub never checked the schema it opened). Numbering: 4 shared base +
+    // 1–3 are the schema of the TypeScript Hub this one replaced. Numbering from there: 4 shared base +
     // contacts, 5 accounts & vault, 6 signals & automation + schedules, 7 channels + Feishu, 8 knowledge,
     // 9 email, 10 GitHub, 11 channel poll cursors, 12 spaces outlive their connection. 4–11 are
     // `IF NOT EXISTS` and alter nothing existing; 12 rebuilds `spaces` (see `migrate`). Once these

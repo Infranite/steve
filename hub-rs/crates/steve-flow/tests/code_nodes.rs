@@ -884,8 +884,6 @@ mod on_node {
                     codex_home: home.path().join("codex"),
                     user_home: home.path().to_path_buf(),
                     version: "test".into(),
-                    idle_release: Duration::from_secs(600),
-                    retry_delays: vec![],
                 },
                 roots: vec![Root {
                     id: RootId::new("prj").unwrap(),

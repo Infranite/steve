@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 /// Everything the ACP driver needs from the configuration (the Node's, built from the Hub's).
 #[derive(Debug, Clone)]
@@ -26,10 +25,6 @@ pub struct AcpConfig {
     pub user_home: PathBuf,
     /// `STEVE_VERSION`, sent as `clientInfo.version`.
     pub version: String,
-    /// `STEVE_IDLE_RELEASE_MS` (default 10 min).
-    pub idle_release: Duration,
-    /// Gateway retry waits; the attempt count is their number (TS: 20 s, 60 s).
-    pub retry_delays: Vec<Duration>,
 }
 
 /// `npm root -g`, run once; failure falls back to Homebrew's global modules like the TS code.
@@ -105,10 +100,7 @@ impl AcpConfig {
         Self {
             adapters,
             declared: HashMap::new(),
-            // `STEVE_NODE=local` is the deprecated 0.2.50 spelling of STEVE_NODE_MODE=local (the
-            // Steve Node switch), not a Node.js binary
             node: var("STEVE_NODE")
-                .filter(|v| v.as_os_str() != "local")
                 .or_else(|| which("node"))
                 .unwrap_or_else(|| PathBuf::from("node")),
             claude_executable: var("CLAUDE_CODE_EXECUTABLE")
@@ -117,13 +109,6 @@ impl AcpConfig {
             codex_home: var("CODEX_HOME").unwrap_or_else(|| home.join(".codex")),
             user_home: home,
             version: env::var("STEVE_VERSION").unwrap_or_else(|_| "dev".into()),
-            // Number("") is 0 in JS; garbage is NaN, which setTimeout treats as 0 — both release at once
-            idle_release: Duration::from_millis(
-                env::var("STEVE_IDLE_RELEASE_MS")
-                    .map(|v| v.trim().parse::<f64>().unwrap_or(0.0).max(0.0) as u64)
-                    .unwrap_or(600_000),
-            ),
-            retry_delays: vec![Duration::from_secs(20), Duration::from_secs(60)],
         }
     }
 }

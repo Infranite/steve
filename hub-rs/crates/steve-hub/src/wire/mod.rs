@@ -144,11 +144,6 @@ fn acp_config(cfg: &Config) -> steve_acp::AcpConfig {
         codex_home: cfg.codex_home.clone(),
         user_home: crate::config::home_dir(),
         version: cfg.version.clone(),
-        idle_release: std::time::Duration::from_millis(cfg.idle_release_ms),
-        retry_delays: vec![
-            std::time::Duration::from_secs(20),
-            std::time::Duration::from_secs(60),
-        ],
     }
 }
 
@@ -172,8 +167,8 @@ struct NodeHost {
     tools: Arc<node_tools::NodeTools>,
 }
 
-/// Construct the local host. Initialization errors fail boot rather than silently routing
-/// persisted Node sessions to legacy. ToolService is installed later, once core/modules exist;
+/// Construct the local host. Initialization errors fail boot rather than leaving persisted Node
+/// sessions with nowhere to run. ToolService is installed later, once core/modules exist;
 /// the returned startup job connects its endpoint before dispatch workers begin.
 fn node_runtime(
     cfg: &Config,
@@ -302,7 +297,7 @@ pub(crate) fn local_node_extras(node: &steve_node::LocalNode, cfg: &Config, kind
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NodeMode {
     Off,
-    /// In the Hub's process (the default): its turns stop when the Hub does.
+    /// In the Hub's process: its turns stop when the Hub does.
     Local,
     /// In a process of its own on this machine (B1): a Hub restart or upgrade leaves its turns
     /// running.
@@ -348,11 +343,11 @@ pub(crate) fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, Back
             "off" => return Ok(false),
             other => {
                 return Err(BackendError::msg(format!(
-                    "STEVE_NODE_MODE={other:?} is not a mode: use local (the default), service or off"
+                    "STEVE_NODE_MODE={other:?} is not a mode: use service (the default), local or off"
                 )));
             }
         },
-        // the default
+        // unset: on (as a service, see `node_mode`)
         None => return Ok(!no_resume),
     };
     if explicit_local && no_resume {
