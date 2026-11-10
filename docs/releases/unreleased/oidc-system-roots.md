@@ -1,1 +1,0 @@
-修复使用私有 CA 证书的 OIDC 登录：之前 Hub 只信任内置的公共根证书，登录时 `/auth/login` 返回 500，日志只有 `discovery: Request failed`。现在 Hub、Node 和 `steve` 命令的 HTTPS 请求也信任系统证书库（macOS 钥匙串、Linux `/etc/ssl`）里的 CA；Node 连接这类 Hub 时也不再必须 `--pin`。OIDC 发现和密钥获取失败时，日志会写出完整原因，例如证书不受信任。
