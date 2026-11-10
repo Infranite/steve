@@ -153,10 +153,23 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             }
             let mut service =
                 steve_install::service::Service::new(&command, &home, label.as_deref())?;
-            let report = service.dispatch(&action, release.as_deref(), wait)?;
+            let mut report = service.dispatch(&action, release.as_deref(), wait)?;
             if json || !std::io::stdout().is_terminal() {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
+                /* for a person, the version comes from the running Hub itself */
+                if command == "hub"
+                    && matches!(action.as_str(), "status" | "doctor")
+                    && report["service"]["running"] == true
+                    && report["running_build"].is_null()
+                {
+                    let health = setup::hub_urls(&home)
+                        .and_then(|(api, _)| setup::hub_ready(&api, std::time::Duration::from_secs(2)));
+                    if let Some(health) = health {
+                        report["running_build"] = serde_json::json!({
+                            "version": health["version"], "commit": health["build_commit"]});
+                    }
+                }
                 print!(
                     "{}",
                     ui::summary(&output::service(&command, &action, &home, label.as_deref(), &report))

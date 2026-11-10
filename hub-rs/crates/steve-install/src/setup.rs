@@ -1061,7 +1061,7 @@ fn finish_hub(
         ("Token", field("token")),
         ("数据目录", home.display().to_string()),
     ]);
-    ui::info(&format!("Token 保存在 {}（权限 0600）。", home.join(OWNER_TOKEN).display()));
+    ui::info(&format!("Token 也保存在 {}", home.join(OWNER_TOKEN).display()));
     ui::gap();
     let how = "第一次打开网页：先填 Hub 地址，再用上面的用户名和 Token 登录。";
     if !input.confirm("现在启动 Hub？", true)? {
