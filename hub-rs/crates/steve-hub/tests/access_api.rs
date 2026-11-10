@@ -460,3 +460,113 @@ async fn single_sign_on_is_set_up_in_the_settings_without_a_restart() {
     let (_, unauth) = e.call("GET", "/api/me", None, None).await;
     assert_ne!(unauth["login"], "/auth/login");
 }
+
+#[tokio::test]
+async fn qr_pairing_mints_a_single_use_client_credential_and_reports_claim() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (_, token) = st.access().token_create(&owner.id, "mac", None).unwrap();
+    let (_, ok) = e
+        .call(
+            "POST",
+            "/auth/token",
+            None,
+            Some(json!({"user": owner.name, "token": token, "client": {"kind": "mac", "name": "MacBook"}})),
+        )
+        .await;
+    let mac_cred = ok["credential"].as_str().unwrap().to_string();
+
+    // Create a QR pairing code from the signed-in macOS/Web client
+    let (s, pair) = e
+        .call(
+            "POST",
+            "/api/access/pairings",
+            Some(&mac_cred),
+            Some(json!({"name": "Home Hub"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{pair}");
+    let pair_id = pair["id"].as_str().expect("id").to_string();
+    let code = pair["code"].as_str().expect("code").to_string();
+    assert!(code.starts_with("stp_"));
+    assert!(pair["uri"].as_str().unwrap().starts_with("steve://pair?"));
+    assert_eq!(
+        pair["loopback_only"], true,
+        "test Hub listens on 127.0.0.1 only"
+    );
+
+    // Status starts as pending
+    let (s, status) = e
+        .call(
+            "GET",
+            &format!("/api/access/pairings/{pair_id}"),
+            Some(&mac_cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{status}");
+    assert_eq!(status["status"], "pending");
+
+    // Claim the pairing code on iOS via /auth/pair
+    let (s, claimed) = e
+        .call(
+            "POST",
+            "/auth/pair",
+            None,
+            Some(json!({
+                "code": code,
+                "client": {"kind": "ios", "name": "iPhone", "platform": "iOS 18", "version": "0.3.0"}
+            })),
+        )
+        .await;
+    assert_eq!(s, 200, "{claimed}");
+    let ios_cred = claimed["credential"]
+        .as_str()
+        .expect("ios cred")
+        .to_string();
+    let ios_id = claimed["client_id"].as_str().expect("ios id").to_string();
+
+    // Pairing code is single-use: re-claiming fails with 401
+    let (s, _) = e
+        .call(
+            "POST",
+            "/auth/pair",
+            None,
+            Some(json!({"code": code, "client": {"kind": "ios", "name": "Replay"}})),
+        )
+        .await;
+    assert_eq!(s, 401);
+
+    // Status now reports claimed with the paired client details
+    let (s, status) = e
+        .call(
+            "GET",
+            &format!("/api/access/pairings/{pair_id}"),
+            Some(&mac_cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{status}");
+    assert_eq!(status["status"], "claimed");
+    assert_eq!(status["client"]["id"], json!(ios_id));
+    assert_eq!(status["client"]["kind"], "ios");
+
+    // Paired iOS client authenticates to /api/me and can be revoked independently
+    let (s, me) = e.call("GET", "/api/me", Some(&ios_cred), None).await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["client"]["id"], json!(ios_id));
+    assert_eq!(me["client"]["kind"], "ios");
+
+    let (s, _) = e
+        .call(
+            "DELETE",
+            &format!("/api/access/clients/{ios_id}"),
+            Some(&mac_cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (s, _) = e.call("GET", "/api/me", Some(&ios_cred), None).await;
+    assert_eq!(s, 401);
+}

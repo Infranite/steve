@@ -248,6 +248,31 @@ impl Access<'_> {
         Ok(Some((u, client, sec)))
     }
 
+    /// Creates a signed-in client for `user_id` directly (e.g. from a short-lived pairing code),
+    /// returning the new client and its secret once. `None` when `user_id` does not exist.
+    pub fn client_create(
+        &self,
+        user_id: &str,
+        token_id: Option<&str>,
+        c: &NewClient,
+    ) -> Result<Option<(User, Client, String)>> {
+        let Some(u) = self.0.users().get(user_id)? else {
+            return Ok(None);
+        };
+        let t = now();
+        let (id, sec) = (uid("cli"), secret());
+        self.0.write(|w| {
+            w.c.run(
+                "INSERT INTO clients (id, user_id, token_id, secret_hash, kind, name, platform, version, origin, created, last_seen)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, u.id, token_id, sha(&sec), c.kind, c.name, c.platform, c.version, c.origin, t, t],
+            )?;
+            Ok(())
+        })?;
+        let client = self.client(&id)?.expect("just written");
+        Ok(Some((u, client, sec)))
+    }
+
     pub fn client(&self, id: &str) -> Result<Option<Client>> {
         self.0.read(|c| {
             one(
@@ -450,5 +475,28 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn a_paired_client_needs_no_token_and_can_be_revoked() {
+        let (_d, s) = store();
+        let me = s.users().create("local:lee", "Lee", None, "owner").unwrap();
+        let ios = NewClient {
+            kind: "ios",
+            name: "iPhone",
+            platform: "iOS",
+            version: "0.3.0",
+            origin: None,
+        };
+        let (u, c, sec) = s.access().client_create(&me, None, &ios).unwrap().unwrap();
+        assert_eq!(
+            (u.id.as_str(), c.kind.as_str(), c.token_id),
+            (me.as_str(), "ios", None)
+        );
+        let cred = credential(&c.id, &sec);
+        let (u2, c2) = s.access().client_user(&cred).unwrap().unwrap();
+        assert_eq!((u2.id, c2.id), (me, c.id.clone()));
+        assert!(s.access().client_revoke(&c.id).unwrap());
+        assert!(s.access().client_user(&cred).unwrap().is_none());
     }
 }

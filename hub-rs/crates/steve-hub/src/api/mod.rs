@@ -662,6 +662,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/access/tokens", post(crate::access::token_create))
         .route("/access/tokens/{id}", delete(crate::access::token_revoke))
         .route("/access/clients/{id}", delete(crate::access::client_revoke))
+        .route("/access/pairings", post(crate::access::pair_create))
+        .route("/access/pairings/{id}", get(crate::access::pair_status))
         // settings and conversational configuration
         .route("/settings/schema", get(misc::settings_schema))
         .route(
@@ -684,7 +686,10 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/devices/{id}", patch(misc::device_patch))
         .route("/system/models", get(misc::system_models))
         .route("/system/harnesses", post(misc::system_harness_add))
-        .route("/system/harnesses/{id}", delete(misc::system_harness_remove))
+        .route(
+            "/system/harnesses/{id}",
+            delete(misc::system_harness_remove),
+        )
         .route("/system/workspaces", get(misc::system_workspaces))
         .route(
             "/system/workspaces/reclaim",

@@ -389,12 +389,13 @@ async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::respo
     res
 }
 
-/// `/hello`, `/token` and `/client/logout`, nested under `/auth` with the login routes; no session
-/// required.
+/// `/hello`, `/token`, `/pair` and `/client/logout`, nested under `/auth` with the login routes; no
+/// session required.
 pub fn auth_routes(st: AppState) -> Router {
     Router::new()
         .route("/hello", get(hello))
         .route("/token", post(sign_in))
+        .route("/pair", post(pair_sign_in))
         .route("/client/logout", post(sign_out))
         .with_state(st)
 }
@@ -648,6 +649,65 @@ mod tests {
         assert_eq!(bearer(&h(&[("authorization", "Basic x")])), None);
         assert_eq!(bearer(&h(&[])), None);
     }
+
+    #[test]
+    fn pairing_endpoints_prefer_public_url_else_lan_urls() {
+        let mk = |host: &str, any: bool, pub_url: &str| {
+            let host = host.to_string();
+            let pub_url = pub_url.to_string();
+            let allow = if any { "1" } else { "0" };
+            crate::config::Config::from_vars(move |k| match k {
+                "STEVE_HOME" => Some("/tmp/steve-pair-ep-test".into()),
+                "STEVE_HOST" => Some(host.clone()),
+                "STEVE_PORT" => Some("8440".into()),
+                "STEVE_ALLOW_ANY_HOST" => Some(allow.into()),
+                "STEVE_PUBLIC_URL" => Some(pub_url.clone()),
+                _ => None,
+            })
+            .expect("config")
+        };
+        let ifs = [
+            "192.168.1.42".parse().unwrap(),
+            "100.64.0.9".parse().unwrap(),
+        ];
+
+        // Public HTTPS configured + wildcard listen: public_url is populated AND lan_urls fallback is included.
+        let ep_pub = pair_endpoints_with(
+            &mk("0.0.0.0", true, "https://steve.example"),
+            &h(&[("host", "127.0.0.1:8440")]),
+            &ifs,
+        );
+        assert_eq!(ep_pub.public_url.as_deref(), Some("https://steve.example"));
+        assert_eq!(
+            ep_pub.lan_urls,
+            vec!["http://192.168.1.42:8440", "http://100.64.0.9:8440"]
+        );
+        assert!(!ep_pub.loopback_only);
+        let uri_pub = build_pair_uri("stp_abc", "My Hub", &ep_pub);
+        assert!(uri_pub.starts_with("steve://pair?"));
+        assert!(uri_pub.contains("pub=https%3A%2F%2Fsteve.example"));
+        assert!(uri_pub.contains("lan=http%3A%2F%2F192.168.1.42%3A8440"));
+
+        // No public URL, explicit LAN listen: public_url is None, lan_urls has the LAN address.
+        let ep_lan = pair_endpoints_with(
+            &mk("127.0.0.1,192.168.1.42", false, "http://127.0.0.1:8440"),
+            &h(&[("host", "127.0.0.1:8440")]),
+            &ifs,
+        );
+        assert_eq!(ep_lan.public_url, None);
+        assert_eq!(ep_lan.lan_urls, vec!["http://192.168.1.42:8440"]);
+        assert!(!ep_lan.loopback_only);
+
+        // Pure loopback listen with loopback public_url: loopback_only is true.
+        let ep_loop = pair_endpoints_with(
+            &mk("127.0.0.1", false, "http://127.0.0.1:8440"),
+            &h(&[("host", "127.0.0.1:8440")]),
+            &ifs,
+        );
+        assert_eq!(ep_loop.public_url, None);
+        assert!(ep_loop.lan_urls.is_empty());
+        assert!(ep_loop.loopback_only);
+    }
 }
 
 /// The host of a URL or origin, without scheme or port (`http://10.0.0.5:8441` → `10.0.0.5`).
@@ -660,7 +720,10 @@ fn host_of(url: &str) -> Option<String> {
 
 /// The paths any web origin may call: what a page needs before it is signed in.
 fn open_path(path: &str) -> bool {
-    matches!(path, "/auth/hello" | "/auth/token" | "/auth/client/logout")
+    matches!(
+        path,
+        "/auth/hello" | "/auth/token" | "/auth/pair" | "/auth/client/logout"
+    )
 }
 
 /// How long whether an origin may call is remembered.
@@ -939,6 +1002,529 @@ pub async fn client_revoke(
     }
     ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     Ok(reply(StatusCode::OK, json!({"ok": true})))
+}
+
+/* ───────── QR client pairing (mobile / companion clients) ───────── */
+
+/// How long an unused pairing code stays valid (5 minutes).
+const PAIR_TTL_MS: i64 = 5 * 60 * 1000;
+/// How long a claimed pairing stays inspectable so the showing screen can confirm pairing.
+const PAIR_KEEP_MS: i64 = 15 * 60 * 1000;
+const PAIR_PREFIX: &str = "stp_";
+
+#[derive(Clone)]
+struct PendingPair {
+    id: String,
+    user_id: String,
+    code_hash: String,
+    expires: i64,
+    claimed_at: Option<i64>,
+    client: Option<Value>,
+}
+
+static PAIRINGS: LazyLock<Mutex<HashMap<String, PendingPair>>> = LazyLock::new(Default::default);
+
+fn pair_code() -> String {
+    format!(
+        "{PAIR_PREFIX}{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn pair_hash(code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(code.trim().as_bytes()))
+}
+
+fn clean_pairings(m: &mut HashMap<String, PendingPair>, now_ms: i64) {
+    m.retain(|_, p| match p.claimed_at {
+        Some(at) => now_ms - at < PAIR_KEEP_MS,
+        None => now_ms < p.expires + 60_000,
+    });
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairEndpoints {
+    pub public_url: Option<String>,
+    pub lan_urls: Vec<String>,
+    pub loopback_only: bool,
+}
+
+fn is_local_or_private_host(host: &str) -> bool {
+    let h = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if h == "localhost" || h.ends_with(".local") || h.ends_with(".lan") {
+        return true;
+    }
+    if let Ok(ip) = h.parse::<IpAddr>() {
+        return ip.is_loopback()
+            || ip.is_unspecified()
+            || private(&ip)
+            || tailnet(&ip)
+            || matches!(ip, IpAddr::V6(v) if v.to_ipv4_mapped().is_some_and(|m| {
+                let mip = IpAddr::V4(m);
+                mip.is_loopback() || private(&mip) || tailnet(&mip)
+            }));
+    }
+    false
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    h == "localhost" || h.parse::<IpAddr>().is_ok_and(|ip| {
+        ip.is_loopback()
+            || matches!(ip, IpAddr::V6(v) if v.to_ipv4_mapped().is_some_and(|m| m.is_loopback()))
+    })
+}
+
+/// Active non-loopback IPv4 interface addresses on this machine (LAN first, tailnet after).
+#[cfg(unix)]
+fn machine_lan_ipv4s() -> Vec<std::net::Ipv4Addr> {
+    let mut lan = Vec::new();
+    let mut tail = Vec::new();
+    // SAFETY: `getifaddrs` initializes `addrs` on return code 0 and `freeifaddrs` frees the list
+    // before returning; every pointer check guards against null `ifa_addr` entries.
+    unsafe {
+        let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut addrs) != 0 || addrs.is_null() {
+            return lan;
+        }
+        let mut cur = addrs;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            let flags = ifa.ifa_flags as i32;
+            let up = (flags & libc::IFF_UP) != 0 && (flags & libc::IFF_LOOPBACK) == 0;
+            if up && !ifa.ifa_addr.is_null() && (*ifa.ifa_addr).sa_family as i32 == libc::AF_INET {
+                let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+                if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local() {
+                    let addr = IpAddr::V4(ip);
+                    if tailnet(&addr) {
+                        if !tail.contains(&ip) {
+                            tail.push(ip);
+                        }
+                    } else if !lan.contains(&ip) {
+                        lan.push(ip);
+                    }
+                }
+            }
+            cur = ifa.ifa_next;
+        }
+        libc::freeifaddrs(addrs);
+    }
+    lan.extend(tail);
+    lan
+}
+
+#[cfg(not(unix))]
+fn machine_lan_ipv4s() -> Vec<std::net::Ipv4Addr> {
+    Vec::new()
+}
+
+/// Resolves the public and internal/LAN URLs a companion device can use to reach this Hub.
+/// When `public_url` is present, clients connect over the public URL by default and keep `lan_urls`
+/// as fallback; when `public_url` is absent, clients connect via `lan_urls`.
+pub fn pair_endpoints_with(
+    cfg: &crate::config::Config,
+    headers: &HeaderMap,
+    if_ips: &[std::net::Ipv4Addr],
+) -> PairEndpoints {
+    let mut public_url: Option<String> = None;
+    let mut lan_urls: Vec<String> = Vec::new();
+    let push_lan = |list: &mut Vec<String>, u: String| {
+        let u = u.trim_end_matches('/').to_string();
+        if !u.is_empty() && !list.contains(&u) {
+            list.push(u);
+        }
+    };
+
+    let mut candidates = Vec::new();
+    if !cfg.public_url.is_empty() {
+        candidates.push(cfg.public_url.clone());
+    }
+    for u in &cfg.public_urls {
+        if !candidates.contains(u) {
+            candidates.push(u.clone());
+        }
+    }
+    let hub_port_for = |u: &reqwest::Url| -> String {
+        // When `STEVE_WEB_PORT` splits the web client onto its own port, `public_url` may name the
+        // web port; API & `/auth/*` live on `cfg.listen.port`.
+        if let Some(wp) = cfg.web_port
+            && u.port() == Some(wp)
+            && wp != cfg.listen.port
+        {
+            let mut copy = u.clone();
+            let _ = copy.set_port(Some(cfg.listen.port));
+            return copy.as_str().trim_end_matches('/').to_string();
+        }
+        u.as_str().trim_end_matches('/').to_string()
+    };
+
+    for raw in &candidates {
+        let Ok(u) = reqwest::Url::parse(raw) else {
+            continue;
+        };
+        let Some(host) = u.host_str() else { continue };
+        if is_loopback_host(host) {
+            continue;
+        }
+        let normalized = hub_port_for(&u);
+        if is_local_or_private_host(host) {
+            push_lan(&mut lan_urls, normalized);
+        } else if public_url.is_none() {
+            public_url = Some(normalized);
+        }
+    }
+
+    // If the pairing creator itself reached the Hub through a non-loopback Host header (e.g. a
+    // reverse proxy or LAN IP), include that origin too.
+    if let Some(raw_host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+    {
+        let scheme = if secure_request(cfg, headers) {
+            "https"
+        } else {
+            "http"
+        };
+        if let Ok(u) = reqwest::Url::parse(&format!("{scheme}://{raw_host}"))
+            && let Some(host) = u.host_str()
+            && !is_loopback_host(host)
+        {
+            let normalized = hub_port_for(&u);
+            if is_local_or_private_host(host) {
+                push_lan(&mut lan_urls, normalized);
+            } else if public_url.is_none() {
+                public_url = Some(normalized);
+            }
+        }
+    }
+
+    // Explicit non-loopback listen hosts (`STEVE_HOST=127.0.0.1,192.168.1.20` or tailnet IP).
+    let port = cfg.listen.port;
+    for h in &cfg.listen.hosts {
+        if let Ok(ip) = h.parse::<IpAddr>() {
+            if ip.is_loopback() || ip.is_unspecified() {
+                continue;
+            }
+            let formatted = match ip {
+                IpAddr::V4(v) => format!("http://{v}:{port}"),
+                IpAddr::V6(v) => format!("http://[{v}]:{port}"),
+            };
+            push_lan(&mut lan_urls, formatted);
+        } else if !is_loopback_host(h) {
+            push_lan(&mut lan_urls, format!("http://{h}:{port}"));
+        }
+    }
+
+    // Wildcard listen (`0.0.0.0` / `::`): every active LAN / tailnet IPv4 interface is reachable.
+    if cfg.listen.any() {
+        for ip in if_ips {
+            push_lan(&mut lan_urls, format!("http://{ip}:{port}"));
+        }
+    }
+
+    let loopback_only = public_url.is_none() && lan_urls.is_empty();
+    PairEndpoints {
+        public_url,
+        lan_urls,
+        loopback_only,
+    }
+}
+
+fn build_pair_uri(code: &str, name: &str, ep: &PairEndpoints) -> String {
+    let mut u = reqwest::Url::parse("steve://pair").expect("static scheme");
+    {
+        let mut q = u.query_pairs_mut();
+        q.append_pair("v", "1");
+        q.append_pair("code", code);
+        if !name.is_empty() {
+            q.append_pair("name", name);
+        }
+        if let Some(pub_url) = &ep.public_url {
+            q.append_pair("pub", pub_url);
+        }
+        if !ep.lan_urls.is_empty() {
+            q.append_pair("lan", &ep.lan_urls.join(","));
+        }
+    }
+    u.into()
+}
+
+#[derive(Deserialize, Default)]
+pub struct PairCreateIn {
+    #[serde(default)]
+    name: String,
+}
+
+/// `POST /api/access/pairings`: creates a short-lived single-use QR pairing code for the signed-in user.
+pub async fn pair_create(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::Extension(c): axum::Extension<crate::api::Ctx>,
+    body: Option<Json<PairCreateIn>>,
+) -> Result<axum::response::Response, crate::error::ApiError> {
+    let store = store_of(&st)?;
+    let now_ms = steve_store::now();
+    let expires = now_ms + PAIR_TTL_MS;
+    let code = pair_code();
+    let id = steve_store::uid("pair");
+    let ep = pair_endpoints_with(&st.cfg, &headers, &machine_lan_ipv4s());
+    let custom_name = body.map(|Json(b)| cut(&b.name, 60)).unwrap_or_default();
+    let hub_name = if !custom_name.is_empty() {
+        custom_name
+    } else {
+        ep.public_url
+            .as_deref()
+            .and_then(host_of)
+            .or_else(|| ep.lan_urls.first().and_then(|u| host_of(u)))
+            .unwrap_or_else(|| "Steve Hub".into())
+    };
+    let uri = build_pair_uri(&code, &hub_name, &ep);
+    {
+        let mut m = PAIRINGS.lock().unwrap_or_else(|e| e.into_inner());
+        clean_pairings(&mut m, now_ms);
+        m.insert(
+            id.clone(),
+            PendingPair {
+                id: id.clone(),
+                user_id: c.me.clone(),
+                code_hash: pair_hash(&code),
+                expires,
+                claimed_at: None,
+                client: None,
+            },
+        );
+    }
+    let me = c.me.clone();
+    let pid = id.clone();
+    tokio::task::spawn_blocking(move || {
+        store
+            .audit(&me, "pair.create", &pid, &json!({}), steve_store::WS)
+            .ok();
+    })
+    .await
+    .ok();
+    Ok(reply(
+        StatusCode::OK,
+        json!({
+            "id": id,
+            "code": code,
+            "name": hub_name,
+            "expires": expires,
+            "public_url": ep.public_url,
+            "lan_urls": ep.lan_urls,
+            "loopback_only": ep.loopback_only,
+            "uri": uri,
+        }),
+    ))
+}
+
+/// `GET /api/access/pairings/{id}`: lets the QR modal poll whether the mobile device has paired.
+pub async fn pair_status(
+    axum::Extension(c): axum::Extension<crate::api::Ctx>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, crate::error::ApiError> {
+    let now_ms = steve_store::now();
+    let item = {
+        let mut m = PAIRINGS.lock().unwrap_or_else(|e| e.into_inner());
+        clean_pairings(&mut m, now_ms);
+        m.get(&id).filter(|p| p.user_id == c.me).cloned()
+    };
+    let Some(p) = item else {
+        return Err(crate::error::ApiError::not_found("pairing"));
+    };
+    let status = if p.claimed_at.is_some() {
+        "claimed"
+    } else if now_ms >= p.expires {
+        "expired"
+    } else {
+        "pending"
+    };
+    Ok(reply(
+        StatusCode::OK,
+        json!({
+            "id": p.id,
+            "status": status,
+            "expires": p.expires,
+            "client": p.client,
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PairSignIn {
+    code: String,
+    #[serde(default)]
+    client: ClientInfo,
+    #[serde(default)]
+    cookie: bool,
+}
+
+/// `POST /auth/pair {code, client, cookie?}`: exchanges a single-use pairing code for a client credential.
+async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::response::Response {
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip());
+    let (route, ip) = route_of(peer, req.headers());
+    let origin = req
+        .headers()
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(|o| o.trim_end_matches('/').to_string());
+    let origin_seen = origin.clone();
+    let headers = req.headers().clone();
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let key = ip
+        .clone()
+        .filter(|_| !route.starts_with("loopback"))
+        .unwrap_or_default();
+    if !key.is_empty() && too_many(&key) {
+        return reply(
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"error": steve_i18n::t!("hub.access.too_many")}),
+        );
+    }
+    let Some(store) = st.modules.as_ref().map(|m| m.store.clone()) else {
+        return reply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "unavailable"}),
+        );
+    };
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024).await else {
+        return reply(StatusCode::BAD_REQUEST, json!({"error": "body"}));
+    };
+    let Ok(b) = serde_json::from_slice::<PairSignIn>(&bytes) else {
+        return reply(StatusCode::BAD_REQUEST, json!({"error": "body"}));
+    };
+    let now_ms = steve_store::now();
+    let wanted = pair_hash(&b.code);
+    let matched = {
+        let mut m = PAIRINGS.lock().unwrap_or_else(|e| e.into_inner());
+        clean_pairings(&mut m, now_ms);
+        let found_id = m
+            .iter()
+            .find(|(_, p)| p.claimed_at.is_none() && now_ms < p.expires && p.code_hash == wanted)
+            .map(|(k, _)| k.clone());
+        found_id.and_then(|id| {
+            let p = m.get_mut(&id)?;
+            p.claimed_at = Some(now_ms);
+            Some((p.id.clone(), p.user_id.clone()))
+        })
+    };
+    let Some((pair_id, user_id)) = matched else {
+        if !key.is_empty() {
+            failed(&key);
+        }
+        return reply(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": steve_i18n::t!("hub.access.pair_expired")}),
+        );
+    };
+    let kind = if KINDS.contains(&b.client.kind.as_str()) {
+        b.client.kind.clone()
+    } else {
+        "other".into()
+    };
+    let name = match cut(&b.client.name, 80) {
+        n if n.is_empty() => kind.clone(),
+        n => n,
+    };
+    let (platform, version) = (cut(&b.client.platform, 80), cut(&b.client.version, 40));
+    let s2 = store.clone();
+    let uid_copy = user_id.clone();
+    let done = tokio::task::spawn_blocking(move || {
+        s2.access().client_create(
+            &uid_copy,
+            None,
+            &NewClient {
+                kind: &kind,
+                name: &name,
+                platform: &platform,
+                version: &version,
+                origin: origin.as_deref(),
+            },
+        )
+    })
+    .await;
+    match done {
+        Ok(Ok(Some((u, c, secret)))) => {
+            {
+                let mut m = PAIRINGS.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(p) = m.get_mut(&pair_id) {
+                    p.client = Some(json!({
+                        "id": c.id,
+                        "kind": c.kind,
+                        "name": c.name,
+                        "platform": c.platform,
+                        "route": route,
+                    }));
+                }
+            }
+            seen(&store, &c, &route, ip);
+            store
+                .audit(
+                    &u.id,
+                    "client.pair",
+                    &c.id,
+                    &json!({"kind": c.kind, "name": c.name, "route": route, "pair_id": pair_id}),
+                    steve_store::WS,
+                )
+                .ok();
+            let cred = credential(&c.id, &secret);
+            let mut res = reply(
+                StatusCode::OK,
+                json!({
+                    "client_id": c.id,
+                    "credential": cred,
+                    "user": {"id": u.id, "name": u.name},
+                    "hub": {"version": st.cfg.version, "api": API_VERSION},
+                }),
+            );
+            if b.cookie {
+                let secure = secure_request(&st.cfg, &headers);
+                let cross_site = origin_seen.as_deref().is_some_and(|o| {
+                    host_of(o)
+                        != host
+                            .as_deref()
+                            .and_then(|h| host_of(&format!("http://{h}")))
+                });
+                if let Ok(v) =
+                    client_cookie(&cred, COOKIE_AGE, secure, cross_site && secure).parse()
+                {
+                    res.headers_mut().append(axum::http::header::SET_COOKIE, v);
+                }
+            }
+            if let Some(o) = &origin_seen {
+                forget_origin(o);
+            }
+            res
+        }
+        Ok(Ok(None)) => reply(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": steve_i18n::t!("hub.access.pair_expired")}),
+        ),
+        Ok(Err(e)) => {
+            tracing::error!("pair sign in: {e}");
+            reply(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": "internal"}),
+            )
+        }
+        Err(e) => {
+            tracing::error!("pair sign in: {e}");
+            reply(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": "internal"}),
+            )
+        }
+    }
 }
 
 /* ───────── single sign-on in the settings (A4b) ───────── */
