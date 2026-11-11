@@ -216,7 +216,11 @@ Sign-in is a user name and an access token the Hub issues, a single-use pairing 
 
 ## Extending Steve
 
-There is no runtime plugin store yet; the Plugins page is a placeholder. Today you extend the Hub through typed extension points:
+There are two ways to add to Steve.
+
+**Plugins** are programs that are not part of Steve, installed while the Hub runs. The instance's owner adds a *plugin library* on the Plugins page (a GitHub repository, the address of an index file, or a directory on the Hub's machine), Steve reads the library's `steve-store.json` and lists what it offers, and the owner installs from it. A plugin is a prebuilt archive checked against the sha256 its library names; it runs as a process of its own beside the Hub and is reached through one of Steve's documented contracts, so no compiler is involved and a plugin that crashes or is removed leaves the Hub as it was. The first kind is a **channel**: a messaging system Steve has no built-in adapter for, connected as you. The official library, [Infranite/steve-extensions](https://github.com/Infranite/steve-extensions), is listed on a new installation and read only when the owner asks; everything that is not installed by default lives there. Installing a plugin runs its program as the Hub's user, so add only libraries you trust. The library format and what a plugin has to implement are in [docs/deployment.md](docs/deployment.md#plugins).
+
+**Extension points** are for what is built into a Hub binary:
 
 | Extension point | What you can add |
 |---|---|
@@ -231,7 +235,7 @@ There is no runtime plugin store yet; the Plugins page is a placeholder. Today y
 
 - **Sessions run on a Node.** The Hub does not start agent processes itself: every session, Steve's own judgment calls and inline research run on the local Node, which is on by default (`STEVE_NODE_MODE=off` parks it).
 - **Multiple devices** (experimental). A `steve-node` on another machine can pair with the Hub and run harnesses there. The listener is on by default; `STEVE_NODE_LISTEN=0` disables it, and diagnostic database copies never enable it. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. Devices are not automatically registered or assigned work: the owner generates a code and confirms the device in Devices; the Node claims the code through its CLI. `STEVE_NODE_BIND` remains unset until an operator selects a paired Node ([docs/deployment.md](docs/deployment.md#remote-nodes)).
-- **Not built yet:** the Plugins page (use the extension points above), quiet hours and a daily digest (marked *Works once push is connected* in Settings), Gmail and Outlook API mail adapters, Feishu docs, calendar and approvals, and external vault backends (1Password, Bitwarden).
+- **Not built yet:** plugin kinds other than channels, quiet hours and a daily digest (marked *Works once push is connected* in Settings), Gmail and Outlook API mail adapters, Feishu docs, calendar and approvals, and external vault backends (1Password, Bitwarden).
 
 ## How it works
 
@@ -353,6 +357,7 @@ For an existing Hub that completed managed setup, run `steve setup --reconfigure
 | `STEVE_UPDATE_CHECK` | `0` turns off the periodic release check. Debug builds don't check unless it is `1` |
 | `STEVE_BACKUP` | `off` turns off the Hub's daily copy of the database and files under `<home>/backups` ([details](docs/deployment.md#backups)); the copies before an upgrade are made either way |
 | `STEVE_YOLO` | `off` disables YOLO for the whole instance |
+| `STEVE_PLUGIN_LIBRARY` | The plugin library a new installation lists instead of the official one (a GitHub repository, an index address or a directory), or `off` for none; it applies until the owner changes the list on the Plugins page ([details](docs/deployment.md#plugins)) |
 | `STEVE_KB_STORE` | `openviking` to use the optional vector backend (default: SQLite FTS) |
 | `STEVE_VAULT_KEYSTORE` | `auto` (Keychain / Secret Service), `dir` with `STEVE_VAULT_KEY_DIR`, or `file` for tests |
 | `STEVE_NODE_MODE` | `service` (default) runs the Hub's own Node in a process of its own, so a Hub restart or upgrade leaves running turns going ([details](docs/deployment.md#the-hubs-own-node-in-a-process-of-its-own)); `local` runs it in the Hub's process; `off` parks sessions |
