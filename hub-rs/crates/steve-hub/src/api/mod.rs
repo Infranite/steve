@@ -637,7 +637,6 @@ pub fn router(st: AppState, modules: Router) -> Router {
         )
         .route("/projects/{id}/lane/now", post(projects::lane_now))
         .route("/projects/{id}/queue", post(projects::queue_act))
-        .route("/fs/dirs", get(projects::dirs))
         .route("/fs/browse", get(projects::browse))
         // tags
         .route("/tags", post(misc::tag_create))

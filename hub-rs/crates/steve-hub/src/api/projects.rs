@@ -1,6 +1,6 @@
-//! `/api/projects*`, `/api/fs/dirs` and `/api/fs/browse`.
+//! `/api/projects*` and `/api/fs/browse`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
@@ -96,9 +96,9 @@ fn exists(p: &str) -> bool {
 
 /* ── reading a directory of the Hub's own device ──
 With the local Node on (`STEVE_NODE_MODE=local`) a directory under one of its roots is read through
-its files face, and `dirs` browses only toward those roots (D11: no "anywhere under ~"). A directory
-under none of them is one being made a project, so a new root: no Node allows it yet, and the Hub
-checks it on its own disk (the machine is the same; the root follows once the project exists).
+its files face. A directory under none of them is one being made a project, so a new root: no Node
+allows it yet, and the Hub checks it on its own disk (the machine is the same; the root follows once
+the project exists).
 Without the local Node the Hub reads its own disk as always. `browse`, the chooser of a new project's
 directory, reads the disk the same way wherever it is asked, for the instance owner only. */
 
@@ -108,8 +108,8 @@ enum Via {
     Hub,
     /// The local Node, at this place under one of its roots.
     Node(Arc<dyn na::Node>, na::RootPath),
-    /// Under none of the local Node's roots, which are these paths: a new root being chosen.
-    Outside(Vec<PathBuf>),
+    /// Under none of the local Node's roots: a new root being chosen.
+    Outside,
 }
 
 async fn via(st: &AppState, path: &str) -> Result<Via, ApiError> {
@@ -123,13 +123,7 @@ async fn via(st: &AppState, path: &str) -> Result<Via, ApiError> {
             At::Workspace(_) => Err(ApiError::internal("a directory placed in a workspace")),
         },
         Err(PlacementError::LocalOff) => Ok(Via::Hub),
-        Err(PlacementError::Outside) => Ok(Via::Outside(
-            ws.local_roots()
-                .map_err(placement_error)?
-                .into_iter()
-                .map(|r| r.path)
-                .collect(),
-        )),
+        Err(PlacementError::Outside) => Ok(Via::Outside),
         Err(e) => Err(placement_error(e)),
     })
     .await
@@ -280,39 +274,6 @@ async fn node_describe(
     Ok((list, readme.join("\n\n"), has_git(&names)))
 }
 
-/// What `dirs` lists of `base` on the Node: its directories, not hidden, the first 200.
-async fn node_dirs(
-    node: &dyn na::Node,
-    at: &na::RootPath,
-    base: &str,
-) -> Result<Vec<String>, Miss> {
-    let home = home_dir().to_string_lossy().into_owned();
-    Ok(node_list(node, at)
-        .await?
-        .into_iter()
-        .filter(|(n, d)| *d && !n.starts_with('.'))
-        .take(200)
-        .map(|(n, _)| join(base, &n).replacen(&home, "~", 1))
-        .collect())
-}
-
-/// What `dirs` lists of a `base` no root holds: the way down to the roots below it, one directory
-/// at a time (only configured roots are browsed, D11).
-fn toward_roots(roots: &[PathBuf], base: &str) -> Vec<String> {
-    let home = home_dir().to_string_lossy().into_owned();
-    let from = PathBuf::from(normalize(base));
-    let next: BTreeSet<String> = roots
-        .iter()
-        .filter_map(|r| r.strip_prefix(&from).ok()?.components().next())
-        .filter_map(|c| c.as_os_str().to_str().map(String::from))
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    next.into_iter()
-        .take(200)
-        .map(|n| join(base, &n).replacen(&home, "~", 1))
-        .collect()
-}
-
 /// Whether `path` is a directory, and a git checkout, as the Hub's disk says.
 async fn hub_dir_and_git(path: &str) -> Result<(bool, bool), ApiError> {
     let p = path.to_string();
@@ -343,7 +304,7 @@ pub async fn create(
     }
     let path = expand(&raw);
     let (dir_ok, git) = match via(&st, &path).await? {
-        Via::Hub | Via::Outside(_) => hub_dir_and_git(&path).await?,
+        Via::Hub | Via::Outside => hub_dir_and_git(&path).await?,
         Via::Node(node, at) => match node_list(&*node, &at).await {
             Ok(names) => (true, has_git(&names)),
             Err(Miss::Gone) => (false, false),
@@ -746,7 +707,7 @@ pub async fn describe(
     let missing = || ApiError::bad_request(steve_i18n::t!("hub.project.dir_missing", path = raw));
     // the Node's answer has the git check in it; the Hub's own disk is asked after, as always
     let from_node = match via(&st, &path).await? {
-        Via::Hub | Via::Outside(_) => None,
+        Via::Hub | Via::Outside => None,
         Via::Node(node, at) => match node_describe(&*node, &at).await {
             Ok(v) => Some(v),
             Err(Miss::Gone) => return Err(missing()),
@@ -789,54 +750,6 @@ pub async fn describe(
     ok(
         json!({ "name": get("name").unwrap_or(base), "description": get("description").unwrap_or_default(), "git": git }),
     )
-}
-
-pub async fn dirs(
-    State(st): State<AppState>,
-    Query(q): Query<HashMap<String, String>>,
-) -> ApiResult {
-    let raw = q
-        .get("path")
-        .filter(|p| !p.is_empty())
-        .cloned()
-        .unwrap_or_else(|| "~/".into());
-    let base = expand(&raw);
-    match via(&st, &base).await? {
-        Via::Hub => {}
-        Via::Outside(roots) => return ok(json!(toward_roots(&roots, &base))),
-        Via::Node(node, at) => match node_dirs(&*node, &at, &base).await {
-            Ok(out) => return ok(json!(out)),
-            Err(Miss::Gone) => return ok(json!([])),
-            Err(Miss::Unsupported) => {}
-            Err(Miss::Fail(e)) => return Err(e),
-        },
-    }
-    let out = blocking(move || {
-        if !exists(&base) {
-            return Ok(vec![]);
-        }
-        let mut ents: Vec<(String, bool)> = std::fs::read_dir(&base)
-            .map_err(|e| fs_error(&e, "scandir", &base))?
-            .filter_map(|e| e.ok())
-            // Dirent.isDirectory(): symlinks are not followed
-            .map(|e| {
-                (
-                    e.file_name().to_string_lossy().into_owned(),
-                    e.file_type().is_ok_and(|t| t.is_dir()),
-                )
-            })
-            .collect();
-        ents.sort();
-        let home = home_dir().to_string_lossy().into_owned();
-        Ok(ents
-            .into_iter()
-            .filter(|(n, d)| *d && !n.starts_with('.'))
-            .take(200)
-            .map(|(n, _)| join(&base, &n).replacen(&home, "~", 1))
-            .collect::<Vec<_>>())
-    })
-    .await?;
-    ok(json!(out))
 }
 
 /// The Node a project is being made on: only the Hub's built-in one runs sessions so far.
@@ -1023,18 +936,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dirs_through_the_node_lists_directories_not_hidden() {
-        let (n, at) = fake(&[
-            ("app/b/x", b""),
-            ("app/a/y", b""),
-            ("app/.cache/z", b""),
-            ("app/file.txt", b""),
-        ]);
-        let out = node_dirs(&*n, &at, "/w/app").await.unwrap();
-        assert_eq!(out, vec!["/w/app/a", "/w/app/b"]);
-    }
-
-    #[tokio::test]
     async fn a_root_the_node_does_not_allow_is_gone_not_a_failure() {
         let (n, mut at) = fake(&[("app/README.md", b"x")]);
         at.root = na::RootId::new("elsewhere").unwrap();
@@ -1138,22 +1039,5 @@ mod tests {
             on_builtin_node(Some("nod_laptop")),
             Err(ApiError::Json(400, _))
         ));
-    }
-
-    #[test]
-    fn outside_the_roots_dirs_shows_the_way_down_to_them() {
-        let roots = [
-            PathBuf::from("/w/code/steve"),
-            PathBuf::from("/w/code/app"),
-            PathBuf::from("/w/notes"),
-            PathBuf::from("/w/.secret/x"),
-            PathBuf::from("/elsewhere"),
-        ];
-        assert_eq!(toward_roots(&roots, "/w/"), vec!["/w/code", "/w/notes"]);
-        assert_eq!(
-            toward_roots(&roots, "/w/code"),
-            vec!["/w/code/app", "/w/code/steve"]
-        );
-        assert!(toward_roots(&roots, "/nowhere").is_empty());
     }
 }
