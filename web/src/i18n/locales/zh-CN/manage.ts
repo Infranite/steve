@@ -286,6 +286,8 @@ export default {
     catLook: "外观",
     /* a deliberate change from "主题、字号、动态效果": the language switch lives in this section now */
     catLookSub: "主题、配色、字体、圆角、语言",
+    catPlugins: "插件",
+    catPluginsSub: "插件库、安装和接入",
     catData: "数据与隐私",
     catDataSub: "数据位置、备份、清理",
     catAbout: "关于",

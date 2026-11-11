@@ -44,7 +44,7 @@ const ProjectsView = lazyView(() => import("@/projects").then((m) => ({ default:
 const ProjectView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectView })))
 const NewProjectDialog = lazyView(() => import("@/projects").then((m) => ({ default: m.NewProjectDialog })))
 const NewWorkspaceDialog = lazyView(() => import("@/projects").then((m) => ({ default: m.NewWorkspaceDialog })))
-const Unwired = lazyView(() => import("@/unwired").then((m) => ({ default: m.Unwired })))
+const PluginsView = lazyView(() => import("@/plugins").then((m) => ({ default: m.PluginsView })))
 const ChannelsRoute = lazyView(() => import("@/channels/channels").then((m) => ({ default: m.ChannelsRoute })))
 const IntegrationsRoute = lazyView(() => import("@/integrations").then((m) => ({ default: m.IntegrationsRoute })))
 const GitHubView = lazyView(() => import("@/github/index").then((m) => ({ default: m.GitHubView })))
@@ -103,7 +103,6 @@ function TokenSignIn() {
 function Splash({ children }: { children: React.ReactNode }) {
   return <div className="flex h-[100dvh] flex-col items-center justify-center gap-4 bg-background px-6 text-center text-foreground">{children}</div>
 }
-const UNWIRED = ["plugins"]
 
 export default function App() {
   useStore()
@@ -186,7 +185,7 @@ export default function App() {
     a === "yolo" ? <YoloDigestView window={b} /> :
     a === "stats" ? <StatsRoute b={b} c={c} /> :
     a === "contacts" ? (b === "me" ? <MeView /> : b ? <ContactView key={b} id={b} /> : <ContactsView />) : a === "orgs" ? (b ? <OrgView key={b} id={b} /> : <ContactsView />) : a === "teams" ? (b ? <TeamView key={b} id={b} /> : <ContactsView />) :
-    UNWIRED.includes(a) ? <Unwired id={a} /> :
+    a === "plugins" ? <PluginsView /> :
     a === "more" ? <MoreView /> : a === "c" && b ? <ChatView key={b} conv={decodeURIComponent(b)} /> : <ChatView />
   const sh = getSheet()
   return (
