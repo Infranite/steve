@@ -717,10 +717,25 @@ mod tests {
             vec!["http://192.168.1.42:8440", "http://100.64.0.9:8440"]
         );
         assert!(!ep_pub.loopback_only);
-        let uri_pub = build_pair_uri("stp_abc", "My Hub", &ep_pub);
-        assert!(uri_pub.starts_with("steve://pair?"));
-        assert!(uri_pub.contains("pub=https%3A%2F%2Fsteve.example"));
-        assert!(uri_pub.contains("lan=http%3A%2F%2F192.168.1.42%3A8440"));
+        let cfg_pub = mk("0.0.0.0", true, "https://steve.example");
+        let links = pair_links(&cfg_pub, "stp_abc", "My Hub", &ep_pub);
+        assert_eq!(
+            links.iter().map(|l| (l.kind, l.url.as_str())).collect::<Vec<_>>(),
+            vec![
+                ("public", "https://steve.example"),
+                ("lan", "http://192.168.1.42:8440"),
+                ("lan", "http://100.64.0.9:8440"),
+            ],
+            "one link per address, the public one first"
+        );
+        let query = "v=1&code=stp_abc&name=My%20Hub&pub=https%3A%2F%2Fsteve.example\
+                     &lan=http%3A%2F%2F192.168.1.42%3A8440%2Chttp%3A%2F%2F100.64.0.9%3A8440";
+        assert_eq!(links[0].link, format!("https://steve.example/#/pair?{query}"));
+        assert_eq!(
+            links[1].link,
+            format!("http://192.168.1.42:8440/#/pair?{query}"),
+            "every link names every address; only where the page is differs"
+        );
 
         // No public URL, explicit LAN listen: public_url is None, lan_urls has the LAN address.
         let ep_lan = pair_endpoints_with(
@@ -1074,12 +1089,10 @@ fn drop_pending_pairings(pred: impl Fn(&PendingPair) -> bool) {
     m.retain(|_, p| p.client.is_some() || !pred(p));
 }
 
+/// A pairing code: 122 random bits, single use, five minutes, behind the claim lockout. Short so the
+/// link that carries it makes a QR code a phone reads at arm's length.
 fn pair_code() -> String {
-    format!(
-        "{PAIR_PREFIX}{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
+    format!("{PAIR_PREFIX}{}", uuid::Uuid::new_v4().simple())
 }
 
 fn pair_hash(code: &str) -> String {
@@ -1283,10 +1296,42 @@ pub fn pair_endpoints_with(
     }
 }
 
-fn build_pair_uri(code: &str, name: &str, ep: &PairEndpoints) -> String {
-    let mut u = reqwest::Url::parse("steve://pair").expect("static scheme");
+/// Where the pages of the Hub at `endpoint` are: the same address, on the web client's own port
+/// when it has one ([`Config::web_port`]).
+fn page_of(cfg: &crate::config::Config, endpoint: &str) -> String {
+    if let Some(wp) = cfg.web_port
+        && wp != cfg.listen.port
+        && let Ok(mut u) = reqwest::Url::parse(endpoint)
+        && u.port() == Some(cfg.listen.port)
+        && u.set_port(Some(wp)).is_ok()
     {
-        let mut q = u.query_pairs_mut();
+        return u.as_str().trim_end_matches('/').to_string();
+    }
+    endpoint.trim_end_matches('/').to_string()
+}
+
+/// One way to this Hub for a pairing: its address, whether that is the public one, and the pairing
+/// link on that address.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PairLink {
+    pub url: String,
+    pub kind: &'static str,
+    pub link: String,
+}
+
+/// The pairing links of a code, one per address of the Hub, the public one first:
+/// `<pages of that address>/#/pair?v=1&code=…&name=…&pub=…&lan=…`. A browser that opens one gets this
+/// Hub's web client, which claims the code; an app reads the same link from the QR code. The
+/// parameters are in the fragment, so the code is in no request line, log or `Referer`.
+fn pair_links(
+    cfg: &crate::config::Config,
+    code: &str,
+    name: &str,
+    ep: &PairEndpoints,
+) -> Vec<PairLink> {
+    let mut q = reqwest::Url::parse("steve://pair").expect("static scheme");
+    {
+        let mut q = q.query_pairs_mut();
         q.append_pair("v", "1");
         q.append_pair("code", code);
         if !name.is_empty() {
@@ -1299,7 +1344,18 @@ fn build_pair_uri(code: &str, name: &str, ep: &PairEndpoints) -> String {
             q.append_pair("lan", &ep.lan_urls.join(","));
         }
     }
-    u.into()
+    /* a space as %20: not every reader of a query takes `+` for one */
+    let query = q.query().unwrap_or_default().replace('+', "%20");
+    ep.public_url
+        .iter()
+        .map(|u| (u, "public"))
+        .chain(ep.lan_urls.iter().map(|u| (u, "lan")))
+        .map(|(u, kind)| PairLink {
+            url: u.clone(),
+            kind,
+            link: format!("{}/#/pair?{query}", page_of(cfg, u)),
+        })
+        .collect()
 }
 
 #[derive(Deserialize, Default)]
@@ -1343,7 +1399,7 @@ pub async fn pair_create(
             .or_else(|| ep.lan_urls.first().and_then(|u| host_of(u)))
             .unwrap_or_else(|| "Steve Hub".into())
     };
-    let uri = build_pair_uri(&code, &hub_name, &ep);
+    let links = pair_links(&st.cfg, &code, &hub_name, &ep);
     {
         let mut m = PAIRINGS.lock().unwrap_or_else(|e| e.into_inner());
         clean_pairings(&mut m, now_ms);
@@ -1392,7 +1448,7 @@ pub async fn pair_create(
             "public_url": ep.public_url,
             "lan_urls": ep.lan_urls,
             "loopback_only": ep.loopback_only,
-            "uri": uri,
+            "links": links,
         }),
     ))
 }
