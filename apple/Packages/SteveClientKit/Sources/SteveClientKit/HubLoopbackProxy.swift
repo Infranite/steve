@@ -703,14 +703,25 @@ public final class HubLoopbackProxy: @unchecked Sendable {
         return URL(string: baseStr + suffix)
     }
 
-    private static func filteredUpstreamHeaders(
+    /// Returns `true` when a cookie in `WKHTTPCookieStore` belongs to one of `purgedHubIDs`.
+    public static func shouldDeleteWebCookie(named cookieName: String, purgedHubIDs: Set<String>) -> Bool {
+        guard cookieName != proxyAuthCookieName, !purgedHubIDs.isEmpty else { return false }
+        for id in purgedHubIDs {
+            if cookieName.hasPrefix(hubCookiePrefix(for: id)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    internal static func filteredUpstreamHeaders(
         from http: HTTPURLResponse,
         hubID: String,
         stripContentLength: Bool
     ) -> [(String, String)] {
         let blocked: Set<String> = [
             "connection", "keep-alive", "transfer-encoding", "content-encoding",
-            "strict-transport-security",
+            "strict-transport-security", "clear-site-data",
         ]
         var out: [(String, String)] = []
         for (rawK, rawV) in http.allHeaderFields {
