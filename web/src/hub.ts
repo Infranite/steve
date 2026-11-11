@@ -93,7 +93,7 @@ export const API = 1
 
 /** why a Hub could not be used, for the page to say in its own words */
 export class HubError extends Error {
-  code: "bad-address" | "not-steve" | "api-mismatch"
+  code: "bad-address" | "no-answer" | "not-steve" | "api-mismatch"
   version?: string
   constructor(code: HubError["code"], version?: string) { super(code); this.code = code; this.version = version }
 }
@@ -123,7 +123,8 @@ export async function hello(base: string, timeout = 8000): Promise<Hello> {
 /** `hello`, as the answer to "can this page use that Hub" */
 async function check(base: string): Promise<Hello> {
   let h: Hello
-  try { h = await hello(base) } catch { throw new HubError("not-steve") }
+  /* something answered that is no Hub, or nothing answered at all (refused, timed out, blocked by the browser) */
+  try { h = await hello(base) } catch (e) { throw new HubError((e as Error)?.message === "not-steve" ? "not-steve" : "no-answer") }
   if (h.api !== API) throw new HubError("api-mismatch", h.version)
   return h
 }
