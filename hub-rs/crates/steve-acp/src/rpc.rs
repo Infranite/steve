@@ -280,8 +280,10 @@ impl Conn {
             write_frames(&mut stdin, &mut out_rx).await;
         });
 
+        // what the adapter says on its own (timings, progress, its own warnings): kept, not a warning
+        // of Steve's. A request that fails says so where it is awaited.
         let tag = sp.log_tag.clone();
-        tokio::spawn(stderr_lines(stderr, move |t| tracing::warn!("{tag} {t}")));
+        tokio::spawn(stderr_lines(stderr, move |t| tracing::info!("{tag} {t}")));
 
         let weak = Arc::downgrade(&conn);
         let read_error = Arc::new(AtomicBool::new(false));
