@@ -28,7 +28,7 @@ jobs:
           python-version: '3.13'
       - name: Install Linux test prerequisites
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
+        run: sh scripts/install-ci-zsh.sh
       - name: Verify public boundary
         run: |
           python3 scripts/check-public-boundary.py --strict
@@ -112,7 +112,7 @@ jobs:
           toolchain: 1.99.1
       - name: Install Linux test prerequisites
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
+        run: sh scripts/install-ci-zsh.sh
       # The key names everything that decides how dependencies are built: platform, toolchain, lockfile,
       # every manifest (profiles, features) and this file (its env sets profile options). main saves a
       # cache only for a key that has none, and starts that one from nothing so it holds no leftovers.
