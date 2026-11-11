@@ -119,12 +119,18 @@ struct QRCodeScannerSheet: View {
             return
         }
         guard !hasQueuedConfirmation else { return }
+        if let refusal = coordinator.pairingRefusalMessage {
+            // Say so here, while the scanner is still up, instead of dropping the scan.
+            errorMessage = refusal
+            return
+        }
         hasQueuedConfirmation = true
         errorMessage = nil
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         dismiss()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            _ = coordinator.stageScannedPairingCode(trimmed)
+            // A refusal that only arose during the dismissal leaves its message with the coordinator.
+            coordinator.stageScannedPairingCode(trimmed)
         }
     }
 }

@@ -18,13 +18,13 @@ struct SteveIOSApp: App {
             version: version
         )
         let hubStore = HubStore(includeLocalDefault: false)
-        _coordinator = StateObject(
-            wrappedValue: SteveClientCoordinator(
-                hubStore: hubStore,
-                webRoot: webRoot,
-                clientDescriptor: descriptor
-            )
+        let coord = SteveClientCoordinator(
+            hubStore: hubStore,
+            webRoot: webRoot,
+            clientDescriptor: descriptor
         )
+        coord.pairConfirmationVisibilityProbe = { IOSPairConfirmation.isAlertOnScreen() }
+        _coordinator = StateObject(wrappedValue: coord)
     }
 
     var body: some Scene {
@@ -44,5 +44,31 @@ struct SteveIOSApp: App {
                     }
                 }
         }
+    }
+}
+
+/// The pairing confirmation is an alert over the root view.
+enum IOSPairConfirmation {
+    /// Is the confirmation alert on screen: an alert controller with the confirmation's title that is
+    /// in a window and not on its way out.
+    @MainActor
+    static func isAlertOnScreen() -> Bool {
+        let title = SteveClientCoordinator.pairConfirmationTitle
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows {
+                var controller = window.rootViewController
+                while let current = controller {
+                    if let alert = current as? UIAlertController,
+                       alert.title == title,
+                       !alert.isBeingDismissed,
+                       alert.viewIfLoaded?.window != nil {
+                        return true
+                    }
+                    controller = current.presentedViewController
+                }
+            }
+        }
+        return false
     }
 }

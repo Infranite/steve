@@ -58,6 +58,7 @@ struct SteveMacApp: App {
             preferredPortDefaults: defaults,
             clientDescriptor: descriptor
         )
+        coord.pairConfirmationVisibilityProbe = { MacPairConfirmation.isAlertOnScreen() }
         _coordinator = StateObject(wrappedValue: coord)
         #if DEBUG
         if let portStr = env["STEVE_CLIENT_DEBUG_PORT"],
@@ -86,6 +87,9 @@ struct SteveMacApp: App {
                         coordinator.requestExternalPairingConfirmation(uri: url.absoluteString)
                     }
                 }
+                // An open main window takes a `steve://` link itself. Without this the window group
+                // opens a second main window for it: two WebViews on one coordinator, two alerts.
+                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         }
         .defaultSize(width: 1240, height: 820)
         .commands {
@@ -99,8 +103,67 @@ struct SteveMacApp: App {
                 .task {
                     coordinator.startIfNeeded()
                 }
+                .modifier(MacPairConfirmationWindowOpener(coordinator: coordinator))
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+/// The pairing confirmation is an alert on the main window.
+enum MacPairConfirmation {
+    private static let mainWindowIDPrefix = "main"
+
+    /// Is the confirmation alert on screen: a visible sheet that carries the confirmation's title.
+    @MainActor
+    static func isAlertOnScreen() -> Bool {
+        let title = SteveClientCoordinator.pairConfirmationTitle
+        return NSApplication.shared.windows.contains { window in
+            guard window.isVisible, window.isSheet || window.sheetParent != nil,
+                  let root = window.contentView else { return false }
+            return containsLabel(title, in: root)
+        }
+    }
+
+    private static func containsLabel(_ text: String, in view: NSView) -> Bool {
+        if let field = view as? NSTextField, field.stringValue == text {
+            return true
+        }
+        return view.subviews.contains { containsLabel(text, in: $0) }
+    }
+
+    @MainActor
+    static var mainWindows: [NSWindow] {
+        NSApplication.shared.windows.filter {
+            $0.identifier?.rawValue.hasPrefix(mainWindowIDPrefix) == true && !$0.isSheet
+        }
+    }
+
+    /// Puts a main window on screen for the confirmation; `open` makes one when none exists.
+    @MainActor
+    static func bringUpMainWindow(open: () -> Void) {
+        if let window = mainWindows.first(where: { $0.isVisible || $0.isMiniaturized }) {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            open()
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+}
+
+/// Lives on the menu-bar item, which exists for the whole run of the app: a pairing request that
+/// arrives with no main window to show its confirmation opens one.
+private struct MacPairConfirmationWindowOpener: ViewModifier {
+    @ObservedObject var coordinator: SteveClientCoordinator
+    @Environment(\.openWindow) private var openWindow
+
+    func body(content: Content) -> some View {
+        content.onChange(of: coordinator.pendingExternalPairConfirmation?.id) { _, pendingID in
+            guard pendingID != nil else { return }
+            MacPairConfirmation.bringUpMainWindow { openWindow(id: "main") }
+        }
     }
 }
 
@@ -273,10 +336,18 @@ private enum MacDebugHarness {
         return diff == 0
     }
 
+    /// A snapshot may only be written inside `STEVE_CLIENT_DEBUG_DIR`. Symbolic links are resolved on
+    /// both sides before the comparison, so a link inside the directory cannot lead a write out of it.
     private static func validatedSnapshotURL(path: String, allowedDir: String?) -> URL? {
         guard let allowedDir, !allowedDir.isEmpty else { return nil }
-        let baseURL = URL(fileURLWithPath: allowedDir, isDirectory: true).standardizedFileURL
-        let fileURL = URL(fileURLWithPath: path, isDirectory: false).standardizedFileURL
+        let baseURL = URL(fileURLWithPath: allowedDir, isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let requested = URL(fileURLWithPath: path, isDirectory: false).standardizedFileURL
+        guard requested.pathExtension.lowercased() == "png" else { return nil }
+        let parent = requested.deletingLastPathComponent().resolvingSymlinksInPath()
+        let fileURL = parent
+            .appendingPathComponent(requested.lastPathComponent, isDirectory: false)
+            .resolvingSymlinksInPath()
         guard fileURL.pathExtension.lowercased() == "png" else { return nil }
         let basePrefix = baseURL.path.hasSuffix("/") ? baseURL.path : (baseURL.path + "/")
         guard fileURL.path.hasPrefix(basePrefix) else { return nil }
@@ -308,6 +379,8 @@ private enum MacDebugHarness {
                 "title": $0.title,
                 "visible": $0.isVisible,
                 "isSheet": $0.isSheet,
+                "identifier": $0.identifier?.rawValue ?? "",
+                "miniaturized": $0.isMiniaturized,
                 "sheetCount": $0.sheets.count,
                 "class": String(describing: type(of: $0)),
             ] as [String: Any] }
@@ -319,6 +392,8 @@ private enum MacDebugHarness {
                 "pendingPair": coordinator.pendingExternalPairConfirmation?.displayName as Any,
                 "pendingEndpoints": coordinator.pendingExternalPairConfirmation?.endpointsSummary as Any,
                 "pairAlertPresented": coordinator.isPairConfirmationPresented,
+                "pairAlertOnScreen": MacPairConfirmation.isAlertOnScreen(),
+                "mainWindowCount": MacPairConfirmation.mainWindows.count,
                 "pairError": coordinator.externalPairErrorMessage as Any,
                 "windows": winIDs,
             ]
@@ -505,6 +580,56 @@ private enum MacDebugHarness {
                     "seenButtons": titles,
                 ]
             }
+        case "pressEscape":
+            // A real Escape key event for the alert sheet, sent the way the application sends a key
+            // press (`via: "app"`, the default) or straight to the sheet (`via: "window"`).
+            let candidateWindows = NSApplication.shared.windows.flatMap { [$0] + $0.sheets }
+            guard let sheetWin = candidateWindows.first(where: {
+                $0.isVisible && ($0.isSheet || String(describing: type(of: $0)).contains("Alert"))
+            }) else {
+                return ["ok": false, "error": "no alert sheet"]
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            guard let down = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: now,
+                windowNumber: sheetWin.windowNumber, context: nil,
+                characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53
+            ), let up = NSEvent.keyEvent(
+                with: .keyUp, location: .zero, modifierFlags: [], timestamp: now + 0.02,
+                windowNumber: sheetWin.windowNumber, context: nil,
+                characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53
+            ) else {
+                return ["ok": false, "error": "keyEvent failed"]
+            }
+            let via = (req["via"] as? String) ?? "app"
+            sheetWin.makeKeyAndOrderFront(nil)
+            if via == "window" {
+                sheetWin.sendEvent(down)
+                sheetWin.sendEvent(up)
+            } else {
+                NSApplication.shared.sendEvent(down)
+                NSApplication.shared.sendEvent(up)
+            }
+            return [
+                "ok": true,
+                "via": via,
+                "windowClass": String(describing: type(of: sheetWin)),
+                "sheetWasKey": sheetWin.isKeyWindow,
+            ]
+        case "openURLEvent":
+            // Hands a URL to the application delegate, where AppKit delivers a `steve://` link after
+            // decoding the open-URL event, so the window group's routing of it can be observed.
+            guard let raw = req["uri"] as? String, let url = URL(string: raw),
+                  let delegate = NSApplication.shared.delegate,
+                  delegate.responds(to: #selector(NSApplicationDelegate.application(_:open:))) else {
+                return ["ok": false, "error": "no url or the delegate takes no URLs"]
+            }
+            delegate.application?(NSApplication.shared, open: [url])
+            return ["ok": true]
+        case "closeMainWindows":
+            let mains = MacPairConfirmation.mainWindows
+            mains.forEach { $0.close() }
+            return ["ok": true, "closed": mains.count]
         case "openURI":
             if let uri = req["uri"] as? String {
                 coordinator.requestExternalPairingConfirmation(uri: uri)

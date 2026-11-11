@@ -58,6 +58,10 @@ public final class SteveClientCoordinator: ObservableObject {
     private var monitorTask: Task<Void, Never>?
     private var started = false
     private var activationGeneration: UInt64 = 0
+    /// A forced activation owes the WebView a reload. If that activation is superseded before it
+    /// reaches the reload, the activation that supersedes it pays the debt, so the window is never
+    /// left on the previous Hub's page with a retired gateway key.
+    private var webReloadOwed = false
     private var pendingPairContinuation: CheckedContinuation<Void, Error>?
     private var confirmingPairID: UUID?
     private let purgeWebCookiesHandler: ((Set<String>) -> Void)?
@@ -81,7 +85,12 @@ public final class SteveClientCoordinator: ObservableObject {
         self.proxy.setAuthEventHandler { [weak self] hubID, event in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.activationGeneration &+= 1
+                // Only the active Hub's sign-in/out makes an in-flight activation stale (it captured the
+                // old credential). A late answer from a Hub that is no longer active must not cancel the
+                // activation of the Hub being switched to.
+                if self.hubStore.activeHubID == hubID {
+                    self.activationGeneration &+= 1
+                }
                 switch event {
                 case .signedIn(let signed):
                     let previousCredential = self.hubStore.credential(for: hubID)
@@ -432,8 +441,38 @@ public final class SteveClientCoordinator: ObservableObject {
 
     // MARK: - Pairing Confirmation Gate (Unified Across Bridge, Scanner & `steve://`)
 
-    private var hasActivePairingFlow: Bool {
-        pendingExternalPairConfirmation != nil || confirmingPairID != nil
+    /// Title of the native confirmation. The apps use it for the alert and to recognise that alert on screen.
+    public static var pairConfirmationTitle: String {
+        L10n.tr("确认配对并连接到此 Hub？", "Pair and connect to this Hub?")
+    }
+
+    /// Installed by the app: is the confirmation alert on screen right now? `isPairConfirmationPresented`
+    /// only says the alert was asked for; the system can decline to show it (no window, another
+    /// presentation in the way). Without a probe the flag is all there is to go by.
+    public var pairConfirmationVisibilityProbe: (@MainActor () -> Bool)?
+
+    private enum PairingRefusal {
+        case confirmationOnScreen
+        case claimInProgress
+    }
+
+    /// A new request is refused only while a confirmation is really on screen or a confirmed code is
+    /// being claimed. A pending item nobody can see never blocks: the new request replaces it.
+    private var pairingRefusal: PairingRefusal? {
+        if confirmingPairID != nil {
+            return .claimInProgress
+        }
+        if pendingExternalPairConfirmation != nil,
+           isPairConfirmationPresented,
+           pairConfirmationVisibilityProbe?() ?? true {
+            return .confirmationOnScreen
+        }
+        return nil
+    }
+
+    /// Why a pairing request would be refused right now, or nil when one can be staged.
+    public var pairingRefusalMessage: String? {
+        pairingRefusal == nil ? nil : Self.busyPairingMessage
     }
 
     private static var busyPairingMessage: String {
@@ -443,9 +482,42 @@ public final class SteveClientCoordinator: ObservableObject {
         )
     }
 
-    public func requestExternalPairingConfirmation(uri: String) {
-        guard !hasActivePairingFlow else {
+    private static var supersededPairingMessage: String {
+        L10n.tr(
+            "此配对请求未能显示确认提示，已被新的配对请求取代，请重试。",
+            "This pairing request was never confirmed and a newer one replaced it. Try again."
+        )
+    }
+
+    /// Refusal for the entry points that have no caller to answer (deep link, scanner). While a claim
+    /// is running no confirmation is up, so the message shows now. While a confirmation is on screen
+    /// that alert is the answer: nothing is stored to pop up after it as a failure of the wrong pairing.
+    private func noteRefusedPairingRequest(_ refusal: PairingRefusal) {
+        if refusal == .claimInProgress {
             externalPairErrorMessage = Self.busyPairingMessage
+        }
+    }
+
+    /// Makes `rawURI` the one pending confirmation. An earlier item that is still pending was not on
+    /// screen (the callers checked `pairingRefusal`); its `pair.claim` is rejected with a showable error.
+    private func stagePairConfirmation(
+        rawURI: String,
+        payload: PairingPayload,
+        continuation: CheckedContinuation<Void, Error>?
+    ) {
+        if let superseded = pendingPairContinuation {
+            pendingPairContinuation = nil
+            superseded.resume(throwing: BridgeCallError.operationFailed(Self.supersededPairingMessage))
+        }
+        externalPairErrorMessage = nil
+        pendingPairContinuation = continuation
+        pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: rawURI, payload: payload)
+        isPairConfirmationPresented = true
+    }
+
+    public func requestExternalPairingConfirmation(uri: String) {
+        if let refusal = pairingRefusal {
+            noteRefusedPairingRequest(refusal)
             return
         }
         let trimmed = uri.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -456,55 +528,48 @@ public final class SteveClientCoordinator: ObservableObject {
             )
             return
         }
-        pendingPairContinuation = nil
-        pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: trimmed, payload: payload)
-        isPairConfirmationPresented = true
+        stagePairConfirmation(rawURI: trimmed, payload: payload, continuation: nil)
     }
 
     /// Validates a scanned or pasted pairing link from the iOS scanner, dismisses the scanner,
     /// and stages user confirmation so no code is ever claimed before the user approves the target Hub.
+    /// Returns false for a link that does not parse (the scanner keeps scanning) and for a refusal;
+    /// a refusal during a claim leaves its message in `externalPairErrorMessage`.
     @discardableResult
     public func stageScannedPairingCode(_ raw: String) -> Bool {
-        guard !hasActivePairingFlow else {
-            return false
-        }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let payload = PairingPayload.parse(trimmed) else {
             return false
         }
+        if let refusal = pairingRefusal {
+            noteRefusedPairingRequest(refusal)
+            return false
+        }
         isQRScannerPresented = false
-        pendingPairContinuation = nil
-        pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: trimmed, payload: payload)
-        isPairConfirmationPresented = true
+        stagePairConfirmation(rawURI: trimmed, payload: payload, continuation: nil)
         return true
     }
 
     private func requestBridgePairingConfirmation(rawURI: String, payload: PairingPayload) async throws {
-        guard !hasActivePairingFlow else {
-            throw BridgeCallError.operationFailed(Self.busyPairingMessage)
-        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            guard !self.hasActivePairingFlow else {
+            guard self.pairingRefusal == nil else {
                 continuation.resume(throwing: BridgeCallError.operationFailed(Self.busyPairingMessage))
                 return
             }
-            self.pendingPairContinuation = continuation
-            self.pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: rawURI, payload: payload)
-            self.isPairConfirmationPresented = true
+            self.stagePairConfirmation(rawURI: rawURI, payload: payload, continuation: continuation)
         }
     }
 
-    /// Called by the SwiftUI alert's `isPresented` setter when the alert dismisses.
-    /// Hides the alert immediately and defers cancellation by one main-actor turn so a synchronous
-    /// "Pair" button action in the same turn always wins even if SwiftUI updates `isPresented` first.
-    public func handlePairAlertDismissed() {
+    /// The alert's `isPresented` setter. It hides the alert and nothing else: it cancels nothing and
+    /// schedules nothing, so it does not matter whether SwiftUI calls it before or after a button's
+    /// action. The item stays pending until a button answers by id (`cancelPendingExternalPairing(id:)`,
+    /// `beginConfirmExternalPairing(id:)`) or a new request replaces it.
+    public func hidePairConfirmationAlert() {
         isPairConfirmationPresented = false
-        guard let pendingID = pendingExternalPairConfirmation?.id else { return }
-        Task { @MainActor [weak self] in
-            self?.cancelPendingExternalPairing(id: pendingID)
-        }
     }
 
+    /// The Cancel button (also Escape and a system dismissal, which trigger the `.cancel` role).
+    /// `pair.claim` resolves `{}`: the person declined.
     public func cancelPendingExternalPairing(id: UUID? = nil) {
         guard let current = pendingExternalPairConfirmation else { return }
         if let id, current.id != id {
@@ -533,6 +598,7 @@ public final class SteveClientCoordinator: ObservableObject {
         pendingPairContinuation = nil
         pendingExternalPairConfirmation = nil
         isPairConfirmationPresented = false
+        externalPairErrorMessage = nil
         confirmingPairID = id
         return TakenPairConfirmation(confirmation: current, continuation: cont)
     }
@@ -639,6 +705,7 @@ public final class SteveClientCoordinator: ObservableObject {
         let previousTargetHubID = proxy.currentTarget().hubID
         if forceReloadWeb {
             activationGeneration &+= 1
+            webReloadOwed = true
         }
         let capturedGen = activationGeneration
 
@@ -653,9 +720,7 @@ public final class SteveClientCoordinator: ObservableObject {
                 route: .unknown,
                 updatedAt: Date()
             )
-            if forceReloadWeb {
-                webReloadNonce = UUID()
-            }
+            issueOwedWebReload()
             return
         }
 
@@ -699,9 +764,7 @@ public final class SteveClientCoordinator: ObservableObject {
 
             // Trigger the WebView reload immediately when the proxy target changes — before `fetchStateSummary` —
             // so the old Hub's page is never left running against the newly selected Hub.
-            if forceReloadWeb {
-                webReloadNonce = UUID()
-            }
+            issueOwedWebReload()
 
             let liveSummary = try? await api.fetchStateSummary(
                 endpoint: resolved.url,
@@ -738,10 +801,14 @@ public final class SteveClientCoordinator: ObservableObject {
                 errorMessage: error.localizedDescription,
                 updatedAt: Date()
             )
-            if forceReloadWeb {
-                webReloadNonce = UUID()
-            }
+            issueOwedWebReload()
         }
+    }
+
+    private func issueOwedWebReload() {
+        guard webReloadOwed else { return }
+        webReloadOwed = false
+        webReloadNonce = UUID()
     }
 
     private func startBackgroundPolling() {
