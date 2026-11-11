@@ -181,9 +181,8 @@ struct NodeHost {
     tools: Arc<node_tools::NodeTools>,
 }
 
-/// Construct the local host. Initialization errors fail boot rather than leaving persisted Node
-/// sessions with nowhere to run. ToolService is installed later, once core/modules exist;
-/// the returned startup job connects its endpoint before dispatch workers begin.
+/// Construct the local host in unit tests (`wire::node_binding::tests`).
+#[cfg(test)]
 fn node_runtime(
     cfg: &Config,
     store: &steve_store::Store,
@@ -192,27 +191,54 @@ fn node_runtime(
     secrets: &Arc<node_secrets::NodeSecrets>,
     jobs: &mut Vec<modules::Job>,
 ) -> Result<Option<NodeHost>, BackendError> {
-    if !local_node_mode(vars, cfg.no_resume)? {
+    let mode = node_mode(vars, cfg.no_resume)?;
+    if mode == NodeMode::Off {
         return Ok(None);
     }
+    open_in_process_node(
+        cfg,
+        store,
+        domain,
+        vars,
+        secrets,
+        jobs,
+        mode == NodeMode::Local,
+    )
+    .map(Some)
+}
+
+/// Opens the Hub's in-process Node: shared with agent sessions (`"local"`, `<data>/node`) only
+/// when `sessions_here` is true (`STEVE_NODE_MODE=local`), and isolated on `"local-jobs"`
+/// (`<data>/node-jobs`, zero session capacity) whenever sessions live in the service Node or are
+/// switched off (`STEVE_NODE_MODE=off`).
+fn open_in_process_node(
+    cfg: &Config,
+    store: &steve_store::Store,
+    domain: Arc<dyn node_runtime::NodeDomain>,
+    vars: &Vars,
+    secrets: &Arc<node_secrets::NodeSecrets>,
+    jobs: &mut Vec<modules::Job>,
+    sessions_here: bool,
+) -> Result<NodeHost, BackendError> {
     for warning in crate::check::local_node_warnings(cfg, vars) {
         tracing::warn!("{warning}");
     }
-    // with the sessions in a process of their own (B1), the jobs keep a Node, and a home, here
-    let service = node_mode(vars, cfg.no_resume)? == NodeMode::Service;
-    let (id, home) = if service {
-        ("local-jobs", cfg.data_dir.join("node-jobs"))
-    } else {
+    let (id, home) = if sessions_here {
         ("local", cfg.data_dir.join("node"))
+    } else {
+        ("local-jobs", cfg.data_dir.join("node-jobs"))
     };
     let node_id = steve_node_api::NodeId::new(id).expect("constant node id");
     let tools = node_tools::NodeTools::open(store.clone(), node_id.clone(), &home)
         .map_err(|e| BackendError::msg(e.to_string()))?;
     let roots = node_binding::roots(store, &workspaces::configured(cfg))
         .map_err(|e| BackendError::msg(e.to_string()))?;
+    let mut node_cfg = local_node_config(cfg, node_id.clone(), home, roots, true);
+    if !sessions_here {
+        node_cfg.capacity.sessions = 0;
+    }
     let node = Arc::new(
-        steve_node::LocalNode::open(local_node_config(cfg, node_id.clone(), home, roots, true))
-            .map_err(|e| BackendError::msg(e.to_string()))?,
+        steve_node::LocalNode::open(node_cfg).map_err(|e| BackendError::msg(e.to_string()))?,
     );
     local_node_extras(&node, cfg, true);
     let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
@@ -240,11 +266,11 @@ fn node_runtime(
         node.clone(),
         tools.clone(),
     )));
-    Ok(Some(NodeHost {
+    Ok(NodeHost {
         runtime,
         tools,
         node,
-    }))
+    })
 }
 
 /// The Hub's own Node as the Hub configures it (in its process, or in one of its own, B1): no
@@ -283,7 +309,9 @@ pub(crate) fn local_node_config(
 /// read itself, its own homes and binaries.
 pub(crate) fn local_node_extras(node: &steve_node::LocalNode, cfg: &Config, jobs: bool) {
     if jobs {
-        node.enable_research(steve_research::ResearchConfig::new(cfg.scratch.join("research")));
+        node.enable_research(steve_research::ResearchConfig::new(
+            cfg.scratch.join("research"),
+        ));
     }
     let homes = crate::resume::Homes::of(cfg);
     node.set_discovery(steve_node::history::DiscoveryConfig {
@@ -564,31 +592,24 @@ pub fn wire_assembly(
     let core_cfg = core_config(cfg, &vars);
     let mut node_jobs = vec![];
     let secrets = node_secrets::NodeSecrets::new();
-    // Model calls always execute on a local Node. Session/workspace routing keeps its existing
-    // switch; a NO_RESUME copy never opens the copied Node journal.
-    let model_vars: Vars = if cfg.no_resume {
-        vars.clone()
-    } else {
-        let vars = vars.clone();
-        // the jobs' Node is in this process either way; `service` tells it the sessions are not
-        let service = !vars("STEVE_NODE_MODE").is_some_and(|v| {
-            let v = v.trim();
-            !v.is_empty() && !v.eq_ignore_ascii_case("service")
-        });
-        Arc::new(move |key| match key {
-            "STEVE_NODE_MODE" => Some(if service { "service" } else { "local" }.into()),
-            _ => vars(key),
-        })
-    };
-    let model_node = node_runtime(
-        cfg,
-        &db,
-        host.clone(),
-        &model_vars,
-        &secrets,
-        &mut node_jobs,
-    )?;
+    // Validate STEVE_NODE_MODE up front before opening any Node directory or journal.
+    // Model calls always execute on an in-process Node except on an inert NO_RESUME copy;
+    // only `NodeMode::Local` shares `"local"` (`<data>/node`) with agent sessions, whereas
+    // `Service` and `Off` isolate jobs on `"local-jobs"` (`<data>/node-jobs`).
     let mode = node_mode(&vars, cfg.no_resume)?;
+    let model_node = if cfg.no_resume {
+        None
+    } else {
+        Some(open_in_process_node(
+            cfg,
+            &db,
+            host.clone(),
+            &vars,
+            &secrets,
+            &mut node_jobs,
+            mode == NodeMode::Local,
+        )?)
+    };
     // the harness adapters this Hub knows, with what the local Node says of them (kept fresh)
     let harnesses = crate::harnesses::HubHarnesses::of(cfg);
     if let Some(h) = &model_node {
@@ -685,7 +706,8 @@ pub fn wire_assembly(
         fleet: fleet.clone(),
         bind_remote,
         // `spread` is the default; `local` keeps new sessions on this machine
-        spread: !vars("STEVE_NODE_PLACEMENT").is_some_and(|v| v.trim().eq_ignore_ascii_case("local")),
+        spread: !vars("STEVE_NODE_PLACEMENT")
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("local")),
         store: db.clone(),
         host: host.clone(),
         workspaces: workspaces.clone(),
@@ -1112,6 +1134,203 @@ mod tests {
             mode(&[("STEVE_NODE_MODE", "loacl")], false)
                 .unwrap_err()
                 .contains("loacl")
+        );
+    }
+
+    /// With `STEVE_NODE_MODE=off`, the in-process model-job Node runs on `local-jobs`
+    /// (`<data>/node-jobs`), never opening `<data>/node` or reconciling/draining sessions
+    /// bound to `local` (even when messages arrive in `queued` before startup reconciliation
+    /// finishes, or when a detached service Node still holds `<data>/node/node.lock`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn steve_node_mode_off_keeps_local_sessions_parked_and_untouched() {
+        steve_modules::net::forbid_in_this_process();
+        let dir = tempfile::tempdir().unwrap();
+        let h = dir.path().canonicalize().unwrap();
+        let repo = h.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let fake = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/streaming-acp.js");
+        let make_vars = |home_sub: &str, mode: &str| -> Vars {
+            let kv: std::collections::HashMap<String, String> = [
+                ("HOME", h.display().to_string()),
+                ("STEVE_HOME", h.join(home_sub).display().to_string()),
+                ("STEVE_HOST", "127.0.0.1".into()),
+                ("STEVE_PUBLIC_URL", "http://127.0.0.1:9".into()),
+                ("STEVE_DEV_LOGIN", "1".into()),
+                ("STEVE_REPO", repo.display().to_string()),
+                ("STEVE_NODE_LISTEN", "0".into()),
+                ("STEVE_NODE_MODE", mode.into()),
+                ("STEVE_VAULT_KEYSTORE", "file".into()),
+                ("STEVE_FORBID_REAL_HOSTS", "1".into()),
+                ("STEVE_ADAPTER_CLAUDE", fake.display().to_string()),
+                ("STEVE_ADAPTER_CODEX", fake.display().to_string()),
+                ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.into(), v))
+            .collect();
+            Arc::new(move |k| kv.get(k).cloned())
+        };
+
+        // 1. Persist a session `s1` already bound to `local` (as left behind before rollback).
+        let off_vars = make_vars("steve", "off");
+        let cfg = Arc::new(crate::config::Config::from_vars(|k| off_vars(k)).unwrap());
+        for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        {
+            let store = steve_store::Store::open(cfg.db_path(), steve_store::NoPublisher).unwrap();
+            store.ensure_workspace().unwrap();
+            store
+                .transaction::<_, steve_store::StoreError>(|tx| {
+                    tx.execute(
+                        "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) \
+                         VALUES ('i1','default',1,'test','run','执行',1,1)",
+                        [],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) \
+                         VALUES ('s1','default','i1','claude-code','','active',1,1)",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            let b = node_binding::binding_for(&store, "s1", None, &|_| true).unwrap();
+            let ws_ref = serde_json::json!({ "node": "local", "id": "w_s1" });
+            store
+                .transaction::<_, steve_store::StoreError>(|tx| {
+                    steve_store::runtime::bind_session_in(
+                        tx,
+                        &steve_store::runtime::SessionBinding {
+                            session: &b.session,
+                            node: "local",
+                            workspace: &ws_ref,
+                            node_session: &b.session,
+                            config_revision: b.policy.revision.as_str(),
+                        },
+                        steve_store::now(),
+                    )?;
+                    tx.execute(
+                        "UPDATE runtime_sessions SET phase='released' WHERE session_id='s1'",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        // 2. Boot with STEVE_NODE_MODE=off, park a message BEFORE startup jobs reconcile (the exact
+        //    Ubuntu CI window in node_e2e), then run startup jobs + a gateway think call.
+        let off_vars = make_vars("steve", "off");
+        let mut w2 = wire_with(&cfg, &crate::bus::Bus::new(), off_vars).unwrap();
+        assert!(w2.node.is_none(), "session Node is disabled");
+        let prompted = w2
+            .domain
+            .session_message("s1", "@wire-check", "", vec![])
+            .await
+            .unwrap();
+        assert_eq!(prompted, "queued");
+        let mut handles = Vec::new();
+        for job in std::mem::take(&mut w2.jobs) {
+            handles.push(tokio::spawn(job));
+        }
+        let ans = w2
+            .core
+            .gateway()
+            .call(
+                "@wire-check",
+                steve_core::Tier::Smart,
+                std::time::Duration::from_secs(20),
+                &steve_core::gateway::ThinkTools::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(ans.text, "答案");
+        // Completing `gateway().call()` proves `start_node -> runtime.start() -> reconcile()` on
+        // `model_node` has already run; if `model_node` had opened `"local"`, `plan_waiting` would
+        // already have popped `s1` from `queued`.
+        let store = w2.core.store().store();
+        let ran: i64 = store
+            .reader(|c| {
+                Ok::<_, steve_store::StoreError>(c.query_row(
+                    "SELECT COUNT(*) FROM events WHERE session_id='s1' AND format='steve.v1' AND data LIKE '%答案%'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let queued: i64 = store
+            .reader(|c| {
+                Ok::<_, steve_store::StoreError>(c.query_row(
+                    "SELECT COUNT(*) FROM queued WHERE session_id='s1'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(ran, 0, "no runner may execute a parked session while off");
+        assert_eq!(queued, 1, "parked message stays queued until Node returns");
+        assert!(
+            !cfg.data_dir.join("node").exists(),
+            "off never opens <data>/node"
+        );
+        assert!(
+            cfg.data_dir.join("node-jobs").exists(),
+            "model jobs run on local-jobs"
+        );
+        w2.domain.shutdown().await;
+        for handle in handles {
+            handle.abort();
+        }
+        drop(w2);
+
+        // 3. Holding `<data>/node/node.lock` and `<data>/node/host-tools.lock` (as a detached
+        //    service Node does) does not block `STEVE_NODE_MODE=off`.
+        let svc_vars = make_vars("steve-service", "off");
+        let svc_cfg = Arc::new(crate::config::Config::from_vars(|k| svc_vars(k)).unwrap());
+        for d in [&svc_cfg.data_dir, &svc_cfg.worktrees, &svc_cfg.scratch] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::create_dir_all(svc_cfg.data_dir.join("node")).unwrap();
+        let mut held_locks = Vec::new();
+        for name in ["node.lock", "host-tools.lock"] {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(svc_cfg.data_dir.join("node").join(name))
+                .unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::flock(
+                        std::os::fd::AsRawFd::as_raw_fd(&f),
+                        libc::LOCK_EX | libc::LOCK_NB,
+                    )
+                },
+                0,
+                "test holds data/node/{name}"
+            );
+            held_locks.push(f);
+        }
+        let off_locked = wire_with(&svc_cfg, &crate::bus::Bus::new(), svc_vars).unwrap();
+        off_locked.domain.shutdown().await;
+        drop(held_locks);
+
+        // 4. An invalid STEVE_NODE_MODE fails before touching `<data>/node` or `<data>/node-jobs`.
+        let bad_vars = make_vars("steve-bad", "loacl");
+        let bad_cfg = Arc::new(crate::config::Config::from_vars(|k| bad_vars(k)).unwrap());
+        for d in [&bad_cfg.data_dir, &bad_cfg.worktrees, &bad_cfg.scratch] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let err = match wire_with(&bad_cfg, &crate::bus::Bus::new(), bad_vars) {
+            Ok(_) => panic!("typo mode must fail"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("loacl"), "{err}");
+        assert!(
+            !bad_cfg.data_dir.join("node").exists() && !bad_cfg.data_dir.join("node-jobs").exists(),
+            "invalid mode must not open any Node home"
         );
     }
 }

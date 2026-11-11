@@ -438,6 +438,7 @@ async fn an_item_keeps_the_ack_until_it_ends() {
     .await;
     let item = i.response.unwrap().item_id.expect("item");
     assert_eq!(sent(&h), [format!("收到，已记为 {item}。")]);
+    h.ch.react_settled(&i.message_id).await;
     assert_eq!(
         h.fake.reactions_on("o1"),
         [ReactionKind::Ack],
@@ -489,6 +490,7 @@ async fn a_reaction_ends_locally_once_the_connection_is_removed() {
     )
     .await;
     let item = i.response.unwrap().item_id.expect("item");
+    h.ch.react_settled(&i.message_id).await;
     assert_eq!(h.fake.reactions_on("o1"), [ReactionKind::Ack]);
     remove_bot(&h).await;
     assert_eq!(
@@ -801,6 +803,12 @@ async fn each_space_has_one_conversation_that_continues() {
         "the conversation answers, not the responder"
     );
     assert_eq!(
+        state(&h, &a.message_id),
+        "ack",
+        "收到 recorded before anything is generated"
+    );
+    h.ch.react_settled(&a.message_id).await;
+    assert_eq!(
         h.fake.reactions_on("o1"),
         [ReactionKind::Ack],
         "收到 before anything is generated"
@@ -906,6 +914,7 @@ async fn each_space_has_one_conversation_that_continues() {
         .unwrap();
     h.ch.conv_deliver(WS, &ann).await.unwrap();
     assert_eq!(sent(&h)[1], "收到，已记为 ST-7。");
+    h.ch.react_settled(&b.message_id).await;
     assert_eq!(h.fake.reactions_on("o2"), [ReactionKind::Ack]);
     assert_eq!(
         one(
@@ -1727,4 +1736,25 @@ async fn a_drafted_answer_is_closed_in_its_own_conversation() {
         (o["status"].clone(), o["decision"].clone()),
         (json!("discarded"), Value::Null)
     );
+}
+
+/// `push` returns as soon as `state = "ack"` and the per-message reaction lock are held, before
+/// the detached provider call finishes; `react_settled` awaits that exact lock without polling.
+#[tokio::test(flavor = "multi_thread")]
+async fn react_settled_synchronizes_with_detached_ack_provider_without_polling() {
+    let h = setup(true).await;
+    *h.fake.reaction_delay.lock().unwrap() = Some(std::time::Duration::from_millis(60));
+    let m = push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "r1", "ulilei", "部署挂了怎么办", true, false),
+    )
+    .await;
+    assert_eq!(state(&h, &m.message_id), "ack");
+    assert!(
+        h.fake.reactions_on("r1").is_empty(),
+        "detached provider call is still in flight when synchronous FakeThread::say returns"
+    );
+    h.ch.react_settled(&m.message_id).await;
+    assert_eq!(h.fake.reactions_on("r1"), [ReactionKind::Ack]);
 }
