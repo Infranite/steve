@@ -979,7 +979,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                     tracing::warn!("{session_id}: {e}");
                 }
                 // A workflow must not lose its required Node tag through the ordinary fallback.
-                if self.workflow_item(session_id).ok().flatten().is_some() {
+                if !matches!(self.workflow_item(session_id), Ok(None)) {
                     return;
                 }
             }
