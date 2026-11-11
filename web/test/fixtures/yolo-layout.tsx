@@ -1,0 +1,28 @@
+/* Real controls and dialogs; the browser intercepts every API request, never a live workspace. */
+import { createRoot } from "react-dom/client"
+import "../../src/index.css"
+import { st, useStore, type Item } from "../../src/store"
+import { getSheet } from "../../src/ui"
+import { YoloDialog, YoloPill } from "../../src/yolo/switch"
+import { YoloItemSwitch, YoloProjectSelect } from "../../src/yolo/badges"
+
+const q = new URLSearchParams(location.search)
+document.documentElement.classList.toggle("dark", q.get("theme") === "dark")
+st.yolo = {
+  on: q.get("state") === "paused", mode: q.get("state") === "paused" ? "on" : "off", active: false,
+  forced_off: q.get("state") === "forced" ? "env" : null,
+  forced_reason: q.get("state") === "forced" ? "configuration/".repeat(24) : null,
+  paused: q.get("state") === "paused" ? { code: "fixture", reason: "reason/".repeat(30), at: Date.now() } : null,
+  window: null, scopes: [], counts: { decided: 0, declined: 0, scheduled: 0 },
+}
+const item = { id: "ST-100", project: "p1", yolo: null } as unknown as Item
+function Fixture() {
+  useStore()
+  return <main className="p-4">
+    <YoloPill />
+    <YoloItemSwitch i={item} />
+    <YoloProjectSelect id="p1" realDir={false} />
+    {getSheet()?.kind === "yolo" && <YoloDialog />}
+  </main>
+}
+createRoot(document.getElementById("root")!).render(<Fixture />)
