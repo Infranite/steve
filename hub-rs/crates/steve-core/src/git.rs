@@ -92,10 +92,12 @@ pub(crate) fn common_git_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Whether `git args…` mutates `.git/worktrees` metadata (`git worktree` subcommands other than
-/// `list`: `add`, `remove`, `prune`, `move`, `repair`, `lock`, `unlock`).
+/// `list`: `add`, `remove`, `prune`, `move`, `repair`, `lock`, `unlock`) or is a `git branch`.
 /// Git's `worktree prune` calls `rmdir(".git/worktrees")` when empty without an internal lock,
-/// racing with concurrent `worktree add` creating `.git/worktrees/<name>`; other commands rely on
-/// Git's own `index.lock` / ref locks so slow `fetch` / `push` / `rebase` runs never block here.
+/// racing with concurrent `worktree add` creating `.git/worktrees/<name>`. `git branch` walks
+/// every entry of `.git/worktrees` (is the branch checked out in one?) and dies when an entry, or
+/// the directory, goes away under it. Other commands rely on Git's own `index.lock` / ref locks so
+/// slow `fetch` / `push` / `rebase` runs never block here.
 fn git_touches_worktrees(args: &[&str]) -> bool {
     let mut i = 0;
     while i < args.len() {
@@ -122,13 +124,14 @@ fn git_touches_worktrees(args: &[&str]) -> bool {
         }
         break;
     }
-    if args.get(i).copied() != Some("worktree") {
-        return false;
+    match args.get(i).copied() {
+        Some("worktree") => matches!(
+            args[i + 1..].iter().copied().find(|a| !a.starts_with('-')),
+            Some(sub) if sub != "list"
+        ),
+        Some("branch") => true,
+        _ => false,
     }
-    matches!(
-        args[i + 1..].iter().copied().find(|a| !a.starts_with('-')),
-        Some(sub) if sub != "list"
-    )
 }
 
 /// Runs `f` under an exclusive `.git/worktrees` lock keyed by [`common_git_dir`]: an in-process
@@ -680,7 +683,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn git_touches_worktrees_matches_only_non_list_worktree_subcommands() {
+    fn git_touches_worktrees_matches_branch_and_non_list_worktree_subcommands() {
         for locked in [
             &[
                 "worktree",
@@ -715,6 +718,8 @@ pub(crate) mod tests {
                 "/tmp/wt",
             ],
             &["--git-dir=/tmp/repo/.git", "worktree", "prune"],
+            &["branch", "-D", "steve/st-1"],
+            &["-C", "/tmp/repo", "branch", "-d", "steve/st-1"],
         ] {
             assert!(
                 git_touches_worktrees(locked),
@@ -739,7 +744,6 @@ pub(crate) mod tests {
             &["rebase", "main"],
             &["commit", "-m", "worktree add"],
             &["clone", "https://example.com/r.git", "/tmp/r"],
-            &["branch", "-D", "steve/st-1"],
             &["status", "--porcelain"],
             &["-c"],
             &[],
