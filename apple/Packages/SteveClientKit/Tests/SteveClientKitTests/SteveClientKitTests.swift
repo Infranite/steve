@@ -572,14 +572,13 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(mockHubB.pairCallCount(), 0)
         XCTAssertEqual(store.profiles.count, 1)
 
-        // Confirming `pair.claim` via `handlePairAlertDismissed()` + synchronous `beginConfirmExternalPairing(id:)`
-        // (matching SwiftUI `.alert` where `isPresented.set(false)` runs in the same main-actor turn as the button action)
-        // claims the code, saves Keychain credential, and switches active Hub.
+        // Confirming `pair.claim`: the alert's setter hides it, the Pair button takes it by id. That claims the
+        // code, saves the Keychain credential, and switches the active Hub.
         let confirmClaimTask = Task {
             try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": httpPairLink], platform: "macos")
         }
         let pendingConfirm = try await waitForPendingPairConfirmation(on: coordinator)
-        coordinator.handlePairAlertDismissed()
+        coordinator.hidePairConfirmationAlert()
         coordinator.beginConfirmExternalPairing(id: pendingConfirm.id)
         _ = try await awaitWithTimeout(seconds: 5.0) { try await confirmClaimTask.value }
         XCTAssertEqual(mockHubB.pairCallCount(), 1)
@@ -637,9 +636,12 @@ final class SteveClientKitTests: XCTestCase {
         } catch {}
 
         // Concurrent `steve://pair` deep link and scanner staging must also be refused without replacing Hub X
+        // (the confirmation on screen is the answer: no error is stored to show up after it)
         coordinator.requestExternalPairingConfirmation(uri: linkY)
-        XCTAssertNotNil(coordinator.externalPairErrorMessage)
+        XCTAssertNil(coordinator.externalPairErrorMessage)
         XCTAssertFalse(coordinator.stageScannedPairingCode(linkY))
+        XCTAssertNil(coordinator.externalPairErrorMessage)
+        XCTAssertNotNil(coordinator.pairingRefusalMessage)
         XCTAssertEqual(coordinator.pendingExternalPairConfirmation?.id, firstPending.id)
         XCTAssertEqual(coordinator.pendingExternalPairConfirmation?.displayName, "Hub X")
 
@@ -666,6 +668,230 @@ final class SteveClientKitTests: XCTestCase {
             XCTFail("Stopping coordinator during pending pair.claim must reject, not resolve {}")
         } catch {}
         XCTAssertEqual(mockHubY.pairCallCount(), 0)
+    }
+
+    @MainActor
+    private func makePairingGateCoordinator(
+        suite: String
+    ) -> (coordinator: SteveClientCoordinator, store: HubStore, cleanup: () -> Void) {
+        let suiteName = "test.steve.\(suite).\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        let store = HubStore(
+            defaults: defaults,
+            credentials: InMemoryCredentialStore(),
+            defaultProfile: HubProfile(id: HubProfile.localDefaultID, name: "Local Hub", lanURLs: [URL(string: "http://127.0.0.1:9")!], isLocalDefault: true),
+            includeLocalDefault: true
+        )
+        let coordinator = SteveClientCoordinator(
+            hubStore: store,
+            preferredPortDefaults: defaults,
+            clientDescriptor: ClientDescriptor(kind: "mac", name: "Test Mac", platform: "macOS", version: "0.3.0")
+        )
+        return (coordinator, store, {
+            coordinator.stop()
+            defaults.removePersistentDomain(forName: suiteName)
+        })
+    }
+
+    private func pairLink(code: Character, name: String, hub: MockUpstreamServer) -> String {
+        let lan = hub.baseURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
+        return "steve://pair?v=1&code=stp_\(String(repeating: code, count: 32))&name=\(name)&lan=\(lan)"
+    }
+
+    /// Lets every task already scheduled on the main actor run, so a cancel that the setter had
+    /// scheduled (as it used to) would have run by the time this returns.
+    @MainActor
+    private func drainMainActor() async {
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+    }
+
+    @MainActor
+    func testPairAlertSetterOnlyHidesAndPairByIDStillClaimsInEitherOrder() async throws {
+        let hub = try await MockUpstreamServer.start()
+        defer { hub.stop() }
+        let (coordinator, store, cleanup) = makePairingGateCoordinator(suite: "pair-setter")
+        defer { cleanup() }
+        let link = pairLink(code: "a", name: "Hub+S", hub: hub)
+
+        // Setter first, nothing else: the item is hidden, still pending, still claimable, and not claimed.
+        let firstClaim = Task {
+            try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": link], platform: "macos")
+        }
+        let first = try await waitForPendingPairConfirmation(on: coordinator)
+        XCTAssertTrue(coordinator.isPairConfirmationPresented)
+        coordinator.hidePairConfirmationAlert()
+        await drainMainActor()
+        XCTAssertFalse(coordinator.isPairConfirmationPresented)
+        XCTAssertEqual(coordinator.pendingExternalPairConfirmation?.id, first.id)
+        XCTAssertEqual(hub.pairCallCount(), 0)
+
+        // The Pair button's action arrives in a later turn than the setter: it still claims.
+        coordinator.beginConfirmExternalPairing(id: first.id)
+        let firstResult = try await awaitWithTimeout(seconds: 10.0) { try await firstClaim.value }
+        XCTAssertTrue(firstResult.isEmpty)
+        XCTAssertEqual(hub.pairCallCount(), 1)
+        XCTAssertEqual(store.activeProfile.name, "Hub S")
+        XCTAssertEqual(store.credential(for: store.activeHubID), "cli_paired.secret_cred")
+        XCTAssertNil(coordinator.pendingExternalPairConfirmation)
+
+        // The other order: the Pair button's action first, the setter after it.
+        let secondClaim = Task {
+            try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": link], platform: "macos")
+        }
+        let second = try await waitForPendingPairConfirmation(on: coordinator)
+        coordinator.beginConfirmExternalPairing(id: second.id)
+        coordinator.hidePairConfirmationAlert()
+        _ = try await awaitWithTimeout(seconds: 10.0) { try await secondClaim.value }
+        XCTAssertEqual(hub.pairCallCount(), 2)
+    }
+
+    @MainActor
+    func testPairAlertCancelByIDResolvesPairClaimEmptyInEitherOrder() async throws {
+        let hub = try await MockUpstreamServer.start()
+        defer { hub.stop() }
+        let (coordinator, store, cleanup) = makePairingGateCoordinator(suite: "pair-cancel")
+        defer { cleanup() }
+        let link = pairLink(code: "b", name: "Hub+C", hub: hub)
+
+        // Setter, then (a turn later) the Cancel button.
+        let firstClaim = Task {
+            try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": link], platform: "macos")
+        }
+        let first = try await waitForPendingPairConfirmation(on: coordinator)
+        coordinator.hidePairConfirmationAlert()
+        await drainMainActor()
+        XCTAssertEqual(coordinator.pendingExternalPairConfirmation?.id, first.id)
+        // Cancel for another id answers nothing.
+        coordinator.cancelPendingExternalPairing(id: UUID())
+        XCTAssertEqual(coordinator.pendingExternalPairConfirmation?.id, first.id)
+        coordinator.cancelPendingExternalPairing(id: first.id)
+        let firstResult = try await awaitWithTimeout(seconds: 10.0) { try await firstClaim.value }
+        XCTAssertTrue(firstResult.isEmpty)
+        XCTAssertNil(coordinator.pendingExternalPairConfirmation)
+        XCTAssertNil(coordinator.externalPairErrorMessage)
+
+        // Cancel button first, setter after it.
+        let secondClaim = Task {
+            try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": link], platform: "macos")
+        }
+        let second = try await waitForPendingPairConfirmation(on: coordinator)
+        coordinator.cancelPendingExternalPairing(id: second.id)
+        coordinator.hidePairConfirmationAlert()
+        let secondResult = try await awaitWithTimeout(seconds: 10.0) { try await secondClaim.value }
+        XCTAssertTrue(secondResult.isEmpty)
+
+        // Nothing was claimed, and a pairing after the cancels works.
+        XCTAssertEqual(hub.pairCallCount(), 0)
+        XCTAssertEqual(store.profiles.count, 1)
+        let thirdClaim = Task {
+            try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": link], platform: "macos")
+        }
+        let third = try await waitForPendingPairConfirmation(on: coordinator)
+        coordinator.beginConfirmExternalPairing(id: third.id)
+        _ = try await awaitWithTimeout(seconds: 10.0) { try await thirdClaim.value }
+        XCTAssertEqual(hub.pairCallCount(), 1)
+        XCTAssertEqual(store.activeProfile.name, "Hub C")
+    }
+
+    @MainActor
+    func testPendingPairingNotOnScreenIsReplacedAndItsPairClaimIsRejected() async throws {
+        let hubX = try await MockUpstreamServer.start()
+        defer { hubX.stop() }
+        let hubY = try await MockUpstreamServer.start()
+        defer { hubY.stop() }
+        let (coordinator, store, cleanup) = makePairingGateCoordinator(suite: "pair-replace")
+        defer { cleanup() }
+        let linkX = pairLink(code: "c", name: "Hub+X", hub: hubX)
+        let linkY = pairLink(code: "d", name: "Hub+Y", hub: hubY)
+
+        func expectRejected(
+            _ task: Task<[String: Any], Error>,
+            _ what: String
+        ) async {
+            do {
+                let value = try await task.value
+                XCTFail("\(what): pair.claim must be rejected, it resolved \(value)")
+            } catch let error as BridgeCallError {
+                guard case .operationFailed(let message) = error else {
+                    return XCTFail("\(what): unexpected error \(error)")
+                }
+                XCTAssertFalse(message.isEmpty, what)
+                XCTAssertEqual(error.localizedDescription, message, what)
+            } catch {
+                XCTFail("\(what): unexpected error \(error)")
+            }
+        }
+
+        // 1. The alert was asked for but the system never showed it (the probe says so). The next
+        //    request, a deep link, replaces the item; the first `pair.claim` is rejected, not resolved.
+        var alertOnScreen = false
+        coordinator.pairConfirmationVisibilityProbe = { alertOnScreen }
+        let neverShownClaim = Task {
+            try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": linkX], platform: "macos")
+        }
+        let neverShown = try await waitForPendingPairConfirmation(on: coordinator)
+        XCTAssertTrue(coordinator.isPairConfirmationPresented)
+        XCTAssertNil(coordinator.pairingRefusalMessage)
+        coordinator.externalPairErrorMessage = "left over from an earlier pairing"
+        coordinator.requestExternalPairingConfirmation(uri: linkY)
+        await expectRejected(neverShownClaim, "never shown")
+        let replacement = try XCTUnwrap(coordinator.pendingExternalPairConfirmation)
+        XCTAssertNotEqual(replacement.id, neverShown.id)
+        XCTAssertEqual(replacement.displayName, "Hub Y")
+        XCTAssertTrue(coordinator.isPairConfirmationPresented)
+        // A new pairing starts clean: the old error is gone.
+        XCTAssertNil(coordinator.externalPairErrorMessage)
+        // The replaced id answers nothing any more.
+        let stale = await coordinator.confirmPendingExternalPairing(id: neverShown.id)
+        XCTAssertNil(stale)
+        XCTAssertEqual(hubX.pairCallCount(), 0)
+
+        // 2. Now the alert for Hub Y is on screen: every entry point is refused and Hub Y stays.
+        alertOnScreen = true
+        XCTAssertNotNil(coordinator.pairingRefusalMessage)
+        let refusedClaim = Task {
+            try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": linkX], platform: "macos")
+        }
+        await expectRejected(refusedClaim, "on screen")
+        coordinator.requestExternalPairingConfirmation(uri: linkX)
+        XCTAssertFalse(coordinator.stageScannedPairingCode(linkX))
+        XCTAssertEqual(coordinator.pendingExternalPairConfirmation?.id, replacement.id)
+        XCTAssertNil(coordinator.externalPairErrorMessage)
+
+        // 3. The alert went away without an answer (only the setter ran). The item no longer blocks:
+        //    a bridge request replaces it, and a further one replaces that and rejects its `pair.claim`.
+        coordinator.hidePairConfirmationAlert()
+        alertOnScreen = false
+        XCTAssertNil(coordinator.pairingRefusalMessage)
+        let hiddenClaim = Task {
+            try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": linkY], platform: "macos")
+        }
+        var hidden = try await waitForPendingPairConfirmation(on: coordinator)
+        for _ in 0..<2000 where hidden.id == replacement.id {
+            try await Task.sleep(nanoseconds: 5_000_000)
+            hidden = try XCTUnwrap(coordinator.pendingExternalPairConfirmation)
+        }
+        XCTAssertNotEqual(hidden.id, replacement.id)
+        // Without a probe the flag alone decides: hidden means replaceable.
+        coordinator.pairConfirmationVisibilityProbe = nil
+        coordinator.hidePairConfirmationAlert()
+        XCTAssertTrue(coordinator.stageScannedPairingCode(linkX))
+        await expectRejected(hiddenClaim, "hidden")
+        let last = try XCTUnwrap(coordinator.pendingExternalPairConfirmation)
+        XCTAssertEqual(last.displayName, "Hub X")
+        // ... and with the flag up and no probe, the item on screen is not replaced.
+        XCTAssertNotNil(coordinator.pairingRefusalMessage)
+        coordinator.requestExternalPairingConfirmation(uri: linkY)
+        XCTAssertEqual(coordinator.pendingExternalPairConfirmation?.id, last.id)
+
+        // Only the item that survived is claimed.
+        let claimed = await coordinator.confirmPendingExternalPairing(id: last.id)
+        XCTAssertEqual(claimed?.name, "Hub X")
+        XCTAssertEqual(hubX.pairCallCount(), 1)
+        XCTAssertEqual(hubY.pairCallCount(), 0)
+        XCTAssertEqual(store.activeProfile.name, "Hub X")
     }
 
     @MainActor
@@ -715,11 +941,11 @@ final class SteveClientKitTests: XCTestCase {
     func testHubSwitchReloadsImmediatelyRotatesProxyTokenAndReportsActiveEndpointInUse() async throws {
         let hubA = try await MockUpstreamServer.start()
         defer { hubA.stop() }
-        let hubB = try await MockUpstreamServer.start(
-            stateDelayNanoseconds: 400_000_000,
-            privateOverlayStateDelayOnly: false
-        )
+        let hubB = try await MockUpstreamServer.start()
         defer { hubB.stop() }
+        // Hub B receives `/api/state` but does not answer it until released: the test looks at the
+        // coordinator while that request is known to be in flight.
+        hubB.holdStateResponses()
 
         let suiteName = "test.steve.switch-isolation.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -735,7 +961,7 @@ final class SteveClientKitTests: XCTestCase {
         creds.setCredential("cli_a.secret", for: HubProfile.localDefaultID)
 
         // Hub B has an unreachable public URL (`127.0.0.1:9`) and a reachable LAN fallback (`hubB.baseURL`),
-        // plus a slow `/api/state` response (400ms) so we can inspect state mid-`fetchStateSummary`.
+        // plus a held `/api/state` response so we can inspect state mid-`fetchStateSummary`.
         let hubBProfile = HubProfile(
             id: "hub-b",
             name: "Hub B",
@@ -766,23 +992,21 @@ final class SteveClientKitTests: XCTestCase {
         let pageATokenCookie = coordinator.proxy.authCookieHeader
         let nonceBeforeSwitch = coordinator.webReloadNonce
 
-        // Begin switching to Hub B (whose `/api/state` takes 400ms)
+        // Begin switching to Hub B (whose `/api/state` is held)
         let switchTask = Task {
             _ = try await coordinator.handleBridgeCall(op: "hubs.switch", args: ["id": hubBProfile.id], platform: "macos")
         }
 
-        // Wait until `proxy.updateTarget` points at `hubB.baseURL`, while `fetchStateSummary` is STILL in flight
-        var observedReloadDuringStateFetch = false
-        for _ in 0..<80 {
-            if coordinator.proxy.currentTarget().baseURL == hubB.baseURL {
-                // At the exact moment `proxy` points to Hub B (before the 400ms `/api/state` returns):
-                // 1) `webReloadNonce` MUST already have changed so WebView reloads immediately
-                observedReloadDuringStateFetch = (coordinator.webReloadNonce != nonceBeforeSwitch)
-                break
-            }
-            try await Task.sleep(nanoseconds: 5_000_000)
-        }
-        XCTAssertTrue(observedReloadDuringStateFetch, "webReloadNonce must update immediately when proxy target changes, before fetchStateSummary completes")
+        // `fetchStateSummary` for Hub B is in flight and stays so until the release below. At this point:
+        // 1) the proxy points at Hub B and `webReloadNonce` has ALREADY changed, so the WebView reloads
+        //    without waiting for the state summary
+        try await waitUntil("Hub B has received /api/state") { hubB.stateCallCount() >= 1 }
+        XCTAssertEqual(coordinator.proxy.currentTarget().baseURL, hubB.baseURL)
+        XCTAssertNotEqual(
+            coordinator.webReloadNonce,
+            nonceBeforeSwitch,
+            "webReloadNonce must update when the proxy target changes, before fetchStateSummary completes"
+        )
 
         // 2) Any lingering request from Hub A's page carrying `pageATokenCookie` MUST be refused with 403 and never reach Hub B
         let hubBCountBefore = hubB.apiMeCallCount()
@@ -797,7 +1021,8 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(oldGenResp.status, 403, "Requests carrying the previous Hub page generation's proxy cookie must be rejected")
         XCTAssertEqual(hubB.apiMeCallCount(), hubBCountBefore)
 
-        try await awaitWithTimeout(seconds: 5.0) { try await switchTask.value }
+        hubB.releaseStateResponses()
+        try await awaitWithTimeout(seconds: 30.0) { try await switchTask.value }
 
         // 3) `hubs.list` `address` contract: when public URL failed and LAN fallback is in use, `address` is the active LAN endpoint
         let hubsListResult = try await coordinator.handleBridgeCall(op: "hubs.list", args: [:], platform: "macos")
@@ -817,8 +1042,11 @@ final class SteveClientKitTests: XCTestCase {
             isLocalDefault: false
         )
         _ = store.upsertProfile(overlayProfile, makeActive: true)
+        // Its address is outside loopback, so its API client gets a session that answers locally: the
+        // `/api/state` request the activation makes is seen by the stub and goes nowhere.
         let overlayCoord = SteveClientCoordinator(
             hubStore: store,
+            api: HubClientAPI(session: NoNetworkURLProtocol.session()),
             resolver: EndpointResolver { _ in
                 HubHelloResponse(name: "steve", version: "0.3.0", api: 1, login: .init(token: true, oidc: false))
             },
@@ -831,6 +1059,11 @@ final class SteveClientKitTests: XCTestCase {
         let overlayHubs = try XCTUnwrap(overlayHubsResult["hubs"] as? [[String: Any]])
         let overlayItem = try XCTUnwrap(overlayHubs.first(where: { ($0["id"] as? String) == "hub-overlay" }))
         XCTAssertEqual(overlayItem["route"] as? String, "tailnet")
+        XCTAssertEqual(
+            NoNetworkURLProtocol.requests(toHost: "100.64.12.34").map(\.path),
+            ["/api/state"],
+            "the overlay Hub's state request must be answered by the stub session"
+        )
     }
 
     // MARK: - N3 HttpOnly Proxy Cookie & WKContentRuleList Cross-Port Loopback Blocking
@@ -1009,6 +1242,133 @@ final class SteveClientKitTests: XCTestCase {
         )
     }
 
+    // MARK: - The previous Hub's document is gone before the rotated key is planted
+
+    @MainActor
+    func testHubSwitchUnloadsPreviousDocumentBeforePlantingRotatedProxyCookieInWebView() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("steve-wv-unload-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        // Every document gets its own id and keeps calling the Hub with it from a timer, as a page that
+        // polls does. A call that carries document A's id can only come from Hub A's page.
+        try Data("""
+        <!doctype html><html><body><div id='app'>ready</div><script>
+        window.__docID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+        setInterval(function () { fetch('/api/tick/' + window.__docID).catch(function () {}); }, 5);
+        </script></body></html>
+        """.utf8).write(to: tempDir.appendingPathComponent("index.html"))
+
+        let hubA = try await MockUpstreamServer.start()
+        defer { hubA.stop() }
+        let hubB = try await MockUpstreamServer.start()
+        defer { hubB.stop() }
+
+        let suiteName = "test.steve.webview-unload.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = HubStore(
+            defaults: defaults,
+            credentials: InMemoryCredentialStore(),
+            defaultProfile: HubProfile(id: HubProfile.localDefaultID, name: "Hub A", lanURLs: [hubA.baseURL], isLocalDefault: true),
+            includeLocalDefault: true
+        )
+        let hubBProfile = try XCTUnwrap(store.addManualHub(address: hubB.baseURL.absoluteString, name: "Hub B", makeActive: false))
+        let coordinator = SteveClientCoordinator(
+            hubStore: store,
+            webRoot: tempDir,
+            preferredPortDefaults: defaults,
+            clientDescriptor: ClientDescriptor(kind: "mac", name: "Test Mac", platform: "macOS", version: "0.3.0")
+        )
+        defer { coordinator.stop() }
+
+        coordinator.startIfNeeded()
+        try await waitUntil("the gateway is up") { coordinator.localGatewayURL != nil }
+
+        let steveWebView = SteveWebView(
+            coordinator: coordinator,
+            platformName: "macos",
+            useNonPersistentDataStore: true
+        )
+        let bridge = steveWebView.makeCoordinator()
+
+        func proxyKeysInCookieStore(of webView: WKWebView) async -> [String] {
+            await withCheckedContinuation { (cont: CheckedContinuation<[String], Never>) in
+                webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
+                    cont.resume(returning: cookies
+                        .filter { $0.name == HubLoopbackProxy.proxyAuthCookieName }
+                        .map(\.value))
+                }
+            }
+        }
+
+        struct Observation: Equatable {
+            let step: SteveWebView.BridgeCoordinator.LoadStep
+            let webViewURL: String
+            let documentURL: String
+            let keysInCookieStore: [String]
+        }
+        var observations: [Observation] = []
+        weak var observedWebView: WKWebView?
+        bridge.loadStepObserver = { step in
+            guard let webView = observedWebView else { return }
+            // Read at the step itself: the load does not go on until this returns.
+            let webViewURL = webView.url?.absoluteString ?? ""
+            let keys = await proxyKeysInCookieStore(of: webView)
+            let documentURL = step == .gatewayLoadStarted
+                ? ""
+                : ((try? await webView.evaluateJavaScript("document.URL")) as? String ?? "")
+            observations.append(Observation(step: step, webViewURL: webViewURL, documentURL: documentURL, keysInCookieStore: keys))
+        }
+
+        let webView = steveWebView.makeTestWebView(bridge: bridge)
+        observedWebView = webView
+        try await waitUntil("Hub A's page is loaded") { bridge.isPageLoaded }
+        let tokenA = coordinator.proxy.proxyAuthToken
+        let docAValue = try await webView.evaluateJavaScript("window.__docID")
+        let docA = try XCTUnwrap(docAValue as? String)
+        try await waitUntil("Hub A's page reaches Hub A from its timer") {
+            hubA.receivedPaths().contains("/api/tick/\(docA)")
+        }
+
+        // Switch to Hub B. The key is rotated at once; the WebView is told as SwiftUI would tell it.
+        _ = try await coordinator.handleBridgeCall(op: "hubs.switch", args: ["id": hubBProfile.id], platform: "macos")
+        let tokenB = coordinator.proxy.proxyAuthToken
+        XCTAssertNotEqual(tokenA, tokenB)
+        observations.removeAll()
+        steveWebView.updateTestWebView(webView, bridge: bridge)
+        XCTAssertFalse(bridge.isPageLoaded)
+        try await waitUntil("Hub B's page is loaded") {
+            bridge.isPageLoaded && observations.contains(where: { $0.step == .gatewayLoadStarted })
+        }
+
+        // The order, and what was true at each step.
+        XCTAssertEqual(
+            observations.map(\.step),
+            [.previousDocumentUnloaded, .proxyCookiePlanted, .gatewayLoadStarted]
+        )
+        let unloaded = try XCTUnwrap(observations.first(where: { $0.step == .previousDocumentUnloaded }))
+        XCTAssertEqual(unloaded.webViewURL, "about:blank")
+        XCTAssertEqual(unloaded.documentURL, "about:blank", "Hub A's document must be gone before the new key is planted")
+        XCTAssertEqual(unloaded.keysInCookieStore, [tokenA], "the rotated key must not be in the cookie store while Hub A's document can still be alive")
+        let planted = try XCTUnwrap(observations.first(where: { $0.step == .proxyCookiePlanted }))
+        XCTAssertEqual(planted.keysInCookieStore, [tokenB])
+        XCTAssertEqual(planted.documentURL, "about:blank", "the new key is planted while no Hub page is loaded")
+
+        // Hub B's page is a new document, it reaches Hub B, and nothing of Hub A's document ever did.
+        let docBValue = try await webView.evaluateJavaScript("window.__docID")
+        let docB = try XCTUnwrap(docBValue as? String)
+        XCTAssertNotEqual(docA, docB)
+        try await waitUntil("Hub B's page reaches Hub B from its timer") {
+            hubB.receivedPaths().contains("/api/tick/\(docB)")
+        }
+        XCTAssertFalse(
+            hubB.receivedPaths().contains("/api/tick/\(docA)"),
+            "a timer of Hub A's page must never reach Hub B"
+        )
+        XCTAssertNil(coordinator.proxyStartupError)
+    }
+
     // MARK: - Stale Credential Poll Race & Retired Credential Revocation
 
     @MainActor
@@ -1021,8 +1381,12 @@ final class SteveClientKitTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let hello = HubHelloResponse(name: "steve", version: "0.3.0", api: 1, login: .init(token: true, oidc: false))
+        // Every resolve waits at a gate the test opens, so "the poll is still resolving" is a fact the
+        // test establishes, not a guess about how long things take.
+        let resolveGate = TestGate()
+        defer { resolveGate.open() }
         let slowResolver = EndpointResolver { _ in
-            try await Task.sleep(nanoseconds: 250_000_000)
+            await resolveGate.pass()
             return hello
         }
 
@@ -1048,7 +1412,7 @@ final class SteveClientKitTests: XCTestCase {
         let inFlightPoll = Task {
             await coordinator.activateCurrentHub(forceReloadWeb: false)
         }
-        try await Task.sleep(nanoseconds: 40_000_000)
+        try await waitUntil("the poll is inside the resolver") { resolveGate.arrivalCount >= 1 }
 
         let (_, login1) = try await RawTCPHTTPClient.request(
             port: coordinator.proxy.port,
@@ -1061,13 +1425,20 @@ final class SteveClientKitTests: XCTestCase {
             ]
         )
         XCTAssertEqual(login1.status, 200)
+        // The sign-in has reached the store while the poll is still held in the resolver.
+        try await waitUntil("the sign-in is stored") {
+            store.credential(for: HubProfile.localDefaultID) == "cli_web_tok.secret_cred"
+        }
 
+        resolveGate.open()
         await inFlightPoll.value
-        try await Task.sleep(nanoseconds: 100_000_000)
 
-        // The stale poll must NOT clobber the newly stored credential back to nil!
+        // The stale poll has now finished: it must NOT have clobbered the newly stored credential back to nil!
         XCTAssertEqual(store.credential(for: HubProfile.localDefaultID), "cli_web_tok.secret_cred")
-        XCTAssertEqual(coordinator.proxy.currentTarget().credential, "cli_web_tok.secret_cred")
+        try await waitUntil("the refresh after the sign-in gave the proxy the new credential") {
+            coordinator.proxy.currentTarget().credential == "cli_web_tok.secret_cred"
+        }
+        XCTAssertEqual(store.credential(for: HubProfile.localDefaultID), "cli_web_tok.secret_cred")
 
         // Now seed an older credential and sign in again: the replaced credential must be retired on `/auth/client/logout`
         store.updateAuthMetadata(id: HubProfile.localDefaultID, clientID: "cli_old", userName: "Owner", credential: "cli_old.stale_secret")
@@ -1082,8 +1453,9 @@ final class SteveClientKitTests: XCTestCase {
             ]
         )
         XCTAssertEqual(login2.status, 200)
-        try await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertEqual(mockHub.lastLogoutAuth(), "Bearer cli_old.stale_secret")
+        try await waitUntil("the replaced credential is signed out at the Hub") {
+            mockHub.lastLogoutAuth() == "Bearer cli_old.stale_secret"
+        }
         XCTAssertEqual(store.credential(for: HubProfile.localDefaultID), "cli_web_tok.secret_cred")
     }
 
@@ -1349,6 +1721,8 @@ final class SteveClientKitTests: XCTestCase {
 
     @MainActor
     func testStaleActivationDoesNotOverwriteSwitchAndInactiveRemoveDoesNotReload() async throws {
+        let mockHubA = try await MockUpstreamServer.start()
+        defer { mockHubA.stop() }
         let mockHubB = try await MockUpstreamServer.start()
         defer { mockHubB.stop() }
 
@@ -1356,11 +1730,14 @@ final class SteveClientKitTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let slowURL = URL(string: "http://192.168.99.1:8440")!
+        // "Slow A" is a Hub on loopback whose resolve waits at a gate the test opens.
+        let slowURL = mockHubA.baseURL
         let hello = HubHelloResponse(name: "steve", version: "0.3.0", api: 1, login: .init(token: true, oidc: false))
+        let slowGate = TestGate()
+        defer { slowGate.open() }
         let resolver = EndpointResolver { candidate in
             if candidate == slowURL {
-                try await Task.sleep(nanoseconds: 350_000_000)
+                await slowGate.pass()
             }
             return hello
         }
@@ -1387,9 +1764,11 @@ final class SteveClientKitTests: XCTestCase {
         let stalePoll = Task {
             await coordinator.activateCurrentHub(forceReloadWeb: false)
         }
-        try await Task.sleep(nanoseconds: 40_000_000)
+        try await waitUntil("the poll is resolving Slow A") { slowGate.arrivalCount >= 1 }
         store.selectHub(id: hubB.id)
         await coordinator.activateCurrentHub(forceReloadWeb: true)
+        // Only now does Slow A answer: the poll that asked is stale.
+        slowGate.open()
         await stalePoll.value
 
         XCTAssertEqual(coordinator.proxy.currentTarget().hubID, hubB.id)
@@ -1402,9 +1781,13 @@ final class SteveClientKitTests: XCTestCase {
         let nonceBeforeRemove = coordinator.webReloadNonce
 
         coordinator.removeHub(id: hubB.id)
-        try await Task.sleep(nanoseconds: 150_000_000)
+        // The sign-out is sent at the end of the removal, so once the Hub has it the removal is done.
+        try await waitUntil("the removed Hub's credential is signed out there") {
+            mockHubB.lastLogoutAuth() == "Bearer cli_b.secret"
+        }
+        XCTAssertFalse(store.profiles.contains(where: { $0.id == hubB.id }))
         XCTAssertEqual(coordinator.webReloadNonce, nonceBeforeRemove, "Removing an inactive Hub must not reload active WebView")
-        XCTAssertEqual(mockHubB.lastLogoutAuth(), "Bearer cli_b.secret")
+        XCTAssertEqual(store.activeHubID, HubProfile.localDefaultID)
     }
 
     @MainActor
@@ -1445,7 +1828,11 @@ final class SteveClientKitTests: XCTestCase {
             ]
         )
         XCTAssertEqual(loginResp.status, 200)
-        try await Task.sleep(nanoseconds: 120_000_000)
+        try await waitUntil("the web sign-in reached the store, the proxy and the summary") {
+            store.credential(for: HubProfile.localDefaultID) == "cli_web_tok.secret_cred"
+                && coordinator.proxy.currentTarget().credential == "cli_web_tok.secret_cred"
+                && coordinator.summary.phase == .connected
+        }
 
         XCTAssertEqual(store.credential(for: HubProfile.localDefaultID), "cli_web_tok.secret_cred")
         XCTAssertEqual(coordinator.proxy.currentTarget().credential, "cli_web_tok.secret_cred")
@@ -1463,7 +1850,11 @@ final class SteveClientKitTests: XCTestCase {
             ]
         )
         XCTAssertEqual(logoutResp.status, 200)
-        try await Task.sleep(nanoseconds: 120_000_000)
+        try await waitUntil("the web sign-out reached the store, the proxy and the summary") {
+            store.credential(for: HubProfile.localDefaultID) == nil
+                && coordinator.proxy.currentTarget().credential == nil
+                && coordinator.summary.phase == .authRequired
+        }
 
         XCTAssertNil(store.credential(for: HubProfile.localDefaultID))
         XCTAssertNil(coordinator.proxy.currentTarget().credential)
@@ -1485,6 +1876,26 @@ final class SteveClientKitTests: XCTestCase {
             try await Task.sleep(nanoseconds: 15_000_000)
         }
         XCTFail("Timed out waiting for pendingExternalPairConfirmation")
+        throw URLError(.timedOut)
+    }
+
+    /// Polls for `condition` up to a generous deadline. Used instead of "sleep, then assert": the wait
+    /// ends as soon as the condition holds, and a slow machine only makes it longer, not wrong.
+    @MainActor
+    private func waitUntil(
+        _ what: String,
+        timeoutSeconds: TimeInterval = 30.0,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ condition: @MainActor () async -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while true {
+            if await condition() { return }
+            if Date() >= deadline { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("Timed out waiting until \(what)", file: file, line: line)
         throw URLError(.timedOut)
     }
 
@@ -1585,6 +1996,11 @@ private final class MockUpstreamServer: @unchecked Sendable {
     private var recordedPairCalls = 0
     private var recordedTotalRequests = 0
     private var recordedAPIMeCalls = 0
+    private var recordedStateCalls = 0
+    private var recordedPaths: [String] = []
+    private var recordedLogoutCalls = 0
+    private var stateResponsesHeld = false
+    private var heldStateResponses: [() -> Void] = []
 
     private init(listener: NWListener, port: UInt16) {
         self.listener = listener
@@ -1615,6 +2031,61 @@ private final class MockUpstreamServer: @unchecked Sendable {
         return recordedAPIMeCalls
     }
 
+    /// Authorized `/api/state` requests received so far, answered or not.
+    func stateCallCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedStateCalls
+    }
+
+    /// The path of every request received, in order.
+    func receivedPaths() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedPaths
+    }
+
+    private func recordPath(_ path: String) {
+        lock.lock()
+        recordedPaths.append(path)
+        lock.unlock()
+    }
+
+    func logoutCallCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedLogoutCalls
+    }
+
+    /// From now on `/api/state` is received and counted but not answered until `releaseStateResponses()`.
+    /// A test that has seen `stateCallCount()` go up knows the request is in flight, for as long as it likes.
+    func holdStateResponses() {
+        lock.lock()
+        stateResponsesHeld = true
+        lock.unlock()
+    }
+
+    func releaseStateResponses() {
+        lock.lock()
+        stateResponsesHeld = false
+        let held = heldStateResponses
+        heldStateResponses = []
+        lock.unlock()
+        held.forEach { $0() }
+    }
+
+    private func answerState(_ send: @escaping () -> Void) {
+        lock.lock()
+        recordedStateCalls += 1
+        if stateResponsesHeld {
+            heldStateResponses.append(send)
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        send()
+    }
+
     private func recordRequest() {
         lock.lock()
         recordedTotalRequests += 1
@@ -1630,6 +2101,7 @@ private final class MockUpstreamServer: @unchecked Sendable {
     private func recordLogout(_ auth: String) {
         lock.lock()
         recordedLogoutAuth = auth
+        recordedLogoutCalls += 1
         lock.unlock()
     }
 
@@ -1642,9 +2114,7 @@ private final class MockUpstreamServer: @unchecked Sendable {
     static func start(
         omitPairCredential: Bool = false,
         webFrontendTargetHubURL: URL? = nil,
-        allowWildcardCORS: Bool = false,
-        stateDelayNanoseconds: UInt64 = 0,
-        privateOverlayStateDelayOnly: Bool = false
+        allowWildcardCORS: Bool = false
     ) async throws -> MockUpstreamServer {
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
@@ -1670,6 +2140,7 @@ private final class MockUpstreamServer: @unchecked Sendable {
                     let lines = raw.components(separatedBy: "\r\n")
                     let method = lines.first?.split(separator: " ").first.map(String.init) ?? "GET"
                     let path = lines.first?.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+                    box.server?.recordPath(path)
                     let headerVal = { (prefix: String) -> String in
                         lines.first(where: { $0.lowercased().hasPrefix(prefix) })?
                             .split(separator: ":", maxSplits: 1).dropFirst().first?
@@ -1777,11 +2248,8 @@ private final class MockUpstreamServer: @unchecked Sendable {
                         let payload = Data("""
                         {"version":"0.3.0","web_version":"0.3.0","thinking":true,"workspace":{"name":"Core"},"devices":[{"status":"正常"},{"status":"暂停接活"},{"status":"离线"}],"sessions":[{"status":"running","busy":true},{"status":"idle","busy":true},{"status":"idle","busy":false}],"decisions":[{"status":"open"},{"status":"resolved"}]}
                         """.utf8)
-                        if stateDelayNanoseconds > 0 && !privateOverlayStateDelayOnly {
-                            let delaySec = Double(stateDelayNanoseconds) / 1_000_000_000.0
-                            DispatchQueue.global().asyncAfter(deadline: .now() + delaySec) {
-                                sendJSONResponse(payload)
-                            }
+                        if let server = box.server {
+                            server.answerState { sendJSONResponse(payload) }
                         } else {
                             sendJSONResponse(payload)
                         }
@@ -1821,6 +2289,88 @@ private final class MockUpstreamServer: @unchecked Sendable {
     }
 
     func stop() {
+        releaseStateResponses()
         listener.cancel()
     }
+}
+
+/// A door the test holds shut. Callers wait at it and are counted; `open()` lets them, and everyone
+/// after them, through.
+private final class TestGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var arrivals = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    var arrivalCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return arrivals
+    }
+
+    func pass() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            arrivals += 1
+            if isOpen {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func open() {
+        lock.lock()
+        isOpen = true
+        let waiting = waiters
+        waiters = []
+        lock.unlock()
+        waiting.forEach { $0.resume() }
+    }
+}
+
+/// Answers every request itself with `503`. A `URLSession` built on it never opens a connection, so a
+/// coordinator whose Hub has an address outside loopback can be driven without anything leaving the test.
+private final class NoNetworkURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var seenURLs: [URL] = []
+
+    static func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NoNetworkURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    /// The requests the stub answered for `host`.
+    static func requests(toHost host: String) -> [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return seenURLs.filter { $0.host == host }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        Self.lock.lock()
+        Self.seenURLs.append(url)
+        Self.lock.unlock()
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 503,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Length": "0"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

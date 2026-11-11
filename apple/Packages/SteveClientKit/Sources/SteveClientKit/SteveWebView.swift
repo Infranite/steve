@@ -137,14 +137,34 @@ public struct SteveWebView: NSViewRepresentableFallback {
             let platform = platformName
             let compiler = ruleListCompiler
 
-            if previousToken != nil && previousToken != token {
-                // Stop any active document work before planting the rotated gateway secret.
-                webView.stopLoading()
-            }
+            // A page loaded with another gateway key is the previous Hub's page. It has to be gone
+            // before the new key exists in the cookie store: `stopLoading()` ends loads, not the
+            // document, and its timers would carry the new key to the newly selected Hub.
+            let mustUnloadPreviousDocument = previousToken != nil && previousToken != token
+            let unloadNavigation: WKNavigation? = mustUnloadPreviousDocument
+                ? bridge.beginUnloadingDocument(in: webView)
+                : nil
 
             Task { @MainActor [weak webView, weak bridge, weak coordinator] in
                 guard let webView, let bridge, let coordinator,
                       bridge.loadGeneration == loadGeneration else { return }
+
+                if mustUnloadPreviousDocument {
+                    let unloaded = await bridge.waitForDocumentUnload(unloadNavigation)
+                    guard bridge.loadGeneration == loadGeneration else { return }
+                    guard unloaded else {
+                        webView.stopLoading()
+                        coordinator.failGatewayIsolation(
+                            L10n.tr(
+                                "无法卸载上一个 Hub 的页面，已停止本地网关。",
+                                "The previous Hub's page could not be unloaded; the local gateway was stopped."
+                            )
+                        )
+                        return
+                    }
+                    await bridge.loadStepObserver?(.previousDocumentUnloaded)
+                    guard bridge.loadGeneration == loadGeneration else { return }
+                }
 
                 if gatewayChanged || !bridge.hasInstalledRuleList {
                     let userContent = webView.configuration.userContentController
@@ -181,10 +201,25 @@ public struct SteveWebView: NSViewRepresentableFallback {
                 }
 
                 coordinator.purgePendingWebCookies()
-                await Self.plantProxyCookie(in: webView, gateway: gateway, token: token)
+                let planted = await Self.plantProxyCookie(in: webView, gateway: gateway, token: token)
                 guard bridge.loadGeneration == loadGeneration else { return }
+                guard planted else {
+                    // Without the key every request of the page is refused by the gateway: say so
+                    // instead of showing a page that only gets 403s.
+                    webView.stopLoading()
+                    coordinator.failGatewayIsolation(
+                        L10n.tr(
+                            "无法为本地网关创建访问密钥 Cookie。",
+                            "The local gateway's access cookie could not be created."
+                        )
+                    )
+                    return
+                }
                 bridge.loadedProxyToken = token
+                await bridge.loadStepObserver?(.proxyCookiePlanted)
+                guard bridge.loadGeneration == loadGeneration else { return }
                 webView.load(URLRequest(url: gateway))
+                await bridge.loadStepObserver?(.gatewayLoadStarted)
             }
             return
         }
@@ -220,13 +255,14 @@ public struct SteveWebView: NSViewRepresentableFallback {
         in webView: WKWebView,
         gateway: URL,
         token: String
-    ) async {
-        guard let cookie = makeProxyAuthCookie(gateway: gateway, token: token) else { return }
+    ) async -> Bool {
+        guard let cookie = makeProxyAuthCookie(gateway: gateway, token: token) else { return false }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
                 continuation.resume()
             }
         }
+        return true
     }
 
     /// Builds a WebKit Content Blocker rule list that blocks WebView requests to any loopback host/port
@@ -607,7 +643,95 @@ public struct SteveWebView: NSViewRepresentableFallback {
         @MainActor
         func bumpLoadGeneration() -> UInt64 {
             loadGeneration &+= 1
+            // A newer load took over: whoever waits for the unload of the older one stops waiting.
+            finishDocumentUnload(committed: false)
             return loadGeneration
+        }
+
+        // MARK: Unloading the previous Hub's document
+
+        enum LoadStep: Equatable {
+            case previousDocumentUnloaded
+            case proxyCookiePlanted
+            case gatewayLoadStarted
+        }
+
+        /// Observes the steps of a load, in order, each before the next one starts.
+        var loadStepObserver: (@MainActor (LoadStep) async -> Void)?
+
+        private static let blankURL = URL(string: "about:blank")!
+        private var unloadNavigation: WKNavigation?
+        private weak var blankNavigation: WKNavigation?
+        private var unloadCommitted: Bool?
+        private var unloadWaiter: CheckedContinuation<Bool, Never>?
+
+        /// Replaces the current document with `about:blank`. The document is gone once this
+        /// navigation commits; `waitForDocumentUnload` waits for that.
+        @MainActor
+        func beginUnloadingDocument(in webView: WKWebView) -> WKNavigation? {
+            webView.stopLoading()
+            unloadCommitted = nil
+            unloadNavigation = webView.load(URLRequest(url: Self.blankURL))
+            blankNavigation = unloadNavigation
+            return unloadNavigation
+        }
+
+        /// True once the `about:blank` navigation has committed. False if it failed or a newer load
+        /// replaced it.
+        @MainActor
+        func waitForDocumentUnload(_ navigation: WKNavigation?) async -> Bool {
+            guard let navigation, navigation === unloadNavigation else { return false }
+            if let unloadCommitted {
+                unloadNavigation = nil
+                return unloadCommitted
+            }
+            return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                unloadWaiter = continuation
+            }
+        }
+
+        @MainActor
+        private func finishDocumentUnload(committed: Bool) {
+            guard unloadNavigation != nil else { return }
+            if let waiter = unloadWaiter {
+                unloadWaiter = nil
+                unloadNavigation = nil
+                unloadCommitted = nil
+                waiter.resume(returning: committed)
+            } else {
+                unloadCommitted = committed
+            }
+        }
+
+        @MainActor
+        public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            if navigation === unloadNavigation {
+                finishDocumentUnload(committed: true)
+            }
+        }
+
+        @MainActor
+        public func webView(
+            _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation!,
+            withError error: Error
+        ) {
+            if navigation === unloadNavigation {
+                finishDocumentUnload(committed: false)
+            }
+        }
+
+        @MainActor
+        public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            if navigation === unloadNavigation {
+                finishDocumentUnload(committed: false)
+            }
+        }
+
+        @MainActor
+        public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            // The process is gone and so is the document it held.
+            finishDocumentUnload(committed: true)
         }
 
         @MainActor
@@ -809,6 +933,9 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
         @MainActor
         public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            // The blank document that stands in between two Hubs' pages is not the page.
+            if let blankNavigation, navigation === blankNavigation { return }
+            guard webView.url?.scheme?.lowercased() != "about" else { return }
             isPageLoaded = true
             parent.applyPendingHashRouteIfNeeded(in: webView)
         }

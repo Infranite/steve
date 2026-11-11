@@ -40,7 +40,7 @@ struct IOSRootView: View {
             QRCodeScannerSheet(coordinator: coordinator)
         }
         .alert(
-            L10n.tr("确认配对并连接到此 Hub？", "Pair and connect to this Hub?"),
+            SteveClientCoordinator.pairConfirmationTitle,
             isPresented: Binding(
                 get: {
                     !coordinator.isQRScannerPresented
@@ -48,8 +48,10 @@ struct IOSRootView: View {
                         && coordinator.pendingExternalPairConfirmation != nil
                 },
                 set: { presented in
+                    // Hides only. The buttons answer by id, so the order in which SwiftUI calls
+                    // this setter and a button's action does not matter.
                     if !presented {
-                        coordinator.handlePairAlertDismissed()
+                        coordinator.hidePairConfirmationAlert()
                     }
                 }
             ),
@@ -75,7 +77,6 @@ struct IOSRootView: View {
                 get: {
                     !coordinator.isQRScannerPresented
                         && !coordinator.isPairConfirmationPresented
-                        && coordinator.pendingExternalPairConfirmation == nil
                         && coordinator.externalPairErrorMessage != nil
                 },
                 set: { if !$0 { coordinator.externalPairErrorMessage = nil } }
