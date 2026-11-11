@@ -840,6 +840,46 @@ async fn a_model_that_does_not_take_fails_the_open() {
     assert_eq!(t.sent("session/prompt"), 0, "nothing ran on another model");
 }
 
+/// Asked for a model, the adapter answers with its own short id for it. Its list names that entry
+/// as what was asked, so the session opens on it; with nothing relating the two, the open fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_short_id_the_adapter_names_as_the_asked_model_opens() {
+    for (alias, opens) in [("big-2=quick", true), ("big-2=quick=Big 2", false)] {
+        let t = T::new(&[
+            ("FAKE_ACP_SHAPE", "claude099"),
+            ("FAKE_ACP_MODEL_ALIAS", alias),
+        ]);
+        let n = t.node();
+        n.prepare_workspace(now_cmd(
+            "op_prep",
+            Prepare {
+                resource: "item:x".into(),
+                kind: PrepareKind::Scratch,
+            },
+        ))
+        .await
+        .unwrap();
+        finished(&n, "op_prep").await;
+        let mut o = open_body("s_1");
+        o.choice.model = Some("big-2".into());
+        n.open_session(now_cmd("op_open", o)).await.unwrap();
+        let s = finished(&n, "op_open").await;
+        let Observed::Finished { outcome, error, .. } = &s else {
+            panic!("{s:?}")
+        };
+        if opens {
+            assert_eq!(*outcome, Outcome::Succeeded, "{alias}: {error:?}");
+        } else {
+            assert_eq!(*outcome, Outcome::Failed, "{alias}");
+            let detail = &error.as_ref().unwrap().safe_detail;
+            assert!(
+                detail.contains("big-2") && detail.contains("quick"),
+                "{detail}"
+            );
+        }
+    }
+}
+
 /// The adapter's `session/set_mode` calls, in order.
 fn modes_sent(t: &T) -> Vec<String> {
     std::fs::read_to_string(&t.log)
