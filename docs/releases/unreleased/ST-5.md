@@ -1,0 +1,3 @@
+Multi-Bot work graphs now execute through ordinary Node sessions when the parent and child share a confirmed request principal. Bot permissions, workspace and worktree checks, Node routing and ceiling, and approvals remain in force. Unknown or mismatched identities and unavailable Bots or Nodes block execution with a visible reason; cross-principal OS isolation is not implemented.
+
+Recovery binds a session interrupted before its first Node binding and reuses durable children and turn records. Dependencies, independent review, integration acceptance, pause and retry remain enforced. The item page now explains the current admission failure instead of saying every workflow needs a future isolation-capable Node.
