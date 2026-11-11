@@ -96,10 +96,10 @@ impl LinkCtx {
 /// Whether every event of the batch is about `node`'s own work; why the first one is not, if any.
 ///
 /// The subject must be this Node's: its session (the Hub's session id and the Node's are the same),
-/// an attempt of that very turn of that very session, or one of its operations. The ids the
-/// coordinator takes from the body must be the subject's: a permission request or resolution of
-/// another execution, a session view of another session or a receipt of another operation would
-/// otherwise reach work that is not this Node's.
+/// an attempt of that very turn of that very session, or an operation that is not another Node's
+/// in the ledger. The ids the coordinator takes from the body must be the subject's: a permission
+/// request or resolution of another execution, a session view of another session or a receipt of
+/// another operation would otherwise reach work that is not this Node's.
 fn foreign(
     c: &rusqlite::Connection,
     node: &str,
@@ -145,14 +145,20 @@ fn foreign(
             || match &e.subject {
                 Subject::Session { session } => own_session(session)?,
                 Subject::Execution(x) => own_execution(x)?,
+                // The ledger names the Node of every operation the coordinator acts on, and a
+                // receipt reaches one only through it. An operation it does not name is a command
+                // the Hub sent this Node directly (a project directory's workspace for a flow
+                // command, the merge queue or a push, a tidy): the Node journals its receipt like
+                // any other and the coordinator passes it by. Refusing it would hold back every
+                // event behind it, of every session on this Node.
                 Subject::Operation { operation } => c
                     .query_row(
-                        "SELECT 1 FROM node_commands WHERE operation_id=? AND node_id=?",
+                        "SELECT 1 FROM node_commands WHERE operation_id=? AND node_id<>?",
                         params![operation.as_str(), node],
                         |_| Ok(()),
                     )
                     .optional()?
-                    .is_some(),
+                    .is_none(),
             };
         if !own {
             return Ok(Some(format!(
@@ -270,6 +276,9 @@ impl EventSink for GuardedSink {
         .await
         .map_err(internal)?;
         if let Some(why) = bad.map_err(internal)? {
+            // the Node sends the batch again until it is taken: the Hub's own log has to say why
+            // that Node's sessions stand still
+            tracing::warn!(node = %l.node, "events refused: {why}");
             l.audit("foreign_event", why).await;
             return Err(ApiError::new(
                 ErrorCode::Denied,

@@ -175,6 +175,58 @@ async fn a_node_cannot_speak_for_another() {
     .await;
 }
 
+/// A command the Hub sends a Node directly is in no ledger (a project directory's workspace for a
+/// flow command, the merge queue or a push). The Node journals its receipt like any other: the
+/// batch is taken, so the session events behind it are not held back, and nothing is audited.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receipt_of_a_command_outside_the_ledger_is_taken() {
+    let h = Hub::start().await;
+    let (ida, a) = h.paired("u1").await;
+    let fa = FakeNode::new(a.as_str());
+    let la = dial(&h, &ida, &a, fa.clone(), 1).await.unwrap();
+    fa.connect(Arc::new(RemoteSink(la.link.clone())));
+    until("A's link installed", 15, || {
+        h.fleet.remote(&a).generation() == Some(la.generation)
+    })
+    .await;
+    let op = OperationId::new("op_fprep_direct").unwrap();
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE operation_id='op_fprep_direct'"),
+        0
+    );
+    fa.emit(
+        Subject::Operation {
+            operation: op.clone(),
+        },
+        EventBody::OperationChanged {
+            receipt: Receipt {
+                operation: op,
+                state: Observed::Finished {
+                    outcome: Outcome::Succeeded,
+                    result: None,
+                    error: None,
+                },
+            },
+        },
+    )
+    .await
+    .unwrap();
+    // a session opened after it comes up: its events are behind that receipt in A's journal
+    h.session("sa");
+    h.bind(&a, "sa");
+    until("A's session ready", 15, || {
+        h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='sa'") == "ready"
+    })
+    .await;
+    until("everything A journaled is taken", 15, || fa.unacked() == 0).await;
+    assert_eq!(
+        h.q::<i64>(&format!(
+            "SELECT COUNT(*) FROM node_audit WHERE node_id='{a}' AND what='foreign_event'"
+        )),
+        0
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_cannot_dial_as_another() {
     let h = Hub::start().await;
