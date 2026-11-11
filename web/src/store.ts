@@ -80,7 +80,7 @@ export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fa
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
 export type Steps = { route?: { kind: string; modelKind?: string; guard?: string | null; confidence?: number; title: string; bot: string; project: string | null; tags: string[]; newTags: string[]; why: string; model: string | null; fallback: boolean; ms: number; picked?: string }; answer?: { thought: string; model: string | null; ms: number; failed: boolean }
   research?: { run: string; model: string | null; ms: number; turns: number; tools: number; stopped?: "user" | "budget" | "violation" | "restart" | "failed" }
-  tools: { name: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
+  tools: { name: string; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps and on older ones */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
 /** a research run being read live (steve.tool), for the user message `mid` */
 export type LiveRun = { mid: string; run: string; t0: number; tools: { name: string; brief: string; ok: boolean; kind?: string }[]; /** the call running right now */ now?: { name: string; brief: string; kind?: string } }
 /** an open decision with no item (a forked or imported session, or its item was deleted): shown with the same card */

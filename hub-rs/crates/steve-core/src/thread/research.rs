@@ -283,6 +283,10 @@ impl ResearchSink for Sink<'_> {
             "status": if t.ok { "ok" } else { "failed" },
             "ms": t.ms,
         });
+        // what the step did is told by this, not by the tool's name: every harness names its own
+        if !t.kind.is_empty() {
+            step["kind"] = json!(t.kind);
+        }
         if let Some(error) = &t.error {
             step["error"] = json!(error);
         }

@@ -3,7 +3,7 @@
  * existing parts (ItemRef, DecisionCard, Trace) — no new colours. */
 import { useEffect, useState } from "react"
 import { cn } from "cn"
-import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, SquareIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon } from "lucide-react"
+import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, SquareIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon, TerminalIcon, PencilIcon, GlobeIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { TraceLine, TraceIcon, TraceTitle, TraceDescription } from "@/components/ui/trace"
@@ -14,19 +14,18 @@ import { ItemRef, DecisionCard, ItemNo, StatusDot, AlertClose, go } from "@/ui"
 import { jumpToMsg, threadMsg } from "@/thread/history"
 import { Trans } from "react-i18next"
 import { t as tr, useT } from "@/i18n"
+import { toolClass, toolCounts, toolShort, meetStep, type ToolClass } from "@/thread/tools"
 
 /* ───────── research ───────── */
-const isRead = (n: string) => n === "Read"
-const isSearch = (n: string) => n === "Grep" || n === "Glob" || n === "LS"
-const isKb = (n: string) => n.includes("knowledge")
 const secs = (ms: number) => tr("common:dur.seconds", { count: Math.max(1, Math.round(ms / 1000)) })
-/** "读了 9 个文件 · 搜索 4 次 · 知识库 2 次 · 41 秒" for a finished research run */
+/** "读了 9 个文件 · 搜索 4 次 · 执行 3 条命令 · 41 秒" for a finished research run */
 export function researchSummary(s: Steps): string {
-  const ts = s.tools, r = s.research
-  const files = new Set(ts.filter((t) => isRead(t.name)).map((t) => String(t.args?.brief ?? ""))).size
-  const searches = ts.filter((t) => isSearch(t.name)).length, kb = ts.filter((t) => isKb(t.name)).length, items = ts.filter((t) => t.name.includes("steve_item")).length
-  const parts = [files && tr("thread:research.files", { count: files }), searches && tr("thread:research.searches", { count: searches }),
-    kb && tr("thread:research.kb", { count: kb }), items && tr("thread:research.items", { count: items })].filter(Boolean) as string[]
+  const ts = s.tools, r = s.research, n = toolCounts(ts)
+  /* Steve's own writes of the first meeting are not "calls": they are what the answer says it saved */
+  const parts = [n.files && tr("thread:research.files", { count: n.files }), n.search && tr("thread:research.searches", { count: n.search }),
+    n.exec && tr("thread:research.commands", { count: n.exec }), n.edit && tr("thread:research.edits", { count: n.edit }), n.fetch && tr("thread:research.fetches", { count: n.fetch }),
+    n.kb && tr("thread:research.kb", { count: n.kb }), n.item && tr("thread:research.items", { count: n.item }), n.meet && tr("thread:research.saves", { count: n.meet }),
+    n.other && tr("thread:research.calls", { count: n.other })].filter(Boolean) as string[]
   if (!parts.length) parts.push(tr("thread:research.noFiles"))
   const failures = ts.filter((t) => t.status === "failed").length
   if (failures) parts.push(tr("thread:research.failures", { count: failures }))
@@ -34,12 +33,16 @@ export function researchSummary(s: Steps): string {
   const stop = r?.stopped ? tr(`thread:research.stopped.${r.stopped}`) : ""
   return [...parts, stop].filter(Boolean).join(" · ")
 }
+const ICON: Partial<Record<ToolClass, typeof FileTextIcon>> = { read: FileTextIcon, search: SearchIcon, kb: LibraryIcon, exec: TerminalIcon, edit: PencilIcon, fetch: GlobeIcon, meet: CheckIcon }
 /** the icon of a research tool row */
-export function researchIcon(name: string) { return isRead(name) ? FileTextIcon : isSearch(name) ? SearchIcon : isKb(name) ? LibraryIcon : FileTextIcon }
-const TOOL_LABEL = (n: string) => (isRead(n) ? tr("thread:research.tool.read") : isSearch(n) ? tr("thread:research.tool.search") : isKb(n) ? tr("thread:research.tool.kb") : n.includes("item") ? tr("thread:research.tool.item") : n)
+export function researchIcon(name: string, kind?: string) { return ICON[toolClass(name, kind)] ?? FileTextIcon }
+/** "读" / "执行" / "保存画像": the verb of one tool row; a tool Steve has no word for goes by its own name */
+export function researchToolLabel(name: string, kind?: string): string {
+  const c = toolClass(name, kind), step = meetStep(name)
+  return c === "meet" ? (step ? tr(`thread:research.tool.meet.${step}`) : toolShort(name)) : c === "other" ? toolShort(name) : tr(`thread:research.tool.${c}`)
+}
 /** "正在读" / "正在搜索": the live line's verb for a tool */
-const liveLabel = (n: string, kind?: string) => (kind === "exec" ? tr("thread:research.live.exec") : isRead(n) ? tr("thread:research.live.read") : isSearch(n) ? tr("thread:research.live.search") : isKb(n) ? tr("thread:research.live.kb") : n.includes("item") ? tr("thread:research.live.item") : tr("thread:research.live.other", { name: n }))
-export const researchToolLabel = TOOL_LABEL
+const liveLabel = (name: string, kind?: string) => { const c = toolClass(name, kind); return c === "other" ? tr("thread:research.live.other", { name: toolShort(name) }) : tr(`thread:research.live.${c}`) }
 
 /** the research being read right now: one line that keeps changing, with a stop button */
 export function ResearchLive() {
@@ -47,7 +50,7 @@ export function ResearchLive() {
   useEffect(() => { if (!l) return; const t = setInterval(() => tick((x) => x + 1), 1000); return () => clearInterval(t) }, [l?.run])
   if (!l) return null
   /* the call that runs now comes first: one that takes minutes is seen while it runs */
-  const now = l.now, last = now ?? l.tools[l.tools.length - 1], I = last ? researchIcon(last.name) : FileTextIcon
+  const now = l.now, last = now ?? l.tools[l.tools.length - 1], I = last ? researchIcon(last.name, last.kind) : FileTextIcon
   return (
     <div className="-mb-1 flex max-w-[88%] items-center gap-2 self-start px-1" data-research-live={l.run}>
       <TraceLine className="min-w-0 flex-1"><TraceIcon>{last && !now ? <I strokeWidth={1.5} /> : <Spinner className="size-3.5" />}</TraceIcon>

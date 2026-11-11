@@ -11,7 +11,12 @@ export default {
     searches_other: "搜索 {{count}} 次",
     kb_other: "知识库 {{count}} 次",
     items_other: "查事项 {{count}} 次",
-    noFiles: "没有读文件",
+    commands_other: "执行 {{count}} 条命令",
+    edits_other: "修改 {{count}} 次",
+    fetches_other: "获取网页 {{count}} 次",
+    saves_other: "保存 {{count}} 次",
+    calls_other: "其他工具 {{count}} 次",
+    noFiles: "没有用工具",
     failures_other: "{{count}} 次调用失败",
     stopped: {
       user: "你停下了",
@@ -26,6 +31,16 @@ export default {
       search: "搜索",
       kb: "查知识库",
       item: "查事项",
+      exec: "执行",
+      edit: "修改",
+      fetch: "获取",
+      /* the first meeting's own tools */
+      meet: {
+        profile: "保存画像",
+        models: "模型设置",
+        bots: "默认 Bot",
+        done: "结束初次见面",
+      },
     },
     /* the live line: what is being done right now */
     live: {
@@ -35,6 +50,9 @@ export default {
       item: "正在查事项",
       other: "正在{{name}}",
       exec: "正在执行",
+      edit: "正在修改",
+      fetch: "正在获取",
+      meet: "正在保存",
     },
     liveMeta: "· 第 {{n}} 个工具 · {{time}}",
     liveMetaSlow: "· 第 {{n}} 个工具 · {{time}} · 还在读…",

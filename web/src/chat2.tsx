@@ -72,7 +72,7 @@ export function StepsBlock({ m }: { m: Msg }) {
           {s.tools.map((tool, n) => {
             const brief = typeof tool.args?.brief === "string" ? tool.args.brief : undefined
             const known = TOOL[tool.name]
-            const [label, I] = known ? [known[0](), known[1]] : brief !== undefined ? [researchToolLabel(tool.name), researchIcon(tool.name)] : [tool.name, InfoIcon], item = tool.result?.item as string | undefined
+            const [label, I] = known ? [known[0](), known[1]] : brief !== undefined ? [researchToolLabel(tool.name, tool.kind), researchIcon(tool.name, tool.kind)] : [tool.name, InfoIcon], item = tool.result?.item as string | undefined
             const desc = tool.name === "create_item" ? [item, botName((tool.result?.bot ?? tool.args.bot) as string), tool.result?.project ? projectName(tool.result.project as string) : t("shell:chat.noProject")].filter(Boolean).join(" · ")
               : tool.name === "draft_config" ? `${tool.result?.target ?? ""}${tool.result ? " · " + t("shell:chat.changes", { count: Number(tool.result.changes) }) : ""}` : tool.name === "supplement" ? String(tool.args.item ?? "") : brief ?? ""
             return (
@@ -80,7 +80,7 @@ export function StepsBlock({ m }: { m: Msg }) {
                 <TraceLine status={tool.status === "failed" ? "error" : undefined}>
                   <TraceIcon>{tool.status === "failed" ? <XIcon strokeWidth={1.75} /> : <I strokeWidth={1.5} />}</TraceIcon><TraceTitle className={tool.status === "failed" ? "" : "text-foreground/80"}>{label}</TraceTitle>
                   <TraceDescription className="min-w-0 shrink truncate font-mono text-[12px]">{item ? <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + item)}>{desc}</button> : desc}</TraceDescription>
-                  <TraceDescription className="inline-flex items-center gap-1">{tool.status === "ok" && <CheckIcon className="size-3.5" strokeWidth={1.75} />}{secs(tool.ms)}</TraceDescription>
+                  <TraceDescription className="inline-flex items-center gap-1">{tool.status === "ok" && <CheckIcon className="size-3.5" strokeWidth={1.75} />}{tool.ms > 0 && secs(tool.ms)}</TraceDescription>
                 </TraceLine>
                 {(tool.error || (s.research && tool.status === "failed")) && <div className="pl-6 type-footnote text-destructive">{s.research ? researchError(tool.error) : tool.error}</div>}
               </div>
