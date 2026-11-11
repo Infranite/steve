@@ -185,8 +185,21 @@ pub(crate) fn backup(db: &Path, dest: &Path) -> Result<()> {
         fs::set_permissions(dest, fs::Permissions::from_mode(0o600))?;
     }
     {
+        // Every page in one step, from one snapshot: a copy taken in pieces starts over whenever
+        // another connection commits between two of them, which beside a running Hub (the daily
+        // copy) is without end. The database is in WAL mode, where a reader holds no writer back.
         let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
-        backup.run_to_completion(128, Duration::from_millis(5), None)?;
+        let mut waited = 0;
+        loop {
+            match backup.step(-1)? {
+                rusqlite::backup::StepResult::Done => break,
+                _ if waited < 100 => {
+                    waited += 1;
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => bail!("the database stayed busy; no copy was made"),
+            }
+        }
     }
     let result: String = dst.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if result != "ok" {

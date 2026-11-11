@@ -1194,6 +1194,25 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     assert_eq!(names[saved["detail"]["about"].as_str().unwrap()], "小李");
     let (_, who) = e.call("GET", "/api/me", None).await;
     assert_eq!(names[saved["actor"].as_str().unwrap()], who["user"]["name"]);
+    /* what another member keeps to themselves is not named for the owner: the entry stays, its
+     * memory's text does not come with it */
+    let theirs = saved["target"].as_str().unwrap().to_string();
+    store
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE mems SET visibility = 'private', created_by = 'usr_another' WHERE id = ?",
+                [&theirs],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (_, again) = e.call("GET", "/api/audit?limit=200", None).await;
+    assert_eq!(again["entries"], page["entries"]);
+    assert!(again["names"].get(&theirs).is_none(), "{again}");
+    assert_eq!(
+        again["names"][made[0]["target"].as_str().unwrap()],
+        "写文档"
+    );
     /* a page at a time: `before` is the oldest entry already shown */
     let (_, first) = e.call("GET", "/api/audit?limit=3", None).await;
     let shown = first["entries"].as_array().unwrap();
