@@ -284,7 +284,7 @@ export const api = {
   lanePolicy: (id: string, p: { window_min: number | null; max_members: number | null }) => patch<{ lane: RLaneState | null }>(`/projects/${encodeURIComponent(id)}/lane`, p),
   laneNow: (id: string) => post<{ closed: boolean; lane: RLaneState | null }>(`/projects/${encodeURIComponent(id)}/lane/now`),
   queueAct: (id: string, act: RQueueAct) => post<{ queue: RQueue | null }>(`/projects/${encodeURIComponent(id)}/queue`, act),
-  describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }), dirs: (path: string) => get<string[]>(`/fs/dirs?path=${encodeURIComponent(path)}`),
+  describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }),
   browse: (path: string, node = "hub") => get<RBrowse>(`/fs/browse?path=${encodeURIComponent(path)}&node=${encodeURIComponent(node)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),
   kindsReview: () => get<RKindReview[]>("/tags/kinds/review"), kindsReviewed: (ids: string[]) => post<RKindReview[]>("/tags/kinds/review", { ids }),

@@ -286,23 +286,12 @@ async fn a_project_on_a_device_that_is_not_there_says_device_offline() {
     assert_eq!((s, v), (503, json!({"error": "设备离线"})));
 }
 
-/// With the local Node on, `dirs` browses only toward its configured roots (D11); a directory
-/// typed in is still taken as a new project, and becomes a root.
+/// With the local Node on, a directory under none of its roots is still taken as a new project,
+/// and one under a root is too.
 #[tokio::test]
-async fn with_the_local_node_dirs_browses_toward_its_roots() {
+async fn with_the_local_node_a_directory_outside_its_roots_becomes_a_project() {
     let e = start_with(true, false).await;
     std::fs::create_dir_all(e.home.join("private/notes")).unwrap();
-    let home = e.home.to_string_lossy().to_string();
-    /* the home directory is no root: only the way down to the roots (the Hub's scratch and
-    worktrees under STEVE_HOME) is offered, not what else is there */
-    let (s, v) = e
-        .call("GET", &format!("/api/fs/dirs?path={home}/"), None)
-        .await;
-    assert_eq!((s, v), (200, json!([format!("{home}/steve")])));
-    let (s, v) = e
-        .call("GET", &format!("/api/fs/dirs?path={home}/private"), None)
-        .await;
-    assert_eq!((s, v), (200, json!([])));
     /* a missing directory is said as before */
     let gone = e.home.join("gone").to_string_lossy().to_string();
     for path in ["/api/projects", "/api/projects/describe"] {
@@ -312,7 +301,7 @@ async fn with_the_local_node_dirs_browses_toward_its_roots() {
         assert_eq!(s, 400, "{path}: {v}");
         assert_eq!(v["error"], format!("目录不存在：{gone}"), "{path}");
     }
-    /* one typed in becomes a project, and a root: browsed from then on */
+    /* one typed in becomes a project */
     let notes = e.home.join("private/notes").to_string_lossy().to_string();
     let (s, v) = e
         .call(
@@ -323,10 +312,6 @@ async fn with_the_local_node_dirs_browses_toward_its_roots() {
         .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["kind"], "dir");
-    let (s, v) = e
-        .call("GET", &format!("/api/fs/dirs?path={home}/private"), None)
-        .await;
-    assert_eq!((s, v), (200, json!([notes])));
     /* under a root (here: the scratch directory) it is taken too */
     let dir = e.home.join("steve/scratch/tool");
     std::fs::create_dir_all(&dir).unwrap();
@@ -538,20 +523,6 @@ async fn with_the_local_node_a_link_out_of_a_root_is_not_read() {
         assert_eq!(s, 400, "{path}: {v}");
         assert_eq!(v["error"], format!("目录不存在：{link}"), "{path}");
     }
-    /* browsing the root lists its directories, not the link */
-    let (s, v) = e
-        .call(
-            "GET",
-            &format!("/api/fs/dirs?path={}", scratch.to_string_lossy()),
-            None,
-        )
-        .await;
-    let real = scratch.join("real").to_string_lossy().to_string();
-    assert_eq!((s, v), (200, json!([real])));
-    let (s, v) = e
-        .call("GET", &format!("/api/fs/dirs?path={link}"), None)
-        .await;
-    assert_eq!((s, v), (200, json!([])));
 }
 
 #[tokio::test]

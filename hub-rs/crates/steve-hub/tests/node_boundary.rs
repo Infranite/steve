@@ -271,8 +271,8 @@ const ALLOWED: &[Entry] = &[
         "`lsof -d cwd` before caches are shed"),
     e(Dir, "steve-core/src/workspace.rs", 6, Later("E14 disk housekeeping (D13)"),
         "worktree cache sizes and the trash"),
-    e(Dir, "steve-hub/src/api/projects.rs", 3, Later("projects describe and browse on the Node"),
-        "the describe input, browsing with no Node, and the new-project directory browser (projects are made on the Hub's own Node only)"),
+    e(Dir, "steve-hub/src/api/projects.rs", 2, Later("projects describe and browse on the Node"),
+        "the describe input and the new-project directory browser (projects are made on the Hub's own Node only)"),
     e(Spawn, "steve-core/src/release.rs", 2, Hub, "D12: the release script stays Hub-host for device=hub"),
     e(Fs, "steve-core/src/release.rs", 11, Hub, "D12: release logs and manifests in the Hub home"),
     /* Hub-host work */
