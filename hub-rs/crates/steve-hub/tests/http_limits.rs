@@ -124,15 +124,31 @@ async fn bodies_are_limited_except_uploads() {
         "{v}"
     );
 
-    // a JSON body beyond the API's limit is refused, not buffered
-    let r = e
+    // a JSON body beyond the API's limit is refused, not buffered: the answer is 413, unless the Hub
+    // has closed the connection while the client was still writing the body
+    match e
         .post("/api/workspaces")
         .header("content-type", "application/json")
         .body(vec![b' '; 17 * 1024 * 1024])
         .send()
         .await
-        .expect("send");
-    assert_eq!(r.status().as_u16(), 413);
+    {
+        Ok(r) => assert_eq!(r.status().as_u16(), 413),
+        Err(err) => {
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+            let mut closed = false;
+            while let Some(c) = cause {
+                closed |= c.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    matches!(
+                        io.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                    )
+                });
+                cause = c.source();
+            }
+            assert!(closed, "{err:?}");
+        }
+    }
 
     // a multipart upload larger than that still goes through /files, and comes back whole
     let data: Vec<u8> = (0..17 * 1024 * 1024)
