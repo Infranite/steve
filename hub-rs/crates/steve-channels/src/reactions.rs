@@ -298,6 +298,13 @@ impl Channels {
         });
     }
 
+    /// Waits for any in-flight reaction call on `message_id` (such as [`Self::react_ack`]'s
+    /// background provider call, whose lock is acquired before `react_ack` returns) to settle.
+    pub async fn react_settled(&self, message_id: &str) {
+        let lock = self.reaction_locks().of(message_id);
+        let _g = lock.lock().await;
+    }
+
     /// Records state `ack` for `message_id` (no reaction id yet); `None` when there is nothing to
     /// acknowledge (no target, or acknowledged already). The caller holds the message's reaction lock.
     fn ack_record(&self, message_id: &str) -> ChannelResult<Option<Target>> {

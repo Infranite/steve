@@ -801,6 +801,19 @@ pub fn received_deliveries(
     .collect()
 }
 
+/// Whether `id` is still `received` and due at `now` (re-checked after claiming its in-memory
+/// queue slot so a worker that committed `delivered` right before `done_one` is never re-queued).
+pub fn delivery_due(c: &Connection, id: &str, now: i64) -> Result<bool> {
+    c.prepare_cached(
+        "SELECT EXISTS(
+            SELECT 1 FROM gh_deliveries d
+              JOIN gh_delivery_inputs i ON i.delivery_id = d.delivery_id
+             WHERE d.delivery_id = ? AND d.status = 'received' AND i.next_at <= ?
+        )",
+    )?
+    .query_row(params![id, now], |r| r.get(0))
+}
+
 /// Failed processings of a delivery so far.
 pub fn delivery_attempts(c: &Connection, id: &str) -> Result<i64> {
     Ok(

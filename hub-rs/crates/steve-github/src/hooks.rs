@@ -397,10 +397,14 @@ impl GitHub {
     }
 
     fn enqueue(&self, job: Job) {
-        let q = &self.0.queue;
-        if !lock(&q.queued).insert(job.delivery_id.clone()) {
+        if !lock(&self.0.queue.queued).insert(job.delivery_id.clone()) {
             return;
         }
+        self.enqueue_claimed(job);
+    }
+
+    fn enqueue_claimed(&self, job: Job) {
+        let q = &self.0.queue;
         q.pending.fetch_add(1, Ordering::SeqCst);
         let mut tx = q.tx.lock().unwrap_or_else(|e| e.into_inner());
         if tx.as_ref().is_none_or(|t| t.is_closed()) {
@@ -475,10 +479,29 @@ impl GitHub {
                 }
                 continue;
             };
-            if lock(&self.0.queue.queued).contains(&delivery_id) {
+            if !lock(&self.0.queue.queued).insert(delivery_id.clone()) {
                 continue;
             }
-            self.enqueue(Job {
+            // A worker commits `delivered` (changing status or advancing `next_at`) BEFORE
+            // `done_one` removes `delivery_id` from `queued`. Re-checking SQLite after claiming
+            // `queued` closes the window where `received_deliveries` read the row right before
+            // the worker finished and released `queued`.
+            match self
+                .store()
+                .reader(|c| repo::delivery_due(c, &delivery_id, self.now()).map_err(ApiError::from))
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    lock(&self.0.queue.queued).remove(&delivery_id);
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, delivery = %delivery_id, "github: delivery due check failed");
+                    lock(&self.0.queue.queued).remove(&delivery_id);
+                    continue;
+                }
+            }
+            self.enqueue_claimed(Job {
                 source,
                 delivery_id,
                 event,

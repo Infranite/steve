@@ -1588,3 +1588,72 @@ async fn a_panicking_processing_counts_as_a_failed_attempt() {
         "backing off, not queued again at once"
     );
 }
+
+/// Concurrent or back-to-back `recover_deliveries` calls while the worker finishes accepted
+/// deliveries never count or enqueue an already-claimed or already-finished delivery twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recover_deliveries_racing_with_worker_completion_queues_each_once() {
+    let (h, app, _repo) = ready().await;
+    let total = 40usize;
+    let source = serde_json::to_string(&steve_github::sync::Source::App { ws: WS.into() }).unwrap();
+    for idx in 0..total {
+        let n = h
+            .fake
+            .open_pr(
+                REPO,
+                &format!("steve/race-{idx}"),
+                &format!("{idx:040x}"),
+                &format!("fix: race {idx}"),
+                "",
+                "someone",
+            )
+            .expect("pr");
+        let payload = pr_payload(&h, &app, n, "opened").await;
+        let row = steve_github::repo::DeliveryRow {
+            delivery_id: format!("d-race-{idx}"),
+            workspace_id: Some(WS.into()),
+            repo_id: None,
+            event: "pull_request".into(),
+            action: Some("opened".into()),
+            status: steve_github::repo::RECEIVED.into(),
+            error: None,
+            received: steve_store::now(),
+        };
+        h.env
+            .store()
+            .transaction(|tx| {
+                steve_github::repo::insert_delivery(tx, &row, &source, &payload.to_string())
+                    .map_err(steve_modules::ApiError::from)
+            })
+            .expect("insert");
+    }
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let gh = h.gh.clone();
+        let done = done.clone();
+        handles.push(tokio::task::spawn_blocking(move || {
+            let mut n = 0usize;
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                n += gh.recover_deliveries();
+            }
+            n += gh.recover_deliveries();
+            n
+        }));
+    }
+    let mut queued = h.gh.recover_deliveries();
+    h.gh.settle().await;
+    done.store(true, std::sync::atomic::Ordering::Release);
+    for handle in handles {
+        queued += handle.await.unwrap();
+    }
+    h.gh.settle().await;
+    assert_eq!(
+        queued, total,
+        "every accepted delivery is queued at most once"
+    );
+    assert_eq!(
+        q(&h, "SELECT count(*) FROM gh_prs", &[]),
+        json!(total as i64)
+    );
+}
