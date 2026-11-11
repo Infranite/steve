@@ -197,9 +197,22 @@ def sha256(path):
 SIGNING_ACCOUNT = "steve/signing/keychain-pass"  # hub-rs steve-modules vault/keystore/signing.rs
 
 
+def key_directory():
+    """The directory this installation's vault keeps its keys in (`STEVE_VAULT_KEYSTORE=dir`: `STEVE_VAULT_KEY_DIR`;
+    `file`: `vault-keys` in the home; hub-rs steve-modules vault/keystore), or None when they are in the login
+    keychain."""
+    env = env_file()
+    get = lambda k: (os.environ.get(k) or env.get(k) or "").strip()
+    kind = get("STEVE_VAULT_KEYSTORE")
+    if kind == "dir" and get("STEVE_VAULT_KEY_DIR"):
+        return pathlib.Path(get("STEVE_VAULT_KEY_DIR"))
+    return HOME / "vault-keys" if kind == "file" else None
+
+
 def signing_password(ident, from_stdin=False):
     """The signing keychain's password: the first line of stdin (the Hub's runner), the 0600 file sign-setup.sh
-    writes, or the login keychain entry the Hub moved it into (`security` asks the user for that one)."""
+    writes, the vault's key directory when the installation has one (`steve setup --vault-dir`), or the login
+    keychain entry the Hub moved it into (`security` asks the user for that one)."""
     if from_stdin:
         password = sys.stdin.readline().strip()
         if not password:
@@ -208,6 +221,20 @@ def signing_password(ident, from_stdin=False):
     file = HOME / "signing/keychain-pass"
     if file.exists():
         return file.read_text().strip()
+    keys = key_directory()
+    if keys is not None:
+        # the Hub keeps the password with the vault's keys there (upgrades/signing.rs), as a key: the 32 bytes its 64
+        # hex digits spell, in base64. The login keychain's entry of this name is another installation's
+        stored = keys / SIGNING_ACCOUNT.replace("/", "__")
+        try:
+            raw = base64.b64decode(stored.read_bytes().strip(), validate=True)
+        except FileNotFoundError:
+            raise Refused(f"no signing keychain password: not in signing/keychain-pass, and not in the key directory ({stored})")
+        except (OSError, ValueError) as e:
+            raise Refused(f"the signing keychain's password in the key directory ({stored}) cannot be read: {e}")
+        if len(raw) != 32:
+            raise Refused(f"{stored} is not a signing password")
+        return raw.hex()
     # only the signed Hub reads the entry unasked; anyone else meets a macOS prompt, which only a person at a
     # terminal should see (a Hub-run or agent-run build would block on it, or teach the user to click it away)
     if not sys.stdin.isatty():

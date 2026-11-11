@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Prepare a bundle in temporary storage: fake signing, no real keychain or service access."""
+import base64
 import importlib.util
 import io
 import hashlib
@@ -99,6 +100,57 @@ class PrepareBundle(BundleFixture, unittest.TestCase):
         with self.assertRaisesRegex(m.Refused, "symlink"):
             m.prepare_bundle(self.args)
         self.sign.assert_not_called()
+
+
+class SigningPassword(unittest.TestCase):
+    """Where a terminal run finds the signing keychain's password: an installation with a key directory keeps it
+    there, and is never sent to the login keychain, whose entry belongs to the usual installation."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name).resolve() / "home"
+        self.keys = Path(self.tmp.name).resolve() / "keys"
+        (self.home / "signing").mkdir(parents=True)
+        self.keys.mkdir()
+        self.addCleanup(patch.stopall)
+        patch.object(m, "HOME", self.home).start()
+        self.env = patch.object(m, "env_file", return_value={"STEVE_VAULT_KEYSTORE": "dir", "STEVE_VAULT_KEY_DIR": str(self.keys)}).start()
+        self.run = patch.object(m.subprocess, "run", side_effect=AssertionError("the login keychain is not asked")).start()
+        patch.dict(os.environ).start()
+        for k in ("STEVE_VAULT_KEYSTORE", "STEVE_VAULT_KEY_DIR"):
+            os.environ.pop(k, None)
+        self.ident = dict(vault_service="test.vault")
+        self.stored = self.keys / "steve__signing__keychain-pass"
+
+    def test_reads_the_key_directory_as_the_hub_wrote_it(self):
+        password = "0123456789abcdef" * 4
+        self.stored.write_text(base64.b64encode(bytes.fromhex(password)).decode())
+        self.assertEqual(m.signing_password(self.ident), password)
+        # the 0600 file an installation not yet started still has comes first, as in the Hub
+        (self.home / "signing/keychain-pass").write_text("f" * 64 + "\n")
+        self.assertEqual(m.signing_password(self.ident), "f" * 64)
+
+    def test_file_store_is_the_homes_own_vault_keys(self):
+        self.env.return_value = {"STEVE_VAULT_KEYSTORE": "file"}
+        (self.home / "vault-keys").mkdir()
+        (self.home / "vault-keys/steve__signing__keychain-pass").write_text(base64.b64encode(b"k" * 32).decode())
+        self.assertEqual(m.signing_password(self.ident), (b"k" * 32).hex())
+
+    def test_a_missing_or_malformed_entry_is_refused_without_asking_the_keychain(self):
+        with self.assertRaisesRegex(m.Refused, "not in the key directory"):
+            m.signing_password(self.ident)
+        for bad in ("not base64 at all", base64.b64encode(b"short").decode()):
+            self.stored.write_text(bad)
+            with self.assertRaisesRegex(m.Refused, "signing password|cannot be read"):
+                m.signing_password(self.ident)
+        self.run.assert_not_called()
+
+    def test_without_a_key_directory_only_a_terminal_reaches_the_keychain(self):
+        self.env.return_value = {}
+        with patch.object(m.sys, "stdin", io.StringIO("")):
+            with self.assertRaisesRegex(m.Refused, "login keychain"):
+                m.signing_password(self.ident)
+        self.run.assert_not_called()
 
 
 class LegacyBundleBridge(BundleFixture, unittest.TestCase):
