@@ -138,7 +138,7 @@ impl Client {
             .get_all("set-cookie")
             .iter()
             .filter_map(|v| v.to_str().ok())
-            .find(|c| c.starts_with("steve_session="))
+            .find(|c| c.starts_with("steve_session_"))
             .map(|c| c.split(';').next().unwrap_or_default().to_string())
             .expect("session cookie");
         Client {
