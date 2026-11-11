@@ -1,0 +1,1 @@
+- 在设置里用“创建 GitHub App”连接 GitHub 时，GitHub 不再报 “Invalid GitHub App configuration”（`Default events unsupported: installation_repositories`）。Steve 此前在 App 清单里订阅了这个事件，而 GitHub 会把它发给每个 App、不接受订阅；仓库增减的通知照常收到。
