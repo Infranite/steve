@@ -173,10 +173,33 @@ jobs:
             ~/.cargo/git
             hub-rs/target/debug
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+  # The macOS and iOS apps: the Swift package's tests, then both apps built unsigned around the web
+  # client of this commit (the iOS one for the simulator, which needs no signing identity).
+  # Skipped with the Rust jobs when only release notes changed.
+  apple:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Build the web client the apps bundle
+        run: npm run build:web
+      - name: Swift package tests
+        run: scripts/build-apple-client.sh test
+      - name: Build SteveMac
+        run: scripts/build-apple-client.sh mac
+      - name: Build SteveIOS for the simulator
+        run: scripts/build-apple-client.sh ios-sim
   test:
     name: CI gate
     if: ${{ always() }}
-    needs: [changes, scripts, web, rust]
+    needs: [changes, scripts, web, rust, apple]
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
@@ -187,11 +210,12 @@ jobs:
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          assert set(results) == {'changes', 'scripts', 'web', 'rust'}, results
+          assert set(results) == {'changes', 'scripts', 'web', 'rust', 'apple'}, results
           changes = results.pop('changes')
           assert changes['result'] in ('success', 'skipped'), changes
-          # The Rust jobs may be skipped only on the word of `changes`; everything else must have passed.
+          # The Rust and Apple jobs may be skipped only on the word of `changes`; everything else must have passed.
           if changes['result'] == 'success' and changes['outputs'].get('skip') == 'true':
-              assert results.pop('rust')['result'] in ('success', 'skipped'), results
+              for job in ('rust', 'apple'):
+                  assert results.pop(job)['result'] in ('success', 'skipped'), results
           assert all(job['result'] == 'success' for job in results.values()), results
           PY
