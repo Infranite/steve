@@ -10,3 +10,4 @@
 - 新安装不再自带“Steve 开发”这个 Bot：只有 Hub 旁边有 Steve 自己的源码时才有它。已有安装里的这个 Bot 不动。
 - 试装或演练时让 harness 用自己的配置目录，免得它读写你平时的会话和记忆：`docs/deployment.md` 的试装步骤里写了在 `steve.env` 中设置 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`。
 - 移除了已无调用方的 `GET /api/fs/dirs`；选目录用 `GET /api/fs/browse`。
+- Hub 日志更干净：正常启动时 Node 稍后才连上，不再为此记两条警告（之后仍连不上才警告）；Steve 的 MCP 工具端点不再声明自己发不出的“工具列表变更”通知，harness 不再来订阅、被拒、重试，每个会话留下四条警告。
