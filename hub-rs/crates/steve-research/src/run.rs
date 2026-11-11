@@ -296,7 +296,9 @@ pub struct AttemptPlan {
 /// The attempts of a run in the order to try them (the Hub's policy):
 /// - the request's models, or the configured ones; none named: the adapter's own default;
 /// - a follow-up first continues the earlier session with its model, then starts fresh on each model
-///   with the whole prompt ([`Resume::fresh`]).
+///   with the whole prompt ([`Resume::fresh`]);
+/// - a follow-up whose earlier model is not among the models to try any more (the setting changed
+///   in between) starts fresh at once: what is configured now is what answers.
 pub fn plan(req: &ResearchRequest, cfg: &ResearchConfig) -> Vec<AttemptPlan> {
     let default_only = [String::new()];
     let models: &[String] = match req.models.as_deref() {
@@ -314,6 +316,7 @@ pub fn plan(req: &ResearchRequest, cfg: &ResearchConfig) -> Vec<AttemptPlan> {
     };
     match &req.resume {
         None => fresh(req.prompt.clone()).collect(),
+        Some(r) if !models.contains(&r.model) => fresh(r.fresh.clone()).collect(),
         Some(r) => {
             let resumed = AttemptPlan {
                 model: r.model.clone(),
@@ -473,10 +476,30 @@ mod tests {
         let plain = ResearchConfig::new("/tmp/scratch");
         assert_eq!(plan(&r, &plain), vec![at("", None, "prompt")]);
         let mut f = follow_up();
+        f.resume.as_mut().unwrap().model = String::new();
         f.models = Some(Vec::new());
         assert_eq!(
             plan(&f, &cfg()),
-            vec![at("opus", Some("sess_1"), "再细一点"), at("", None, WHOLE)]
+            vec![at("", Some("sess_1"), "再细一点"), at("", None, WHOLE)]
+        );
+    }
+
+    /// The research model was changed between the answer and the follow-up: the earlier session
+    /// ran on a model that is not to be tried any more, so nothing continues it.
+    #[test]
+    fn a_follow_up_after_the_models_changed_starts_fresh_on_the_new_ones() {
+        let mut f = follow_up();
+        f.models = Some(vec!["haiku".into()]);
+        assert_eq!(plan(&f, &cfg()), vec![at("haiku", None, WHOLE)]);
+        // from a named model back to the adapter's default
+        f.models = Some(Vec::new());
+        assert_eq!(plan(&f, &cfg()), vec![at("", None, WHOLE)]);
+        // from the default to the configured ones
+        f.models = None;
+        f.resume.as_mut().unwrap().model = String::new();
+        assert_eq!(
+            plan(&f, &cfg()),
+            vec![at("sonnet", None, WHOLE), at("opus", None, WHOLE)]
         );
     }
 
