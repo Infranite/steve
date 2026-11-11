@@ -317,6 +317,7 @@ export default {
     empty: "这个会话还没有内容",
     moreSegs_other: "前面还有 {{count}} 段 · 显示全部",
     startingShort: "正在开始",
+    startingSlow: "比平时久。会话要等 Node 准备好工作区并启动 harness；一直不动时，原因在 Hub 和这台 Node 的日志里。",
   },
   runBar: {
     run: "运行中",

@@ -26,8 +26,21 @@ try {
     assert.equal(await page.locator('[data-comment="3"] [data-streamdown="strong"]').innerText(), "第二条", "queued comments keep their Markdown")
     assert.equal(await page.locator('[data-comment="2"] [data-queued]').count(), 0, "an answered comment is not queued")
     /* the strip keeps only what no comment claims: Steve's row and the unmatched one */
-    const strip = page.locator("[data-sq]:not([data-queued-comment] *)").filter({ has: page.locator("ul") })
+    const strip = page.locator("[data-running-strip] [data-sq]")
     assert.deepEqual(await strip.locator("li[data-queued]").evaluateAll(xs => xs.map(x => x.getAttribute("data-queued"))), ["q3", "q4"])
+    /* before the session is up: Steve's brief is not "a queued message" and has no controls; nothing offers 立即发送 */
+    const brief = page.locator("[data-starting-brief] [data-sq]")
+    assert.match(await brief.locator("[data-sq-note]").innerText(), /^任务说明 · 会话启动后开始$/)
+    assert.equal(await brief.locator("button[data-queued-edit], button[data-queued-withdraw], button[data-queued-send]").count(), 0)
+    const mixed = page.locator("[data-starting-mixed] [data-sq]")
+    assert.match(await mixed.locator("[data-sq-note]").innerText(), /排队 2 条 · 会话启动后发送/)
+    assert.equal(await mixed.locator('[data-queued="b1"] button').count(), 0, "the brief only waits")
+    assert.equal(await mixed.locator('[data-queued="b2"]').locator("[data-queued-edit], [data-queued-withdraw]").count(), 2)
+    assert.equal(await mixed.locator("[data-queued-send]").count(), 0, "no turn to interrupt yet")
+    /* a start that stands still shows: the time it has taken, and past two minutes that this is long */
+    assert.equal(await page.locator("[data-start-fresh] [data-starting]").innerText(), "正在开始…")
+    assert.match(await page.locator("[data-start-long] [data-starting]").innerText(), /^正在开始…\s*5:0\d\s*比平时久。/)
+    assert.equal(await page.locator("[data-start-fresh] [data-starting-slow]").count(), 0)
     /* editing happens in place on the comment */
     const q1 = page.locator('[data-queued="q1"]')
     await q1.locator("[data-queued-edit]").click()
@@ -40,5 +53,5 @@ try {
   }
   assert.deepEqual(errors, [])
   assert.deepEqual(requests, [], "viewing queued comments must not call the API")
-  console.log(JSON.stringify({ passed: true, scenarios: ["queued comment state", "controls on comment", "markdown kept", "answered comment untouched", "strip keeps unpaired rows only", "inline edit", "1066/390px"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["queued comment state", "controls on comment", "markdown kept", "answered comment untouched", "strip keeps unpaired rows only", "starting session: brief without controls, no send-now", "slow start shown", "inline edit", "1066/390px"] }))
 } finally { await browser.close() }
