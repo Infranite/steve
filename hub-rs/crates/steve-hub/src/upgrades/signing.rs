@@ -615,4 +615,44 @@ mod tests {
         assert!(matches!(migrate(h.path(), &store, None), Moved::Kept(_)));
         assert!(h.path().join(FILE).exists());
     }
+
+    #[test]
+    fn a_password_an_earlier_installation_left_in_the_key_store_gives_way() {
+        // an uninstall leaves the key store's entry; the next setup makes a new keychain with a new
+        // password in the file: the file's opens the keychain, so it is the one to keep
+        let (h, store) = home();
+        let earlier = "f".repeat(64);
+        signing::set(&store, &earlier).unwrap();
+        fs::write(h.path().join(FILE), format!("{}\n", pass())).unwrap();
+        let kc = Fake::with(&pass());
+        assert_eq!(
+            migrate(h.path(), &store, Some(&kc)),
+            Moved::Moved(Rotated::Yes)
+        );
+        assert!(!h.path().join(FILE).exists());
+        let now = stored(&store);
+        assert!(now != earlier && now != pass(), "moved, then changed");
+        assert!(kc.opens(&now));
+        assert_eq!(
+            password(h.path(), Some(&store))
+                .unwrap()
+                .as_deref()
+                .map(|p| p.as_str()),
+            Some(now.as_str()),
+            "a build signs with the one that opens the keychain"
+        );
+
+        // a file that does not open the keychain proves nothing: both stay as they are
+        let (h, store) = home();
+        signing::set(&store, &earlier).unwrap();
+        fs::write(h.path().join(FILE), pass()).unwrap();
+        let kc = Fake::with(&earlier);
+        assert_eq!(
+            migrate(h.path(), &store, Some(&kc)),
+            Moved::Kept("the key store holds a different password".into())
+        );
+        assert!(h.path().join(FILE).exists());
+        assert_eq!(stored(&store), earlier);
+        assert!(kc.opens(&earlier));
+    }
 }
