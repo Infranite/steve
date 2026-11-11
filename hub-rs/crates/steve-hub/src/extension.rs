@@ -671,7 +671,10 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     }
     crate::upgrades::spawn_auto_check((*cfg).clone());
     crate::upgrades::signing::spawn_migrate(cfg.home.clone());
-    let app = crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes);
+    let app = crate::app::own_cookies(
+        crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes),
+        cfg.listen.port,
+    );
     let listeners = cfg.listen.bind().await?;
     if cfg.listen.any() {
         tracing::warn!(

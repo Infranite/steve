@@ -262,6 +262,76 @@ pub fn app(
         .layer(middleware::from_fn_with_state(cors_state, crate::access::cors))
 }
 
+/// The Hub's cookies under names of its own, as it is served on `port`. A browser keeps cookies by host and not by
+/// port: two Hubs on one machine would read each other's sign-in and overwrite it. So a cookie this Hub sets
+/// leaves with the port after its name (`steve_client_8440`), and comes back under the name the code reads. A
+/// `steve_…` cookie without this port is another Hub's, and is not passed on.
+pub fn own_cookies(app: Router, port: u16) -> Router {
+    app.layer(middleware::from_fn(move |req: Request, next: Next| {
+        port_cookies(port, req, next)
+    }))
+}
+
+async fn port_cookies(port: u16, mut req: Request, next: Next) -> Response {
+    let suffix = format!("_{port}");
+    if req.headers().contains_key(header::COOKIE) {
+        let kept = cookies_in(
+            req.headers()
+                .get_all(header::COOKIE)
+                .iter()
+                .filter_map(|v| v.to_str().ok()),
+            &suffix,
+        );
+        req.headers_mut().remove(header::COOKIE);
+        if let Some(v) = kept.and_then(|k| k.parse().ok()) {
+            req.headers_mut().insert(header::COOKIE, v);
+        }
+    }
+    let mut res = next.run(req).await;
+    if res.headers().contains_key(header::SET_COOKIE) {
+        let set: Vec<_> = res
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .cloned()
+            .collect();
+        res.headers_mut().remove(header::SET_COOKIE);
+        for v in set {
+            let named = v
+                .to_str()
+                .ok()
+                .and_then(|c| cookie_out(c, &suffix))
+                .and_then(|c| c.parse().ok());
+            res.headers_mut()
+                .append(header::SET_COOKIE, named.unwrap_or(v));
+        }
+    }
+    res
+}
+
+/// The `Cookie` header as the Hub reads it: its own cookies without the suffix, other Hubs' left out.
+fn cookies_in<'a>(sent: impl Iterator<Item = &'a str>, suffix: &str) -> Option<String> {
+    let kept: Vec<String> = sent
+        .flat_map(|v| v.split(';'))
+        .filter_map(|kv| {
+            let kv = kv.trim();
+            let (name, value) = kv.split_once('=')?;
+            if !name.starts_with("steve_") {
+                return Some(kv.to_string());
+            }
+            Some(format!("{}={value}", name.strip_suffix(suffix)?))
+        })
+        .collect();
+    (!kept.is_empty()).then(|| kept.join("; "))
+}
+
+/// A `Set-Cookie` value with the suffix after the name; `None` for a cookie that is not the Hub's.
+fn cookie_out(set: &str, suffix: &str) -> Option<String> {
+    let (name, rest) = set.split_once('=')?;
+    name.starts_with("steve_")
+        .then(|| format!("{name}{suffix}={rest}"))
+}
+
 /// The language of the text this request answers with (steve-i18n): `?lang=` (the SSE stream, which can't set
 /// a header), else `Accept-Language`, else zh-CN. `/mcp` is always zh-CN: what it answers goes to a model.
 async fn locale(req: Request, next: Next) -> Response {
@@ -424,6 +494,91 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
         rt.runtimes.get(false).await;
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod cookie_tests {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{HeaderMap, Request, header};
+    use axum::routing::get;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    #[test]
+    fn a_cookie_is_the_hubs_by_the_port_after_its_name() {
+        let read = |sent: &[&str]| super::cookies_in(sent.iter().copied(), "_8440");
+        assert_eq!(
+            read(&["theme=dark; steve_client_8440=a; steve_ws_8440=w"]).as_deref(),
+            Some("theme=dark; steve_client=a; steve_ws=w")
+        );
+        // another Hub on this host, a name from before the ports, a port that only ends alike
+        assert_eq!(
+            read(&["steve_client_9000=b; steve_client=old", "steve_session_18440=c"]),
+            None
+        );
+        assert_eq!(
+            read(&["steve_client_9000=b", "steve_session_8440=s=1"]).as_deref(),
+            Some("steve_session=s=1")
+        );
+        assert_eq!(
+            super::cookie_out("steve_client=x; Max-Age=1; Path=/; HttpOnly", "_8440").as_deref(),
+            Some("steve_client_8440=x; Max-Age=1; Path=/; HttpOnly")
+        );
+        assert_eq!(super::cookie_out("sidebar_state=true; Path=/", "_8440"), None);
+    }
+
+    #[tokio::test]
+    async fn two_hubs_on_one_host_keep_their_own_cookies() {
+        let hub = |port: u16| {
+            let app = Router::new().route(
+                "/",
+                get(|h: HeaderMap| async move {
+                    let sent = h
+                        .get(header::COOKIE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    (
+                        axum::response::AppendHeaders([
+                            (header::SET_COOKIE, "steve_client=new; Path=/; HttpOnly"),
+                            (header::SET_COOKIE, "other=1; Path=/"),
+                        ]),
+                        sent,
+                    )
+                }),
+            );
+            super::own_cookies(app, port)
+        };
+        // what a browser holds for the host after signing in to both
+        let jar = "steve_client_8440=a; steve_client_9000=b; other=1";
+        for (port, mine) in [(8440, "a"), (9000, "b")] {
+            let r = hub(port)
+                .oneshot(
+                    Request::get("/")
+                        .header(header::COOKIE, jar)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let set: Vec<String> = r
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .map(|v| v.to_str().unwrap().to_string())
+                .collect();
+            assert_eq!(
+                set,
+                [
+                    format!("steve_client_{port}=new; Path=/; HttpOnly"),
+                    "other=1; Path=/".to_string()
+                ]
+            );
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body, format!("steve_client={mine}; other=1"));
+        }
+    }
 }
 
 #[cfg(test)]

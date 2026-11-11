@@ -363,7 +363,8 @@ impl Config {
             });
         }
 
-        let public_raw = env("STEVE_PUBLIC_URL", "http://127.0.0.1:8440");
+        // unset: this machine, on the port the Hub listens on
+        let public_raw = env("STEVE_PUBLIC_URL", &format!("http://127.0.0.1:{port_n}"));
         let public_url = strip_slash(&public_raw);
         let web_port = match get("STEVE_WEB_PORT").filter(|v| !v.trim().is_empty()) {
             None => None,
@@ -700,6 +701,10 @@ mod tests {
         assert_eq!(c.listen.port, 9001);
         // an empty STEVE_PUBLIC_URLS is "set" for `??`, so no origins at all
         assert!(cfg(&[("STEVE_PUBLIC_URLS", "")]).public_urls.is_empty());
+        // no public URL: the Hub's own port, not the default one
+        let c = cfg(&[("STEVE_PORT", "9001")]);
+        assert_eq!(c.public_url, "http://127.0.0.1:9001");
+        assert_eq!(c.public_urls, vec!["http://127.0.0.1:9001"]);
     }
 
     #[test]
