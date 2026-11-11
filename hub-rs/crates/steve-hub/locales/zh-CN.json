@@ -206,5 +206,9 @@
   "hub.project.node_remote_unsupported": "项目暂时只能建在 Hub 内置的 Node 上：其他 Node 上还不能运行会话",
   "hub.project.browse_owner_only": "仅实例管理员可以浏览这台机器的目录",
   "hub.onboard.owner_only": "仅实例管理员可以开始或跳过初次见面",
+  "hub.check.adapter_missing": "ACP 适配器 %{harness} 不在 %{adapter}；启动 %{harness} 任务前，先安装它的 ACP 适配器，并把它的注册项配成绝对路径（docs/deployment.md#harness-setup）",
+  "hub.check.node_missing": "STEVE_NODE：Node.js 可执行文件不在 %{node}；启动 %{harness} 任务前，先安装 Node.js，或把它设成绝对路径",
+  "hub.check.principal_state": "STEVE_PRINCIPAL_STATE=on（默认）：新会话用各自独立的 harness 目录，已有会话沿用记录下来的状态。Codex 的登录不会被复制。继续某个主体的任务前，先在 Node 的 state/<runtime_sessions.state_dir>/harness 目录里为它登录，见 docs/deployment.md#harness-setup。STEVE_PRINCIPAL_STATE=off 只让新会话回到共用状态。",
+  "hub.check.unconfined": "STEVE_CONFINE：运行不会放进沙箱：%{why}",
   "hub.audit.owner_only": "仅实例管理员可以查看操作记录"
 }

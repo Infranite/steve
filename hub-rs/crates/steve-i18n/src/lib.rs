@@ -139,6 +139,12 @@ pub fn stored<R>(f: impl FnOnce() -> R) -> R {
     LOCALE.sync_scope(ZH_CN, f)
 }
 
+/// Runs `f` in `locale` whatever the request's or the process's language: for text whose reader is known
+/// apart from them (a log line, in en; what a program prints for the one that started it, in that one's).
+pub fn with<R>(locale: &'static str, f: impl FnOnce() -> R) -> R {
+    LOCALE.sync_scope(locale, f)
+}
+
 /// One BCP 47 tag to one of ours: any Chinese is zh-CN, any English is en.
 pub fn match_tag(tag: &str) -> Option<&'static str> {
     let t = tag.trim().to_ascii_lowercase();

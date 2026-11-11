@@ -557,7 +557,13 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     }
     // the startup checks on this environment, without the database or the Hub's port (check.rs)
     if std::env::args().any(|arg| arg == "--check-config") {
-        let report = crate::check::check(|k| std::env::var(k).ok());
+        /* its warnings in the language of whoever runs it (`STEVE_LANG`, which `steve setup` passes on), else en */
+        let lang = std::env::var("STEVE_LANG")
+            .ok()
+            .as_deref()
+            .and_then(steve_i18n::match_tag)
+            .unwrap_or(steve_i18n::EN);
+        let report = steve_i18n::with(lang, || crate::check::check(|k| std::env::var(k).ok()));
         println!("{}", serde_json::to_string(&report)?);
         std::process::exit(if report.ok { 0 } else { 2 });
     }

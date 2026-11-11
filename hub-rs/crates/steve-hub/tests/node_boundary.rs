@@ -298,7 +298,7 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-install/src/common.rs", 7, Hub, "operator installer owns private setup receipts and verified package copies"),
     e(Dir, "steve-install/src/setup.rs", 1, Hub, "first installation checks an explicitly selected vault-key directory is empty before owning it"),
     e(Spawn, "steve-install/src/setup.rs", 1, Hub, "the wizard's last step opens the Hub's own address in the operator's browser (open, xdg-open)"),
-    e(Fs, "steve-install/src/setup.rs", 12, Hub, "first installation validates, copies and registers only its own release and configuration under a setup lock, and reads back the owner token it saved; a fresh installation renames the old home aside under the same lock, and the last step reads this installation's own address"),
+    e(Fs, "steve-install/src/setup.rs", 13, Hub, "first installation validates, copies and registers only its own release and configuration under a setup lock, and reads back the owner token it saved; a fresh installation renames the old home, and the key directory its receipt names, aside under the same lock, and the last step reads this installation's own address"),
     e(Spawn, "steve-install/src/setup/reconfigure.rs", 1, Hub, "operator configuration maintenance runs only the verified installed Hub's bounded configuration check"),
     e(Fs, "steve-install/src/setup/reconfigure.rs", 7, Hub, "operator configuration maintenance reads private configuration and locks, syncs and archives its own recoverable transaction"),
     e(Spawn, "steve-install/src/service.rs", 1, Hub, "operator service manager invokes fixed launchctl/systemctl and verified installation identity commands"),

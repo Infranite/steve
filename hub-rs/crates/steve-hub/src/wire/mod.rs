@@ -220,7 +220,10 @@ fn open_in_process_node(
     jobs: &mut Vec<modules::Job>,
     sessions_here: bool,
 ) -> Result<NodeHost, BackendError> {
-    for warning in crate::check::local_node_warnings(cfg, vars) {
+    /* a log line: in en whatever language the Hub answers people in */
+    for warning in steve_i18n::with(steve_i18n::EN, || {
+        crate::check::local_node_warnings(cfg, vars)
+    }) {
         tracing::warn!("{warning}");
     }
     let (id, home) = if sessions_here {
