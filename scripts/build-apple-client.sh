@@ -7,8 +7,10 @@ DERIVED_DATA="${APPLE_DIR}/Build/DerivedData"
 CONFIGURATION="${CONFIGURATION:-Debug}"
 JOBS="${STEVE_BUILD_JOBS:-6}"
 
-if [[ -z "${DEVELOPER_DIR:-}" && -d "/Applications/Xcode.app/Contents/Developer" ]]; then
-  export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+if [[ -z "${DEVELOPER_DIR:-}" ]] && ! xcrun --find xctest >/dev/null 2>&1; then
+  if [[ -d "/Applications/Xcode.app/Contents/Developer" ]]; then
+    export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+  fi
 fi
 
 TARGET="${1:-all}"
@@ -92,6 +94,7 @@ case "${TARGET}" in
     build_web
     test_swift_package
     build_mac
+    build_ios_sim
     build_ios_device
     ;;
   *)
