@@ -1953,13 +1953,14 @@ private enum RawTCPHTTPClient {
         var buffer = Data()
         while true {
             let chunk: Data = try await withCheckedThrowingContinuation { cont in
-                conn.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, err in
-                    if let err {
-                        cont.resume(throwing: err)
-                    } else if let data, !data.isEmpty {
+                conn.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, _, err in
+                    if let data, !data.isEmpty {
                         cont.resume(returning: data)
-                    } else if isComplete {
+                    } else if case .posix(.ENODATA)? = err {
+                        // how Network.framework sometimes reports that the peer closed the stream
                         cont.resume(returning: Data())
+                    } else if let err {
+                        cont.resume(throwing: err)
                     } else {
                         cont.resume(returning: Data())
                     }

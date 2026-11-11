@@ -200,9 +200,10 @@ fn common_git_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Whether `git args…` mutates `.git/worktrees` metadata (`git worktree` subcommands other than
-/// `list`: `add`, `remove`, `prune`, `move`, `repair`, `lock`, `unlock`). Kept in lockstep with
-/// `steve-core/src/git.rs` so only `.git/worktrees` operations take the common `.git` `flock`,
-/// while `fetch` / `push` / `rebase` / `commit` rely on Git's own locks without blocking worktrees.
+/// `list`: `add`, `remove`, `prune`, `move`, `repair`, `lock`, `unlock`) or is a `git branch`, which
+/// walks that metadata and dies when an entry goes away under it. Kept in lockstep with
+/// `steve-core/src/git.rs` so only these take the common `.git` `flock`, while `fetch` / `push` /
+/// `rebase` / `commit` rely on Git's own locks without blocking worktrees.
 fn git_touches_worktrees(args: &[&str]) -> bool {
     let mut i = 0;
     while i < args.len() {
@@ -229,13 +230,14 @@ fn git_touches_worktrees(args: &[&str]) -> bool {
         }
         break;
     }
-    if args.get(i).copied() != Some("worktree") {
-        return false;
+    match args.get(i).copied() {
+        Some("worktree") => matches!(
+            args[i + 1..].iter().copied().find(|a| !a.starts_with('-')),
+            Some(sub) if sub != "list"
+        ),
+        Some("branch") => true,
+        _ => false,
     }
-    matches!(
-        args[i + 1..].iter().copied().find(|a| !a.starts_with('-')),
-        Some(sub) if sub != "list"
-    )
 }
 
 impl Commands {
@@ -740,7 +742,7 @@ mod tests {
     use super::git_touches_worktrees;
 
     #[test]
-    fn git_touches_worktrees_matches_only_non_list_worktree_subcommands() {
+    fn git_touches_worktrees_matches_branch_and_non_list_worktree_subcommands() {
         for locked in [
             &[
                 "worktree",
@@ -774,6 +776,8 @@ mod tests {
                 "add",
                 "/tmp/wt",
             ],
+            &["branch", "-d", "steve/st-1"],
+            &["-C", "/tmp/repo", "branch", "-D", "steve/st-1"],
         ] {
             assert!(
                 git_touches_worktrees(locked),
