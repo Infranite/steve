@@ -129,3 +129,61 @@ fn an_old_hub_is_not_started_with_an_unrecognized_upgrade_command() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("设置页"));
     assert!(!unexpected.exists());
 }
+
+/// `steve adapters …` hands the action and the adapters named to the release of the home it was
+/// pointed at, for the Hub or for the Node, and its exit status is the command's.
+#[test]
+fn adapters_commands_reach_the_selected_homes_release() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap().join("installation");
+    let release = home.join("releases/now");
+    fs::create_dir_all(release.join("bin")).unwrap();
+    let calls = temp.path().join("calls");
+    let quoted = steve_install::common::shell_quote(calls.to_str().unwrap()).unwrap();
+    for role in ["hub", "node"] {
+        let program = release.join(format!("bin/steve-{role}"));
+        fs::write(
+            &program,
+            format!("#!/bin/sh\nprintf '%s|%s|%s|%s\\n' {role} \"$STEVE_HOME\" \"$STEVE_LANG\" \"$*\" >> {quoted}\n[ \"$2\" = status ] && exit 3\nexit 0\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::os::unix::fs::symlink(&release, home.join("current")).unwrap();
+    let at = home.to_str().unwrap();
+    let run = |args: &[&str]| {
+        let mut args = args.to_vec();
+        args.extend(["--home", at]);
+        let out = invoke(&temp.path().join("unused-home"), &args);
+        (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    assert_eq!(run(&["adapters", "install", "codex"]).0, Some(0));
+    assert_eq!(run(&["adapters", "install", "claude-code", "codex", "hub"]).0, Some(0));
+    assert_eq!(run(&["adapters", "upgrade"]).0, Some(0));
+    assert_eq!(run(&["adapters", "install", "codex", "node"]).0, Some(0));
+    // no action is `status`, and what the release's command exits with is the answer
+    assert_eq!(run(&["adapters"]).0, Some(3));
+    let (code, said) = run(&["adapters", "remove", "codex"]);
+    assert_eq!(code, Some(1), "{said}");
+    let (code, said) = run(&["adapters", "install", "codex", "hub", "more"]);
+    assert_eq!(code, Some(1), "{said}");
+    assert_eq!(
+        fs::read_to_string(&calls).unwrap().lines().collect::<Vec<_>>(),
+        [
+            format!("hub|{at}|zh-CN|--adapters install codex"),
+            format!("hub|{at}|zh-CN|--adapters install claude-code codex"),
+            format!("hub|{at}|zh-CN|--adapters install"),
+            format!("node|{at}|zh-CN|adapters install codex"),
+            format!("hub|{at}|zh-CN|--adapters status"),
+        ]
+    );
+    // a home never set up says so and runs nothing
+    let empty = temp.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let out = invoke(
+        &temp.path().join("unused-home"),
+        &["adapters", "install", "codex", "--home", empty.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 5);
+}
