@@ -219,6 +219,15 @@ fn page_redirect(web_port: u16, req: &Request) -> Option<String> {
     if !wants_page || h.contains_key("x-forwarded-proto") || h.contains_key("x-forwarded-host") {
         return None;
     }
+    // `/auth/…` and `/api/…` are this port's own: the web port sends `/auth/…` back here, and a
+    // path of them that is no route is answered as one, not passed back and forth.
+    let p = req.uri().path();
+    if ["/auth", "/api"]
+        .iter()
+        .any(|own| p.strip_prefix(own).is_some_and(|rest| rest.is_empty() || rest.starts_with('/')))
+    {
+        return None;
+    }
     let host = host_of(h)?;
     let path = req
         .uri()
@@ -249,7 +258,12 @@ pub fn web_only(cfg: std::sync::Arc<Config>) -> axum::Router {
                 let port = c.listen.port;
                 async move {
                     let host = host_of(&headers).unwrap_or_else(|| "127.0.0.1".into());
-                    axum::Json(serde_json::json!({ "hub": format!("http://{host}:{port}") }))
+                    // readable from any page: another Hub's page, given this address as a Hub's,
+                    // finds the Hub behind it
+                    (
+                        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+                        axum::Json(serde_json::json!({ "hub": format!("http://{host}:{port}") })),
+                    )
                 }
             }),
         )
@@ -401,6 +415,25 @@ mod tests {
             ),
             None,
             "behind a proxy the browser's address is not this one"
+        );
+        for own in ["/auth/nothing-here", "/auth", "/api/nothing-here?x=1"] {
+            assert_eq!(
+                page_redirect(
+                    8441,
+                    &req(&[("host", "192.168.1.20:8440"), ("accept", page)], own)
+                ),
+                None,
+                "{own}: the web port sends /auth/… here, so it is answered here"
+            );
+        }
+        assert_eq!(
+            page_redirect(
+                8441,
+                &req(&[("host", "192.168.1.20:8440"), ("accept", page)], "/authors")
+            )
+            .as_deref(),
+            Some("http://192.168.1.20:8441/authors"),
+            "a page path that only starts like one of them is a page"
         );
     }
 
