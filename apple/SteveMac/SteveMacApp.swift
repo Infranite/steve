@@ -8,7 +8,13 @@ struct SteveMacApp: App {
 
     init() {
         let env = ProcessInfo.processInfo.environment
+        #if DEBUG
+        let hostName = env["STEVE_CLIENT_DEVICE_NAME"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? Host.current().localizedName
+            ?? "Mac"
+        #else
         let hostName = Host.current().localizedName ?? "Mac"
+        #endif
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         let webRoot = Bundle.main.resourceURL?.appendingPathComponent("WebDist", isDirectory: true)
         let descriptor = ClientDescriptor(
@@ -54,8 +60,17 @@ struct SteveMacApp: App {
         )
         _coordinator = StateObject(wrappedValue: coord)
         #if DEBUG
-        if let portStr = env["STEVE_CLIENT_DEBUG_PORT"], let port = UInt16(portStr), port > 0 {
-            MacDebugHarness.start(port: port, coordinator: coord)
+        if let portStr = env["STEVE_CLIENT_DEBUG_PORT"],
+           let port = UInt16(portStr),
+           port > 0,
+           let token = env["STEVE_CLIENT_DEBUG_TOKEN"],
+           token.utf8.count >= 16 {
+            MacDebugHarness.start(
+                port: port,
+                expectedToken: token,
+                snapshotDir: env["STEVE_CLIENT_DEBUG_DIR"],
+                coordinator: coord
+            )
         }
         #endif
     }
@@ -185,12 +200,28 @@ private struct MacMenuBarIconLabel: View {
 import Network
 import WebKit
 
+/// Loopback-only automation harness used for local end-to-end verification of `SteveMac` in environments
+/// where macOS Accessibility / `System Events` AppleEvents are unavailable (`AXIsProcessTrusted() == false`).
+///
+/// Security invariants:
+/// - Compiled out of `Release` builds (`#if DEBUG`).
+/// - Inert unless BOTH `STEVE_CLIENT_DEBUG_PORT` and `STEVE_CLIENT_DEBUG_TOKEN` (>= 16 UTF-8 bytes) are set.
+/// - Every HTTP request must supply `X-Steve-Debug-Token` matching `STEVE_CLIENT_DEBUG_TOKEN` in constant time.
+/// - Never bypasses the pairing confirmation alert: alert approval is driven only via `clickAlertButton`,
+///   which dispatches a real left-mouse down/up click (or `performClick`) on the live `NSAlert` sheet's `NSButton`.
+/// - Snapshot writes are restricted to `.png` files inside `STEVE_CLIENT_DEBUG_DIR`.
 private enum MacDebugHarness {
     private static var listener: NWListener?
     private static var previewWindow: NSWindow?
 
-    static func start(port: UInt16, coordinator: SteveClientCoordinator) {
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+    static func start(
+        port: UInt16,
+        expectedToken: String,
+        snapshotDir: String?,
+        coordinator: SteveClientCoordinator
+    ) {
+        guard let nwPort = NWEndpoint.Port(rawValue: port),
+              expectedToken.utf8.count >= 16 else { return }
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: nwPort)
         guard let l = try? NWListener(using: params) else { return }
@@ -202,10 +233,25 @@ private enum MacDebugHarness {
                     conn.cancel()
                     return
                 }
+                let headerLines = raw[..<split.lowerBound].components(separatedBy: "\r\n")
+                let suppliedHeaderToken = headerLines.dropFirst().compactMap { line -> String? in
+                    guard let colon = line.firstIndex(of: ":") else { return nil }
+                    let key = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                    guard key == "x-steve-debug-token" else { return nil }
+                    return line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                }.first ?? ""
+
+                if !constantTimeEquals(suppliedHeaderToken, expectedToken) {
+                    let forbidden = Data("{\"ok\":false,\"error\":\"forbidden\"}".utf8)
+                    let head = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: \(forbidden.count)\r\nConnection: close\r\n\r\n"
+                    conn.send(content: Data(head.utf8) + forbidden, completion: .contentProcessed { _ in conn.cancel() })
+                    return
+                }
+
                 let bodyData = Data(raw[split.upperBound...].utf8)
                 let req = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
                 Task { @MainActor in
-                    let resp = await handle(req, coordinator: coordinator)
+                    let resp = await handle(req, snapshotDir: snapshotDir, coordinator: coordinator)
                     let payload = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data("{}".utf8)
                     let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
                     conn.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in conn.cancel() })
@@ -216,8 +262,44 @@ private enum MacDebugHarness {
         listener = l
     }
 
+    private static func constantTimeEquals(_ lhs: String, _ rhs: String) -> Bool {
+        let a = Array(lhs.utf8)
+        let b = Array(rhs.utf8)
+        guard a.count == b.count else { return false }
+        var diff: UInt8 = 0
+        for idx in 0..<a.count {
+            diff |= (a[idx] ^ b[idx])
+        }
+        return diff == 0
+    }
+
+    private static func validatedSnapshotURL(path: String, allowedDir: String?) -> URL? {
+        guard let allowedDir, !allowedDir.isEmpty else { return nil }
+        let baseURL = URL(fileURLWithPath: allowedDir, isDirectory: true).standardizedFileURL
+        let fileURL = URL(fileURLWithPath: path, isDirectory: false).standardizedFileURL
+        guard fileURL.pathExtension.lowercased() == "png" else { return nil }
+        let basePrefix = baseURL.path.hasSuffix("/") ? baseURL.path : (baseURL.path + "/")
+        guard fileURL.path.hasPrefix(basePrefix) else { return nil }
+        return fileURL
+    }
+
+    private static func collectButtons(in view: NSView) -> [NSButton] {
+        var result: [NSButton] = []
+        if let btn = view as? NSButton {
+            result.append(btn)
+        }
+        for sub in view.subviews {
+            result.append(contentsOf: collectButtons(in: sub))
+        }
+        return result
+    }
+
     @MainActor
-    private static func handle(_ req: [String: Any], coordinator: SteveClientCoordinator) async -> [String: Any] {
+    private static func handle(
+        _ req: [String: Any],
+        snapshotDir: String?,
+        coordinator: SteveClientCoordinator
+    ) async -> [String: Any] {
         let cmd = req["cmd"] as? String ?? "status"
         switch cmd {
         case "status":
@@ -225,6 +307,8 @@ private enum MacDebugHarness {
                 "number": $0.windowNumber,
                 "title": $0.title,
                 "visible": $0.isVisible,
+                "isSheet": $0.isSheet,
+                "sheetCount": $0.sheets.count,
                 "class": String(describing: type(of: $0)),
             ] as [String: Any] }
             return [
@@ -234,6 +318,7 @@ private enum MacDebugHarness {
                 "phase": coordinator.summary.phase.rawValue,
                 "pendingPair": coordinator.pendingExternalPairConfirmation?.displayName as Any,
                 "pendingEndpoints": coordinator.pendingExternalPairConfirmation?.endpointsSummary as Any,
+                "pairAlertPresented": coordinator.isPairConfirmationPresented,
                 "pairError": coordinator.externalPairErrorMessage as Any,
                 "windows": winIDs,
             ]
@@ -250,10 +335,31 @@ private enum MacDebugHarness {
                 return ["ok": false, "error": error.localizedDescription]
             }
         case "snapshot":
-            guard let path = req["path"] as? String else { return ["ok": false, "error": "missing path"] }
+            guard let path = req["path"] as? String,
+                  let outURL = validatedSnapshotURL(path: path, allowedDir: snapshotDir) else {
+                return ["ok": false, "error": "invalid or unauthorized snapshot path"]
+            }
             let target = (req["target"] as? String) ?? "webview"
+            if target == "alert" {
+                let candidateWindows = NSApplication.shared.windows.flatMap { [$0] + $0.sheets }
+                guard let sheetWin = candidateWindows.first(where: {
+                    $0.isSheet || String(describing: type(of: $0)).contains("Alert")
+                }), let root = sheetWin.contentView,
+                      let rep = root.bitmapImageRepForCachingDisplay(in: root.bounds) else {
+                    return ["ok": false, "error": "no alert sheet view"]
+                }
+                root.cacheDisplay(in: root.bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else {
+                    return ["ok": false, "error": "png failed"]
+                }
+                try? png.write(to: outURL)
+                return ["ok": true, "windowNumber": sheetWin.windowNumber]
+            }
             if target == "menubar" {
-                let host = NSHostingView(rootView: MacMenuBarPopoverView(coordinator: coordinator))
+                let host = NSHostingView(
+                    rootView: MacMenuBarPopoverView(coordinator: coordinator)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                )
                 let size = host.fittingSize
                 host.frame = NSRect(origin: .zero, size: NSSize(width: max(size.width, 320), height: max(size.height, 360)))
                 let win = NSWindow(
@@ -263,6 +369,8 @@ private enum MacDebugHarness {
                     defer: false
                 )
                 win.title = "Steve MenuBar"
+                win.isOpaque = true
+                win.backgroundColor = .windowBackgroundColor
                 win.contentView = host
                 win.orderFrontRegardless()
                 previewWindow = win
@@ -274,7 +382,7 @@ private enum MacDebugHarness {
                 guard let png = rep.representation(using: .png, properties: [:]) else {
                     return ["ok": false, "error": "png failed"]
                 }
-                try? png.write(to: URL(fileURLWithPath: path))
+                try? png.write(to: outURL)
                 let num = win.windowNumber
                 return ["ok": true, "windowNumber": num]
             }
@@ -288,7 +396,7 @@ private enum MacDebugHarness {
                       let png = rep.representation(using: .png, properties: [:]) else {
                     return ["ok": false, "error": "png encode failed"]
                 }
-                try png.write(to: URL(fileURLWithPath: path))
+                try png.write(to: outURL)
                 return ["ok": true, "windowNumber": wv.window?.windowNumber ?? 0]
             } catch {
                 return ["ok": false, "error": error.localizedDescription]
@@ -305,7 +413,6 @@ private enum MacDebugHarness {
                   let y = (req["y"] as? NSNumber)?.doubleValue else {
                 return ["ok": false, "error": "missing webview, window, or coords"]
             }
-            // Convert CSS top-left coordinates inside `wv` into AppKit bottom-left window coordinates.
             let localPt = NSPoint(x: x, y: wv.isFlipped ? y : (wv.bounds.height - y))
             let winPt = wv.convert(localPt, to: nil)
             let now = ProcessInfo.processInfo.systemUptime
@@ -318,17 +425,86 @@ private enum MacDebugHarness {
                 timestamp: now + 0.02, windowNumber: win.windowNumber, context: nil,
                 eventNumber: 2, clickCount: 1, pressure: 0.0
             ) {
-                win.sendEvent(down)
-                win.sendEvent(up)
+                _ = win.makeFirstResponder(wv)
+                wv.mouseDown(with: down)
+                wv.mouseUp(with: up)
                 return ["ok": true]
             }
             return ["ok": false, "error": "mouseEvent failed"]
-        case "confirmPair":
-            let profile = await coordinator.confirmPendingExternalPairing()
-            return ["ok": profile != nil, "id": profile?.id as Any]
-        case "cancelPair":
-            coordinator.cancelPendingExternalPairing()
-            return ["ok": true]
+        case "clickAlertButton":
+            let wantedRole = (req["role"] as? String) ?? "confirm"
+            let candidateWindows = NSApplication.shared.windows.flatMap { [$0] + $0.sheets }
+            var alertButtons: [(NSWindow, NSButton)] = []
+            var seen = Set<ObjectIdentifier>()
+            for w in candidateWindows where w.isSheet || String(describing: type(of: w)).contains("Alert") || String(describing: type(of: w)).contains("Panel") {
+                guard seen.insert(ObjectIdentifier(w)).inserted,
+                      let root = w.contentView else { continue }
+                for b in collectButtons(in: root) where !b.isHidden && b.isEnabled {
+                    alertButtons.append((w, b))
+                }
+            }
+            let titles = alertButtons.map { $0.1.title }
+            let chosen = alertButtons.first { _, btn in
+                if wantedRole == "cancel" {
+                    return btn.title == "取消" || btn.title == "Cancel" || btn.keyEquivalent == "\u{1b}"
+                } else {
+                    return btn.title == "确认配对" || btn.title == "Pair" || btn.keyEquivalent == "\r"
+                }
+            }
+            guard let (sheetWin, button) = chosen else {
+                return ["ok": false, "error": "alert button not found", "seenButtons": titles]
+            }
+            let title = button.title
+            let winPt = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+            let now = ProcessInfo.processInfo.systemUptime
+            let method = (req["method"] as? String) ?? "mouse"
+            if method == "accessibility" {
+                let pressed = button.accessibilityPerformPress()
+                return [
+                    "ok": pressed,
+                    "method": "accessibilityPerformPress",
+                    "clickedTitle": title,
+                    "windowClass": String(describing: type(of: sheetWin)),
+                    "seenButtons": titles,
+                ]
+            } else if method == "performClick" {
+                button.performClick(nil)
+                return [
+                    "ok": true,
+                    "method": "performClick",
+                    "clickedTitle": title,
+                    "windowClass": String(describing: type(of: sheetWin)),
+                    "seenButtons": titles,
+                ]
+            } else if let down = NSEvent.mouseEvent(
+                with: .leftMouseDown, location: winPt, modifierFlags: [],
+                timestamp: now, windowNumber: sheetWin.windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 1.0
+            ), let up = NSEvent.mouseEvent(
+                with: .leftMouseUp, location: winPt, modifierFlags: [],
+                timestamp: now + 0.02, windowNumber: sheetWin.windowNumber, context: nil,
+                eventNumber: 2, clickCount: 1, pressure: 0.0
+            ) {
+                sheetWin.makeKeyAndOrderFront(nil)
+                sheetWin.sendEvent(down)
+                sheetWin.sendEvent(up)
+                return [
+                    "ok": true,
+                    "method": "mouseEvent",
+                    "clickedTitle": title,
+                    "windowClass": String(describing: type(of: sheetWin)),
+                    "seenButtons": titles,
+                ]
+            } else {
+                let pressed = button.accessibilityPerformPress()
+                return [
+                    "ok": pressed,
+                    "method": "accessibilityPerformPressFallback",
+                    "clickedTitle": title,
+                    "windowClass": String(describing: type(of: sheetWin)),
+                    "seenButtons": titles,
+                ]
+            }
         case "openURI":
             if let uri = req["uri"] as? String {
                 coordinator.requestExternalPairingConfirmation(uri: uri)

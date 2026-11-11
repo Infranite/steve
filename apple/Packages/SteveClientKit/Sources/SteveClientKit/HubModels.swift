@@ -49,14 +49,14 @@ public enum HubRouteKind: String, Codable, Sendable, Equatable {
         }
     }
 
-    /// Route label exposed to the web client via Native Bridge v2 (`NativeHub.route`).
-    /// Standard codes (`loopback`, `lan`, `proxy`, `public`) are localized by the web UI;
-    /// `privateOverlay` supplies vendor-neutral text directly.
+    /// Wire route code exposed to the web client via Native Bridge v2 (`NativeHub.route`).
+    /// Matches `loopback | lan | tailnet | proxy | public` in `web/src/hub-ui.tsx` so the web page
+    /// translates the route label in its own active locale.
     public var bridgeRouteValue: String? {
         switch self {
         case .loopback: return "loopback"
         case .lan: return "lan"
-        case .privateOverlay: return L10n.tr("专用组网", "Private overlay")
+        case .privateOverlay: return "tailnet"
         case .publicNetwork: return "public"
         case .proxy: return "proxy"
         case .unknown: return nil
@@ -69,13 +69,13 @@ public enum HubRouteKind: String, Codable, Sendable, Equatable {
         }
         let host = rawHost.replacingOccurrences(of: "\\.+$", with: "", options: .regularExpression)
         guard !host.isEmpty else { return .unknown }
-        if host == "localhost" || host.hasSuffix(".localhost") || isLoopbackIPv4(host) || host == "::1" {
+        if host == "localhost" || host.hasSuffix(".localhost") || isLoopbackIPv4(host) || isLoopbackIPv6(host) {
             return .loopback
         }
         if isCarrierGradeNATIPv4(host) {
             return .privateOverlay
         }
-        if isPrivateOrLinkLocalIPv4(host) {
+        if isPrivateOrLinkLocalIPv4(host) || isPrivateOrLinkLocalIPv6(host) {
             return .lan
         }
         if isLocalOnlyHostname(host) {
@@ -135,6 +135,30 @@ public enum HubRouteKind: String, Codable, Sendable, Equatable {
         if a == 169 && b == 254 { return true }
         return false
     }
+
+    private static func isLoopbackIPv6(_ host: String) -> Bool {
+        if host == "::1" { return true }
+        if host.hasPrefix("::ffff:") {
+            let mapped = String(host.dropFirst("::ffff:".count))
+            return isLoopbackIPv4(mapped)
+        }
+        return false
+    }
+
+    /// IPv6 Unique Local (`fc00::/7`) and Link-Local (`fe80::/10`), matching `hub-rs` `access.rs`.
+    private static func isPrivateOrLinkLocalIPv6(_ host: String) -> Bool {
+        guard host.contains(":") else { return false }
+        if host.hasPrefix("::ffff:") {
+            let mapped = String(host.dropFirst("::ffff:".count))
+            return isPrivateOrLinkLocalIPv4(mapped)
+        }
+        guard let firstGroup = host.split(separator: ":", omittingEmptySubsequences: false).first,
+              !firstGroup.isEmpty,
+              let word = UInt16(firstGroup, radix: 16) else {
+            return false
+        }
+        return (word & 0xfe00) == 0xfc00 || (word & 0xffc0) == 0xfe80
+    }
 }
 
 public enum URLNormalizer {
@@ -158,18 +182,24 @@ public enum URLNormalizer {
               components.password == nil,
               let scheme = components.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
-              let host = components.host, !host.isEmpty else {
+              let host = components.host, !host.isEmpty,
+              components.percentEncodedHost?.contains("%") != true else {
             return nil
         }
-        var clean = URLComponents()
+        var clean = components
         clean.scheme = scheme
-        clean.host = host.lowercased()
+        if let peHost = components.percentEncodedHost, !peHost.isEmpty {
+            clean.percentEncodedHost = peHost.lowercased()
+        } else {
+            clean.host = host.lowercased()
+        }
         if let port = components.port {
             let isDefaultPort = (scheme == "http" && port == 80) || (scheme == "https" && port == 443)
-            if !isDefaultPort {
-                clean.port = port
-            }
+            clean.port = isDefaultPort ? nil : port
         }
+        clean.path = ""
+        clean.query = nil
+        clean.fragment = nil
         return clean.url
     }
 

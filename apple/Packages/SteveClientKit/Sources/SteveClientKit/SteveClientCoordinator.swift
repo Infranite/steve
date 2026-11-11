@@ -45,7 +45,8 @@ public final class SteveClientCoordinator: ObservableObject {
     @Published public private(set) var targetHashRoute: String?
 
     @Published public var isQRScannerPresented = false
-    @Published public var pendingExternalPairConfirmation: PendingPairConfirmation?
+    @Published public private(set) var pendingExternalPairConfirmation: PendingPairConfirmation?
+    @Published public private(set) var isPairConfirmationPresented = false
     @Published public var externalPairErrorMessage: String?
 
     public let hubStore: HubStore
@@ -58,6 +59,7 @@ public final class SteveClientCoordinator: ObservableObject {
     private var started = false
     private var activationGeneration: UInt64 = 0
     private var pendingPairContinuation: CheckedContinuation<Void, Error>?
+    private var confirmingPairID: UUID?
     private let purgeWebCookiesHandler: ((Set<String>) -> Void)?
 
     public init(
@@ -164,6 +166,17 @@ public final class SteveClientCoordinator: ObservableObject {
         }
     }
 
+    public func failGatewayIsolation(_ message: String) {
+        proxy.stop()
+        localGatewayURL = nil
+        proxyStartupError = message
+        summary = HubRuntimeSummary(
+            phase: .offline,
+            errorMessage: message,
+            updatedAt: Date()
+        )
+    }
+
     private func ensureGatewayRunning() async {
         do {
             let url = try await proxy.ensureRunning()
@@ -184,9 +197,11 @@ public final class SteveClientCoordinator: ObservableObject {
         activationGeneration &+= 1
         if let cont = pendingPairContinuation {
             pendingPairContinuation = nil
-            cont.resume(returning: ())
+            cont.resume(throwing: BridgeCallError.operationFailed(L10n.tr("客户端已停止", "Client stopped")))
         }
         pendingExternalPairConfirmation = nil
+        isPairConfirmationPresented = false
+        confirmingPairID = nil
         monitorTask?.cancel()
         monitorTask = nil
         proxy.stop()
@@ -206,6 +221,7 @@ public final class SteveClientCoordinator: ObservableObject {
 
     public func listNativeHubs() -> [NativeHubBridgeItem] {
         let currentID = hubStore.activeHubID
+        let proxyTarget = proxy.currentTarget()
         return hubStore.profiles.map { profile in
             let isCurrent = (profile.id == currentID)
             let hasStoredCredential = !(hubStore.credential(for: profile.id) ?? "").isEmpty
@@ -225,11 +241,20 @@ public final class SteveClientCoordinator: ObservableObject {
                 route = nil
             }
 
+            let address: String
+            if isCurrent,
+               (summary.phase == .connected || summary.phase == .authRequired),
+               let inUse = summary.activeEndpoint ?? (proxyTarget.hubID == profile.id ? proxyTarget.baseURL : nil) {
+                address = URLNormalizer.canonicalOrigin(inUse)
+            } else {
+                address = profile.primaryDisplayAddress
+            }
+
             let version = (isCurrent ? summary.hubVersion : nil) ?? profile.lastKnownVersion
             return NativeHubBridgeItem(
                 id: profile.id,
                 name: profile.name,
-                address: profile.primaryDisplayAddress,
+                address: address,
                 current: isCurrent,
                 signedIn: signedIn,
                 route: route,
@@ -405,20 +430,24 @@ public final class SteveClientCoordinator: ObservableObject {
         targetHashRoute = nil
     }
 
-    public func addAndSwitchManualHub(address: String, name: String?) async throws {
-        _ = try await handleBridgeCall(
-            op: "hubs.add",
-            args: [
-                "address": address,
-                "name": name ?? "",
-            ],
-            platform: "macos"
+    // MARK: - Pairing Confirmation Gate (Unified Across Bridge, Scanner & `steve://`)
+
+    private var hasActivePairingFlow: Bool {
+        pendingExternalPairConfirmation != nil || confirmingPairID != nil
+    }
+
+    private static var busyPairingMessage: String {
+        L10n.tr(
+            "已有正在处理的配对请求，请先完成或取消当前提示。",
+            "Another pairing confirmation is already in progress."
         )
     }
 
-    // MARK: - Pairing Confirmation Gate (Unified Across Bridge, Scanner & `steve://`)
-
     public func requestExternalPairingConfirmation(uri: String) {
+        guard !hasActivePairingFlow else {
+            externalPairErrorMessage = Self.busyPairingMessage
+            return
+        }
         let trimmed = uri.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let payload = PairingPayload.parse(trimmed) else {
             externalPairErrorMessage = L10n.tr(
@@ -427,75 +456,126 @@ public final class SteveClientCoordinator: ObservableObject {
             )
             return
         }
-        replacePendingPairConfirmation(
-            PendingPairConfirmation(rawURI: trimmed, payload: payload),
-            continuation: nil
-        )
+        pendingPairContinuation = nil
+        pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: trimmed, payload: payload)
+        isPairConfirmationPresented = true
     }
 
     /// Validates a scanned or pasted pairing link from the iOS scanner, dismisses the scanner,
     /// and stages user confirmation so no code is ever claimed before the user approves the target Hub.
     @discardableResult
     public func stageScannedPairingCode(_ raw: String) -> Bool {
+        guard !hasActivePairingFlow else {
+            return false
+        }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let payload = PairingPayload.parse(trimmed) else {
             return false
         }
         isQRScannerPresented = false
-        replacePendingPairConfirmation(
-            PendingPairConfirmation(rawURI: trimmed, payload: payload),
-            continuation: nil
-        )
+        pendingPairContinuation = nil
+        pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: trimmed, payload: payload)
+        isPairConfirmationPresented = true
         return true
     }
 
     private func requestBridgePairingConfirmation(rawURI: String, payload: PairingPayload) async throws {
+        guard !hasActivePairingFlow else {
+            throw BridgeCallError.operationFailed(Self.busyPairingMessage)
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            replacePendingPairConfirmation(
-                PendingPairConfirmation(rawURI: rawURI, payload: payload),
-                continuation: continuation
-            )
+            guard !self.hasActivePairingFlow else {
+                continuation.resume(throwing: BridgeCallError.operationFailed(Self.busyPairingMessage))
+                return
+            }
+            self.pendingPairContinuation = continuation
+            self.pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: rawURI, payload: payload)
+            self.isPairConfirmationPresented = true
         }
     }
 
-    private func replacePendingPairConfirmation(
-        _ confirmation: PendingPairConfirmation,
-        continuation: CheckedContinuation<Void, Error>?
-    ) {
-        if let existing = pendingPairContinuation {
-            pendingPairContinuation = nil
-            existing.resume(returning: ())
+    /// Called by the SwiftUI alert's `isPresented` setter when the alert dismisses.
+    /// Hides the alert immediately and defers cancellation by one main-actor turn so a synchronous
+    /// "Pair" button action in the same turn always wins even if SwiftUI updates `isPresented` first.
+    public func handlePairAlertDismissed() {
+        isPairConfirmationPresented = false
+        guard let pendingID = pendingExternalPairConfirmation?.id else { return }
+        Task { @MainActor [weak self] in
+            self?.cancelPendingExternalPairing(id: pendingID)
         }
-        pendingPairContinuation = continuation
-        pendingExternalPairConfirmation = confirmation
     }
 
-    public func cancelPendingExternalPairing() {
+    public func cancelPendingExternalPairing(id: UUID? = nil) {
+        guard let current = pendingExternalPairConfirmation else { return }
+        if let id, current.id != id {
+            return
+        }
         pendingExternalPairConfirmation = nil
+        isPairConfirmationPresented = false
         if let cont = pendingPairContinuation {
             pendingPairContinuation = nil
             cont.resume(returning: ())
         }
     }
 
-    @discardableResult
-    public func confirmPendingExternalPairing() async -> HubProfile? {
-        guard let pending = pendingExternalPairConfirmation else { return nil }
+    private struct TakenPairConfirmation {
+        let confirmation: PendingPairConfirmation
+        let continuation: CheckedContinuation<Void, Error>?
+    }
+
+    private func takePendingConfirmationForClaim(id: UUID) -> TakenPairConfirmation? {
+        guard confirmingPairID == nil,
+              let current = pendingExternalPairConfirmation,
+              current.id == id else {
+            return nil
+        }
         let cont = pendingPairContinuation
         pendingPairContinuation = nil
         pendingExternalPairConfirmation = nil
+        isPairConfirmationPresented = false
+        confirmingPairID = id
+        return TakenPairConfirmation(confirmation: current, continuation: cont)
+    }
+
+    @discardableResult
+    private func completeTakenExternalPairing(_ taken: TakenPairConfirmation) async -> HubProfile? {
+        defer {
+            if confirmingPairID == taken.confirmation.id {
+                confirmingPairID = nil
+            }
+        }
         do {
-            let profile = try await pairWithLink(uri: pending.rawURI)
-            cont?.resume(returning: ())
+            let profile = try await pairWithLink(uri: taken.confirmation.rawURI)
+            taken.continuation?.resume(returning: ())
             return profile
         } catch {
-            if let cont {
+            if let cont = taken.continuation {
                 cont.resume(throwing: error)
             } else {
                 externalPairErrorMessage = error.localizedDescription
             }
             return nil
         }
+    }
+
+    /// Synchronously claims ownership of `id` in the alert button action before launching the async Hub claim.
+    public func beginConfirmExternalPairing(id: UUID) {
+        guard let taken = takePendingConfirmationForClaim(id: id) else { return }
+        Task { @MainActor [weak self] in
+            guard let self else {
+                taken.continuation?.resume(
+                    throwing: BridgeCallError.operationFailed(L10n.tr("客户端已停止", "Client stopped"))
+                )
+                return
+            }
+            _ = await self.completeTakenExternalPairing(taken)
+        }
+    }
+
+    @discardableResult
+    public func confirmPendingExternalPairing(id: UUID) async -> HubProfile? {
+        guard let taken = takePendingConfirmationForClaim(id: id) else { return nil }
+        return await completeTakenExternalPairing(taken)
     }
 
     /// Pairs this device by resolving the pairing link's public-first / LAN-fallback endpoints
@@ -556,12 +636,16 @@ public final class SteveClientCoordinator: ObservableObject {
 
     public func activateCurrentHub(forceReloadWeb: Bool) async {
         purgePendingWebCookies()
+        let previousTargetHubID = proxy.currentTarget().hubID
         if forceReloadWeb {
             activationGeneration &+= 1
         }
         let capturedGen = activationGeneration
 
         guard let profile = hubStore.currentProfile else {
+            if forceReloadWeb || !previousTargetHubID.isEmpty {
+                proxy.rotateAuthToken()
+            }
             proxy.updateTarget(.init(hubID: "", baseURL: nil, credential: nil))
             summary = HubRuntimeSummary(
                 phase: .offline,
@@ -575,7 +659,14 @@ public final class SteveClientCoordinator: ObservableObject {
             return
         }
 
+        let hubChanged = !previousTargetHubID.isEmpty && previousTargetHubID != profile.id
         if forceReloadWeb {
+            if hubChanged {
+                // Immediately invalidate the previous Hub page's gateway token and sever upstream forwarding
+                // so the old Hub's open page cannot talk to either Hub while resolving or reloading.
+                proxy.rotateAuthToken()
+                proxy.updateTarget(.init(hubID: profile.id, baseURL: nil, credential: nil))
+            }
             summary = HubRuntimeSummary(
                 phase: .connecting,
                 activeEndpoint: profile.orderedEndpoints.first,
@@ -589,9 +680,28 @@ public final class SteveClientCoordinator: ObservableObject {
             guard activationGeneration == capturedGen, hubStore.activeHubID == profile.id else {
                 return
             }
+            let currentProxyHubID = proxy.currentTarget().hubID
+            if !currentProxyHubID.isEmpty && currentProxyHubID != profile.id {
+                proxy.rotateAuthToken()
+            }
             let freshCredential = hubStore.credential(for: profile.id)
             proxy.updateTarget(.init(hubID: profile.id, baseURL: resolved.url, credential: freshCredential))
             hubStore.updateConnectionMetadata(id: profile.id, version: resolved.hello.version)
+
+            let hasCred = !(freshCredential ?? "").isEmpty
+            summary = HubRuntimeSummary(
+                phase: hasCred ? .connected : .authRequired,
+                activeEndpoint: resolved.url,
+                route: resolved.route,
+                hubVersion: resolved.hello.version,
+                updatedAt: Date()
+            )
+
+            // Trigger the WebView reload immediately when the proxy target changes — before `fetchStateSummary` —
+            // so the old Hub's page is never left running against the newly selected Hub.
+            if forceReloadWeb {
+                webReloadNonce = UUID()
+            }
 
             let liveSummary = try? await api.fetchStateSummary(
                 endpoint: resolved.url,
@@ -608,34 +718,29 @@ public final class SteveClientCoordinator: ObservableObject {
             }
             if let liveSummary {
                 summary = liveSummary
-            } else {
-                summary = HubRuntimeSummary(
-                    phase: .connected,
-                    activeEndpoint: resolved.url,
-                    route: resolved.route,
-                    hubVersion: resolved.hello.version,
-                    updatedAt: Date()
-                )
             }
         } catch {
             guard activationGeneration == capturedGen, hubStore.activeHubID == profile.id else {
                 return
+            }
+            let currentProxyHubID = proxy.currentTarget().hubID
+            if !currentProxyHubID.isEmpty && currentProxyHubID != profile.id {
+                proxy.rotateAuthToken()
             }
             let freshCredential = hubStore.credential(for: profile.id)
             // Leave baseURL nil when unreachable so `/auth/hello` returns an immediate 503 to the web UI.
             proxy.updateTarget(.init(hubID: profile.id, baseURL: nil, credential: freshCredential))
             summary = HubRuntimeSummary(
                 phase: .offline,
-                activeEndpoint: profile.orderedEndpoints.first,
+                activeEndpoint: nil,
                 route: profile.orderedEndpoints.first.map { HubRouteKind.classify(url: $0, explicitPublicURL: profile.publicURL) } ?? .unknown,
                 hubVersion: profile.lastKnownVersion,
                 errorMessage: error.localizedDescription,
                 updatedAt: Date()
             )
-        }
-
-        if forceReloadWeb {
-            webReloadNonce = UUID()
+            if forceReloadWeb {
+                webReloadNonce = UUID()
+            }
         }
     }
 
