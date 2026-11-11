@@ -19,7 +19,6 @@ export const UNWIRED = {
   stats: { icon: ChartNoAxesColumnIcon, phase: "rustHub", now: true },
   integrations: { icon: PlugIcon, phase: "rustHub", now: true },
   channels: { icon: MessagesSquareIcon, phase: "rustHub", now: true },
-  plugins: { icon: PlugIcon, phase: "p4" },
 } satisfies Record<string, Mod>
 type Id = keyof typeof UNWIRED
 

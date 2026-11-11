@@ -8,7 +8,7 @@ import { HubData } from "@/backup-settings"
 import { OutboxDead } from "@/outbox-settings"
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, FilePenIcon, ZapIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon } from "lucide-react"
+import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, FilePenIcon, ZapIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon, PlugIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -338,6 +338,8 @@ const cats = (t: T): [string, string, any, string][] => [
   STATS_CAT,
   /* the audit trail names every member, client and token: the Hub answers the instance's owner only */
   ...(st.owner ? [AUDIT_CAT] : []),
+  /* a page of its own (plugins.tsx), listed here: the nav below links straight to #/plugins */
+  ["plugins", t("manage:settings.catPlugins"), PlugIcon, t("manage:settings.catPluginsSub")],
   ["data", t("manage:settings.catData"), DatabaseIcon, t("manage:settings.catDataSub")],
   ["about", t("manage:settings.catAbout"), InfoIcon, t("manage:settings.catAboutSub")],
 ]
@@ -358,7 +360,7 @@ export function SettingsView() {
   const nav = (
     <nav className="flex flex-col gap-0.5" data-settings-nav>
       {CATS.map(([id, l, I, d]) => (
-        <a key={id} href={"#/settings/" + id} data-settings-cat={id} aria-current={cur === id ? "page" : undefined} className={cn("group/cat flex items-center gap-3 rounded-lg px-2.5 py-2 type-body text-foreground/80 transition-colors hover:bg-accent hover:text-foreground md:py-1.5 md:type-callout", cur === id && "bg-accent font-medium text-foreground")}>
+        <a key={id} href={id === "plugins" ? "#/plugins" : "#/settings/" + id} data-settings-cat={id} aria-current={cur === id ? "page" : undefined} className={cn("group/cat flex items-center gap-3 rounded-lg px-2.5 py-2 type-body text-foreground/80 transition-colors hover:bg-accent hover:text-foreground md:py-1.5 md:type-callout", cur === id && "bg-accent font-medium text-foreground")}>
           <I className={cn("size-4 shrink-0 text-muted-foreground transition-colors", cur === id && "text-foreground")} strokeWidth={1.75} /><span className="min-w-0 flex-1"><span className="flex items-center gap-1.5">{l}{id === "about" && st.update && <span className="size-1.5 rounded-full bg-attention" data-settings-update-dot />}</span><span className="block truncate type-footnote font-normal text-muted-foreground md:hidden">{d}</span></span><ChevronRightIcon className="size-4 shrink-0 text-tertiary md:hidden" />
         </a>))}
     </nav>

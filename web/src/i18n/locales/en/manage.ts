@@ -289,6 +289,8 @@ export default {
     catNotifySub: "Push channels, quiet hours",
     catLook: "Appearance",
     catLookSub: "Theme, colors, fonts, corners, language",
+    catPlugins: "Plugins",
+    catPluginsSub: "Libraries, installing and connecting",
     catData: "Data and privacy",
     catDataSub: "Data location, backups, cleanup",
     catAbout: "About",

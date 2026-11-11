@@ -368,11 +368,6 @@ export default {
       will: [["Groups and DMs", "Every conversation in connections that send and receive messages, filtered by source and account"], ["Per-group settings", "Which persona speaks, when to respond, quiet mode, and where content may go"], ["Personas", "The name, introduction and voice bots use in a group"]],
       now: "This Hub doesn't have the channels module yet.",
     },
-    plugins: {
-      title: "Plugins",
-      sub: "Add event sources, actions and capabilities to Steve",
-      will: [["Installed", "Built-in, official and locally developed plugins; disabling one turns off what it provides"], ["Permissions", "Lists the permissions it needs before you install"], ["Development", "Install from a local folder; reloads automatically on changes"]],
-    },
   },
   queue: {
     next: "Next",
