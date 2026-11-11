@@ -32,6 +32,7 @@ import { showTag } from "@/views"
 import { AskSteve } from "@/config-ui"
 import { VAULT_CAT, VaultSettingsPane } from "@/vault/settings"
 import { STATS_CAT, StatsSettingsPane } from "@/stats/prices"
+import { AUDIT_CAT, AuditSettingsPane } from "@/audit-settings"
 import { MODELS_CAT, ModelsSettingsPane, SteveJudges } from "@/models-settings"
 import { ModelPicker } from "@/model-picker"
 import { RecentStats } from "@/stats/drill"
@@ -296,6 +297,8 @@ const cats = (t: T): [string, string, any, string][] => [
   ACCESS_CAT,
   VAULT_CAT,
   STATS_CAT,
+  /* the audit trail names every member, client and token: the Hub answers the instance's owner only */
+  ...(st.owner ? [AUDIT_CAT] : []),
   ["data", t("manage:settings.catData"), DatabaseIcon, t("manage:settings.catDataSub")],
   ["about", t("manage:settings.catAbout"), InfoIcon, t("manage:settings.catAboutSub")],
 ]
@@ -346,6 +349,7 @@ function Pane({ id }: { id: string }) {
   if (id === "workspace") return <WorkspacePane />
   if (id === "vault") return <VaultSettingsPane />
   if (id === "stats") return <StatsSettingsPane />
+  if (id === "audit") return <AuditSettingsPane />
   if (id === "models") return <ModelsSettingsPane />
   if (id === "access") return <AccessSettingsPane />
   if (id === "general") return <div className="flex flex-col gap-8">

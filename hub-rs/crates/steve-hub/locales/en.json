@@ -205,5 +205,6 @@
   "hub.harness.manifest_unwritable": "Cannot write the harness manifest: %{error}",
   "hub.project.node_remote_unsupported": "A project can only be created on the Hub's built-in Node for now: sessions do not run on other Nodes yet",
   "hub.project.browse_owner_only": "Only the instance owner can browse this machine's directories",
-  "hub.onboard.owner_only": "Only the instance owner can start or skip the first meeting"
+  "hub.onboard.owner_only": "Only the instance owner can start or skip the first meeting",
+  "hub.audit.owner_only": "Only the instance owner can read the activity log"
 }

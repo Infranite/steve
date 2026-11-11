@@ -1144,6 +1144,64 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     assert_eq!(onboard().await, "pending");
     assert_eq!(e.call("POST", "/api/onboard/skip", None).await.0, 200);
     assert_eq!(onboard().await, "done");
+
+    /* the trail as the settings read it, newest first: the meeting's own entries say what it began,
+     * saved and how it ended, each write has its entry, and the ids come with what they are called */
+    let (s, page) = e.call("GET", "/api/audit?limit=200", None).await;
+    assert_eq!((s, &page["more"]), (200, &json!(false)), "{page}");
+    let entries = page["entries"].as_array().unwrap();
+    assert!(
+        entries
+            .windows(2)
+            .all(|w| w[0]["id"].as_i64() > w[1]["id"].as_i64()),
+        "{page}"
+    );
+    let meeting: Vec<(&str, &Value)> = entries
+        .iter()
+        .rev()
+        .map(|x| (x["action"].as_str().unwrap(), &x["detail"]))
+        .filter(|(a, _)| a.starts_with("onboard."))
+        .collect();
+    let expect = [
+        ("onboard.start", json!({})),
+        (
+            "onboard.profile",
+            json!({"fields": ["name", "note"], "memories": 2, "known": 0}),
+        ),
+        ("onboard.models", json!({"purposes": ["route", "title"]})),
+        (
+            "onboard.bots",
+            json!({"created": ["代码审查", "写文档"], "skipped": []}),
+        ),
+        ("onboard.end", json!({"how": "done"})),
+        ("onboard.start", json!({})),
+        ("onboard.end", json!({"how": "skip"})),
+    ];
+    assert_eq!(
+        meeting,
+        expect.iter().map(|(a, d)| (*a, d)).collect::<Vec<_>>()
+    );
+    let made: Vec<&Value> = entries
+        .iter()
+        .filter(|x| x["action"] == "bot.create")
+        .collect();
+    assert_eq!(made[0]["detail"]["name"], "写文档", "{page}");
+    let names = &page["names"];
+    assert_eq!(names[made[0]["target"].as_str().unwrap()], "写文档");
+    let saved = entries.iter().find(|x| x["action"] == "mm.create").unwrap();
+    let text = names[saved["target"].as_str().unwrap()].as_str().unwrap();
+    assert!(["主要写 Rust", "回答先给结论"].contains(&text), "{page}");
+    assert_eq!(names[saved["detail"]["about"].as_str().unwrap()], "小李");
+    let (_, who) = e.call("GET", "/api/me", None).await;
+    assert_eq!(names[saved["actor"].as_str().unwrap()], who["user"]["name"]);
+    /* a page at a time: `before` is the oldest entry already shown */
+    let (_, first) = e.call("GET", "/api/audit?limit=3", None).await;
+    let shown = first["entries"].as_array().unwrap();
+    assert_eq!((shown.len(), &first["more"]), (3, &json!(true)));
+    let next = format!("/api/audit?limit=3&before={}", shown[2]["id"]);
+    let (_, second) = e.call("GET", &next, None).await;
+    assert_eq!(second["entries"][0]["id"], entries[3]["id"]);
+
     store
         .with_conn(|c| {
             c.execute("UPDATE users SET role='member' WHERE role='owner'", [])?;
@@ -1152,4 +1210,5 @@ async fn the_first_meeting_writes_through_its_own_tools() {
         .unwrap();
     assert_eq!(e.call("POST", "/api/onboard/start", None).await.0, 403);
     assert_eq!(e.call("POST", "/api/onboard/skip", None).await.0, 403);
+    assert_eq!(e.call("GET", "/api/audit", None).await.0, 403);
 }

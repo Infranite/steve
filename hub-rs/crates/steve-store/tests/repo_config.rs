@@ -322,7 +322,7 @@ fn bots_seed_create_patch() {
         Ok(assert_eq!(
             count(
                 c,
-                "SELECT count(*) FROM audit WHERE action = 'bot.create' AND detail = '{}'"
+                r#"SELECT count(*) FROM audit WHERE action = 'bot.create' AND detail = '{"name":"Dev"}'"#
             ),
             1
         ))

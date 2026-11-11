@@ -185,7 +185,7 @@ impl Bots<'_> {
             seed(w.c, &id, false, b, ws)?;
             w.c.run(
                 "INSERT INTO audit (workspace_id, ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?, ?)",
-                params![ws, now(), author, "bot.create", id, "{}"],
+                params![ws, now(), author, "bot.create", id, json!({"name": b.name}).to_string()],
             )?;
             w.publish(ChangeEvent::Bot { id: id.clone() });
             one(w.c, BOT, [&id], Bot::from_row)

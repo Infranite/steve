@@ -17,6 +17,11 @@ pub const DONE: &str = "done";
 /// How many of the owner's messages a meeting lasts at most, so one nobody finished does not keep
 /// the router skipped.
 pub const TURNS: usize = 12;
+/// How a meeting ended, as its audit entry (`onboard.end`) says it: Steve called it done, the owner
+/// skipped it, or its turns ran out.
+pub const ENDED: &str = "done";
+pub const SKIPPED: &str = "skip";
+pub const RAN_OUT: &str = "turns";
 /// What the research run is told while the meeting is on.
 pub const BRIEF: &str = include_str!("onboard.txt");
 
@@ -41,15 +46,26 @@ impl Core {
             Some(&json!({"onboard": true})),
         )?;
         self.onboard_set(ws, PENDING, &id, actor)?;
+        self.store()
+            .audit(actor, "onboard.start", ws, &json!({}), ws)?;
         Ok(id)
     }
 
-    /// End the first meeting (done, skipped or run out); ending one that is not on changes nothing.
-    pub fn onboard_end(&self, ws: &str, actor: &str) -> Result<()> {
-        if self.store().setting(ws, STATE, "")? == DONE {
+    /// End the first meeting; `how` is [`ENDED`], [`SKIPPED`] or [`RAN_OUT`]. Ending one that is
+    /// over changes nothing, and skipping one that never began leaves no entry of a meeting.
+    pub fn onboard_end(&self, ws: &str, actor: &str, how: &str) -> Result<()> {
+        let was = self.store().setting(ws, STATE, "")?;
+        if was == DONE {
             return Ok(());
         }
-        self.onboard_set(ws, DONE, "", actor)
+        self.onboard_set(ws, DONE, "", actor)?;
+        let action = if was == PENDING {
+            "onboard.end"
+        } else {
+            "onboard.skip"
+        };
+        self.store()
+            .audit(actor, action, ws, &json!({"how": how}), ws)
     }
 
     fn onboard_set(&self, ws: &str, state: &str, from: &str, actor: &str) -> Result<()> {
@@ -72,7 +88,7 @@ impl Core {
         if said.is_some_and(|n| n <= TURNS) {
             return Ok(true);
         }
-        self.onboard_end(ws, "steve")?;
+        self.onboard_end(ws, "steve", RAN_OUT)?;
         Ok(false)
     }
 

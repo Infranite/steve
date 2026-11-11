@@ -1872,7 +1872,7 @@ impl Domain for CoreDomain {
     }
     async fn onboard_end(&self, ws: &str, actor: &str) -> BResult<()> {
         let (c, ws, actor) = (self.core.clone(), ws.to_string(), actor.to_string());
-        blocking(move || c.onboard_end(&ws, &actor)).await
+        blocking(move || c.onboard_end(&ws, &actor, steve_core::thread::onboard::SKIPPED)).await
     }
     async fn config_draft(&self, ws: &str, target: &Obj, text: &str) -> BResult<Obj> {
         let t = steve_core::changes::Target {

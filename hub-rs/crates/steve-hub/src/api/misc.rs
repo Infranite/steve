@@ -939,6 +939,27 @@ pub async fn onboard_skip(State(st): State<AppState>, Extension(c): Extension<Ct
     ok_true()
 }
 
+#[derive(serde::Deserialize)]
+pub struct AuditQuery {
+    before: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// `GET /api/audit?before=<id>&limit=<n>`: what was changed in this workspace and by whom, newest
+/// first: `{entries: [{id, ts, actor, action, target, detail}], names: {id: name}, more}`. `names`
+/// says what the ids in the page are called now; `before` is the id of the oldest entry already
+/// shown. The instance's owner only: the trail names every member, client and token.
+pub async fn audit_list(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Query(q): Query<AuditQuery>,
+) -> ApiResult {
+    owner_or(&c, || steve_i18n::t!("hub.audit.owner_only"))?;
+    let limit = q.limit.unwrap_or(50);
+    st.read(move |r| ok(r.audit_page(&c.ws, q.before, limit)?))
+        .await
+}
+
 pub async fn config_draft(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
