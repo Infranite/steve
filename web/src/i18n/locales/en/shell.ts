@@ -594,7 +594,7 @@ export default {
     signInWithBrowser: "Use single sign-on",
     userName: "User name",
     accessToken: "Access token",
-    tokenHint: "The Hub issues tokens: run steve-hub --access token create on the Hub's machine to get one.",
+    tokenHint: "The Hub issues tokens. steve setup showed the first one and saved it in secrets/owner.token in the installation's directory (~/.steve by default); for more, run ~/.steve/current/bin/steve-hub --access token create on the Hub's machine.",
     cantConnect: "Can't reach Steve",
     connectTitle: "Connect to your Hub",
   },
