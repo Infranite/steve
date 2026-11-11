@@ -1217,6 +1217,19 @@ pub async fn system_workspaces_reclaim(
     ok(st.domain.reclaim_workspaces().await?)
 }
 
+/// `GET /api/system/backup`: where the database and its copies are on the Hub's machine, whether the
+/// daily copy is on, and the newest one.
+pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
+    instance_owner(&c)?;
+    let cfg = st.cfg.clone();
+    let v = tokio::task::spawn_blocking(move || {
+        crate::daily_backup::status(&cfg.home, &cfg.db_path(), cfg.backup)
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    ok(v)
+}
+
 /// The outbox's store: only a Hub with its modules wired has one.
 fn outbox_store(st: &AppState) -> Result<steve_store::Store, ApiError> {
     st.modules

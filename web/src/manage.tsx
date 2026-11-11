@@ -3,6 +3,7 @@ import { ACCESS_CAT, AccessSettingsPane } from "@/access-settings"
 import { useT } from "@/i18n"
 import { Trans } from "react-i18next"
 import { WorkspaceDisk } from "@/disk-settings"
+import { HubData } from "@/backup-settings"
 import { OutboxDead } from "@/outbox-settings"
 import { useEffect, useState, type ReactNode } from "react"
 import { cn } from "cn"
@@ -391,9 +392,7 @@ function Pane({ id }: { id: string }) {
       <Row title={t("manage:look.reduceMotion")} sub={t("manage:look.reduceMotionSub")}><Switch checked={c.reduceMotion === "开"} onCheckedChange={(v) => setSetting({ reduceMotion: v ? "开" : "关" })} /></Row>
     </Group></section></div>
   if (id === "data") return <div className="flex flex-col gap-8">
-    <section><SectionLabel>{t("manage:data.hub")}</SectionLabel><Group>
-      <Row title={t("manage:data.location")} sub={<span className="font-mono">~/.steve/data/steve.sqlite3</span>} />
-      <Row title={t("manage:data.backup")} sub={t("manage:data.backupSub")} /></Group></section>
+    <HubData />
     <WorkspaceDisk />
     <OutboxDead />
     <section><SectionLabel>{t("manage:data.retention")}</SectionLabel><Group>

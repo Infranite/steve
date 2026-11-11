@@ -695,6 +695,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
             "/system/workspaces/reclaim",
             post(misc::system_workspaces_reclaim),
         )
+        .route("/system/backup", get(misc::system_backup))
         .route("/system/outbox", get(misc::system_outbox))
         .route("/system/outbox/revive", post(misc::system_outbox_revive))
         // event stream

@@ -120,7 +120,7 @@ export default {
     pause: "Pause work",
     hubNode: "Central node",
     storage: "Storage",
-    storageSub: "SQLite · ~/.steve/data; backed up daily and before each release",
+    storageSub: "SQLite, in the Hub's data directory; backed up daily and before each upgrade",
     access: "Access",
     accessSub: "The address and sign-in are set up by whoever deployed it; this machine can also open it directly",
     models: "Model calls",
