@@ -286,6 +286,13 @@ fn modified_setup_file(name: &str) -> anyhow::Error {
 /// Where setup keeps the owner's first access token (`user=…`, `token=…`; mode 0600).
 const OWNER_TOKEN: &str = "secrets/owner.token";
 
+/// The command that issues another access token for the installation in `home`: the Hub's own binary there (it is
+/// not on the PATH), told which installation it is.
+fn token_command(home: &Path) -> Result<String> {
+    let quoted = |p: &Path| shell_quote(p.to_str().context(t!("install.setup.home_not_utf8"))?);
+    Ok(format!("STEVE_HOME={} {} --access token create", quoted(home)?, quoted(&home.join("current/bin/steve-hub"))?))
+}
+
 fn completion_lines(
     role: &str,
     home: &Path,
@@ -349,10 +356,10 @@ fn completion_lines(
                 };
                 lines.push(t!("install.setup.plain.sign_in_user", user = field("user")));
                 lines.push(t!("install.setup.plain.access_token", token = field("token")));
-                lines.push(t!("install.setup.plain.token_saved", path = home.join(OWNER_TOKEN).display()));
+                lines.push(t!("install.setup.plain.token_saved", path = home.join(OWNER_TOKEN).display(), command = token_command(&home)?));
             }
             Err(_) => lines.push(
-                t!("install.setup.plain.token_missing"),
+                t!("install.setup.plain.token_missing", command = token_command(&home)?),
             ),
         }
         lines.push(t!("install.setup.plain.next_hub"));
@@ -2126,5 +2133,12 @@ exit 2"#,
         let lines = completion_lines("hub", home, None, &env, false).unwrap();
         assert!(lines.contains(&"登录用户名：lee".to_string()), "{lines:?}");
         assert!(lines.contains(&"访问 token：stt_abc".to_string()), "{lines:?}");
+        // more tokens: the installation's own binary by its path (it is not on the PATH), told its home
+        let h = home.to_str().unwrap();
+        let command = format!("运行 STEVE_HOME='{h}' '{h}/current/bin/steve-hub' --access token create");
+        assert!(lines.iter().any(|line| line.contains(&command)), "{lines:?}");
+        fs::remove_file(home.join(OWNER_TOKEN)).unwrap();
+        let lines = completion_lines("hub", home, None, &env, false).unwrap();
+        assert!(lines.iter().any(|line| line.starts_with("没有找到 owner token") && line.contains(&command)), "{lines:?}");
     }
 }

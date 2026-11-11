@@ -149,7 +149,7 @@ Besides a browser session, a client signs in with a user's name and one of that 
 
 The Hub records each client's kind and name, and the route it last came by. Routes are `loopback`, `lan`, `tailnet`, `proxy` or `public`, with `+tls` added when the request arrived over TLS. Forwarding headers are believed only from this machine or the local network. Failed sign-ins from another address are slowed down after ten tries in ten minutes.
 
-Manage tokens and clients on the Hub's machine, also when it does not answer:
+Manage tokens and clients on the Hub's machine, also when it does not answer. `steve-hub` is the installation's own binary, `<home>/current/bin/steve-hub` (`~/.steve/current/bin/steve-hub` for the usual installation); it is not on the `PATH`. For an installation in another directory, name it with `STEVE_HOME=<home>` in front of the command, as the line `steve setup` prints when it is done does.
 
 ```sh
 steve-hub --access token create [--user NAME] [--name LABEL] [--days N]   # shown once
