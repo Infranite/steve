@@ -123,7 +123,8 @@ Besides a browser session, a client signs in with a user's name and one of that 
 
 - `GET /auth/hello` says which Hub this is, its API version and which sign-ins it offers.
 - `POST /auth/token {"user": "...", "token": "stt_...", "client": {"kind": "web|mac|ios|cli|...", "name": "...", "platform": "...", "version": "..."}}` returns `{client_id, credential}`.
-- `POST /api/access/pairings` (authenticated) issues a 5-minute single-use `stp_...` pairing code together with the Hub's configured public URL (when set) and reachable LAN addresses, encoded as a `steve://pair?v=1&code=stp_...` QR URI; `GET /api/access/pairings/{id}` reports when a device claims it, and `POST /auth/pair` exchanges that single-use code for a dedicated client credential without creating a reusable access token.
+- `POST /api/access/pairings` (authenticated) issues a 5-minute single-use `stp_...` pairing code and answers `{id, code, name, expires, links, …}`. `links` has one entry per address a device may reach the Hub by, the public one before those of the local network: `{url, kind: "public"|"lan", link}`. `link` is what the QR code holds: `<that address's web page>/#/pair?v=1&code=stp_...&name=...&pub=...&lan=...`, a page any browser opens. The apps read the same link, also as `steve://pair?` with the same query.
+- `GET /api/access/pairings/{id}` reports when a device claims it, and `POST /auth/pair {"code": "stp_...", "client": {...}}` exchanges that single-use code for a dedicated client credential without creating a reusable access token.
 
 The Hub records each client's kind and name, and the route it last came by. Routes are `loopback`, `lan`, `tailnet`, `proxy` or `public`, with `+tls` added when the request arrived over TLS. Forwarding headers are believed only from this machine or the local network. Failed sign-ins from another address are slowed down after ten tries in ten minutes.
 
@@ -145,23 +146,36 @@ Single sign-on through OIDC is optional. The owner sets it up in **Settings · A
 
 The web page can run on its own origin instead of the Hub's port.
 
-- **New installations** set `STEVE_WEB_PORT` to the Hub's port plus one. The Hub then serves the pages on that port, on the same hosts, and its own port answers the API only.
+- **New installations** set `STEVE_WEB_PORT` to the Hub's port plus one. The Hub then serves the pages on that port, on the same hosts, and its own port answers the API only. A browser that asks the API port for a page is sent to the page port.
 - **Without `STEVE_WEB_PORT`**, pages and API share the Hub's port as before.
 - **On another machine or a static host:** `steve-hub --serve-web --listen <address:port>` serves only `STEVE_WEB_DIR`. Any static host also works, because the built pages are plain files.
 
- Opened somewhere no Hub answers, it asks for the Hub's address once, checks it with `/auth/hello`, keeps it in the browser, and then shows the sign-in.
+Opened somewhere no Hub answers, it asks for the Hub's address once, checks it with `/auth/hello`, keeps it in the browser, and then shows the sign-in.
 
 - **Cross-origin access.** The Hub answers cross-origin calls with credentials only from the origins of web clients that signed in there, and from those listed in `STEVE_CLIENT_ORIGINS` (comma-separated). The sign-in paths and a `401` are readable from any origin.
 - **Same machine.** A Hub on the same host as the page (another port) is the same site, so its sign-in cookie works over plain HTTP.
 - **Another machine.** A Hub on another host needs HTTPS: the Hub then sets its cookie with `SameSite=None; Secure`.
+- **Cookie names.** Browsers keep cookies per host, whatever the port. The Hub therefore names its cookies with its port (`steve_client_8440`, `steve_session_8440`, …), so several Hubs on one host stay signed in side by side.
+
+## Several Hubs, and pairing a device
+
+The web client keeps a list of Hubs and switches between them. It is the same screens in a browser and inside the macOS and iOS apps.
+
+- **Where.** The Hub switcher is at the top of the sidebar (on a phone: the **Me** page). It lists the saved Hubs and has **Add Hub…** and **Pair a new device…**. The sign-in screen and the "cannot connect" screen show the same list. **Settings · Access & clients** has the full list, where a Hub can be forgotten, and <kbd>⌘</kbd> <kbd>K</kbd> has the same entries. A link can open them directly: `#/hub/add`, `#/hub/pair`.
+- **The list** is kept in the browser (`localStorage`), per page origin. Inside the apps it is the app's list, with the credentials in the Keychain.
+- **Adding** takes a Hub address or a pairing link. The address is checked with `/auth/hello` before it is saved.
+- **Switching in a browser** goes one of two ways. When the page can hold a session at the other Hub (same host on another port, or an HTTPS Hub), it stays where it is and calls that Hub. Otherwise (plain HTTP on another host, or an HTTPS page and an HTTP Hub) the browser goes to that Hub's own page. The saved list travels along in the address fragment, which is not sent to any server, holds addresses and names only, and is added to the other page's list only after the person agrees.
+- **Pairing.** **Pair a new device…** shows a QR code that is valid for five minutes and for one device, with the address it uses; when the Hub has several addresses, pick the one the device can reach. The code holds a link (see `POST /api/access/pairings` above). A phone's camera opens it in the browser: the page names the Hub, asks, and signs this browser in. The iOS app's scanner reads the same code, and the page offers to open the app when it is installed. The link can also be copied and pasted into another device's **Add Hub** field. The pairing code is removed from the address bar as soon as the page has read it.
+- **Which addresses a pairing offers.** `STEVE_PUBLIC_URL` when it names a public host; then the addresses of the local network: a `STEVE_PUBLIC_URL` on a private address or a `.local` / `.lan` name, the address the browser that asked came by, and the addresses the Hub listens on (every active interface when it listens on `0.0.0.0`). Loopback addresses are never offered. A Hub that listens on loopback only has nothing to offer another device, and the dialog says so.
 
 ## macOS and iOS clients
 
-Native macOS (`SteveMac`) and iOS (`SteveIOS`) clients live in `apple/SteveClient.xcodeproj` atop the shared Swift package `apple/Packages/SteveClientKit`.
+Native macOS (`SteveMac`) and iOS (`SteveIOS`) clients live in `apple/SteveClient.xcodeproj` atop the shared Swift package `apple/Packages/SteveClientKit`. Each is a shell around the web client: it shows the bundled pages through a gateway on loopback that adds the client's credential from the Keychain, so the credential never reaches script in the page.
 
-- **Default local Hub & multi-Hub switching.** On launch, the client automatically connects to the local Hub (`127.0.0.1:8440`, or `STEVE_HUB_URL` when set in the process environment). Additional Hubs can be added manually or by QR pairing and switched at any time from the window toolbar, the macOS menu bar item, the iOS floating Hub pill, **Settings · Access & clients**, or <kbd>⌘</kbd> <kbd>K</kbd>.
-- **Mobile QR pairing and route selection.** Signed-in **Web** and **macOS** clients generate a 5-minute single-use QR code in **Settings · Access & clients** (or from the macOS toolbar / menu bar). Scanning the QR code in the iOS app claims a dedicated Keychain-stored client credential via `POST /auth/pair`. When the Hub advertises a public address (`STEVE_PUBLIC_URL`), the client connects over the public address by default and falls back to the advertised LAN addresses if the public route is unreachable; when no public address is configured, it connects directly over LAN.
-- **macOS menu bar status item.** `SteveMac` provides a live status bar icon (`MenuBarExtra`) displaying connection phase, route (`loopback` / `LAN` / `public`), Hub version, active workspace, running sessions, pending Inbox decisions, online devices, quick Hub switching, QR pairing, and one-click navigation into the main window.
+- **Default local Hub.** On launch, the client connects to the local Hub (`127.0.0.1:8440`, or `STEVE_HUB_URL` when set in the process environment). With no Hub, or one that does not answer, it shows the web client's own screen for adding or choosing one.
+- **Hubs and pairing** are the web client's screens described above. The app supplies what a browser cannot: the Keychain, the camera on iOS, the `steve://pair` link, and a confirmation of its own before any pairing is claimed (script in the page can ask for a pairing, not confirm one).
+- **Route selection.** When a pairing names a public address, the client connects over it by default and falls back to the LAN addresses if it is unreachable; without a public address it connects over LAN.
+- **macOS menu bar status item.** `SteveMac` provides a live status bar icon (`MenuBarExtra`) displaying connection phase, route (`loopback` / `LAN` / `public`), Hub version, active workspace, running sessions, pending Inbox decisions and online devices, with quick Hub switching and entries that open the main window at **Add Hub…** and **Pair a new device…**.
 - **Building from source** (macOS 14+ with Xcode):
 
 ```sh
