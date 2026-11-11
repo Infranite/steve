@@ -556,8 +556,17 @@ impl Core {
         };
         r.freed = purge(&trash);
         let procs = process_dirs();
-        let candidates = self.tx().workspace_candidates()?;
-        self.tx().prune_worktrees()?;
+        let (candidates, git_projects) = {
+            let t = self.tx();
+            (t.workspace_candidates()?, t.git_worktree_projects()?)
+        };
+        for path in git_projects {
+            if path.is_dir()
+                && let Err(e) = git::git(&path, &["worktree", "prune"])
+            {
+                tracing::warn!("worktree prune {}: {e}", path.display());
+            }
+        }
 
         /* closed items: their caches, and their worktree where nothing is lost */
         for c in candidates.iter().filter(|c| c.finished) {
@@ -931,21 +940,18 @@ impl Tx<'_> {
         Ok(out)
     }
 
-    /// `git worktree prune` in every git project with worktrees: forgets worktrees whose folder is gone (a
-    /// removal cut short, a folder deleted by hand).
-    fn prune_worktrees(&self) -> Result<()> {
+    /// Every git project path configured with worktrees, so `reclaim_pass` can run
+    /// `git worktree prune` outside the core state lock.
+    fn git_worktree_projects(&self) -> Result<Vec<PathBuf>> {
+        let mut out = Vec::new();
         for ws in self.db().workspace_ids()? {
             for p in self.db().projects(&ws)? {
-                if p.kind == "git"
-                    && p.worktree
-                    && Path::new(&p.path).is_dir()
-                    && let Err(e) = git::git(Path::new(&p.path), &["worktree", "prune"])
-                {
-                    tracing::warn!("worktree prune {}: {e}", p.path);
+                if p.kind == "git" && p.worktree {
+                    out.push(PathBuf::from(p.path));
                 }
             }
         }
-        Ok(())
+        Ok(out)
     }
 
     /// Moves an idle open item's caches to the trash, checking under the lock that it is still idle.

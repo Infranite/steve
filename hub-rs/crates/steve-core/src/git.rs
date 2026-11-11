@@ -6,9 +6,10 @@
 
 use crate::util::js_head;
 use std::collections::HashMap;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// The git Steve runs: `STEVE_GIT` when set (a pinned build Steve manages), else `git` on `PATH`. Every git
@@ -45,23 +46,145 @@ pub fn version() -> Option<(u32, u32)> {
     Some((n.next()??, n.next()??))
 }
 
+/// Canonical common `.git` directory of the repository containing `dir` (a checkout, a linked
+/// worktree, a subdirectory of either, `.git` itself, or a bare repository).
+pub(crate) fn common_git_dir(dir: &Path) -> Option<PathBuf> {
+    let resolve_common = |gitdir: &Path| -> PathBuf {
+        let common = match std::fs::read_to_string(gitdir.join("commondir")) {
+            Ok(rel) => {
+                let rel = Path::new(rel.trim());
+                if rel.is_absolute() {
+                    rel.to_path_buf()
+                } else {
+                    gitdir.join(rel)
+                }
+            }
+            Err(_) => gitdir.to_path_buf(),
+        };
+        std::fs::canonicalize(&common).unwrap_or(common)
+    };
+    for cur in dir.ancestors() {
+        let dot = cur.join(".git");
+        if let Ok(meta) = std::fs::metadata(&dot) {
+            if meta.is_dir() {
+                return Some(resolve_common(&dot));
+            }
+            if meta.is_file() {
+                let text = std::fs::read_to_string(&dot).ok()?;
+                let raw = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+                let gitdir = if Path::new(raw).is_absolute() {
+                    PathBuf::from(raw)
+                } else {
+                    cur.join(raw)
+                };
+                return Some(resolve_common(&gitdir));
+            }
+        }
+        if cur.join("HEAD").is_file()
+            && (cur.join("commondir").is_file()
+                || cur.join("objects").is_dir()
+                || cur.join("refs").is_dir())
+        {
+            return Some(resolve_common(cur));
+        }
+    }
+    None
+}
+
+/// Whether `git args…` can mutate repository state or `.git/worktrees` metadata.
+/// Git's own `worktree add`, `worktree remove` and `worktree prune` have no internal lock over
+/// `.git/worktrees` (`prune` calls `rmdir(".git/worktrees")` when empty, racing with `add`).
+fn git_mutates_repo(args: &[&str]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        if matches!(
+            a,
+            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+        ) {
+            i += 2;
+            continue;
+        }
+        if a.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        let rest = &args[i + 1..];
+        return match a {
+            "status" | "diff" | "log" | "show" | "ls-files" | "ls-tree" | "cat-file"
+            | "rev-parse" | "rev-list" | "merge-base" | "for-each-ref" | "cherry" | "patch-id"
+            | "check-ignore" | "name-rev" | "describe" | "shortlog" | "version" | "help"
+            | "init" => false,
+            "symbolic-ref" => rest.iter().filter(|x| !x.starts_with('-')).count() > 1,
+            "config" => !rest
+                .iter()
+                .any(|x| matches!(*x, "--get" | "--get-all" | "--get-regexp" | "--list" | "-l")),
+            _ => true,
+        };
+    }
+    false
+}
+
+/// Runs `f` under an exclusive per-repository lock keyed by [`common_git_dir`]: an in-process
+/// mutex plus an advisory `flock(LOCK_EX)` on the `O_RDONLY | O_CLOEXEC` common `.git` directory
+/// descriptor so `steve-core`, `steve-node` and sibling processes serialize on the same repo
+/// without creating lockfiles inside `.git`.
+fn with_repo_lock<R>(dir: &Path, f: impl FnOnce() -> R) -> R {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let Some(common) = common_git_dir(dir) else {
+        return f();
+    };
+    let arc = {
+        let mut map = LOCKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if map.len() > 4096 {
+            map.retain(|_, v| Arc::strong_count(v) > 1);
+        }
+        map.entry(common.clone()).or_default().clone()
+    };
+    let _mem = arc.lock().unwrap_or_else(|e| e.into_inner());
+    let file = std::fs::File::open(&common).ok();
+    if let Some(ref f_dir) = file {
+        loop {
+            if unsafe { libc::flock(f_dir.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                break;
+            }
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                break;
+            }
+        }
+    }
+    let res = f();
+    drop(file);
+    res
+}
+
 /// `git -C dir args…`: trimmed stdout, or the trimmed stderr (≤300 chars) as the error.
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = command()
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_EDITOR", "true")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
-    outcome(
-        args,
-        out.status.success(),
-        &String::from_utf8_lossy(&out.stdout),
-        &String::from_utf8_lossy(&out.stderr),
-    )
+    let run = || {
+        let out = command()
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_EDITOR", "true")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| e.to_string())?;
+        outcome(
+            args,
+            out.status.success(),
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+        )
+    };
+    if git_mutates_repo(args) {
+        with_repo_lock(dir, run)
+    } else {
+        run()
+    }
 }
 
 /// How long a read of the repository through [`git_read`] may take. Generous: it only has to end a
@@ -548,5 +671,55 @@ pub(crate) mod tests {
         add_worktree(&r, &wt, "steve/st-1").unwrap();
         assert_eq!(g(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]), "steve/st-1");
         assert!(is_git(&r) && !is_git(t.path()));
+    }
+
+    #[test]
+    fn common_git_dir_resolves_checkout_worktree_subdir_and_bare_repo_alike() {
+        let t = tempfile::tempdir().unwrap();
+        let r = repo(t.path());
+        let wts = t.path().join("wt");
+        let (_, wt) = branch_with(&r, &wts, "T-1", "x.txt", "x\n");
+        let sub = wt.join("nested/dir");
+        fs::create_dir_all(&sub).unwrap();
+        let expected = common_git_dir(&r).expect("repo common dir");
+        assert_eq!(common_git_dir(&r.join(".git")).as_ref(), Some(&expected));
+        assert_eq!(common_git_dir(&wt).as_ref(), Some(&expected));
+        assert_eq!(common_git_dir(&sub).as_ref(), Some(&expected));
+
+        let bare = t.path().join("mirror.git");
+        g(t.path(), &["init", "-q", "--bare", &bare.to_string_lossy()]);
+        assert_eq!(
+            common_git_dir(&bare),
+            Some(fs::canonicalize(&bare).unwrap())
+        );
+    }
+
+    #[test]
+    fn concurrent_worktree_mutations_and_prunes_on_one_repo_do_not_race() {
+        let t = tempfile::tempdir().unwrap();
+        let r = repo(t.path());
+        let wts = t.path().join("wt");
+        fs::create_dir_all(&wts).unwrap();
+        std::thread::scope(|s| {
+            for tid in 0..6 {
+                let r = &r;
+                let wts = &wts;
+                s.spawn(move || {
+                    for i in 0..50 {
+                        let wt = wts.join(format!("T{tid}-{i}"));
+                        let wt_s = wt.to_string_lossy().into_owned();
+                        let br = format!("steve/t{tid}-{i}");
+                        git(r, &["worktree", "add", "-q", "-b", &br, &wt_s, "main"])
+                            .unwrap_or_else(|e| panic!("add {br}: {e}"));
+                        git(r, &["worktree", "remove", "--force", &wt_s])
+                            .unwrap_or_else(|e| panic!("remove {br}: {e}"));
+                        git(r, &["worktree", "prune"])
+                            .unwrap_or_else(|e| panic!("prune {br}: {e}"));
+                        git(r, &["branch", "-D", &br])
+                            .unwrap_or_else(|e| panic!("branch -D {br}: {e}"));
+                    }
+                });
+            }
+        });
     }
 }
