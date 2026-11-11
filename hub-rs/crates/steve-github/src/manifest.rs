@@ -106,9 +106,11 @@ pub fn manifest(workspace_name: &str, public_url: &str, origin: &str) -> Value {
             "metadata": "read", "contents": "write", "pull_requests": "write", "issues": "write",
             "checks": "read", "actions": "write", "statuses": "read"
         },
+        // `installation` and `installation_repositories` reach every App without a subscription;
+        // GitHub refuses a manifest that lists either one
         "default_events": [
             "pull_request", "pull_request_review", "pull_request_review_comment", "check_suite",
-            "check_run", "workflow_run", "issues", "issue_comment", "installation_repositories"
+            "check_run", "workflow_run", "issues", "issue_comment"
         ]
     })
 }
@@ -583,7 +585,12 @@ mod tests {
         );
         assert_eq!(m["setup_url"], "http://o.test/api/github/app/installed");
         assert_eq!(m["default_permissions"]["actions"], "write");
-        assert_eq!(m["default_events"].as_array().unwrap().len(), 9);
+        let events = m["default_events"].as_array().unwrap();
+        assert_eq!(events.len(), 8);
+        assert!(
+            !events.iter().any(|e| e.as_str().is_some_and(|e| e.starts_with("installation"))),
+            "GitHub refuses a manifest that subscribes to the installation events"
+        );
         assert_eq!(manifest("Lee", "u", "o")["name"], "Steve · Lee");
     }
 }

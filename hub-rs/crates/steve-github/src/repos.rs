@@ -28,8 +28,8 @@ use crate::sync::latest_checks;
 /// How long the list of repos a connection can see is reused.
 const AVAILABLE_TTL_MS: i64 = 5 * 60_000;
 
-/// Events of a PAT repository hook: the App's list without the App-only
-/// `installation_repositories`, plus `status` for legacy CI.
+/// Events of a PAT repository hook: the App's list, plus `status` for legacy CI. (The
+/// installation events an App also gets have no repository-hook counterpart.)
 pub const REPO_HOOK_EVENTS: [&str; 9] = [
     "pull_request",
     "pull_request_review",

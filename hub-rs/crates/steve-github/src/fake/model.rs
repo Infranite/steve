@@ -668,7 +668,6 @@ pub fn app_events() -> Value {
         "check_run",
         "workflow_run",
         "issues",
-        "issue_comment",
-        "installation_repositories"
+        "issue_comment"
     ])
 }
