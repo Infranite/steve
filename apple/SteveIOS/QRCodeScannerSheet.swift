@@ -60,8 +60,8 @@ struct QRCodeScannerSheet: View {
 
                 Text(
                     L10n.tr(
-                        "将取景框对准 Mac 或网页端「设置 · 访问与客户端」中的配对二维码。有公网地址时默认走公网连接，否则自动走局域网连接。",
-                        "Point the camera at the pairing QR code in Mac or Web Settings -> Access & Clients. Connects via public URL when configured, otherwise LAN."
+                        "将取景框对准其他设备上的配对二维码。有公网地址时默认走公网连接，否则自动走局域网连接。",
+                        "Point the camera at the pairing QR code shown on another signed-in device. Connects via public URL when configured, otherwise LAN."
                     )
                 )
                 .font(.footnote)
@@ -78,11 +78,11 @@ struct QRCodeScannerSheet: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(L10n.tr("或粘贴配对链接（steve://pair?…）", "Or paste pairing URI (steve://pair?…)"))
+                    Text(L10n.tr("或粘贴配对链接", "Or paste pairing link"))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     HStack(spacing: 8) {
-                        TextField("steve://pair?v=1&code=stp_…", text: $pastedURI)
+                        TextField("https://…/#/pair?… / steve://pair?…", text: $pastedURI)
                             .textFieldStyle(.roundedBorder)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
@@ -112,8 +112,8 @@ struct QRCodeScannerSheet: View {
         guard PairingPayload.parse(trimmed) != nil else {
             if raw == pastedURI {
                 errorMessage = L10n.tr(
-                    "配对链接格式无效，请扫描或粘贴有效的 steve://pair 二维码",
-                    "Invalid pairing link. Scan or paste a valid steve://pair QR code."
+                    "配对链接格式无效，请扫描二维码或粘贴有效的配对链接。",
+                    "Invalid pairing link. Scan a pairing QR code or paste a valid pairing link."
                 )
             }
             return

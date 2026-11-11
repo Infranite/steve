@@ -56,18 +56,22 @@ public struct SteveWebView: NSViewRepresentableFallback {
     @MainActor
     private func buildWebView(bridge: BridgeCoordinator) -> WKWebView {
         let config = WKWebViewConfiguration()
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["STEVE_CLIENT_WEBKIT_EPHEMERAL"] == "1" {
+            config.websiteDataStore = .nonPersistent()
+        } else {
+            config.websiteDataStore = .default()
+        }
+        #else
         config.websiteDataStore = .default()
+        #endif
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
 
         let userContent = WKUserContentController()
-        userContent.add(bridge, name: BridgeCoordinator.handlerName)
-        let bootstrapJS = Self.makeBootstrapScript(platform: platformName, coordinator: coordinator)
-        userContent.addUserScript(
-            WKUserScript(
-                source: bootstrapJS,
-                injectionTime: .atDocumentStart,
-                forMainFrameOnly: true
-            )
+        userContent.addScriptMessageHandler(
+            bridge,
+            contentWorld: .page,
+            name: BridgeCoordinator.handlerName
         )
         config.userContentController = userContent
 
@@ -82,23 +86,52 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
     @MainActor
     private func loadIfReady(in webView: WKWebView, bridge: BridgeCoordinator) {
-        guard let gateway = coordinator.localGatewayURL else { return }
-
-        // Keep dynamic bridge state synchronized whenever active Hub or route changes
-        let syncJS = Self.makeActiveHubSyncScript(platform: platformName, coordinator: coordinator)
-        webView.evaluateJavaScript(syncJS, completionHandler: nil)
+        guard let gateway = coordinator.localGatewayURL,
+              let gatewayPort = gateway.port else { return }
 
         if bridge.loadedNonce != coordinator.webReloadNonce || bridge.loadedGateway != gateway {
+            let gatewayChanged = (bridge.loadedGateway != gateway)
             bridge.loadedNonce = coordinator.webReloadNonce
             bridge.loadedGateway = gateway
+            bridge.isPageLoaded = false
+            let loadGeneration = bridge.bumpLoadGeneration()
             let token = coordinator.proxy.proxyAuthToken
-            Self.plantProxyCookie(in: webView, gateway: gateway, token: token) { [weak webView] in
-                webView?.load(URLRequest(url: gateway))
+            let platform = platformName
+
+            Task { @MainActor [weak webView, weak bridge, weak coordinator] in
+                guard let webView, let bridge, let coordinator,
+                      bridge.loadGeneration == loadGeneration else { return }
+
+                if gatewayChanged || !bridge.hasInstalledRuleList {
+                    let userContent = webView.configuration.userContentController
+                    userContent.removeAllUserScripts()
+                    let bootstrapJS = Self.makeBootstrapScript(platform: platform, gateway: gateway)
+                    userContent.addUserScript(
+                        WKUserScript(
+                            source: bootstrapJS,
+                            injectionTime: .atDocumentStart,
+                            forMainFrameOnly: true
+                        )
+                    )
+                    userContent.removeAllContentRuleLists()
+                    if let ruleList = try? await Self.compileLoopbackPortRuleList(gatewayPort: gatewayPort) {
+                        guard bridge.loadGeneration == loadGeneration else { return }
+                        userContent.add(ruleList)
+                        bridge.hasInstalledRuleList = true
+                    }
+                }
+
+                coordinator.purgePendingWebCookies()
+                await Self.plantProxyCookie(in: webView, gateway: gateway, token: token)
+                guard bridge.loadGeneration == loadGeneration else { return }
+                webView.load(URLRequest(url: gateway))
             }
             return
         }
 
-        applyPendingHashRouteIfNeeded(in: webView)
+        if bridge.isPageLoaded {
+            applyPendingHashRouteIfNeeded(in: webView)
+        }
     }
 
     @MainActor
@@ -111,35 +144,105 @@ public struct SteveWebView: NSViewRepresentableFallback {
         }
     }
 
+    // MARK: - Loopback Cookie & Port Isolation (N3)
+
+    /// Creates the per-launch `steve_proxy_key` cookie via RFC 6265 `Set-Cookie` parsing so `isHTTPOnly` is guaranteed `true`.
+    internal static func makeProxyAuthCookie(gateway: URL, token: String) -> HTTPCookie? {
+        let headerValue = "\(HubLoopbackProxy.proxyAuthCookieName)=\(token); Path=/; HttpOnly; SameSite=Lax"
+        return HTTPCookie.cookies(
+            withResponseHeaderFields: ["Set-Cookie": headerValue],
+            for: gateway
+        ).first(where: { $0.name == HubLoopbackProxy.proxyAuthCookieName })
+    }
+
     @MainActor
     private static func plantProxyCookie(
         in webView: WKWebView,
         gateway: URL,
-        token: String,
-        completion: @escaping @MainActor () -> Void
-    ) {
-        let props: [HTTPCookiePropertyKey: Any] = [
-            .name: HubLoopbackProxy.proxyAuthCookieName,
-            .value: token,
-            .originURL: gateway,
-            .domain: gateway.host ?? "127.0.0.1",
-            .path: "/",
-            HTTPCookiePropertyKey("HttpOnly"): "TRUE",
-            .sameSitePolicy: HTTPCookieStringPolicy.sameSiteLax,
-        ]
-        guard let cookie = HTTPCookie(properties: props) else {
-            completion()
-            return
-        }
-        webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
-            Task { @MainActor in
-                completion()
+        token: String
+    ) async {
+        guard let cookie = makeProxyAuthCookie(gateway: gateway, token: token) else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
+                continuation.resume()
             }
         }
     }
 
+    /// Builds a WebKit Content Blocker rule list that blocks WebView requests to any loopback host/port
+    /// (`127.0.0.0/8`, `0.0.0.0`, `localhost`, `*.localhost`, `[::1]`) except `127.0.0.1:<gatewayPort>`.
+    /// Uses only WebKit DFA-compatible regex syntax (no `|` alternation or `{m,n}` quantifiers).
+    internal static func makeLoopbackPortIsolationRuleListJSON(gatewayPort: Int) -> String {
+        let hostPatterns = [
+            "127\\.[0-9]+\\.[0-9]+\\.[0-9]+[:/]",
+            "0\\.0\\.0\\.0[:/]",
+            "localhost[:/]",
+            "[a-z0-9.-]+\\.localhost[:/]",
+            "\\[::1\\][:/]",
+        ]
+        let schemePrefixes = ["^https?://", "^wss?://"]
+
+        var rules: [[String: Any]] = []
+        for scheme in schemePrefixes {
+            for host in hostPatterns {
+                rules.append([
+                    "trigger": [
+                        "url-filter": "\(scheme)\(host)",
+                        "url-filter-is-case-sensitive": false,
+                    ],
+                    "action": [
+                        "type": "block",
+                    ],
+                ])
+            }
+        }
+
+        for allowPrefix in [
+            "^http://127\\.0\\.0\\.1:\(gatewayPort)/",
+            "^ws://127\\.0\\.0\\.1:\(gatewayPort)/",
+        ] {
+            rules.append([
+                "trigger": [
+                    "url-filter": allowPrefix,
+                    "url-filter-is-case-sensitive": false,
+                ],
+                "action": [
+                    "type": "ignore-previous-rules",
+                ],
+            ])
+        }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: rules),
+              let json = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+        return json
+    }
+
+    @MainActor
+    internal static func compileLoopbackPortRuleList(gatewayPort: Int) async throws -> WKContentRuleList {
+        let identifier = "steve-loopback-isolation-\(gatewayPort)"
+        let json = makeLoopbackPortIsolationRuleListJSON(gatewayPort: gatewayPort)
+        guard let store = WKContentRuleListStore.default() else {
+            throw BridgeCallError.operationFailed("WKContentRuleListStore unavailable")
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: json) { list, error in
+                if let list {
+                    continuation.resume(returning: list)
+                } else {
+                    continuation.resume(throwing: error ?? BridgeCallError.operationFailed("Rule list compile failed"))
+                }
+            }
+        }
+    }
+
+    // MARK: - Navigation Confinement & Authenticated Downloads (N5)
+
     internal enum NavigationDisposition: Equatable, Sendable {
         case allow
+        case download
+        case startGatewayDownload(URL)
         case cancel
         case openExternal(URL)
     }
@@ -147,14 +250,35 @@ public struct SteveWebView: NSViewRepresentableFallback {
     internal static func decideNavigationDisposition(
         url: URL,
         gateway: URL?,
+        activeHubEndpoints: [URL] = [],
+        shouldPerformDownload: Bool = false,
         targetFrameIsMain: Bool?,
         sourceFrameIsMain: Bool,
         navigationType: WKNavigationType
     ) -> NavigationDisposition {
         let scheme = url.scheme?.lowercased() ?? ""
 
-        // Never initiate pairing from web content; custom `steve:` links in web pages are ignored.
+        // Never initiate pairing directly from web navigation; pairing flows through `pair.claim`.
         if scheme == "steve" {
+            return .cancel
+        }
+
+        // Allow `<a download>` on `blob:` / `data:` or gateway-origin resources.
+        if shouldPerformDownload {
+            if scheme == "blob" || scheme == "data" {
+                return (sourceFrameIsMain || navigationType == .linkActivated) ? .download : .cancel
+            }
+            if let gateway, isGatewayOrigin(url, gateway: gateway) {
+                return (sourceFrameIsMain || navigationType == .linkActivated) ? .download : .cancel
+            }
+            if (sourceFrameIsMain || navigationType == .linkActivated),
+               let gwDownload = gatewayDownloadURLForAuthenticatedPath(
+                   url,
+                   gateway: gateway,
+                   activeHubEndpoints: activeHubEndpoints
+               ) {
+                return .startGatewayDownload(gwDownload)
+            }
             return .cancel
         }
 
@@ -164,9 +288,16 @@ public struct SteveWebView: NSViewRepresentableFallback {
         }
 
         // `target="_blank"` links have `targetFrame == nil` (`targetFrameIsMain == nil`).
-        // From subframes, only open the system browser on an explicit user link click (`linkActivated`).
+        // Route same-Hub `/api/...` links through authenticated gateway download instead of an unauthenticated browser.
         if targetFrameIsMain == nil {
             if (scheme == "http" || scheme == "https") && (sourceFrameIsMain || navigationType == .linkActivated) {
+                if let gwDownload = gatewayDownloadURLForAuthenticatedPath(
+                    url,
+                    gateway: gateway,
+                    activeHubEndpoints: activeHubEndpoints
+                ) {
+                    return .startGatewayDownload(gwDownload)
+                }
                 return .openExternal(url)
             }
             return .cancel
@@ -183,6 +314,13 @@ public struct SteveWebView: NSViewRepresentableFallback {
                 return .allow
             }
             if (scheme == "http" || scheme == "https") && navigationType == .linkActivated {
+                if let gwDownload = gatewayDownloadURLForAuthenticatedPath(
+                    url,
+                    gateway: gateway,
+                    activeHubEndpoints: activeHubEndpoints
+                ) {
+                    return .startGatewayDownload(gwDownload)
+                }
                 return .openExternal(url)
             }
             return .cancel
@@ -193,11 +331,113 @@ public struct SteveWebView: NSViewRepresentableFallback {
             return .allow
         }
 
+        if scheme == "blob" || scheme == "data" {
+            return .download
+        }
+
         if scheme == "http" || scheme == "https" {
+            if let gwDownload = gatewayDownloadURLForAuthenticatedPath(
+                url,
+                gateway: gateway,
+                activeHubEndpoints: activeHubEndpoints
+            ) {
+                return .startGatewayDownload(gwDownload)
+            }
             return .openExternal(url)
         }
 
         return .cancel
+    }
+
+    /// Rewrites authenticated `/api/...` URLs targeting the gateway or active Hub to a gateway URL
+    /// so `WKDownload` fetches them with `steve_proxy_key` + Keychain `Authorization: Bearer`.
+    internal static func gatewayDownloadURLForAuthenticatedPath(
+        _ url: URL,
+        gateway: URL?,
+        activeHubEndpoints: [URL]
+    ) -> URL? {
+        guard let gateway else { return nil }
+        let path = url.path
+        let isAPIPath = (path == "/api" || path.hasPrefix("/api/"))
+        guard isAPIPath else { return nil }
+
+        if isGatewayOrigin(url, gateway: gateway) {
+            return url
+        }
+
+        let targetOrigin = URLNormalizer.canonicalOrigin(url)
+        let matchesActiveHub = activeHubEndpoints.contains {
+            URLNormalizer.canonicalOrigin($0) == targetOrigin
+        }
+        guard matchesActiveHub,
+              var comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let gwComps = URLComponents(url: gateway, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        comps.scheme = gwComps.scheme
+        comps.host = gwComps.host
+        comps.port = gwComps.port
+        return comps.url
+    }
+
+    internal static func shouldDownloadResponse(
+        _ response: URLResponse,
+        canShowMIMEType: Bool,
+        gateway: URL?
+    ) -> Bool {
+        guard let url = response.url else { return false }
+        let scheme = url.scheme?.lowercased() ?? ""
+        let allowedOrigin = (scheme == "blob" || scheme == "data")
+            || (gateway != nil && isGatewayOrigin(url, gateway: gateway!))
+        guard allowedOrigin else { return false }
+
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode >= 400 {
+                return false
+            }
+            if let disposition = http.value(forHTTPHeaderField: "Content-Disposition")?.lowercased() {
+                let trimmed = disposition.trimmingCharacters(in: .whitespaces)
+                if trimmed == "attachment" || trimmed.hasPrefix("attachment;") {
+                    return true
+                }
+            }
+        }
+        return !canShowMIMEType
+    }
+
+    internal static func sanitizeSuggestedFilename(_ raw: String) -> String {
+        let trimmed = raw
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+            .replacingOccurrences(of: "\0", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == "." || trimmed == ".." {
+            return "download"
+        }
+        return trimmed
+    }
+
+    /// Chooses a non-conflicting file path inside `directory` (`name.ext`, `name (1).ext`, `name (2).ext`, ...).
+    internal static func uniqueDownloadDestination(in directory: URL, suggestedFilename: String) -> URL {
+        let safeName = sanitizeSuggestedFilename(suggestedFilename)
+        let fm = FileManager.default
+        let initial = directory.appendingPathComponent(safeName, isDirectory: false)
+        if !fm.fileExists(atPath: initial.path) {
+            return initial
+        }
+
+        let nsName = safeName as NSString
+        let ext = nsName.pathExtension
+        let stem = ext.isEmpty ? safeName : nsName.deletingPathExtension
+
+        for index in 1...10_000 {
+            let candidateName = ext.isEmpty ? "\(stem) (\(index))" : "\(stem) (\(index)).\(ext)"
+            let candidate = directory.appendingPathComponent(candidateName, isDirectory: false)
+            if !fm.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return directory.appendingPathComponent("\(UUID().uuidString)-\(safeName)", isDirectory: false)
     }
 
     internal static func isGatewayOrigin(_ url: URL, gateway: URL) -> Bool {
@@ -227,64 +467,60 @@ public struct SteveWebView: NSViewRepresentableFallback {
         return targetComps.url ?? url
     }
 
-    @MainActor
-    private static func makeBootstrapScript(platform: String, coordinator: SteveClientCoordinator) -> String {
-        let activeJSON = encodeActiveHubJSON(coordinator: coordinator)
+    // MARK: - Native Bridge v2 Bootstrap (`window.__STEVE_NATIVE__`)
+
+    internal static func makeBootstrapScript(platform: String, gateway: URL) -> String {
+        let expectedOrigin = URLNormalizer.canonicalOrigin(gateway)
+        let caps = SteveClientCoordinator.bridgeCapabilities(for: platform)
+        let capsJSON = (try? String(data: JSONEncoder().encode(caps), encoding: .utf8)) ?? "[]"
         return """
         (function() {
-          if (window.location.hostname !== '' && window.location.hostname !== '127.0.0.1') { return; }
+          const expectedOrigin = '\(expectedOrigin)';
+          if (window.location.origin !== 'null' && window.location.origin !== '' && window.location.origin !== expectedOrigin) { return; }
           try { localStorage.removeItem('steve.hub'); } catch (_) {}
-          const post = (action) => {
-            try { window.webkit.messageHandlers.\(BridgeCoordinator.handlerName).postMessage({ action }); } catch (_) {}
-          };
-          window.__STEVE_NATIVE__ = {
+          const can = Object.freeze(\(capsJSON));
+          const bridge = Object.freeze({
+            v: 2,
             platform: '\(platform)',
-            activeHub: \(activeJSON),
-            openHubSwitcher: () => post('openHubSwitcher'),
-            openPairSheet: () => post('openPairSheet'),
-            openQRScanner: \(platform == "ios" ? "() => post('openQRScanner')" : "undefined")
-          };
+            can: can,
+            call: function(op, args) {
+              if (window.location.origin !== expectedOrigin) {
+                return Promise.reject(new Error('Forbidden origin'));
+              }
+              const payloadArgs = (args && typeof args === 'object' && !Array.isArray(args)) ? args : {};
+              return window.webkit.messageHandlers.\(BridgeCoordinator.handlerName).postMessage({
+                op: String(op || ''),
+                args: payloadArgs
+              });
+            }
+          });
+          try {
+            Object.defineProperty(window, '__STEVE_NATIVE__', {
+              value: bridge,
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+          } catch (_) {
+            window.__STEVE_NATIVE__ = bridge;
+          }
         })();
         """
     }
 
-    @MainActor
-    private static func makeActiveHubSyncScript(platform: String, coordinator: SteveClientCoordinator) -> String {
-        let activeJSON = encodeActiveHubJSON(coordinator: coordinator)
-        return """
-        if (window.__STEVE_NATIVE__ && window.location.hostname === '127.0.0.1') {
-          window.__STEVE_NATIVE__.platform = '\(platform)';
-          window.__STEVE_NATIVE__.activeHub = \(activeJSON);
-        }
-        """
-    }
+    // MARK: - Bridge, Navigation, Open Panel & Download Coordinator
 
-    @MainActor
-    private static func encodeActiveHubJSON(coordinator: SteveClientCoordinator) -> String {
-        guard let profile = coordinator.hubStore.currentProfile else {
-            return "null"
-        }
-        let endpoint = coordinator.summary.activeEndpoint.map(URLNormalizer.canonicalOrigin) ?? profile.primaryDisplayAddress
-        let dict: [String: String] = [
-            "id": profile.id,
-            "name": profile.name,
-            "endpoint": endpoint,
-            "route": coordinator.summary.route.rawValue,
-        ]
-        guard let data = try? JSONEncoder().encode(dict),
-              let str = String(data: data, encoding: .utf8) else {
-            return "null"
-        }
-        return str
-    }
-
-    public final class BridgeCoordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
+    public final class BridgeCoordinator: NSObject, WKScriptMessageHandlerWithReply, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
         public static let handlerName = "steveNative"
 
         var parent: SteveWebView
         weak var webView: WKWebView?
         var loadedNonce: UUID?
         var loadedGateway: URL?
+        var isPageLoaded = false
+        var hasInstalledRuleList = false
+        private(set) var loadGeneration: UInt64 = 0
+        private var downloadDestinations: [ObjectIdentifier: URL] = [:]
 
         init(parent: SteveWebView) {
             self.parent = parent
@@ -292,38 +528,76 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
         func attach(_ webView: WKWebView) {
             self.webView = webView
+            #if DEBUG && os(macOS)
+            Self.debugLastAttachedWebView = webView
+            #endif
         }
 
-        public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        #if DEBUG && os(macOS)
+        @MainActor
+        public static weak var debugLastAttachedWebView: WKWebView?
+        @MainActor
+        public static var debugNextOpenPanelURLs: [URL]?
+        #endif
+
+        @MainActor
+        func bumpLoadGeneration() -> UInt64 {
+            loadGeneration &+= 1
+            return loadGeneration
+        }
+
+        @MainActor
+        private func isTrustedGatewayFrame(_ frameInfo: WKFrameInfo) -> Bool {
+            guard frameInfo.isMainFrame,
+                  let gateway = loadedGateway ?? parent.coordinator.localGatewayURL,
+                  let expectedPort = gateway.port else {
+                return false
+            }
+            let originProto = frameInfo.securityOrigin.`protocol`.lowercased()
+            let originHost = frameInfo.securityOrigin.host.lowercased()
+            let originPort = frameInfo.securityOrigin.port
+            return originProto == (gateway.scheme?.lowercased() ?? "http")
+                && originHost == (gateway.host?.lowercased() ?? "127.0.0.1")
+                && originPort == expectedPort
+        }
+
+        @MainActor
+        public func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage,
+            replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void
+        ) {
             guard message.name == Self.handlerName,
-                  message.frameInfo.isMainFrame,
+                  isTrustedGatewayFrame(message.frameInfo),
                   let body = message.body as? [String: Any],
-                  let action = body["action"] as? String else {
+                  let op = body["op"] as? String,
+                  !op.isEmpty else {
+                replyHandler(nil, "Forbidden bridge call")
                 return
             }
-            let originProto = message.frameInfo.securityOrigin.`protocol`.lowercased()
-            let originHost = message.frameInfo.securityOrigin.host.lowercased()
-            let originPort = message.frameInfo.securityOrigin.port
+            let args = (body["args"] as? [String: Any]) ?? [:]
+            let platform = parent.platformName
+            let coordinator = parent.coordinator
 
             Task { @MainActor in
-                guard let gateway = self.loadedGateway ?? self.parent.coordinator.localGatewayURL,
-                      let expectedPort = gateway.port,
-                      originProto == (gateway.scheme?.lowercased() ?? "http"),
-                      originHost == (gateway.host?.lowercased() ?? "127.0.0.1"),
-                      originPort == expectedPort else {
-                    return
-                }
-                switch action {
-                case "openHubSwitcher":
-                    self.parent.coordinator.isHubSwitcherPresented = true
-                case "openPairSheet":
-                    self.parent.coordinator.isPairQRPresented = true
-                case "openQRScanner":
-                    self.parent.coordinator.isQRScannerPresented = true
-                default:
-                    break
+                do {
+                    let result = try await coordinator.handleBridgeCall(op: op, args: args, platform: platform)
+                    replyHandler(result, nil)
+                } catch {
+                    replyHandler(nil, error.localizedDescription)
                 }
             }
+        }
+
+        private var activeHubEndpoints: [URL] {
+            var endpoints: [URL] = []
+            if let active = parent.coordinator.summary.activeEndpoint {
+                endpoints.append(active)
+            }
+            if let profileEndpoints = parent.coordinator.hubStore.currentProfile?.orderedEndpoints {
+                endpoints.append(contentsOf: profileEndpoints)
+            }
+            return endpoints
         }
 
         @MainActor
@@ -341,6 +615,8 @@ public struct SteveWebView: NSViewRepresentableFallback {
             let disposition = SteveWebView.decideNavigationDisposition(
                 url: url,
                 gateway: gateway,
+                activeHubEndpoints: activeHubEndpoints,
+                shouldPerformDownload: navigationAction.shouldPerformDownload,
                 targetFrameIsMain: navigationAction.targetFrame?.isMainFrame,
                 sourceFrameIsMain: navigationAction.sourceFrame.isMainFrame,
                 navigationType: navigationAction.navigationType
@@ -349,12 +625,53 @@ public struct SteveWebView: NSViewRepresentableFallback {
             switch disposition {
             case .allow:
                 decisionHandler(.allow)
+            case .download:
+                decisionHandler(.download)
+            case .startGatewayDownload(let downloadURL):
+                startAuthenticatedDownload(url: downloadURL, in: webView)
+                decisionHandler(.cancel)
             case .cancel:
                 decisionHandler(.cancel)
             case .openExternal(let externalURL):
                 openInSystemBrowser(externalURL, gateway: gateway)
                 decisionHandler(.cancel)
             }
+        }
+
+        @MainActor
+        public func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationResponse: WKNavigationResponse,
+            decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+        ) {
+            let gateway = loadedGateway ?? parent.coordinator.localGatewayURL
+            if SteveWebView.shouldDownloadResponse(
+                navigationResponse.response,
+                canShowMIMEType: navigationResponse.canShowMIMEType,
+                gateway: gateway
+            ) {
+                decisionHandler(.download)
+            } else {
+                decisionHandler(.allow)
+            }
+        }
+
+        @MainActor
+        public func webView(
+            _ webView: WKWebView,
+            navigationAction: WKNavigationAction,
+            didBecome download: WKDownload
+        ) {
+            download.delegate = self
+        }
+
+        @MainActor
+        public func webView(
+            _ webView: WKWebView,
+            navigationResponse: WKNavigationResponse,
+            didBecome download: WKDownload
+        ) {
+            download.delegate = self
         }
 
         @MainActor
@@ -369,15 +686,181 @@ public struct SteveWebView: NSViewRepresentableFallback {
                (scheme == "http" || scheme == "https"),
                (navigationAction.sourceFrame.isMainFrame || navigationAction.navigationType == .linkActivated) {
                 let gateway = loadedGateway ?? parent.coordinator.localGatewayURL
-                openInSystemBrowser(url, gateway: gateway)
+                if let gwDownload = SteveWebView.gatewayDownloadURLForAuthenticatedPath(
+                    url,
+                    gateway: gateway,
+                    activeHubEndpoints: activeHubEndpoints
+                ) {
+                    startAuthenticatedDownload(url: gwDownload, in: webView)
+                } else {
+                    openInSystemBrowser(url, gateway: gateway)
+                }
             }
             return nil
         }
 
+        #if os(macOS)
+        @MainActor
+        public func webView(
+            _ webView: WKWebView,
+            runOpenPanelWith parameters: WKOpenPanelParameters,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping ([URL]?) -> Void
+        ) {
+            // Allow gateway main frame and gateway subframes; reject any untrusted origin.
+            guard let gateway = loadedGateway ?? parent.coordinator.localGatewayURL,
+                  let expectedPort = gateway.port,
+                  frame.securityOrigin.`protocol`.lowercased() == (gateway.scheme?.lowercased() ?? "http"),
+                  frame.securityOrigin.host.lowercased() == (gateway.host?.lowercased() ?? "127.0.0.1"),
+                  frame.securityOrigin.port == expectedPort else {
+                completionHandler(nil)
+                return
+            }
+
+            #if DEBUG
+            if let injected = Self.debugNextOpenPanelURLs {
+                Self.debugNextOpenPanelURLs = nil
+                completionHandler(injected)
+                return
+            }
+            #endif
+
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = parameters.allowsDirectories
+            panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+            panel.canCreateDirectories = false
+
+            if let window = webView.window {
+                panel.beginSheetModal(for: window) { response in
+                    completionHandler(response == .OK ? panel.urls : nil)
+                }
+            } else {
+                panel.begin { response in
+                    completionHandler(response == .OK ? panel.urls : nil)
+                }
+            }
+        }
+        #endif
+
         @MainActor
         public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            isPageLoaded = true
             parent.applyPendingHashRouteIfNeeded(in: webView)
         }
+
+        @MainActor
+        private func startAuthenticatedDownload(url: URL, in webView: WKWebView) {
+            webView.startDownload(using: URLRequest(url: url)) { [weak self] download in
+                Task { @MainActor [weak self] in
+                    download.delegate = self
+                }
+            }
+        }
+
+        // MARK: - WKDownloadDelegate
+
+        @MainActor
+        public func download(
+            _ download: WKDownload,
+            decideDestinationUsing response: URLResponse,
+            suggestedFilename: String,
+            completionHandler: @escaping (URL?) -> Void
+        ) {
+            #if os(macOS)
+            let baseDir: URL
+            #if DEBUG
+            if let overrideDir = ProcessInfo.processInfo.environment["STEVE_CLIENT_DOWNLOADS_DIR"],
+               !overrideDir.isEmpty {
+                let custom = URL(fileURLWithPath: overrideDir, isDirectory: true)
+                try? FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+                baseDir = custom
+            } else {
+                baseDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                    ?? FileManager.default.temporaryDirectory
+            }
+            #else
+            baseDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                ?? FileManager.default.temporaryDirectory
+            #endif
+            try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+            let dest = SteveWebView.uniqueDownloadDestination(in: baseDir, suggestedFilename: suggestedFilename)
+            downloadDestinations[ObjectIdentifier(download)] = dest
+            completionHandler(dest)
+            #else
+            let tempFolder = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SteveDownloads", isDirectory: true)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: tempFolder, withIntermediateDirectories: true)
+                let dest = SteveWebView.uniqueDownloadDestination(in: tempFolder, suggestedFilename: suggestedFilename)
+                downloadDestinations[ObjectIdentifier(download)] = dest
+                completionHandler(dest)
+            } catch {
+                completionHandler(nil)
+            }
+            #endif
+        }
+
+        @MainActor
+        public func downloadDidFinish(_ download: WKDownload) {
+            guard let fileURL = downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) else {
+                return
+            }
+            #if os(macOS)
+            DistributedNotificationCenter.default().post(
+                name: NSNotification.Name("com.apple.DownloadFileFinished"),
+                object: fileURL.path
+            )
+            #elseif canImport(UIKit)
+            presentIOSShareSheet(for: fileURL)
+            #endif
+        }
+
+        @MainActor
+        public func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+            if let fileURL = downloadDestinations.removeValue(forKey: ObjectIdentifier(download)) {
+                #if !os(macOS)
+                try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+                #else
+                _ = fileURL
+                #endif
+            }
+        }
+
+        #if canImport(UIKit) && !os(macOS)
+        @MainActor
+        private func presentIOSShareSheet(for fileURL: URL) {
+            guard let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState == .foregroundActive })
+                ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+                  let rootVC = scene.windows.first(where: \.isKeyWindow)?.rootViewController
+                    ?? scene.windows.first?.rootViewController else {
+                try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+                return
+            }
+            var presenter = rootVC
+            while let presented = presenter.presentedViewController {
+                presenter = presented
+            }
+            let activity = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+            if let popover = activity.popoverPresentationController {
+                popover.sourceView = presenter.view
+                popover.sourceRect = CGRect(
+                    x: presenter.view.bounds.midX,
+                    y: presenter.view.bounds.midY,
+                    width: 1,
+                    height: 1
+                )
+                popover.permittedArrowDirections = []
+            }
+            activity.completionWithItemsHandler = { _, _, _, _ in
+                try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+            }
+            presenter.present(activity, animated: true)
+        }
+        #endif
 
         @MainActor
         private func openInSystemBrowser(_ url: URL, gateway: URL?) {

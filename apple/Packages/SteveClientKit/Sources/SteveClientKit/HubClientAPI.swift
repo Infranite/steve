@@ -48,31 +48,6 @@ public struct PairSignInResponse: Codable, Sendable, Equatable {
     }
 }
 
-public struct CreatedPairing: Codable, Sendable, Equatable {
-    public var id: String
-    public var code: String
-    public var name: String
-    public var expires: Int64
-    public var public_url: String?
-    public var lan_urls: [String]
-    public var loopback_only: Bool
-    public var uri: String
-}
-
-public struct PairingClaimStatus: Codable, Sendable, Equatable {
-    public struct ClaimedClient: Codable, Sendable, Equatable {
-        public var id: String
-        public var name: String
-        public var kind: String
-        public var platform: String
-    }
-
-    public var id: String
-    public var status: String
-    public var expires: Int64
-    public var client: ClaimedClient?
-}
-
 public enum HubClientAPIError: Error, LocalizedError, Sendable, Equatable {
     case invalidResponse
     case missingCredential
@@ -100,7 +75,7 @@ public struct HubClientAPI: Sendable {
         self.session = session
     }
 
-    /// Exchanges a scanned `stp_...` QR pairing code for a dedicated client credential at `POST /auth/pair`.
+    /// Exchanges a scanned or pasted `stp_...` pairing code for a dedicated client credential at `POST /auth/pair`.
     public func claimPairing(
         endpoint: URL,
         code: String,
@@ -134,42 +109,6 @@ public struct HubClientAPI: Sendable {
         return decoded
     }
 
-    /// Signs in with a user name and access token at `POST /auth/token` (`cookie: false`) to obtain a Bearer credential.
-    public func signInWithToken(
-        endpoint: URL,
-        user: String,
-        token: String,
-        client: ClientDescriptor
-    ) async throws -> PairSignInResponse {
-        var req = URLRequest(url: endpoint.appendingPathComponent("auth/token"))
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(L10n.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
-        req.timeoutInterval = 10
-
-        struct Body: Encodable {
-            let user: String
-            let token: String
-            let cookie: Bool
-            let client: ClientDescriptor
-        }
-        req.httpBody = try JSONEncoder().encode(Body(user: user, token: token, cookie: false, client: client))
-
-        let (data, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
-            throw HubClientAPIError.invalidResponse
-        }
-        if !(200...299).contains(http.statusCode) {
-            let msg = Self.extractErrorMessage(from: data) ?? "HTTP \(http.statusCode)"
-            throw HubClientAPIError.serverError(status: http.statusCode, message: msg)
-        }
-        let decoded = try JSONDecoder().decode(PairSignInResponse.self, from: data)
-        guard let cred = decoded.credential, !cred.isEmpty else {
-            throw HubClientAPIError.missingCredential
-        }
-        return decoded
-    }
-
     /// Best-effort revocation of a client credential on the Hub (`POST /auth/client/logout`).
     public func signOutClient(endpoint: URL, credential: String) async {
         guard !credential.isEmpty else { return }
@@ -178,57 +117,6 @@ public struct HubClientAPI: Sendable {
         req.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         req.timeoutInterval = 4
         _ = try? await session.data(for: req)
-    }
-
-    /// Creates a QR pairing code on the active Hub (`POST /api/access/pairings`).
-    public func createPairing(endpoint: URL, credential: String?) async throws -> CreatedPairing {
-        var req = URLRequest(url: endpoint.appendingPathComponent("api/access/pairings"))
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(L10n.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
-        if let credential, !credential.isEmpty {
-            req.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
-        }
-        req.httpBody = Data("{}".utf8)
-        req.timeoutInterval = 8
-
-        let (data, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
-            throw HubClientAPIError.invalidResponse
-        }
-        if http.statusCode == 401 {
-            throw HubClientAPIError.unauthorized
-        }
-        if !(200...299).contains(http.statusCode) {
-            let msg = Self.extractErrorMessage(from: data) ?? "HTTP \(http.statusCode)"
-            throw HubClientAPIError.serverError(status: http.statusCode, message: msg)
-        }
-        return try JSONDecoder().decode(CreatedPairing.self, from: data)
-    }
-
-    /// Polls QR pairing claim status (`GET /api/access/pairings/{id}`).
-    public func pairingStatus(endpoint: URL, id: String, credential: String?) async throws -> PairingClaimStatus {
-        let safeID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        var req = URLRequest(url: endpoint.appendingPathComponent("api/access/pairings/\(safeID)"))
-        req.httpMethod = "GET"
-        req.setValue(L10n.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
-        if let credential, !credential.isEmpty {
-            req.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
-        }
-        req.timeoutInterval = 8
-
-        let (data, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
-            throw HubClientAPIError.invalidResponse
-        }
-        if http.statusCode == 401 {
-            throw HubClientAPIError.unauthorized
-        }
-        if !(200...299).contains(http.statusCode) {
-            let msg = Self.extractErrorMessage(from: data) ?? "HTTP \(http.statusCode)"
-            throw HubClientAPIError.serverError(status: http.statusCode, message: msg)
-        }
-        return try JSONDecoder().decode(PairingClaimStatus.self, from: data)
     }
 
     /// Queries `/api/state` to populate menu bar & runtime summary metrics.

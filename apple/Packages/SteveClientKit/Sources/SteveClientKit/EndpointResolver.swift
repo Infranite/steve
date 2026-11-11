@@ -41,22 +41,27 @@ public struct ResolvedHubEndpoint: Sendable, Equatable {
 public enum EndpointResolutionError: Error, LocalizedError, Sendable, Equatable {
     case noCandidates
     case unreachable(tried: [URL])
+    case notSteveHub(url: URL)
     case incompatibleAPI(version: Int)
 
     public var errorDescription: String? {
         switch self {
         case .noCandidates:
             return L10n.tr("未配置可用的 Hub 地址", "No Hub address configured")
-        case .unreachable(let tried):
-            let joined = tried.map(URLNormalizer.canonicalOrigin).joined(separator: ", ")
+        case .unreachable:
             return L10n.tr(
-                "无法连接到 Hub（已尝试：\(joined)）",
-                "Could not reach Hub (tried: \(joined))"
+                "这个地址没有应答。请确认 Hub 在运行，并且这台设备能访问到它。",
+                "Nothing answers at that address. Check that the Hub is running and that this device can reach it."
+            )
+        case .notSteveHub:
+            return L10n.tr(
+                "这个地址上没有找到 Steve Hub",
+                "No Steve Hub answers at that address"
             )
         case .incompatibleAPI(let version):
             return L10n.tr(
-                "Hub 接口版本（v\(version)）与当前客户端不兼容，请升级客户端或 Hub",
-                "Hub API version (v\(version)) is incompatible with this client"
+                "这个 Hub（v\(version)）与当前客户端的版本不兼容",
+                "This Hub (v\(version)) is incompatible with this client"
             )
         }
     }
@@ -102,27 +107,35 @@ public struct EndpointResolver: Sendable {
         }
 
         var incompatibleVersion: Int?
+        var nonSteveURL: URL?
 
         // 1. Public URL takes strict priority when configured.
         if let pub = publicURL {
-            if let hello = try? await probe(pub), hello.name == "steve" {
-                if hello.api == Self.supportedAPIVersion {
-                    return ResolvedHubEndpoint(
-                        url: pub,
-                        route: HubRouteKind.classify(url: pub, explicitPublicURL: pub),
-                        hello: hello,
-                        usedFallbackFromPublic: false
-                    )
+            do {
+                let hello = try await probe(pub)
+                if hello.name == "steve" {
+                    if hello.api == Self.supportedAPIVersion {
+                        return ResolvedHubEndpoint(
+                            url: pub,
+                            route: HubRouteKind.classify(url: pub, explicitPublicURL: pub),
+                            hello: hello,
+                            usedFallbackFromPublic: false
+                        )
+                    } else {
+                        incompatibleVersion = hello.api
+                    }
                 } else {
-                    incompatibleVersion = hello.api
+                    nonSteveURL = pub
                 }
-            }
+            } catch let err as EndpointResolutionError {
+                if case .notSteveHub = err { nonSteveURL = pub }
+            } catch {}
         }
 
         // 2. Probe LAN candidates concurrently; first compatible responder wins.
         if !lanCandidates.isEmpty {
             let probeFn = self.probe
-            let (winner, badAPI) = await Self.raceCandidates(lanCandidates, probe: probeFn)
+            let (winner, badAPI, nonSteve) = await Self.raceCandidates(lanCandidates, probe: probeFn)
             if let (url, hello) = winner {
                 return ResolvedHubEndpoint(
                     url: url,
@@ -134,10 +147,16 @@ public struct EndpointResolver: Sendable {
             if let badAPI {
                 incompatibleVersion = badAPI
             }
+            if let nonSteve {
+                nonSteveURL = nonSteve
+            }
         }
 
         if let incompatibleVersion {
             throw EndpointResolutionError.incompatibleAPI(version: incompatibleVersion)
+        }
+        if let nonSteveURL {
+            throw EndpointResolutionError.notSteveHub(url: nonSteveURL)
         }
         throw EndpointResolutionError.unreachable(tried: allCandidates)
     }
@@ -145,50 +164,95 @@ public struct EndpointResolver: Sendable {
     private enum ProbeOutcome: Sendable {
         case ok(URL, HubHelloResponse)
         case incompatible(Int)
+        case notSteve(URL)
         case failed
     }
 
     private static func raceCandidates(
         _ candidates: [URL],
         probe: @escaping Probe
-    ) async -> ((URL, HubHelloResponse)?, Int?) {
+    ) async -> ((URL, HubHelloResponse)?, Int?, URL?) {
         if candidates.count == 1 {
             let only = candidates[0]
-            guard let hello = try? await probe(only), hello.name == "steve" else {
-                return (nil, nil)
+            do {
+                let hello = try await probe(only)
+                guard hello.name == "steve" else {
+                    return (nil, nil, only)
+                }
+                if hello.api == supportedAPIVersion {
+                    return ((only, hello), nil, nil)
+                }
+                return (nil, hello.api, nil)
+            } catch let err as EndpointResolutionError {
+                if case .notSteveHub = err { return (nil, nil, only) }
+                return (nil, nil, nil)
+            } catch {
+                return (nil, nil, nil)
             }
-            if hello.api == supportedAPIVersion {
-                return ((only, hello), nil)
-            }
-            return (nil, hello.api)
         }
 
         return await withTaskGroup(of: ProbeOutcome.self) { group in
             for candidate in candidates {
                 group.addTask {
-                    guard let hello = try? await probe(candidate), hello.name == "steve" else {
+                    do {
+                        let hello = try await probe(candidate)
+                        guard hello.name == "steve" else {
+                            return .notSteve(candidate)
+                        }
+                        if hello.api == supportedAPIVersion {
+                            return .ok(candidate, hello)
+                        }
+                        return .incompatible(hello.api)
+                    } catch let err as EndpointResolutionError {
+                        if case .notSteveHub = err { return .notSteve(candidate) }
+                        return .failed
+                    } catch {
                         return .failed
                     }
-                    if hello.api == supportedAPIVersion {
-                        return .ok(candidate, hello)
-                    }
-                    return .incompatible(hello.api)
                 }
             }
             var seenIncompatible: Int?
+            var seenNotSteve: URL?
             while let next = await group.next() {
                 switch next {
                 case .ok(let url, let hello):
                     group.cancelAll()
-                    return ((url, hello), nil)
+                    return ((url, hello), nil, nil)
                 case .incompatible(let ver):
                     seenIncompatible = ver
+                case .notSteve(let url):
+                    seenNotSteve = url
                 case .failed:
                     continue
                 }
             }
-            return (nil, seenIncompatible)
+            return (nil, seenIncompatible, seenNotSteve)
         }
+    }
+
+    /// If `baseURL` is a Steve web-only port serving `/hub.json`, returns the canonical Hub API origin behind it.
+    public static func resolveHubBehind(
+        webURL: URL,
+        fetch: @Sendable (URL) async throws -> (Data, URLResponse) = { url in
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.cachePolicy = .reloadIgnoringLocalCacheData
+            req.timeoutInterval = 4.0
+            return try await URLSession.shared.data(for: req)
+        }
+    ) async -> URL? {
+        struct HubJSON: Decodable { let hub: String? }
+        let hubJSONURL = webURL.appendingPathComponent("hub.json")
+        guard let (data, response) = try? await fetch(hubJSONURL),
+              let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              let decoded = try? JSONDecoder().decode(HubJSON.self, from: data),
+              let hubRaw = decoded.hub,
+              let normalized = URLNormalizer.normalize(hubRaw),
+              URLNormalizer.canonicalOrigin(normalized) != URLNormalizer.canonicalOrigin(webURL) else {
+            return nil
+        }
+        return normalized
     }
 
     public static let defaultProbe: Probe = { baseURL in
@@ -199,11 +263,11 @@ public struct EndpointResolver: Sendable {
         request.timeoutInterval = 4.5
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
+            throw EndpointResolutionError.notSteveHub(url: baseURL)
         }
-        let decoded = try JSONDecoder().decode(HubHelloResponse.self, from: data)
-        guard decoded.name == "steve" else {
-            throw URLError(.cannotParseResponse)
+        guard let decoded = try? JSONDecoder().decode(HubHelloResponse.self, from: data),
+              decoded.name == "steve" else {
+            throw EndpointResolutionError.notSteveHub(url: baseURL)
         }
         return decoded
     }

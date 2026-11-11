@@ -21,6 +21,21 @@ public struct PendingPairConfirmation: Identifiable, Sendable, Equatable {
     }
 }
 
+public enum BridgeCallError: Error, LocalizedError, Sendable, Equatable {
+    case invalidArgument(String)
+    case unsupportedOperation(String)
+    case operationFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidArgument(let message), .operationFailed(let message):
+            return message
+        case .unsupportedOperation(let op):
+            return L10n.tr("不支持的原生操作：\(op)", "Unsupported native bridge operation: \(op)")
+        }
+    }
+}
+
 @MainActor
 public final class SteveClientCoordinator: ObservableObject {
     @Published public private(set) var summary = HubRuntimeSummary()
@@ -29,12 +44,9 @@ public final class SteveClientCoordinator: ObservableObject {
     @Published public private(set) var webReloadNonce = UUID()
     @Published public private(set) var targetHashRoute: String?
 
-    @Published public var isHubSwitcherPresented = false
-    @Published public var isPairQRPresented = false
     @Published public var isQRScannerPresented = false
     @Published public var pendingExternalPairConfirmation: PendingPairConfirmation?
     @Published public var externalPairErrorMessage: String?
-    @Published public private(set) var lastCreatedPairing: CreatedPairing?
 
     public let hubStore: HubStore
     public let api: HubClientAPI
@@ -45,6 +57,8 @@ public final class SteveClientCoordinator: ObservableObject {
     private var monitorTask: Task<Void, Never>?
     private var started = false
     private var activationGeneration: UInt64 = 0
+    private var pendingPairContinuation: CheckedContinuation<Void, Error>?
+    private let purgeWebCookiesHandler: ((Set<String>) -> Void)?
 
     public init(
         hubStore: HubStore? = nil,
@@ -52,19 +66,23 @@ public final class SteveClientCoordinator: ObservableObject {
         resolver: EndpointResolver = EndpointResolver(),
         webRoot: URL? = nil,
         preferredPortDefaults: UserDefaults? = .standard,
-        clientDescriptor: ClientDescriptor
+        clientDescriptor: ClientDescriptor,
+        purgeWebCookiesHandler: ((Set<String>) -> Void)? = nil
     ) {
         self.hubStore = hubStore ?? HubStore()
         self.api = api
         self.resolver = resolver
         self.proxy = HubLoopbackProxy(webRoot: webRoot, preferredPortDefaults: preferredPortDefaults)
         self.clientDescriptor = clientDescriptor
+        self.purgeWebCookiesHandler = purgeWebCookiesHandler
 
         self.proxy.setAuthEventHandler { [weak self] hubID, event in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.activationGeneration &+= 1
                 switch event {
                 case .signedIn(let signed):
+                    let previousCredential = self.hubStore.credential(for: hubID)
                     self.hubStore.updateAuthMetadata(
                         id: hubID,
                         clientID: signed.client_id,
@@ -72,6 +90,15 @@ public final class SteveClientCoordinator: ObservableObject {
                         credential: signed.credential
                     )
                     self.hubStore.updateConnectionMetadata(id: hubID, version: signed.hub.version)
+                    if let previousCredential,
+                       !previousCredential.isEmpty,
+                       previousCredential != signed.credential,
+                       let endpoint = self.endpointForHub(id: hubID) {
+                        let clientAPI = self.api
+                        Task {
+                            await clientAPI.signOutClient(endpoint: endpoint, credential: previousCredential)
+                        }
+                    }
                     if self.hubStore.activeHubID == hubID {
                         await self.refreshActiveHubState()
                     }
@@ -85,13 +112,32 @@ public final class SteveClientCoordinator: ObservableObject {
         }
     }
 
+    private func endpointForHub(id: String) -> URL? {
+        if hubStore.activeHubID == id, let active = summary.activeEndpoint {
+            return active
+        }
+        return hubStore.profiles.first(where: { $0.id == id })?.orderedEndpoints.first
+    }
+
     public func startIfNeeded() {
         guard !started else { return }
         started = true
         Task { [weak self] in
             guard let self else { return }
-            await self.ensureGatewayRunning()
-            await self.activateCurrentHub(forceReloadWeb: true)
+            do {
+                let url = try await self.proxy.ensureRunning()
+                self.proxyStartupError = nil
+                await self.activateCurrentHub(forceReloadWeb: false)
+                self.localGatewayURL = url
+            } catch {
+                self.localGatewayURL = nil
+                self.proxyStartupError = error.localizedDescription
+                self.summary = HubRuntimeSummary(
+                    phase: .offline,
+                    errorMessage: error.localizedDescription,
+                    updatedAt: Date()
+                )
+            }
             self.startBackgroundPolling()
         }
     }
@@ -136,6 +182,11 @@ public final class SteveClientCoordinator: ObservableObject {
 
     public func stop() {
         activationGeneration &+= 1
+        if let cont = pendingPairContinuation {
+            pendingPairContinuation = nil
+            cont.resume(returning: ())
+        }
+        pendingExternalPairConfirmation = nil
         monitorTask?.cancel()
         monitorTask = nil
         proxy.stop()
@@ -143,7 +194,153 @@ public final class SteveClientCoordinator: ObservableObject {
         started = false
     }
 
+    // MARK: - Native Bridge v2 (`window.__STEVE_NATIVE__`)
+
+    public static func bridgeCapabilities(for platform: String) -> [String] {
+        var caps = ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "pair.claim"]
+        if platform == "ios" {
+            caps.append("pair.scan")
+        }
+        return caps
+    }
+
+    public func listNativeHubs() -> [NativeHubBridgeItem] {
+        let currentID = hubStore.activeHubID
+        return hubStore.profiles.map { profile in
+            let isCurrent = (profile.id == currentID)
+            let hasStoredCredential = !(hubStore.credential(for: profile.id) ?? "").isEmpty
+            let signedIn: Bool
+            if isCurrent && summary.phase == .authRequired {
+                signedIn = false
+            } else if isCurrent && summary.phase == .connected {
+                signedIn = true
+            } else {
+                signedIn = hasStoredCredential
+            }
+
+            let route: String?
+            if isCurrent && (summary.phase == .connected || summary.phase == .authRequired) {
+                route = summary.route.bridgeRouteValue
+            } else {
+                route = nil
+            }
+
+            let version = (isCurrent ? summary.hubVersion : nil) ?? profile.lastKnownVersion
+            return NativeHubBridgeItem(
+                id: profile.id,
+                name: profile.name,
+                address: profile.primaryDisplayAddress,
+                current: isCurrent,
+                signedIn: signedIn,
+                route: route,
+                version: version,
+                removable: !profile.isLocalDefault
+            )
+        }
+    }
+
+    public func handleBridgeCall(
+        op: String,
+        args: [String: Any],
+        platform: String
+    ) async throws -> [String: Any] {
+        switch op {
+        case "hubs.list":
+            return ["hubs": listNativeHubs().map { $0.asBridgeDictionary() }]
+
+        case "hubs.switch":
+            guard let id = (args["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !id.isEmpty,
+                  hubStore.profiles.contains(where: { $0.id == id }) else {
+                throw BridgeCallError.invalidArgument(L10n.tr("未找到指定的 Hub", "Unknown Hub"))
+            }
+            let wasAlreadyActive = (hubStore.activeHubID == id)
+            if !wasAlreadyActive {
+                hubStore.selectHub(id: id)
+                await activateCurrentHub(forceReloadWeb: true)
+                return [:]
+            }
+            // Retrying an offline active Hub from HubChooser (`down = true`): reload if recovered, else surface error.
+            activationGeneration &+= 1
+            await activateCurrentHub(forceReloadWeb: false)
+            if summary.phase == .offline {
+                throw BridgeCallError.operationFailed(
+                    summary.errorMessage ?? L10n.tr("无法连接到该 Hub", "Could not connect to Hub")
+                )
+            }
+            webReloadNonce = UUID()
+            return [:]
+
+        case "hubs.add":
+            let rawAddress = (args["address"] as? String) ?? ""
+            let rawName = args["name"] as? String
+            guard var candidate = HubStore.makeManualCandidate(address: rawAddress, name: rawName) else {
+                throw BridgeCallError.invalidArgument(L10n.tr("Hub 地址格式无效", "Invalid Hub address"))
+            }
+            let resolved: ResolvedHubEndpoint
+            do {
+                resolved = try await resolver.resolve(profile: candidate)
+            } catch let err as EndpointResolutionError {
+                if case .notSteveHub(let webURL) = err,
+                   let behindURL = await EndpointResolver.resolveHubBehind(webURL: webURL),
+                   let behindCandidate = HubStore.makeManualCandidate(address: behindURL.absoluteString, name: rawName) {
+                    candidate = behindCandidate
+                    resolved = try await resolver.resolve(profile: candidate)
+                } else {
+                    throw err
+                }
+            }
+            var verified = candidate
+            verified.lastKnownVersion = resolved.hello.version
+            verified.lastConnectedAt = Date()
+            _ = hubStore.upsertProfile(verified, makeActive: true)
+            purgePendingWebCookies()
+            await activateCurrentHub(forceReloadWeb: true)
+            return [:]
+
+        case "hubs.forget":
+            guard let id = (args["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !id.isEmpty,
+                  let target = hubStore.profiles.first(where: { $0.id == id }) else {
+                throw BridgeCallError.invalidArgument(L10n.tr("未找到指定的 Hub", "Unknown Hub"))
+            }
+            guard !target.isLocalDefault else {
+                throw BridgeCallError.invalidArgument(
+                    L10n.tr("默认本机 Hub 不可移除", "The default local Hub cannot be removed")
+                )
+            }
+            await forgetHub(id: id)
+            return [:]
+
+        case "pair.claim":
+            let rawLink = (args["link"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let payload = PairingPayload.parse(rawLink) else {
+                throw BridgeCallError.invalidArgument(
+                    L10n.tr(
+                        "配对链接无效，请检查二维码或配对地址格式。",
+                        "Invalid pairing link. Check the QR code or pairing link."
+                    )
+                )
+            }
+            try await requestBridgePairingConfirmation(rawURI: rawLink, payload: payload)
+            return [:]
+
+        case "pair.scan":
+            guard platform == "ios" else {
+                throw BridgeCallError.unsupportedOperation(op)
+            }
+            isQRScannerPresented = true
+            return [:]
+
+        default:
+            throw BridgeCallError.unsupportedOperation(op)
+        }
+    }
+
+    // MARK: - Native Actions (Menu Bar / Commands / Deep Links / Scanner)
+
     public func switchToHub(id: String) {
+        guard hubStore.profiles.contains(where: { $0.id == id }) else { return }
         guard hubStore.activeHubID != id else { return }
         hubStore.selectHub(id: id)
         Task { [weak self] in
@@ -152,15 +349,17 @@ public final class SteveClientCoordinator: ObservableObject {
     }
 
     public func removeHub(id: String) {
-        guard let removed = hubStore.removeHub(id: id) else { return }
-        let removedID = removed.profile.id
-        let prefix = HubLoopbackProxy.hubCookiePrefix(for: removedID)
-        let cookieStore = WKWebsiteDataStore.default().httpCookieStore
-        cookieStore.getAllCookies { cookies in
-            for cookie in cookies where cookie.name.hasPrefix(prefix) {
-                cookieStore.delete(cookie, completionHandler: nil)
-            }
+        Task { [weak self] in
+            await self?.forgetHub(id: id)
         }
+    }
+
+    private func forgetHub(id: String) async {
+        guard let removed = hubStore.removeHub(id: id) else { return }
+        if removed.wasActive {
+            activationGeneration &+= 1
+        }
+        purgePendingWebCookies()
         if let cred = removed.credential, !cred.isEmpty,
            let endpoint = removed.profile.orderedEndpoints.first {
             let clientAPI = self.api
@@ -169,8 +368,21 @@ public final class SteveClientCoordinator: ObservableObject {
             }
         }
         if removed.wasActive {
-            Task { [weak self] in
-                await self?.activateCurrentHub(forceReloadWeb: true)
+            await activateCurrentHub(forceReloadWeb: true)
+        }
+    }
+
+    public func purgePendingWebCookies() {
+        let purgedIDs = hubStore.drainCookieCleanupHubIDs()
+        guard !purgedIDs.isEmpty else { return }
+        if let purgeWebCookiesHandler {
+            purgeWebCookiesHandler(purgedIDs)
+            return
+        }
+        let cookieStore = WKWebsiteDataStore.default().httpCookieStore
+        cookieStore.getAllCookies { cookies in
+            for cookie in cookies where HubLoopbackProxy.shouldDeleteWebCookie(named: cookie.name, purgedHubIDs: purgedIDs) {
+                cookieStore.delete(cookie, completionHandler: nil)
             }
         }
     }
@@ -194,28 +406,34 @@ public final class SteveClientCoordinator: ObservableObject {
     }
 
     public func addAndSwitchManualHub(address: String, name: String?) async throws {
-        guard let added = hubStore.addManualHub(address: address, name: name, makeActive: true) else {
-            throw EndpointResolutionError.noCandidates
-        }
-        _ = added
-        await activateCurrentHub(forceReloadWeb: true)
+        _ = try await handleBridgeCall(
+            op: "hubs.add",
+            args: [
+                "address": address,
+                "name": name ?? "",
+            ],
+            platform: "macos"
+        )
     }
 
-    // MARK: - External `steve://pair` Confirmation Gate
+    // MARK: - Pairing Confirmation Gate (Unified Across Bridge, Scanner & `steve://`)
 
     public func requestExternalPairingConfirmation(uri: String) {
         let trimmed = uri.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let payload = PairingPayload.parse(trimmed) else {
             externalPairErrorMessage = L10n.tr(
                 "配对链接无效，请检查二维码或配对地址格式。",
-                "Invalid pairing link. Check the QR code or pairing URI."
+                "Invalid pairing link. Check the QR code or pairing link."
             )
             return
         }
-        pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: trimmed, payload: payload)
+        replacePendingPairConfirmation(
+            PendingPairConfirmation(rawURI: trimmed, payload: payload),
+            continuation: nil
+        )
     }
 
-    /// Validates a scanned or pasted `steve://pair` URI from the iOS scanner, dismisses the scanner,
+    /// Validates a scanned or pasted pairing link from the iOS scanner, dismisses the scanner,
     /// and stages user confirmation so no code is ever claimed before the user approves the target Hub.
     @discardableResult
     public func stageScannedPairingCode(_ raw: String) -> Bool {
@@ -224,31 +442,67 @@ public final class SteveClientCoordinator: ObservableObject {
             return false
         }
         isQRScannerPresented = false
-        pendingExternalPairConfirmation = PendingPairConfirmation(rawURI: trimmed, payload: payload)
+        replacePendingPairConfirmation(
+            PendingPairConfirmation(rawURI: trimmed, payload: payload),
+            continuation: nil
+        )
         return true
+    }
+
+    private func requestBridgePairingConfirmation(rawURI: String, payload: PairingPayload) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            replacePendingPairConfirmation(
+                PendingPairConfirmation(rawURI: rawURI, payload: payload),
+                continuation: continuation
+            )
+        }
+    }
+
+    private func replacePendingPairConfirmation(
+        _ confirmation: PendingPairConfirmation,
+        continuation: CheckedContinuation<Void, Error>?
+    ) {
+        if let existing = pendingPairContinuation {
+            pendingPairContinuation = nil
+            existing.resume(returning: ())
+        }
+        pendingPairContinuation = continuation
+        pendingExternalPairConfirmation = confirmation
     }
 
     public func cancelPendingExternalPairing() {
         pendingExternalPairConfirmation = nil
+        if let cont = pendingPairContinuation {
+            pendingPairContinuation = nil
+            cont.resume(returning: ())
+        }
     }
 
     @discardableResult
     public func confirmPendingExternalPairing() async -> HubProfile? {
         guard let pending = pendingExternalPairConfirmation else { return nil }
+        let cont = pendingPairContinuation
+        pendingPairContinuation = nil
         pendingExternalPairConfirmation = nil
         do {
-            return try await pairWithQRCode(uri: pending.rawURI)
+            let profile = try await pairWithLink(uri: pending.rawURI)
+            cont?.resume(returning: ())
+            return profile
         } catch {
-            externalPairErrorMessage = error.localizedDescription
+            if let cont {
+                cont.resume(throwing: error)
+            } else {
+                externalPairErrorMessage = error.localizedDescription
+            }
             return nil
         }
     }
 
-    /// Pairs this device by resolving the QR payload's public-first / LAN-fallback endpoints
+    /// Pairs this device by resolving the pairing link's public-first / LAN-fallback endpoints
     /// and claiming the single-use `stp_...` code for a dedicated Keychain-stored client credential.
-    /// Private so every external/UI entry point must pass through `pendingExternalPairConfirmation`.
+    /// Private so every external/UI/bridge entry point must pass through `pendingExternalPairConfirmation`.
     @discardableResult
-    private func pairWithQRCode(uri: String) async throws -> HubProfile {
+    private func pairWithLink(uri: String) async throws -> HubProfile {
         guard let payload = PairingPayload.parse(uri) else {
             throw HubClientAPIError.invalidResponse
         }
@@ -262,6 +516,13 @@ public final class SteveClientCoordinator: ObservableObject {
             throw HubClientAPIError.missingCredential
         }
 
+        var existingCredentialsByID: [String: String] = [:]
+        for p in hubStore.profiles {
+            if let c = hubStore.credential(for: p.id), !c.isEmpty {
+                existingCredentialsByID[p.id] = c
+            }
+        }
+
         let displayName = payload.name ?? resolved.url.host ?? "Steve Hub"
         let profile = HubProfile(
             name: displayName,
@@ -273,65 +534,18 @@ public final class SteveClientCoordinator: ObservableObject {
             lastKnownVersion: claim.hub.version,
             lastConnectedAt: Date()
         )
+        activationGeneration &+= 1
         let saved = try hubStore.addPairedProfile(profile, credential: credential, makeActive: true)
+        if let replacedCred = existingCredentialsByID[saved.id], replacedCred != credential {
+            let clientAPI = self.api
+            let endpoint = resolved.url
+            Task {
+                await clientAPI.signOutClient(endpoint: endpoint, credential: replacedCred)
+            }
+        }
+        purgePendingWebCookies()
         await activateCurrentHub(forceReloadWeb: true)
         return saved
-    }
-
-    public func signInActiveHubWithToken(user: String, token: String) async throws {
-        guard let profile = hubStore.currentProfile else {
-            throw EndpointResolutionError.noCandidates
-        }
-        let resolved = try await resolver.resolve(profile: profile)
-        let signed = try await api.signInWithToken(
-            endpoint: resolved.url,
-            user: user,
-            token: token,
-            client: clientDescriptor
-        )
-        guard let credential = signed.credential, !credential.isEmpty else {
-            throw HubClientAPIError.missingCredential
-        }
-        guard hubStore.updateAuthMetadata(
-            id: profile.id,
-            clientID: signed.client_id,
-            userName: signed.user.name,
-            credential: credential
-        ) else {
-            throw CredentialStoreError.saveFailed
-        }
-        hubStore.updateConnectionMetadata(id: profile.id, version: signed.hub.version)
-        await activateCurrentHub(forceReloadWeb: true)
-    }
-
-    public func createPairingForActiveHub() async throws -> CreatedPairing {
-        guard let profile = hubStore.currentProfile else {
-            throw EndpointResolutionError.noCandidates
-        }
-        let endpoint = summary.activeEndpoint ?? profile.orderedEndpoints.first
-        guard let endpoint else {
-            throw EndpointResolutionError.noCandidates
-        }
-        let created = try await api.createPairing(
-            endpoint: endpoint,
-            credential: hubStore.credential(for: profile.id)
-        )
-        lastCreatedPairing = created
-        return created
-    }
-
-    public func pollPairingStatus(id: String) async throws -> PairingClaimStatus {
-        guard let profile = hubStore.currentProfile else {
-            throw EndpointResolutionError.noCandidates
-        }
-        guard let endpoint = summary.activeEndpoint ?? profile.orderedEndpoints.first else {
-            throw EndpointResolutionError.noCandidates
-        }
-        return try await api.pairingStatus(
-            endpoint: endpoint,
-            id: id,
-            credential: hubStore.credential(for: profile.id)
-        )
     }
 
     // MARK: - Internal Resolution & Status Polling
@@ -341,6 +555,7 @@ public final class SteveClientCoordinator: ObservableObject {
     }
 
     public func activateCurrentHub(forceReloadWeb: Bool) async {
+        purgePendingWebCookies()
         if forceReloadWeb {
             activationGeneration &+= 1
         }
@@ -360,8 +575,6 @@ public final class SteveClientCoordinator: ObservableObject {
             return
         }
 
-        let credential = hubStore.credential(for: profile.id)
-
         if forceReloadWeb {
             summary = HubRuntimeSummary(
                 phase: .connecting,
@@ -376,17 +589,22 @@ public final class SteveClientCoordinator: ObservableObject {
             guard activationGeneration == capturedGen, hubStore.activeHubID == profile.id else {
                 return
             }
-            proxy.updateTarget(.init(hubID: profile.id, baseURL: resolved.url, credential: credential))
+            let freshCredential = hubStore.credential(for: profile.id)
+            proxy.updateTarget(.init(hubID: profile.id, baseURL: resolved.url, credential: freshCredential))
             hubStore.updateConnectionMetadata(id: profile.id, version: resolved.hello.version)
 
             let liveSummary = try? await api.fetchStateSummary(
                 endpoint: resolved.url,
                 route: resolved.route,
                 helloVersion: resolved.hello.version,
-                credential: credential
+                credential: freshCredential
             )
             guard activationGeneration == capturedGen, hubStore.activeHubID == profile.id else {
                 return
+            }
+            let latestCredential = hubStore.credential(for: profile.id)
+            if latestCredential != freshCredential {
+                proxy.updateTarget(.init(hubID: profile.id, baseURL: resolved.url, credential: latestCredential))
             }
             if let liveSummary {
                 summary = liveSummary
@@ -403,8 +621,9 @@ public final class SteveClientCoordinator: ObservableObject {
             guard activationGeneration == capturedGen, hubStore.activeHubID == profile.id else {
                 return
             }
-            // Even when offline, point the proxy at the primary candidate so user retries reach it once up
-            proxy.updateTarget(.init(hubID: profile.id, baseURL: profile.orderedEndpoints.first, credential: credential))
+            let freshCredential = hubStore.credential(for: profile.id)
+            // Leave baseURL nil when unreachable so `/auth/hello` returns an immediate 503 to the web UI.
+            proxy.updateTarget(.init(hubID: profile.id, baseURL: nil, credential: freshCredential))
             summary = HubRuntimeSummary(
                 phase: .offline,
                 activeEndpoint: profile.orderedEndpoints.first,
