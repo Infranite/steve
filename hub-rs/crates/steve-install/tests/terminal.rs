@@ -451,9 +451,14 @@ fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
     let cli = installer(&root);
     manager(&bin, &root.join("manager-calls"), false);
     // 1.2.2 finished installing here; the installer is 1.2.3
+    // its vault keys are in a directory of their own, outside its home
+    let keys = root.join("vault keys");
+    fs::create_dir_all(&keys).unwrap();
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o700)).unwrap();
+    private_fixture_file(&keys.join("vault.key"), b"the key that opens that database");
     let receipt = serde_json::to_vec(&json!({
         "format":1,"component":"hub","home":home,"version":"1.2.2","commit":"b".repeat(40),
-        "steps":["environment","verified","installed"],"files":{}
+        "steps":["environment","verified","installed"],"files":{},"key_directory":keys
     }))
     .unwrap();
     private_fixture_file(&home.join("setup.json"), &receipt);
@@ -481,6 +486,7 @@ fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
         assert!(said.contains("Hub 1.2.2 · bbbbbbbb；不会覆盖"), "{args:?}: {said}");
         assert!(said.contains("steve setup --fresh"), "{args:?}: {said}");
         assert_eq!(installation_tree(&account), before, "{args:?} changed the installation");
+        assert!(keys.join("vault.key").is_file(), "{args:?} moved the keys");
     }
     assert!(!root.join("manager-calls").exists(), "a refusal asks the service manager nothing");
 
@@ -508,6 +514,12 @@ fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
         .filter(|(path, _)| !path.as_os_str().is_empty())
         .collect();
     assert_eq!(kept, was, "nothing in the installation set aside changed");
+    // its keys went with it under the same stamp, so the same key directory can be given again:
+    // the next installation starts with an empty one, and the old data keeps the keys that open it
+    let keys_aside = root.join(format!("vault keys{}", name.strip_prefix(".steve").unwrap()));
+    assert_eq!(fs::read(keys_aside.join("vault.key")).unwrap(), b"the key that opens that database");
+    assert!(!keys.exists(), "the old keys are out of the new installation's way");
+    assert!(said.contains(keys_aside.to_str().unwrap()), "setup says where the keys went: {said}");
     let started: Value = serde_json::from_slice(&fs::read(home.join("setup.json")).unwrap()).unwrap();
     assert_eq!(started["version"], "1.2.3");
     assert_eq!(started["steps"], json!([]));

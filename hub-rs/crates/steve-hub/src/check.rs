@@ -62,7 +62,7 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
                 &cfg.data_dir.join("node"),
                 vars("STEVE_CONFINE"),
             ) {
-                warnings.push(format!("STEVE_CONFINE: runs will not be sandboxed: {why}"));
+                warnings.push(steve_i18n::t!("hub.check.unconfined", why = why));
             }
         }
         Ok(false) => {}
@@ -125,28 +125,21 @@ pub(crate) fn local_node_warnings(cfg: &Config, vars: &crate::wire::Vars) -> Vec
             {
                 continue;
             }
-            warnings.push(format!(
-                "ACP adapter {harness} is unavailable at {adapter}; install its ACP adapter \
-                 and configure its registry entry with an absolute path before starting \
-                 {harness} tasks (docs/deployment.md#harness-setup)"
+            warnings.push(steve_i18n::t!(
+                "hub.check.adapter_missing",
+                harness = harness,
+                adapter = adapter
             ));
         } else if js && !available(&cfg.node, true) {
-            warnings.push(format!(
-                "STEVE_NODE: Node.js executable is unavailable at {}; install Node.js or set \
-                 its absolute path before starting {harness} tasks",
-                cfg.node
+            warnings.push(steve_i18n::t!(
+                "hub.check.node_missing",
+                node = cfg.node,
+                harness = harness
             ));
         }
     }
     if crate::wire::principal_state(vars) {
-        warnings.push(
-            "STEVE_PRINCIPAL_STATE=on (default): new sessions use a separate harness directory; \
-             existing sessions keep their recorded state. Codex login is not copied. Authenticate \
-             each principal in the Node's state/<runtime_sessions.state_dir>/harness directory \
-             before continuing their tasks; see docs/deployment.md#harness-setup. \
-             STEVE_PRINCIPAL_STATE=off restores shared state for new sessions only."
-                .into(),
-        );
+        warnings.push(steve_i18n::t!("hub.check.principal_state"));
     }
     warnings
 }
@@ -205,9 +198,47 @@ mod tests {
                 kv.push((k.into(), v.into()));
             }
         }
-        let r = check(move |k| kv.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone()));
+        let r = steve_i18n::with(steve_i18n::EN, || {
+            check(move |k| kv.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone()))
+        });
         drop(tmp);
         r
+    }
+
+    /// What the check warns about is read by whoever started it: `steve setup` shows it in its own
+    /// language, so the warnings come in the language the check runs in, the variable names as they are.
+    #[test]
+    fn warnings_come_in_the_language_of_their_reader() {
+        let vars: crate::wire::Vars = Arc::new(|k: &str| match k {
+            "PATH" => Some("/usr/bin:/bin".into()),
+            _ => None,
+        });
+        let cfg = Config::from_vars(|k| match k {
+            "STEVE_HOME" => Some("/nonexistent/steve-test/home".into()),
+            "STEVE_ADAPTER_CODEX" => Some("/nonexistent/steve-test/codex-acp".into()),
+            "STEVE_ADAPTER_CLAUDE" => Some("/usr/bin/false".into()),
+            _ => None,
+        })
+        .expect("config");
+        let zh = steve_i18n::with(steve_i18n::ZH_CN, || local_node_warnings(&cfg, &vars));
+        let en = steve_i18n::with(steve_i18n::EN, || local_node_warnings(&cfg, &vars));
+        assert_eq!(zh.len(), en.len(), "{zh:?} {en:?}");
+        assert!(
+            zh.iter().any(|w| w.contains("ACP 适配器 codex")
+                && w.contains("/nonexistent/steve-test/codex-acp")),
+            "{zh:?}"
+        );
+        assert!(
+            zh.iter().any(|w| w.starts_with("STEVE_PRINCIPAL_STATE=on")
+                && w.contains("harness-setup")
+                && w.contains("登录")),
+            "{zh:?}"
+        );
+        assert!(
+            en.iter().any(|w| w.starts_with("STEVE_PRINCIPAL_STATE=on")
+                && w.contains("Codex login is not copied")),
+            "{en:?}"
+        );
     }
 
     #[test]

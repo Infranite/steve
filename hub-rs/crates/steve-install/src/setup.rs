@@ -289,10 +289,15 @@ const OWNER_TOKEN: &str = "secrets/owner.token";
 fn completion_lines(
     role: &str,
     home: &Path,
+    label: Option<&str>,
     environment: &Value,
     paired: bool,
 ) -> Result<Vec<String>> {
-    let quoted_home = shell_quote(home.to_str().context(t!("install.setup.home_not_utf8"))?)?;
+    /* what selects this installation in a command: its home always, its label when it has its own */
+    let mut selected = format!("--home {}", shell_quote(home.to_str().context(t!("install.setup.home_not_utf8"))?)?);
+    if let Some(label) = label {
+        selected.push_str(&format!(" --label {}", shell_quote(label)?));
+    }
     let mut lines = vec![t!("install.setup.plain.configured", role = role, home = home.display())];
     if role == "hub" {
         let host = environment["STEVE_HOST"]
@@ -305,7 +310,14 @@ fn completion_lines(
             .parse()?;
         lines.push(t!("install.setup.plain.listen", address = SocketAddr::new(host, port)));
         if let Some(web) = environment["STEVE_WEB_PORT"].as_str() {
-            lines.push(t!("install.setup.plain.web_port", web = web, port = port));
+            /* the address to type: the one it listens on, or this machine's when it listens on all */
+            let ip: std::net::IpAddr = host;
+            let hub = if ip.is_unspecified() {
+                format!("http://{}:{port}", t!("install.setup.plain.this_machine"))
+            } else {
+                format!("http://{}", SocketAddr::new(ip, port))
+            };
+            lines.push(t!("install.setup.plain.web_port", web = web, hub = hub));
         }
         lines.push(t!("install.setup.plain.browser_address", url = environment["STEVE_PUBLIC_URL"].as_str().unwrap_or("")));
     } else if paired {
@@ -314,17 +326,17 @@ fn completion_lines(
         );
     } else {
         lines.push(t!("install.setup.plain.node_unpaired"));
-        lines.push(format!("steve setup node --home {quoted_home}"));
+        lines.push(format!("steve setup node {selected}"));
     }
     lines.push(if role == "node" {
         t!("install.setup.plain.start_after_pairing")
     } else {
         t!("install.setup.plain.start_service")
     });
-    lines.push(format!("steve {role} start --home {quoted_home}"));
+    lines.push(format!("steve {role} start {selected}"));
     lines.push(t!("install.setup.plain.status_commands"));
-    lines.push(format!("steve {role} status --home {quoted_home}"));
-    lines.push(format!("steve {role} doctor --home {quoted_home}"));
+    lines.push(format!("steve {role} status {selected}"));
+    lines.push(format!("steve {role} doctor {selected}"));
     if role == "hub" {
         match fs::read_to_string(home.join(OWNER_TOKEN)) {
             Ok(saved) => {
@@ -432,6 +444,24 @@ fn captured(
             "{}", t!("install.setup.command_failed", status = output.status));
     }
     serde_json::from_slice(&output.stdout).context(t!("install.setup.command_no_json"))
+}
+
+/// The Hub's own check of this environment (`steve-hub --check-config`): its report, also when it
+/// found the configuration wrong (exit 2, `ok: false`, the reasons under `errors`).
+fn config_report(program: &Path, home: &Path, environment: &Value) -> Result<Value> {
+    let mut command = clean_command(program, Some(home));
+    command.arg("--check-config").stdin(std::process::Stdio::null());
+    for (key, value) in environment.as_object().into_iter().flatten() {
+        command.env(key, value.as_str().context(t!("install.setup.env_value_not_string"))?);
+    }
+    let output = command
+        .output()
+        .with_context(|| t!("install.setup.run_failed", path = program.display()))?;
+    match serde_json::from_slice::<Value>(&output.stdout) {
+        Ok(report) if report["ok"].is_boolean() => Ok(report),
+        _ if !output.status.success() => bail!("{}", t!("install.setup.command_failed", status = output.status)),
+        _ => bail!("{}", t!("install.setup.command_no_json")),
+    }
 }
 
 fn verify_bundle(root: &Path, expected: &Value, home: &Path) -> Result<()> {
@@ -933,8 +963,10 @@ fn stamp() -> String {
 
 /// Moves the installation in `home` out of the way, whole: its service is stopped and unregistered
 /// and the directory renamed next to itself. Nothing in it is changed or deleted, so moving it back
-/// and registering the service again restores it.
-fn set_aside(home: &Path) -> Result<PathBuf> {
+/// and registering the service again restores it. A Hub's key directory (outside its home) goes with
+/// it under the same stamp, the second path returned: those keys open the data set aside and no
+/// other, and the next installation starts with an empty directory of its own.
+fn set_aside(home: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
     owned(home, true)?;
     owned(&home.join("setup.json"), false).context(t!("install.setup.aside.no_receipt"))?;
     let record = read_json(&home.join("setup.json"))?;
@@ -964,14 +996,29 @@ fn set_aside(home: &Path) -> Result<PathBuf> {
             bail!("{}", t!("install.setup.aside.still_running"));
         }
     }
-    let name = home.file_name().and_then(|n| n.to_str()).context(t!("install.setup.home_not_utf8"))?;
-    let aside = home.with_file_name(format!("{name}.bak-{}", stamp()));
-    if exists(&aside) {
-        bail!("{}", t!("install.setup.aside.target_exists", aside = aside.display()));
-    }
+    let stamp = stamp();
+    let beside = |dir: &Path| -> Result<PathBuf> {
+        let name = dir.file_name().and_then(|n| n.to_str()).context(t!("install.setup.home_not_utf8"))?;
+        let aside = dir.with_file_name(format!("{name}.bak-{stamp}"));
+        if exists(&aside) {
+            bail!("{}", t!("install.setup.aside.target_exists", aside = aside.display()));
+        }
+        Ok(aside)
+    };
+    let aside = beside(home)?;
+    /* only a directory setup made for this installation's keys: this user's, private, apart from the home */
+    let keys = record["key_directory"]
+        .as_str()
+        .map(PathBuf::from)
+        .filter(|keys| keys.is_absolute() && !keys.starts_with(home) && !home.starts_with(keys) && owned(keys, true).is_ok());
+    let keys_aside = keys.as_deref().map(beside).transpose()?;
     drop(lock);
     fs::rename(home, &aside)?;
-    Ok(aside)
+    if let (Some(keys), Some(keys_aside)) = (&keys, &keys_aside) {
+        fs::rename(keys, keys_aside)
+            .with_context(|| t!("install.setup.aside.keys_left", keys = keys.display(), aside = aside.display()))?;
+    }
+    Ok((aside, keys_aside))
 }
 
 pub fn reconfigure_existing(options: Options) -> Result<()> {
@@ -1250,7 +1297,10 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         let aside = ui::step(
             &t!("install.setup.existing.moving"),
             || set_aside(&home),
-            |aside| (t!("install.setup.existing.moved"), aside.display().to_string()),
+            |(aside, keys)| {
+                let keys = keys.as_ref().map(|k| format!(" · {}", t!("install.setup.existing.moved_keys", keys = k.display())));
+                (t!("install.setup.existing.moved"), format!("{}{}", aside.display(), keys.unwrap_or_default()))
+            },
         )?;
         let _ = aside;
     }
@@ -1424,14 +1474,15 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         let check = ui::step(
             &t!("install.setup.step.checking"),
             || {
-                let check = captured(
-                    &candidate.join("bin/steve-hub"),
-                    &home,
-                    &["--check-config"],
-                    Some(env),
-                )?;
+                let check = config_report(&candidate.join("bin/steve-hub"), &home, env)?;
                 if check["ok"] != true {
-                    bail!("{}", t!("install.setup.step.check_failed"));
+                    /* and why, in the Hub's words: without them the user is sent to look elsewhere */
+                    let mut said = t!("install.setup.step.check_failed");
+                    for reason in check["errors"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                        said.push_str("\n  ");
+                        said.push_str(reason);
+                    }
+                    bail!("{said}");
                 }
                 Ok(check)
             },
@@ -1489,6 +1540,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
     for line in completion_lines(
         &role,
         &home,
+        options.label.as_deref(),
         &wizard.record["environment"],
         home.join("node/node.json").is_file(),
     )? {
@@ -1708,7 +1760,7 @@ mod tests {
         let home = Path::new("/tmp/steve user's data");
         for (host, address) in [("0.0.0.0", "0.0.0.0:8440"), ("::1", "[::1]:8440")] {
             let env = json!({"STEVE_HOST":host,"STEVE_PORT":"8440","STEVE_PUBLIC_URL":"https://hub.example"});
-            let lines = completion_lines("hub", home, &env, false).unwrap();
+            let lines = completion_lines("hub", home, None, &env, false).unwrap();
             assert!(lines.contains(&format!("监听地址：{address}")));
             assert!(
                 lines
@@ -1722,13 +1774,29 @@ mod tests {
             }
             assert!(lines.iter().any(|line| line.contains("用用户名和 token 登录")));
         }
-        let lines = completion_lines("node", home, &Value::Null, false)
+        // an installation with a label of its own is named by it in every command, and the Hub
+        // address to type is the one it listens on (this machine's only when it listens on all)
+        let label = Some("io.example.trial.hub");
+        for (host, hub) in [("127.0.0.1", "http://127.0.0.1:18440"), ("::1", "http://[::1]:18440"), ("0.0.0.0", "http://<这台机器的地址>:18440")] {
+            let env = json!({"STEVE_HOST":host,"STEVE_PORT":"18440","STEVE_WEB_PORT":"18441","STEVE_PUBLIC_URL":"http://127.0.0.1:18441"});
+            let lines = completion_lines("hub", home, label, &env, false).unwrap();
+            for action in ["start", "status", "doctor"] {
+                assert!(
+                    lines.contains(&format!(r"steve hub {action} --home '/tmp/steve user'\''s data' --label 'io.example.trial.hub'")),
+                    "{lines:?}"
+                );
+            }
+            assert!(lines.contains(&format!("网页端口：18441。第一次打开网页时，输入 Hub 地址 {hub}")), "{lines:?}");
+        }
+        let lines = completion_lines("node", home, label, &Value::Null, false).unwrap().join("\n");
+        assert!(lines.contains("steve setup node --home '/tmp/steve user'\\''s data' --label 'io.example.trial.hub'"), "{lines}");
+        let lines = completion_lines("node", home, None, &Value::Null, false)
             .unwrap()
             .join("\n");
         assert!(lines.contains("Node 尚未配对"));
         assert!(lines.contains("steve setup node --home"));
         assert!(!lines.contains("完整指纹"));
-        let lines = completion_lines("node", home, &Value::Null, true)
+        let lines = completion_lines("node", home, None, &Value::Null, true)
             .unwrap()
             .join("\n");
         assert!(lines.contains("核对并确认完整指纹"));
@@ -2013,6 +2081,41 @@ mod tests {
         assert!(stamp.bytes().enumerate().all(|(at, b)| at == 8 || b.is_ascii_digit()), "{stamp}");
     }
 
+    /// The Hub's check answers with a report also when it refuses the configuration (exit 2): setup
+    /// reads it either way, so it can say why; and the check is told setup's language.
+    #[test]
+    fn a_refused_configuration_still_gives_its_report() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let hub = |name: &str, body: &str| {
+            let path = temp.path().join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        let env = json!({"STEVE_PORT":"18440"});
+        let refused = hub(
+            "refused",
+            r#"[ "$1" = --check-config ] || exit 95
+echo '{"ok":false,"errors":["STEVE_HOST: cannot listen on 192.0.2.9"],"listen":[],"warnings":[]}'
+exit 2"#,
+        );
+        let report = config_report(&refused, temp.path(), &env).unwrap();
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["errors"], json!(["STEVE_HOST: cannot listen on 192.0.2.9"]));
+        let passed = hub("passed", r#"echo "{\"ok\":true,\"warnings\":[\"$STEVE_LANG $STEVE_PORT $STEVE_HOME\"]}""#);
+        let report = config_report(&passed, temp.path(), &env).unwrap();
+        assert_eq!(
+            report["warnings"][0],
+            format!("{} 18440 {}", steve_i18n::current(), temp.path().display())
+        );
+        // no report at all is the command's failure, not a verdict on the configuration
+        let broken = hub("broken", "exit 3");
+        assert!(config_report(&broken, temp.path(), &env).is_err());
+        let silent = hub("silent", "exit 0");
+        assert!(config_report(&silent, temp.path(), &env).is_err());
+    }
+
     #[test]
     fn completion_shows_the_owner_token() {
         let temp = tempfile::tempdir().unwrap();
@@ -2020,7 +2123,7 @@ mod tests {
         private_dir(&home.join("secrets")).unwrap();
         private_file(&home.join(OWNER_TOKEN), b"user=lee\ntoken=stt_abc\n").unwrap();
         let env = json!({"STEVE_HOST":"127.0.0.1","STEVE_PORT":"8440","STEVE_PUBLIC_URL":"http://127.0.0.1:8440"});
-        let lines = completion_lines("hub", home, &env, false).unwrap();
+        let lines = completion_lines("hub", home, None, &env, false).unwrap();
         assert!(lines.contains(&"登录用户名：lee".to_string()), "{lines:?}");
         assert!(lines.contains(&"访问 token：stt_abc".to_string()), "{lines:?}");
     }
