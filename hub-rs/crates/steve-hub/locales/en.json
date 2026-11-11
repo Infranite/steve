@@ -268,5 +268,17 @@
   "hub.dep_wait.owner_only": "The main item's owner manages its waits for prerequisites",
   "hub.dep_wait.no_session": "The current owner has no live session to resume",
   "hub.dep_wait.work_running": "Collaboration work is still running or its stop is not confirmed; pause the work graph and confirm it stopped before registering a wait for prerequisites",
-  "hub.session.node_parked": "This session is bound to a Node, but Nodes are not enabled here (STEVE_NODE_MODE): the message is queued and will not go to the old runner."
+  "hub.session.node_parked": "This session is bound to a Node, but Nodes are not enabled here (STEVE_NODE_MODE): the message is queued and will not go to the old runner.",
+  "hub.plugins.owner_only": "Only the instance owner can add plugin libraries and install plugins",
+  "hub.plugins.no_library": "No such plugin library",
+  "hub.plugins.library_twice": "This library is already added",
+  "hub.plugins.too_many_libraries": "Too many plugin libraries; remove one first",
+  "hub.plugins.library_in_use": "Plugins from this library are installed; uninstall them first",
+  "hub.plugins.no_plugin": "This library has no such plugin; refresh the library and try again",
+  "hub.plugins.needs_newer": "This plugin needs a newer Steve",
+  "hub.plugins.no_build": "This plugin has no build for this machine (%{target})",
+  "hub.plugins.not_installed": "This plugin is not installed",
+  "hub.plugins.plugin_in_use": "This plugin is still connected; disconnect its accounts first",
+  "hub.plugins.settings_wrong": "Check these settings: %{fields}",
+  "hub.plugins.not_started": "The plugin did not start: %{detail}"
 }
