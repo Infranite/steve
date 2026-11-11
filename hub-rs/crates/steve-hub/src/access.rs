@@ -783,6 +783,33 @@ mod tests {
         assert_eq!(ep_loop.public_url, None);
         assert!(ep_loop.lan_urls.is_empty());
         assert!(ep_loop.loopback_only);
+
+        // A name under `localhost` is this machine to whoever asks: offered to nobody.
+        let ep_named = pair_endpoints_with(
+            &mk("127.0.0.1", false, "https://steve.localhost"),
+            &h(&[("host", "steve.localhost")]),
+            &ifs,
+        );
+        assert!(ep_named.loopback_only, "{ep_named:?}");
+
+        // Names that resolve only inside a network are of the local network, not public.
+        for (name, local) in [
+            ("nas", true),
+            ("nas.home", true),
+            ("nas.home.arpa", true),
+            ("nas.internal", true),
+            ("nas.lan.", true),
+            ("steve.example", false),
+            ("localhome.example", false),
+        ] {
+            let ep = pair_endpoints_with(
+                &mk("127.0.0.1", false, &format!("http://{name}:8440")),
+                &h(&[("host", "127.0.0.1:8440")]),
+                &ifs,
+            );
+            assert_eq!(ep.public_url.is_none(), local, "{name}: {ep:?}");
+            assert_eq!(ep.lan_urls.is_empty(), !local, "{name}: {ep:?}");
+        }
     }
 }
 
@@ -1141,9 +1168,20 @@ pub struct PairEndpoints {
     pub loopback_only: bool,
 }
 
+/// A host another device reaches only from inside this network: a private or overlay address, a
+/// name with no dot, or a name under a suffix that is reserved or widely used for local networks.
 fn is_local_or_private_host(host: &str) -> bool {
     let h = host.trim_matches(['[', ']']).to_ascii_lowercase();
-    if h == "localhost" || h.ends_with(".local") || h.ends_with(".lan") {
+    let h = h.trim_end_matches('.');
+    const LOCAL_SUFFIXES: [&str; 6] = [
+        ".local",
+        ".lan",
+        ".home",
+        ".home.arpa",
+        ".internal",
+        ".localdomain",
+    ];
+    if is_loopback_name(h) || LOCAL_SUFFIXES.iter().any(|s| h.ends_with(s)) {
         return true;
     }
     if let Ok(ip) = h.parse::<IpAddr>() {
@@ -1156,12 +1194,19 @@ fn is_local_or_private_host(host: &str) -> bool {
                 mip.is_loopback() || private(&mip) || tailnet(&mip)
             }));
     }
-    false
+    !h.is_empty() && !h.contains('.')
 }
 
+/// `localhost` and every name under it, which resolve to this machine wherever they are asked.
+fn is_loopback_name(h: &str) -> bool {
+    h == "localhost" || h.ends_with(".localhost")
+}
+
+/// A host that names the machine it is asked on, so no other device can use it for this Hub.
 fn is_loopback_host(host: &str) -> bool {
     let h = host.trim_matches(['[', ']']).to_ascii_lowercase();
-    h == "localhost" || h.parse::<IpAddr>().is_ok_and(|ip| {
+    let h = h.trim_end_matches('.');
+    is_loopback_name(h) || h.parse::<IpAddr>().is_ok_and(|ip| {
         ip.is_loopback()
             || matches!(ip, IpAddr::V6(v) if v.to_ipv4_mapped().is_some_and(|m| m.is_loopback()))
     })
