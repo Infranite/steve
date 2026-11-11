@@ -312,7 +312,7 @@ The plugin has 20 seconds to start listening when it is first connected. One tha
 
 - `stores.json`: the libraries and the index last read from each;
 - `installed/<library>/<plugin>/`: `installed.json` beside the unpacked version;
-- `instances/<id>/`: `instance.json`, the settings (`config.json`) and `token`, both readable by the Hub's user only, the plugin's `data/`, and `plugin.log` with what it wrote to standard output and error. Look there first when a plugin does not start.
+- `instances/<id>/`: `instance.json`, the settings (`config.json`) and `token`, both readable by the Hub's user only, the plugin's `data/`, and `plugin.log` with what it wrote to standard output and error (started again once it passes 1 MiB). Look there first when a plugin does not start.
 
 ## Diagnostic capture and queries
 

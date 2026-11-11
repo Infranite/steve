@@ -13,6 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 /// The log of an instance is started again when it has grown past this.
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
+/// How often a running plugin's log is looked at for that.
+const LOG_CHECK: Duration = Duration::from_secs(60);
 /// How long a plugin gets to exit after its standard input closes and it is signalled.
 const STOP_GRACE: Duration = Duration::from_secs(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
@@ -79,22 +81,21 @@ fn environment(spec: &Spec) -> Vec<(String, String)> {
     env
 }
 
+/// The instance's log, opened for appending (so emptying it under a running plugin leaves no
+/// hole) and emptied when it has grown past [`MAX_LOG_BYTES`].
 fn log_file(dir: &Path) -> std::io::Result<std::fs::File> {
-    let path = dir.join("plugin.log");
-    let grown = std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES);
     let mut o = std::fs::OpenOptions::new();
-    o.create(true).write(true);
-    if grown {
-        o.truncate(true);
-    } else {
-        o.append(true);
-    }
+    o.create(true).append(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o600);
     }
-    o.open(path)
+    let log = o.open(dir.join("plugin.log"))?;
+    if log.metadata()?.len() > MAX_LOG_BYTES {
+        log.set_len(0)?;
+    }
+    Ok(log)
 }
 
 fn spawn(spec: &Spec) -> anyhow::Result<tokio::process::Child> {
@@ -129,30 +130,44 @@ async fn end(mut child: tokio::process::Child, stdin: Option<tokio::process::Chi
     }
 }
 
+/// One run of the plugin, to its exit; `None` when it was stopped instead.
+async fn run(spec: &Spec, stop: &CancellationToken, status: &Mutex<Status>) -> Option<String> {
+    let mut child = match spawn(spec) {
+        Ok(child) => child,
+        Err(e) => return Some(format!("not started: {e:#}")),
+    };
+    *lock(status) = Status::Running {
+        pid: child.id().unwrap_or_default(),
+    };
+    // held here for as long as it runs: `wait` would close it, and to the plugin that is the Hub
+    // going away
+    let stdin = child.stdin.take();
+    let mut tidy = tokio::time::interval(LOG_CHECK);
+    loop {
+        tokio::select! {
+            _ = stop.cancelled() => {
+                end(child, stdin).await;
+                return None;
+            }
+            exit = child.wait() => return Some(match exit {
+                Ok(s) => format!("exited ({s})"),
+                Err(e) => format!("not waited for: {e}"),
+            }),
+            _ = tidy.tick() => {
+                if let Err(e) = log_file(&spec.dir) {
+                    tracing::debug!(instance = %spec.id, "plugin log not looked at: {e}");
+                }
+            }
+        }
+    }
+}
+
 async fn supervise(spec: Spec, stop: CancellationToken, status: Arc<Mutex<Status>>) {
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = Instant::now();
-        let error = match spawn(&spec) {
-            Ok(mut child) => {
-                *lock(&status) = Status::Running {
-                    pid: child.id().unwrap_or_default(),
-                };
-                // held here for as long as it runs: `wait` would close it, and to the plugin
-                // that is the Hub going away
-                let stdin = child.stdin.take();
-                tokio::select! {
-                    _ = stop.cancelled() => {
-                        end(child, stdin).await;
-                        break;
-                    }
-                    exit = child.wait() => match exit {
-                        Ok(s) => format!("exited ({s})"),
-                        Err(e) => format!("not waited for: {e}"),
-                    },
-                }
-            }
-            Err(e) => format!("not started: {e:#}"),
+        let Some(error) = run(&spec, &stop, &status).await else {
+            break;
         };
         tracing::warn!(instance = %spec.id, "plugin {error}");
         *lock(&status) = Status::Waiting { error };
@@ -351,6 +366,22 @@ mod tests {
         let e = r.ready("i1", 1, Duration::from_secs(5)).await.unwrap_err();
         assert!(e.contains("exited"), "{e}");
         r.stop("i1").await;
+    }
+
+    #[test]
+    fn a_log_that_has_grown_is_started_again_under_whoever_writes_it() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = log_file(dir.path()).unwrap();
+        writer
+            .write_all(&vec![b'x'; MAX_LOG_BYTES as usize + 1])
+            .unwrap();
+        log_file(dir.path()).unwrap();
+        writer.write_all(b"next\n").unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("plugin.log")).unwrap(),
+            b"next\n"
+        );
     }
 
     #[tokio::test]
