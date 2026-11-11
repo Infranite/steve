@@ -257,11 +257,17 @@ pub async fn open(
                             .and_then(|o| o["currentValue"].as_str())
                     });
                 match actual {
+                    Some(actual) if actual == model => reports.model(actual),
+                    // An adapter may answer with its own short id for the model that was asked
+                    // (on a loaded session, say). That is the asked model only when the adapter's
+                    // own list says so: the entry it reports as current is named what was asked.
+                    Some(actual) if named(&updated, actual, model) => reports.model(model),
+                    // Nothing in the answer relates the two ids, so this is another model as far
+                    // as anyone can tell, and the open fails rather than run on it. No table of
+                    // known aliases here: which ids mean the same model is the adapter's to say.
                     Some(actual) => {
                         reports.model(actual);
-                        if actual != model {
-                            return Err(err(format!("模型没能生效：请求 {model}，实际 {actual}")));
-                        }
+                        return Err(err(format!("模型没能生效：请求 {model}，实际 {actual}")));
                     }
                     // the adapter took it without saying what it runs: what was asked and accepted
                     // is in force
@@ -315,11 +321,35 @@ pub async fn open(
     })
 }
 
+/// Whether the adapter's own model list in `answer` calls the entry with id `actual` by the name
+/// `asked`: the "model" config option's choices (`value`, `name`, possibly in groups) and
+/// `models.availableModels` (`modelId`, `name`).
+fn named(answer: &Value, actual: &str, asked: &str) -> bool {
+    fn any(list: &Value, id: &str, actual: &str, asked: &str) -> bool {
+        list.as_array().is_some_and(|es| {
+            es.iter().any(|e| {
+                (e.get(id).and_then(Value::as_str) == Some(actual)
+                    && e.get("name").and_then(Value::as_str) == Some(asked))
+                    || e.get("options").is_some_and(|g| any(g, id, actual, asked))
+            })
+        })
+    }
+    let option = answer
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .and_then(|os| os.iter().find(|o| o["id"] == "model"))
+        .and_then(|o| o.get("options"));
+    option.is_some_and(|l| any(l, "value", actual, asked))
+        || answer
+            .pointer("/models/availableModels")
+            .is_some_and(|l| any(l, "modelId", actual, asked))
+}
+
 /// Switch the session's model. claude-agent-acp 0.99.1 and codex-acp only take the "model" config
 /// option (`session/set_model` is -32601 there) and the model does not survive `session/load`, so
 /// this runs on every start. `session/set_model` is the fallback for adapters without the option.
-/// The adapter may map an id it does not list to a near one; that is logged here and judged by the
-/// caller (which refuses it).
+/// The adapter may answer with another id than the one asked; that is logged here and judged by
+/// the caller ([`named`]).
 async fn apply_model(
     l: &Conn,
     acp_id: &str,
@@ -369,4 +399,36 @@ async fn apply_model(
         tracing::warn!("set model {model}: the adapter runs {cur}");
     }
     Ok(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What claude-agent-acp 0.106 answers on a loaded session when asked for an id it knows under
+    /// a short one: `currentValue` is the short id, and its entry is named what was asked.
+    #[test]
+    fn an_id_the_adapters_list_names_as_asked_is_the_asked_model() {
+        let answer = json!({"configOptions": [{"id": "model", "currentValue": "quick", "options": [
+            {"value": "route/big-2", "name": "route/big-2"},
+            {"value": "quick", "name": "big-2"},
+        ]}]});
+        assert!(named(&answer, "quick", "big-2"));
+        assert!(!named(&answer, "quick", "route/big-2"), "another entry");
+        assert!(!named(&answer, "route/big-2", "big-2"), "not its name");
+        let grouped = json!({"configOptions": [{"id": "model", "options": [
+            {"group": "g", "options": [{"value": "quick", "name": "big-2"}]},
+        ]}]});
+        assert!(named(&grouped, "quick", "big-2"));
+        let models = json!({"models": {"currentModelId": "quick", "availableModels": [
+            {"modelId": "quick", "name": "big-2"},
+        ]}});
+        assert!(named(&models, "quick", "big-2"));
+        assert!(!named(&json!({}), "quick", "big-2"));
+        // a display name is not an id
+        let shown = json!({"configOptions": [{"id": "model", "options": [
+            {"value": "quick", "name": "Big 2"},
+        ]}]});
+        assert!(!named(&shown, "quick", "big-2"));
+    }
 }

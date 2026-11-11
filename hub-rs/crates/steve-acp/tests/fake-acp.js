@@ -129,7 +129,10 @@ async function turn(text) {
 let model = process.env.FAKE_ACP_CODEX ? "gpt-fake" : "kiro/claude-opus-5-5"
 let effort = "medium"
 const effortOpts = () => process.env.FAKE_ACP_EFFORT ? [{ id: "thought_level", category: "thought_level", type: "select", currentValue: effort, options: [{ group: "levels", options: [{ value: "low" }, { value: "medium" }, { value: "high" }] }] }] : []
-const modelOpt = () => ({ id: "model", type: "select", currentValue: model, options: [{ value: "kiro/claude-opus-5-5" }, { value: "kiro/claude-sonnet-5-5" }, { value: "claude-haiku-5-5" }] })
+// FAKE_ACP_MODEL_ALIAS=asked=short[=name]: asked for `asked`, the adapter answers `short`, whose entry
+// in its list is named `name` (default: `asked`), as claude-agent-acp does on a loaded session
+const alias = (process.env.FAKE_ACP_MODEL_ALIAS ?? "").split("=")
+const modelOpt = () => ({ id: "model", type: "select", currentValue: model, options: [{ value: "kiro/claude-opus-5-5" }, { value: "kiro/claude-sonnet-5-5" }, { value: "claude-haiku-5-5" }, ...(alias[1] ? [{ value: alias[1], name: alias[2] ?? alias[0] }] : [])] })
 // the modes most adapters offer (claude-agent-acp 0.99.1's five); $FAKE_ACP_MODES=a,b,… offers those
 const modes = () => ({ currentModeId: "default", availableModes: (process.env.FAKE_ACP_MODES ?? "default,acceptEdits,plan,auto,bypassPermissions").split(",").filter(Boolean).map((id) => ({ id, name: id })) })
 const session = () => process.env.FAKE_ACP_CODEX
@@ -153,7 +156,8 @@ process.stdin.on("data", (d) => {
     else if (m.method === "session/set_mode") { mode = m.params.modeId; send({ id: m.id, result: {} }) }
     else if (m.method === "session/set_model" && process.env.FAKE_ACP_NO_SET_MODEL) send({ id: m.id, error: { code: -32601, message: "\"Method not found\": session/set_model", data: { method: "session/set_model" } } })
     else if (m.method === "session/set_config_option" && m.params.configId === "model") {
-      if (!process.env.FAKE_ACP_CODEX && !modelOpt().options.some((o) => o.value === m.params.value)) send({ id: m.id, error: { code: -32602, message: `Invalid params: Invalid value for config option model: ${m.params.value}` } })
+      if (alias[1] && m.params.value === alias[0]) { model = alias[1]; send({ id: m.id, result: { configOptions: [modelOpt(), ...effortOpts()] } }) }
+      else if (!process.env.FAKE_ACP_CODEX && !modelOpt().options.some((o) => o.value === m.params.value)) send({ id: m.id, error: { code: -32602, message: `Invalid params: Invalid value for config option model: ${m.params.value}` } })
       else { model = m.params.value; send({ id: m.id, result: { configOptions: [modelOpt(), ...effortOpts()] } }) }
     }
     else if (m.method === "session/set_config_option" && m.params.configId === "thought_level") {
