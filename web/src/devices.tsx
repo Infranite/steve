@@ -16,7 +16,7 @@ import { VitalsSection } from "@/devices-vitals"
 import { NodeTags } from "@/devices-tags"
 import { TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
-import { hubBase } from "@/hub"
+import { useHubAddress } from "@/hub-ui"
 
 const Ico = ({ d, size = 36 }: { d: RDevice; size?: number }) => <span className="relative flex shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground" style={{ width: size, height: size }}><ServerIcon className="size-[45%]" strokeWidth={1.5} />
   <span className={cn("absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-background", d.status === "暂停接活" ? "bg-attention" : "bg-success")} /></span>
@@ -193,6 +193,8 @@ function AddHarness() {
 
 export function PairDialog() {
   const t = useT()
+  /* the Hub's own address: this page may be served apart from it (A3), or by a shell's gateway on this machine */
+  const hub = useHubAddress()
   const [pairing, setPairing] = useState<RPairing | null>(null)
   const [nodes, setNodes] = useState<RNode[]>([])
   const [busy, setBusy] = useState(false), [error, setError] = useState("")
@@ -219,9 +221,8 @@ export function PairDialog() {
         {pairing && <div className="rounded-xl border p-4 space-y-2 type-callout">
           {now < pairing.expires ? <><p>{t("shell:devices.codeExpires", { time: new Date(pairing.expires).toLocaleTimeString() })}</p><code className="block break-all select-all">{pairing.code}</code></> : <p>{t("shell:devices.codeExpired")}</p>}
           {pairing.pin && <><p>{t("shell:devices.hubPin")}</p><code className="block break-all select-all">{pairing.pin}</code></>}
-          {/* the Hub's own address: this page may be served apart from it (A3) */}
-          <p>{t("shell:devices.setupCommand")}</p><code className="block break-all select-all" data-setup-command>steve setup node --hub {hubBase() || window.location.origin}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
-          <p>{t("shell:devices.pairCommand")}</p><code className="block break-all select-all" data-pair-command>steve-node pair {hubBase() || window.location.origin}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
+          <p>{t("shell:devices.setupCommand")}</p><code className="block break-all select-all" data-setup-command>steve setup node --hub {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
+          <p>{t("shell:devices.pairCommand")}</p><code className="block break-all select-all" data-pair-command>steve-node pair {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
         </div>}
         <TailcatSection />
         <Button variant="outline" disabled={busy} onClick={() => void act(reload)}><RefreshCwIcon />{t("shell:devices.refreshNodes")}</Button>

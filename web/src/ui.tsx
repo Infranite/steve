@@ -42,6 +42,7 @@ import { st, emit, briefHead, pendingCards, acceptChoosesRelease, ST, SS, WT, FA
 import { YoloBadge } from "@/yolo/badges"
 import { YoloPill } from "@/yolo/switch"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
+import { HubSwitcher } from "@/hub-ui"
 import { useUploads, PendingList, AttachButton, Files } from "@/attach"
 import type { RFile } from "@/api"
 import { MemConfirm, memAsk } from "@/knowledge/parts"
@@ -301,7 +302,7 @@ export function Sidebar({ route: full }: { route: string }) {
               <span className="min-w-0"><span className="block truncate type-headline">{S?.n}</span><span className="block type-footnote text-muted-foreground">{t("core:sidebar.assistant")}</span></span>
             </SidebarMenuButton>
           </SidebarMenuItem>
-          <WorkspaceSwitcher />
+          <WorkspaceSwitcher /><HubSwitcher />
           {st.yolo && <SidebarMenuItem className="px-1.5 py-0.5 group-data-[collapsible=icon]:hidden" data-sidebar-yolo><YoloPill /></SidebarMenuItem>}
           <SidebarMenuItem>
             <SidebarMenuButton tooltip={t("core:sidebar.searchTip")} onClick={() => openSheet("command")} className="text-muted-foreground" data-open-command>

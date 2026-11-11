@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
 import { api, signIn } from "@/api"
-import { API, hello, hubBase, hubUrl, nativeBridge, needsHttpsForCrossHost, normalize, rememberHub, savedHubs, setHub } from "@/hub"
+import { API, currentHub, hello, hubBase, hubUrl, nativeBridge, rememberHub, setHub } from "@/hub"
+import { HubChooser, HubLine, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command"
 import { BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, Building2Icon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LockIcon, QrCodeIcon, UsersRoundIcon, WorkflowIcon, InboxIcon, ListTodoIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, PlugIcon, PlusIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon } from "lucide-react"
 import { st, useStore, start } from "@/store"
@@ -35,7 +36,7 @@ const TagDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.Ta
 const DevicesView = lazyView(() => import("@/devices").then((m) => ({ default: m.DevicesView })))
 const DeviceView = lazyView(() => import("@/devices").then((m) => ({ default: m.DeviceView })))
 const PairDialog = lazyView(() => import("@/devices").then((m) => ({ default: m.PairDialog })))
-const MobilePairDialog = lazyView(() => import("@/access-settings").then((m) => ({ default: m.MobilePairDialog })))
+const PairDeviceDialog = lazyView(() => import("@/access-settings").then((m) => ({ default: m.PairDeviceDialog })))
 const ProjectsView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectsView })))
 const ProjectView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectView })))
 const NewProjectDialog = lazyView(() => import("@/projects").then((m) => ({ default: m.NewProjectDialog })))
@@ -86,7 +87,6 @@ function CommandMenu({ open }: { open: boolean }) {
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h)
   }, [open])
   const run = (f: () => void) => { closeSheet(); f() }
-  const bridge = nativeBridge()
   const pages: [string, string, any][] = [["", t("shell:cmd.page.chat"), MessageCircleIcon], ["inbox", t("shell:cmd.page.inbox"), InboxIcon], ["items", t("shell:cmd.page.items"), ListTodoIcon], ["projects", t("shell:cmd.page.projects"), FolderIcon], ["sessions", t("shell:cmd.page.sessions"), SquareTerminalIcon], ["stats", t("shell:cmd.page.stats"), ChartNoAxesColumnIcon], ["signals", t("shell:cmd.page.signals"), RadioIcon], ["auto", t("shell:cmd.page.auto"), WorkflowIcon], ["integrations", t("shell:cmd.page.integrations"), PlugIcon], ["channels", t("shell:cmd.page.channels"), MessagesSquareIcon], ["contacts", t("shell:cmd.page.contacts"), ContactRoundIcon], ["knowledge", t("shell:cmd.page.knowledge"), BookOpenIcon], ["github", "GitHub", GitPullRequestIcon], ["accounts", t("shell:cmd.page.accounts"), KeyRoundIcon], ["vault", t("shell:cmd.page.vault"), LockIcon], ["bots", "Bot", BotIcon], ["devices", t("shell:cmd.page.devices"), ServerIcon], ["settings/general", t("shell:cmd.page.settings"), SettingsIcon], ["settings/access", t("shell:cmd.page.settingsAccess"), KeyRoundIcon], ["settings/tags", t("shell:cmd.page.settingsTags"), SettingsIcon], ["settings/workspace", t("shell:cmd.page.settingsSpace"), SettingsIcon]]
   return (
     <CommandDialog open={open} onOpenChange={(o) => !o && closeSheet()} title={t("common:action.search")} description={t("shell:cmd.description")}>
@@ -98,8 +98,8 @@ function CommandMenu({ open }: { open: boolean }) {
           <CommandItem onSelect={() => run(() => { go("#/items"); openSheet("newItem") })}><PlusIcon />{t("shell:cmd.newItem")}<CommandShortcut>N</CommandShortcut></CommandItem>
           <CommandItem onSelect={() => run(() => { go("#/projects"); openSheet("newProject") })}><FolderIcon />{t("shell:cmd.newProject")}</CommandItem>
           <CommandItem onSelect={() => run(() => { go("#/bots"); openSheet("newBot") })} data-cmd-newbot><BotIcon />{t("shell:cmd.newBot")}</CommandItem>
-          <CommandItem onSelect={() => run(() => { if (bridge?.openPairSheet) bridge.openPairSheet(); else openSheet("pairClient") })} data-cmd-pair-mobile><QrCodeIcon />{t("shell:cmd.pairMobile")}</CommandItem>
-          <CommandItem onSelect={() => run(() => { if (bridge?.openHubSwitcher) bridge.openHubSwitcher(); else go("#/settings/access") })} data-cmd-switch-hub><ServerIcon />{t("shell:cmd.switchHub")}</CommandItem>
+          <CommandItem onSelect={() => run(() => openSheet("pairClient"))} data-cmd-pair-device><QrCodeIcon />{t("shell:cmd.pairDevice")}</CommandItem>
+          <CommandItem onSelect={() => run(() => openSheet("hubs"))} data-cmd-switch-hub><ServerIcon />{t("shell:cmd.switchHub")}</CommandItem>
           <CommandItem onSelect={() => run(() => setTheme(resolvedTheme() === "dark" ? "light" : "dark"))}>{resolvedTheme() === "dark" ? <SunIcon /> : <MoonIcon />}{resolvedTheme() === "dark" ? t("shell:cmd.toLight") : t("shell:cmd.toDark")}</CommandItem>
         </CommandGroup>
         <CommandSeparator />
@@ -152,64 +152,6 @@ function TokenSignIn() {
   )
 }
 
-/** a web client served on its own: which Hub it talks to (A3) */
-function ConnectHub() {
-  const t = useT()
-  const bridge = nativeBridge()
-  const [url, setUrl] = useState(hubBase())
-  const [error, setError] = useState("")
-  const [busy, setBusy] = useState(false)
-  const recent = savedHubs()
-  /* served on its own port by a Hub: that Hub's address, as a suggestion to confirm */
-  useEffect(() => {
-    if (hubBase()) return
-    fetch("/hub.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((j) => { if (typeof j?.hub === "string") setUrl((u) => u || j.hub) }, () => {})
-  }, [])
-  const connectTo = async (raw: string) => {
-    const base = normalize(raw)
-    if (!base) { setError(t("shell:app.badAddress")); return }
-    if (!bridge && needsHttpsForCrossHost(base)) { setError(t("shell:app.needsHttps")); return }
-    setBusy(true); setError("")
-    try {
-      const h = await hello(base)
-      if (h.api !== API) { setError(t("shell:app.apiMismatch", { version: h.version })); setBusy(false); return }
-      rememberHub(base, { version: h.version })
-      setHub(base === location.origin ? null : base, { version: h.version }); location.reload()
-    } catch { setError(t("shell:app.notSteve")); setBusy(false) }
-  }
-  const go = async (e: React.FormEvent) => {
-    e.preventDefault()
-    await connectTo(url)
-  }
-  return (
-    <div className="flex w-full max-w-xs flex-col gap-3 text-left">
-      <form onSubmit={go} className="flex w-full flex-col gap-2" data-connect-hub>
-        <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={t("shell:app.hubAddress")} autoFocus inputMode="url" />
-        {error && <div className="type-footnote text-destructive">{error}</div>}
-        <Button type="submit" disabled={busy || !url.trim()}>{busy ? <Spinner className="size-4" /> : t("shell:app.connect")}</Button>
-        {bridge?.openQRScanner && (
-          <Button type="button" variant="outline" onClick={() => bridge.openQRScanner?.()} data-native-scan-qr>
-            <QrCodeIcon className="size-4" />
-            {t("shell:app.scanQr")}
-          </Button>
-        )}
-        <div className="type-footnote text-muted-foreground">{t("shell:app.connectHint")}</div>
-      </form>
-      {recent.length > 0 && (
-        <div className="flex flex-col gap-1.5 border-t border-border pt-3" data-saved-hubs>
-          <div className="type-footnote text-muted-foreground">{t("shell:app.savedHubs")}</div>
-          {recent.slice(0, 4).map((h) => (
-            <Button key={h.url} variant="ghost" size="sm" className="justify-between font-normal" disabled={busy} onClick={() => void connectTo(h.url)}>
-              <span className="truncate">{h.name || h.url}</span>
-              {h.version && <span className="ml-2 shrink-0 font-mono text-[11px] text-muted-foreground">{h.version}</span>}
-            </Button>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 function Splash({ children }: { children: React.ReactNode }) {
   return <div className="flex h-[100dvh] flex-col items-center justify-center gap-4 bg-background px-6 text-center text-foreground">{children}</div>
 }
@@ -221,12 +163,15 @@ export default function App() {
   /* whether this page has a Hub to talk to: the one that served it, or the one it was pointed at */
   const [hub, setHubState] = useState<"checking" | "ok" | "missing">("checking")
   useEffect(() => {
-    hello(hubBase()).then(() => setHubState("ok"), async () => {
+    /* a browser keeps the Hub it is on in its list, so the list it takes to another Hub's page can lead back */
+    const ok = (version: string) => { if (!nativeBridge()) rememberHub(currentHub(), { version }); setHubState("ok") }
+    hello(hubBase()).then((h) => ok(h.version), async () => {
       /* served on its own port by a Hub (/hub.json): that Hub, when it answers, without asking */
       if (!hubBase()) {
         try {
           const j = await fetch("/hub.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null))
-          if (typeof j?.hub === "string" && (await hello(j.hub)).api === API) { setHub(j.hub); setHubState("ok"); return }
+          const h = typeof j?.hub === "string" ? await hello(j.hub) : null
+          if (h?.api === API) { setHub(j.hub, { version: h.version }); setHubState("ok"); return }
         } catch { /* ask */ }
       }
       setHubState("missing")
@@ -236,17 +181,39 @@ export default function App() {
   const [a = "", b, c] = useRoute()
   /* an “撤销” toast belongs to the page it was raised on */
   useEffect(() => { sonnerToast.dismiss() }, [a, b, c])
+  /* #/hub/add and #/hub/pair (a shell's menu, a link): the dialog is opened and the route left; before the page is
+   * signed in, "add" is the list on the screen that is shown instead */
+  const [intent, setIntent] = useState<"" | "add" | "pair">("")
+  const [others, setOthers] = useState(false)
+  const up = hub === "ok" && st.ready && !st.login
+  useEffect(() => {
+    if (a !== "hub") return
+    setIntent(b === "pair" ? "pair" : "add")
+    history.replaceState(null, "", location.pathname + location.search + "#/"); window.dispatchEvent(new HashChangeEvent("hashchange"))
+  }, [a, b])
+  useEffect(() => {
+    if (!intent || !up) return
+    openSheet(intent === "pair" ? "pairClient" : "hubs", { add: true }); setIntent("")
+  }, [intent, up])
+  const pairing = usePairRequest()
+  const title = (sub: string) => <><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>
+  const list = others || intent === "add"
+  if (pairing) return <Splash><PairClaim /></Splash>
   if (hub === "missing") return (
-    <Splash><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{t("shell:app.connectTitle")}</div></div><ConnectHub /></Splash>
+    <Splash>{title(t("shell:app.connectTitle"))}<HubsOffer className="max-w-xs" /><HubChooser down className="max-w-xs" /></Splash>
   )
   if (st.login) return (
-    <Splash><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{t("shell:app.signInToContinue")}</div></div>
-      {signIn.token && <TokenSignIn />}
-      {(signIn.link || !signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => { location.href = hubUrl(signIn.link ?? st.login ?? "/auth/login") + "?back=" + encodeURIComponent(hubBase() ? location.href : location.pathname + location.hash) }} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}
-      {nativeBridge()?.openQRScanner && <Button variant="outline" onClick={() => nativeBridge()?.openQRScanner?.()} data-login-scan-qr><QrCodeIcon className="size-4" />{t("shell:app.scanQr")}</Button>}
-      {(hubBase() || nativeBridge()?.openHubSwitcher) && <Button variant="ghost" size="sm" onClick={() => { const nb = nativeBridge(); if (nb?.openHubSwitcher) nb.openHubSwitcher(); else { setHub(null); setHubState("missing") } }} data-login-change-hub>{t("shell:app.changeHub")}</Button>}</Splash>
+    <Splash>{title(t("shell:app.signInToContinue"))}<HubLine className="-mt-2" />
+      {list ? <><HubChooser className="max-w-xs" /><Button variant="ghost" size="sm" onClick={() => { setOthers(false); setIntent("") }} data-login-back>{t("common:action.back")}</Button></> : <>
+        {signIn.token && <TokenSignIn />}
+        {(signIn.link || !signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => { location.href = hubUrl(signIn.link ?? st.login ?? "/auth/login") + "?back=" + encodeURIComponent(hubBase() ? location.href : location.pathname + location.hash) }} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}
+        <ScanButton />
+        <Button variant="ghost" size="sm" onClick={() => setOthers(true)} data-login-change-hub>{t("shell:hub.other")}</Button></>}
+      <HubsOffer className="max-w-xs" /></Splash>
   )
-  if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><div className="type-callout text-muted-foreground">{st.error}</div>{hubBase() && <Button variant="ghost" onClick={() => { setHub(null); setHubState("missing") }}>{t("shell:app.changeHub")}</Button>}</> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
+  if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><HubLine className="-mt-2" /><div className="type-callout text-muted-foreground">{st.error}</div>
+    {list ? <HubChooser down className="max-w-xs" /> : <div className="flex gap-2"><Button variant="outline" onClick={() => location.reload()}>{t("common:action.retry")}</Button><Button variant="ghost" onClick={() => setOthers(true)} data-error-change-hub>{t("shell:hub.other")}</Button></div>}
+    <HubsOffer className="max-w-xs" /></> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
   const view =
     a === "inbox" ? <InboxView /> :
     a === "items" ? (b ? <ItemView key={b} id={b} /> : <ItemsView />) :
@@ -285,7 +252,9 @@ export default function App() {
         {sh?.kind === "import" && <ImportDialog />}
         {sh?.kind === "deleteBot" && <DeleteBotDialog k={sh.payload.k} />}
         {sh?.kind === "pair" && <PairDialog />}
-        {sh?.kind === "pairClient" && <MobilePairDialog />}
+        {sh?.kind === "pairClient" && <PairDeviceDialog />}
+        {sh?.kind === "hubs" && <HubsDialog add={sh.payload?.add} />}
+        <HubsOfferDialog />
         {sh?.kind === "tag" && <TagDialog id={sh.payload?.id} item={sh.payload?.item} name={sh.payload?.name} />}
         {sh?.kind === "newProject" && <NewProjectDialog />}
         {sh?.kind === "newWorkspace" && <NewWorkspaceDialog />}
