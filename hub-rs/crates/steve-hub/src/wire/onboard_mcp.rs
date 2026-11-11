@@ -2,7 +2,9 @@
 //! yes in the conversation — their profile, the models of Steve's purposes, the first Bots — and the
 //! end of the meeting. They exist for the run answering the owner in Steve's own conversation while
 //! the meeting is on; every call checks that again, and every write goes through the same checks,
-//! audit and revisions as the settings pages.
+//! audit and revisions as the settings pages. A call that wrote also leaves one audit entry of its
+//! own (`onboard.profile`, `onboard.models`, `onboard.bots`), so the trail says these changes were
+//! the first meeting's, next to the entries of the writes themselves.
 
 use serde_json::{Value, json};
 use steve_core::Core;
@@ -127,19 +129,27 @@ pub async fn call(
         }
         let ws = run.workspace_id.as_str();
         let user = run.user_id.clone().unwrap_or(owner);
-        match name.as_str() {
-            PROFILE => profile(&x, ws, &user, &args),
-            MODELS => models(core, ws, &user, &args),
-            BOTS => bots(&x, ws, &user, &args),
+        let (said, wrote) = match name.as_str() {
+            PROFILE => profile(&x, ws, &user, &args)?,
+            MODELS => models(core, ws, &user, &args)?,
+            BOTS => bots(&x, ws, &user, &args)?,
             DONE => {
-                core.onboard_end(ws, &user).map_err(|e| e.to_string())?;
-                Ok(
-                    "The first meeting is over. From here on the conversation works as usual."
-                        .into(),
-                )
+                core.onboard_end(ws, &user, steve_core::thread::onboard::ENDED)
+                    .map_err(|e| e.to_string())?;
+                let said =
+                    "The first meeting is over. From here on the conversation works as usual.";
+                (said.to_string(), None)
             }
-            _ => Err(super::research_mcp::REFUSED.into()),
+            _ => return Err(super::research_mcp::REFUSED.into()),
+        };
+        /* what the call wrote, as one entry (best effort: each write has its own entry already) */
+        if let Some(wrote) = wrote {
+            let action = format!("onboard.{}", name.trim_start_matches("steve_onboard_"));
+            if let Err(e) = x.store.audit(&user, &action, ws, &wrote, ws) {
+                tracing::warn!("first meeting: audit of {action}: {e}");
+            }
         }
+        Ok(said)
     }))
     .await
     .map_err(|e| e.to_string())?
@@ -177,7 +187,10 @@ fn too_long(key: &str, value: Option<&str>, max: usize) -> Result<(), String> {
     }
 }
 
-fn profile(x: &Extra, ws: &str, user: &str, args: &Value) -> Result<String, String> {
+/// What a tool answers, and what it wrote (for the meeting's audit entry) when it wrote.
+type Called = Result<(String, Option<Value>), String>;
+
+fn profile(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
     let (name, about) = (text(args, "name")?, text(args, "about")?);
     let kinds = [
         ("fact", texts(args, "facts")?),
@@ -203,12 +216,15 @@ fn profile(x: &Extra, ws: &str, user: &str, args: &Value) -> Result<String, Stri
     };
     let shown = |e: steve_modules::ApiError| e.to_string();
     let mut said = vec![];
+    let mut fields = vec![];
     if name.is_some() || about.is_some() {
         if let Some(n) = &name {
             said.push(format!("name “{n}”"));
+            fields.push("name");
         }
         if about.is_some() {
             said.push("description".into());
+            fields.push("note");
         }
         service::patch_contact(
             &x.modules,
@@ -254,9 +270,14 @@ fn profile(x: &Extra, ws: &str, user: &str, args: &Value) -> Result<String, Stri
     if skipped > 0 {
         said.push(format!("{skipped} already known"));
     }
-    Ok(format!(
-        "Saved to the user's profile: {}. They can read and change it under 我.",
-        said.join(", ")
+    let wrote = (!fields.is_empty() || saved > 0)
+        .then(|| json!({"fields": fields, "memories": saved, "known": skipped}));
+    Ok((
+        format!(
+            "Saved to the user's profile: {}. They can read and change it under 我.",
+            said.join(", ")
+        ),
+        wrote,
     ))
 }
 
@@ -309,9 +330,9 @@ fn known_model(core: &Core, harness: &str, model: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn models(core: &Core, ws: &str, user: &str, args: &Value) -> Result<String, String> {
+fn models(core: &Core, ws: &str, user: &str, args: &Value) -> Called {
     let Some(purposes) = args.get("purposes").filter(|p| !p.is_null()) else {
-        return Ok(overview(core, ws).to_string());
+        return Ok((overview(core, ws).to_string(), None));
     };
     let steve = core.models().steve().runs_on;
     for (key, choice) in purposes.as_object().into_iter().flatten() {
@@ -331,15 +352,22 @@ fn models(core: &Core, ws: &str, user: &str, args: &Value) -> Result<String, Str
         }
     }
     let written = core.models().apply(ws, &json!({"purposes": patch}), user)?;
-    Ok(json!({
+    let keys: Vec<&String> = patch
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(k, _)| k)
+        .collect();
+    let said = json!({
         "saved": written.len(),
         "purposes": overview(core, ws)["purposes"],
         "note": "The user can change these under Settings · Models.",
-    })
-    .to_string())
+    });
+    let wrote = (!written.is_empty()).then(|| json!({"purposes": keys}));
+    Ok((said.to_string(), wrote))
 }
 
-fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Result<String, String> {
+fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
     let core = &x.tools.core;
     let there = x.store.bots().list(Some(ws)).map_err(|e| e.to_string())?;
     if args.get("bots").is_none_or(Value::is_null) {
@@ -347,7 +375,7 @@ fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Result<String, String>
             .iter()
             .map(|b| json!({"name": b.name, "role": b.role, "harness": b.harness, "main": b.main}))
             .collect();
-        return Ok(json!({"bots": bots}).to_string());
+        return Ok((json!({"bots": bots}).to_string(), None));
     }
     let list = args["bots"]
         .as_array()
@@ -417,5 +445,6 @@ fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Result<String, String>
         ));
     }
     out.push("The user can change them under Bots, and give one work with @name.".into());
-    Ok(out.join(" "))
+    let wrote = (!created.is_empty()).then(|| json!({"created": created, "skipped": skipped}));
+    Ok((out.join(" "), wrote))
 }

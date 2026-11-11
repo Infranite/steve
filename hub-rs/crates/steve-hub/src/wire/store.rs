@@ -346,6 +346,10 @@ impl Repo for StoreBackend {
     ) -> BResult<()> {
         self.0.audit(actor, action, target, detail, ws).map_err(err)
     }
+    fn audit_page(&self, ws: &str, before: Option<i64>, limit: i64) -> BResult<Value> {
+        let page = self.0.audit_page(ws, before, limit).map_err(err)?;
+        serde_json::to_value(page).map_err(|e| BackendError::msg(e.to_string()))
+    }
 
     fn settings_all(&self, ws: &str) -> BResult<Obj> {
         self.0.settings().all(ws).map_err(err)

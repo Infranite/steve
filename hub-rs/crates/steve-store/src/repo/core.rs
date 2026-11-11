@@ -5,10 +5,56 @@ use rusqlite::params;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
 use super::{Sets, all, exists, must, one, revision, to_json};
 use crate::types::json_or;
 use crate::{ChangeEvent, MemberWorkspace, Result, Store, User, WS, Workspace, now, sha, uid};
+
+/// One entry of the audit trail: who did what to what, and the detail the writer kept.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub ts: i64,
+    pub actor: String,
+    pub action: String,
+    pub target: String,
+    pub detail: Value,
+}
+
+/// A page of [`Store::audit_page`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AuditPage {
+    pub entries: Vec<AuditEntry>,
+    pub names: BTreeMap<String, String>,
+    pub more: bool,
+}
+
+/// What an id of an audit entry is called: the first of the things an entry can point at that has
+/// it. A memory goes by the start of its text.
+const NAME_OF: &str = "SELECT COALESCE(
+    (SELECT NULLIF(name, '') FROM users WHERE id = ?1),
+    (SELECT NULLIF(name, '') FROM bots WHERE id = ?1),
+    (SELECT NULLIF(name, '') FROM parties WHERE id = ?1),
+    (SELECT NULLIF(name, '') FROM projects WHERE id = ?1),
+    (SELECT NULLIF(title, '') FROM items WHERE id = ?1),
+    (SELECT NULLIF(name, '') FROM access_tokens WHERE id = ?1),
+    (SELECT NULLIF(name, '') FROM clients WHERE id = ?1),
+    (SELECT NULLIF(substr(text, 1, 80), '') FROM mems WHERE id = ?1),
+    (SELECT NULLIF(name, '') FROM flows WHERE id = ?1),
+    (SELECT NULLIF(name, '') FROM devices WHERE id = ?1),
+    (SELECT NULLIF(name, '') FROM nodes WHERE node_id = ?1),
+    (SELECT NULLIF(name, '') FROM workspaces WHERE id = ?1))";
+
+/// A value of an entry's detail that may be the id of something: `prefix_` and a generated tail.
+fn id_like(v: &str) -> bool {
+    v.split_once('_').is_some_and(|(kind, tail)| {
+        !kind.is_empty()
+            && kind.bytes().all(|b| b.is_ascii_lowercase())
+            && tail.len() >= 8
+            && tail.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
 
 impl Store {
     /// `audit(actor, action, target, detail, ws)`; TS defaults are `detail = {}`, `ws = WS`.
@@ -24,6 +70,47 @@ impl Store {
             w.c.prepare_cached("INSERT INTO audit (workspace_id, ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?, ?)")?
                 .execute(params![ws, now(), actor, action, target, to_json(detail)?])?;
             Ok(())
+        })
+    }
+
+    /// One page of a workspace's audit trail, newest first: the entries before `before` (an entry's
+    /// id; `None` starts at the newest), at most `limit`, and whether older ones remain. `names` says
+    /// what the ids in the page are called now, for whoever shows it: the actor and target of every
+    /// entry and the ids its detail refers to. An id nothing is called by any more is not in it.
+    pub fn audit_page(&self, ws: &str, before: Option<i64>, limit: i64) -> Result<AuditPage> {
+        let limit = limit.clamp(1, 200);
+        self.read(|c| {
+            let mut entries = all(
+                c,
+                "SELECT id, ts, actor, action, target, detail FROM audit WHERE workspace_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
+                params![ws, before.unwrap_or(i64::MAX), limit + 1],
+                |r| {
+                    Ok(AuditEntry {
+                        id: r.get(0)?,
+                        ts: r.get(1)?,
+                        actor: r.get(2)?,
+                        action: r.get(3)?,
+                        target: r.get(4)?,
+                        detail: json_or(r.get(5)?, Value::Null),
+                    })
+                },
+            )?;
+            let more = entries.len() as i64 > limit;
+            entries.truncate(limit as usize);
+            let mut names = BTreeMap::new();
+            for e in &entries {
+                let told = e.detail.as_object().into_iter().flatten();
+                let ids = told.filter_map(|(_, v)| v.as_str()).filter(|v| id_like(v));
+                for id in [e.actor.as_str(), e.target.as_str()].into_iter().chain(ids) {
+                    if id.is_empty() || names.contains_key(id) {
+                        continue;
+                    }
+                    if let Some(name) = one(c, NAME_OF, [id], |r| r.get::<_, Option<String>>(0))?.flatten() {
+                        names.insert(id.to_string(), name);
+                    }
+                }
+            }
+            Ok(AuditPage { entries, names, more })
         })
     }
 

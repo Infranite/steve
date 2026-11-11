@@ -3,7 +3,7 @@
 use crate::repo::WS;
 use crate::testkit::{FakeResearch, Kit, Step};
 use crate::thread::MAIN;
-use crate::thread::onboard::{BRIEF, DONE, PENDING, STATE, TURNS};
+use crate::thread::onboard::{BRIEF, DONE, ENDED, PENDING, STATE, TURNS};
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -111,7 +111,7 @@ async fn the_first_meeting_is_a_conversation_with_steve_itself() {
     assert!(!k.core.onboard_allows(WS, &there, Some(&owner)).unwrap());
 
     /* done (or skipped): the router is back, the brief is gone, the tools are closed */
-    k.core.onboard_end(WS, "me").unwrap();
+    k.core.onboard_end(WS, "me", ENDED).unwrap();
     assert_eq!(state(), DONE);
     k.core
         .say_as(WS, Some(&owner), "帮我把桌面也整理一下", &[], &[])

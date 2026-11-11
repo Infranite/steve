@@ -71,6 +71,23 @@ steve setup hub --home ~/steve-trial --listen 127.0.0.1:18440 \
 
 Manage it with the same `--home` and `--label`, as in `steve hub status --home ~/steve-trial --label io.github.infranite.steve-trial.hub`.
 
+#### Its harnesses' own state
+
+A second installation is separate from the usual one in everything Steve keeps, but not in what the harnesses keep. The owner's main conversation, the first meeting and the model listing start each harness with the service's environment, so Claude Code and Codex use the OS user's own state directory (`~/.claude`, `~/.codex`): the same history, memory and settings you use yourself and the usual installation uses. An installation made to try something out, to test a build or to demonstrate Steve should not write there. Before its first start, give each of its harnesses a directory of its own in its `steve.env`, with the variable the harness reads its state directory from (`CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex; for another adapter, the `state.env` it declares in the harness manifest):
+
+```sh
+mkdir -p ~/steve-trial-harness/claude ~/steve-trial-harness/codex
+cat >> ~/steve-trial/steve.env <<EOF
+CLAUDE_CONFIG_DIR='$HOME/steve-trial-harness/claude'
+CODEX_HOME='$HOME/steve-trial-harness/codex'
+EOF
+steve hub start --home ~/steve-trial --label io.github.infranite.steve-trial.hub
+```
+
+`steve.env` holds literal values, so the paths are written out in full (the shell does that above). The directories start empty: the harness has no settings and no login there. Put the settings it needs into them (`settings.json` for Claude Code, `config.toml` for Codex) and sign in with the harness's own command and the same variable, as in `CODEX_HOME="$HOME/steve-trial-harness/codex" codex login`. Do not copy another installation's `auth.json` or refresh tokens. Sessions that run for a principal get their own directory under the installation's home either way ([`STEVE_PRINCIPAL_STATE`](#harness-setup)); the owner's starts from the settings found in the directory configured here.
+
+Two things stay shared. The owner's main conversation works in the OS user's home directory with that user's access, so a harness still reads the instruction and configuration files it looks for in its working directory, and Steve itself can read and change whatever that user can: use a trial for what you would do at your own shell. And a real harness spends the same account's quota whichever directory it keeps its state in.
+
 ## The first meeting
 
 The first time the instance's owner opens an empty Hub in the browser, a short tour ends by offering a first meeting. Accepting it makes Steve open a conversation in its own main conversation; declining it, or skipping the tour, is remembered by the Hub for every browser. Other users only see the tour.
@@ -81,11 +98,15 @@ In the meeting Steve asks what to call you and what you use it for, and then, on
 - **The models.** It lists the models each installed harness offers and picks, per purpose, a fast one for routing and titles and the strongest for research, drafting and orchestration. Only models a harness reports are accepted. Settings · Models shows and changes the result.
 - **Bots.** From what you do and the Bots there are already, it proposes two to four Bots and creates the ones you agree to. The Bots page shows and changes them.
 
-Every one of these writes goes through the same validation, audit log and setting revisions as the corresponding page, so each can be reviewed and undone there. The meeting runs as the owner's main conversation does, with the access of the OS user the Hub runs as, and it uses the model of Steve's own Bot, so it spends that harness's quota.
+Every one of these writes goes through the same validation, audit log and setting revisions as the corresponding page, so each can be reviewed and undone there. Settings · Activity log lists them for the instance's owner, newest first: when the meeting began and how it ended, what each step saved (the profile's fields and the number of remembered facts, the purposes set, the Bots created), and under them the single writes, each with who did it and, opened, what changed. The meeting runs as the owner's main conversation does, with the access of the OS user the Hub runs as, and it uses the model of Steve's own Bot, so it spends that harness's quota.
 
 The meeting ends when Steve finishes it, when you say you want to skip it or press **Skip introductions** under its welcome, or by itself after twelve of your messages. Until then, what you say in the main conversation goes straight to Steve without the routing step, except a message that names a Bot or an item. After it, changes go through the usual pages and change cards; its tools no longer exist. Settings · General · Onboarding starts the tour, and with it a new meeting, again.
 
 A Hub driven without the web client can use `POST /api/onboard/start` and `POST /api/onboard/skip` (the owner's access token) for the same two actions.
+
+### The activity log
+
+Settings · Activity log (the instance's owner only) shows the workspace's audit trail: who changed what and when, newest first, fifty at a time. An entry opens to what its writer recorded: for a changed setting the old and the new value, for a created Bot its name. Ids are shown by what they are called now. The same list is `GET /api/audit?limit=<1..200>&before=<entry id>` with the owner's access token: `{entries: [{id, ts, actor, action, target, detail}], names: {<id>: <name>}, more}`; pass the last entry's `id` as `before` for the next page. The Hub does not change or remove entries.
 
 ### Models without the meeting
 
