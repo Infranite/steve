@@ -75,7 +75,7 @@ function QrSvg({ text, size = 216 }: { text: string; size?: number }) {
 
 /** The pairing of another device: the QR code of a pairing link, and the link itself. A phone's camera opens the
  * link in a browser, the Steve app reads the same code. Used in 设置 · 访问与客户端 and in `PairDeviceDialog`. */
-function PairContent({ onClaimed }: { onClaimed?: () => void }) {
+function PairContent({ onClaimed, ask = false }: { onClaimed?: () => void; ask?: boolean }) {
   const t = useT()
   const [pair, setPair] = useState<ClientPairing | null>(null)
   /* the address the code is drawn for: a device that cannot reach the first is given another */
@@ -98,8 +98,10 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
     setBusy(false)
   }
 
+  /* `ask`: the dialog was opened by an address, and an address alone does not make a code that signs a device in */
+  const [asked, setAsked] = useState(ask)
   useEffect(() => {
-    void generate()
+    if (!ask) void generate()
   }, [])
 
   useEffect(() => {
@@ -129,6 +131,10 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
         <Button size="sm" variant="outline" onClick={() => void generate()}>{t("pages:access.pairRefresh")}</Button>
       </div>
     )
+  }
+
+  if (asked && !pair && !busy) {
+    return <div className="flex justify-center py-6"><Button onClick={() => { setAsked(false); void generate() }} data-pair-show>{t("pages:access.pairShow")}</Button></div>
   }
 
   if (!pair || busy) {
@@ -202,8 +208,9 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
   )
 }
 
-/** the pairing in a dialog: `openSheet("pairClient")`, from the sidebar's Hub switcher, ⌘K, 我的, and `#/hub/pair` */
-export function PairDeviceDialog() {
+/** the pairing in a dialog: `openSheet("pairClient")`, from the sidebar's Hub switcher, ⌘K, 我的, and `#/hub/pair`
+ * (`ask`: opened by an address, so the code is made on a click) */
+export function PairDeviceDialog({ ask }: { ask?: boolean }) {
   const t = useT()
   return (
     <Dialog open onOpenChange={(o) => !o && closeSheet()}>
@@ -212,7 +219,7 @@ export function PairDeviceDialog() {
           <DialogTitle>{t("pages:access.pairTitle")}</DialogTitle>
           <DialogDescription>{t("pages:access.pairSub")}</DialogDescription>
         </DialogHeader>
-        <PairContent />
+        <PairContent ask={ask} />
         <DialogFooter>
           <Button variant="outline" onClick={() => closeSheet()}>{t("pages:access.done")}</Button>
         </DialogFooter>

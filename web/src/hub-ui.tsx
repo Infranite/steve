@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input"
 import { SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar"
 import { Spinner } from "@/components/ui/spinner"
 import { cn } from "cn"
-import { answerOffer, appPairLink, claimPair, currentHub, dropPairRequest, hubDirectory, HubError, hubsOffer, nativeBridge, onArrival, pairAddresses, pairIsHere, pairPlan, pairRequest, type HubEntry } from "@/hub"
+import { answerOffer, appPairLink, claimPair, currentHub, dropPairRequest, hubDirectory, HubError, hubsOffer, nativeBridge, onArrival, pairAddresses, pairPlan, pairRequest, type HubEntry } from "@/hub"
 import { t as tr, useT } from "@/i18n"
 import { st, toast } from "@/store"
 import { closeSheet, go, Group, openSheet, Row, SectionLabel } from "@/ui"
@@ -18,7 +18,7 @@ import { closeSheet, go, Group, openSheet, Row, SectionLabel } from "@/ui"
 /** why a Hub could not be used, in the page's words */
 export const hubErrorText = (e: unknown): string =>
   e instanceof HubError
-    ? e.code === "api-mismatch" ? tr("shell:hub.apiMismatch", { version: e.version ?? "" }) : e.code === "bad-address" ? tr("shell:hub.badAddress") : e.code === "no-answer" ? tr("shell:hub.unreachable") : tr("shell:hub.notSteve")
+    ? e.code === "api-mismatch" ? tr("shell:hub.apiMismatch", { version: e.version ?? "" }) : e.code === "bad-address" ? tr("shell:hub.badAddress") : e.code === "no-answer" ? tr("shell:hub.unreachable") : e.code === "no-session" ? tr("shell:hub.noSession") : tr("shell:hub.notSteve")
     : (e as Error)?.message || String(e)
 
 const hostOf = (u: string) => { try { return new URL(u).host } catch { return u } }
@@ -218,7 +218,11 @@ export function HubsOffer({ className }: { className?: string }) {
     <div className={cn("flex w-full flex-col gap-2 rounded-xl border border-border p-3 text-left", className)} data-hubs-offer>
       <div className="type-callout">{t("shell:hub.offerTitle")}</div>
       <div className="type-footnote text-muted-foreground">{t("shell:hub.offerSub")}</div>
-      <ul className="flex flex-col gap-0.5 font-mono text-[12px]">{offer.map((h) => <li key={h.url} className="truncate">{h.name ? `${h.name} · ${hostOf(h.url)}` : h.url}</li>)}</ul>
+      {/* the address is never the part that is cut: a long name must not push it out of sight */}
+      <ul className="flex flex-col gap-1 text-[12px]">{offer.map((h) => <li key={h.url} className="flex min-w-0 flex-col">
+        {h.name && <span className="truncate">{h.name}</span>}
+        <span className="font-mono break-all text-muted-foreground" data-hubs-offer-address>{h.url}</span>
+      </li>)}</ul>
       <div className="flex gap-2">
         <Button size="sm" onClick={() => answerOffer(true)} data-hubs-offer-add>{t("shell:hub.offerAdd")}</Button>
         <Button size="sm" variant="ghost" onClick={() => answerOffer(false)} data-hubs-offer-skip>{t("shell:hub.offerSkip")}</Button>
@@ -259,9 +263,11 @@ export function PairClaim() {
   const [err, setErr] = useState("")
   useEffect(() => {
     if (!native || !req?.link) return
-    setBusy(true)
-    native.call("pair.claim", { link: req.text }).then(() => dropPairRequest(), (e) => { setErr(hubErrorText(e)); setBusy(false) })
-  }, [])
+    let live = true
+    setBusy(true); setErr("")
+    native.call("pair.claim", { link: req.text }).then(() => { if (live) dropPairRequest() }, (e) => { if (live) { setErr(hubErrorText(e)); setBusy(false) } })
+    return () => { live = false }
+  }, [req?.text])
   if (!req) return null
   const link = req.link
   const plan = link && !native ? pairPlan(link) : null
@@ -281,7 +287,7 @@ export function PairClaim() {
       </div>
       {!link || !addresses.length ? <p className="type-callout text-muted-foreground" data-pair-bad>{t("shell:hub.pairBad")}</p> : native ? (busy && <Spinner className="size-5 text-muted-foreground" />) : <>
         <p className="type-callout text-muted-foreground">{t("shell:hub.pairSub")}</p>
-        {!pairIsHere(link) && <p className="rounded-lg bg-attention/10 px-3 py-2 type-footnote text-attention" data-pair-other>{t("shell:hub.pairOther")}</p>}
+        {plan?.open && <p className="rounded-lg bg-attention/10 px-3 py-2 type-footnote text-attention" data-pair-other>{t("shell:hub.pairOther")}</p>}
       </>}
       {err && <div className="type-footnote text-destructive" role="alert" data-pair-error>{err}</div>}
       <div className="flex w-full max-w-xs flex-col gap-2">

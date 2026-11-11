@@ -93,7 +93,7 @@ export const API = 1
 
 /** why a Hub could not be used, for the page to say in its own words */
 export class HubError extends Error {
-  code: "bad-address" | "no-answer" | "not-steve" | "api-mismatch"
+  code: "bad-address" | "no-answer" | "not-steve" | "api-mismatch" | "no-session"
   version?: string
   constructor(code: HubError["code"], version?: string) { super(code); this.code = code; this.version = version }
 }
@@ -120,13 +120,30 @@ export async function hello(base: string, timeout = 8000): Promise<Hello> {
   return j as Hello
 }
 
-/** `hello`, as the answer to "can this page use that Hub" */
-async function check(base: string): Promise<Hello> {
+/** the Hub a web client on its own port names in `/hub.json`, when `base` is such a port; else null */
+async function hubBehind(base: string): Promise<string | null> {
+  try {
+    const r = await fetch(base + "/hub.json", { cache: "no-store", signal: AbortSignal.timeout(4000) })
+    const j = r.ok ? await r.json() : null
+    const hub = typeof j?.hub === "string" ? normalize(j.hub) : null
+    return hub && hub !== base ? hub : null
+  } catch { return null }
+}
+
+/** `hello`, as the answer to "can this page use that Hub": the Hub's address and what it said. An address that is a
+ * Hub's page port (what a person copies out of the address bar) stands for the Hub behind it. */
+async function check(base: string): Promise<{ base: string; hello: Hello }> {
   let h: Hello
   /* something answered that is no Hub, or nothing answered at all (refused, timed out, blocked by the browser) */
-  try { h = await hello(base) } catch (e) { throw new HubError((e as Error)?.message === "not-steve" ? "not-steve" : "no-answer") }
+  try { h = await hello(base) } catch (e) {
+    if ((e as Error)?.message !== "not-steve") throw new HubError("no-answer")
+    const hub = await hubBehind(base)
+    if (!hub) throw new HubError("not-steve")
+    try { h = await hello(hub) } catch { throw new HubError("not-steve") }
+    base = hub
+  }
   if (h.api !== API) throw new HubError("api-mismatch", h.version)
-  return h
+  return { base, hello: h }
 }
 
 /** reads the saved Hubs list, most recently used first */
@@ -285,13 +302,16 @@ export const appPairLink = (p: PairLink): string => `steve://pair?${pairQuery(p)
 /** the Hub's addresses in a pairing link, the public one first */
 export const pairAddresses = (p: Pick<PairLink, "publicUrl" | "lanUrls">): string[] => [...(p.publicUrl ? [p.publicUrl] : []), ...p.lanUrls]
 
-/** What the page at `page` does with a pairing: the addresses it can claim the code at itself (its own host first:
- * the browser got here, so it gets there), else the address of the link on a page that can. */
-export function pairPlan(p: PairLink, page?: string): { call: string[]; open: string | null } {
+/** What the page at `page`, talking to the Hub at `hub`, does with a pairing. It claims the code itself only at the
+ * link's addresses that are its own: on the host that served it (the browser got here, so it gets there), or the Hub
+ * it already talks to. A link for any other Hub is opened at that Hub's own page, where the address bar says which
+ * Hub it is: a link someone made up cannot have this page sign in somewhere under another Hub's address. */
+export function pairPlan(p: PairLink, page?: string, hub?: string): { call: string[]; open: string | null } {
   const here = page ?? location.origin
+  const mine = hub ?? currentHub()
   const all = pairAddresses(p)
   const host = (u: string) => { try { return new URL(u).hostname.toLowerCase() } catch { return "" } }
-  const call = all.filter((u) => reach(u, here) === "call").sort((a, b) => Number(host(b) === host(here)) - Number(host(a) === host(here)))
+  const call = all.filter((u) => (host(u) === host(here) || u === mine) && reach(u, here) === "call")
   return { call, open: call.length || !all.length ? null : `${all[0]}/#/pair?${pairQuery(p)}` }
 }
 
@@ -307,19 +327,30 @@ export const clientInfo = (version: string): { kind: string; name: string; platf
  * answers (the Hub keeps the credential in an HttpOnly cookie), and makes it this page's Hub. Throws a `HubError`,
  * or an Error with the Hub's own words (an expired or used code). */
 export async function claimPair(p: PairLink, version: string): Promise<string> {
-  let at = "", mismatch: Hello | null = null
+  let at = "", mismatch: Hello | null = null, other = false
   for (const base of pairPlan(p).call) {
     try {
       const h = await hello(base, 4000)
       if (h.api !== API) { mismatch = h; continue }
       at = base; break
-    } catch { /* the next address */ }
+    } catch (e) { if ((e as Error)?.message === "not-steve") other = true /* the next address */ }
   }
-  if (!at) throw mismatch ? new HubError("api-mismatch", mismatch.version) : new HubError("not-steve")
+  if (!at) throw mismatch ? new HubError("api-mismatch", mismatch.version) : new HubError(other ? "not-steve" : "no-answer")
   const r = await fetch(at + "/auth/pair", { method: "POST", headers: { "content-type": "application/json" }, credentials: "include", body: JSON.stringify({ code: p.code, cookie: true, client: clientInfo(version) }) })
   if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(typeof j.error === "string" ? j.error : `HTTP ${r.status}`) }
+  await signedIn(at)
   setHub(at === location.origin ? null : at, { name: p.name })
   return at
+}
+
+/** After a sign-in at `base` was accepted: whether this browser kept it. A browser that refuses the cookie of a Hub
+ * on another site (Safari, a private window) would show the sign-in again without a word; this says why instead. */
+export async function signedIn(base: string): Promise<void> {
+  /* inside a shell the credential is the shell's, and its gateway adds it */
+  if (nativeBridge()) return
+  let status = 0
+  try { status = (await fetch(base + "/api/me", { credentials: "include", cache: "no-store", signal: AbortSignal.timeout(8000) })).status } catch { return }
+  if (status === 401) throw new HubError("no-session")
 }
 
 /* ───────── what the address the page was opened with asks for ───────── */
@@ -352,20 +383,17 @@ export const onArrival = (f: () => void): (() => void) => { waiting.add(f); retu
 /** answered, one way or the other */
 export const dropPairRequest = () => { request = null; tell() }
 
-/** whether the Hub of a pairing link is the one this page talks to, or is on the host that served the page. When it
- * is neither, the person is told before they say yes: the link would point this page at a Hub they did not pick. */
-export function pairIsHere(p: PairLink, page?: string, hub?: string): boolean {
-  const here = page ?? location.origin
-  const host = (u: string) => { try { return new URL(u).hostname.toLowerCase() } catch { return "" } }
-  return pairAddresses(p).some((u) => u === (hub ?? currentHub()) || host(u) === host(here))
-}
-
-/** the Hubs another page's list named that are not in this page's: offered, and added only when the person says so
- * (a link someone made up must not put a Hub into the list unseen) */
+/** What a yes to another page's list would change in this page's: the Hubs it does not have, and the names for
+ * those it has without one. All of it is shown first (a link someone made up must not put a Hub or a name into the
+ * list unseen). */
 export function hubsOffer(): CarriedHub[] {
   try {
-    const known = new Set([currentHub(), ...savedHubs().map((h) => h.url)])
-    return parseCarried(sessionStorage.getItem(OFFER_KEY) ?? "").filter((h) => !known.has(h.url))
+    const have = new Map(savedHubs().map((h) => [h.url, h]))
+    const cur = currentHub()
+    return parseCarried(sessionStorage.getItem(OFFER_KEY) ?? "").filter((h) => {
+      const known = have.get(h.url)
+      return known ? !!h.name && !known.name : h.url !== cur || !!h.name
+    })
   } catch {
     return []
   }
@@ -374,13 +402,8 @@ export function hubsOffer(): CarriedHub[] {
 export function answerOffer(add: boolean) {
   try {
     if (add) {
-      /* a Hub already in the list (this page's own, for one) takes the name the other page had for it */
       const have = new Map(savedHubs().map((h) => [h.url, h]))
-      parseCarried(sessionStorage.getItem(OFFER_KEY) ?? "").forEach((h, n) => {
-        const known = have.get(h.url)
-        if (!known) rememberHub(h.url, { name: h.name, now: Date.now() - 1 - n })
-        else if (h.name && !known.name) rememberHub(h.url, { name: h.name, now: known.lastUsed })
-      })
+      hubsOffer().forEach((h, n) => rememberHub(h.url, { name: h.name, now: have.get(h.url)?.lastUsed ?? Date.now() - 1 - n }))
     }
     sessionStorage.removeItem(OFFER_KEY)
   } catch { /* private mode */ }
@@ -444,16 +467,16 @@ export function browserEntries(): HubEntry[] {
 }
 
 function browserDirectory(): HubDirectory {
-  const go = async (base: string, name?: string) => {
-    if (reach(base) === "open") {
-      /* an http page may ask it first, so a wrong address is told here and not as a browser's error page */
-      if (location.protocol === "http:") await check(base)
+  const go = async (typed: string, name?: string) => {
+    /* an https page may not ask a plain-http address anything: that one is taken as typed */
+    const asked = reach(typed) === "call" || location.protocol === "http:" ? await check(typed) : null
+    const base = asked?.base ?? typed
+    if (!asked || reach(base) === "open") {
       rememberHub(base, { name })
       location.href = openUrl(base, browserEntries().map((h) => ({ url: h.address, ...(h.name !== hostOf(h.address) ? { name: h.name } : {}) })))
       return
     }
-    const h = await check(base)
-    setHub(base === location.origin ? null : base, { name, version: h.version })
+    setHub(base === location.origin ? null : base, { name, version: asked.hello.version })
     location.reload()
   }
   return {

@@ -306,24 +306,33 @@ test("parsePairLink reads the link a browser opens and the one the app opens, an
   assert.equal(hubMod.parsePairLink("https://steve.example.com/#/items/pair?code=stp_00112233445566778899aabbccddeeff"), null)
 })
 
-test("pairPlan: a page claims the code at the addresses it can call, its own host first, else goes to a page that can", () => {
+test("pairPlan: a page claims the code only at its own host or its own Hub, and opens any other Hub's link there", () => {
   const code = "stp_00112233445566778899aabbccddeeff"
   const both = { code, publicUrl: "https://steve.example.com", lanUrls: ["http://192.168.1.25:8440", "http://10.0.0.8:8440"] }
-  /* the phone opened the LAN link: the LAN address answers it, the public one may not */
-  assert.deepEqual(hubMod.pairPlan(both, "http://192.168.1.25:8441"), { call: ["http://192.168.1.25:8440", "https://steve.example.com"], open: null })
-  assert.deepEqual(hubMod.pairPlan(both, "https://steve.example.com"), { call: ["https://steve.example.com"], open: null })
-  /* pasted into another Hub's page on plain http: only https can be called from there */
-  assert.deepEqual(hubMod.pairPlan(both, "http://192.168.1.99:8440"), { call: ["https://steve.example.com"], open: null })
+  /* the phone opened the LAN link: the LAN address on this host answers it */
+  assert.deepEqual(hubMod.pairPlan(both, "http://192.168.1.25:8441", ""), { call: ["http://192.168.1.25:8440"], open: null })
+  assert.deepEqual(hubMod.pairPlan(both, "https://steve.example.com", ""), { call: ["https://steve.example.com"], open: null })
+  /* pasted into another Hub's page: that Hub's own page takes it, even where this page could call it */
+  const there = hubMod.pairPlan(both, "http://192.168.1.99:8440", "http://192.168.1.99:8440")
+  assert.deepEqual(there.call, [])
+  assert.equal(there.open, "https://steve.example.com/#/pair?" + hubMod.pairQuery(both))
+  /* a page elsewhere that already talks to this Hub claims at it */
+  assert.deepEqual(hubMod.pairPlan(both, "https://app.example.com", "https://steve.example.com"), { call: ["https://steve.example.com"], open: null })
   const lan = { code, name: "Home Hub", lanUrls: ["http://192.168.1.25:8440"] }
-  const plan = hubMod.pairPlan(lan, "http://192.168.1.99:8440")
+  const plan = hubMod.pairPlan(lan, "http://192.168.1.99:8440", "")
   assert.deepEqual(plan.call, [])
   assert.equal(plan.open, "http://192.168.1.25:8440/#/pair?" + hubMod.pairQuery(lan))
   assert.deepEqual(hubMod.parsePairLink(plan.open), lan)
-  assert.deepEqual(hubMod.pairPlan({ code, lanUrls: [] }, "http://192.168.1.99:8440"), { call: [], open: null })
+  assert.deepEqual(hubMod.pairPlan({ code, lanUrls: [] }, "http://192.168.1.99:8440", ""), { call: [], open: null })
+  /* an https page cannot call its own host over plain http: the link goes to that page */
+  assert.deepEqual(hubMod.pairPlan(lan, "https://192.168.1.25", "").call, [])
 
-  assert.equal(hubMod.pairIsHere(lan, "http://192.168.1.25:8441", ""), true, "the Hub on the host that served the page")
-  assert.equal(hubMod.pairIsHere(lan, "https://app.example.com", "http://192.168.1.25:8440"), true, "the Hub the page talks to")
-  assert.equal(hubMod.pairIsHere(lan, "http://192.168.1.99:8440", "http://192.168.1.99:8440"), false)
+  /* a made-up link that names this page's host beside another Hub: the code is never claimed at the other one */
+  const forged = { code, publicUrl: "https://evil.example", lanUrls: ["http://hub.example:1"] }
+  assert.deepEqual(hubMod.pairPlan(forged, "http://hub.example:8441", "").call, ["http://hub.example:1"])
+  const onTls = hubMod.pairPlan(forged, "https://hub.example", "")
+  assert.deepEqual(onTls.call, [])
+  assert.ok(onTls.open.startsWith("https://evil.example/#/pair?"), "opened there, under its own address, with a warning first")
 })
 
 test("readArrival takes a pairing or a carried list out of the fragment and leaves every other route alone", () => {
@@ -367,7 +376,8 @@ test("the Hubs another page's list named are offered once, and added only on a y
       hubMod.setHub("http://192.168.1.10:8440")
       /* a no leaves the list as it was */
       session.set("steve.hubs.offer", carried)
-      assert.deepEqual(hubMod.hubsOffer().map((h) => h.url), ["https://steve.example.com", "http://10.0.0.2:8440"])
+      /* everything a yes would change is in the offer: the two unknown Hubs, and the name for the one in use */
+      assert.deepEqual(hubMod.hubsOffer().map((h) => h.url), ["http://192.168.1.10:8440", "https://steve.example.com", "http://10.0.0.2:8440"])
       hubMod.answerOffer(false)
       assert.deepEqual(hubMod.hubsOffer(), [])
       assert.deepEqual(hubMod.savedHubs().map((h) => h.url), ["http://192.168.1.10:8440"])
@@ -376,9 +386,10 @@ test("the Hubs another page's list named are offered once, and added only on a y
       hubMod.answerOffer(true)
       assert.deepEqual(hubMod.savedHubs().map((h) => [h.url, h.name]), [["http://192.168.1.10:8440", "Home"], ["https://steve.example.com", "Cloud"], ["http://10.0.0.2:8440", undefined]])
       assert.equal(session.has("steve.hubs.offer"), false)
-      /* a name the person gave stays */
+      /* a name the person gave stays, and a list that would change nothing is no offer */
       hubMod.rememberHub("https://steve.example.com", { name: "Mine" })
       session.set("steve.hubs.offer", carried)
+      assert.deepEqual(hubMod.hubsOffer(), [])
       hubMod.answerOffer(true)
       assert.equal(hubMod.savedHubs().find((h) => h.url === "https://steve.example.com").name, "Mine")
     } finally {

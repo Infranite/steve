@@ -40,6 +40,7 @@ export default {
     pairSub: "Sign another device in to this account: scan the QR code with its camera or the Steve app, or open the pairing link in its browser. The code and the link work once, for 5 minutes.",
     pairButton: "Show pairing QR code",
     pairRefresh: "Refresh QR code",
+    pairShow: "Show the pairing code",
     pairCopyUri: "Copy pairing link",
     pairAddress: "The other device will connect to",
     pairAddressPick: "The other device will connect to (pick another address if it cannot reach this one)",
