@@ -249,6 +249,71 @@ For a design or report delivery, Steve saves the delivery text as a Markdown fil
 
 At startup, the Hub repairs old output records that point to a prose summary when the full saved text can still be found. Before it changes a record, it creates a verified `pre-delivery-recovery-*.sqlite3` copy in `<home>/backups`. The repair is safe to retry after a failed start. Files that were deleted before the upgrade cannot be restored this way.
 
+## Plugins
+
+A plugin is a program that is not part of Steve, installed from a plugin library and run beside the Hub as a process of its own. It is reached through one of Steve's documented contracts and never links into the Hub. The first kind is a channel plugin: a [channel service](#an-external-channel-service) the Hub starts and connects for you.
+
+**Using them.** On the Plugins page the instance's owner adds libraries and installs, upgrades and uninstalls plugins; anyone signed in connects an installed plugin with their own settings (an address, a token, whatever that plugin asks for). Connecting starts one process for that person and creates an external-channel connection of theirs, which then appears in Accounts like any other. The connection's token is kept in the vault, so the vault has to be turned on first. Disconnecting it in Accounts stops the process and removes its settings and data. A library with something installed from it, and a plugin somebody is connected through, cannot be removed until that is undone.
+
+**Trust.** Installing a plugin runs its program as the Hub's user, outside the sandbox the Node gives agent runs. A library is trusted as much as the owner trusts it by adding it; what is installed is exactly the archive whose sha256 the library's index names. The official library, `https://github.com/Infranite/steve-extensions`, is listed on a new installation and nothing is read from it until the owner asks. `STEVE_PLUGIN_LIBRARY` names another first library, or `off` for none; once the owner has changed the list, the list is what they made it.
+
+**A library's address** is one of:
+
+- `https://github.com/<owner>/<repo>` (or `<owner>/<repo>`): `steve-store.json` at the root of the repository's default branch;
+- the `https://` address of an index file itself, on any host (plain `http://` only on `127.0.0.1` and `::1`);
+- an absolute directory on the Hub's machine with `steve-store.json` in it: a library in development, or one that is not published.
+
+**The index**, `steve-store.json` (format 1; unknown members are ignored):
+
+```json
+{
+  "store": 1,
+  "name": "Example plugins",
+  "plugins": [{
+    "id": "example",
+    "name": "Example",
+    "summary": {"en": "What it does", "zh-CN": "它做什么"},
+    "kind": "channel",
+    "version": "0.1.0",
+    "contract": 1,
+    "entry": "bin/example",
+    "homepage": "https://example.org/plugin",
+    "config": [
+      {"key": "address", "label": "Service address", "hint": "wss://…"},
+      {"key": "token", "label": "Access token", "secret": true},
+      {"key": "note", "label": "Note", "required": false}
+    ],
+    "artifacts": {
+      "aarch64-apple-darwin": {"url": "https://example.org/example-0.1.0-aarch64-apple-darwin.tar.gz", "sha256": "…"}
+    }
+  }]
+}
+```
+
+- `id` and a setting's `key` are a lowercase letter or digit followed by lowercase letters, digits, `-` and `_`, at most 40 characters. `name`, `summary`, `label` and `hint` are a string or a map from language to string.
+- `version` is a semantic version. The index names one version of each plugin, the one to install now; an installed plugin with an older version is offered as an update after the owner reads the library again.
+- `config` lists the settings a person enters when connecting. A `secret` one is entered like a password and never shown again; a setting is required unless it says `"required": false`.
+- `artifacts` is keyed by the target the Hub was built for (`steve-hub --build-info` prints it). A plugin without an artifact for the Hub's target is listed and cannot be installed there. `url` is `https://`, or a path relative to the index, which is the only form a directory library uses. The archive is a `.tar.gz` of regular files and directories, at most 256 MiB; an archive with a link or a path that leaves it is refused. `entry` is the executable in it.
+- `kind` and `contract` say how the Hub runs the plugin. One whose kind or contract this Hub does not know is listed as needing a newer Steve.
+
+**A channel plugin** (`"kind": "channel"`, `"contract": 1`) implements the external channel protocol (`hub-rs/crates/steve-channels/src/adapters/ext_ws/protocol.rs`) for one signed-in person. The Hub starts its `entry` once per connection, with `PATH`, `HOME`, the locale, `TMPDIR` and `TZ` of its own environment and these variables:
+
+| Variable | Meaning |
+|---|---|
+| `STEVE_PLUGIN_LISTEN` | `127.0.0.1:<port>`: where to serve the protocol, with the WebSocket at `/ws` and media under `/v1/media/` |
+| `STEVE_PLUGIN_TOKEN_FILE` | A file with the bearer token the Hub presents; refuse anything else |
+| `STEVE_PLUGIN_CONFIG` | A JSON file: an object with the person's settings, each a string under its `key` |
+| `STEVE_PLUGIN_DATA` | A directory that is the instance's to write; it is also the working directory |
+| `STEVE_PLUGIN_SUPERVISED` | `1`: the Hub holds standard input open; exit when it reaches end of file, which means the Hub is gone |
+
+The plugin has 20 seconds to start listening when it is first connected. One that exits is started again after a pause that grows from a second to a minute; meanwhile its connection behaves like any external channel whose service is unreachable. To stop it the Hub closes its standard input and sends `SIGTERM`, and kills it after five seconds.
+
+**On disk**, everything is under `<home>/plugins` and readable without a running Hub:
+
+- `stores.json`: the libraries and the index last read from each;
+- `installed/<library>/<plugin>/`: `installed.json` beside the unpacked version;
+- `instances/<id>/`: `instance.json`, the settings (`config.json`) and `token`, both readable by the Hub's user only, the plugin's `data/`, and `plugin.log` with what it wrote to standard output and error. Look there first when a plugin does not start.
+
 ## Diagnostic capture and queries
 
 New items, including ordinary conversation items and workflow child items, automatically start one 30-minute window of detailed capture. The deadline is persisted when the item is created; queries, restarts and continuing the item never extend it. Older items are not enabled retroactively. Once a window expires or the owner stops it, it stays stopped until the instance owner explicitly starts another 1–60 minute window in **Debug**. There is no new environment switch.
