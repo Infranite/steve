@@ -155,8 +155,9 @@ async fn workspaces_report_and_reclaim() {
     );
 }
 
-/// The data page asks where the database and its copies are: the Hub's own paths, the daily copy on
-/// unless turned off, and no copy yet on a Hub that has just started.
+/// The data page asks where the database and its copies are: the Hub's own paths, the daily copy as
+/// it is started (this Hub runs with NO_RESUME, as one on a copy of a real database does, so it makes
+/// none), and no copy yet on a Hub that has just started.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_reads_where_the_database_and_its_copies_are() {
     let e = start().await;
@@ -173,7 +174,7 @@ async fn the_owner_reads_where_the_database_and_its_copies_are() {
             .unwrap()
             .join("backups")
     );
-    assert_eq!(v["daily"], true, "{v}");
+    assert_eq!(v["daily"], false, "{v}");
     assert_eq!(v["keep_days"], 14, "{v}");
     assert_eq!(v["last"], Value::Null, "{v}");
 }

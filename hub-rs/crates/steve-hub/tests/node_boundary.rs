@@ -315,7 +315,7 @@ const ALLOWED: &[Entry] = &[
     e(Spawn, "steve-modules/src/vault/keystore/helper.rs", 1, Hub, "the vault keystore helper"),
     e(Spawn, "steve-modules/src/net.rs", 1, Hub, "test support: reruns one test in a child"),
     e(Dir, "steve-hub/src/upgrades/mod.rs", 1, Hub, "upgrade operations in the Hub data dir"),
-    e(Dir, "steve-hub/src/daily_backup.rs", 3, Hub, "the daily copy: the parts of the Hub's own home its tar takes, and its backups directory (old copies, the newest one)"),
+    e(Dir, "steve-hub/src/daily_backup.rs", 4, Hub, "the daily copy: the parts of the Hub's own home its tar takes, and its backups directory (old copies, what an interrupted copy left, the newest one)"),
     e(Dir, "steve-modules/src/vault/inject.rs", 1, Hub, "the vault's scratch dirs in the Hub data dir"),
     e(Dir, "steve-knowledge/src/eval.rs", 1, Hub, "the offline retrieval eval corpus"),
     e(Fs, "steve-knowledge/src/eval.rs", 3, Hub, "the offline retrieval eval corpus"),
