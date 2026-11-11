@@ -1,2 +1,2 @@
 - 单次 ACP 调用在收到适配器报错返回前先排干已到达的通知并封口统计：模型因过载等错误回退时，失败尝试已上报的 token 与费用不再偶发漏记；会话加载阶段末尾重放的历史片段也不会串入后续提问。
-- 同一 Git 仓库上的写操作（`worktree add` / `remove` / `prune`、分支与变基等）现按公共 `.git` 目录串行化，后台磁盘回收中的 `git worktree prune` 移出核心状态锁外执行，避免与新建或清理 worktree 并发修改 `.git/worktrees` 导致偶发报错。
+- 同一 Git 仓库上的 `git worktree` 变更子命令（`add` / `remove` / `prune` / `move` / `repair` / `lock` / `unlock`）现按公共 `.git` 目录串行化（`fetch` / `push` / `rebase` / `commit` 等非 worktree 命令不加此锁，保持 Git 自身锁行为），后台磁盘回收中的 `git worktree prune` 移出核心状态锁外执行，避免与新建或清理 worktree 并发修改 `.git/worktrees` 导致偶发报错。
