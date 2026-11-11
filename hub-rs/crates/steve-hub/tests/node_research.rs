@@ -526,9 +526,14 @@ async fn a_run_on_the_node_answers_falls_back_and_continues() {
         2
     );
 
-    // a follow-up continues the session with the model that answered
+    // a follow-up continues the session with the model that answered, which is still one to try
     w.reset();
     let mut r = request(&w, "tr_3", "default", "然后呢？\n@msg m3\n@say 接着说。");
+    r.models = steve_core::models::Choice {
+        harness: "claude-code".into(),
+        models: vec!["m-busy".into(), "m2".into()],
+        effort: Some("max".into()),
+    };
     r.resume = Some(ResumeFrom {
         run: "tr_2".into(),
         session: "sess-1".into(),
