@@ -71,13 +71,13 @@ function LevelRow({ m, title, sub, on, current, disabled, pick }: { m: YoloLevel
   const t = useT()
   return (
     <button type="button" role="radio" aria-checked={on} disabled={disabled} onClick={pick} data-yolo-level={m}
-      className={cn("flex w-full items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors disabled:opacity-50",
+      className={cn("flex min-w-0 w-full items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors disabled:opacity-50",
         on ? (m === "full" ? "border-attention/60 bg-attention/5" : "border-foreground/25 bg-muted/50") : "border-transparent hover:bg-muted/50")}>
       <span className={cn("mt-[3px] flex size-4 shrink-0 items-center justify-center rounded-full border", on ? (m === "full" ? "border-attention" : "border-foreground") : "border-border")} aria-hidden>
         {on && <span className={cn("size-2 rounded-full", m === "full" ? "bg-attention" : "bg-foreground")} />}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-2 type-headline">{title}{current && <span className="type-footnote font-normal text-muted-foreground">{t("yolo:switch.current")}</span>}</span>
+        <span className="flex flex-wrap items-center gap-x-2 type-headline">{title}{current && <span className="type-footnote font-normal text-muted-foreground">{t("yolo:switch.current")}</span>}</span>
         <span className="mt-0.5 block type-footnote text-muted-foreground">{sub}</span>
       </span>
     </button>
@@ -103,40 +103,42 @@ export function YoloDialog() {
   const needsOk = sel === "full" && cur !== "full"
   return (
     <Dialog open onOpenChange={(o) => !o && closeSheet()}>
-      <DialogContent className="max-h-[92dvh] gap-4 overflow-y-auto rounded-2xl sm:max-w-[520px]" data-yolo-dialog={s}>
-        <DialogHeader>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] gap-4 rounded-2xl p-4 [overflow-wrap:anywhere] sm:max-w-[520px] sm:p-6" data-yolo-dialog={s}>
+        <DialogHeader className="min-w-0 pr-8">
           <DialogTitle className="type-headline">{t("yolo:switch.title")}</DialogTitle>
           <DialogDescription className="type-callout">{t("yolo:switch.desc")}</DialogDescription>
         </DialogHeader>
-        {s === "forced" && <div className="rounded-xl bg-muted/60 px-3.5 py-3 type-callout text-muted-foreground" data-yolo-forced>{t("yolo:switch.forced", { reason: y.forced_reason })}</div>}
-        {s === "paused" && <div role="alert" className="flex items-start gap-2.5 rounded-xl border border-destructive/40 px-3.5 py-3 type-callout" data-yolo-paused>
-          <Dot s="paused" className="mt-[7px]" />
-          <div className="min-w-0 flex-1"><div className="font-medium">{label("paused")}</div><div className="mt-0.5 text-muted-foreground">{t("yolo:switch.pausedNote", { reason: y.paused?.reason })}</div></div>
-          <Button size="sm" disabled={busy} onClick={() => void run(async () => { await yoloResume(); closeSheet() })} data-yolo-resume>{t("yolo:run.resume")}</Button></div>}
-        <div role="radiogroup" aria-label={t("yolo:switch.modes")} className="-mx-1.5 flex flex-col gap-1">
-          {levels().map((l) => <LevelRow key={l.m} {...l} on={sel === l.m} current={cur === l.m && !locked} disabled={locked && l.m !== "off"} pick={() => { setSel(l.m); setOk(false) }} />)}
+        <div className="flex min-h-0 min-w-0 flex-col gap-4 overflow-y-auto p-1 *:shrink-0" data-yolo-scroll>
+          {s === "forced" && <div className="rounded-xl bg-muted/60 px-3.5 py-3 type-callout text-muted-foreground" data-yolo-forced>{t("yolo:switch.forced", { reason: y.forced_reason })}</div>}
+          {s === "paused" && <div role="alert" className="flex flex-wrap items-start gap-2.5 rounded-xl border border-destructive/40 px-3.5 py-3 type-callout" data-yolo-paused>
+            <Dot s="paused" className="mt-[7px]" />
+            <div className="min-w-0 flex-1"><div className="font-medium">{label("paused")}</div><div className="mt-0.5 text-muted-foreground">{t("yolo:switch.pausedNote", { reason: y.paused?.reason })}</div></div>
+            <Button size="sm" disabled={busy} onClick={() => void run(async () => { await yoloResume(); closeSheet() })} data-yolo-resume>{t("yolo:run.resume")}</Button></div>}
+          <div role="radiogroup" aria-label={t("yolo:switch.modes")} className="flex min-w-0 shrink-0 flex-col gap-1">
+            {levels().map((l) => <LevelRow key={l.m} {...l} on={sel === l.m} current={cur === l.m && !locked} disabled={locked && l.m !== "off"} pick={() => { setSel(l.m); setOk(false) }} />)}
+          </div>
+          {(cur === "on" || cur === "full") && !locked && <div className="flex flex-wrap items-center gap-x-1.5 type-footnote text-muted-foreground" data-yolo-on>
+            <span><Trans t={t} i18nKey={y.counts.scheduled ? "yolo:switch.countsScheduled" : "yolo:switch.counts"} values={{ decided: y.counts.decided, declined: y.counts.declined, scheduled: y.counts.scheduled }} components={{ b: <b className="font-medium text-foreground" /> }} /></span>
+            <span>·</span><button type="button" className="text-blue hover:underline" onClick={() => { closeSheet(); go("#/yolo") }} data-yolo-digest-link>{t("yolo:switch.viewRecord")}</button></div>}
+          {turningOn && <div className="flex min-w-0 shrink-0 flex-col gap-2" data-yolo-preview>
+            {!pv && !err && <div className="flex items-center gap-2 type-footnote text-muted-foreground"><Spinner className="size-3.5" />{t("yolo:switch.previewLoading")}</div>}
+            {err && <div className="type-footnote text-destructive">{err}</div>}
+            {pv && <>
+              <div className="type-footnote text-muted-foreground"><Trans t={t} i18nKey={pv.hard_limited ? "yolo:switch.previewHard" : "yolo:switch.preview"} values={{ n, keep: pv.keep_for_you, hard: pv.hard_limited }} components={{ b: <b className="font-medium text-foreground" /> }} /></div>
+              {n > 0 && <ul className="flex min-w-0 flex-col gap-1" data-yolo-would>
+                {pv.would_handle.slice(0, 6).map((w) => <li key={w.decision_id} className="flex min-w-0 flex-wrap items-baseline gap-x-2 type-footnote"><span className="min-w-0 max-w-full">{w.question}</span><span className="min-w-0 max-w-full text-muted-foreground">{t("auto:quoted", { text: choiceText(w.choice, w.rule.startsWith("release") ? "release" : undefined) })}{w.delay_s ? t("yolo:switch.delay", { when: t("yolo:badge.inMinutes", { count: Math.round(w.delay_s / 60) }) }) : ""}</span></li>)}
+              </ul>}
+              {n > 0 && <label className="flex items-start gap-2 type-footnote"><Checkbox checked={all} onCheckedChange={(v) => setAll(!!v)} data-yolo-include-open /><span className="min-w-0">{t("yolo:switch.includeOpen", { count: n })}</span></label>}
+            </>}
+          </div>}
+          {needsOk && <div className="flex min-w-0 shrink-0 flex-col gap-2 rounded-xl bg-attention/8 px-3.5 py-3" data-yolo-full-confirm>
+            <div className="type-callout font-medium">{fullGives()}</div>
+            <div className="type-footnote text-muted-foreground">{fullKeeps()}</div>
+            <label className="mt-1 flex items-start gap-2 type-callout"><Checkbox className="mt-0.5" checked={ok} onCheckedChange={(v) => setOk(!!v)} data-yolo-full-ok /><span className="min-w-0">{t("yolo:switch.fullOk")}</span></label>
+          </div>}
+          {s !== "forced" && !needsOk && <div className="type-footnote text-tertiary" data-yolo-never>{never()}</div>}
         </div>
-        {(cur === "on" || cur === "full") && !locked && <div className="flex flex-wrap items-center gap-x-1.5 type-footnote text-muted-foreground" data-yolo-on>
-          <span><Trans t={t} i18nKey={y.counts.scheduled ? "yolo:switch.countsScheduled" : "yolo:switch.counts"} values={{ decided: y.counts.decided, declined: y.counts.declined, scheduled: y.counts.scheduled }} components={{ b: <b className="font-medium text-foreground" /> }} /></span>
-          <span>·</span><button type="button" className="text-blue hover:underline" onClick={() => { closeSheet(); go("#/yolo") }} data-yolo-digest-link>{t("yolo:switch.viewRecord")}</button></div>}
-        {turningOn && <div className="flex flex-col gap-2" data-yolo-preview>
-          {!pv && !err && <div className="flex items-center gap-2 type-footnote text-muted-foreground"><Spinner className="size-3.5" />{t("yolo:switch.previewLoading")}</div>}
-          {err && <div className="type-footnote text-destructive">{err}</div>}
-          {pv && <>
-            <div className="type-footnote text-muted-foreground"><Trans t={t} i18nKey={pv.hard_limited ? "yolo:switch.previewHard" : "yolo:switch.preview"} values={{ n, keep: pv.keep_for_you, hard: pv.hard_limited }} components={{ b: <b className="font-medium text-foreground" /> }} /></div>
-            {n > 0 && <ul className="flex max-h-32 flex-col gap-1 overflow-auto" data-yolo-would>
-              {pv.would_handle.slice(0, 6).map((w) => <li key={w.decision_id} className="flex min-w-0 items-baseline gap-2 type-footnote"><span className="min-w-0 flex-1 truncate">{w.question}</span><span className="shrink-0 text-muted-foreground">{t("auto:quoted", { text: choiceText(w.choice, w.rule.startsWith("release") ? "release" : undefined) })}{w.delay_s ? t("yolo:switch.delay", { when: t("yolo:badge.inMinutes", { count: Math.round(w.delay_s / 60) }) }) : ""}</span></li>)}
-            </ul>}
-            {n > 0 && <label className="flex items-center gap-2 type-footnote"><Checkbox checked={all} onCheckedChange={(v) => setAll(!!v)} data-yolo-include-open />{t("yolo:switch.includeOpen", { count: n })}</label>}
-          </>}
-        </div>}
-        {needsOk && <div className="flex flex-col gap-2 rounded-xl bg-attention/8 px-3.5 py-3" data-yolo-full-confirm>
-          <div className="type-callout font-medium">{fullGives()}</div>
-          <div className="type-footnote text-muted-foreground">{fullKeeps()}</div>
-          <label className="mt-1 flex items-start gap-2 type-callout"><Checkbox className="mt-0.5" checked={ok} onCheckedChange={(v) => setOk(!!v)} data-yolo-full-ok />{t("yolo:switch.fullOk")}</label>
-        </div>}
-        {s !== "forced" && !needsOk && <div className="type-footnote text-tertiary" data-yolo-never>{never()}</div>}
-        <DialogFooter className="gap-2">
+        <DialogFooter className="min-w-0 gap-2 *:h-auto *:min-h-8 *:min-w-0 *:whitespace-normal">
           <Button variant="ghost" onClick={closeSheet}>{action ? t("common:action.cancel") : t("yolo:switch.done")}</Button>
           {action && <Button disabled={busy || (needsOk && !ok) || (turningOn && !pv && !err)} data-yolo-apply={sel}
             className={cn(sel === "full" && "bg-attention text-white hover:bg-attention/90")} variant={sel === "off" ? "outline" : "default"}

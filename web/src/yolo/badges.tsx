@@ -111,7 +111,7 @@ function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project
         <DropdownMenuTrigger disabled={!!st.yolo?.forced_off} render={<button type="button" className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12.5px] text-foreground/85 transition-colors hover:bg-muted disabled:opacity-50" aria-label={label} data-yolo-scope={type} data-yolo-scope-mode={cur} />}>
           {children}<ChevronDownIcon className="size-3.5 text-muted-foreground" />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="min-w-64">
+        <DropdownMenuContent align="start" className="w-[min(20rem,calc(100vw-2rem))] min-w-0 [overflow-wrap:anywhere]">
           <DropdownMenuGroup><DropdownMenuLabel className="type-footnote text-muted-foreground">{label}</DropdownMenuLabel></DropdownMenuGroup>
           <DropdownMenuSeparator />
           <DropdownMenuRadioGroup value={cur} onValueChange={(v) => pick(v as YoloMode)}>
@@ -123,12 +123,12 @@ function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project
         </DropdownMenuContent>
       </DropdownMenu>
       <AlertDialog open={ask} onOpenChange={setAsk}>
-        <AlertDialogContent data-yolo-scope-confirm>
-          <AlertDialogHeader>
+        <AlertDialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] grid-rows-[minmax(0,1fr)_auto] gap-4 p-4 [overflow-wrap:anywhere] sm:p-6" data-yolo-scope-confirm>
+          <AlertDialogHeader className="min-h-0 min-w-0 overflow-y-auto p-1">
             <AlertDialogTitle>{type === "item" ? t("yolo:scope.confirmItem") : t("yolo:scope.confirmProject")}</AlertDialogTitle>
             <AlertDialogDescription className="flex flex-col gap-2"><span className="text-foreground">{fullGives()}</span><span>{fullKeeps()}</span></AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
+          <AlertDialogFooter className="min-w-0 *:h-auto *:min-h-8 *:min-w-0 *:whitespace-normal"><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
             <AlertDialogAction className="bg-attention text-white hover:bg-attention/90" onClick={() => void yoloScope(type, id, "full")} data-yolo-scope-full-ok>{t("yolo:level.full")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
