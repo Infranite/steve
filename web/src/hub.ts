@@ -403,7 +403,12 @@ export function answerOffer(add: boolean) {
   try {
     if (add) {
       const have = new Map(savedHubs().map((h) => [h.url, h]))
-      hubsOffer().forEach((h, n) => rememberHub(h.url, { name: h.name, now: have.get(h.url)?.lastUsed ?? Date.now() - 1 - n }))
+      const cur = currentHub()
+      /* one reading of the clock: the Hub in use is the most recent, the new ones follow it in the order they came */
+      const now = Date.now()
+      const offer = hubsOffer()
+      if (cur && have.has(cur)) rememberHub(cur, { now })
+      offer.forEach((h, n) => rememberHub(h.url, { name: h.name, now: h.url === cur ? now : have.get(h.url)?.lastUsed ?? now - 1 - n }))
     }
     sessionStorage.removeItem(OFFER_KEY)
   } catch { /* private mode */ }
