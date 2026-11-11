@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { QueuedComment, queuedComments, QueueStrip } from "../../src/queue"
 import { Markdown } from "../../src/components/markdown"
+import { StartingLine } from "../../src/ui"
 import type { RQueued } from "../../src/api"
 /* an item page in miniature: the timeline's comments, then the strip that sits above the composer */
 const P = "补充信息："
@@ -23,5 +24,11 @@ createRoot(document.getElementById("root")!).render(<StrictMode><main style={{ m
         : <div className="type-body">{e[1]}</div>}
     </div>
   })}
-  <QueueStrip sid="s1" rows={rest} prefix={P} note="本回合结束后发送" />
+  <div data-running-strip><QueueStrip sid="s1" rows={rest} prefix={P} note="本回合结束后发送" /></div>
+  {/* a session that is still starting: Steve's brief waits for it, as does what the user added meanwhile */}
+  <div data-starting-brief><QueueStrip sid="s2" rows={[row("b1", "steve", "把对话页的排队做成可以立即发送")]} note="会话启动后发送" starting /></div>
+  <div data-starting-mixed><QueueStrip sid="s2" rows={[row("b1", "steve", "把对话页的排队做成可以立即发送"), row("b2", "me", "顺便看下移动端")]} note="会话启动后发送" starting /></div>
+  {/* the session's own line while it starts: just now, and for five minutes */}
+  <div data-start-fresh><StartingLine since={Date.now()} /></div>
+  <div data-start-long><StartingLine since={Date.now() - 5 * 60_000} /></div>
 </main></StrictMode>)

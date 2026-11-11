@@ -570,6 +570,16 @@ export function useNow(on: boolean) {
   }, [on])
   return n
 }
+/** a session not opened on its Node yet: how long it has been starting, and past two minutes that this is long.
+ * Nothing else on the page says a start stands still: there is no turn, no event and no error to show. */
+const SLOW_START_MS = 120_000
+export function StartingLine({ since }: { since?: number }) {
+  const t = useT(), now = useNow(true), waited = since ? now - since : 0, slow = waited >= SLOW_START_MS
+  return <div className="type-callout text-muted-foreground" data-starting={slow ? "slow" : "ok"}>
+    {t("core:transcript.starting")}{waited >= 10_000 && <span className="ml-1.5 tabular-nums">{clock(waited)}</span>}
+    {slow && <div className="mt-1 type-footnote text-attention" data-starting-slow>{t("core:transcript.startingSlow")}</div>}
+  </div>
+}
 const TOOLN = ["ToolSearch", "TodoWrite", "Task", "Agent", "Skill"] as const
 const toolName = (tool: string) => ((TOOLN as readonly string[]).includes(tool) ? t(`core:transcript.tool.${tool as (typeof TOOLN)[number]}`) : undefined)
 type StepView = { I: any; verb: string; subj: string; mono: boolean; full?: string }
@@ -865,7 +875,7 @@ function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: stri
   useEffect(() => { if (s && !s.loaded) void loadEvents(k) }, [k, s?.loaded])
   if (!s) return null
   if (!s.loaded) return <div className="flex items-center gap-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("core:transcript.loading")}</div>
-  if (!s.ev.length && !range) return <div className="type-callout text-muted-foreground">{t(s.st === "run" ? "core:transcript.starting" : "core:transcript.empty")}</div>
+  if (!s.ev.length && !range) return s.starting ? <StartingLine since={s.since} /> : <div className="type-callout text-muted-foreground">{t(s.st === "run" ? "core:transcript.starting" : "core:transcript.empty")}</div>
   const segs = segsOf(s, range, skip)
   /* the turn running now may be shown elsewhere (skipped): then its progress is there, not here */
   const last = segs[segs.length - 1], tailOpen = (!range || range[1] >= s.ev.length) && last?.t !== "away"
@@ -888,11 +898,13 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
   if (!s || !s.loaded || (!s.ev.length && !run)) return null
   let i = s.ev.length - 1
   while (i >= 0 && !["u", "hi", "q"].includes(s.ev[i][0])) i--
-  const turn = s.ev.slice(i + 1), t0 = (i >= 0 ? s.ts[i] : s.ts[0]) || now
+  /* before the session is up there is no turn: the clock counts the start itself */
+  const starting = run && !!s.starting && !s.ev.length
+  const turn = s.ev.slice(i + 1), t0 = (starting && s.since) || (i >= 0 ? s.ts[i] : s.ts[0]) || now
   const end = turn.findLast((e) => e[0] === "end"), endAt = end ? s.ts[s.ev.lastIndexOf(end)] : 0
   const stats = workStats(turn)
   const tone = run ? "run" : s.st === "wait" ? "wait" : end?.[1] === "cancelled" ? "stop" : s.st === "ended" ? "ended" : "done"
-  const label = t(`core:runBar.${tone}`)
+  const label = starting ? t("core:transcript.startingShort") : t(`core:runBar.${tone}`)
   const what = run ? <Doing evs={turn} /> : tone === "wait" ? t("core:runBar.waitWhat") : stats.join(" · ")
   return (
     <div role="status" aria-live="polite" data-runbar={tone}
@@ -928,7 +940,7 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
         <button type="button" onClick={toggle} className="flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-expanded={open}>
           <span className="shrink-0 type-callout font-medium">{t("core:session.no", { n: s.n })}</span>
           <Status s={s.st} sess />
-          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${st.devices.find((d) => d.id === s.device)?.name ?? "Hub"} · ${s.h} · ${s.m} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : lastA ? lastA[1] : s.st === "run" ? t("core:runBar.run") : ""}</span>
+          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${st.devices.find((d) => d.id === s.device)?.name ?? "Hub"} · ${s.h} · ${s.m} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : lastA ? lastA[1] : s.starting ? t("core:transcript.startingShort") : s.st === "run" ? t("core:runBar.run") : ""}</span>
           <span className="ml-auto shrink-0 type-footnote text-muted-foreground">{t(open ? "core:session.collapse" : "core:session.expand")}</span>
         </button>
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>

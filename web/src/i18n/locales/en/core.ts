@@ -323,6 +323,7 @@ export default {
     moreSegs_one: "{{count}} earlier part · Show all",
     moreSegs_other: "{{count}} earlier parts · Show all",
     startingShort: "Starting",
+    startingSlow: "Taking longer than usual. The session starts once its Node has prepared the workspace and started the harness; if it stays here, the Hub's log and that Node's log say why.",
   },
   runBar: {
     run: "Running",

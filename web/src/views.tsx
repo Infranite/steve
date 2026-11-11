@@ -372,7 +372,8 @@ export function ItemView({ id }: { id: string }) {
   const targets = (a && a.st === "run" ? ["auto", "steer", "new"] : ["auto", "new"]) as ("auto" | "steer" | "new")[]
   /* queued supplements show on their comments; the strip above the composer keeps only rows no comment claims */
   const queued = queuedComments(i.tl, i.qs, i.q, "补充信息：")
-  const qNote = a ? queueNote(st.S[i.qs ?? ""] ?? null) : t("views:item.queueNewSession")
+  const qSess = st.S[i.qs ?? ""] ?? null
+  const qNote = a ? queueNote(qSess) : t("views:item.queueNewSession")
   /* activity feed: filter, then fold everything but the latest four entries (a queued comment is never folded) */
   const feed = i.tl.map((e, n) => ({ e, n })).filter(({ e }) => feedMode === "all" || e[0] !== "sys" || KEY_SYS.test(e[1]))
   const firstQueued = feed.findIndex(({ n }) => queued.byComment.has(n))
@@ -419,7 +420,7 @@ export function ItemView({ id }: { id: string }) {
     const q = e[0] === "me" && queued.byComment.get(n)
     if (q) return (
       <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">{t("views:item.me")}</span>
-        <QueuedComment sid={i.qs!} q={q} prefix="补充信息：" composer={itemComposer} note={qNote} at={e[2]} body={(t) => <div className="type-body"><Markdown text={t} /></div>} /></div>
+        <QueuedComment sid={i.qs!} q={q} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} at={e[2]} body={(t) => <div className="type-body"><Markdown text={t} /></div>} /></div>
     )
     /* notes sent from an output show what they mark and open the output there */
     const notes = e[0] === "me" && e[7] != null ? i.anns.filter((x) => x.timeline_id === e[7]) : []
@@ -436,7 +437,7 @@ export function ItemView({ id }: { id: string }) {
         onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== i.t) patchItem(i.id, { t: v }); setTitleEdit(false) }} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setTitleEdit(false) }} />
       : <span className="cursor-text" onDoubleClick={() => setTitleEdit(true)} data-title>{i.t}</span>} back={["#/items", t("views:items.title")]} actions={actions} toolbar={quick} toolbarTop max={1080}
       footer={<div className="w-full shrink-0 border-t bg-background/85 backdrop-blur-xl"><div className="mx-auto w-full px-4 pb-[76px] pt-3 sm:px-8 md:pb-4" style={{ maxWidth: 1080 + 64 }}><div className="lg:pr-[296px]">
-        {i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} />}
+        {i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} />}
         <Composer draftKey={draftKey(st.workspace?.id, "item", i.id)} handle={itemComposer} placeholder={t("views:item.composer", { id: i.id })} testId="item" onSend={(text, files) => supp(i.id, text, target, files)}
           left={<Segmented size="sm" value={targets.includes(target) ? target : "auto"} onChange={setTarget} options={targets.map((x) => [x, targetLabel[x]] as const)} />} />
       </div></div></div>}
@@ -645,7 +646,7 @@ export function SessionView({ k }: { k: string }) {
                 <span className={s.ctx >= 80 ? "text-attention" : ""}>{s.contextKnown ? t("views:session.ctxPct", { pct: s.ctx }) : t("views:session.ctxUnknown")}</span>
               </div>
               <RunBar k={k} onStop={s.ro ? undefined : () => interrupt(k)} />
-              {!s.ro && <QueueStrip sid={k} rows={s.queue} note={queueNote(s)} composer={composer} />}
+              {!s.ro && <QueueStrip sid={k} rows={s.queue} note={queueNote(s)} starting={s.starting} composer={composer} />}
               {s.ro ? (
                 <div className="flex flex-wrap items-center gap-3 rounded-2xl border bg-card px-4 py-3" data-readonly>
                   <LockIcon className="size-4 text-muted-foreground" /><span className="min-w-0 flex-1 type-callout text-muted-foreground">{t("views:session.readOnlyNote", { src: s.src.startsWith("本机 ") ? t("views:session.srcLocal", { h: s.src.slice(3) }) : s.src })}</span>

@@ -352,6 +352,8 @@ export default {
   queue: {
     afterRelease: "sends after the release",
     afterTurn: "sends when this turn ends",
+    afterStart: "sends once the session has started",
+    briefWaiting: "The brief · work begins once the session has started",
     afterTurnInOrder: "sends in order when this turn ends",
     notRunning: "the conversation isn't running, you can send now",
     now: "sending now",

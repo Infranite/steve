@@ -1,6 +1,8 @@
 /* The queue strip under a composer: every message waiting for the session's next turn is its own row,
  * with 编辑 (inline), 撤回 (back into the composer when it is empty, else an undo toast) and 立即发送 (interrupts the
  * running turn; the queue, this message first, is the next turn). Attachments stay with the message.
+ * While the session is still starting there is no turn to interrupt, so nothing offers 立即发送, and Steve's brief
+ * (the session's first turn once it is up) is shown as what it is, without controls.
  * The main conversation has the same strip (ChatQueue): what you say while Steve is on a turn waits for it.
  * On an item page the queue is shown on the comments instead (QueuedComment); the strip keeps only what pairs with none. */
 import { useState, type ReactNode } from "react"
@@ -19,6 +21,7 @@ import { t, useT } from "@/i18n"
 /** when the queue goes, in the strip's header */
 export function queueNote(s: Sess | null) {
   if (st.hold) return t("shell:queue.afterRelease")
+  if (s?.starting) return t("shell:queue.afterStart")
   if (s?.st === "run") return t("shell:queue.afterTurn")
   return t("shell:queue.notRunning")
 }
@@ -26,22 +29,23 @@ export function queueNote(s: Sess | null) {
 const snip = (s: string) => (s.length > 24 ? s.slice(0, 24) + "…" : s)
 
 /** `prefix`: what the Hub put in front of the user's words (item supplements: “补充信息：”); shown and edited without it */
-export function QueueStrip({ sid, rows, note, composer, prefix = "", className }: {
-  sid: string; rows: RQueued[]; note: string; composer?: { current: ComposerHandle | null }; prefix?: string; className?: string
+export function QueueStrip({ sid, rows, note, composer, prefix = "", starting, className }: {
+  sid: string; rows: RQueued[]; note: string; composer?: { current: ComposerHandle | null }; prefix?: string; starting?: boolean; className?: string
 }) {
   const t = useT()
   if (!rows.length) return null
   const strip = (s: string) => (prefix && s.startsWith(prefix) ? s.slice(prefix.length) : s)
+  const brief = !!starting && rows.every((q) => q.via === "steve")
   return (
     <div role="region" aria-label={t("shell:queue.region")} className={"mb-2 rounded-xl border border-dashed " + (className ?? "")} data-sq>
       <div className="flex items-center gap-2 px-3.5 pt-2 pb-1 type-footnote text-muted-foreground" data-sq-note>
-        <ClockIcon className="size-3.5 shrink-0" aria-hidden /><span>{t("shell:queue.queuedN", { count: rows.length, note })}</span>
+        <ClockIcon className="size-3.5 shrink-0" aria-hidden /><span>{brief ? t("shell:queue.briefWaiting") : t("shell:queue.queuedN", { count: rows.length, note })}</span>
       </div>
       <ul className="flex flex-col">
-        {rows.map((q) => <Row key={q.id} q={q} shown={strip(q.text)} ops={{
+        {rows.map((q) => <Row key={q.id} q={q} shown={strip(q.text)} ops={starting && q.via === "steve" ? "none" : {
           edit: (text) => qEdit(sid, q.id, (q.text.startsWith(prefix) ? prefix : "") + text),
           withdraw: () => qWithdraw(sid, q.id, composer?.current, strip),
-          sendNow: () => qSendNow(sid, q.id),
+          sendNow: starting ? undefined : () => qSendNow(sid, q.id),
         }} />)}
       </ul>
     </div>
@@ -69,15 +73,15 @@ export function ChatQueue({ composer }: { composer?: { current: ComposerHandle |
 }
 
 type QRow = Pick<RQueued, "id" | "text" | "files" | "via">
-/** what a row can do; `null` while it is still being sent */
-type QOps = { edit: (text: string) => Promise<unknown>; withdraw: () => Promise<unknown>; sendNow?: () => Promise<unknown> } | null
+/** what a row can do; `null` while it is still being sent, `"none"` when it only waits (Steve's brief before the session is up) */
+type QOps = { edit: (text: string) => Promise<unknown>; withdraw: () => Promise<unknown>; sendNow?: () => Promise<unknown> } | "none" | null
 
 /** inline editing of one queued message: `edit` is the draft while editing, else null */
 function useQueuedEdit(shown: string, ops: QOps) {
   const [edit, setEdit] = useState<string | null>(null), [busy, setBusy] = useState(false)
   const run = async (f: () => Promise<unknown>) => { setBusy(true); try { await f() } finally { setBusy(false) } }
   const save = () => run(async () => {
-    if (!ops) return
+    if (!ops || ops === "none") return
     const t = (edit ?? "").trim()
     if (!t || t === shown) { setEdit(null); return }
     await ops.edit(t)
@@ -93,7 +97,7 @@ function EditBox({ e }: { e: QEdit }) {
     onKeyDown={(x) => { if (x.key === "Escape") { x.preventDefault(); e.setEdit(null) } if (x.key === "Enter" && (x.metaKey || x.ctrlKey)) { x.preventDefault(); void e.save() } }} />
 }
 
-function Actions({ e, shown, ops, via, className }: { e: QEdit; shown: string; ops: NonNullable<QOps>; via: string; className?: string }) {
+function Actions({ e, shown, ops, via, className }: { e: QEdit; shown: string; ops: Exclude<QOps, "none" | null>; via: string; className?: string }) {
   const { edit, busy, run } = e, t = useT()
   return <div className={"flex shrink-0 flex-wrap items-center gap-0.5 " + (className ?? "")}>
     {edit !== null ? <>
@@ -118,7 +122,7 @@ function Row({ q, shown, ops }: { q: QRow; shown: string; ops: QOps }) {
         <Files files={q.files} className="mt-1.5" />
       </div>
       {!ops && <div className="flex shrink-0 items-center gap-1.5 py-1 type-footnote text-muted-foreground" data-queued-sending><Spinner className="size-3" />{t("shell:queue.submitting")}</div>}
-      {ops && <Actions e={e} shown={shown} ops={ops} via={q.via} className="-ml-2 sm:ml-0" />}
+      {ops && ops !== "none" && <Actions e={e} shown={shown} ops={ops} via={q.via} className="-ml-2 sm:ml-0" />}
     </li>
   )
 }
@@ -149,14 +153,14 @@ export function queuedComments(tl: any[], sid: string | null, rows: RQueued[], p
 }
 
 /** a comment still waiting in the session's queue: its words (editable), when it goes, and 编辑 / 撤回 / 立即发送 */
-export function QueuedComment({ sid, q, prefix = "", composer, note, at, body }: {
-  sid: string; q: RQueued; prefix?: string; composer?: { current: ComposerHandle | null }; note: string; at: string; body: (text: string) => ReactNode
+export function QueuedComment({ sid, q, prefix = "", composer, note, starting, at, body }: {
+  sid: string; q: RQueued; prefix?: string; composer?: { current: ComposerHandle | null }; note: string; starting?: boolean; at: string; body: (text: string) => ReactNode
 }) {
   const shown = prefix && q.text.startsWith(prefix) ? q.text.slice(prefix.length) : q.text
-  const ops: NonNullable<QOps> = {
+  const ops: Exclude<QOps, "none" | null> = {
     edit: (text) => qEdit(sid, q.id, (q.text.startsWith(prefix) ? prefix : "") + text),
     withdraw: () => qWithdraw(sid, q.id, composer?.current, (s) => (prefix && s.startsWith(prefix) ? s.slice(prefix.length) : s)),
-    sendNow: () => qSendNow(sid, q.id),
+    sendNow: starting ? undefined : () => qSendNow(sid, q.id),
   }
   const e = useQueuedEdit(shown, ops), t = useT()
   return <div className="min-w-0 flex-1" data-queued={q.id} data-queued-comment>
