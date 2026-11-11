@@ -50,10 +50,15 @@ function Fixture() {
   // The panel refreshes after an action. Keep fixture interactions off every real Hub.
   api.item = async () => ({} as RItemDetail)
   api.workflowChange = async (_id, args) => {
-    const next = {
+    if (args.action === "single_session" && query.has("conflict")) throw new Error("工作图已变化，请刷新后重新确认验收方式")
+    const single = args.action === "single_session"
+    const next: Workflow = {
       ...workflow, revision: workflow.revision + 1,
+      acceptance_mode: single ? "single_session" : workflow.acceptance_mode,
+      blockers: single ? [] : workflow.blockers,
+      history: single ? [...workflow.history, { revision: workflow.revision + 1, reason: args.reason, created: 3, action: args.action }] : workflow.history,
       paused: args.action === "pause" ? true : args.action === "resume" ? false : workflow.paused,
-      units: workflow.units.map((u) => args.action === "retry" && u.id === args.unit_id ? { ...u, status: "pending", reason: "", attempt: u.attempt + 1 } : u),
+      units: workflow.units.map((u) => single && u.status !== "succeeded" ? { ...u, status: "cancelled" } : args.action === "retry" && u.id === args.unit_id ? { ...u, status: "pending", reason: "", attempt: u.attempt + 1 } : u),
     }
     ;(window as any).__workflowChanges ??= []
     ;(window as any).__workflowChanges.push(args)

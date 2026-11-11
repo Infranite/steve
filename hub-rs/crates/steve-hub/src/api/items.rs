@@ -197,7 +197,7 @@ pub async fn workflow_change(
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
     let args = body(&b)?;
-    // The core validates the same commands for HTTP, MCP and Node tools.
+    // Authenticated user boundary. single_session is deliberately unavailable to Bot/MCP calls.
     ok(st.domain.workflow_change(&id, args, &c.me).await?)
 }
 

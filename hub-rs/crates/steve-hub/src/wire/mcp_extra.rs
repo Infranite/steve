@@ -189,7 +189,7 @@ fn extra_tools() -> Vec<Value> {
 fn workflow_tool() -> Value {
     json!({
         "name": "steve_workflow",
-        "description": "Read or replan this item's shared work graph. Only the parent item's responsible Bot may change the graph; child Bots can read their own work and upstream deliveries, deliver success through steve_deliver, or report a failure / rejected review with action fail and reason, then end their turn. Plan work, independent review and integration units; dependencies must pass before successors run. Graph changes require the latest expected_revision and a reason. A new graph starts at revision 0. A plan replaces the active specification; preserve existing unit IDs for unchanged work. Do not transfer credentials or permissions between Bots.",
+        "description": "Read or replan this item's shared work graph. Only the parent item's responsible Bot may change the graph; child Bots can read their own work and upstream deliveries, deliver success through steve_deliver, or report a failure / rejected review with action fail and reason, then end their turn. Plan work, independent review and integration units; dependencies must pass before successors run. Graph changes require the latest expected_revision and a reason. A new graph starts at revision 0. A plan replaces the active specification; preserve existing unit IDs for unchanged work. Cancelling units does not waive required acceptance. Only the user can explicitly switch to single-session acceptance on the item page after pausing; Bot tokens cannot approve it. Do not transfer credentials or permissions between Bots.",
         "inputSchema": {
             "type": "object",
             "properties": {

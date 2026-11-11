@@ -89,6 +89,209 @@ fn finish(k: &Kit, parent: &str, id: &str) {
     k.rt.end_turn(&k.core, &s, "end_turn", None);
 }
 
+fn parent_deliver(k: &Kit, parent: &str) -> crate::Result<()> {
+    k.manual_acceptance();
+    let sid = k.session(parent, "idle");
+    let s = k.db().session(&sid)?.unwrap();
+    k.core.tool_deliver(
+        &s,
+        "单会话实际核验完成，未做独立评审",
+        &[Output {
+            kind: "文件".into(),
+            title: "已核验成果".into(),
+            location: Some("result.txt".into()),
+            role: None,
+        }],
+        &[Check {
+            name: "实际操作通过".into(),
+            passed: true,
+            operated: true,
+        }],
+        &[],
+    )
+}
+
+#[test]
+fn cancelled_graph_requires_explicit_human_single_session_acceptance() {
+    let (k, parent, specs) = setup(false);
+    plan(&k, &parent, &specs);
+    change(&k, &parent, "pause", None).unwrap();
+    for u in &specs {
+        change(&k, &parent, "cancel", Some(&u.id)).unwrap();
+    }
+    let before = graph(&k, &parent);
+    assert!(parent_deliver(&k, &parent).is_err());
+    assert!(k.finish(&parent).is_err());
+    let sid = k.session(&parent, "idle");
+    let s = k.db().session(&sid).unwrap().unwrap();
+    let args = json!({"action":"single_session", "reason":"用户确认本次单会话验收，未做独立评审", "expected_revision":before.revision});
+    let err = k.core.tool_workflow(&s, args.clone()).unwrap_err();
+    assert!(err.to_string().contains("Bot 不能代为批准"));
+    assert_eq!(graph(&k, &parent), before);
+    let mut stale = args.clone();
+    stale["expected_revision"] = json!(before.revision - 1);
+    assert!(k.core.workflow_change(&parent, stale, "me").is_err());
+    assert_eq!(graph(&k, &parent), before);
+    k.core.workflow_change(&parent, args, "me").unwrap();
+    let saved = graph(&k, &parent);
+    assert_ne!(
+        k.phase(&parent),
+        "closed",
+        "changing mode alone does not accept the item"
+    );
+    assert!(saved.single_session() && saved.paused);
+    assert!(
+        saved
+            .units
+            .iter()
+            .all(|u| u.status == "cancelled" && u.spec.required)
+    );
+    assert_eq!(saved.history.last().unwrap().detail["actor"], "me");
+    assert_eq!(saved.history.last().unwrap().action, "single_session");
+    assert_eq!(
+        saved.units, before.units,
+        "cancelled results are not rewritten as success"
+    );
+    assert!(
+        k.core.workflow_get(&parent).unwrap()["blockers"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        k.core.workflow_get(&parent).unwrap()["execution_ready"],
+        false
+    );
+    assert_eq!(
+        k.core.workflow_get(&parent).unwrap()["acceptance_mode"],
+        "single_session"
+    );
+    change(&k, &parent, "single_session", None).unwrap();
+    assert_eq!(
+        graph(&k, &parent),
+        saved,
+        "repeat confirmation is idempotent"
+    );
+    assert!(change(&k, &parent, "resume", None).is_err());
+    assert!(change(&k, &parent, "retry", Some("a")).is_err());
+    k.core.lifecycle_tick().unwrap();
+    assert!(k.rt.st().created.is_empty(), "no Node isolation fallback");
+    parent_deliver(&k, &parent).unwrap();
+    assert!(k.timeline_texts(&parent).join("\n").contains("单会话验收"));
+    assert_ne!(
+        k.phase(&parent),
+        "closed",
+        "mode change does not auto-accept delivery"
+    );
+    k.finish(&parent).unwrap();
+    assert_eq!(k.phase(&parent), "closed");
+}
+
+#[test]
+fn single_session_cancels_unfinished_units_and_replan_restores_review_gate() {
+    let (k, parent, specs) = setup(false);
+    plan(&k, &parent, &specs);
+    assert!(
+        change(&k, &parent, "single_session", None).is_err(),
+        "must pause first"
+    );
+    change(&k, &parent, "pause", None).unwrap();
+    change(&k, &parent, "single_session", None).unwrap();
+    assert!(
+        graph(&k, &parent)
+            .units
+            .iter()
+            .all(|u| u.status == "cancelled")
+    );
+    assert!(parent_deliver(&k, &parent).is_ok());
+    let g = graph(&k, &parent);
+    k.core
+        .workflow_change(
+            &parent,
+            json!({"action":"plan", "expected_revision":g.revision,
+        "reason":"恢复独立评审要求", "units":specs}),
+            "me",
+        )
+        .unwrap();
+    assert!(!graph(&k, &parent).single_session());
+    assert!(parent_deliver(&k, &parent).is_err());
+    assert!(k.finish(&parent).is_err());
+}
+
+#[test]
+fn single_session_never_ignores_unsettled_cancelled_execution() {
+    for unsettled in ["running", "uncertain", "queued"] {
+        let (k, parent, specs) = setup(true);
+        plan(&k, &parent, &specs);
+        change(&k, &parent, "pause", None).unwrap();
+        for u in &specs {
+            change(&k, &parent, "cancel", Some(&u.id)).unwrap();
+        }
+        let a = unit(&k, &parent, "a");
+        let sid = a.session_id.as_deref().unwrap();
+        // Cancel does not establish that the Node stopped. Settle b; leave exactly one blocker.
+        {
+            let mut rt = k.rt.st();
+            rt.turning.clear();
+            rt.attempts.clear();
+            if unsettled == "running" {
+                rt.turning.insert(sid.into());
+            }
+            if unsettled == "uncertain" {
+                rt.uncertain.insert(sid.into());
+            }
+        }
+        if unsettled == "queued" {
+            k.db().queue_add(sid, "未结清输入", "me", &[]).unwrap();
+        }
+        let before = graph(&k, &parent);
+        assert!(
+            change(&k, &parent, "single_session", None)
+                .unwrap_err()
+                .to_string()
+                .contains("仍未确认结束")
+        );
+        assert_eq!(graph(&k, &parent), before);
+        assert!(parent_deliver(&k, &parent).is_err());
+        {
+            let mut rt = k.rt.st();
+            rt.turning.clear();
+            rt.uncertain.clear();
+        }
+        k.db().queue_take(sid).unwrap();
+        change(&k, &parent, "single_session", None).unwrap();
+        assert!(parent_deliver(&k, &parent).is_ok());
+        // A newly reported uncertain execution still blocks close even after mode confirmation.
+        k.rt.st().uncertain.insert(sid.into());
+        assert!(k.finish(&parent).is_err());
+    }
+}
+
+#[test]
+fn single_session_confirmation_cannot_waive_a_new_goal_or_cycle() {
+    for column in ["cycle", "goal"] {
+        let (k, parent, specs) = setup(false);
+        plan(&k, &parent, &specs);
+        change(&k, &parent, "pause", None).unwrap();
+        change(&k, &parent, "single_session", None).unwrap();
+        if column == "cycle" {
+            k.db()
+                .exec("UPDATE items SET cycle=cycle+1 WHERE id=?", &[&parent])
+                .unwrap();
+        } else {
+            k.db()
+                .exec(
+                    "UPDATE workflows SET goal_version=goal_version-1 WHERE item_id=?",
+                    &[&parent],
+                )
+                .unwrap();
+        }
+        assert!(parent_deliver(&k, &parent).is_err());
+        assert!(k.finish(&parent).is_err());
+        assert!(change(&k, &parent, "single_session", None).is_err());
+    }
+}
+
 #[test]
 fn no_confined_node_plans_but_never_creates_or_runs_children() {
     let (k, parent, specs) = setup(false);

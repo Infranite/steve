@@ -101,6 +101,88 @@ fn finish(t: &T, unit: &WorkUnit, passed: bool) -> Workflow {
         .unwrap()
 }
 
+#[test]
+fn explicit_single_session_mode_is_durable_audited_and_replan_revokes_it() {
+    let (t, parent, specs) = setup();
+    plan(&t, &parent, &specs);
+    let a = start(&t, &parent, "a");
+    let success = finish(&t, &a, true);
+    is_conflict(
+        t.store
+            .workflows()
+            .accept_single_session(&parent, success.revision, "确认", "owner"),
+        "暂停",
+    );
+    let paused = t
+        .store
+        .workflows()
+        .pause(&parent, true, "用户暂停")
+        .unwrap();
+    is_conflict(
+        t.store
+            .workflows()
+            .accept_single_session(&parent, paused.revision - 1, "确认", "owner"),
+        "已更新",
+    );
+    is_conflict(
+        t.store
+            .workflows()
+            .accept_single_session(&parent, paused.revision, "", "owner"),
+        "用户和原因",
+    );
+    let single = t
+        .store
+        .workflows()
+        .accept_single_session(
+            &parent,
+            paused.revision,
+            "本轮未完成独立评审，改为单会话验收",
+            "owner",
+        )
+        .unwrap();
+    assert!(single.single_session() && single.paused);
+    assert!(single.blockers().is_empty());
+    assert_eq!(
+        single.units[0], success.units[0],
+        "successful evidence is retained unchanged"
+    );
+    assert!(
+        single.units[1..]
+            .iter()
+            .all(|u| u.status == "cancelled" && u.spec.required)
+    );
+    let history = single.history.last().unwrap();
+    assert_eq!(history.action, "single_session");
+    assert_eq!(history.detail["actor"], "owner");
+    assert_eq!(history.detail["before"][2]["status"], "pending");
+    assert_eq!(
+        single,
+        t.store.workflows().get(&parent).unwrap().unwrap(),
+        "mode survives re-read"
+    );
+    assert_eq!(
+        single,
+        t.store
+            .workflows()
+            .accept_single_session(&parent, single.revision, "重复确认", "owner")
+            .unwrap()
+    );
+    assert!(
+        t.store
+            .workflows()
+            .pause(&parent, false, "不能直接恢复")
+            .is_err()
+    );
+    assert!(t.store.workflows().claim(&parent, "b").is_err());
+    let replanned = t
+        .store
+        .workflows()
+        .replace(&parent, single.revision, "恢复评审要求", &specs, 2, 3)
+        .unwrap();
+    assert!(!replanned.single_session());
+    assert!(!replanned.blockers().is_empty());
+}
+
 fn is_conflict<T: std::fmt::Debug>(r: Result<T>, wanted: &str) {
     match r {
         Err(StoreError::Conflict(message)) => {

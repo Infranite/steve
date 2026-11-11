@@ -1644,6 +1644,15 @@ impl Tx<'_> {
                 blockers.join("；")
             )));
         }
+        if self
+            .db()
+            .store()
+            .workflows()
+            .get(item_id)?
+            .is_some_and(|g| g.single_session())
+        {
+            notes.push_str("\n\n验收方式：用户已明确改为单会话验收；已取消的协作单元不视为通过，独立评审和集成验收不再作为本次交付门禁。");
+        }
         /* the goal asks for an actual operation: the delivery says when it shows none (ST-57) */
         if let Some(why) = self.proof_missing(&item, checks)? {
             notes.push_str(&format!("\n\n注意：{why}"));

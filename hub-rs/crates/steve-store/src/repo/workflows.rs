@@ -78,16 +78,28 @@ pub struct Workflow {
 }
 
 impl Workflow {
-    /// Optional work may be waived by cancelling it; every required unit needs current successful
-    /// evidence. An active optional unit still prevents closing the parent.
+    /// The existing append-only history is the authority for an explicit acceptance-mode change.
+    /// Replanning reinstates collaboration; ordinary pause/cancel never waive required evidence.
+    pub fn single_session(&self) -> bool {
+        self.history
+            .iter()
+            .rev()
+            .find(|h| matches!(h.action.as_str(), "single_session" | "plan" | "replan"))
+            .is_some_and(|h| h.action == "single_session")
+    }
+
+    /// Optional work may be waived by cancelling it; required units need successful evidence unless
+    /// the user explicitly chose single-session acceptance. Active work always prevents closing.
     pub fn blockers(&self) -> Vec<String> {
         let mut out: Vec<_> = self
             .units
             .iter()
-            .filter(|u| (u.spec.required && u.status != "succeeded") || u.active())
+            .filter(|u| {
+                (!self.single_session() && u.spec.required && u.status != "succeeded") || u.active()
+            })
             .map(|u| format!("{}（{}）", u.spec.title, u.status))
             .collect();
-        if self.paused {
+        if self.paused && !self.single_session() {
             out.push("协作工作已暂停".into());
         }
         out
@@ -632,7 +644,7 @@ impl Workflows<'_> {
             if unit.active() {
                 return Ok(unit.clone());
             }
-            if graph.paused {
+            if graph.paused || graph.single_session() {
                 return Err(conflict("协作工作已暂停"));
             }
             if unit.status != "pending" {
@@ -825,6 +837,58 @@ impl Workflows<'_> {
         })
     }
 
+    /// Called only after a human acceptance-mode change. Keep units and evidence for audit;
+    /// cancellation is not success. Core additionally checks live/uncertain Node executions.
+    pub fn accept_single_session(
+        &self,
+        parent: &str,
+        expected_revision: i64,
+        reason: &str,
+        actor: &str,
+    ) -> Result<Workflow> {
+        if reason.trim().is_empty() || actor.trim().is_empty() {
+            return Err(conflict("切换单会话验收必须记录用户和原因"));
+        }
+        self.0.transaction(|tx| {
+            let item = open_parent(tx, parent)?;
+            let graph = must_graph(tx, parent)?;
+            if graph.revision != expected_revision {
+                return Err(conflict("工作图已更新，请重新读取后再确认验收方式"));
+            }
+            let goal: i64 = tx.query_row(
+                "SELECT coalesce(max(version),0) FROM item_goals WHERE item_id=?",
+                [parent],
+                |r| r.get(0),
+            )?;
+            if graph.cycle != item.cycle || graph.goal_version != goal {
+                return Err(conflict("主事项目标或周期已变化，请先重新规划"));
+            }
+            if graph.single_session() {
+                return Ok(graph);
+            }
+            if !graph.paused {
+                return Err(conflict("请先暂停协作并确认所有工作执行已停止"));
+            }
+            tx.execute(
+                "UPDATE workflow_units SET status='cancelled',reason=?
+                 WHERE workflow_id=? AND status NOT IN ('succeeded','cancelled')",
+                params![reason, parent],
+            )?;
+            record(
+                tx,
+                parent,
+                "single_session",
+                reason,
+                None,
+                &json!({
+                    "actor": actor, "cycle": graph.cycle, "goal_version": graph.goal_version,
+                    "before": graph.units, "cancelled_units_are_passed": false
+                }),
+            )?;
+            must_graph(tx, parent)
+        })
+    }
+
     pub fn pause(&self, parent: &str, paused: bool, reason: &str) -> Result<Workflow> {
         if reason.trim().is_empty() {
             return Err(conflict("暂停或恢复必须说明原因"));
@@ -832,6 +896,9 @@ impl Workflows<'_> {
         self.0.transaction(|tx| {
             open_parent(tx, parent)?;
             let graph = must_graph(tx, parent)?;
+            if !paused && graph.single_session() {
+                return Err(conflict("当前为单会话验收，恢复协作前必须重新规划"));
+            }
             if graph.paused == paused {
                 return Ok(graph);
             }
