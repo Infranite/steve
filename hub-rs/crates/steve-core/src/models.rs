@@ -1350,11 +1350,15 @@ mod tests {
         let s = store(d.path());
         steve_bot(&s, CODEX, None);
         let m = Models::new(s.clone(), Defaults::default());
-        probed(&m, CODEX, &["gpt-6-luna", "gpt-6-luna-mini"]);
+        probed(
+            &m,
+            CODEX,
+            &["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"],
+        );
         m.migrate_all();
         assert_eq!(
             m.for_purpose("default", "route"),
-            ch(CODEX, &["gpt-6-luna-mini"], None)
+            ch(CODEX, &["gpt-6-luna"], None)
         );
         // an adapter that declares no such word: nothing, and asked again later
         let d = tempfile::tempdir().unwrap();
