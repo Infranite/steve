@@ -314,10 +314,10 @@ pub async fn run<B: Backend>(
 
 impl<B: Backend> ServerHandler for Handler<B> {
     fn get_info(&self) -> ServerConfig {
-        let mut tools = ToolsCapability::default();
-        tools.list_changed = Some(true);
+        // tools, and no `listChanged`: every request is its own exchange, so no notification can
+        // follow one, and a client told otherwise asks to listen for them and is refused
         let mut caps = ServerCapabilities::default();
-        caps.tools = Some(tools);
+        caps.tools = Some(ToolsCapability::default());
         ServerConfig::new(caps).with_server_info(Implementation::new("steve", "1.0.0"))
     }
 
