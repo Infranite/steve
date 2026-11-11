@@ -1,2 +1,0 @@
-- `STEVE_NODE_MODE=off` 时，Hub 进程内承载对话与研究模型调用的内置 Node 现隔离到独立的 `local-jobs`（`<data>/node-jobs`），不再打开 `<data>/node` 或对账、消费已停泊在 `local` 上的编码会话消息，也不会与独立运行的 `steve-hub --local-node` 争抢目录锁。
-- GitHub Webhook 投递恢复扫描在抢占内存队列槽位后再复核数据库的待处理状态，避免后台工作线程刚完成投递并释放槽位时同一条投递被重复入队。
