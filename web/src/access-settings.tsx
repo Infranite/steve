@@ -1,19 +1,19 @@
-/* 设置 · 访问与客户端 (A4): this page's Hub and client, multi-Hub switching, mobile QR pairing, access tokens, and
+/* 设置 · 访问与客户端 (A4): this page's Hub and client, the list of Hubs, pairing another device, access tokens, and
  * every signed-in client of yours with the route it last came by. A token's text is shown once, when it is made. */
 import { ago } from "@/i18n/format"
 import { t as tr, useT } from "@/i18n"
 import { useEffect, useMemo, useState } from "react"
-import { CheckCircle2Icon, GlobeIcon, KeyRoundIcon, QrCodeIcon, RefreshCwIcon, WifiIcon } from "lucide-react"
-import { Badge } from "@/components/ui/badge"
+import { CheckCircle2Icon, KeyRoundIcon, QrCodeIcon, RefreshCwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { api, modReq } from "@/api"
-import { API, forgetHub, hello, hubBase, nativeBridge, needsHttpsForCrossHost, normalize, rememberHub, savedHubs, setHub, type SavedHub } from "@/hub"
+import { HubChooser, useHubAddress } from "@/hub-ui"
 import { encodeQr, qrSvgPath } from "@/qr"
 import { toast } from "@/store"
 import { closeSheet, Group, Row, SectionLabel } from "@/ui"
+import { cn } from "cn"
 
 export const ACCESS_CAT = Object.defineProperties(["access", "", KeyRoundIcon, ""], {
   1: { get: () => tr("pages:access.cat.title"), enumerable: true },
@@ -32,7 +32,8 @@ export type ClientPairing = {
   public_url: string | null
   lan_urls: string[]
   loopback_only: boolean
-  uri: string
+  /** one pairing link per address of the Hub, the public one first */
+  links: { url: string; kind: "public" | "lan"; link: string }[]
 }
 type PairingStatus = {
   id: string
@@ -72,10 +73,13 @@ function QrSvg({ text, size = 216 }: { text: string; size?: number }) {
   )
 }
 
-/** Shared QR pairing body used both inline in AccessSettingsPane and inside MobilePairDialog (⌘K / menu bar). */
+/** The pairing of another device: the QR code of a pairing link, and the link itself. A phone's camera opens the
+ * link in a browser, the Steve app reads the same code. Used in 设置 · 访问与客户端 and in `PairDeviceDialog`. */
 function PairContent({ onClaimed }: { onClaimed?: () => void }) {
   const t = useT()
   const [pair, setPair] = useState<ClientPairing | null>(null)
+  /* the address the code is drawn for: a device that cannot reach the first is given another */
+  const [at, setAt] = useState(0)
   const [status, setStatus] = useState<PairingStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
@@ -86,6 +90,7 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
     try {
       const p = await access.createPairing()
       setPair(p)
+      setAt(0)
       setStatus({ id: p.id, status: "pending", expires: p.expires, client: null })
     } catch (e) {
       setError((e as Error).message)
@@ -130,47 +135,29 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
     return <div className="flex items-center justify-center py-8"><Spinner className="size-5 text-muted-foreground" /></div>
   }
 
-  const endpoints = [
-    ...(pair.public_url ? [{ url: pair.public_url, kind: "public" as const }] : []),
-    ...pair.lan_urls.map((url) => ({ url, kind: "lan" as const })),
-  ]
+  const link = pair.links[Math.min(at, pair.links.length - 1)]
   const curStatus = status?.status === "claimed" && status.client != null ? "claimed" : status?.status === "expired" ? "expired" : "pending"
 
   return (
     <div className="flex flex-col items-center gap-4 text-center" data-pair-card>
-      {!pair.loopback_only && <QrSvg text={pair.uri} />}
+      {link && curStatus === "pending" && <QrSvg text={link.link} />}
 
-      <div className="flex flex-wrap items-center justify-center gap-2">
-        {pair.public_url ? (
-          <Badge variant="outline" className="gap-1.5 font-normal" data-pair-route="public">
-            <GlobeIcon className="size-3.5 text-primary" />
-            {t("pages:access.pairRoutePublic")}
-          </Badge>
-        ) : !pair.loopback_only ? (
-          <Badge variant="outline" className="gap-1.5 font-normal" data-pair-route="lan">
-            <WifiIcon className="size-3.5 text-primary" />
-            {t("pages:access.pairRouteLan")}
-          </Badge>
-        ) : null}
-      </div>
-
-      {pair.loopback_only && (
+      {!link && (
         <p className="max-w-sm rounded-lg bg-attention/10 px-3 py-2 type-footnote text-attention" data-pair-loopback>
           {t("pages:access.pairRouteLoopback")}
         </p>
       )}
 
-      {endpoints.length > 0 && (
-        <div className="w-full max-w-sm rounded-xl border border-border bg-muted/30 px-3 py-2 text-left">
-          <div className="mb-1 type-footnote text-muted-foreground">{t("pages:access.pairEndpoints")}</div>
-          <div className="flex flex-col gap-1">
-            {endpoints.map((ep) => (
-              <div key={ep.url} className="flex items-center justify-between gap-2 font-mono text-[12px]">
-                <span className="truncate">{ep.url}</span>
-                <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-sans text-[11px] text-muted-foreground">
-                  {t(`pages:access.route.${ep.kind}`)}
-                </span>
-              </div>
+      {link && (
+        <div className="w-full max-w-sm rounded-xl border border-border bg-muted/30 px-3 py-2 text-left" data-pair-addresses>
+          <div className="mb-1 type-footnote text-muted-foreground">{t(pair.links.length > 1 ? "pages:access.pairAddressPick" : "pages:access.pairAddress")}</div>
+          <div className="flex flex-col gap-0.5">
+            {pair.links.map((l, n) => (
+              <button key={l.url} type="button" onClick={() => setAt(n)} aria-pressed={l === link} disabled={pair.links.length < 2}
+                className={cn("flex items-center justify-between gap-2 rounded-md px-1.5 py-1 text-left font-mono text-[12px]", pair.links.length > 1 && "cursor-pointer hover:bg-accent", l === link && pair.links.length > 1 && "bg-accent")} data-pair-address={l.url}>
+                <span className="truncate">{l.url}</span>
+                <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-sans text-[11px] text-muted-foreground">{t(`pages:access.route.${l.kind}`)}</span>
+              </button>
             ))}
           </div>
         </div>
@@ -180,7 +167,7 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
         {curStatus === "claimed" ? (
           <span className="inline-flex items-center gap-1.5 font-medium text-success">
             <CheckCircle2Icon className="size-4" />
-            {t("pages:access.pairClaimed", { name: status?.client?.name ?? "iOS" })}
+            {t("pages:access.pairClaimed", { name: status?.client?.name ?? "" })}
           </span>
         ) : curStatus === "expired" ? (
           <span className="text-destructive">{t("pages:access.pairExpired")}</span>
@@ -197,12 +184,12 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
           <RefreshCwIcon className="size-3.5" />
           {t("pages:access.pairRefresh")}
         </Button>
-        {!pair.loopback_only && (
+        {link && curStatus === "pending" && (
           <Button
             size="sm"
             variant="ghost"
             onClick={() => {
-              void navigator.clipboard?.writeText(pair.uri)
+              void navigator.clipboard?.writeText(link.link)
               toast(t("pages:access.copied"))
             }}
             data-pair-copy
@@ -215,12 +202,12 @@ function PairContent({ onClaimed }: { onClaimed?: () => void }) {
   )
 }
 
-/** Modal pairing dialog opened from ⌘K (`openSheet("pairClient")`). */
-export function MobilePairDialog() {
+/** the pairing in a dialog: `openSheet("pairClient")`, from the sidebar's Hub switcher, ⌘K, 我的, and `#/hub/pair` */
+export function PairDeviceDialog() {
   const t = useT()
   return (
     <Dialog open onOpenChange={(o) => !o && closeSheet()}>
-      <DialogContent className="sm:max-w-md" data-mobile-pair-dialog>
+      <DialogContent className="sm:max-w-md" data-pair-device-dialog>
         <DialogHeader>
           <DialogTitle>{t("pages:access.pairTitle")}</DialogTitle>
           <DialogDescription>{t("pages:access.pairSub")}</DialogDescription>
@@ -231,142 +218,6 @@ export function MobilePairDialog() {
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function HubSwitcherSection({ currentVersion }: { currentVersion: string }) {
-  const t = useT()
-  const bridge = nativeBridge()
-  const activeBase = hubBase()
-  const activeOrigin = activeBase || location.origin
-  const [hubs, setHubs] = useState<SavedHub[]>(() => savedHubs())
-  const [newUrl, setNewUrl] = useState("")
-  const [newName, setNewName] = useState("")
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    setHubs(rememberHub(activeOrigin, { version: currentVersion }))
-  }, [activeOrigin, currentVersion])
-
-  const connectTo = async (rawUrl: string, label?: string) => {
-    const base = normalize(rawUrl)
-    if (!base) {
-      toast(t("shell:app.badAddress"))
-      return
-    }
-    if (!bridge && needsHttpsForCrossHost(base)) {
-      toast(t("shell:app.needsHttps"))
-      return
-    }
-    setBusy(true)
-    try {
-      const h = await hello(base)
-      if (h.api !== API) {
-        toast(t("shell:app.apiMismatch", { version: h.version }))
-        setBusy(false)
-        return
-      }
-      rememberHub(base, { name: label, version: h.version })
-      setHub(base === location.origin ? null : base, { name: label, version: h.version })
-      location.reload()
-    } catch {
-      toast(t("shell:app.notSteve"))
-      setBusy(false)
-    }
-  }
-
-  return (
-    <section data-hub-switcher>
-      <SectionLabel
-        right={
-          bridge?.openHubSwitcher ? (
-            <Button size="xs" variant="outline" onClick={() => bridge.openHubSwitcher?.()} data-native-hub-switcher>
-              {t("shell:cmd.switchHub")}
-            </Button>
-          ) : undefined
-        }
-      >
-        {t("pages:access.hubs")}
-      </SectionLabel>
-      <p className="mb-3 type-footnote text-muted-foreground">{t("pages:access.hubsSub")}</p>
-      <Group>
-        {activeBase && (
-          <Row title={t("pages:access.defaultHub")} sub={location.origin}>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setHub(null)
-                location.reload()
-              }}
-              data-reset-default-hub
-            >
-              {t("pages:access.useDefaultHub")}
-            </Button>
-          </Row>
-        )}
-        {hubs.map((h) => {
-          const isCurrent = h.url === activeOrigin
-          return (
-            <Row
-              key={h.url}
-              title={
-                <span className="flex items-center gap-2">
-                  <span>{h.name || h.url}</span>
-                  {isCurrent && (
-                    <span className="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground">
-                      {t("pages:access.current")}
-                    </span>
-                  )}
-                </span>
-              }
-              sub={`${h.name ? `${h.url} · ` : ""}${h.version ?? ""}${h.lastUsed ? ` · ${ago(h.lastUsed)}` : ""}`}
-            >
-              {!isCurrent && (
-                <div className="flex items-center gap-1.5">
-                  <Button size="sm" variant="outline" disabled={busy} onClick={() => void connectTo(h.url, h.name)} data-switch-hub={h.url}>
-                    {t("pages:access.switchTo")}
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => setHubs(forgetHub(h.url))} data-forget-hub={h.url}>
-                    {t("pages:access.forgetHub")}
-                  </Button>
-                </div>
-              )}
-            </Row>
-          )
-        })}
-        <Row
-          title={
-            <div className="flex w-full flex-col gap-2 sm:flex-row">
-              <Input
-                value={newUrl}
-                onChange={(e) => setNewUrl(e.target.value)}
-                placeholder={t("pages:access.addHubPlaceholder")}
-                inputMode="url"
-                className="flex-1"
-                data-add-hub-url
-              />
-              <Input
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder={t("pages:access.addHubName")}
-                className="sm:max-w-44"
-                data-add-hub-name
-              />
-            </div>
-          }
-        >
-          <Button
-            size="sm"
-            disabled={busy || !newUrl.trim()}
-            onClick={() => void connectTo(newUrl, newName)}
-            data-add-hub-submit
-          >
-            {busy ? <Spinner className="size-4" /> : t("pages:access.addAndSwitch")}
-          </Button>
-        </Row>
-      </Group>
-    </section>
   )
 }
 
@@ -412,7 +263,7 @@ const routeText = (t: ReturnType<typeof useT>, r: string | null) => {
 
 export function AccessSettingsPane() {
   const t = useT()
-  const bridge = nativeBridge()
+  const hub = useHubAddress()
   const [v, setV] = useState<View | null>(null)
   const [error, setError] = useState("")
   const [name, setName] = useState("")
@@ -431,24 +282,21 @@ export function AccessSettingsPane() {
   if (error) return <p className="type-callout text-destructive">{error}</p>
   if (!v) return <Spinner className="size-5 text-muted-foreground" />
   const live = (x: { revoked: number | null }) => !x.revoked
-  const hub = bridge?.activeHub?.endpoint ?? (hubBase() || location.origin)
   return <div className="flex flex-col gap-8" data-access-pane>
     <section><SectionLabel>{t("pages:access.here")}</SectionLabel><Group>
-      <Row title={t("pages:access.hub")} sub={`${hub} · ${v.hub.version}`}>
-        <div className="flex items-center gap-2">
-          {bridge?.openHubSwitcher ? (
-            <Button size="sm" variant="outline" onClick={() => bridge.openHubSwitcher?.()} data-change-hub>{t("pages:access.changeHub")}</Button>
-          ) : hubBase() ? (
-            <Button size="sm" variant="ghost" onClick={() => { setHub(null); location.reload() }} data-change-hub>{t("pages:access.changeHub")}</Button>
-          ) : null}
-        </div>
-      </Row>
+      <Row title={t("pages:access.hub")} sub={[hub, v.hub.version].filter(Boolean).join(" · ")} data-access-hub />
       <Row title={t("pages:access.thisClient")} sub={v.current ? routeText(t, v.route) : t("pages:access.browserSession")}>
         <Button size="sm" variant="outline" onClick={async () => { await api.logout().catch(() => {}); location.reload() }} data-sign-out>{t("pages:access.signOut")}</Button>
       </Row>
     </Group></section>
 
-    <section data-mobile-pair-section>
+    <section data-hub-switcher>
+      <SectionLabel>{t("pages:access.hubs")}</SectionLabel>
+      <p className="mb-3 type-footnote text-muted-foreground">{t("pages:access.hubsSub")}</p>
+      <HubChooser manage className="max-w-md" />
+    </section>
+
+    <section data-pair-device-section>
       <SectionLabel>{t("pages:access.pairTitle")}</SectionLabel>
       <p className="mb-3 type-footnote text-muted-foreground">{t("pages:access.pairSub")}</p>
       {showPair ? (
@@ -458,14 +306,7 @@ export function AccessSettingsPane() {
       ) : (
         <Group>
           <Row title={t("pages:access.pairTitle")}>
-            <Button
-              size="sm"
-              onClick={() => {
-                if (bridge?.openPairSheet) bridge.openPairSheet()
-                else setShowPair(true)
-              }}
-              data-open-pair-qr
-            >
+            <Button size="sm" onClick={() => setShowPair(true)} data-open-pair-qr>
               <QrCodeIcon className="size-4" />
               {t("pages:access.pairButton")}
             </Button>
@@ -473,8 +314,6 @@ export function AccessSettingsPane() {
         </Group>
       )}
     </section>
-
-    {!bridge && <HubSwitcherSection currentVersion={v.hub.version} />}
 
     <section><SectionLabel>{t("pages:access.tokens")}</SectionLabel>
       <p className="mb-3 type-footnote text-muted-foreground">{t("pages:access.tokensSub")}</p>

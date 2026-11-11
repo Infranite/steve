@@ -1,7 +1,7 @@
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
-import { hubUrl, nativeBridge } from "./hub"
+import { clientInfo, hubUrl } from "./hub"
 import type { Workflow } from "./workflow"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
@@ -317,12 +317,8 @@ export const api = {
   logout: () => Promise.all([fetch(hubUrl("/auth/logout"), { method: "POST", credentials: "include" }), fetch(hubUrl("/auth/client/logout"), { method: "POST", credentials: "include" })]),
   /** signs this page in with a user's name and an access token; the Hub keeps the client's credential in an HttpOnly cookie */
   tokenSignIn: async (user: string, token: string, version: string): Promise<void> => {
-    const bridge = nativeBridge()
-    const ua = navigator.userAgent
-    const browser = bridge?.platform === "macos" ? "Steve Mac" : bridge?.platform === "ios" ? "Steve iOS" : /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" : /Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "Browser"
-    const kind = bridge?.platform === "macos" ? "mac" : bridge?.platform === "ios" ? "ios" : "web"
     const r = await fetch(hubUrl("/auth/token"), { method: "POST", headers: { "content-type": "application/json", "accept-language": lang() }, credentials: "include",
-      body: JSON.stringify({ user, token, cookie: true, client: { kind, name: browser, platform: (navigator as any).userAgentData?.platform ?? navigator.platform ?? "", version } }) })
+      body: JSON.stringify({ user, token, cookie: true, client: clientInfo(version) }) })
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error ?? t("shell:http.failed", { status: r.status })) }
   },
 }

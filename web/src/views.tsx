@@ -24,6 +24,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { draftKey, newClientId } from "@/composer-draft"
 import { GitHubMoreRow } from "@/github/index"
+import { HubMore } from "@/hub-ui"
 import { SessionKnowledge } from "@/knowledge/parts"
 import { lazyView } from "@/lazy"
 import { AnnRefs } from "@/annotate"
@@ -689,6 +690,7 @@ export function MoreView() {
         {groups.map((group) => <section key={group.name}><SectionLabel>{group.name}</SectionLabel><Group>{group.rows.map(([h, title, s, I]) => (
           <Row key={h} icon={<Ico I={I} />} title={title} sub={s} onClick={() => go("#/" + h)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
         ))}</Group></section>)}
+        <HubMore />
         <Group><GitHubMoreRow /></Group>
         {st.yolo && <Group><Row icon={<Ico I={ZapIcon} />} title={t("views:more.yolo")} sub={{ on: t("views:more.yoloOn"), full: t("views:more.yoloFull"), off: t("views:more.yoloOff"), paused: t("views:more.yoloPaused", { reason: st.yolo.paused?.reason ?? "" }), forced: t("views:more.yoloForced") }[yoloState(st.yolo)!]} onClick={() => openSheet("yolo")} data-more-yolo><ChevronRightIcon className="size-4 text-tertiary" /></Row>
           <Row title={t("views:more.yoloLog")} sub={t("views:more.yoloLogSub")} onClick={() => go("#/yolo")}><ChevronRightIcon className="size-4 text-tertiary" /></Row></Group>}

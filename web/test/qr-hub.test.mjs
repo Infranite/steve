@@ -185,31 +185,28 @@ function decodeQrMatrix(qr) {
   return new TextDecoder().decode(out)
 }
 
-test("encodeQr encodes and round-trips short and UTF-8 multi-endpoint steve://pair URIs with zero RS syndromes", () => {
-  const shortUri = "steve://pair?v=1&code=stp_0123456789abcdef0123456789abcdef&lan=http%3A%2F%2F192.168.1.20%3A8440"
-  const shortQr = qrMod.encodeQr(shortUri)
-  assert.ok(shortQr.version >= 4 && shortQr.version <= 8)
+test("encodeQr round-trips a pairing link as a phone's camera reads it, short and with several addresses and a UTF-8 name", () => {
+  const short = "http://192.168.1.20:8440/#/pair?v=1&code=stp_0123456789abcdef0123456789abcdef&name=192.168.1.20&lan=http%3A%2F%2F192.168.1.20%3A8440"
+  const shortQr = qrMod.encodeQr(short)
+  assert.ok(shortQr.version >= 4 && shortQr.version <= 9)
   assert.equal(shortQr.size, shortQr.version * 4 + 17)
   assert.equal(shortQr.modules.length, shortQr.size * shortQr.size)
-  assert.equal(decodeQrMatrix(shortQr), shortUri)
+  assert.equal(decodeQrMatrix(shortQr), short)
 
   const svg = qrMod.qrSvgPath(shortQr, 2)
   assert.equal(svg.viewBox, `0 0 ${shortQr.size + 4} ${shortQr.size + 4}`)
   assert.match(svg.d, /^M\d+ \d+h\d+v1h-\d+z/)
 
-  // Multi-endpoint payload with UTF-8 device name (version >= 7, exercises 2-group RS interleaving + version info)
-  const longUri =
-    "steve://pair?v=1&code=stp_fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210" +
-    "&name=" + encodeURIComponent("工作室 Mac Studio") +
-    "&pub=" + encodeURIComponent("https://hub.example.com") +
-    "&lan=" + encodeURIComponent("http://192.168.1.42:8440") +
-    "&lan=" + encodeURIComponent("http://100.64.0.9:8440")
-  const longQr = qrMod.encodeQr(longUri)
+  // several addresses and a UTF-8 name (version >= 7: two groups of blocks, version information)
+  const long =
+    "https://hub.example.com/#/pair?" +
+    hubMod.pairQuery({ code: "stp_fedcba9876543210fedcba9876543210", name: "工作室 Mac Studio", publicUrl: "https://hub.example.com", lanUrls: ["http://192.168.1.42:8440", "http://100.64.0.9:8440"] })
+  const longQr = qrMod.encodeQr(long)
   assert.ok(longQr.version >= 7 && longQr.version <= 16)
-  assert.equal(decodeQrMatrix(longQr), longUri)
+  assert.equal(decodeQrMatrix(longQr), long)
 })
 
-test("savedHubs remembers, deduplicates, orders by recency, forgets Hub origins, and flags cross-host plain HTTP", () => {
+test("savedHubs remembers, deduplicates, orders by recency, keeps the 20 most recent, and forgets", () => {
   withMockStorage(() => {
     assert.deepEqual(hubMod.savedHubs(), [])
     hubMod.rememberHub("192.168.1.10:8440/", { name: "Office Mac", version: "0.3.0", now: 100 })
@@ -224,6 +221,7 @@ test("savedHubs remembers, deduplicates, orders by recency, forgets Hub origins,
 
     hubMod.setHub("http://192.168.1.10:8440", { version: "0.3.2" })
     assert.equal(hubMod.hubBase(), "http://192.168.1.10:8440")
+    assert.equal(hubMod.currentHub(), "http://192.168.1.10:8440")
     assert.equal(hubMod.savedHubs()[0].url, "http://192.168.1.10:8440")
     assert.equal(hubMod.savedHubs()[0].name, "Office Mac")
     assert.equal(hubMod.savedHubs()[0].version, "0.3.2")
@@ -234,41 +232,127 @@ test("savedHubs remembers, deduplicates, orders by recency, forgets Hub origins,
     hubMod.setHub(null)
     assert.equal(hubMod.hubBase(), "")
   })
-
-  // Cross-host plain HTTP check (#10)
-  assert.equal(hubMod.needsHttpsForCrossHost("http://192.168.1.10:8440", "http://192.168.1.5:8440"), true)
-  assert.equal(hubMod.needsHttpsForCrossHost("https://192.168.1.10:8440", "http://192.168.1.5:8440"), false)
-  assert.equal(hubMod.needsHttpsForCrossHost("http://127.0.0.1:18540", "http://127.0.0.1:8440"), false)
+  assert.equal(hubMod.normalize(" 192.168.1.10:8440/ "), "http://192.168.1.10:8440")
+  assert.equal(hubMod.normalize("HTTPS://Steve.Example.com/x?y#z"), "https://steve.example.com")
+  for (const bad of ["", "ftp://192.168.1.10", "steve://pair?code=x", "javascript:alert(1)", "http://"]) assert.equal(hubMod.normalize(bad), null, bad)
+  withMockStorage(() => {
+    /* an old one remembered late does not push a newer one out */
+    for (let n = 1; n <= 20; n++) hubMod.rememberHub(`http://10.0.0.${n}:8440`, { now: 1000 + n })
+    hubMod.rememberHub("http://10.0.9.9:8440", { now: 5 })
+    const urls = hubMod.savedHubs().map((h) => h.url)
+    assert.equal(urls.length, 20)
+    assert.equal(urls[0], "http://10.0.0.20:8440")
+    assert.ok(!urls.includes("http://10.0.9.9:8440"))
+  })
 })
 
-test("parsePairUri and preferredPairEndpoint prefer public network by default and fall back to LAN", () => {
-  const pubUri =
-    "steve://pair?v=1&code=stp_00112233445566778899aabbccddeeff" +
-    "&name=Home%20Hub&pub=https%3A%2F%2Fsteve.example.com%2F&lan=http%3A%2F%2F192.168.1.25%3A8440&lan=http%3A%2F%2F10.0.0.8%3A8440"
-  const parsedPub = hubMod.parsePairUri(pubUri)
-  assert.deepEqual(parsedPub, {
+test("reach: a page calls its own Hub, the same host on another port and any https Hub; it goes to the page of the rest", () => {
+  const lan = "http://192.168.1.5:8440"
+  assert.equal(hubMod.reach(lan, lan), "call")
+  assert.equal(hubMod.reach("http://192.168.1.5:8440", "http://192.168.1.5:8441"), "call")
+  assert.equal(hubMod.reach("http://127.0.0.1:18540", "http://127.0.0.1:8440"), "call")
+  assert.equal(hubMod.reach("https://steve.example.com", lan), "call")
+  assert.equal(hubMod.reach("https://steve.example.com", "https://other.example.com"), "call")
+  /* a cookie from plain http on another host does not stick */
+  assert.equal(hubMod.reach("http://192.168.1.10:8440", lan), "open")
+  /* an https page may not call plain http, on its own host either */
+  assert.equal(hubMod.reach("http://192.168.1.10:8440", "https://steve.example.com"), "open")
+  assert.equal(hubMod.reach("http://steve.example.com:8440", "https://steve.example.com"), "open")
+  assert.equal(hubMod.reach("not a url", lan), "open")
+})
+
+test("openUrl carries the list in the fragment and parseCarried reads only what openUrl writes", () => {
+  assert.equal(hubMod.openUrl("http://192.168.1.10:8440"), "http://192.168.1.10:8440/#/")
+  const url = hubMod.openUrl("http://192.168.1.10:8440", [{ url: "http://192.168.1.5:8440", name: "书房 Mac" }, { url: "https://steve.example.com" }])
+  const u = new URL(url)
+  assert.equal(u.origin + u.pathname, "http://192.168.1.10:8440/")
+  assert.equal(u.search, "", "nothing of the list is in what a server is sent")
+  const arrival = hubMod.readArrival(u.hash)
+  assert.deepEqual(arrival, { hubs: [{ url: "http://192.168.1.5:8440", name: "书房 Mac" }, { url: "https://steve.example.com" }], rest: "#/" })
+
+  assert.deepEqual(hubMod.parseCarried("nonsense"), [])
+  assert.deepEqual(hubMod.parseCarried('{"a":1}'), [])
+  assert.deepEqual(hubMod.parseCarried('[["javascript:alert(1)"],["ftp://x"],[42],"http://a",["http://a:1/path?q#f","  n  "],["http://a:1"]]'), [{ url: "http://a:1", name: "n" }])
+  assert.equal(hubMod.parseCarried(JSON.stringify(Array.from({ length: 50 }, (_, n) => [`http://10.0.0.${n}:8440`]))).length, 20)
+})
+
+test("parsePairLink reads the link a browser opens and the one the app opens, and pairQuery writes what it reads", () => {
+  const query =
+    "v=1&code=stp_00112233445566778899aabbccddeeff" +
+    "&name=Home%20Hub&pub=https%3A%2F%2Fsteve.example.com%2F&lan=http%3A%2F%2F192.168.1.25%3A8440,http%3A%2F%2F10.0.0.8%3A8440"
+  const want = {
     code: "stp_00112233445566778899aabbccddeeff",
     name: "Home Hub",
     publicUrl: "https://steve.example.com",
     lanUrls: ["http://192.168.1.25:8440", "http://10.0.0.8:8440"],
-  })
-  assert.deepEqual(hubMod.preferredPairEndpoint(parsedPub), {
-    url: "https://steve.example.com",
-    mode: "public",
-  })
+  }
+  assert.deepEqual(hubMod.parsePairLink("steve://pair?" + query), want)
+  assert.deepEqual(hubMod.parsePairLink("https://steve.example.com/#/pair?" + query), want)
+  /* the link's own host is where the page is, not an address of the Hub */
+  assert.deepEqual(hubMod.parsePairLink("  http://192.168.1.25:8441/#/pair?" + query + "\n"), want)
+  /* `lan` given once per address is read too */
+  assert.deepEqual(hubMod.parsePairLink("steve://pair?v=1&code=stp_00112233445566778899aabbccddeeff&lan=http%3A%2F%2F192.168.1.25%3A8440&lan=http%3A%2F%2F10.0.0.8%3A8440").lanUrls, want.lanUrls)
+  assert.deepEqual(hubMod.pairAddresses(want), ["https://steve.example.com", "http://192.168.1.25:8440", "http://10.0.0.8:8440"])
 
-  const lanOnlyUri =
-    "steve://pair?v=1&code=stp_00112233445566778899aabbccddeeff&lan=http%3A%2F%2F192.168.1.25%3A8440"
-  const parsedLan = hubMod.parsePairUri(lanOnlyUri)
-  assert.deepEqual(parsedLan, {
-    code: "stp_00112233445566778899aabbccddeeff",
-    lanUrls: ["http://192.168.1.25:8440"],
-  })
-  assert.deepEqual(hubMod.preferredPairEndpoint(parsedLan), {
-    url: "http://192.168.1.25:8440",
-    mode: "lan",
-  })
+  const named = { code: "stp_00112233445566778899aabbccddeeff", name: "工作室 Mac & Studio", lanUrls: ["http://192.168.1.25:8440"] }
+  assert.ok(!hubMod.pairQuery(named).includes("+"), "a space is %20: not every reader of a query takes + for one")
+  assert.deepEqual(hubMod.parsePairLink("steve://pair?" + hubMod.pairQuery(named)), named)
+  assert.deepEqual(hubMod.parsePairLink(hubMod.appPairLink(want)), want)
 
-  assert.equal(hubMod.parsePairUri("https://example.com/pair?code=stp_1234567890123456"), null)
-  assert.equal(hubMod.parsePairUri("steve://pair?v=1&code=bad"), null)
+  assert.equal(hubMod.parsePairLink("https://example.com/pair?code=stp_1234567890123456"), null, "not in the fragment")
+  assert.equal(hubMod.parsePairLink("steve://pair?v=1&code=bad"), null)
+  assert.equal(hubMod.parsePairLink("steve://pair?v=1&code=stp_short"), null)
+  assert.equal(hubMod.parsePairLink("http://192.168.1.25:8440"), null, "an address is not a pairing link")
+  assert.equal(hubMod.parsePairLink("https://steve.example.com/#/items/pair?code=stp_00112233445566778899aabbccddeeff"), null)
+})
+
+test("pairPlan: a page claims the code at the addresses it can call, its own host first, else goes to a page that can", () => {
+  const code = "stp_00112233445566778899aabbccddeeff"
+  const both = { code, publicUrl: "https://steve.example.com", lanUrls: ["http://192.168.1.25:8440", "http://10.0.0.8:8440"] }
+  /* the phone opened the LAN link: the LAN address answers it, the public one may not */
+  assert.deepEqual(hubMod.pairPlan(both, "http://192.168.1.25:8441"), { call: ["http://192.168.1.25:8440", "https://steve.example.com"], open: null })
+  assert.deepEqual(hubMod.pairPlan(both, "https://steve.example.com"), { call: ["https://steve.example.com"], open: null })
+  /* pasted into another Hub's page on plain http: only https can be called from there */
+  assert.deepEqual(hubMod.pairPlan(both, "http://192.168.1.99:8440"), { call: ["https://steve.example.com"], open: null })
+  const lan = { code, name: "Home Hub", lanUrls: ["http://192.168.1.25:8440"] }
+  const plan = hubMod.pairPlan(lan, "http://192.168.1.99:8440")
+  assert.deepEqual(plan.call, [])
+  assert.equal(plan.open, "http://192.168.1.25:8440/#/pair?" + hubMod.pairQuery(lan))
+  assert.deepEqual(hubMod.parsePairLink(plan.open), lan)
+  assert.deepEqual(hubMod.pairPlan({ code, lanUrls: [] }, "http://192.168.1.99:8440"), { call: [], open: null })
+
+  assert.equal(hubMod.pairIsHere(lan, "http://192.168.1.25:8441", ""), true, "the Hub on the host that served the page")
+  assert.equal(hubMod.pairIsHere(lan, "https://app.example.com", "http://192.168.1.25:8440"), true, "the Hub the page talks to")
+  assert.equal(hubMod.pairIsHere(lan, "http://192.168.1.99:8440", "http://192.168.1.99:8440"), false)
+})
+
+test("readArrival takes a pairing or a carried list out of the fragment and leaves every other route alone", () => {
+  const query = "v=1&code=stp_00112233445566778899aabbccddeeff&lan=http%3A%2F%2F192.168.1.25%3A8440"
+  const href = "http://192.168.1.25:8441/#/pair?" + query
+  assert.deepEqual(hubMod.readArrival("#/pair?" + query, href), {
+    pair: { link: { code: "stp_00112233445566778899aabbccddeeff", lanUrls: ["http://192.168.1.25:8440"] }, text: href },
+    rest: "#/",
+  })
+  /* said "pair" and could not be read: still taken out of the address, and told as such */
+  assert.deepEqual(hubMod.readArrival("#/pair?code=nope", "http://h/#/pair?code=nope"), { pair: { link: null, text: "http://h/#/pair?code=nope" }, rest: "#/" })
+  assert.deepEqual(hubMod.readArrival("#/pair"), { pair: { link: null, text: "steve://pair" }, rest: "#/" })
+  assert.deepEqual(hubMod.readArrival("#/?hubs=%5B%5B%22http%3A%2F%2Fa%3A1%22%5D%5D"), { hubs: [{ url: "http://a:1" }], rest: "#/" })
+  assert.deepEqual(hubMod.readArrival("#/?hubs=garbage"), { hubs: [], rest: "#/" })
+  for (const h of ["", "#/", "#/items/ST-1", "#/pairing", "#/settings/access", "#/?x=1", "#/hub/pair"]) assert.equal(hubMod.readArrival(h), null, h)
+})
+
+test("browserEntries lists the saved Hubs with the one in use among them, in a steady order", () => {
+  withMockStorage(() => {
+    assert.deepEqual(hubMod.browserEntries(), [])
+    hubMod.rememberHub("https://steve.example.com", { name: "Cloud", version: "0.3.1", now: 300 })
+    hubMod.rememberHub("http://192.168.1.10:8440", { now: 100 })
+    hubMod.setHub("http://192.168.1.10:8440")
+    assert.deepEqual(hubMod.browserEntries(), [
+      { id: "http://192.168.1.10:8440", name: "192.168.1.10:8440", address: "http://192.168.1.10:8440", current: true, removable: false },
+      { id: "https://steve.example.com", name: "Cloud", address: "https://steve.example.com", current: false, version: "0.3.1", removable: true },
+    ])
+    /* the Hub in use is listed before it was ever saved */
+    hubMod.forgetHub("http://192.168.1.10:8440")
+    assert.deepEqual(hubMod.browserEntries().map((h) => [h.address, h.current]), [["http://192.168.1.10:8440", true], ["https://steve.example.com", false]])
+  })
 })
