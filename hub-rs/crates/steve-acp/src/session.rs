@@ -395,7 +395,8 @@ async fn apply_model(
         })
         .and_then(|o| o.get("currentValue"))
         .and_then(Value::as_str);
-    if let Some(cur) = current.filter(|c| *c != model) {
+    // its own short id for the asked model is no news
+    if let Some(cur) = current.filter(|c| *c != model && !named(&r, c, model)) {
         tracing::warn!("set model {model}: the adapter runs {cur}");
     }
     Ok(r)

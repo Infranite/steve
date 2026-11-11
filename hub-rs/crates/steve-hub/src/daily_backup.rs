@@ -17,7 +17,7 @@
 use std::{
     fs,
     io::Write,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -35,6 +35,10 @@ const FIRST: Duration = Duration::from_secs(300);
 const RETRY_TICKS: u32 = 6;
 /// What the tar takes of the home, where it is there.
 const PARTS: [&str; 4] = ["data/files", "signing", "secrets", "steve.env"];
+/// How often the files are tried for a day's copy.
+const TAR_TRIES: u32 = 3;
+/// What the name of a copy still being written ends in (SQLite's journal comes after it).
+const PARTIAL: &str = ".hub.partial";
 /// In `signing`: the keychain's password as an earlier installation kept it.
 const NOT_COPIED: &str = "keychain-pass";
 
@@ -112,27 +116,49 @@ pub fn make(home: &Path, db: &Path, day: &str) -> Result<Made> {
         .mode(0o700)
         .create(&out)
         .with_context(|| format!("create {}", out.display()))?;
+    // a directory that was there before (the job of a source-based installation makes it too) is
+    // the owner's alone from now on
+    fs::set_permissions(&out, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("close {}", out.display()))?;
+    clear_partials(&out);
     let database = out.join(db_name(day));
-    let partial = out.join(format!("{}.hub.partial", db_name(day)));
-    let _ = fs::remove_file(&partial);
+    let partial = out.join(format!("{}{PARTIAL}", db_name(day)));
     if let Err(e) = crate::upgrades::supervisor::backup(db, &partial) {
-        let _ = fs::remove_file(&partial);
+        clear_partials(&out);
         return Err(e.context("database copy"));
     }
     fs::rename(&partial, &database)?;
-    let files = match tar(home, &out, day) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!("daily backup: the files were not copied: {e:#}");
-            None
+    // a file that goes away while the tar walks the attachments (an upload being moved into place)
+    // fails that tar as a whole, and the day is not looked at again once its database is copied
+    let mut files = None;
+    for left in (0..TAR_TRIES).rev() {
+        match tar(home, &out, day) {
+            Ok(f) => {
+                files = f;
+                break;
+            }
+            Err(e) if left > 0 => tracing::info!("daily backup: the files once more: {e:#}"),
+            Err(e) => tracing::warn!("daily backup: the files were not copied: {e:#}"),
         }
-    };
+    }
     let removed = prune(&out, SystemTime::now());
     Ok(Made {
         database,
         files,
         removed,
     })
+}
+
+/// Removes what a copy that was interrupted (a Hub stopped in the middle of one) left in `out`: the
+/// half-made file of any day and the journal SQLite kept beside it. Only one copy is made at a time.
+fn clear_partials(out: &Path) {
+    for entry in fs::read_dir(out).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("daily-") && name.contains(PARTIAL) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// The tar of [`PARTS`], `None` when the home has none of them.
@@ -145,7 +171,7 @@ fn tar(home: &Path, out: &Path, day: &str) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     let dest = out.join(tar_name(day));
-    let partial = out.join(format!("{}.hub.partial", tar_name(day)));
+    let partial = out.join(format!("{}{PARTIAL}", tar_name(day)));
     let _ = fs::remove_file(&partial);
     let written = (|| {
         let file = fs::OpenOptions::new()
@@ -280,7 +306,6 @@ pub async fn run(home: PathBuf, db: PathBuf, on: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// Only the owner reads what the copies hold.
     fn owner_only(p: &Path) -> bool {
@@ -377,6 +402,82 @@ mod tests {
             .filter(|n| n.ends_with(".partial"))
             .collect();
         assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// Beside a Hub that keeps writing: a copy taken in pieces starts over at every commit of
+    /// another connection and never ends.
+    #[test]
+    fn the_copy_finishes_while_the_database_is_written() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        let (t, db) = home();
+        let c = rusqlite::Connection::open(&db).unwrap();
+        let mode: String = c
+            .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        // some thousand pages: more than a few pieces
+        c.execute_batch(
+            "BEGIN;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4000)
+             INSERT INTO t SELECT zeroblob(4000) FROM n;
+             COMMIT;",
+        )
+        .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = std::thread::spawn({
+            let stop = stop.clone();
+            move || {
+                let mut written = 0u32;
+                while !stop.load(Ordering::Relaxed) {
+                    c.execute("INSERT INTO t VALUES ('more')", []).unwrap();
+                    written += 1;
+                }
+                written
+            }
+        });
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn({
+            let (h, db) = (t.path().to_path_buf(), db.clone());
+            move || tx.send(make(&h, &db, "20260102"))
+        });
+        let made = rx.recv_timeout(Duration::from_secs(30));
+        stop.store(true, Ordering::Relaxed);
+        let written = writer.join().unwrap();
+        let m = made.expect("the copy did not end beside a writer").unwrap();
+        assert!(written > 0, "nothing was written meanwhile");
+        let copy = rusqlite::Connection::open(&m.database).unwrap();
+        let kept: i64 = copy
+            .query_row("SELECT count(*) FROM t WHERE x = 'kept'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
+    #[test]
+    fn what_an_interrupted_copy_left_goes_with_the_next() {
+        let (t, db) = home();
+        let out = t.path().join("backups");
+        fs::create_dir_all(&out).unwrap();
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o755)).unwrap();
+        let stale = [
+            "daily-20251231.sqlite3.hub.partial",
+            "daily-20251231.sqlite3.hub.partial-journal",
+            "daily-20251231-files.tar.hub.partial",
+        ];
+        for n in stale {
+            fs::write(out.join(n), "half").unwrap();
+        }
+        fs::write(out.join("notes.hub.partial"), "not a copy's").unwrap();
+        make(t.path(), &db, "20260102").unwrap();
+        for n in stale {
+            assert!(!out.join(n).exists(), "{n}");
+        }
+        assert!(out.join("notes.hub.partial").exists());
+        // a directory made by something else is the owner's alone afterwards
+        assert!(owner_only(&out));
     }
 
     #[test]

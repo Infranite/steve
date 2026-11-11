@@ -956,7 +956,7 @@ pub async fn audit_list(
 ) -> ApiResult {
     owner_or(&c, || steve_i18n::t!("hub.audit.owner_only"))?;
     let limit = q.limit.unwrap_or(50);
-    st.read(move |r| ok(r.audit_page(&c.ws, q.before, limit)?))
+    st.read(move |r| ok(r.audit_page(&c.ws, &c.me, q.before, limit)?))
         .await
 }
 
@@ -1223,7 +1223,8 @@ pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<C
     instance_owner(&c)?;
     let cfg = st.cfg.clone();
     let v = tokio::task::spawn_blocking(move || {
-        crate::daily_backup::status(&cfg.home, &cfg.db_path(), cfg.backup)
+        // as the job is started (`wire`): not on a copy of a real database
+        crate::daily_backup::status(&cfg.home, &cfg.db_path(), cfg.backup && !cfg.no_resume)
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;

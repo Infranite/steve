@@ -112,7 +112,7 @@ export default {
     pause: "暂停接活",
     hubNode: "中心节点",
     storage: "存储",
-    storageSub: "SQLite，在 Hub 的数据目录里；每天备份，升级前也备份",
+    storageSub: "SQLite，在 Hub 的数据目录里；升级前备份，没关掉的话每天也备份",
     access: "访问入口",
     accessSub: "访问地址和登录方式由部署者配置；本机也可直接访问",
     models: "模型调用",

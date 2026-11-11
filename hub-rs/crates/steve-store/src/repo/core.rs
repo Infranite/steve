@@ -30,17 +30,19 @@ pub struct AuditPage {
     pub more: bool,
 }
 
-/// What an id of an audit entry is called: the first of the things an entry can point at that has
-/// it. A memory goes by the start of its text.
+/// What an id of an audit entry is called for the reader `?2`: the first of the things an entry can
+/// point at that has it. A memory goes by the start of its text. A contact or a memory that is not
+/// the whole workspace's is named only for whoever made it: the trail says that something was
+/// written, not what another member keeps to themselves.
 const NAME_OF: &str = "SELECT COALESCE(
     (SELECT NULLIF(name, '') FROM users WHERE id = ?1),
     (SELECT NULLIF(name, '') FROM bots WHERE id = ?1),
-    (SELECT NULLIF(name, '') FROM parties WHERE id = ?1),
+    (SELECT NULLIF(name, '') FROM parties WHERE id = ?1 AND (visibility = 'workspace' OR created_by = ?2)),
     (SELECT NULLIF(name, '') FROM projects WHERE id = ?1),
     (SELECT NULLIF(title, '') FROM items WHERE id = ?1),
     (SELECT NULLIF(name, '') FROM access_tokens WHERE id = ?1),
     (SELECT NULLIF(name, '') FROM clients WHERE id = ?1),
-    (SELECT NULLIF(substr(text, 1, 80), '') FROM mems WHERE id = ?1),
+    (SELECT NULLIF(substr(text, 1, 80), '') FROM mems WHERE id = ?1 AND (visibility = 'workspace' OR created_by = ?2)),
     (SELECT NULLIF(name, '') FROM flows WHERE id = ?1),
     (SELECT NULLIF(name, '') FROM devices WHERE id = ?1),
     (SELECT NULLIF(name, '') FROM nodes WHERE node_id = ?1),
@@ -75,9 +77,16 @@ impl Store {
 
     /// One page of a workspace's audit trail, newest first: the entries before `before` (an entry's
     /// id; `None` starts at the newest), at most `limit`, and whether older ones remain. `names` says
-    /// what the ids in the page are called now, for whoever shows it: the actor and target of every
-    /// entry and the ids its detail refers to. An id nothing is called by any more is not in it.
-    pub fn audit_page(&self, ws: &str, before: Option<i64>, limit: i64) -> Result<AuditPage> {
+    /// what the ids in the page are called now, for `reader` (a user id) who is shown it: the actor
+    /// and target of every entry and the ids its detail refers to. An id nothing is called by any
+    /// more, or whose name is not the reader's to see, is not in it.
+    pub fn audit_page(
+        &self,
+        ws: &str,
+        reader: &str,
+        before: Option<i64>,
+        limit: i64,
+    ) -> Result<AuditPage> {
         let limit = limit.clamp(1, 200);
         self.read(|c| {
             let mut entries = all(
@@ -105,7 +114,7 @@ impl Store {
                     if id.is_empty() || names.contains_key(id) {
                         continue;
                     }
-                    if let Some(name) = one(c, NAME_OF, [id], |r| r.get::<_, Option<String>>(0))?.flatten() {
+                    if let Some(name) = one(c, NAME_OF, [id, reader], |r| r.get::<_, Option<String>>(0))?.flatten() {
                         names.insert(id.to_string(), name);
                     }
                 }

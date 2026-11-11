@@ -205,9 +205,15 @@ pub trait Repo {
     ) -> BResult<()> {
         todo_backend!("audit")
     }
-    /// A page of the workspace's audit trail, newest first, with the names of the ids in it
-    /// (`steve_store::AuditPage`).
-    fn audit_page(&self, ws: &str, before: Option<i64>, limit: i64) -> BResult<Value> {
+    /// A page of the workspace's audit trail, newest first, with the names of the ids in it as
+    /// `reader` may see them (`steve_store::AuditPage`).
+    fn audit_page(
+        &self,
+        ws: &str,
+        reader: &str,
+        before: Option<i64>,
+        limit: i64,
+    ) -> BResult<Value> {
         todo_backend!("audit_page")
     }
 
