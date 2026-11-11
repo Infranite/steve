@@ -309,7 +309,7 @@ export default {
   audit: {
     title: "Activity log",
     sub: "Who changed what, and when",
-    hint: "Every change in this workspace: who made it and what it changed. Newest first; select an entry for its details. Only the instance owner can read this.",
+    hint: "The changes this workspace has on record: who made each and what it changed. Newest first; select an entry for its details. Only the instance owner can read this.",
     empty: "Nothing recorded yet",
     loading: "Loading…",
     more: "Earlier entries",
