@@ -138,11 +138,23 @@ async fn workflow_routes_require_login_and_parent_workspace_ownership() {
             .await
             .unwrap();
         assert_eq!(r.status().as_u16(), 401);
+        let r = http
+            .post(format!("{base}/api/items/local-item/{route}"))
+            .bearer_auth("not-a-human-login")
+            .json(&json!({"action":"single_session"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status().as_u16(),
+            401,
+            "an arbitrary Bot bearer token cannot authorize a user action"
+        );
         for method in [reqwest::Method::GET, reqwest::Method::POST] {
             let r = http
                 .request(method, format!("{base}/api/items/other-item/{route}"))
                 .header("cookie", &cookie)
-                .json(&json!({"action": "pause"}))
+                .json(&json!({"action": "single_session"}))
                 .send()
                 .await
                 .unwrap();
@@ -164,7 +176,7 @@ async fn workflow_routes_require_login_and_parent_workspace_ownership() {
             .post(format!("{base}/api/items/local-item/{route}"))
             .header("cookie", &cookie)
             .header("sec-fetch-site", "same-origin")
-            .json(&json!({"action": "pause"}))
+            .json(&json!({"action": "single_session"}))
             .send()
             .await
             .unwrap();
@@ -187,7 +199,7 @@ async fn workflow_routes_require_login_and_parent_workspace_ownership() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
     assert_eq!(r.json::<Value>().await.unwrap()["item_id"], "local-item");
-    let args = json!({"action": "pause", "expected_revision": 1, "reason": "Review"});
+    let args = json!({"action": "single_session", "expected_revision": 1, "reason": "User explicitly chose single-session acceptance"});
     let r = http
         .post(format!("{base}/api/items/local-item/workflow"))
         .header("cookie", &cookie)

@@ -47,7 +47,10 @@ export default {
     details: "目标与交付", outputs: "共享交付物",
     checkPassed: "通过", checkFailed: "未通过", operated: "实际操作",
     history_other: "计划调整记录（{{count}}）", revision: "第 {{n}} 版",
-    reason: { pause: "用户在事项页暂停编排", resume: "用户在事项页恢复编排", retry: "用户在事项页重试未通过的工作" },
+    single: "改为单会话验收",
+    singleConfirm: "取消尚未完成的协作单元，保留已有结果和调整记录，由当前负责会话继续完成并交付。已取消的独立评审和集成验收不会记为通过，也不再阻止本轮主事项交付。此操作不会自动接受交付或改变权限；仍有执行未结束时会拒绝切换。确认采用此验收方式？",
+    singleHint: "用户已改为单会话验收。已取消的协作单元不视为通过；本轮交付不再要求协作评审与集成验收全部通过。恢复协作需要重新规划。",
+    reason: { single_session: "用户在事项页明确确认改为单会话验收；取消的协作单元不视为通过", pause: "用户在事项页暂停编排", resume: "用户在事项页恢复编排", retry: "用户在事项页重试未通过的工作" },
   },
   /* the 待处理 page: decisions waiting on the user, and the ones made lately */
   inbox: {

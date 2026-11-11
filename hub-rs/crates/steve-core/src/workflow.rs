@@ -79,6 +79,11 @@ impl Core {
         if current.bot_id != i.bot_id {
             return Err(conflict("只有主事项当前负责人可以调整工作图"));
         }
+        if args["action"].as_str() == Some("single_session") {
+            return Err(conflict(
+                "单会话验收只能由用户在事项页明确确认，Bot 不能代为批准",
+            ));
+        }
         t.workflow_change(item, args, current.bot_id.as_deref().unwrap_or("agent"))
     }
 }
@@ -136,7 +141,7 @@ impl Tx<'_> {
         if complete && !self.workflow_current(&g)? {
             out.push("主事项目标或周期已变化，请重规划并重新验证旧成果".into());
         }
-        if complete && g.paused {
+        if complete && g.paused && !g.single_session() {
             out.push("协作已暂停".into());
         }
         for u in &g.units {
@@ -144,9 +149,11 @@ impl Tx<'_> {
                 out.push(format!("{}：执行或取消仍未确认结束", u.spec.title));
             } else if matches!(u.status.as_str(), "running" | "dispatching") {
                 out.push(format!("{}：工作单元尚未结束", u.spec.title));
-            } else if complete && u.spec.required && u.status != "succeeded" {
+            } else if complete && !g.single_session() && u.spec.required && u.status != "succeeded"
+            {
                 out.push(format!("{}：{}", u.spec.title, u.status));
             } else if complete
+                && !g.single_session()
                 && u.status == "succeeded"
                 && let Some(child) = u.item_id.as_deref()
                 && self
@@ -167,9 +174,16 @@ impl Tx<'_> {
         let mut out = serde_json::to_value(&g)?;
         let mut blockers = self.workflow_blockers(item, true)?;
         let ready = self.rt().check_workflow_execution(item);
-        if let Err(e) = &ready {
+        if let Err(e) = &ready
+            && !g.single_session()
+        {
             blockers.push(e.to_string());
         }
+        out["acceptance_mode"] = json!(if g.single_session() {
+            "single_session"
+        } else {
+            "collaborative"
+        });
         out["execution_ready"] = json!(ready.is_ok());
         out["blockers"] = json!(blockers);
         Ok(out)
@@ -222,11 +236,46 @@ impl Tx<'_> {
         }
         let reason = required_text(&args, "reason")?;
         if matches!(action, "resume" | "retry") {
+            if graph.as_ref().is_some_and(Workflow::single_session) {
+                return Err(conflict(
+                    "当前为单会话验收；恢复协作前必须重新规划独立评审与集成验收",
+                ));
+            }
             self.rt()
                 .check_workflow_execution(item)
                 .map_err(|e| conflict(e.to_string()))?;
         }
         match action {
+            "single_session" => {
+                let g = graph.as_ref().ok_or_else(|| conflict("尚未建立工作图"))?;
+                if !self.workflow_current(g)? {
+                    return Err(conflict("主事项目标或周期已变化，请先重规划再确认验收方式"));
+                }
+                for u in &g.units {
+                    if self.workflow_busy(u)? {
+                        return Err(conflict(format!(
+                            "{}：执行或取消仍未确认结束",
+                            u.spec.title
+                        )));
+                    }
+                }
+                if g.single_session() {
+                    return self.workflow_view(item);
+                }
+                self.db()
+                    .store()
+                    .workflows()
+                    .accept_single_session(item, rev, reason, actor)?;
+                // Settled attempts still keep their child identity; reject late tools/results and
+                // clear their sessions without turning cancelled evidence into successful review.
+                for u in &g.units {
+                    if u.status != "succeeded"
+                        && let Some(child) = &u.item_id
+                    {
+                        self.workflow_cancel_child(child)?;
+                    }
+                }
+            }
             "plan" => {
                 if let Some(p) = self.db().project(parent.project_id.as_deref())?
                     && (p.kind != "git" || !p.worktree)
@@ -401,7 +450,7 @@ impl Tx<'_> {
                     }
                 }
             }
-            ItemAction::Resume => {
+            ItemAction::Resume if !g.single_session() => {
                 self.db()
                     .store()
                     .workflows()

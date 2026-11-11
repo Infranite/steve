@@ -2,6 +2,7 @@ import { useState } from "react"
 import { ChevronDownIcon, CircleCheckIcon, GitBranchIcon, PauseIcon, PlayIcon, RotateCcwIcon } from "lucide-react"
 import { api } from "@/api"
 import { Button } from "@/components/ui/button"
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { useT } from "@/i18n"
 import { cn } from "@/lib/utils"
 import { loadItem, st } from "@/store"
@@ -9,7 +10,8 @@ import { orderedUnits, workflowProgress, type Workflow } from "@/workflow"
 
 export function WorkflowPanel({ item, workflow }: { item: string; workflow: Workflow }) {
   const t = useT()
-  const [busy, setBusy] = useState(false), [error, setError] = useState("")
+  const [busy, setBusy] = useState(false), [error, setError] = useState(""), [confirmSingle, setConfirmSingle] = useState<number | null>(null)
+  const single = workflow.acceptance_mode === "single_session"
   const progress = workflowProgress(workflow)
   const unavailable = workflow.execution_ready === false
   const labels: Record<string, string> = {
@@ -20,11 +22,11 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
     paused: t("views:workflow.paused"),
   }
   const kinds = { work: t("views:workflow.work"), review: t("views:workflow.review"), integrate: t("views:workflow.integrate") }
-  const change = async (action: "pause" | "resume" | "retry", unit_id?: string) => {
+  const change = async (action: "pause" | "resume" | "retry" | "single_session", unit_id?: string, revision = workflow.revision) => {
     setBusy(true); setError("")
     try {
       await api.workflowChange(item, {
-        action, unit_id, expected_revision: workflow.revision,
+        action, unit_id, expected_revision: revision,
         reason: t(`views:workflow.reason.${action}`),
       })
       await loadItem(item, true)
@@ -40,13 +42,29 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
         <h2 className="flex items-center gap-2 type-headline"><GitBranchIcon className="size-4" />{t("views:workflow.title")}</h2>
         <p className="mt-1 type-footnote text-muted-foreground">{t("views:workflow.progress", { done: progress.passed, total: progress.total, running: progress.running, max: workflow.max_parallel, revision: workflow.revision })}</p>
       </div>
-      <Button size="sm" variant="outline" disabled={busy || workflow.paused && unavailable} onClick={() => void change(workflow.paused ? "resume" : "pause")} data-workflow-toggle>
-        {workflow.paused ? <PlayIcon /> : <PauseIcon />}{workflow.paused ? t("views:workflow.resume") : t("views:workflow.pause")}
-      </Button>
+      {!single && <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="outline" disabled={busy || workflow.paused && unavailable} onClick={() => void change(workflow.paused ? "resume" : "pause")} data-workflow-toggle>
+          {workflow.paused ? <PlayIcon /> : <PauseIcon />}{workflow.paused ? t("views:workflow.resume") : t("views:workflow.pause")}
+        </Button>
+        {workflow.paused && <Button size="sm" variant="outline" disabled={busy} onClick={() => setConfirmSingle(workflow.revision)} data-workflow-single>{t("views:workflow.single")}</Button>}
+      </div>}
     </div>
+    <AlertDialog open={confirmSingle !== null} onOpenChange={(open) => !open && setConfirmSingle(null)}>
+      <AlertDialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] grid-rows-[minmax(0,1fr)_auto] [overflow-wrap:anywhere]" data-workflow-single-confirm>
+        <AlertDialogHeader className="min-h-0 min-w-0 overflow-y-auto">
+          <AlertDialogTitle>{t("views:workflow.single")}</AlertDialogTitle>
+          <AlertDialogDescription>{t("views:workflow.singleConfirm")}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter className="min-w-0 *:h-auto *:min-h-8 *:whitespace-normal">
+          <AlertDialogCancel disabled={busy}>{t("common:action.cancel")}</AlertDialogCancel>
+          <AlertDialogAction disabled={busy} onClick={() => { const revision = confirmSingle; setConfirmSingle(null); if (revision !== null) void change("single_session", undefined, revision) }} data-workflow-single-ok>{t("views:workflow.single")}</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    {single && <p className="mb-3 rounded-xl border p-3 type-callout text-muted-foreground" data-workflow-single-mode>{t("views:workflow.singleHint")}</p>}
     {error && <p role="alert" className="mb-3 break-words type-callout text-destructive">{error}</p>}
-    {unavailable && <p className="mb-3 rounded-xl border p-3 type-callout text-muted-foreground" role="status" data-workflow-unavailable>{t("views:workflow.unavailable")}</p>}
-    {workflow.paused && !unavailable && <p className="mb-3 type-callout text-muted-foreground">{t("views:workflow.pauseHint")}</p>}
+    {unavailable && !single && <p className="mb-3 rounded-xl border p-3 type-callout text-muted-foreground" role="status" data-workflow-unavailable>{t("views:workflow.unavailable")}</p>}
+    {workflow.paused && !single && !unavailable && <p className="mb-3 type-callout text-muted-foreground">{t("views:workflow.pauseHint")}</p>}
     {workflow.blockers.length > 0 && <div className="mb-4 rounded-xl border bg-muted/40 p-3" data-workflow-blockers>
       <p className="type-callout font-medium">{t("views:workflow.blockers")}</p>
       <ul className="mt-1 list-disc space-y-1 pl-4 type-footnote text-muted-foreground">{workflow.blockers.map((text, n) => <li key={n} className="break-words">{text}</li>)}</ul>
@@ -62,7 +80,7 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
         </div>
         <div className="mt-1 flex items-start justify-between gap-2">
           <h3 className="min-w-0 break-words type-callout font-medium">{unit.item_id ? <a href={`#/items/${encodeURIComponent(unit.item_id)}`} className="hover:underline">{unit.title}</a> : unit.title}</h3>
-          {unit.status === "failed" && <Button size="sm" variant="ghost" disabled={busy || unavailable || unit.attempt >= workflow.max_attempts} onClick={() => void change("retry", unit.id)} data-workflow-retry={unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
+          {!single && unit.status === "failed" && <Button size="sm" variant="ghost" disabled={busy || unavailable || unit.attempt >= workflow.max_attempts} onClick={() => void change("retry", unit.id)} data-workflow-retry={unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
         </div>
         {unit.depends_on.length > 0 && <p className="mt-1 break-words type-footnote text-muted-foreground">{t("views:workflow.depends", { names: unit.depends_on.map((id) => workflow.units.find((u) => u.id === id)?.title ?? id).join(" · ") })}</p>}
         {unit.resources.length > 0 && <p className="mt-1 break-words type-footnote text-muted-foreground">{t("views:workflow.resources", { names: unit.resources.join(" · ") })}</p>}

@@ -48,7 +48,10 @@ export default {
     details: "Goal and delivery", outputs: "Shared outputs",
     checkPassed: "Passed", checkFailed: "Failed", operated: "Actually operated",
     history_one: "Plan changes ({{count}})", history_other: "Plan changes ({{count}})", revision: "Revision {{n}}",
-    reason: { pause: "The user paused the workflow from the item page", resume: "The user resumed the workflow from the item page", retry: "The user retried failed work from the item page" },
+    single: "Use single-session acceptance",
+    singleConfirm: "Cancel unfinished collaboration units and keep their results and history. The responsible session will finish and deliver the item. Cancelled independent review and integration units will not count as passed or block this cycle's delivery. This does not accept the delivery or change permissions. Switching is refused while execution remains unsettled. Use this acceptance mode?",
+    singleHint: "The user chose single-session acceptance. Cancelled units do not count as passed; this cycle's delivery no longer requires all collaboration reviews and integration checks to pass. Replan before restarting collaboration.",
+    reason: { single_session: "The user explicitly chose single-session acceptance from the item page; cancelled units do not count as passed", pause: "The user paused the workflow from the item page", resume: "The user resumed the workflow from the item page", retry: "The user retried failed work from the item page" },
   },
   inbox: {
     title: "Inbox",
