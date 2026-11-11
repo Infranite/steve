@@ -40,7 +40,14 @@ public final class HubLoopbackProxy: @unchecked Sendable {
         }
     }
 
-    public let proxyAuthToken: String
+    private var currentProxyAuthToken: String
+
+    public var proxyAuthToken: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentProxyAuthToken
+    }
+
     public var authCookieHeader: String {
         "\(Self.proxyAuthCookieName)=\(proxyAuthToken)"
     }
@@ -85,7 +92,7 @@ public final class HubLoopbackProxy: @unchecked Sendable {
         self.webRoot = webRoot
         self.preferredPortDefaults = preferredPortDefaults
         self.preferredPortKey = preferredPortKey
-        self.proxyAuthToken = Self.generateRandomHexToken()
+        self.currentProxyAuthToken = Self.generateRandomHexToken()
 
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 60
@@ -94,6 +101,17 @@ public final class HubLoopbackProxy: @unchecked Sendable {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
         self.session = URLSession(configuration: cfg, delegate: redirectDelegate, delegateQueue: nil)
+    }
+
+    /// Rotates the per-page-generation gateway secret so requests from an older WebView document
+    /// are rejected (`403 forbidden_proxy_key`) until the reloaded page plants the new cookie.
+    @discardableResult
+    public func rotateAuthToken() -> String {
+        let next = Self.generateRandomHexToken()
+        lock.lock()
+        currentProxyAuthToken = next
+        lock.unlock()
+        return next
     }
 
     public func updateTarget(_ newTarget: ActiveTarget) {

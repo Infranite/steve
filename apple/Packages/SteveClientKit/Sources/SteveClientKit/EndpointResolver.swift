@@ -230,20 +230,47 @@ public struct EndpointResolver: Sendable {
         }
     }
 
+    private final class NoRedirectProbeDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            // Do not follow redirects: a separate web-only port redirects `/auth/hello` (307) to its API port,
+            // and must fail the direct hello check so `resolveHubBehind` reads `/hub.json` instead.
+            completionHandler(nil)
+        }
+    }
+
+    private static let noRedirectDelegate = NoRedirectProbeDelegate()
+    private static let probeSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 4.5
+        cfg.timeoutIntervalForResource = 6.0
+        cfg.httpCookieAcceptPolicy = .never
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieStorage = nil
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: cfg, delegate: noRedirectDelegate, delegateQueue: nil)
+    }()
+
     /// If `baseURL` is a Steve web-only port serving `/hub.json`, returns the canonical Hub API origin behind it.
     public static func resolveHubBehind(
         webURL: URL,
-        fetch: @Sendable (URL) async throws -> (Data, URLResponse) = { url in
+        fetch: (@Sendable (URL) async throws -> (Data, URLResponse))? = nil
+    ) async -> URL? {
+        struct HubJSON: Decodable { let hub: String? }
+        let hubJSONURL = webURL.appendingPathComponent("hub.json")
+        let performFetch: @Sendable (URL) async throws -> (Data, URLResponse) = fetch ?? { url in
             var req = URLRequest(url: url)
             req.httpMethod = "GET"
             req.cachePolicy = .reloadIgnoringLocalCacheData
             req.timeoutInterval = 4.0
-            return try await URLSession.shared.data(for: req)
+            return try await EndpointResolver.probeSession.data(for: req)
         }
-    ) async -> URL? {
-        struct HubJSON: Decodable { let hub: String? }
-        let hubJSONURL = webURL.appendingPathComponent("hub.json")
-        guard let (data, response) = try? await fetch(hubJSONURL),
+        guard let (data, response) = try? await performFetch(hubJSONURL),
               let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode),
               let decoded = try? JSONDecoder().decode(HubJSON.self, from: data),
@@ -261,7 +288,7 @@ public struct EndpointResolver: Sendable {
         request.httpMethod = "GET"
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 4.5
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await EndpointResolver.probeSession.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw EndpointResolutionError.notSteveHub(url: baseURL)
         }

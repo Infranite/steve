@@ -8,12 +8,30 @@ import UIKit
 #endif
 
 public struct SteveWebView: NSViewRepresentableFallback {
+    internal typealias RuleListCompiler = @MainActor (Int) async throws -> WKContentRuleList
+
     @ObservedObject private var coordinator: SteveClientCoordinator
     private let platformName: String
+    private let ruleListCompiler: RuleListCompiler
+    private let useNonPersistentDataStore: Bool?
 
     public init(coordinator: SteveClientCoordinator, platformName: String) {
         self.coordinator = coordinator
         self.platformName = platformName
+        self.ruleListCompiler = Self.compileLoopbackPortRuleList
+        self.useNonPersistentDataStore = nil
+    }
+
+    internal init(
+        coordinator: SteveClientCoordinator,
+        platformName: String,
+        useNonPersistentDataStore: Bool? = nil,
+        ruleListCompiler: @escaping RuleListCompiler = Self.compileLoopbackPortRuleList
+    ) {
+        self.coordinator = coordinator
+        self.platformName = platformName
+        self.useNonPersistentDataStore = useNonPersistentDataStore
+        self.ruleListCompiler = ruleListCompiler
     }
 
     #if os(macOS)
@@ -54,17 +72,36 @@ public struct SteveWebView: NSViewRepresentableFallback {
     #endif
 
     @MainActor
+    internal func makeTestWebView(bridge: BridgeCoordinator) -> WKWebView {
+        let webView = buildWebView(bridge: bridge)
+        webView.frame = CGRect(x: 0, y: 0, width: 480, height: 360)
+        bridge.attach(webView)
+        loadIfReady(in: webView, bridge: bridge)
+        return webView
+    }
+
+    @MainActor
+    internal func updateTestWebView(_ webView: WKWebView, bridge: BridgeCoordinator) {
+        bridge.parent = self
+        loadIfReady(in: webView, bridge: bridge)
+    }
+
+    @MainActor
     private func buildWebView(bridge: BridgeCoordinator) -> WKWebView {
         let config = WKWebViewConfiguration()
-        #if DEBUG
-        if ProcessInfo.processInfo.environment["STEVE_CLIENT_WEBKIT_EPHEMERAL"] == "1" {
-            config.websiteDataStore = .nonPersistent()
+        if let useNonPersistentDataStore {
+            config.websiteDataStore = useNonPersistentDataStore ? .nonPersistent() : .default()
         } else {
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["STEVE_CLIENT_WEBKIT_EPHEMERAL"] == "1" {
+                config.websiteDataStore = .nonPersistent()
+            } else {
+                config.websiteDataStore = .default()
+            }
+            #else
             config.websiteDataStore = .default()
+            #endif
         }
-        #else
-        config.websiteDataStore = .default()
-        #endif
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
 
         let userContent = WKUserContentController()
@@ -91,12 +128,19 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
         if bridge.loadedNonce != coordinator.webReloadNonce || bridge.loadedGateway != gateway {
             let gatewayChanged = (bridge.loadedGateway != gateway)
+            let previousToken = bridge.loadedProxyToken
             bridge.loadedNonce = coordinator.webReloadNonce
             bridge.loadedGateway = gateway
             bridge.isPageLoaded = false
             let loadGeneration = bridge.bumpLoadGeneration()
             let token = coordinator.proxy.proxyAuthToken
             let platform = platformName
+            let compiler = ruleListCompiler
+
+            if previousToken != nil && previousToken != token {
+                // Stop any active document work before planting the rotated gateway secret.
+                webView.stopLoading()
+            }
 
             Task { @MainActor [weak webView, weak bridge, weak coordinator] in
                 guard let webView, let bridge, let coordinator,
@@ -105,25 +149,41 @@ public struct SteveWebView: NSViewRepresentableFallback {
                 if gatewayChanged || !bridge.hasInstalledRuleList {
                     let userContent = webView.configuration.userContentController
                     userContent.removeAllUserScripts()
-                    let bootstrapJS = Self.makeBootstrapScript(platform: platform, gateway: gateway)
-                    userContent.addUserScript(
-                        WKUserScript(
-                            source: bootstrapJS,
-                            injectionTime: .atDocumentStart,
-                            forMainFrameOnly: true
-                        )
-                    )
                     userContent.removeAllContentRuleLists()
-                    if let ruleList = try? await Self.compileLoopbackPortRuleList(gatewayPort: gatewayPort) {
+                    bridge.hasInstalledRuleList = false
+                    do {
+                        let ruleList = try await compiler(gatewayPort)
                         guard bridge.loadGeneration == loadGeneration else { return }
                         userContent.add(ruleList)
+                        let bootstrapJS = Self.makeBootstrapScript(platform: platform, gateway: gateway)
+                        userContent.addUserScript(
+                            WKUserScript(
+                                source: bootstrapJS,
+                                injectionTime: .atDocumentStart,
+                                forMainFrameOnly: true
+                            )
+                        )
                         bridge.hasInstalledRuleList = true
+                    } catch {
+                        guard bridge.loadGeneration == loadGeneration else { return }
+                        userContent.removeAllUserScripts()
+                        userContent.removeAllContentRuleLists()
+                        bridge.hasInstalledRuleList = false
+                        webView.stopLoading()
+                        coordinator.failGatewayIsolation(
+                            L10n.tr(
+                                "WebView 端口隔离规则编译失败：\(error.localizedDescription)",
+                                "Failed to compile WebView loopback isolation rules: \(error.localizedDescription)"
+                            )
+                        )
+                        return
                     }
                 }
 
                 coordinator.purgePendingWebCookies()
                 await Self.plantProxyCookie(in: webView, gateway: gateway, token: token)
                 guard bridge.loadGeneration == loadGeneration else { return }
+                bridge.loadedProxyToken = token
                 webView.load(URLRequest(url: gateway))
             }
             return
@@ -172,7 +232,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
     /// Builds a WebKit Content Blocker rule list that blocks WebView requests to any loopback host/port
     /// (`127.0.0.0/8`, `0.0.0.0`, `localhost`, `*.localhost`, `[::1]`) except `127.0.0.1:<gatewayPort>`.
     /// Uses only WebKit DFA-compatible regex syntax (no `|` alternation or `{m,n}` quantifiers).
-    internal static func makeLoopbackPortIsolationRuleListJSON(gatewayPort: Int) -> String {
+    internal static func makeLoopbackPortIsolationRuleListJSON(gatewayPort: Int) throws -> String {
         let hostPatterns = [
             "127\\.[0-9]+\\.[0-9]+\\.[0-9]+[:/]",
             "0\\.0\\.0\\.0[:/]",
@@ -212,17 +272,20 @@ public struct SteveWebView: NSViewRepresentableFallback {
             ])
         }
 
-        guard let data = try? JSONSerialization.data(withJSONObject: rules),
-              let json = String(data: data, encoding: .utf8) else {
-            return "[]"
+        let data = try JSONSerialization.data(withJSONObject: rules)
+        guard let json = String(data: data, encoding: .utf8), !rules.isEmpty else {
+            throw BridgeCallError.operationFailed("Failed to serialize loopback isolation rule list")
         }
         return json
     }
 
     @MainActor
     internal static func compileLoopbackPortRuleList(gatewayPort: Int) async throws -> WKContentRuleList {
+        guard (1...65535).contains(gatewayPort) else {
+            throw BridgeCallError.operationFailed("Invalid gateway port for rule list")
+        }
         let identifier = "steve-loopback-isolation-\(gatewayPort)"
-        let json = makeLoopbackPortIsolationRuleListJSON(gatewayPort: gatewayPort)
+        let json = try makeLoopbackPortIsolationRuleListJSON(gatewayPort: gatewayPort)
         guard let store = WKContentRuleListStore.default() else {
             throw BridgeCallError.operationFailed("WKContentRuleListStore unavailable")
         }
@@ -517,6 +580,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
         weak var webView: WKWebView?
         var loadedNonce: UUID?
         var loadedGateway: URL?
+        var loadedProxyToken: String?
         var isPageLoaded = false
         var hasInstalledRuleList = false
         private(set) var loadGeneration: UInt64 = 0

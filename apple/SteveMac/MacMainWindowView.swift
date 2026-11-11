@@ -41,16 +41,22 @@ struct MacMainWindowView: View {
         .alert(
             L10n.tr("确认配对并连接到此 Hub？", "Pair and connect to this Hub?"),
             isPresented: Binding(
-                get: { coordinator.pendingExternalPairConfirmation != nil },
-                set: { if !$0 { coordinator.cancelPendingExternalPairing() } }
+                get: {
+                    coordinator.isPairConfirmationPresented && coordinator.pendingExternalPairConfirmation != nil
+                },
+                set: { presented in
+                    if !presented {
+                        coordinator.handlePairAlertDismissed()
+                    }
+                }
             ),
             presenting: coordinator.pendingExternalPairConfirmation
-        ) { _ in
+        ) { pending in
             Button(L10n.tr("取消", "Cancel"), role: .cancel) {
-                coordinator.cancelPendingExternalPairing()
+                coordinator.cancelPendingExternalPairing(id: pending.id)
             }
             Button(L10n.tr("确认配对", "Pair")) {
-                Task { await coordinator.confirmPendingExternalPairing() }
+                coordinator.beginConfirmExternalPairing(id: pending.id)
             }
         } message: { pending in
             Text(
@@ -63,7 +69,11 @@ struct MacMainWindowView: View {
         .alert(
             L10n.tr("配对失败", "Pairing Failed"),
             isPresented: Binding(
-                get: { coordinator.externalPairErrorMessage != nil },
+                get: {
+                    !coordinator.isPairConfirmationPresented
+                        && coordinator.pendingExternalPairConfirmation == nil
+                        && coordinator.externalPairErrorMessage != nil
+                },
                 set: { if !$0 { coordinator.externalPairErrorMessage = nil } }
             )
         ) {
