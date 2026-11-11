@@ -859,7 +859,7 @@ async fn a_mode_change_at_idle_configures_the_node_session() {
     assert!(r.said(&sid, seq, "second-A7") > 0, "the next turn ran");
 }
 
-/// B1a, on the scripted agent: a Bot in `auto` (the seeded "Steve 开发") runs on the Node in auto,
+/// B1a, on the scripted agent: a Bot in `auto` runs on the Node in auto,
 /// and YOLO's set_mode reaches it both ways: full access, then back to the Bot's `auto`.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_auto_bot_runs_on_the_node_and_yolo_sets_auto_back() {

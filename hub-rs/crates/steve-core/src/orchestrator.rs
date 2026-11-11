@@ -261,9 +261,20 @@ fn undo_patch(u: &Value) -> Map<String, Value> {
     p
 }
 
+/// The bot that develops Steve itself, as `seed` makes it beside Steve's own source (a `NewBot` as JSON).
+pub(crate) fn dev_bot(project: Option<&str>) -> Value {
+    json!({
+        "name": "Steve 开发", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "role": "开发 Steve 自己：Hub、前端、部署脚本", "accept_mode": "inherit", "perm_mode": "auto",
+        "persona": "直接、话少", "default_project": project, "avatar": {"color": "#8c7ae6", "round": 45},
+        "rules": "在 git worktree 的分支上工作，不直接改 main。改完必须跑类型检查和测试；界面改动要截图自查。提交信息用中文说明改了什么。不推送、不发布，除非用 steve_request_approval 得到批准。",
+    })
+}
+
 impl Core {
-    /* ── seed: the personal workspace, Steve's own project, the main bot and the developer bot ── */
-    /// Every boot: workspace `default`, bots `steve` and `dev`, and Steve's own project if `STEVE_REPO` is a git repo.
+    /* ── seed: the personal workspace and the main bot; beside Steve's own source, its project and developer bot ── */
+    /// Every boot: workspace `default` and the bot `steve`. Where `STEVE_REPO` is a git repo (a maintainer's
+    /// installation), Steve's own project and the bot `dev` that develops it; an installation without the source
+    /// has neither, and its Bots are the ones its owner makes.
     pub fn seed(&self) -> Result<()> {
         let t = self.tx();
         let db = t.db();
@@ -304,16 +315,9 @@ impl Core {
                 release.as_ref(),
             )?);
         }
-        db.bot_seed(
-            "dev",
-            false,
-            json!({
-                "name": "Steve 开发", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "role": "开发 Steve 自己：Hub、前端、部署脚本", "accept_mode": "inherit", "perm_mode": "auto",
-                "persona": "直接、话少", "default_project": steve_project.as_ref().map(|p| p.id.clone()), "avatar": {"color": "#8c7ae6", "round": 45},
-                "rules": "在 git worktree 的分支上工作，不直接改 main。改完必须跑类型检查和测试；界面改动要截图自查。提交信息用中文说明改了什么。不推送、不发布，除非用 steve_request_approval 得到批准。",
-            }),
-            WS,
-        )?;
+        if let Some(p) = &steve_project {
+            db.bot_seed("dev", false, dev_bot(Some(&p.id)), WS)?;
+        }
         /* a Steve bot with no harness gets one, with no model: the harness's own default; one that has a
         harness is left as the user set it, model or not */
         db.store().with_conn(|c| {
