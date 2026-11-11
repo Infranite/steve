@@ -596,6 +596,8 @@ export default {
     other: "其它 Hub…",
     badAddress: "这不是一个有效的地址",
     notSteve: "这个地址上没有找到 Steve Hub",
+    unreachable: "这个地址没有应答。请确认 Hub 在运行，并且这台设备能访问到它。",
+    lost: "与 {{name}} 的连接断开了，正在重连…",
     apiMismatch: "这个 Hub（{{version}}）与当前网页的版本不兼容",
     offerTitle: "要记住这些 Hub 吗？",
     offerSub: "你来的那个页面带上了它保存的 Hub。加入后，可以从这里切换回去。",

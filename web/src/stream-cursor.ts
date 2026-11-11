@@ -24,6 +24,8 @@ export type StreamDeps = {
   on: (data: string) => void
   /** opened; `resumed` when it continues from a cursor (no full resync needed) */
   onOpen: (resumed: boolean) => void
+  /** the stream broke, or an attempt to open it failed; a retry is scheduled */
+  onDown?: () => void
   /** the watermark of the state on screen, used until a frame id is seen */
   cursor: () => string | null
   setTimeout: (f: () => void, ms: number) => unknown
@@ -52,7 +54,7 @@ export function resumableStream(d: StreamDeps) {
     src.onerror = () => {
       src.close(); if (es !== src) return
       es = null
-      if (!closed) timer = d.setTimeout(open, retry = Math.min(retry * 2, MAX_RETRY))
+      if (!closed) { timer = d.setTimeout(open, retry = Math.min(retry * 2, MAX_RETRY)); d.onDown?.() }
     }
   }
   /* back in front: don't wait for the backoff; a failed attempt now retries after 2 s, not 15 */

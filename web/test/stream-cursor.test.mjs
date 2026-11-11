@@ -4,7 +4,7 @@ import { resumableStream, STALE_MS } from "../src/stream-cursor.ts"
 
 /* a fake EventSource per open, fake timers and clock, and window/document targets */
 function rig({ cursor = () => null, hidden = false } = {}) {
-  const sources = [], data = [], opens = [], timers = []
+  const sources = [], data = [], opens = [], timers = [], downs = []
   let now = 0
   const target = () => { const ls = {}; return { ls, addEventListener: (t, f) => { (ls[t] ??= new Set()).add(f) }, removeEventListener: (t, f) => ls[t]?.delete(f), fire: (t) => ls[t]?.forEach((f) => f()) } }
   const win = target(), doc = Object.assign(target(), { visibilityState: hidden ? "hidden" : "visible" })
@@ -19,12 +19,12 @@ function rig({ cursor = () => null, hidden = false } = {}) {
       src.drop = () => { src.readyState = 2; src.onerror?.({}) }
       sources.push(src); return src
     },
-    on: (d) => data.push(d), onOpen: (resumed) => opens.push(resumed), cursor,
+    on: (d) => data.push(d), onOpen: (resumed) => opens.push(resumed), onDown: () => downs.push(now), cursor,
     setTimeout: (f, ms) => { const t = { f, ms, at: now + ms }; timers.push(t); return t }, clearTimeout: (t) => { if (t) t.cancelled = true },
     now: () => now, win, doc,
   })
   const advance = (ms) => { now += ms; for (const t of timers.splice(0)) { if (t.cancelled) continue; if (t.at <= now) t.f(); else timers.push(t) } }
-  return { s, sources, data, opens, timers, win, doc, advance, last: () => sources.at(-1) }
+  return { s, sources, data, opens, downs, timers, win, doc, advance, last: () => sources.at(-1) }
 }
 
 test("the first open resumes after the state's watermark; without one it opens as before", () => {
@@ -102,4 +102,13 @@ test("a source the browser closed without an error is reopened on pageshow, howe
   assert.equal(r.sources.length, 2); assert.equal(r.last().url, "/api/stream?after=E:4")
   r.advance(1000); r.doc.fire("visibilitychange") // the new one is connecting: left alone
   assert.equal(r.sources.length, 2)
+})
+
+test("every break and every failed attempt is told; a close is not", () => {
+  const r = rig({ cursor: () => "E:5" })
+  r.last().open(); assert.deepEqual(r.downs, [])
+  r.last().drop(); assert.equal(r.downs.length, 1)
+  r.advance(2000); r.last().drop(); assert.equal(r.downs.length, 2) // the retry failed too
+  r.advance(4000); r.last().open(); assert.deepEqual(r.opens, [true, true])
+  r.s.close(); r.last().drop(); assert.equal(r.downs.length, 2)
 })

@@ -324,12 +324,12 @@ export const api = {
 }
 /** the live stream; `cursor` is the watermark of the state on screen, `onOpen(resumed)` is false when the Hub could not
  * be asked to resume (no cursor yet): then everything on screen has to be refetched */
-export function stream(on: (e: HubEvent) => void, onOpen: (resumed: boolean) => void, cursor: () => string | null = () => null) {
+export function stream(on: (e: HubEvent) => void, onOpen: (resumed: boolean) => void, cursor: () => string | null = () => null, onDown?: () => void) {
   const s = resumableStream({
     url: (after) => withWs(`/api/stream?lang=${encodeURIComponent(lang())}${after ? "&after=" + encodeURIComponent(after) : ""}`), // the workspace and language at each (re)connect
     source: (url) => new EventSource(url, { withCredentials: true }),
     on: (data) => { try { on(JSON.parse(data)) } catch {} },
-    onOpen, cursor,
+    onOpen, cursor, onDown,
     setTimeout: (f, ms) => setTimeout(f, ms), clearTimeout: (x) => clearTimeout(x as ReturnType<typeof setTimeout>), now: Date.now,
     win: window, doc: document,
   })

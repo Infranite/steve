@@ -141,7 +141,9 @@ export const LOADED_WEB_VERSION = document.querySelector('meta[name="steve-web-v
 
 /* ───────── the store ───────── */
 export const st = {
-  ready: false, error: "" as string, login: null as string | null, version: "", webVersion: "", update: null as StateUpdate | null,
+  ready: false, error: "" as string, login: null as string | null,
+  /* the live stream has been broken for a while: what is on screen may be old, and nothing sent will arrive */
+  down: false, version: "", webVersion: "", update: null as StateUpdate | null,
   workspace: null as State["workspace"] | null, workspaces: [] as State["workspaces"],
   bots: {} as Record<string, Bot>, allBots: [] as State["allBots"], S: {} as Record<string, Sess>, items: [] as Item[], projects: [] as Project[],
   thread: [] as Msg[], queue: [] as Msg[], done: [] as Done[], tags: [] as Tag[], tagUses: {} as Record<string, number>,
@@ -724,19 +726,30 @@ function resync(): Promise<void> {
  * handled live since then would all be replayed on the next reconnect (steve.tool twice). Once that resync has a
  * watermark the stream is reopened from it instead, so its frames carry ids; only the short handoff can repeat. */
 let streamGen = 0
+/** a stream that comes back within this is not worth a word */
+const DOWN_AFTER_MS = 4000
+let downTimer: ReturnType<typeof setTimeout> | null = null
+const streamUp = () => {
+  if (downTimer) { clearTimeout(downTimer); downTimer = null }
+  if (st.down) { st.down = false; emit() }
+}
 const connect = () => {
   closeStream()
   const gen = ++streamGen, from = watermark
   closeStream = stream(onHub, (resumed) => {
+    if (gen === streamGen) streamUp()
     if (resumed) return
     void resync().then(() => { if (gen === streamGen && watermark) connect() })
-  }, () => from)
+  }, () => from, () => {
+    if (gen !== streamGen || st.down || downTimer) return
+    downTimer = setTimeout(() => { downTimer = null; if (gen === streamGen) { st.down = true; emit() } }, DOWN_AFTER_MS)
+  })
   yoloSoon()
 }
 export function start() {
   let live = true
   void refresh().then(() => { if (live) connect() })
-  return () => { live = false; streamGen++; closeStream(); closeStream = () => {} }
+  return () => { live = false; streamGen++; closeStream(); closeStream = () => {}; streamUp() }
 }
 
 /* ───────── selectors ───────── */

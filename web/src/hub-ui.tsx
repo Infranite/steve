@@ -2,7 +2,7 @@
  * field (on the no-Hub, signed-out and cannot-connect screens, in a dialog, and in 设置 · 访问与客户端), the answer
  * to a pairing link, and the offer of the Hubs another page sent along. The list itself is `hubDirectory()`. */
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { CheckIcon, ChevronRightIcon, ChevronsUpDownIcon, KeyRoundIcon, PlusIcon, QrCodeIcon, ServerIcon } from "lucide-react"
+import { CheckIcon, ChevronRightIcon, ChevronsUpDownIcon, KeyRoundIcon, PlusIcon, QrCodeIcon, ServerIcon, ServerOffIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -18,7 +18,7 @@ import { closeSheet, go, Group, openSheet, Row, SectionLabel } from "@/ui"
 /** why a Hub could not be used, in the page's words */
 export const hubErrorText = (e: unknown): string =>
   e instanceof HubError
-    ? e.code === "api-mismatch" ? tr("shell:hub.apiMismatch", { version: e.version ?? "" }) : e.code === "bad-address" ? tr("shell:hub.badAddress") : tr("shell:hub.notSteve")
+    ? e.code === "api-mismatch" ? tr("shell:hub.apiMismatch", { version: e.version ?? "" }) : e.code === "bad-address" ? tr("shell:hub.badAddress") : e.code === "no-answer" ? tr("shell:hub.unreachable") : tr("shell:hub.notSteve")
     : (e as Error)?.message || String(e)
 
 const hostOf = (u: string) => { try { return new URL(u).host } catch { return u } }
@@ -50,6 +50,20 @@ export function useHubAddress(): string {
 function hubSub(h: HubEntry): string {
   const route = h.route && ["loopback", "lan", "tailnet", "proxy", "public"].includes(h.route) ? tr(`pages:access.route.${h.route as "lan"}`) : h.route
   return [h.name !== hostOf(h.address) && h.name !== h.address ? hostOf(h.address) : "", h.version ?? "", route ?? "", h.signedIn === false ? tr("shell:hub.signedOut") : ""].filter(Boolean).join(" · ")
+}
+
+/** Said above every page while the live stream is broken: which Hub, that the page keeps trying, and the way to another. */
+export function HubLostBanner() {
+  const t = useT(), { dir, hubs } = useHubs()
+  if (!st.down) return null
+  const name = hubs?.find((h) => h.current)?.name ?? (dir.native ? "Hub" : hostOf(currentHub()))
+  return (
+    <div role="status" className="flex shrink-0 items-center gap-2 border-b bg-attention/10 px-4 py-2 type-footnote text-foreground/80 sm:px-6" data-hub-lost>
+      <ServerOffIcon className="size-3.5 shrink-0 text-attention" aria-hidden />
+      <span className="min-w-0 flex-1">{t("shell:hub.lost", { name })}</span>
+      <Button size="xs" variant="ghost" onClick={() => openSheet("hubs")} data-hub-lost-switch>{t("shell:hub.other")}</Button>
+    </div>
+  )
 }
 
 /** the sidebar's Hub switcher, under the workspace switcher */
@@ -108,14 +122,16 @@ export function HubMore() {
 export function HubChooser({ manage = false, down = false, focus = false, className }: { manage?: boolean; down?: boolean; focus?: boolean; className?: string }) {
   const t = useT(), { dir, hubs, error, reload } = useHubs()
   const [busy, setBusy] = useState("")
+  /* what went wrong, and where it is said: under the list for one of its rows, under the field for an address typed */
   const [err, setErr] = useState("")
+  const [errAt, setErrAt] = useState<"list" | "add">("add")
   const [input, setInput] = useState("")
   const [name, setName] = useState("")
   /* a switch that worked leaves this page (a reload, or the other Hub's page); what comes back here did not */
   const act = async (key: string, f: () => Promise<void>) => {
     if (busy) return
     setBusy(key); setErr("")
-    try { await f() } catch (e) { setErr(hubErrorText(e)) }
+    try { await f() } catch (e) { setErr(hubErrorText(e)); setErrAt(key === "add" || key === "scan" ? "add" : "list") }
     setBusy(""); void reload()
   }
   const shown = (hubs ?? []).filter((h) => !(down && !dir.native && h.current && h.address === location.origin))
@@ -143,10 +159,11 @@ export function HubChooser({ manage = false, down = false, focus = false, classN
         </div>
       )}
       {error && <div className="type-footnote text-destructive" role="alert">{error}</div>}
+      {err && errAt === "list" && <div className="-mt-1 type-footnote text-destructive" role="alert" data-hub-error>{err}</div>}
       <form onSubmit={(e) => { e.preventDefault(); if (input.trim()) void act("add", () => dir.add(input, name)) }} className="flex w-full flex-col gap-2" data-add-hub>
         <Input value={input} onChange={(e) => setInput(e.target.value)} placeholder={t("shell:hub.addPlaceholder")} autoFocus={focus} inputMode="url" autoCapitalize="off" autoCorrect="off" spellCheck={false} data-add-hub-url />
         {manage && <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("shell:hub.namePlaceholder")} data-add-hub-name />}
-        {err && <div className="type-footnote text-destructive" role="alert" data-hub-error>{err}</div>}
+        {err && errAt === "add" && <div className="type-footnote text-destructive" role="alert" data-hub-error>{err}</div>}
         <div className="flex gap-2">
           <Button type="submit" className="flex-1" disabled={!!busy || !input.trim()} data-add-hub-submit>{busy === "add" ? <Spinner className="size-4" /> : t("shell:hub.connect")}</Button>
           {dir.scan && <Button type="button" variant="outline" disabled={!!busy} onClick={() => void act("scan", dir.scan!)} data-hub-scan><QrCodeIcon className="size-4" />{t("shell:hub.scan")}</Button>}

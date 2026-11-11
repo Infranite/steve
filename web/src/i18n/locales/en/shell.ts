@@ -618,6 +618,8 @@ export default {
     other: "Other Hubs…",
     badAddress: "That is not a valid address",
     notSteve: "No Steve Hub answers at that address",
+    unreachable: "Nothing answers at that address. Check that the Hub is running and that this device can reach it.",
+    lost: "The connection to {{name}} is lost. Reconnecting…",
     apiMismatch: "This Hub ({{version}}) does not work with this version of the page",
     offerTitle: "Remember these Hubs?",
     offerSub: "The page you came from sent along the Hubs it had saved. Once added, you can switch back from here.",
