@@ -733,8 +733,11 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
         Ok(c) => c,
         Err(e) => return Probe::failed(ProbeStatus::AdapterMissing, e),
     };
-    // a bare name is looked up on PATH by the spawn; a path must exist
-    if program.components().count() > 1 && !program.exists() {
+    // a bare name is looked up on PATH by the spawn; a path must exist: the program's, and the
+    // adapter's own file when another program runs it (a `.js` one through node, which would
+    // start and answer a missing file with a stack trace and an exit, read as a failed handshake)
+    let gone = |p: &Path| p.components().count() > 1 && !p.exists();
+    if gone(&program) || cfg.adapters.get(id).is_some_and(|own| gone(own)) {
         return Probe::failed(
             ProbeStatus::AdapterMissing,
             "the adapter's command is missing",
@@ -1129,5 +1132,12 @@ mod tests {
         assert_eq!(p.status, ProbeStatus::AdapterMissing);
         let p = probe(&c, "unknown", dir.path(), Duration::from_secs(5)).await;
         assert_eq!(p.status, ProbeStatus::AdapterMissing);
+        // a script adapter that is not there: missing too, without starting its interpreter on it
+        // (`node` here is a program that would answer anything it is started with)
+        c.node = "/bin/cat".into();
+        c.adapters
+            .insert("unbuilt".into(), dir.path().join("nope/agent.js"));
+        let p = probe(&c, "unbuilt", dir.path(), Duration::from_millis(300)).await;
+        assert_eq!(p.status, ProbeStatus::AdapterMissing, "{p:?}");
     }
 }

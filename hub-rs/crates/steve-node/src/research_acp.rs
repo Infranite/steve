@@ -656,6 +656,68 @@ mod tests {
     }
 
     #[test]
+    fn a_full_access_run_answers_to_no_read_only_rule_but_keeps_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = r::Scope::new(dir.path(), &[], &dir.path().join("home"));
+        let call = |id: &str, update: Value| {
+            let mut update = update;
+            update["toolCallId"] = json!(id);
+            let mut normalizer = Normalizer::new("/", "test", Epoch::new("test").unwrap());
+            normalizer.update(&update);
+            normalizer.fact(id).unwrap().clone()
+        };
+        let outside = json!({
+            "sessionUpdate": "tool_call", "name": "any_reader", "kind": "read",
+            "status": "in_progress", "locations": [{"path": "/etc/hosts"}],
+        });
+        let write = json!({
+            "sessionUpdate": "tool_call", "name": "any_writer", "kind": "edit",
+            "status": "in_progress", "locations": [{"path": "/etc/hosts"}],
+        });
+        let shell = json!({
+            "sessionUpdate": "tool_call", "name": "any_shell", "kind": "execute",
+            "rawInput": {"command": "touch notes.md"}
+        });
+        let budget = r::Budget::default();
+        let run = |state: &mut State, id: &str, update: &Value, budget: r::Budget, full: bool| {
+            let fact = call(id, update.clone());
+            state.tool(&fact, &scope, budget, false, false, full)
+        };
+
+        // read-only: the first call out of scope ends the run, and nothing after it counts
+        let mut limited = State::default();
+        assert!(!run(&mut limited, "a", &outside, budget, false));
+        assert!(matches!(
+            limited.stop,
+            Some(r::RunStatus::Violated(r::Violation::OutOfScope { .. }))
+        ));
+        assert!(!run(&mut limited, "b", &shell, budget, false));
+        assert!(limited.calls.is_empty());
+
+        // full access: the same calls go through
+        let mut full = State::default();
+        for (id, update) in [("a", &outside), ("b", &write), ("c", &shell)] {
+            assert!(run(&mut full, id, update, budget, true));
+        }
+        assert!(full.stop.is_none());
+        assert_eq!(full.calls.len(), 3);
+
+        // and a limit the owner set on tool calls still ends it
+        let two = r::Budget {
+            max_tools: Some(2),
+            ..budget
+        };
+        let mut capped = State::default();
+        assert!(run(&mut capped, "a", &outside, two, true));
+        assert!(run(&mut capped, "b", &write, two, true));
+        assert!(!run(&mut capped, "c", &shell, two, true));
+        assert!(matches!(
+            capped.stop,
+            Some(r::RunStatus::Budget(r::BudgetHit::Tools))
+        ));
+    }
+
+    #[test]
     fn sandbox_policy_uses_adapter_capabilities_instead_of_names() {
         let own = steve_acp::AdapterProperties {
             self_read_only: true,
