@@ -671,12 +671,20 @@ mod tests {
 
     #[tokio::test]
     async fn binds_every_listed_host() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|l| l.local_addr())
-            .expect("free port")
-            .port();
-        let l = Listen::parse("127.0.0.1,localhost", port, false).expect("listen");
-        let bound = l.bind().await.expect("bind");
+        // a port that was free when asked for can be another test's a moment later: ask again then
+        let mut tries = 0;
+        let (port, bound) = loop {
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .and_then(|l| l.local_addr())
+                .expect("free port")
+                .port();
+            let l = Listen::parse("127.0.0.1,localhost", port, false).expect("listen");
+            match l.bind().await {
+                Ok(bound) => break (port, bound),
+                Err(e) if tries < 20 && e.kind() == std::io::ErrorKind::AddrInUse => tries += 1,
+                Err(e) => panic!("bind: {e:?}"),
+            }
+        };
         assert!(!bound.is_empty());
         // a second Hub on the same port is refused, naming the address
         let e = Listen::parse("127.0.0.1", port, false)
