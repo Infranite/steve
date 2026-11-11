@@ -196,6 +196,11 @@ async fn node_harnesses(
 ) -> Option<Vec<steve_node_api::HarnessCapability>> {
     match node.probe(fresh).await {
         Ok(c) => Some(c.harnesses),
+        // not linked is how every start begins: the caller says "not known yet", nothing is wrong
+        Err(e) if e.code == steve_node_api::ErrorCode::Offline => {
+            tracing::info!("the local Node is not linked: its harnesses are not known yet");
+            None
+        }
         Err(e) => {
             tracing::warn!("probe of the local Node: {e}");
             None

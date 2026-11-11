@@ -510,6 +510,9 @@ impl NodeRuntime {
         // last handle ends both. Nothing is sent before the Hub has reconciled with the Node.
         let (weak, wake) = (Arc::downgrade(self), self.wake_send.clone());
         tokio::spawn(async move {
+            // the Node links a moment after the Hub starts: the first try finding it not there is
+            // the usual order, a later one is worth a warning
+            let mut waited = false;
             loop {
                 let Some(me) = weak.upgrade() else { return };
                 match me.reconcile().await {
@@ -524,6 +527,13 @@ impl NodeRuntime {
                         me.reconciled.store(true, Ordering::SeqCst);
                         me.plan_waiting();
                         break;
+                    }
+                    Err(e) if e.code == ErrorCode::Offline && !waited => {
+                        waited = true;
+                        tracing::info!(
+                            "node {}: not linked yet; reconciling once it is",
+                            me.node_id
+                        );
                     }
                     Err(e) => tracing::warn!("node {}: reconcile: {e}; trying again", me.node_id),
                 }
