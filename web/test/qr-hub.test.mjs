@@ -356,3 +356,34 @@ test("browserEntries lists the saved Hubs with the one in use among them, in a s
     assert.deepEqual(hubMod.browserEntries().map((h) => [h.address, h.current]), [["http://192.168.1.10:8440", true], ["https://steve.example.com", false]])
   })
 })
+
+test("the Hubs another page's list named are offered once, and added only on a yes", () => {
+  withMockStorage(() => {
+    const session = new Map()
+    const desc = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage")
+    Object.defineProperty(globalThis, "sessionStorage", { configurable: true, writable: true, value: { getItem: (k) => (session.has(k) ? session.get(k) : null), setItem: (k, v) => session.set(k, String(v)), removeItem: (k) => session.delete(k) } })
+    try {
+      const carried = JSON.stringify([["http://192.168.1.10:8440", "Home"], ["https://steve.example.com", "Cloud"], ["http://10.0.0.2:8440"]])
+      hubMod.setHub("http://192.168.1.10:8440")
+      /* a no leaves the list as it was */
+      session.set("steve.hubs.offer", carried)
+      assert.deepEqual(hubMod.hubsOffer().map((h) => h.url), ["https://steve.example.com", "http://10.0.0.2:8440"])
+      hubMod.answerOffer(false)
+      assert.deepEqual(hubMod.hubsOffer(), [])
+      assert.deepEqual(hubMod.savedHubs().map((h) => h.url), ["http://192.168.1.10:8440"])
+      /* a yes adds the unknown ones behind the Hub in use, which takes the name the other page had for it */
+      session.set("steve.hubs.offer", carried)
+      hubMod.answerOffer(true)
+      assert.deepEqual(hubMod.savedHubs().map((h) => [h.url, h.name]), [["http://192.168.1.10:8440", "Home"], ["https://steve.example.com", "Cloud"], ["http://10.0.0.2:8440", undefined]])
+      assert.equal(session.has("steve.hubs.offer"), false)
+      /* a name the person gave stays */
+      hubMod.rememberHub("https://steve.example.com", { name: "Mine" })
+      session.set("steve.hubs.offer", carried)
+      hubMod.answerOffer(true)
+      assert.equal(hubMod.savedHubs().find((h) => h.url === "https://steve.example.com").name, "Mine")
+    } finally {
+      if (desc) Object.defineProperty(globalThis, "sessionStorage", desc)
+      else delete globalThis.sessionStorage
+    }
+  })
+})

@@ -90,7 +90,8 @@ export function HubSwitcher() {
 export function HubMore() {
   const t = useT(), { hubs } = useHubs()
   const cur = hubs?.find((h) => h.current)
-  const ico = (I: typeof ServerIcon) => <I className="size-5 text-muted-foreground" strokeWidth={1.5} />
+  /* the tile the other rows of 我的 have (views.tsx `Ico`) */
+  const ico = (I: typeof ServerIcon) => <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"><I className="size-4" strokeWidth={1.5} /></span>
   const more = <ChevronRightIcon className="size-4 text-tertiary" />
   return (
     <section data-more-hub><SectionLabel>Hub</SectionLabel><Group>
