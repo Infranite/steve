@@ -291,6 +291,66 @@ fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
     assert!(!account.join(".config/systemd/user").exists());
 }
 
+/// On a terminal that can draw, the wizard asks with widgets: Ctrl-C at one says so, leaves the
+/// terminal as it was and nothing set up, and exits as an interrupted command does (130).
+#[test]
+fn actual_setup_cancelled_at_a_widget_exits_as_interrupted_and_restores_the_terminal() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let account = root.join("account");
+    let empty_path = root.join("empty-path");
+    let install = account.join(".steve");
+    for path in [account.clone(), empty_path.clone()] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let cli = installer(&root);
+
+    let mut pty = Pty::open().unwrap();
+    let before = pty.attributes();
+    let mut command = Command::new(&cli);
+    command
+        .args(["setup", "hub"])
+        .env_clear()
+        .env("STEVE_LANG", "zh-CN")
+        .env("TERM", "xterm-256color")
+        .env("HOME", &account)
+        .env("PATH", &empty_path)
+        .env("TMPDIR", &root)
+        .current_dir(&root)
+        .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
+        .process_group(0);
+    let mut process = Process(command.spawn().unwrap());
+    // the first question is a list; one step down redraws it, then Ctrl-C, which the widget reads
+    // as a key (no signal is sent while it has the terminal)
+    pty.wait_prompt(&mut process.0, "↑↓ 选择 · 回车确认");
+    assert_eq!(pty.attributes().c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG), 0);
+    pty.master.write_all(b"\x1b[B").unwrap();
+    pty.wait_prompt(&mut process.0, "↑↓ 选择 · 回车确认");
+    pty.master.write_all(&[3]).unwrap();
+    let status = pty.wait_exit(&mut process.0);
+    assert_eq!(status.code(), Some(130), "{}", String::from_utf8_lossy(&pty.output));
+    let after = pty.attributes();
+    // PENDIN is the kernel's own note that input waits to be read again after canonical mode came back
+    let flags = |attributes: &libc::termios| attributes.c_lflag & !libc::PENDIN;
+    assert_eq!(flags(&after), flags(&before), "terminal flags are unchanged");
+    assert_eq!(after.c_cc, before.c_cc, "terminal input controls are unchanged");
+    let output = String::from_utf8_lossy(&pty.output);
+    assert!(output.contains("谁可以连接这台 Hub？"), "{output}");
+    assert!(output.contains("已取消"), "{output}");
+    assert!(!output.contains("steve:"), "the widget already said it: {output}");
+    let (hidden, shown) = (output.rfind("\x1b[?25l").unwrap(), output.rfind("\x1b[?25h").unwrap());
+    assert!(hidden < shown, "the cursor is shown again: {output:?}");
+
+    let receipt: Value = serde_json::from_slice(&fs::read(install.join("setup.json")).unwrap()).unwrap();
+    assert_eq!(receipt["steps"], json!([]));
+    assert!(receipt["environment"].is_null());
+    for relative in ["secrets", "steve.env", "signing", "services", "current", "data", "bin"] {
+        assert!(!install.join(relative).exists(), "cancelled setup wrote {relative}");
+    }
+}
+
 fn terminal_output(command: &mut Command) -> (ExitStatus, String) {
     let mut pty = Pty::open().unwrap();
     let mut process = Process(

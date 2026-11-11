@@ -8,6 +8,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { AskSteve } from "@/config-ui"
+import { crumbs, emptyNote, lookUp, nameOf, narrowed, projectNodes } from "@/dir-browse"
 import { GitHubLine } from "@/github/index"
 import { LaneSection } from "@/lane"
 import { RecentStats } from "@/stats/drill"
@@ -101,12 +102,6 @@ export function ProjectView({ id }: { id: string }) {
   )
 }
 
-/** `~/a/b` or `/a/b` as the steps down to it */
-const crumbs = (p: string) => {
-  const abs = p.startsWith("/"), segs = p.split("/").filter(Boolean)
-  return [...(abs ? [{ name: "/", path: "/" }] : []), ...segs.map((name, i) => ({ name, path: (abs ? "/" : "") + segs.slice(0, i + 1).join("/") }))]
-}
-
 /** the directory chooser of a new project: the directories of where `path` is on the Node's machine; a click goes
  *  into one, and the directory you are in is the project's. A path still being typed narrows its parent's list */
 function DirBrowser({ path, node, onPick, onSeen }: { path: string; node: string; onPick: (p: string) => void; onSeen: (git: boolean | null) => void }) {
@@ -118,10 +113,9 @@ function DirBrowser({ path, node, onPick, onSeen }: { path: string; node: string
     let live = true
     const timer = setTimeout(async () => {
       try {
-        let b = await api.browse(path.trim(), node), tail = ""
-        if (!b.exists && b.parent != null) { tail = b.path.slice(b.path.lastIndexOf("/") + 1); b = await api.browse(b.parent, node) }
+        const seen = await lookUp((p) => api.browse(p, node), path)
         if (!live) return
-        setAt(b); setTyped(tail); setErr(""); onSeen(path.trim() && !tail && b.exists ? b.git : null)
+        setAt(seen.at); setTyped(seen.typed); setErr(""); onSeen(seen.git)
       } catch (e) { if (live) { setAt(null); setErr((e as Error).message) } }
     }, at && !clicked.current ? 150 : 0)
     clicked.current = false
@@ -129,8 +123,8 @@ function DirBrowser({ path, node, onPick, onSeen }: { path: string; node: string
   }, [path, node])
   if (err) return <FieldDescription className="type-footnote" data-dir-browser-error>{err}</FieldDescription>
   if (!at) return <div className="flex h-24 items-center justify-center rounded-lg border border-border"><Spinner className="size-4" /></div>
-  const cs = crumbs(at.path), abs = at.path.startsWith("/"), shown = at.dirs.filter((x) => x.name.toLowerCase().startsWith(typed.toLowerCase()))
-  const note = !at.exists ? t("pages:projects.browseMissing") : at.denied ? t("pages:projects.browseDenied") : !at.dirs.length ? t("pages:projects.browseEmpty") : !shown.length ? t("pages:projects.browseNoMatch", { text: typed }) : ""
+  const cs = crumbs(at.path), abs = at.path.startsWith("/"), shown = narrowed(at, typed), why = emptyNote(at, typed)
+  const note = why ? t(`pages:projects.${why}`, { text: typed }) : ""
   return (
     <div className="overflow-hidden rounded-lg border border-border" data-dir-browser>
       <div className="flex items-center gap-1 border-b border-border bg-muted/40 py-1 pr-2.5 pl-1">
@@ -158,12 +152,13 @@ export function NewProjectDialog() {
   const [path, setPath] = useState(""), [n, setN] = useState(""), [d, setD] = useState(""), [bot, setBot] = useState("none"), [git, setGit] = useState<boolean | null>(null), [wt, setWt] = useState(true)
   const [named, setNamed] = useState(false), [busy, setBusy] = useState(false), [nodes, setNodes] = useState<RNode[]>([])
   // the Nodes are the owner's to list: anyone else is offered the Hub's own
-  useEffect(() => { api.nodes().then((r) => setNodes([...new Map(r.nodes.map((x) => [x.node_id, x])).values()])).catch(() => {}) }, [])
+  useEffect(() => { api.nodes().then((r) => setNodes(r.nodes)).catch(() => {}) }, [])
   // the built-in Node's own name says it is the Hub's; without the list, the Hub's device stands for it
-  const here = nodes.find((x) => x.local)?.name ?? t("pages:projects.nodeBuiltin", { name: st.devices.find((x) => x.roles.includes("Hub"))?.name ?? "Hub" })
+  const { local, remote } = projectNodes(nodes)
+  const here = local?.name ?? t("pages:projects.nodeBuiltin", { name: st.devices.find((x) => x.roles.includes("Hub"))?.name ?? "Hub" })
   // a project's sessions run on the Hub's own Node only, so the others are shown and not offered
-  const nodeOptions = [{ v: "hub", l: here }, ...nodes.filter((x) => !x.local && x.state !== "revoked").map((x) => ({ v: x.node_id, l: t("pages:projects.nodeRemoteSoon", { name: x.name }), disabled: true }))]
-  const pick = (p: string) => { setPath(p); setGit(null); const base = p.slice(p.lastIndexOf("/") + 1); if (!named && base && base !== "~") setN(base.slice(0, 40)) }
+  const nodeOptions = [{ v: "hub", l: here }, ...remote.map((x) => ({ v: x.node_id, l: t("pages:projects.nodeRemoteSoon", { name: x.name }), disabled: true }))]
+  const pick = (p: string) => { setPath(p); setGit(null); const name = nameOf(p); if (!named && name) setN(name) }
   const draft = async () => {
     if (!path.trim()) return; setBusy(true)
     try { const r = await api.describeProject(path.trim()); if (!n) setN(r.name); setD(r.description); setGit(r.git) } catch (e) { toast((e as Error).message) } finally { setBusy(false) }
