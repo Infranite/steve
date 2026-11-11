@@ -275,6 +275,7 @@ pub fn present(home: &Path, store: Option<&dyn KeyStore>) -> bool {
 /// The vault's own key directory, when the vault keeps its keys in one (`STEVE_VAULT_KEYSTORE=dir`
 /// or `file`): the password goes there too, never into the login keychain, where another
 /// installation under this user keeps its own (`steve setup --vault-dir`).
+#[cfg(target_os = "macos")]
 fn vault_dir_store(home: &Path) -> Option<Option<Arc<dyn KeyStore>>> {
     let kind = std::env::var("STEVE_VAULT_KEYSTORE").ok()?;
     if !matches!(kind.trim(), "dir" | "file") {
