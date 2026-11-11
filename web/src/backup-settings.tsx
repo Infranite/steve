@@ -7,7 +7,7 @@ import { bytes } from "@/disk"
 import { lastKey, planKey, type BackupStatus } from "@/backup"
 
 /** Settings · 数据 · Hub 上的数据: where this Hub keeps its database and the copies of it, as the Hub says (an
- * installation's directory is its own), and when the last daily copy was made. The Hub answers the instance owner
+ * installation's directory is its own), and when the last daily copy was made, a row each (a row's second line is cut after two lines). The Hub answers the instance owner
  * only (paths of its machine); anyone else sees nothing here. */
 export function HubData() {
   const [s, setS] = useState<BackupStatus | null>(null)
@@ -21,9 +21,8 @@ export function HubData() {
   const last = s && lastKey(s)
   return <section data-hub-data><SectionLabel>{t("manage:data.hub")}</SectionLabel><Group>
     <Row title={t("manage:data.location")} sub={<span className="font-mono break-all" data-hub-database>{s?.database ?? err ?? "…"}</span>} />
-    {s && <Row title={t("manage:data.backup")} sub={<span data-hub-backup={s.daily ? "daily" : "off"}>
-      {t(`manage:data.${planKey(s)}`, { dir: s.dir, days: s.keep_days })}
-      {last && <><br /><span data-hub-backup-last>{t(`manage:data.${last}`, s.last ? { when: monthDayTime(s.last.at), size: bytes(s.last.bytes) } : {})}</span></>}
-    </span>} />}
+    {s && <Row title={t("manage:data.backup")} sub={<span data-hub-backup={s.daily ? "daily" : "off"}>{t(`manage:data.${planKey(s)}`, { days: s.keep_days })}</span>} />}
+    {s && <Row title={t("manage:data.backupDir")} sub={<span className="font-mono break-all" data-hub-backup-dir>{s.dir}</span>} />}
+    {s && last && <Row title={t("manage:data.backupLatest")} sub={<span data-hub-backup-last>{t(`manage:data.${last}`, s.last ? { when: monthDayTime(s.last.at), size: bytes(s.last.bytes) } : {})}</span>} />}
   </Group></section>
 }
