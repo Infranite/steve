@@ -199,40 +199,48 @@ fn common_git_dir(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-fn git_mutates_repo(args: &[&str]) -> bool {
+/// Whether `git args…` mutates `.git/worktrees` metadata (`git worktree` subcommands other than
+/// `list`: `add`, `remove`, `prune`, `move`, `repair`, `lock`, `unlock`). Kept in lockstep with
+/// `steve-core/src/git.rs` so only `.git/worktrees` operations take the common `.git` `flock`,
+/// while `fetch` / `push` / `rebase` / `commit` rely on Git's own locks without blocking worktrees.
+fn git_touches_worktrees(args: &[&str]) -> bool {
     let mut i = 0;
     while i < args.len() {
         let a = args[i];
         if matches!(
             a,
-            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+            "-c" | "-C"
+                | "--git-dir"
+                | "--work-tree"
+                | "--namespace"
+                | "--super-prefix"
+                | "--config-env"
         ) {
             i += 2;
             continue;
+        }
+        if a == "--" {
+            i += 1;
+            break;
         }
         if a.starts_with('-') {
             i += 1;
             continue;
         }
-        let rest = &args[i + 1..];
-        return match a {
-            "status" | "diff" | "log" | "show" | "ls-files" | "ls-tree" | "cat-file"
-            | "rev-parse" | "rev-list" | "merge-base" | "for-each-ref" | "cherry" | "patch-id"
-            | "check-ignore" | "name-rev" | "describe" | "shortlog" | "version" | "help"
-            | "init" => false,
-            "symbolic-ref" => rest.iter().filter(|x| !x.starts_with('-')).count() > 1,
-            "config" => !rest
-                .iter()
-                .any(|x| matches!(*x, "--get" | "--get-all" | "--get-regexp" | "--list" | "-l")),
-            _ => true,
-        };
+        break;
     }
-    false
+    if args.get(i).copied() != Some("worktree") {
+        return false;
+    }
+    matches!(
+        args[i + 1..].iter().copied().find(|a| !a.starts_with('-')),
+        Some(sub) if sub != "list"
+    )
 }
 
 impl Commands {
     pub(crate) fn git(&self, dir: &Path, args: &[&str]) -> Result<String, String> {
-        match self.run(dir, args, &[], 1 << 20, git_mutates_repo(args))? {
+        match self.run(dir, args, &[], 1 << 20, git_touches_worktrees(args))? {
             (_, true) => Err("git output limit".into()),
             (out, false) => Ok(String::from_utf8_lossy(&out).trim().to_string()),
         }
@@ -287,7 +295,15 @@ impl Commands {
     ) -> Result<Ran, Failed> {
         let mut all: Vec<(&str, &str)> = vec![("GIT_TERMINAL_PROMPT", "0"), ("GIT_EDITOR", "true")];
         all.extend_from_slice(env);
-        self.run_full(dir, args, &all, &[], 1 << 20, deadline, true)
+        self.run_full(
+            dir,
+            args,
+            &all,
+            &[],
+            1 << 20,
+            deadline,
+            git_touches_worktrees(args),
+        )
     }
 
     /// `git args` in `dir` under the pipe: stdout (the first `cap` bytes, the rest drained and
@@ -298,9 +314,9 @@ impl Commands {
         args: &[&str],
         env: &[(&str, &str)],
         cap: usize,
-        mutating: bool,
+        lock_worktrees: bool,
     ) -> Result<(Vec<u8>, bool), Failed> {
-        let r = self.run_full(dir, args, env, &[], cap, DEADLINE, mutating)?;
+        let r = self.run_full(dir, args, env, &[], cap, DEADLINE, lock_worktrees)?;
         match r.code {
             Some(0) => Ok((r.stdout, r.truncated)),
             Some(_) => Err(Failed::Git(r.stderr)),
@@ -316,7 +332,7 @@ impl Commands {
         input: &[u8],
         cap: usize,
         limit: std::time::Duration,
-        mutating: bool,
+        lock_worktrees: bool,
     ) -> Result<Ran, Failed> {
         use std::io::{Read, Write};
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
@@ -329,9 +345,10 @@ impl Commands {
         let started_at = std::time::Instant::now();
         let deadline = started_at + limit;
         // Advisory `flock` on the repository's common `.git` directory (`O_RDONLY | O_CLOEXEC`)
-        // serializes repository mutations with `steve-core` (`prune_worktrees`, `lane`, `tidy`)
-        // and sibling processes while still honoring `limit` and Node shutdown.
-        let _repo_lock = if mutating
+        // serializes `git worktree` changes (`.git/worktrees` directory creation/removal) with
+        // `steve-core` (`prune_worktrees`, `lane`, `tidy`) and sibling processes while honoring
+        // `limit` and Node shutdown; non-worktree commands (`fetch`, `rebase`, `push`) do not lock.
+        let _worktrees_lock = if lock_worktrees
             && let Some(common) = common_git_dir(dir)
             && let Ok(f_dir) = std::fs::File::open(common)
         {
@@ -715,5 +732,70 @@ pub(crate) fn display(path: &Path) -> String {
             }
         }
         _ => s,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_touches_worktrees;
+
+    #[test]
+    fn git_touches_worktrees_matches_only_non_list_worktree_subcommands() {
+        for locked in [
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "steve/st-1",
+                "/tmp/wt",
+                "main",
+            ][..],
+            &["worktree", "remove", "--force", "/tmp/wt"],
+            &["worktree", "prune"],
+            &["worktree", "move", "/tmp/wt", "/tmp/wt2"],
+            &["worktree", "repair"],
+            &["worktree", "lock", "/tmp/wt"],
+            &["worktree", "unlock", "/tmp/wt"],
+            &[
+                "-c",
+                "protocol.version=2",
+                "worktree",
+                "add",
+                "/tmp/wt",
+                "main",
+            ],
+            &[
+                "-C",
+                "/tmp/repo",
+                "-c",
+                "gc.auto=0",
+                "worktree",
+                "add",
+                "/tmp/wt",
+            ],
+        ] {
+            assert!(
+                git_touches_worktrees(locked),
+                "expected locked for {locked:?}"
+            );
+        }
+        for unlocked in [
+            &["worktree", "list"][..],
+            &["worktree", "list", "--porcelain"],
+            &["-C", "/tmp/repo", "worktree", "list"],
+            &["fetch", "origin"],
+            &["push", "origin", "HEAD"],
+            &["rebase", "main"],
+            &["commit", "-m", "worktree"],
+            &["clone", "https://example.com/r.git", "/tmp/r"],
+            &["-c"],
+            &[],
+        ] {
+            assert!(
+                !git_touches_worktrees(unlocked),
+                "expected unlocked for {unlocked:?}"
+            );
+        }
     }
 }

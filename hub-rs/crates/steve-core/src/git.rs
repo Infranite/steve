@@ -91,45 +91,51 @@ pub(crate) fn common_git_dir(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Whether `git args…` can mutate repository state or `.git/worktrees` metadata.
-/// Git's own `worktree add`, `worktree remove` and `worktree prune` have no internal lock over
-/// `.git/worktrees` (`prune` calls `rmdir(".git/worktrees")` when empty, racing with `add`).
-fn git_mutates_repo(args: &[&str]) -> bool {
+/// Whether `git args…` mutates `.git/worktrees` metadata (`git worktree` subcommands other than
+/// `list`: `add`, `remove`, `prune`, `move`, `repair`, `lock`, `unlock`).
+/// Git's `worktree prune` calls `rmdir(".git/worktrees")` when empty without an internal lock,
+/// racing with concurrent `worktree add` creating `.git/worktrees/<name>`; other commands rely on
+/// Git's own `index.lock` / ref locks so slow `fetch` / `push` / `rebase` runs never block here.
+fn git_touches_worktrees(args: &[&str]) -> bool {
     let mut i = 0;
     while i < args.len() {
         let a = args[i];
         if matches!(
             a,
-            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+            "-c" | "-C"
+                | "--git-dir"
+                | "--work-tree"
+                | "--namespace"
+                | "--super-prefix"
+                | "--config-env"
         ) {
             i += 2;
             continue;
+        }
+        if a == "--" {
+            i += 1;
+            break;
         }
         if a.starts_with('-') {
             i += 1;
             continue;
         }
-        let rest = &args[i + 1..];
-        return match a {
-            "status" | "diff" | "log" | "show" | "ls-files" | "ls-tree" | "cat-file"
-            | "rev-parse" | "rev-list" | "merge-base" | "for-each-ref" | "cherry" | "patch-id"
-            | "check-ignore" | "name-rev" | "describe" | "shortlog" | "version" | "help"
-            | "init" => false,
-            "symbolic-ref" => rest.iter().filter(|x| !x.starts_with('-')).count() > 1,
-            "config" => !rest
-                .iter()
-                .any(|x| matches!(*x, "--get" | "--get-all" | "--get-regexp" | "--list" | "-l")),
-            _ => true,
-        };
+        break;
     }
-    false
+    if args.get(i).copied() != Some("worktree") {
+        return false;
+    }
+    matches!(
+        args[i + 1..].iter().copied().find(|a| !a.starts_with('-')),
+        Some(sub) if sub != "list"
+    )
 }
 
-/// Runs `f` under an exclusive per-repository lock keyed by [`common_git_dir`]: an in-process
+/// Runs `f` under an exclusive `.git/worktrees` lock keyed by [`common_git_dir`]: an in-process
 /// mutex plus an advisory `flock(LOCK_EX)` on the `O_RDONLY | O_CLOEXEC` common `.git` directory
-/// descriptor so `steve-core`, `steve-node` and sibling processes serialize on the same repo
-/// without creating lockfiles inside `.git`.
-fn with_repo_lock<R>(dir: &Path, f: impl FnOnce() -> R) -> R {
+/// descriptor so `steve-core`, `steve-node` and sibling processes serialize `git worktree` changes
+/// on the same repo without creating lockfiles inside `.git`.
+fn with_worktrees_lock<R>(dir: &Path, f: impl FnOnce() -> R) -> R {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
     let Some(common) = common_git_dir(dir) else {
         return f();
@@ -180,8 +186,8 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
             &String::from_utf8_lossy(&out.stderr),
         )
     };
-    if git_mutates_repo(args) {
-        with_repo_lock(dir, run)
+    if git_touches_worktrees(args) {
+        with_worktrees_lock(dir, run)
     } else {
         run()
     }
@@ -671,6 +677,78 @@ pub(crate) mod tests {
         add_worktree(&r, &wt, "steve/st-1").unwrap();
         assert_eq!(g(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]), "steve/st-1");
         assert!(is_git(&r) && !is_git(t.path()));
+    }
+
+    #[test]
+    fn git_touches_worktrees_matches_only_non_list_worktree_subcommands() {
+        for locked in [
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "steve/st-1",
+                "/tmp/wt",
+                "main",
+            ][..],
+            &["worktree", "remove", "--force", "/tmp/wt"],
+            &["worktree", "prune"],
+            &["worktree", "move", "/tmp/wt", "/tmp/wt2"],
+            &["worktree", "repair"],
+            &["worktree", "lock", "/tmp/wt"],
+            &["worktree", "unlock", "/tmp/wt"],
+            &[
+                "-c",
+                "protocol.version=2",
+                "worktree",
+                "add",
+                "/tmp/wt",
+                "main",
+            ],
+            &[
+                "-C",
+                "/tmp/repo",
+                "-c",
+                "gc.auto=0",
+                "worktree",
+                "add",
+                "/tmp/wt",
+            ],
+            &["--git-dir=/tmp/repo/.git", "worktree", "prune"],
+        ] {
+            assert!(
+                git_touches_worktrees(locked),
+                "expected locked for {locked:?}"
+            );
+        }
+        for unlocked in [
+            &["worktree", "list"][..],
+            &["worktree", "list", "--porcelain"],
+            &[
+                "-C",
+                "/tmp/repo",
+                "-c",
+                "core.bare=false",
+                "worktree",
+                "list",
+            ],
+            &["worktree"],
+            &["worktree", "-h"],
+            &["fetch", "origin"],
+            &["push", "origin", "HEAD"],
+            &["rebase", "main"],
+            &["commit", "-m", "worktree add"],
+            &["clone", "https://example.com/r.git", "/tmp/r"],
+            &["branch", "-D", "steve/st-1"],
+            &["status", "--porcelain"],
+            &["-c"],
+            &[],
+        ] {
+            assert!(
+                !git_touches_worktrees(unlocked),
+                "expected unlocked for {unlocked:?}"
+            );
+        }
     }
 
     #[test]
