@@ -93,7 +93,7 @@ async fn initialize_list_and_call() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         v["result"],
-        json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"steve","version":"1.0.0"}})
+        json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"steve","version":"1.0.0"}})
     );
 
     let (_, v) = post(
