@@ -27,6 +27,7 @@ pub mod jobs;
 pub mod js;
 pub mod nodes;
 pub mod notify;
+pub mod plugins;
 pub mod price_sync;
 pub mod recovery;
 pub mod resume;

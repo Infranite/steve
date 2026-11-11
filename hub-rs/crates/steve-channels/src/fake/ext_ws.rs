@@ -135,6 +135,11 @@ pub const ME: &str = "u_123";
 
 impl FakeExtWs {
     pub async fn start() -> std::io::Result<Self> {
+        Self::start_at(SocketAddr::from(([127, 0, 0, 1], 0))).await
+    }
+
+    /// The fake on an address it is given (a service started where it was told to listen).
+    pub async fn start_at(at: SocketAddr) -> std::io::Result<Self> {
         let world = World {
             token: TOKEN.into(),
             realm: REALM.into(),
@@ -190,7 +195,7 @@ impl FakeExtWs {
             .route("/ws", get(upgrade))
             .route("/v1/media/{key}", get(media))
             .with_state(world.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let listener = tokio::net::TcpListener::bind(at).await?;
         let addr = listener.local_addr()?;
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;

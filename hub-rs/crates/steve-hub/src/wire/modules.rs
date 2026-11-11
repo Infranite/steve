@@ -596,7 +596,11 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
 
     // the extensions' step two: their routes (merged with the modules' below) and jobs
     let started = crate::extension::Started::new(&channels, bus, vars);
+    // plugins: the libraries, what is installed from them, one process per connected plugin
+    let plugins = crate::plugins::Plugins::new(steve_home, vars(crate::plugins::LIBRARY_VAR))
+        .map_err(|e| BackendError::msg(format!("plugins: {e}")))?;
     let routes = Router::new()
+        .merge(crate::plugins::api::routes(plugins.clone(), conns.clone()))
         .merge(steve_knowledge::routes(kb.clone()))
         .merge(steve_modules::contacts::routes(ports))
         .merge(steve_modules::accounts::routes())
@@ -683,6 +687,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         Box::pin(steve_flow::Poller::new(flow.clone()).run()),
         Box::pin(steve_flow::retention::run(flow.clone())),
         Box::pin(steve_channels::messages::retention(modules.clone())),
+        Box::pin(plugins.supervise(modules.clone(), bus.tap(&["connection"]))),
     ];
     // the extensions' (built in: Feishu app registrations resumed) and the connection runtime
     // (built in: the Feishu long connections and self pollers)
