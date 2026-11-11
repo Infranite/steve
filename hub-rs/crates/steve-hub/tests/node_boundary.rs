@@ -242,6 +242,7 @@ const ALLOWED: &[Entry] = &[
         "the steve_research import: the run's policy (its attempts, its answer); the runs are Node jobs"),
     /* project directories on the Hub host */
     e(Spawn, "steve-core/src/git.rs", 1, NoNode, "git for items no Node holds"),
+    e(Fs, "steve-core/src/git.rs", 3, NoNode, "locking the repository's common .git directory around git writes for items no Node holds"),
     e(Spawn, "steve-github/src/push.rs", 1, NoNode, "the Hub-side push when no Node holds the item"),
     e(Spawn, "steve-modules/src/vault/inject.rs", 1, NoNode, "a secret use with no Node"),
     e(Dir, "steve-hub/src/api/outputs.rs", 1, NoNode, "the outputs listing with no Node"),

@@ -302,6 +302,87 @@ fn incoming(
 
 /// Stream the adapter's updates while both the handshake and prompt are pending. The RPC reader
 /// delivers notifications in stdout order, including every update before the prompt response.
+fn incoming_during_open(
+    conn: &Conn,
+    inc: Incoming,
+    on_activity: Option<&(dyn Fn() + Send + Sync)>,
+) {
+    match inc {
+        Incoming::Request { id, method, .. } if method == "session/request_permission" => {
+            conn.respond(id, json!({"outcome":{"outcome":"cancelled"}}));
+        }
+        Incoming::Request { id, .. } => {
+            conn.respond_error(id, -32601, "client capability is unavailable");
+        }
+        Incoming::Notification { method, .. } if method == "session/update" => {
+            if let Some(activity) = on_activity {
+                activity();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Drains notifications emitted during `session/new` or `session/load` (including any queued
+/// right before `opening` resolves) so replayed history never leaks into `session/prompt`.
+async fn drive_open<T, E, F>(
+    conn: &Conn,
+    rx: &mut mpsc::UnboundedReceiver<Incoming>,
+    opening: F,
+    on_activity: Option<&(dyn Fn() + Send + Sync)>,
+) -> Result<T, OneShotError>
+where
+    E: std::fmt::Display,
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    tokio::pin!(opening);
+    let result = loop {
+        tokio::select! {
+            biased;
+            // session/load replays history before its response. That history is neither
+            // a new draft nor a tool the current attempt is executing.
+            Some(inc) = rx.recv() => incoming_during_open(conn, inc, on_activity),
+            result = &mut opening => break result,
+        }
+    };
+    while let Ok(inc) = rx.try_recv() {
+        incoming_during_open(conn, inc, on_activity);
+    }
+    result.map_err(failed)
+}
+
+/// Streams updates until `prompting` resolves, then drains any updates already queued on `rx`
+/// and seals `norm` before inspecting `Ok` vs `Err`—so usage/cost updates emitted right before
+/// a JSON-RPC error response are never dropped when `prompting` wins a `select!` poll.
+async fn drive_prompt<F>(
+    conn: &Conn,
+    rx: &mut mpsc::UnboundedReceiver<Incoming>,
+    prompting: F,
+    norm: &mut Normalizer,
+    out: &mut Output,
+    req: &Request<'_>,
+    on_event: &(dyn Fn(EventBody) + Send + Sync),
+) -> Result<Value, OneShotError>
+where
+    F: std::future::Future<Output = Result<Value, RpcError>>,
+{
+    tokio::pin!(prompting);
+    let result = loop {
+        tokio::select! {
+            biased;
+            Some(inc) = rx.recv() => incoming(conn, inc, norm, out, req, on_event)?,
+            result = &mut prompting => break result,
+        }
+    };
+    while let Ok(inc) = rx.try_recv() {
+        incoming(conn, inc, norm, out, req, on_event)?;
+    }
+    out.events(norm.finish(), on_event);
+    let end = result.map_err(OneShotError::harness)?;
+    out.events(norm.prompt_response(&end), on_event);
+    Ok(end)
+}
+
 pub async fn run(
     req: Request<'_>,
     on_spawn: &(dyn Fn(u32) -> bool + Send + Sync),
@@ -384,25 +465,7 @@ pub async fn run(
             req.cfg.session_meta_for(req.harness, req.tools_off),
             &reports,
         );
-        tokio::pin!(opening);
-        let opened = loop {
-            tokio::select! {
-                biased;
-                // session/load replays history before its response. That history is neither
-                // a new draft nor a tool the current attempt is executing.
-                Some(inc) = rx.recv() => match inc {
-                    Incoming::Request { id, method, .. } if method == "session/request_permission" =>
-                        conn.respond(id, json!({"outcome":{"outcome":"cancelled"}})),
-                    Incoming::Request { id, .. } =>
-                        conn.respond_error(id, -32601, "client capability is unavailable"),
-                    Incoming::Notification { method, .. } if method == "session/update" => {
-                        if let Some(activity) = req.on_activity { activity(); }
-                    }
-                    _ => {}
-                },
-                result = &mut opening => break result.map_err(failed)?,
-            }
-        };
+        let opened = drive_open(&conn, &mut rx, opening, req.on_activity).await?;
         if !opened.image && req.prompt.iter().any(|p| p["type"] == "image") {
             return Err(OneShotError::Unsupported("images"));
         }
@@ -416,19 +479,10 @@ pub async fn run(
             json!({"sessionId": opened.acp_id, "prompt": prompt}),
             None,
         );
-        tokio::pin!(prompting);
-        let end = loop {
-            tokio::select! {
-                biased;
-                Some(inc) = rx.recv() => incoming(&conn, inc, &mut norm, &mut out, &req, on_event)?,
-                result = &mut prompting => break result.map_err(OneShotError::harness)?,
-            }
-        };
-        while let Ok(inc) = rx.try_recv() {
-            incoming(&conn, inc, &mut norm, &mut out, &req, on_event)?;
-        }
-        out.events(norm.finish(), on_event);
-        out.events(norm.prompt_response(&end), on_event);
+        let end = drive_prompt(
+            &conn, &mut rx, prompting, &mut norm, &mut out, &req, on_event,
+        )
+        .await?;
         let reported = out
             .usage
             .iter()
@@ -895,6 +949,154 @@ for line in sys.stdin:
             json!([{"mode": "override", "content": [{"type": "text", "text": "rules"}]}, "answer"])
         );
         assert_eq!(said(false).await[0]["mode"], "append");
+    }
+
+    #[tokio::test]
+    async fn usage_preceding_a_prompt_error_is_kept_even_when_response_wins_the_poll() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = adapter(temp.path(), "", true);
+        let req = request(&cfg, temp.path(), &|_| false);
+        let conn = Conn::spawn_registered(
+            Spawn {
+                program: "/bin/cat".into(),
+                args: vec![],
+                cwd: temp.path().into(),
+                env: vec![],
+                log_tag: "[test]".into(),
+                clean_env: false,
+            },
+            1 << 20,
+            |_| true,
+            |_| Ok(()),
+            |_, _| None,
+            || {},
+        )
+        .unwrap();
+        let _owned = Owned(conn.clone());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let meter = Epoch::new("attempt_test.acp").unwrap();
+        let mut norm = Normalizer::new(temp.path(), "attempt_test", meter);
+        let mut out = Output::default();
+        let seen = Mutex::new(vec![]);
+        let on_event = |ev: EventBody| {
+            if let EventBody::Usage { report } = ev {
+                seen.lock().unwrap().push(report);
+            }
+        };
+        let mut sent = false;
+        let prompting = std::future::poll_fn(|_| {
+            if !sent {
+                sent = true;
+                // Reproduces the exact reader-task interleaving on 2-vCPU Linux CI:
+                // `biased` already polled `rx.recv()` (`Pending`), and before `prompting`
+                // finishes polling `oneshot_rx`, stdout delivers `usage_update` ($0.01)
+                // followed immediately by the JSON-RPC `error` (`503 overloaded`).
+                let _ = tx.send(Incoming::Notification {
+                    method: "session/update".into(),
+                    params: json!({
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "usage_update",
+                            "used": 4,
+                            "size": 100,
+                            "cost": { "amount": 0.01, "currency": "USD" }
+                        }
+                    }),
+                });
+            }
+            std::task::Poll::Ready(Err(RpcError {
+                message: "API Error: 503 overloaded".into(),
+                data: None,
+            }))
+        });
+        let err = drive_prompt(
+            &conn, &mut rx, prompting, &mut norm, &mut out, &req, &on_event,
+        )
+        .await
+        .expect_err("prompt failed with 503");
+        assert!(err.transient(), "{err:?}");
+        let usage = seen.lock().unwrap();
+        assert_eq!(
+            usage.len(),
+            1,
+            "failed try's usage_update must be drained before returning the harness error"
+        );
+    }
+
+    #[tokio::test]
+    async fn replayed_history_at_the_tail_of_open_never_leaks_into_the_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = Conn::spawn_registered(
+            Spawn {
+                program: "/bin/cat".into(),
+                args: vec![],
+                cwd: temp.path().into(),
+                env: vec![],
+                log_tag: "[test]".into(),
+                clean_env: false,
+            },
+            1 << 20,
+            |_| true,
+            |_| Ok(()),
+            |_, _| None,
+            || {},
+        )
+        .unwrap();
+        let _owned = Owned(conn.clone());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let activity = AtomicU64::new(0);
+        let on_activity = || {
+            activity.fetch_add(1, Ordering::Relaxed);
+        };
+        let mut sent = false;
+        let opening = std::future::poll_fn(|_| {
+            if !sent {
+                sent = true;
+                let _ = tx.send(Incoming::Notification {
+                    method: "session/update".into(),
+                    params: json!({
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": { "type": "text", "text": "old-history-marker" }
+                        }
+                    }),
+                });
+            }
+            std::task::Poll::Ready(Ok::<_, &'static str>("s1"))
+        });
+        let sid = drive_open(&conn, &mut rx, opening, Some(&on_activity))
+            .await
+            .unwrap();
+        assert_eq!(sid, "s1");
+        assert_eq!(activity.load(Ordering::Relaxed), 1);
+        assert!(
+            rx.try_recv().is_err(),
+            "open must drain queued replay updates"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_answer_after_a_usage_update_still_delivers_that_usage() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = adapter(
+            temp.path(),
+            r#"        update({'sessionUpdate':'usage_update','used':4,'size':100,'cost':{'amount':0.01,'currency':'USD'}})
+        send({'jsonrpc':'2.0','id':msg['id'],'error':{'code':-32603,'message':'API Error: 503 overloaded'}})
+        continue"#,
+            true,
+        );
+        let usage = Mutex::new(vec![]);
+        let err = run(request(&cfg, temp.path(), &|_| false), &|_| true, &|ev| {
+            if let EventBody::Usage { report } = ev {
+                usage.lock().unwrap().push(report);
+            }
+        })
+        .await
+        .err()
+        .expect("503 error");
+        assert!(err.transient(), "{err:?}");
+        assert_eq!(usage.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -156,9 +156,83 @@ pub(crate) struct Commands {
     pub inner: std::sync::Arc<crate::Inner>,
     pub op: OperationId,
 }
+fn common_git_dir(dir: &Path) -> Option<PathBuf> {
+    let resolve_common = |gitdir: &Path| -> PathBuf {
+        let common = match std::fs::read_to_string(gitdir.join("commondir")) {
+            Ok(rel) => {
+                let rel = Path::new(rel.trim());
+                if rel.is_absolute() {
+                    rel.to_path_buf()
+                } else {
+                    gitdir.join(rel)
+                }
+            }
+            Err(_) => gitdir.to_path_buf(),
+        };
+        std::fs::canonicalize(&common).unwrap_or(common)
+    };
+    for cur in dir.ancestors() {
+        let dot = cur.join(".git");
+        if let Ok(meta) = std::fs::metadata(&dot) {
+            if meta.is_dir() {
+                return Some(resolve_common(&dot));
+            }
+            if meta.is_file() {
+                let text = std::fs::read_to_string(&dot).ok()?;
+                let raw = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+                let gitdir = if Path::new(raw).is_absolute() {
+                    PathBuf::from(raw)
+                } else {
+                    cur.join(raw)
+                };
+                return Some(resolve_common(&gitdir));
+            }
+        }
+        if cur.join("HEAD").is_file()
+            && (cur.join("commondir").is_file()
+                || cur.join("objects").is_dir()
+                || cur.join("refs").is_dir())
+        {
+            return Some(resolve_common(cur));
+        }
+    }
+    None
+}
+
+fn git_mutates_repo(args: &[&str]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        if matches!(
+            a,
+            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+        ) {
+            i += 2;
+            continue;
+        }
+        if a.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        let rest = &args[i + 1..];
+        return match a {
+            "status" | "diff" | "log" | "show" | "ls-files" | "ls-tree" | "cat-file"
+            | "rev-parse" | "rev-list" | "merge-base" | "for-each-ref" | "cherry" | "patch-id"
+            | "check-ignore" | "name-rev" | "describe" | "shortlog" | "version" | "help"
+            | "init" => false,
+            "symbolic-ref" => rest.iter().filter(|x| !x.starts_with('-')).count() > 1,
+            "config" => !rest
+                .iter()
+                .any(|x| matches!(*x, "--get" | "--get-all" | "--get-regexp" | "--list" | "-l")),
+            _ => true,
+        };
+    }
+    false
+}
+
 impl Commands {
     pub(crate) fn git(&self, dir: &Path, args: &[&str]) -> Result<String, String> {
-        match self.run(dir, args, &[], 1 << 20)? {
+        match self.run(dir, args, &[], 1 << 20, git_mutates_repo(args))? {
             (_, true) => Err("git output limit".into()),
             (out, false) => Ok(String::from_utf8_lossy(&out).trim().to_string()),
         }
@@ -177,7 +251,7 @@ impl Commands {
             ("GIT_NO_LAZY_FETCH", "1"),
             ("GIT_TERMINAL_PROMPT", "0"),
         ];
-        self.run(dir, args, &READ_ENV, cap)
+        self.run(dir, args, &READ_ENV, cap, false)
     }
 
     /// A git that only reads, as [`Commands::read`], with more environment (`GIT_INDEX_FILE` for a
@@ -199,7 +273,7 @@ impl Commands {
             ("GIT_TERMINAL_PROMPT", "0"),
         ];
         all.extend_from_slice(env);
-        self.run_full(dir, args, &all, input, cap, deadline)
+        self.run_full(dir, args, &all, input, cap, deadline, false)
     }
 
     /// A git that changes the repository (a rebase, its abort, a fetch), under the pipe with the
@@ -213,7 +287,7 @@ impl Commands {
     ) -> Result<Ran, Failed> {
         let mut all: Vec<(&str, &str)> = vec![("GIT_TERMINAL_PROMPT", "0"), ("GIT_EDITOR", "true")];
         all.extend_from_slice(env);
-        self.run_full(dir, args, &all, &[], 1 << 20, deadline)
+        self.run_full(dir, args, &all, &[], 1 << 20, deadline, true)
     }
 
     /// `git args` in `dir` under the pipe: stdout (the first `cap` bytes, the rest drained and
@@ -224,8 +298,9 @@ impl Commands {
         args: &[&str],
         env: &[(&str, &str)],
         cap: usize,
+        mutating: bool,
     ) -> Result<(Vec<u8>, bool), Failed> {
-        let r = self.run_full(dir, args, env, &[], cap, DEADLINE)?;
+        let r = self.run_full(dir, args, env, &[], cap, DEADLINE, mutating)?;
         match r.code {
             Some(0) => Ok((r.stdout, r.truncated)),
             Some(_) => Err(Failed::Git(r.stderr)),
@@ -241,6 +316,7 @@ impl Commands {
         input: &[u8],
         cap: usize,
         limit: std::time::Duration,
+        mutating: bool,
     ) -> Result<Ran, Failed> {
         use std::io::{Read, Write};
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
@@ -250,6 +326,42 @@ impl Commands {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(Failed::Pipe("node shutting down".into()));
         }
+        let started_at = std::time::Instant::now();
+        let deadline = started_at + limit;
+        // Advisory `flock` on the repository's common `.git` directory (`O_RDONLY | O_CLOEXEC`)
+        // serializes repository mutations with `steve-core` (`prune_worktrees`, `lane`, `tidy`)
+        // and sibling processes while still honoring `limit` and Node shutdown.
+        let _repo_lock = if mutating
+            && let Some(common) = common_git_dir(dir)
+            && let Ok(f_dir) = std::fs::File::open(common)
+        {
+            loop {
+                if unsafe { libc::flock(f_dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    break Some(f_dir);
+                }
+                let err = std::io::Error::last_os_error();
+                if !matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) {
+                    break None;
+                }
+                if self.inner.closed.load(Ordering::SeqCst) {
+                    return Err(Failed::Pipe("node shutting down".into()));
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Ok(Ran {
+                        code: None,
+                        stdout: Vec::new(),
+                        truncated: false,
+                        stderr: String::new(),
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        } else {
+            None
+        };
         let mut child = Command::new("/bin/sh")
             .args([
                 "-c",
@@ -310,7 +422,6 @@ impl Commands {
                 ));
             }
         }
-        let deadline = std::time::Instant::now() + limit;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut truncated = false;
