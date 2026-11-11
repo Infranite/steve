@@ -149,4 +149,19 @@ mod tests {
         assert!(rules < brief && brief < ui);
         assert!(!render(&PromptInput::default()).contains("{{brief}}"));
     }
+
+    /// The answer is the run's last message (`steve-node` research_acp: what was said before and between
+    /// tool calls is not kept), so every run is told that, whatever it may do and whatever harness runs it.
+    #[test]
+    fn says_that_only_the_last_message_is_the_answer() {
+        for full in [false, true] {
+            let s = render(&PromptInput {
+                full,
+                brief: "【初次见面】先互相认识。".into(),
+                ..Default::default()
+            });
+            let rule = s.find("用户只看得到你这一轮最后发出的那条消息").unwrap();
+            assert!(s.find("怎么答：").unwrap() < rule && rule < s.find("【初次见面】").unwrap());
+        }
+    }
 }
