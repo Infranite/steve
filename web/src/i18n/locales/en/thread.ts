@@ -45,7 +45,7 @@ export default {
         profile: "Save profile",
         models: "Model settings",
         bots: "Default Bots",
-        done: "End the first meeting",
+        done: "End introductions",
       },
     },
     live: {

@@ -36,10 +36,10 @@ export default {
       fetch: "获取",
       /* the first meeting's own tools */
       meet: {
-        profile: "保存画像",
+        profile: "保存你的资料",
         models: "模型设置",
         bots: "默认 Bot",
-        done: "结束初次见面",
+        done: "结束互相认识",
       },
     },
     /* the live line: what is being done right now */

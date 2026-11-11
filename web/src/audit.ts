@@ -8,6 +8,13 @@ type Names = Record<string, string>
 /** `settings.models.migrate` → `settings_models_migrate`: an action's key among the labels */
 export const actionKey = (action: string) => action.replaceAll(".", "_")
 
+/** the keys an entry's action may have words under, the most telling first: an action on something of a `type`
+ *  (`party.create` of an `org`) for that type, then for itself */
+export function actionKeys(e: AuditEntry): string[] {
+  const key = actionKey(e.action), type = e.detail?.type
+  return typeof type === "string" && /^[a-z_]+$/.test(type) ? [`${key}_${type}`, key] : [key]
+}
+
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v)
 const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 

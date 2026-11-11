@@ -9,6 +9,13 @@ test("an action's label key has no dots, so one action can be the start of anoth
   assert.equal(m.actionKey("settings.models.migrate"), "settings_models_migrate")
 })
 
+test("an action on something of a type may be worded for that type, and goes by its own words otherwise", () => {
+  assert.deepEqual(m.actionKeys(entry("party.create", { type: "org", self: true })), ["party_create_org", "party_create"])
+  assert.deepEqual(m.actionKeys(entry("party.create", { type: 3 })), ["party_create"])
+  assert.deepEqual(m.actionKeys(entry("party.create", { type: "a.b" })), ["party_create"])
+  assert.deepEqual(m.actionKeys(entry("bot.create", null)), ["bot_create"])
+})
+
 test("a detail's ids go by their names, a model choice by its harness and models, a missing value by a dash", () => {
   const names = { ct_0123456789abcdef: "小李" }
   assert.equal(m.shown("ct_0123456789abcdef", names), "小李")

@@ -7,10 +7,11 @@ import { HubError, modReq } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { st, tm } from "@/store"
+import { cn } from "cn"
 import { Group, Row } from "@/ui"
 import { t as tr, useT } from "@/i18n"
 import { monthDayTime } from "@/i18n/format"
-import { actionKey, changed, detailLines, purposeOf, type AuditEntry, type AuditPage } from "@/audit"
+import { actionKeys, changed, detailLines, purposeOf, type AuditEntry, type AuditPage } from "@/audit"
 
 export const AUDIT_CAT = Object.defineProperties(["audit", "", HistoryIcon, ""] as [string, string, any, string], {
   1: { get: () => tr("manage:audit.title"), enumerable: true },
@@ -20,9 +21,10 @@ export const AUDIT_CAT = Object.defineProperties(["audit", "", HistoryIcon, ""] 
 const PAGE = 50
 type Words = { names: Record<string, string>; purposes: Record<string, string> }
 
-/** "新建 Bot「代码评审」": the action in words, with what it was done to when that has a name */
+/** "新建 Bot「代码评审」": the action in words, with what it was done to when that has a name. An action on
+ *  something of a `type` (a party that is a contact or an org) is worded for that type where there are words for it */
 function title(e: AuditEntry, w: Words): string {
-  const action = tr(`manage:audit.action.${actionKey(e.action)}`, { defaultValue: e.action })
+  const action = tr(actionKeys(e).map((k) => `manage:audit.action.${k}`), { defaultValue: e.action })
   const target = e.target === st.workspace?.id ? "" : w.names[e.target] ?? ""
   return target ? tr("manage:audit.withTarget", { action, target }) : action
 }
@@ -35,6 +37,7 @@ function summary(e: AuditEntry, w: Words): string {
   const parts: string[] = []
   if (fields.length) parts.push(fields.join(sep))
   if (typeof d.memories === "number" && d.memories > 0) parts.push(tr("manage:audit.memories", { count: d.memories }))
+  if (typeof d.person === "string") parts.push(tr("manage:audit.person", { name: w.names[d.person] ?? d.person }))
   if (e.action.startsWith("onboard.")) {
     parts.push(...list(d.purposes).map(purpose), ...list(d.created))
     if (typeof d.how === "string") parts.push(tr(`manage:audit.how.${d.how}`, { defaultValue: d.how }))
@@ -80,7 +83,10 @@ export function AuditSettingsPane() {
             <dt className="text-muted-foreground">{t("manage:audit.when")}</dt><dd className="tabular-nums">{monthDayTime(e.ts)}</dd>
             <dt className="text-muted-foreground">{t("manage:audit.who")}</dt><dd className="break-all">{who}{who !== e.actor && <span className="ml-2 font-mono text-tertiary">{e.actor}</span>}</dd>
             <dt className="text-muted-foreground">{t("manage:audit.what")}</dt><dd className="break-all font-mono">{e.action}{e.target && <span className="ml-2 text-tertiary">{e.target}</span>}</dd>
-            {detailLines(e, page.names).map(([k, v]) => <div key={k} className="contents"><dt className="font-mono text-muted-foreground">{k}</dt><dd className="break-words whitespace-pre-wrap">{v}</dd></div>)}
+            {detailLines(e, page.names).map(([k, v]) => {
+              const purpose = purposes[purposeOf(k)]
+              return <div key={k} className="contents"><dt className={cn("text-muted-foreground", !purpose && "font-mono")}>{purpose ?? k}</dt><dd className="break-words whitespace-pre-wrap">{v}</dd></div>
+            })}
           </dl>}
         </div>
       })}
