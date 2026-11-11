@@ -483,6 +483,15 @@ impl Kit {
         });
         let core = Core::new(store, rt.clone(), gw.clone(), cfg);
         core.seed().unwrap();
+        /* the second Bot the tests give work to: an installation has it only beside Steve's own source */
+        core.store()
+            .bot_seed(
+                "dev",
+                false,
+                crate::orchestrator::dev_bot(None),
+                crate::repo::WS,
+            )
+            .unwrap();
         Kit {
             dir,
             core,
