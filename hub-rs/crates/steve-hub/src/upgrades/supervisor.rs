@@ -172,9 +172,11 @@ async fn stop(child: &mut HubChild) -> Result<()> {
     Ok(())
 }
 
-fn backup(db: &Path, dest: &Path) -> Result<()> {
+/// An online copy of `db` at `dest`, for its owner only, kept by the caller only when this returns
+/// `Ok`: the copy passed `quick_check` and is on disk.
+pub(crate) fn backup(db: &Path, dest: &Path) -> Result<()> {
     if !db.exists() {
-        bail!("database missing; cannot make verified upgrade backup")
+        bail!("database missing; cannot make a verified backup")
     }
     let src = rusqlite::Connection::open(db)?;
     let mut dst = rusqlite::Connection::open(dest)?;

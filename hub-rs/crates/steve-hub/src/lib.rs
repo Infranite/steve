@@ -14,6 +14,7 @@ pub mod bus;
 pub mod catalog;
 pub mod check;
 pub mod config;
+pub mod daily_backup;
 pub mod error;
 pub mod extension;
 pub mod files;

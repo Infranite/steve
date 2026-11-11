@@ -146,6 +146,8 @@ pub struct Config {
     pub dev_login: bool,
     /// Don't resume interrupted turns or send held prompts at boot (set when running on a copy of a real database).
     pub no_resume: bool,
+    /// The daily copy under `<home>/backups` (`STEVE_BACKUP=off` turns it off): see `daily_backup`.
+    pub backup: bool,
     /// `STEVE_TAKEOVER_CONTINUES`: how often Steve continues a stopped agent before the user hears of it
     /// (`None`: the core's default).
     pub takeover_continues: Option<u32>,
@@ -512,6 +514,7 @@ impl Config {
             },
             dev_login: get("STEVE_DEV_LOGIN").as_deref() == Some("1"),
             no_resume: get("STEVE_NO_RESUME").as_deref() == Some("1"),
+            backup: crate::daily_backup::enabled(get("STEVE_BACKUP").as_deref()),
             takeover_continues: get("STEVE_TAKEOVER_CONTINUES").and_then(|v| v.parse().ok()),
             disk: steve_core::workspace::DiskPolicy::from_vars(&get),
             gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),

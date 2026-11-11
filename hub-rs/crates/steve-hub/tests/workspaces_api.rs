@@ -154,3 +154,26 @@ async fn workspaces_report_and_reclaim() {
         "a folder no item points at is never deleted"
     );
 }
+
+/// The data page asks where the database and its copies are: the Hub's own paths, the daily copy on
+/// unless turned off, and no copy yet on a Hub that has just started.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_reads_where_the_database_and_its_copies_are() {
+    let e = start().await;
+    let (s, v) = e.call("GET", "/api/system/backup", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (database, dir) = (v["database"].as_str().unwrap(), v["dir"].as_str().unwrap());
+    assert!(database.ends_with("/data/steve.sqlite3"), "{v}");
+    assert!(std::path::Path::new(database).exists(), "{v}");
+    assert_eq!(
+        std::path::Path::new(dir),
+        std::path::Path::new(database)
+            .parent()
+            .and_then(|d| d.parent())
+            .unwrap()
+            .join("backups")
+    );
+    assert_eq!(v["daily"], true, "{v}");
+    assert_eq!(v["keep_days"], 14, "{v}");
+    assert_eq!(v["last"], Value::Null, "{v}");
+}
