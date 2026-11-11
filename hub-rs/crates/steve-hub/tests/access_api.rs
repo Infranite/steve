@@ -490,10 +490,15 @@ async fn qr_pairing_mints_a_single_use_client_credential_and_reports_claim() {
     let pair_id = pair["id"].as_str().expect("id").to_string();
     let code = pair["code"].as_str().expect("code").to_string();
     assert!(code.starts_with("stp_"));
-    assert!(pair["uri"].as_str().unwrap().starts_with("steve://pair?"));
+    assert_eq!(code.len(), 4 + 32, "short enough for a small QR code");
     assert_eq!(
         pair["loopback_only"], true,
         "test Hub listens on 127.0.0.1 only"
+    );
+    assert_eq!(
+        pair["links"],
+        json!([]),
+        "no address another device could reach, so no link to show"
     );
 
     // Status starts as pending

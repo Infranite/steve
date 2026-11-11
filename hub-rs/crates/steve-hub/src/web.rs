@@ -190,6 +190,9 @@ pub async fn serve(cfg: &Config, req: Request) -> Response {
         if !matches!(*req.method(), Method::GET | Method::HEAD) {
             return ApiError::no_route().into_response();
         }
+        if let Some(to) = page_redirect(port, &req) {
+            return (StatusCode::FOUND, [(header::LOCATION, to)]).into_response();
+        }
         return (
             StatusCode::NOT_FOUND,
             axum::Json(serde_json::json!({
@@ -202,6 +205,39 @@ pub async fn serve(cfg: &Config, req: Request) -> Response {
     pages(cfg, req).await
 }
 
+/// Where a browser that asked the Hub's own port for a page is sent: the same host and path on the
+/// web client's port. Someone who types the Hub's address, or follows a link to it from another
+/// Hub's page, lands on its pages; the fragment of the address goes along by the browser's doing.
+/// Only for a page navigation that reached the Hub directly: a script's call gets the JSON answer,
+/// and behind a proxy the address the browser used is not this one.
+fn page_redirect(web_port: u16, req: &Request) -> Option<String> {
+    let h = req.headers();
+    let wants_page = h
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
+    if !wants_page || h.contains_key("x-forwarded-proto") || h.contains_key("x-forwarded-host") {
+        return None;
+    }
+    let host = host_of(h)?;
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
+    Some(format!("http://{host}:{web_port}{path}"))
+}
+
+/// The host a request was addressed to, without its port, as it goes into a URL (an IPv6 address
+/// keeps its brackets).
+fn host_of(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| reqwest::Url::parse(&format!("http://{h}")).ok())
+        .and_then(|u| u.host_str().map(str::to_string))
+}
+
 /// The web client on its own port (A3): its pages, and `/hub.json`, the address of the Hub that
 /// serves them as seen from the page (a suggestion the page shows when it asks which Hub to use).
 pub fn web_only(cfg: std::sync::Arc<Config>) -> axum::Router {
@@ -212,17 +248,7 @@ pub fn web_only(cfg: std::sync::Arc<Config>) -> axum::Router {
             axum::routing::get(move |headers: axum::http::HeaderMap| {
                 let port = c.listen.port;
                 async move {
-                    let host = headers
-                        .get(header::HOST)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|h| reqwest::Url::parse(&format!("http://{h}")).ok())
-                        .and_then(|u| u.host_str().map(str::to_string))
-                        .unwrap_or_else(|| "127.0.0.1".into());
-                    let host = if host.contains(':') {
-                        format!("[{host}]")
-                    } else {
-                        host
-                    };
+                    let host = host_of(&headers).unwrap_or_else(|| "127.0.0.1".into());
                     axum::Json(serde_json::json!({ "hub": format!("http://{host}:{port}") }))
                 }
             }),
@@ -235,17 +261,7 @@ pub fn web_only(cfg: std::sync::Arc<Config>) -> axum::Router {
                 move |headers: axum::http::HeaderMap, uri: axum::http::Uri| {
                     let port = cfg.listen.port;
                     async move {
-                        let host = headers
-                            .get(header::HOST)
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|h| reqwest::Url::parse(&format!("http://{h}")).ok())
-                            .and_then(|u| u.host_str().map(str::to_string))
-                            .unwrap_or_else(|| "127.0.0.1".into());
-                        let host = if host.contains(':') {
-                            format!("[{host}]")
-                        } else {
-                            host
-                        };
+                        let host = host_of(&headers).unwrap_or_else(|| "127.0.0.1".into());
                         let to = format!(
                             "http://{host}:{port}{}",
                             uri.path_and_query().map(|p| p.as_str()).unwrap_or("/")
@@ -329,6 +345,63 @@ mod tests {
         assert_eq!(resolve(d.path(), "/"), Some(d.path().join("index.html")));
         assert_eq!(resolve(d.path(), "/../etc/passwd"), None);
         assert_eq!(resolve(d.path(), "/nope.js"), None);
+    }
+
+    #[test]
+    fn a_page_asked_of_the_api_port_goes_to_the_web_port() {
+        let req = |hs: &[(&str, &str)], uri: &str| {
+            let mut b = axum::http::Request::builder().uri(uri);
+            for (k, v) in hs {
+                b = b.header(*k, *v);
+            }
+            b.body(axum::body::Body::empty()).unwrap()
+        };
+        let page = "text/html,application/xhtml+xml,*/*;q=0.8";
+        assert_eq!(
+            host_of(req(&[("host", "[fd00::2]:8441")], "/hub.json").headers()).as_deref(),
+            Some("[fd00::2]"),
+            "bracketed once: /hub.json and the sign-in redirect build their address from it"
+        );
+        assert_eq!(
+            page_redirect(
+                8441,
+                &req(&[("host", "192.168.1.20:8440"), ("accept", page)], "/")
+            )
+            .as_deref(),
+            Some("http://192.168.1.20:8441/")
+        );
+        assert_eq!(
+            page_redirect(
+                8441,
+                &req(&[("host", "[fd00::2]:8440"), ("accept", page)], "/x?y=1")
+            )
+            .as_deref(),
+            Some("http://[fd00::2]:8441/x?y=1"),
+            "an IPv6 host keeps its brackets, the path and query go along"
+        );
+        assert_eq!(
+            page_redirect(
+                8441,
+                &req(&[("host", "192.168.1.20:8440"), ("accept", "*/*")], "/")
+            ),
+            None,
+            "a script's call is told, not moved"
+        );
+        assert_eq!(
+            page_redirect(
+                8441,
+                &req(
+                    &[
+                        ("host", "steve.example"),
+                        ("accept", page),
+                        ("x-forwarded-proto", "https")
+                    ],
+                    "/"
+                )
+            ),
+            None,
+            "behind a proxy the browser's address is not this one"
+        );
     }
 
     #[test]
