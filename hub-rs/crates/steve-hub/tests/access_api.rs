@@ -216,6 +216,32 @@ async fn a_page_signs_in_with_a_token_into_a_cookie_and_out_again() {
     let (s, v) = me(cookie.clone()).await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["client"]["name"], "Safari");
+    // signing in again in the same browser replaces the cookie: the client the old one named is
+    // signed out, not left in the list with a credential nobody holds
+    let r = e
+        .http
+        .post(format!("{}/auth/token", e.base))
+        .header("cookie", &cookie)
+        .json(&json!({"user": owner.name, "token": token, "cookie": true, "client": {"kind": "web", "name": "Safari again"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let old = cookie;
+    let cookie = r
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("steve_client="))
+        .and_then(|c| c.split(';').next())
+        .expect("client cookie")
+        .to_string();
+    let (s, _) = me(old).await;
+    assert_eq!(s, 401, "the replaced client is signed out");
+    let (s, v) = me(cookie.clone()).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["client"]["name"], "Safari again");
     let r = e
         .http
         .post(format!("{}/auth/client/logout", e.base))

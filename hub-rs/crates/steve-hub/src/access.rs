@@ -335,6 +335,7 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
                 }),
             );
             if b.cookie {
+                retire_replaced(&store, &headers, &c.id).await;
                 let secure = secure_request(&st.cfg, &headers);
                 /* a page on another host (not only another port) is another site: its requests carry
                  * the cookie only as SameSite=None, which browsers take over TLS only */
@@ -378,6 +379,32 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
                 json!({"error": "internal"}),
             )
         }
+    }
+}
+
+/// A browser that signs in again is given a new client and a new cookie; the client its old cookie
+/// named is left with a credential nobody holds. It is signed out here, with the pairings it had
+/// open, so the list of clients keeps no entry that can never be used again.
+async fn retire_replaced(store: &Store, headers: &HeaderMap, new_client: &str) {
+    let Some(old) = crate::api::cookie(headers, COOKIE).filter(|c| !c.is_empty()) else {
+        return;
+    };
+    let (store, new_client) = (store.clone(), new_client.to_string());
+    let retired = tokio::task::spawn_blocking(move || {
+        let (_, c) = store.access().client_user(&old).ok().flatten()?;
+        if c.id == new_client {
+            return None;
+        }
+        store.access().client_revoke(&c.id).ok();
+        Some((c.user_id, c.id))
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some((uid, cid)) = retired {
+        drop_pending_pairings(|p| {
+            p.user_id == uid && p.creator_client_id.as_deref() == Some(cid.as_str())
+        });
     }
 }
 
@@ -1641,6 +1668,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
                 }),
             );
             if b.cookie {
+                retire_replaced(&store, &headers, &c.id).await;
                 let secure = secure_request(&st.cfg, &headers);
                 let cross_site = origin_seen.as_deref().is_some_and(|o| {
                     host_of(o)
