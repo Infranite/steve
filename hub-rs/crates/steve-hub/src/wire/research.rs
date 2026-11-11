@@ -523,6 +523,8 @@ impl r::AttemptRunner for OnNode<'_> {
         let mut progressed = false;
         let mut ids = std::collections::HashSet::new();
         let mut running = None;
+        // when each call was first seen: the adapters report no duration of their own
+        let mut began = HashMap::new();
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         let mut health = tokio::time::interval(Duration::from_secs(1));
         let end = loop {
@@ -544,6 +546,7 @@ impl r::AttemptRunner for OnNode<'_> {
                             .and_then(|c| c.as_str().map(str::to_owned))
                             .unwrap_or_default();
                         let brief = v.target.unwrap_or_default();
+                        let seen = *began.entry(v.id.clone()).or_insert_with(std::time::Instant::now);
                         let ok = match v.phase {
                             api::ToolPhase::Succeeded => true,
                             api::ToolPhase::Failed => false,
@@ -558,13 +561,17 @@ impl r::AttemptRunner for OnNode<'_> {
                             }
                         };
                         running = None;
+                        began.remove(&v.id);
                         self.sink.tool(&ToolSeen {
                             name: v.name,
                             kind,
                             brief,
                             ok,
                             error: v.error,
-                            ms: v.duration_ms.unwrap_or(0) as i64,
+                            ms: v
+                                .duration_ms
+                                .unwrap_or_else(|| seen.elapsed().as_millis() as u64)
+                                as i64,
                         });
                     }
                     Some(News::Usage(u)) => {
