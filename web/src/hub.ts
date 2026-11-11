@@ -372,7 +372,15 @@ export function hubsOffer(): CarriedHub[] {
 /** the person's answer to the offer */
 export function answerOffer(add: boolean) {
   try {
-    if (add) hubsOffer().forEach((h, n) => rememberHub(h.url, { name: h.name, now: Date.now() - 1 - n }))
+    if (add) {
+      /* a Hub already in the list (this page's own, for one) takes the name the other page had for it */
+      const have = new Map(savedHubs().map((h) => [h.url, h]))
+      parseCarried(sessionStorage.getItem(OFFER_KEY) ?? "").forEach((h, n) => {
+        const known = have.get(h.url)
+        if (!known) rememberHub(h.url, { name: h.name, now: Date.now() - 1 - n })
+        else if (h.name && !known.name) rememberHub(h.url, { name: h.name, now: known.lastUsed })
+      })
+    }
     sessionStorage.removeItem(OFFER_KEY)
   } catch { /* private mode */ }
   tell()
