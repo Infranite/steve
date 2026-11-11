@@ -33,7 +33,7 @@ public enum L10n {
 public enum HubRouteKind: String, Codable, Sendable, Equatable {
     case loopback
     case lan
-    case tailnet
+    case privateOverlay = "overlay"
     case publicNetwork = "public"
     case proxy
     case unknown
@@ -42,29 +42,66 @@ public enum HubRouteKind: String, Codable, Sendable, Equatable {
         switch self {
         case .loopback: return L10n.tr("本机", "Local")
         case .lan: return L10n.tr("内网 / 局域网", "LAN")
-        case .tailnet: return "Tailnet"
+        case .privateOverlay: return L10n.tr("专用组网", "Private overlay")
         case .publicNetwork: return L10n.tr("公网", "Public")
         case .proxy: return L10n.tr("代理", "Proxy")
         case .unknown: return L10n.tr("未知", "Unknown")
         }
     }
 
+    /// Route label exposed to the web client via Native Bridge v2 (`NativeHub.route`).
+    /// Standard codes (`loopback`, `lan`, `proxy`, `public`) are localized by the web UI;
+    /// `privateOverlay` supplies vendor-neutral text directly.
+    public var bridgeRouteValue: String? {
+        switch self {
+        case .loopback: return "loopback"
+        case .lan: return "lan"
+        case .privateOverlay: return L10n.tr("专用组网", "Private overlay")
+        case .publicNetwork: return "public"
+        case .proxy: return "proxy"
+        case .unknown: return nil
+        }
+    }
+
     public static func classify(url: URL, explicitPublicURL: URL? = nil) -> HubRouteKind {
+        guard let rawHost = url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]")) else {
+            return .unknown
+        }
+        let host = rawHost.replacingOccurrences(of: "\\.+$", with: "", options: .regularExpression)
+        guard !host.isEmpty else { return .unknown }
+        if host == "localhost" || host.hasSuffix(".localhost") || isLoopbackIPv4(host) || host == "::1" {
+            return .loopback
+        }
+        if isCarrierGradeNATIPv4(host) {
+            return .privateOverlay
+        }
+        if isPrivateOrLinkLocalIPv4(host) {
+            return .lan
+        }
+        if isLocalOnlyHostname(host) {
+            return .lan
+        }
         if let explicitPublicURL,
            URLNormalizer.canonicalOrigin(explicitPublicURL) == URLNormalizer.canonicalOrigin(url) {
             return .publicNetwork
         }
-        guard let host = url.host?.lowercased() else { return .unknown }
-        if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" {
-            return .loopback
-        }
-        if isTailnetIPv4(host) || host.hasSuffix(".ts.net") {
-            return .tailnet
-        }
-        if isPrivateOrLinkLocalIPv4(host) || host.hasSuffix(".local") || !host.contains(".") {
-            return .lan
-        }
         return .publicNetwork
+    }
+
+    private static let localOnlySuffixes = [
+        ".local",
+        ".lan",
+        ".home",
+        ".home.arpa",
+        ".internal",
+        ".localdomain",
+    ]
+
+    private static func isLocalOnlyHostname(_ host: String) -> Bool {
+        if localOnlySuffixes.contains(where: { host.hasSuffix($0) }) {
+            return true
+        }
+        return !host.contains(".") && !host.contains(":")
     }
 
     private static func ipv4Octets(_ host: String) -> (UInt8, UInt8, UInt8, UInt8)? {
@@ -79,7 +116,13 @@ public enum HubRouteKind: String, Codable, Sendable, Equatable {
         return (a, b, c, d)
     }
 
-    private static func isTailnetIPv4(_ host: String) -> Bool {
+    private static func isLoopbackIPv4(_ host: String) -> Bool {
+        guard let (a, _, _, _) = ipv4Octets(host) else { return false }
+        return a == 127
+    }
+
+    /// RFC 6598 `100.64.0.0/10` address space used by private overlay mesh networks (such as tailcat).
+    private static func isCarrierGradeNATIPv4(_ host: String) -> Bool {
         guard let (a, b, _, _) = ipv4Octets(host) else { return false }
         return a == 100 && (64...127).contains(b)
     }
@@ -100,6 +143,10 @@ public enum URLNormalizer {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
         guard !trimmed.isEmpty else { return nil }
+        if trimmed.range(of: "^[a-zA-Z][a-zA-Z0-9+.-]*://", options: .regularExpression) != nil,
+           trimmed.range(of: "^https?://", options: [.regularExpression, .caseInsensitive]) == nil {
+            return nil
+        }
         let withScheme: String
         if trimmed.range(of: "^https?://", options: [.regularExpression, .caseInsensitive]) != nil {
             withScheme = trimmed
@@ -107,6 +154,8 @@ public enum URLNormalizer {
             withScheme = "http://\(trimmed)"
         }
         guard let components = URLComponents(string: withScheme),
+              components.user == nil,
+              components.password == nil,
               let scheme = components.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
               let host = components.host, !host.isEmpty else {
@@ -203,6 +252,56 @@ public struct HubProfile: Identifiable, Codable, Sendable, Equatable {
             lanURLs: [loopback],
             isLocalDefault: true
         )
+    }
+}
+
+/// A Hub entry returned by Native Bridge v2 `hubs.list`, matching `NativeHub` in `web/src/hub.ts`.
+public struct NativeHubBridgeItem: Codable, Sendable, Equatable {
+    public var id: String
+    public var name: String
+    public var address: String
+    public var current: Bool
+    public var signedIn: Bool
+    public var route: String?
+    public var version: String?
+    public var removable: Bool
+
+    public init(
+        id: String,
+        name: String,
+        address: String,
+        current: Bool,
+        signedIn: Bool,
+        route: String? = nil,
+        version: String? = nil,
+        removable: Bool
+    ) {
+        self.id = id
+        self.name = name
+        self.address = address
+        self.current = current
+        self.signedIn = signedIn
+        self.route = route
+        self.version = version
+        self.removable = removable
+    }
+
+    public func asBridgeDictionary() -> [String: Any] {
+        var dict: [String: Any] = [
+            "id": id,
+            "name": name,
+            "address": address,
+            "current": current,
+            "signedIn": signedIn,
+            "removable": removable,
+        ]
+        if let route, !route.isEmpty {
+            dict["route"] = route
+        }
+        if let version, !version.isEmpty {
+            dict["version"] = version
+        }
+        return dict
     }
 }
 

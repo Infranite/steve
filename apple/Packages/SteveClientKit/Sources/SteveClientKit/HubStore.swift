@@ -10,6 +10,7 @@ public final class HubStore: ObservableObject {
     private let activeKey: String
     private let includeLocalDefault: Bool
     private let fallbackDefaultProfile: HubProfile
+    private var pendingCookieCleanupHubIDs: Set<String> = []
     public let credentials: CredentialStoring
 
     public nonisolated static var defaultIncludeLocalDefault: Bool {
@@ -55,12 +56,16 @@ public final class HubStore: ObservableObject {
                         credentials.setCredential(nil, for: existing.id)
                         loaded[idx].clientID = nil
                         loaded[idx].userName = nil
+                        self.pendingCookieCleanupHubIDs.insert(existing.id)
                     }
                 }
             } else {
                 loaded.insert(defaultProfile, at: 0)
             }
         } else {
+            for removed in loaded where removed.isLocalDefault || removed.id == HubProfile.localDefaultID {
+                self.pendingCookieCleanupHubIDs.insert(removed.id)
+            }
             loaded.removeAll { $0.isLocalDefault || $0.id == HubProfile.localDefaultID }
         }
 
@@ -84,6 +89,17 @@ public final class HubStore: ObservableObject {
 
     public var activeProfile: HubProfile {
         currentProfile ?? fallbackDefaultProfile
+    }
+
+    /// Returns and clears Hub IDs whose endpoints changed or were removed since last WebView cookie cleanup.
+    public func drainCookieCleanupHubIDs() -> Set<String> {
+        let drained = pendingCookieCleanupHubIDs
+        pendingCookieCleanupHubIDs.removeAll()
+        return drained
+    }
+
+    public func recordCookieCleanupNeeded(for hubID: String) {
+        pendingCookieCleanupHubIDs.insert(hubID)
     }
 
     public func selectHub(id: String) {
@@ -142,6 +158,9 @@ public final class HubStore: ObservableObject {
             if updated.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 updated.name = existing.name
             }
+            if endpointsChanged {
+                pendingCookieCleanupHubIDs.insert(updated.id)
+            }
             if endpointsChanged && credential == nil {
                 credentials.setCredential(nil, for: updated.id)
                 updated.clientID = nil
@@ -166,8 +185,8 @@ public final class HubStore: ObservableObject {
         return updated
     }
 
-    @discardableResult
-    public func addManualHub(address: String, name: String? = nil, makeActive: Bool = true) -> HubProfile? {
+    /// Constructs a candidate manual Hub profile without persisting it (used to probe before saving).
+    public static func makeManualCandidate(address: String, name: String? = nil) -> HubProfile? {
         guard let url = URLNormalizer.normalize(address) else { return nil }
         let route = HubRouteKind.classify(url: url)
         let displayName: String
@@ -176,12 +195,17 @@ public final class HubStore: ObservableObject {
         } else {
             displayName = url.host ?? URLNormalizer.canonicalOrigin(url)
         }
-        let profile = HubProfile(
+        return HubProfile(
             name: displayName,
             publicURL: route == .publicNetwork ? url : nil,
             lanURLs: route == .publicNetwork ? [] : [url],
             isLocalDefault: false
         )
+    }
+
+    @discardableResult
+    public func addManualHub(address: String, name: String? = nil, makeActive: Bool = true) -> HubProfile? {
+        guard let profile = Self.makeManualCandidate(address: address, name: name) else { return nil }
         return upsertProfile(profile, makeActive: makeActive)
     }
 
@@ -220,6 +244,7 @@ public final class HubStore: ObservableObject {
         let oldCred = credentials.credential(for: id)
         let wasActive = (activeHubID == id)
         credentials.setCredential(nil, for: id)
+        pendingCookieCleanupHubIDs.insert(id)
         profiles.remove(at: idx)
         if wasActive {
             activeHubID = profiles.first?.id ?? ""

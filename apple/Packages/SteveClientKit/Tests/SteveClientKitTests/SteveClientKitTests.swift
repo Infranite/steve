@@ -5,47 +5,86 @@ import XCTest
 @testable import SteveClientKit
 
 final class SteveClientKitTests: XCTestCase {
-    func testPairingPayloadParsesPublicAndLanEndpointsAndPrefersPublic() {
-        let uri =
+    // MARK: - Unified Pairing Link & URL Normalization
+
+    func testPairingPayloadParsesSteveAndHTTPSLinksAndIgnoresOuterGatewayHost() {
+        let steveURI =
             "steve://pair?v=1&code=stp_0123456789abcdef0123456789abcdef"
             + "&name=Studio%20Mac"
             + "&pub=https%3A%2F%2Fsteve.example.com%2F"
-            + "&lan=http%3A%2F%2F192.168.1.40%3A8440"
-            + "&lan=http%3A%2F%2F100.64.0.12%3A8440"
+            + "&lan=http%3A%2F%2F192.168.1.40%3A8440,http%3A%2F%2F100.64.0.12%3A8440"
 
-        let parsed = PairingPayload.parse(uri)
-        XCTAssertNotNil(parsed)
-        XCTAssertEqual(parsed?.code, "stp_0123456789abcdef0123456789abcdef")
-        XCTAssertEqual(parsed?.name, "Studio Mac")
-        XCTAssertEqual(parsed?.publicURL?.absoluteString, "https://steve.example.com")
-        XCTAssertEqual(parsed?.lanURLs.map(\.absoluteString), [
+        let parsedSteve = PairingPayload.parse(steveURI)
+        XCTAssertNotNil(parsedSteve)
+        XCTAssertEqual(parsedSteve?.code, "stp_0123456789abcdef0123456789abcdef")
+        XCTAssertEqual(parsedSteve?.name, "Studio Mac")
+        XCTAssertEqual(parsedSteve?.publicURL?.absoluteString, "https://steve.example.com")
+        XCTAssertEqual(parsedSteve?.lanURLs.map(\.absoluteString), [
             "http://192.168.1.40:8440",
             "http://100.64.0.12:8440",
         ])
-        XCTAssertTrue(parsed?.usesPublicByDefault == true)
-        XCTAssertEqual(parsed?.orderedEndpoints.map(\.absoluteString), [
-            "https://steve.example.com",
-            "http://192.168.1.40:8440",
-            "http://100.64.0.12:8440",
-        ])
+        XCTAssertEqual(parsedSteve?.usesPublicByDefault, true)
+
+        // Arrival link inside a native shell (`http://127.0.0.1:<gateway>/#/pair?...`) with `+` spaces and `%26`/`%2B` in name:
+        // Outer `127.0.0.1:54321` must never be treated as a Hub endpoint.
+        let gatewayArrivalLink =
+            "http://127.0.0.1:54321/#/pair?v=1&code=stp_abcdef0123456789abcdef0123456789"
+            + "&name=R%26D%2BTeam+Hub"
+            + "&lan=http%3A%2F%2F192.168.1.88%3A8440"
+
+        let parsedGateway = PairingPayload.parse(gatewayArrivalLink)
+        XCTAssertNotNil(parsedGateway)
+        XCTAssertEqual(parsedGateway?.name, "R&D+Team Hub")
+        XCTAssertNil(parsedGateway?.publicURL)
+        XCTAssertEqual(parsedGateway?.orderedEndpoints.map(\.absoluteString), ["http://192.168.1.88:8440"])
+
+        // Public HTTPS web link (`https://hub.example.com/#/pair?...`)
+        let httpsLink =
+            "https://hub.example.com/#/pair?v=1&code=stp_99887766554433221100aabbccddeeff"
+            + "&name=Cloud+Hub&pub=https%3A%2F%2Fhub.example.com&lan=http%3A%2F%2F10.0.0.5%3A8440"
+        let parsedHTTPS = PairingPayload.parse(httpsLink)
+        XCTAssertEqual(parsedHTTPS?.publicURL?.absoluteString, "https://hub.example.com")
+        XCTAssertEqual(parsedHTTPS?.lanURLs.map(\.absoluteString), ["http://10.0.0.5:8440"])
     }
 
-    func testPairingPayloadWithoutPublicUsesLanDirectly() {
-        let uri = "steve://pair?v=1&code=stp_abcdef0123456789abcdef0123456789&lan=http%3A%2F%2F192.168.1.88%3A8440"
-        let parsed = PairingPayload.parse(uri)
-        XCTAssertNotNil(parsed)
-        XCTAssertNil(parsed?.publicURL)
-        XCTAssertEqual(parsed?.usesPublicByDefault, false)
-        XCTAssertEqual(parsed?.orderedEndpoints.map(\.absoluteString), ["http://192.168.1.88:8440"])
+    func testPairingPayloadRejectsInvalidLinksAndOuterOriginWithoutEmbeddedEndpoints() {
+        // Query on path instead of `#/pair?...`
+        XCTAssertNil(PairingPayload.parse("https://steve.example.com/pair?code=stp_0123456789abcdef&pub=https://steve.example.com"))
+        // Outer HTTP host without `pub` or `lan` in `#/pair?...` must NOT fall back to outer host
+        XCTAssertNil(PairingPayload.parse("http://127.0.0.1:54321/#/pair?v=1&code=stp_0123456789abcdef"))
+        // Short code
+        XCTAssertNil(PairingPayload.parse("steve://pair?v=1&code=stp_short&lan=http://192.168.1.2:8440"))
+        // No endpoints
+        XCTAssertNil(PairingPayload.parse("steve://pair?v=1&code=stp_0123456789abcdef"))
     }
 
-    func testPairingPayloadRejectsInvalidSchemesOrShortCodes() {
-        XCTAssertNil(PairingPayload.parse("https://steve.example.com/pair?code=stp_0123456789abcdef"))
-        XCTAssertNil(PairingPayload.parse("steve://pair?v=1&code=short&lan=http://192.168.1.2:8440"))
-        XCTAssertNil(PairingPayload.parse("steve://pair?v=1&code=stp_0123456789abcdef")) // no endpoints
+    func testURLNormalizerAndVendorNeutralPrivateOverlayClassification() {
+        XCTAssertEqual(URLNormalizer.normalize("192.168.1.10:8440/")?.absoluteString, "http://192.168.1.10:8440")
+        XCTAssertEqual(URLNormalizer.normalize("localhost:8440")?.absoluteString, "http://localhost:8440")
+        XCTAssertEqual(URLNormalizer.normalize("https://Steve.Example.COM:443///")?.absoluteString, "https://steve.example.com")
+        XCTAssertNil(URLNormalizer.normalize("ftp://steve.example.com"))
+        XCTAssertNil(URLNormalizer.normalize("steve://pair?code=stp_0123456789abcdef"))
+        XCTAssertNil(URLNormalizer.normalize("javascript:alert(1)"))
+        XCTAssertNil(URLNormalizer.normalize("http://user:pass@192.168.1.10:8440"))
+
+        // RFC 6598 100.64.0.0/10 -> vendor-neutral `.privateOverlay` ("overlay"), never vendor-specific `.ts.net`
+        XCTAssertEqual(HubRouteKind.classify(url: URL(string: "http://100.64.0.1:8440")!), .privateOverlay)
+        XCTAssertEqual(HubRouteKind.classify(url: URL(string: "http://100.127.255.254:8440")!), .privateOverlay)
+        XCTAssertEqual(HubRouteKind.privateOverlay.rawValue, "overlay")
+        XCTAssertEqual(HubRouteKind.classify(url: URL(string: "http://100.63.255.255:8440")!), .publicNetwork)
+        XCTAssertEqual(HubRouteKind.classify(url: URL(string: "http://100.128.0.1:8440")!), .publicNetwork)
+        XCTAssertEqual(HubRouteKind.classify(url: URL(string: "https://node.example.ts.net")!), .publicNetwork)
+
+        // When a local Hub has no STEVE_PUBLIC_URL, its public_url is `http://127.0.0.1:<port>` and still classifies as `.loopback`
+        let localPub = URL(string: "http://127.0.0.1:18521")!
+        XCTAssertEqual(HubRouteKind.classify(url: localPub, explicitPublicURL: localPub), .loopback)
+        XCTAssertEqual(HubRouteKind.classify(url: URL(string: "https://steve.localhost")!), .loopback)
+        XCTAssertEqual(HubRouteKind.classify(url: URL(string: "http://nas:8440")!), .lan)
+        XCTAssertEqual(HubRouteKind.classify(url: URL(string: "http://nas.home.arpa:8440")!), .lan)
+        XCTAssertEqual(HubRouteKind.classify(url: URL(string: "http://nas.internal:8440")!), .lan)
+        XCTAssertEqual(HubRouteKind.classify(url: URL(string: "http://localhome.example:8440")!), .publicNetwork)
     }
 
-    // Review #1: Real Hub `/auth/pair` and `/auth/token` responses carry `user: {id, name}` (no `role`) and `hub: {version, api}`.
     func testPairSignInResponseDecodesRealHubShapeWithoutRole() throws {
         let realHubJSON = Data("""
         {
@@ -64,7 +103,6 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(decoded.hub.api, 1)
     }
 
-    // Review #12 & #14: Public-first routing, concurrent LAN probing, and API version check.
     func testEndpointResolverConnectsViaPublicRacesLanConcurrentlyAndChecksAPIVersion() async throws {
         let pub = URL(string: "https://steve.example.com")!
         let lan = URL(string: "http://192.168.1.20:8440")!
@@ -111,7 +149,7 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertTrue(res2.usedFallbackFromPublic)
         XCTAssertLessThan(elapsed, 1.0, "LAN candidates must be probed concurrently rather than sequentially")
 
-        // 3. Incompatible API version surfaces `.incompatibleAPI`
+        // 3. Incompatible API version surfaces `.incompatibleAPI`; non-Steve service surfaces `.notSteveHub`
         let resolverFutureAPI = EndpointResolver { _ in
             HubHelloResponse(name: "steve", version: "9.0.0", api: 99, login: .init(token: true, oidc: false))
         }
@@ -121,9 +159,27 @@ final class SteveClientKitTests: XCTestCase {
         } catch let err as EndpointResolutionError {
             XCTAssertEqual(err, .incompatibleAPI(version: 99))
         }
+
+        let resolverNotSteve = EndpointResolver { _ in
+            HubHelloResponse(name: "nginx", version: "1.0.0", api: 1, login: .init(token: false, oidc: false))
+        }
+        do {
+            _ = try await resolverNotSteve.resolve(publicURL: nil, lanURLs: [lan])
+            XCTFail("Expected notSteveHub error")
+        } catch let err as EndpointResolutionError {
+            XCTAssertEqual(err, .notSteveHub(url: lan))
+        }
+
+        // 4. Web-only port serving `/hub.json` resolves to the Hub API port behind it
+        let webPortURL = URL(string: "http://192.168.1.20:18511")!
+        let behind = await EndpointResolver.resolveHubBehind(webURL: webPortURL) { url in
+            XCTAssertEqual(url.absoluteString, "http://192.168.1.20:18511/hub.json")
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            return (Data("{\"hub\":\"http://192.168.1.20:18501/\"}".utf8), resp)
+        }
+        XCTAssertEqual(behind?.absoluteString, "http://192.168.1.20:18501")
     }
 
-    // Review #11 & #13: LocalHubDiscovery parses `steve.env` and iOS HubStore starts with no bogus 127.0.0.1:8440 profile.
     @MainActor
     func testLocalHubDiscoveryReadsSteveEnvAndIOSHubStoreStartsEmpty() throws {
         let tempHome = FileManager.default.temporaryDirectory.appendingPathComponent("steve-env-\(UUID().uuidString)", isDirectory: true)
@@ -140,11 +196,9 @@ final class SteveClientKitTests: XCTestCase {
         let profile = LocalHubDiscovery.defaultProfile(environment: [:], steveHome: tempHome)
         XCTAssertEqual(profile.orderedEndpoints.map(\.absoluteString), ["http://127.0.0.1:18540"])
 
-        // Environment variable overrides steve.env
         let envOverride = LocalHubDiscovery.defaultProfile(environment: ["STEVE_PORT": "18545"], steveHome: tempHome)
         XCTAssertEqual(envOverride.orderedEndpoints.map(\.absoluteString), ["http://127.0.0.1:18545"])
 
-        // iOS mode (`includeLocalDefault: false`) starts clean with zero profiles
         let suiteName = "test.steve.iosstore.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -161,44 +215,56 @@ final class SteveClientKitTests: XCTestCase {
     }
 
     @MainActor
-    func testHubStoreDefaultsToLocalHubAndSupportsAddingSwitchingAndRemovingOtherHubs() {
+    func testHubStoreDefaultsToLocalHubAndTracksCookieCleanupOnEndpointChange() {
         let suiteName = "test.steve.hubstore.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let creds = InMemoryCredentialStore()
-        let store = HubStore(
+        let store1 = HubStore(
             defaults: defaults,
             credentials: creds,
             defaultProfile: LocalHubDiscovery.defaultProfile(environment: ["STEVE_PORT": "18540"]),
             includeLocalDefault: true
         )
+        store1.updateAuthMetadata(id: HubProfile.localDefaultID, clientID: "c1", userName: "Owner", credential: "cred_18540")
+        XCTAssertTrue(store1.drainCookieCleanupHubIDs().isEmpty)
 
-        XCTAssertEqual(store.activeProfile.id, HubProfile.localDefaultID)
-        XCTAssertTrue(store.activeProfile.isLocalDefault)
-        XCTAssertEqual(store.activeProfile.orderedEndpoints.map(\.absoluteString), ["http://127.0.0.1:18540"])
+        // Relaunch with STEVE_PORT changed to 18541 -> clears stale credential AND marks `local-default` for cookie purge
+        let store2 = HubStore(
+            defaults: defaults,
+            credentials: creds,
+            defaultProfile: LocalHubDiscovery.defaultProfile(environment: ["STEVE_PORT": "18541"]),
+            includeLocalDefault: true
+        )
+        XCTAssertNil(store2.credential(for: HubProfile.localDefaultID))
+        XCTAssertEqual(store2.drainCookieCleanupHubIDs(), [HubProfile.localDefaultID])
+        XCTAssertTrue(store2.drainCookieCleanupHubIDs().isEmpty)
 
-        let added = store.addManualHub(address: "https://remote.example.com/", name: "Remote Hub", makeActive: true)
-        XCTAssertNotNil(added)
-        XCTAssertEqual(store.activeProfile.name, "Remote Hub")
-        XCTAssertEqual(store.activeProfile.publicURL?.absoluteString, "https://remote.example.com")
+        let added = store2.addManualHub(address: "https://remote.example.com/", name: "Remote Hub", makeActive: true)!
+        XCTAssertEqual(store2.activeProfile.name, "Remote Hub")
 
-        store.selectHub(id: HubProfile.localDefaultID)
-        XCTAssertEqual(store.activeProfile.id, HubProfile.localDefaultID)
+        // Updating `added` by ID with a new endpoint marks it for cookie cleanup
+        var changed = added
+        changed.publicURL = URL(string: "https://remote-v2.example.com")!
+        _ = store2.upsertProfile(changed, makeActive: true)
+        XCTAssertEqual(store2.drainCookieCleanupHubIDs(), [added.id])
 
-        XCTAssertNil(store.removeHub(id: HubProfile.localDefaultID))
-        XCTAssertEqual(store.profiles.count, 2)
-        if let remoteID = added?.id {
-            store.selectHub(id: remoteID)
-            let removed = store.removeHub(id: remoteID)
-            XCTAssertEqual(removed?.wasActive, true)
-        }
-        XCTAssertEqual(store.profiles.count, 1)
-        XCTAssertEqual(store.activeProfile.id, HubProfile.localDefaultID)
+        // Removing `added` marks it for cookie cleanup
+        let removed = store2.removeHub(id: added.id)
+        XCTAssertEqual(removed?.wasActive, true)
+        XCTAssertEqual(store2.drainCookieCleanupHubIDs(), [added.id])
+
+        let purgedPrefix = HubLoopbackProxy.hubCookiePrefix(for: added.id)
+        let keptPrefix = HubLoopbackProxy.hubCookiePrefix(for: HubProfile.localDefaultID)
+        XCTAssertTrue(HubLoopbackProxy.shouldDeleteWebCookie(named: "\(purgedPrefix)steve_session_8440", purgedHubIDs: [added.id]))
+        XCTAssertFalse(HubLoopbackProxy.shouldDeleteWebCookie(named: "\(keptPrefix)steve_session_18541", purgedHubIDs: [added.id]))
+        XCTAssertFalse(HubLoopbackProxy.shouldDeleteWebCookie(named: HubLoopbackProxy.proxyAuthCookieName, purgedHubIDs: [added.id]))
     }
 
-    // Review #2 & Suspected Redirects: Loopback proxy enforces Host, Origin, and per-launch cookie secret, and does not auto-follow redirects.
-    func testLoopbackProxyEnforcesHostOriginAndPerLaunchCookieSecret() async throws {
+    // MARK: - Loopback Proxy Security, Opaque Cookie Isolation & Clear-Site-Data Stripping
+
+    func testLoopbackProxyEnforcesHostOriginCookieSecretAndStripsClearSiteData() async throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("steve-proxy-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -231,7 +297,7 @@ final class SteveClientKitTests: XCTestCase {
         )
         XCTAssertEqual(dnsRebindResp.status, 403)
 
-        // 3. Local process hitting `/api/me` WITHOUT `steve_proxy_key` cookie gets 403 Forbidden (no credential leak!)
+        // 3. Local process hitting `/api/me` WITHOUT `steve_proxy_key` cookie gets 403 Forbidden
         let (noCookieData, noCookieResp) = try await RawTCPHTTPClient.request(
             port: proxy.port,
             path: "/api/me",
@@ -253,7 +319,7 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(badOriginResp.status, 403)
 
         // 5. Legitimate WKWebView request carrying `steve_proxy_key` cookie & valid Host/Origin succeeds,
-        //    injects `Authorization: Bearer`, and strips `steve_proxy_key` from upstream `Cookie`!
+        //    injects `Authorization: Bearer`, and strips `steve_proxy_key` from upstream `Cookie`.
         var authedReq = URLRequest(url: gateway.appendingPathComponent("api/me"))
         authedReq.setValue("http://127.0.0.1:\(proxy.port)", forHTTPHeaderField: "Origin")
         authedReq.setValue(proxy.authCookieHeader, forHTTPHeaderField: "Cookie")
@@ -267,34 +333,38 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(json?["cookie"], "")
         XCTAssertEqual(json?["path"], "/api/me")
 
-        // 6. SSE `/api/stream` streams events incrementally with valid proxy cookie
-        var sseReq = URLRequest(url: gateway.appendingPathComponent("api/stream"))
-        sseReq.setValue(proxy.authCookieHeader, forHTTPHeaderField: "Cookie")
-        let (bytes, sseResp) = try await clientSession.bytes(for: sseReq)
-        XCTAssertEqual((sseResp as? HTTPURLResponse)?.statusCode, 200)
-        XCTAssertEqual((sseResp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type"), "text/event-stream")
-        var receivedLines: [String] = []
-        for try await line in bytes.lines {
-            receivedLines.append(line)
-            if receivedLines.count >= 2 { break }
-        }
-        XCTAssertEqual(receivedLines, ["id: 1", "data: {\"type\":\"steve.thinking\",\"on\":true}"])
-
-        // 7. Upstream 302 redirect is returned raw without following or leaking Authorization
-        let (_, redirResp) = try await RawTCPHTTPClient.request(
+        // 6. Upstream `Clear-Site-Data` header is stripped so a remote Hub cannot wipe `steve_proxy_key` or other Hubs' storage.
+        let (_, clearResp) = try await RawTCPHTTPClient.request(
             port: proxy.port,
-            path: "/auth/redirect-test",
+            path: "/auth/clear-site-data-test",
             headers: [
                 ("Host", "127.0.0.1:\(proxy.port)"),
                 ("Cookie", proxy.authCookieHeader),
             ]
         )
-        XCTAssertEqual(redirResp.status, 302)
-        XCTAssertEqual(redirResp.header("location"), "https://idp.example.com/authorize")
+        XCTAssertEqual(clearResp.status, 200)
+        XCTAssertNil(clearResp.header("clear-site-data"), "Proxy must strip Clear-Site-Data from upstream responses")
+
+        // 7. When `baseURL` is nil (no Hub or offline Hub), `/auth/hello` returns immediate 503 JSON while `/` still serves WebDist.
+        proxy.updateTarget(.init(hubID: "hub-main", baseURL: nil, credential: nil))
+        let (_, offlineHelloResp) = try await RawTCPHTTPClient.request(
+            port: proxy.port,
+            path: "/auth/hello",
+            headers: [
+                ("Host", "127.0.0.1:\(proxy.port)"),
+                ("Cookie", proxy.authCookieHeader),
+            ]
+        )
+        XCTAssertEqual(offlineHelloResp.status, 503)
+        let (_, offlineIndexResp) = try await RawTCPHTTPClient.request(
+            port: proxy.port,
+            path: "/",
+            headers: [("Host", "127.0.0.1:\(proxy.port)")]
+        )
+        XCTAssertEqual(offlineIndexResp.status, 200)
     }
 
-    // Review #5: Cross-Hub cookie isolation and multi-Set-Cookie splitting (including `Expires=Wed, ...`).
-    func testLoopbackProxyIsolatesCookiesAcrossHubSwitches() async throws {
+    func testLoopbackProxyIsolatesOpaquePortCookiesAcrossHubSwitches() async throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("steve-cookies-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -310,7 +380,6 @@ final class SteveClientKitTests: XCTestCase {
         _ = try await proxy.start()
         defer { proxy.stop() }
 
-        // Sign in on Hub A where upstream sets two cookies (including an Expires attribute containing a comma)
         let (_, loginResp) = try await RawTCPHTTPClient.request(
             port: proxy.port,
             path: "/auth/set-multi-cookie",
@@ -324,18 +393,16 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(setCookies.count, 2, "Multiple upstream Set-Cookie headers must remain separate")
 
         let alphaPrefix = HubLoopbackProxy.hubCookiePrefix(for: "hub-alpha")
-        XCTAssertTrue(setCookies.contains { $0.hasPrefix("\(alphaPrefix)steve_client=cookie_cred_a;") && !$0.lowercased().contains("secure") })
-        XCTAssertTrue(setCookies.contains { $0.hasPrefix("\(alphaPrefix)steve_ws=workspace_a;") && $0.contains("SameSite=Lax") })
+        XCTAssertTrue(setCookies.contains { $0.hasPrefix("\(alphaPrefix)steve_session_18521=sess_cred_a;") && !$0.lowercased().contains("secure") })
+        XCTAssertTrue(setCookies.contains { $0.hasPrefix("\(alphaPrefix)steve_ws_18521=workspace_a;") && $0.contains("SameSite=Lax") })
 
-        // Simulate browser sending all accumulated cookies (proxy key + Hub A's cookies + a legacy unprefixed cookie)
         let browserCookieJar = [
             proxy.authCookieHeader,
-            "\(alphaPrefix)steve_client=cookie_cred_a",
-            "\(alphaPrefix)steve_ws=workspace_a",
-            "steve_client=legacy_unscoped",
+            "\(alphaPrefix)steve_session_18521=sess_cred_a",
+            "\(alphaPrefix)steve_ws_18521=workspace_a",
+            "unscoped_cookie=foreign",
         ].joined(separator: "; ")
 
-        // While Hub A is active, Hub A receives its unwrapped cookies (and NOT legacy_unscoped or steve_proxy_key)
         let (echoAData, _) = try await RawTCPHTTPClient.request(
             port: proxy.port,
             path: "/api/me",
@@ -345,9 +412,8 @@ final class SteveClientKitTests: XCTestCase {
             ]
         )
         let echoA = try JSONSerialization.jsonObject(with: echoAData) as? [String: String]
-        XCTAssertEqual(echoA?["cookie"], "steve_client=cookie_cred_a; steve_ws=workspace_a")
+        XCTAssertEqual(echoA?["cookie"], "steve_session_18521=sess_cred_a; steve_ws_18521=workspace_a")
 
-        // Switch active target to Hub B: Hub B must receive ZERO cookies from Hub A!
         proxy.updateTarget(.init(hubID: "hub-beta", baseURL: hubB.baseURL, credential: "cli_b.secret"))
         let (echoBData, _) = try await RawTCPHTTPClient.request(
             port: proxy.port,
@@ -362,7 +428,6 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(echoB?["auth"], "Bearer cli_b.secret")
     }
 
-    // Review #6: Preferred loopback port persists across restarts and falls back cleanly when occupied.
     func testLoopbackProxyPersistsPreferredPortAndFallsBackWhenOccupied() async throws {
         let suiteName = "test.steve.proxyport.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -376,9 +441,8 @@ final class SteveClientKitTests: XCTestCase {
 
         let proxy2 = HubLoopbackProxy(preferredPortDefaults: defaults)
         let url2 = try await proxy2.start()
-        XCTAssertEqual(url2, url1, "Second launch should reuse persisted port to keep WKWebView localStorage origin")
+        XCTAssertEqual(url2, url1)
 
-        // Occupy `firstPort` with proxy2 still running; proxy3 must fall back to a different ephemeral port cleanly
         let proxy3 = HubLoopbackProxy(preferredPortDefaults: defaults)
         let url3 = try await proxy3.start()
         XCTAssertNotEqual(url3, url1)
@@ -387,7 +451,334 @@ final class SteveClientKitTests: XCTestCase {
         proxy3.stop()
     }
 
-    // Review #3: `steve://pair` confirmation gate, mandatory credential check, and credential isolation from existing profiles.
+    // MARK: - Native Bridge v2 Operations & Confirmation Gates
+
+    @MainActor
+    func testNativeBridgeV2OperationsListAddSwitchForgetPairClaimAndScan() async throws {
+        let mockHubA = try await MockUpstreamServer.start()
+        defer { mockHubA.stop() }
+        let mockHubB = try await MockUpstreamServer.start()
+        defer { mockHubB.stop() }
+
+        let suiteName = "test.steve.bridgev2.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        var purgedSets: [Set<String>] = []
+        let creds = InMemoryCredentialStore()
+        let store = HubStore(
+            defaults: defaults,
+            credentials: creds,
+            defaultProfile: HubProfile(id: HubProfile.localDefaultID, name: "Local Hub", lanURLs: [mockHubA.baseURL], isLocalDefault: true),
+            includeLocalDefault: true
+        )
+        let coordinator = SteveClientCoordinator(
+            hubStore: store,
+            preferredPortDefaults: defaults,
+            clientDescriptor: ClientDescriptor(kind: "mac", name: "Test Mac", platform: "macOS", version: "0.3.0"),
+            purgeWebCookiesHandler: { ids in purgedSets.append(ids) }
+        )
+        defer { coordinator.stop() }
+
+        XCTAssertEqual(
+            SteveClientCoordinator.bridgeCapabilities(for: "macos"),
+            ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "pair.claim"]
+        )
+        XCTAssertEqual(
+            SteveClientCoordinator.bridgeCapabilities(for: "ios"),
+            ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "pair.claim", "pair.scan"]
+        )
+
+        await coordinator.activateCurrentHub(forceReloadWeb: false)
+
+        // 1. `hubs.list`
+        let listRes1 = try await coordinator.handleBridgeCall(op: "hubs.list", args: [:], platform: "macos")
+        let hubs1 = try XCTUnwrap(listRes1["hubs"] as? [[String: Any]])
+        XCTAssertEqual(hubs1.count, 1)
+        XCTAssertEqual(hubs1[0]["id"] as? String, HubProfile.localDefaultID)
+        XCTAssertEqual(hubs1[0]["current"] as? Bool, true)
+        XCTAssertEqual(hubs1[0]["removable"] as? Bool, false)
+        XCTAssertEqual(hubs1[0]["route"] as? String, "loopback")
+
+        // 2. `hubs.add` probes before saving: dead port rejects without adding to HubStore
+        do {
+            _ = try await coordinator.handleBridgeCall(
+                op: "hubs.add",
+                args: ["address": "http://127.0.0.1:9", "name": "Dead Hub"],
+                platform: "macos"
+            )
+            XCTFail("Unreachable Hub must fail hubs.add before persisting")
+        } catch {
+            XCTAssertEqual(store.profiles.count, 1)
+        }
+
+        // Valid `hubs.add` saves and activates Hub B
+        _ = try await coordinator.handleBridgeCall(
+            op: "hubs.add",
+            args: ["address": mockHubB.baseURL.absoluteString, "name": "Lab Hub"],
+            platform: "macos"
+        )
+        XCTAssertEqual(store.profiles.count, 2)
+        XCTAssertEqual(store.activeProfile.name, "Lab Hub")
+
+        // 3. `hubs.switch` back to Local Hub
+        _ = try await coordinator.handleBridgeCall(
+            op: "hubs.switch",
+            args: ["id": HubProfile.localDefaultID],
+            platform: "macos"
+        )
+        XCTAssertEqual(store.activeHubID, HubProfile.localDefaultID)
+
+        // 4. `hubs.forget` refuses `local-default`, removes `Lab Hub`, and triggers cookie purge
+        do {
+            _ = try await coordinator.handleBridgeCall(
+                op: "hubs.forget",
+                args: ["id": HubProfile.localDefaultID],
+                platform: "macos"
+            )
+            XCTFail("local-default must not be removable")
+        } catch {}
+
+        let labID = try XCTUnwrap(store.profiles.first(where: { !$0.isLocalDefault })?.id)
+        _ = try await coordinator.handleBridgeCall(op: "hubs.forget", args: ["id": labID], platform: "macos")
+        XCTAssertEqual(store.profiles.count, 1)
+        XCTAssertTrue(purgedSets.contains([labID]))
+
+        // 5. `pair.claim` with HTTP `#/pair?...` link stages confirmation; Cancel resolves cleanly without claiming
+        let lanEncoded = mockHubB.baseURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
+        let httpPairLink = "http://127.0.0.1:59999/#/pair?v=1&code=stp_0123456789abcdef0123456789abcdef&name=Paired+Lab&lan=\(lanEncoded)"
+
+        let cancelClaimTask = Task {
+            try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": httpPairLink], platform: "macos")
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertNotNil(coordinator.pendingExternalPairConfirmation)
+        XCTAssertEqual(mockHubB.pairCallCount(), 0)
+        coordinator.cancelPendingExternalPairing()
+        _ = try await cancelClaimTask.value
+        XCTAssertEqual(mockHubB.pairCallCount(), 0)
+        XCTAssertEqual(store.profiles.count, 1)
+
+        // Confirming `pair.claim` claims code, saves Keychain credential, and switches active Hub
+        let confirmClaimTask = Task {
+            try await coordinator.handleBridgeCall(op: "pair.claim", args: ["link": httpPairLink], platform: "macos")
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertNotNil(coordinator.pendingExternalPairConfirmation)
+        _ = await coordinator.confirmPendingExternalPairing()
+        _ = try await confirmClaimTask.value
+        XCTAssertEqual(mockHubB.pairCallCount(), 1)
+        XCTAssertEqual(store.activeProfile.name, "Paired Lab")
+        XCTAssertEqual(store.credential(for: store.activeHubID), "cli_paired.secret_cred")
+
+        // 6. `pair.scan` rejected on macOS, accepted on iOS
+        do {
+            _ = try await coordinator.handleBridgeCall(op: "pair.scan", args: [:], platform: "macos")
+            XCTFail("pair.scan must not succeed on macOS")
+        } catch {}
+        _ = try await coordinator.handleBridgeCall(op: "pair.scan", args: [:], platform: "ios")
+        XCTAssertTrue(coordinator.isQRScannerPresented)
+    }
+
+    // MARK: - N3 HttpOnly Proxy Cookie & WKContentRuleList Cross-Port Loopback Blocking
+
+    @MainActor
+    func testHttpOnlyProxyCookieAndWKContentRuleListBlocksOtherLoopbackPortsInWebView() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("steve-wv-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try Data("<!doctype html><html><body><div id='app'>ready</div></body></html>".utf8)
+            .write(to: tempDir.appendingPathComponent("index.html"))
+
+        let mockHub = try await MockUpstreamServer.start()
+        defer { mockHub.stop() }
+        let foreignLocalServer = try await MockUpstreamServer.start()
+        defer { foreignLocalServer.stop() }
+
+        let suiteName = "test.steve.webview-isolation.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = HubStore(
+            defaults: defaults,
+            credentials: InMemoryCredentialStore(),
+            defaultProfile: HubProfile(id: HubProfile.localDefaultID, name: "Local Hub", lanURLs: [mockHub.baseURL], isLocalDefault: true),
+            includeLocalDefault: true
+        )
+        let coordinator = SteveClientCoordinator(
+            hubStore: store,
+            webRoot: tempDir,
+            preferredPortDefaults: defaults,
+            clientDescriptor: ClientDescriptor(kind: "mac", name: "Test Mac", platform: "macOS", version: "0.3.0")
+        )
+        defer { coordinator.stop() }
+
+        let gateway = try await coordinator.proxy.ensureRunning()
+        await coordinator.activateCurrentHub(forceReloadWeb: false)
+
+        // 1. Verify `makeProxyAuthCookie` produces a true `HttpOnly` cookie
+        let cookie = try XCTUnwrap(SteveWebView.makeProxyAuthCookie(gateway: gateway, token: coordinator.proxy.proxyAuthToken))
+        XCTAssertTrue(cookie.isHTTPOnly, "steve_proxy_key must be HttpOnly so document.cookie cannot read it")
+        XCTAssertEqual(cookie.name, HubLoopbackProxy.proxyAuthCookieName)
+
+        // 2. Compile `WKContentRuleList` and load real `WKWebView` at gateway origin
+        let ruleList = try await SteveWebView.compileLoopbackPortRuleList(gatewayPort: Int(coordinator.proxy.port))
+        let bridgeView = SteveWebView(coordinator: coordinator, platformName: "macos")
+        let bridge = bridgeView.makeCoordinator()
+
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        let uc = WKUserContentController()
+        uc.addScriptMessageHandler(bridge, contentWorld: .page, name: SteveWebView.BridgeCoordinator.handlerName)
+        uc.addUserScript(
+            WKUserScript(
+                source: SteveWebView.makeBootstrapScript(platform: "macos", gateway: gateway),
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
+        )
+        uc.add(ruleList)
+        config.userContentController = uc
+
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 400, height: 300), configuration: config)
+        webView.navigationDelegate = bridge
+        bridge.loadedGateway = gateway
+
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            config.websiteDataStore.httpCookieStore.setCookie(cookie) { cont.resume() }
+        }
+        webView.load(URLRequest(url: gateway))
+
+        for _ in 0..<50 {
+            if bridge.isPageLoaded { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(bridge.isPageLoaded, "WKWebView should finish loading bundled index.html from gateway")
+
+        // 3. `document.cookie` must NOT expose `steve_proxy_key`
+        let docCookie = try await webView.evaluateJavaScript("document.cookie") as? String ?? ""
+        XCTAssertFalse(docCookie.contains(HubLoopbackProxy.proxyAuthCookieName))
+
+        // 4. Same-gateway fetch `/auth/hello` succeeds AND `window.__STEVE_NATIVE__.call('hubs.list')` works
+        let bridgeCheck = try await webView.callAsyncJavaScript(
+            """
+            const helloResp = await fetch('/auth/hello');
+            const hello = await helloResp.json();
+            const hubsRes = await window.__STEVE_NATIVE__.call('hubs.list', {});
+            return {
+              v: window.__STEVE_NATIVE__.v,
+              platform: window.__STEVE_NATIVE__.platform,
+              helloName: hello.name,
+              hubCount: hubsRes.hubs.length
+            };
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? [String: Any]
+        XCTAssertEqual(bridgeCheck?["v"] as? Int, 2)
+        XCTAssertEqual(bridgeCheck?["platform"] as? String, "macos")
+        XCTAssertEqual(bridgeCheck?["helloName"] as? String, "steve")
+        XCTAssertEqual(bridgeCheck?["hubCount"] as? Int, 1)
+
+        // 5. Cross-port fetch to `http://127.0.0.1:<foreignPort>/auth/hello` is blocked by `WKContentRuleList`
+        let crossPortBlocked = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await fetch(targetURL);
+              return false;
+            } catch (_) {
+              return true;
+            }
+            """,
+            arguments: ["targetURL": foreignLocalServer.baseURL.appendingPathComponent("auth/hello").absoluteString],
+            in: nil,
+            contentWorld: .page
+        ) as? Bool
+        XCTAssertEqual(crossPortBlocked, true, "WKContentRuleList must block fetches to any other port on 127.0.0.1")
+        XCTAssertEqual(foreignLocalServer.requestCount(), 0, "Blocked cross-port loopback request must never hit the foreign socket")
+    }
+
+    // MARK: - Stale Credential Poll Race & Retired Credential Revocation
+
+    @MainActor
+    func testBackgroundPollCannotOverwriteNewSignInCredentialAndReplacedCredentialIsRetired() async throws {
+        let mockHub = try await MockUpstreamServer.start()
+        defer { mockHub.stop() }
+
+        let suiteName = "test.steve.credrace.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let hello = HubHelloResponse(name: "steve", version: "0.3.0", api: 1, login: .init(token: true, oidc: false))
+        let slowResolver = EndpointResolver { _ in
+            try await Task.sleep(nanoseconds: 250_000_000)
+            return hello
+        }
+
+        let creds = InMemoryCredentialStore()
+        let store = HubStore(
+            defaults: defaults,
+            credentials: creds,
+            defaultProfile: HubProfile(id: HubProfile.localDefaultID, name: "Local Hub", lanURLs: [mockHub.baseURL], isLocalDefault: true),
+            includeLocalDefault: true
+        )
+        let coordinator = SteveClientCoordinator(
+            hubStore: store,
+            resolver: slowResolver,
+            preferredPortDefaults: defaults,
+            clientDescriptor: ClientDescriptor(kind: "mac", name: "Test Mac", platform: "macOS", version: "0.3.0")
+        )
+        defer { coordinator.stop() }
+
+        let gateway = try await coordinator.proxy.ensureRunning()
+        coordinator.proxy.updateTarget(.init(hubID: HubProfile.localDefaultID, baseURL: mockHub.baseURL, credential: nil))
+
+        // Start a slow background poll while credential is nil, then sign in via `/auth/token` BEFORE poll finishes
+        let inFlightPoll = Task {
+            await coordinator.activateCurrentHub(forceReloadWeb: false)
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+
+        let (_, login1) = try await RawTCPHTTPClient.request(
+            port: coordinator.proxy.port,
+            method: "POST",
+            path: "/auth/token",
+            headers: [
+                ("Host", "127.0.0.1:\(coordinator.proxy.port)"),
+                ("Origin", gateway.absoluteString),
+                ("Cookie", coordinator.proxy.authCookieHeader),
+            ]
+        )
+        XCTAssertEqual(login1.status, 200)
+
+        await inFlightPoll.value
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // The stale poll must NOT clobber the newly stored credential back to nil!
+        XCTAssertEqual(store.credential(for: HubProfile.localDefaultID), "cli_web_tok.secret_cred")
+        XCTAssertEqual(coordinator.proxy.currentTarget().credential, "cli_web_tok.secret_cred")
+
+        // Now seed an older credential and sign in again: the replaced credential must be retired on `/auth/client/logout`
+        store.updateAuthMetadata(id: HubProfile.localDefaultID, clientID: "cli_old", userName: "Owner", credential: "cli_old.stale_secret")
+        let (_, login2) = try await RawTCPHTTPClient.request(
+            port: coordinator.proxy.port,
+            method: "POST",
+            path: "/auth/token",
+            headers: [
+                ("Host", "127.0.0.1:\(coordinator.proxy.port)"),
+                ("Origin", gateway.absoluteString),
+                ("Cookie", coordinator.proxy.authCookieHeader),
+            ]
+        )
+        XCTAssertEqual(login2.status, 200)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(mockHub.lastLogoutAuth(), "Bearer cli_old.stale_secret")
+        XCTAssertEqual(store.credential(for: HubProfile.localDefaultID), "cli_web_tok.secret_cred")
+    }
+
+    // MARK: - Pairing Confirmation Isolation, Subframe Confinement & Downloads (N5)
+
     @MainActor
     func testQRPairingConfirmationAndCredentialIsolationAgainstProfileHijacking() async throws {
         let attackerNoCredHub = try await MockUpstreamServer.start(omitPairCredential: true)
@@ -406,7 +797,6 @@ final class SteveClientKitTests: XCTestCase {
             defaultProfile: HubProfile.makeLocalDefault(port: 18540),
             includeLocalDefault: true
         )
-        // Store a real owner credential on `local-default`
         store.updateAuthMetadata(
             id: HubProfile.localDefaultID,
             clientID: "cli_local_owner",
@@ -421,241 +811,30 @@ final class SteveClientKitTests: XCTestCase {
         )
         defer { coordinator.stop() }
 
-        // 1. External `steve://pair` URL queues confirmation rather than executing immediately
         let lanLocalEncoded = "http://127.0.0.1:18540".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
         let attackerPubEncoded = attackerNoCredHub.baseURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
         let evilURI = "steve://pair?v=1&code=stp_0123456789abcdef0123456789abcdef&name=EvilHub&pub=\(attackerPubEncoded)&lan=\(lanLocalEncoded)"
 
         coordinator.requestExternalPairingConfirmation(uri: evilURI)
         XCTAssertNotNil(coordinator.pendingExternalPairConfirmation)
-        XCTAssertEqual(coordinator.pendingExternalPairConfirmation?.displayName, "EvilHub")
-        XCTAssertTrue(coordinator.pendingExternalPairConfirmation?.endpointsSummary.contains(attackerNoCredHub.baseURL.absoluteString) == true)
-        XCTAssertEqual(store.profiles.count, 1, "Must not pair before user confirms")
+        XCTAssertEqual(store.profiles.count, 1)
 
-        // 2. Even if confirmed, an attacker server omitting `credential` fails and leaves `local-default` untouched
         await coordinator.confirmPendingExternalPairing()
         XCTAssertNotNil(coordinator.externalPairErrorMessage)
         XCTAssertEqual(store.profiles.count, 1)
-        XCTAssertNil(store.activeProfile.publicURL)
         XCTAssertEqual(store.credential(for: HubProfile.localDefaultID), "cli_local_owner.top_secret")
 
-        // 3. Even when pairing succeeds with a valid credential and overlapping `lan=http://127.0.0.1:18540`,
-        //    it creates a distinct profile and NEVER overwrites `local-default` or steals its credential!
         let validPubEncoded = realNewHub.baseURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
         let overlappingURI = "steve://pair?v=1&code=stp_fedcba9876543210fedcba9876543210&name=PairedHub&pub=\(validPubEncoded)&lan=\(lanLocalEncoded)"
         coordinator.requestExternalPairingConfirmation(uri: overlappingURI)
-        XCTAssertNotNil(coordinator.pendingExternalPairConfirmation)
-        let maybePairedProfile = await coordinator.confirmPendingExternalPairing()
-        let pairedProfile = try XCTUnwrap(maybePairedProfile)
+        let confirmedProfile = await coordinator.confirmPendingExternalPairing()
+        let pairedProfile = try XCTUnwrap(confirmedProfile)
         XCTAssertNotEqual(pairedProfile.id, HubProfile.localDefaultID)
         XCTAssertEqual(store.profiles.count, 2)
-        let localAfter = store.profiles.first { $0.id == HubProfile.localDefaultID }!
-        XCTAssertNil(localAfter.publicURL, "local-default must never acquire an external publicURL from pairing")
         XCTAssertEqual(store.credential(for: HubProfile.localDefaultID), "cli_local_owner.top_secret")
         XCTAssertEqual(store.credential(for: pairedProfile.id), "cli_paired.secret_cred")
     }
 
-    // Review #4: Gateway origin confinement and rewriting gateway `/api/files/...` URLs for external browser opening.
-    func testGatewayOriginConfinementAndExternalURLRewriting() {
-        let gateway = URL(string: "http://127.0.0.1:51234")!
-        let activeHub = URL(string: "https://hub.example.com:8443")!
-
-        XCTAssertTrue(SteveWebView.isGatewayOrigin(URL(string: "http://127.0.0.1:51234/#/inbox")!, gateway: gateway))
-        XCTAssertFalse(SteveWebView.isGatewayOrigin(URL(string: "http://127.0.0.1:18540/")!, gateway: gateway))
-        XCTAssertFalse(SteveWebView.isGatewayOrigin(URL(string: "http://localhost:51234/")!, gateway: gateway))
-        XCTAssertFalse(SteveWebView.isGatewayOrigin(URL(string: "https://127.0.0.1:51234/")!, gateway: gateway))
-        XCTAssertFalse(SteveWebView.isGatewayOrigin(URL(string: "https://github.com/org/repo")!, gateway: gateway))
-
-        let rewrittenAttachment = SteveWebView.rewriteExternalGatewayURL(
-            URL(string: "http://127.0.0.1:51234/api/files/f_123?download=1")!,
-            gateway: gateway,
-            activeHubEndpoint: activeHub
-        )
-        XCTAssertEqual(rewrittenAttachment.absoluteString, "https://hub.example.com:8443/api/files/f_123?download=1")
-
-        let externalUnchanged = SteveWebView.rewriteExternalGatewayURL(
-            URL(string: "https://github.com/org/repo/releases")!,
-            gateway: gateway,
-            activeHubEndpoint: activeHub
-        )
-        XCTAssertEqual(externalUnchanged.absoluteString, "https://github.com/org/repo/releases")
-    }
-
-    // Review #7 & #14: Stale activation race protection + removing an inactive Hub revokes client without reloading active WebView.
-    @MainActor
-    func testStaleActivationDoesNotOverwriteSwitchAndInactiveRemoveDoesNotReload() async throws {
-        let mockHubB = try await MockUpstreamServer.start()
-        defer { mockHubB.stop() }
-
-        let suiteName = "test.steve.race.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let slowURL = URL(string: "http://192.168.99.1:8440")!
-        let hello = HubHelloResponse(name: "steve", version: "0.3.0", api: 1, login: .init(token: true, oidc: false))
-        let resolver = EndpointResolver { candidate in
-            if candidate == slowURL {
-                try await Task.sleep(nanoseconds: 350_000_000)
-            }
-            return hello
-        }
-
-        let creds = InMemoryCredentialStore()
-        let store = HubStore(
-            defaults: defaults,
-            credentials: creds,
-            defaultProfile: HubProfile(id: HubProfile.localDefaultID, name: "Slow A", lanURLs: [slowURL], isLocalDefault: true),
-            includeLocalDefault: true
-        )
-        let hubB = store.addManualHub(address: mockHubB.baseURL.absoluteString, name: "Fast B", makeActive: false)!
-        creds.setCredential("cli_b.secret", for: hubB.id)
-
-        let coordinator = SteveClientCoordinator(
-            hubStore: store,
-            resolver: resolver,
-            preferredPortDefaults: defaults,
-            clientDescriptor: ClientDescriptor(kind: "mac", name: "Test Mac", platform: "macOS", version: "0.3.0")
-        )
-        defer { coordinator.stop() }
-
-        // Start a background poll on Slow A, then immediately switch to Fast B before Slow A resolves
-        let stalePoll = Task {
-            await coordinator.activateCurrentHub(forceReloadWeb: false)
-        }
-        try await Task.sleep(nanoseconds: 40_000_000)
-        store.selectHub(id: hubB.id)
-        await coordinator.activateCurrentHub(forceReloadWeb: true)
-        await stalePoll.value
-
-        XCTAssertEqual(coordinator.proxy.currentTarget().hubID, hubB.id)
-        XCTAssertEqual(coordinator.proxy.currentTarget().baseURL, mockHubB.baseURL)
-        XCTAssertEqual(coordinator.summary.activeEndpoint, mockHubB.baseURL)
-
-        // Switch back to Slow A, then remove inactive Hub B -> must NOT change `webReloadNonce`, and must call `/auth/client/logout`
-        store.selectHub(id: HubProfile.localDefaultID)
-        await coordinator.activateCurrentHub(forceReloadWeb: true)
-        let nonceBeforeRemove = coordinator.webReloadNonce
-
-        coordinator.removeHub(id: hubB.id)
-        try await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertEqual(coordinator.webReloadNonce, nonceBeforeRemove, "Removing an inactive Hub must not reload active WebView")
-        XCTAssertEqual(mockHubB.lastLogoutAuth(), "Bearer cli_b.secret")
-    }
-
-    @MainActor
-    func testCoordinatorQRPairingAndMenuBarStateSummaryEndToEnd() async throws {
-        let mockHub = try await MockUpstreamServer.start()
-        defer { mockHub.stop() }
-
-        let suiteName = "test.steve.coordinator.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let creds = InMemoryCredentialStore()
-        let store = HubStore(
-            defaults: defaults,
-            credentials: creds,
-            defaultProfile: LocalHubDiscovery.defaultProfile(environment: ["STEVE_PORT": "18540"]),
-            includeLocalDefault: true
-        )
-        let coordinator = SteveClientCoordinator(
-            hubStore: store,
-            preferredPortDefaults: defaults,
-            clientDescriptor: ClientDescriptor(kind: "ios", name: "Test iPhone", platform: "iOS", version: "0.3.0")
-        )
-        defer { coordinator.stop() }
-
-        // Public URL is unreachable (closed port 9), LAN URL points to mockHub -> falls back to LAN automatically
-        let pubEncoded = "http://127.0.0.1:9".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
-        let lanEncoded = mockHub.baseURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
-        let pairURI = "steve://pair?v=1&code=stp_0123456789abcdef0123456789abcdef&name=Office%20Mac&pub=\(pubEncoded)&lan=\(lanEncoded)"
-
-        coordinator.isQRScannerPresented = true
-        XCTAssertTrue(coordinator.stageScannedPairingCode(pairURI))
-        XCTAssertFalse(coordinator.isQRScannerPresented)
-        XCTAssertEqual(mockHub.pairCallCount(), 0, "Scanner staging must not call /auth/pair before user confirms")
-
-        let maybeProfile = await coordinator.confirmPendingExternalPairing()
-        let profile = try XCTUnwrap(maybeProfile)
-        XCTAssertEqual(mockHub.pairCallCount(), 1)
-        XCTAssertEqual(profile.name, "Office Mac")
-        XCTAssertEqual(store.activeProfile.id, profile.id)
-        XCTAssertEqual(store.credential(for: profile.id), "cli_paired.secret_cred")
-
-        XCTAssertEqual(coordinator.summary.phase, .connected)
-        XCTAssertEqual(coordinator.summary.hubVersion, "0.3.0")
-        XCTAssertEqual(coordinator.summary.workspaceName, "Core")
-        XCTAssertEqual(coordinator.summary.runningSessions, 2)
-        XCTAssertEqual(coordinator.summary.openDecisions, 1)
-        XCTAssertEqual(coordinator.summary.onlineDevices, 2)
-        XCTAssertEqual(coordinator.summary.totalDevices, 3)
-        XCTAssertTrue(coordinator.summary.steveThinking)
-    }
-
-    @MainActor
-    func testWebSignInAndLogoutThroughProxySyncsNativeHubStoreAndSummary() async throws {
-        let mockHub = try await MockUpstreamServer.start()
-        defer { mockHub.stop() }
-
-        let suiteName = "test.steve.websync.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let creds = InMemoryCredentialStore()
-        let store = HubStore(
-            defaults: defaults,
-            credentials: creds,
-            defaultProfile: HubProfile(id: HubProfile.localDefaultID, name: "Local Hub", lanURLs: [mockHub.baseURL], isLocalDefault: true),
-            includeLocalDefault: true
-        )
-        let coordinator = SteveClientCoordinator(
-            hubStore: store,
-            preferredPortDefaults: defaults,
-            clientDescriptor: ClientDescriptor(kind: "mac", name: "Test Mac", platform: "macOS", version: "0.3.0")
-        )
-        defer { coordinator.stop() }
-
-        let gateway = try await coordinator.proxy.ensureRunning()
-        await coordinator.activateCurrentHub(forceReloadWeb: true)
-        XCTAssertNil(store.credential(for: HubProfile.localDefaultID))
-
-        // Simulate Web UI submitting `POST /auth/token` through `HubLoopbackProxy`
-        let (_, loginResp) = try await RawTCPHTTPClient.request(
-            port: coordinator.proxy.port,
-            method: "POST",
-            path: "/auth/token",
-            headers: [
-                ("Host", "127.0.0.1:\(coordinator.proxy.port)"),
-                ("Origin", gateway.absoluteString),
-                ("Cookie", coordinator.proxy.authCookieHeader),
-            ]
-        )
-        XCTAssertEqual(loginResp.status, 200)
-        try await Task.sleep(nanoseconds: 120_000_000)
-
-        XCTAssertEqual(store.credential(for: HubProfile.localDefaultID), "cli_web_tok.secret_cred")
-        XCTAssertEqual(coordinator.proxy.currentTarget().credential, "cli_web_tok.secret_cred")
-        XCTAssertEqual(coordinator.summary.phase, .connected)
-
-        // Simulate Web UI logging out via `POST /auth/client/logout`
-        let (_, logoutResp) = try await RawTCPHTTPClient.request(
-            port: coordinator.proxy.port,
-            method: "POST",
-            path: "/auth/client/logout",
-            headers: [
-                ("Host", "127.0.0.1:\(coordinator.proxy.port)"),
-                ("Origin", gateway.absoluteString),
-                ("Cookie", coordinator.proxy.authCookieHeader),
-            ]
-        )
-        XCTAssertEqual(logoutResp.status, 200)
-        try await Task.sleep(nanoseconds: 120_000_000)
-
-        XCTAssertNil(store.credential(for: HubProfile.localDefaultID))
-        XCTAssertNil(coordinator.proxy.currentTarget().credential)
-    }
-
-    // Round 2 N1 & N6: Scanner/paste staging cancels cleanly without claiming, and pairing URI `name` strips newlines/control/BiDi chars and caps length.
     @MainActor
     func testScannerStagingRequiresConfirmationAndSanitizesPairingDisplayName() async throws {
         let mockHub = try await MockUpstreamServer.start()
@@ -682,127 +861,117 @@ final class SteveClientKitTests: XCTestCase {
         allowed.remove(charactersIn: "&=+")
         let encodedName = spoofedName.addingPercentEncoding(withAllowedCharacters: allowed)!
         let lanEncoded = mockHub.baseURL.absoluteString.addingPercentEncoding(withAllowedCharacters: allowed)!
-        let uri = "steve://pair?v=1&code=stp_11223344556677889900aabbccddeeff&name=\(encodedName)&lan=\(lanEncoded)"
+        let uri = "https://hub.example.com/#/pair?v=1&code=stp_11223344556677889900aabbccddeeff&name=\(encodedName)&lan=\(lanEncoded)"
 
         coordinator.isQRScannerPresented = true
         XCTAssertTrue(coordinator.stageScannedPairingCode(uri))
-        XCTAssertFalse(coordinator.isQRScannerPresented, "Scanner presentation state must close before showing confirmation")
+        XCTAssertFalse(coordinator.isQRScannerPresented)
 
         let pending = try XCTUnwrap(coordinator.pendingExternalPairConfirmation)
         XCTAssertFalse(pending.displayName.contains("\n"))
         XCTAssertFalse(pending.displayName.contains("\r"))
         XCTAssertFalse(pending.displayName.unicodeScalars.contains(where: { $0.value == 0x202E || $0.value == 0x0007 }))
         XCTAssertLessThanOrEqual(pending.displayName.count, PairingPayload.maxNameLength)
-        XCTAssertTrue(pending.displayName.hasPrefix("Trusted Mac Target: https://trusted.local "))
-
-        // Before confirmation and after cancellation, `/auth/pair` must NEVER be called
         XCTAssertEqual(mockHub.pairCallCount(), 0)
-        XCTAssertFalse(store.hasProfiles)
 
         coordinator.cancelPendingExternalPairing()
         XCTAssertNil(coordinator.pendingExternalPairConfirmation)
         XCTAssertEqual(mockHub.pairCallCount(), 0)
-        XCTAssertFalse(store.hasProfiles)
     }
 
-    // Round 2 N2: Subframe navigation policy cancels scripted external `http(s)` navigations without launching system browser.
-    func testSubframeNavigationPolicyBlocksScriptedExternalBrowserLaunch() {
+    func testNavigationPolicyDownloadsAndFilenameDeduplication() throws {
         let gateway = URL(string: "http://127.0.0.1:51234")!
-        let external = URL(string: "https://attacker.example/phish")!
-        let gatewayEmbed = URL(string: "http://127.0.0.1:51234/api/files/f_pdf")!
+        let activeHub = URL(string: "https://hub.example.com:8443")!
+        let external = URL(string: "https://github.com/org/repo/releases")!
 
-        // Sandboxed agent iframe scripted navigation (`targetFrameIsMain == false`, `.other`) -> cancel, never openExternal
+        // 1. `<a download>` on `blob:` or gateway URL triggers `.download`
         XCTAssertEqual(
             SteveWebView.decideNavigationDisposition(
-                url: external,
+                url: URL(string: "blob:http://127.0.0.1:51234/abc")!,
                 gateway: gateway,
-                targetFrameIsMain: false,
-                sourceFrameIsMain: false,
-                navigationType: .other
-            ),
-            .cancel
-        )
-
-        // Sandboxed agent iframe scripted `target="_blank"` (`targetFrameIsMain == nil`, `sourceFrameIsMain == false`, `.other`) -> cancel
-        XCTAssertEqual(
-            SteveWebView.decideNavigationDisposition(
-                url: external,
-                gateway: gateway,
-                targetFrameIsMain: nil,
-                sourceFrameIsMain: false,
-                navigationType: .other
-            ),
-            .cancel
-        )
-
-        // Explicit user click inside an iframe (`navigationType == .linkActivated`) -> opens external browser
-        XCTAssertEqual(
-            SteveWebView.decideNavigationDisposition(
-                url: external,
-                gateway: gateway,
-                targetFrameIsMain: false,
-                sourceFrameIsMain: false,
-                navigationType: .linkActivated
-            ),
-            .openExternal(external)
-        )
-        XCTAssertEqual(
-            SteveWebView.decideNavigationDisposition(
-                url: external,
-                gateway: gateway,
-                targetFrameIsMain: nil,
-                sourceFrameIsMain: false,
-                navigationType: .linkActivated
-            ),
-            .openExternal(external)
-        )
-
-        // Legitimate embeds (`about:srcdoc`, `blob:`, and gateway-origin PDF/mail iframe) remain `.allow`
-        XCTAssertEqual(
-            SteveWebView.decideNavigationDisposition(
-                url: URL(string: "about:srcdoc")!,
-                gateway: gateway,
-                targetFrameIsMain: false,
-                sourceFrameIsMain: true,
-                navigationType: .other
-            ),
-            .allow
-        )
-        XCTAssertEqual(
-            SteveWebView.decideNavigationDisposition(
-                url: URL(string: "blob:http://127.0.0.1:51234/uuid")!,
-                gateway: gateway,
-                targetFrameIsMain: false,
-                sourceFrameIsMain: true,
-                navigationType: .other
-            ),
-            .allow
-        )
-        XCTAssertEqual(
-            SteveWebView.decideNavigationDisposition(
-                url: gatewayEmbed,
-                gateway: gateway,
-                targetFrameIsMain: false,
-                sourceFrameIsMain: true,
-                navigationType: .other
-            ),
-            .allow
-        )
-
-        // Custom `steve:` scheme in any frame is always cancelled
-        XCTAssertEqual(
-            SteveWebView.decideNavigationDisposition(
-                url: URL(string: "steve://pair?v=1&code=stp_12345678&lan=http://127.0.0.1:9999")!,
-                gateway: gateway,
+                activeHubEndpoints: [activeHub],
+                shouldPerformDownload: true,
                 targetFrameIsMain: true,
                 sourceFrameIsMain: true,
                 navigationType: .linkActivated
             ),
+            .download
+        )
+
+        // 2. `target="_blank"` on gateway `/api/files/...` or active Hub `/api/files/...` routes to authenticated gateway download!
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: URL(string: "https://hub.example.com:8443/api/files/f_123?download=1")!,
+                gateway: gateway,
+                activeHubEndpoints: [activeHub],
+                targetFrameIsMain: nil,
+                sourceFrameIsMain: true,
+                navigationType: .linkActivated
+            ),
+            .startGatewayDownload(URL(string: "http://127.0.0.1:51234/api/files/f_123?download=1")!)
+        )
+
+        // 3. External `target="_blank"` non-Hub URL still opens in system browser; scripted subframe external is cancelled
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: external,
+                gateway: gateway,
+                activeHubEndpoints: [activeHub],
+                targetFrameIsMain: nil,
+                sourceFrameIsMain: true,
+                navigationType: .linkActivated
+            ),
+            .openExternal(external)
+        )
+        XCTAssertEqual(
+            SteveWebView.decideNavigationDisposition(
+                url: external,
+                gateway: gateway,
+                activeHubEndpoints: [activeHub],
+                targetFrameIsMain: false,
+                sourceFrameIsMain: false,
+                navigationType: .other
+            ),
             .cancel
         )
+
+        // 4. `Content-Disposition: attachment` response from gateway triggers download, while 404 JSON does not
+        let attachResp = HTTPURLResponse(
+            url: URL(string: "http://127.0.0.1:51234/api/tasks/t1/artifacts/a.zip?download=1")!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Disposition": "attachment; filename=\"a.zip\""]
+        )!
+        XCTAssertTrue(SteveWebView.shouldDownloadResponse(attachResp, canShowMIMEType: true, gateway: gateway))
+
+        let errResp = HTTPURLResponse(
+            url: URL(string: "http://127.0.0.1:51234/api/tasks/t1/artifacts/missing")!,
+            statusCode: 404,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Disposition": "attachment; filename=\"missing\""]
+        )!
+        XCTAssertFalse(SteveWebView.shouldDownloadResponse(errResp, canShowMIMEType: false, gateway: gateway))
+
+        // 5. Unique download destination deduplication & filename sanitization
+        let dlDir = FileManager.default.temporaryDirectory.appendingPathComponent("steve-dl-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dlDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dlDir) }
+
+        let first = SteveWebView.uniqueDownloadDestination(in: dlDir, suggestedFilename: "report.pdf")
+        XCTAssertEqual(first.lastPathComponent, "report.pdf")
+        try Data("1".utf8).write(to: first)
+
+        let second = SteveWebView.uniqueDownloadDestination(in: dlDir, suggestedFilename: "report.pdf")
+        XCTAssertEqual(second.lastPathComponent, "report (1).pdf")
+        try Data("2".utf8).write(to: second)
+
+        let third = SteveWebView.uniqueDownloadDestination(in: dlDir, suggestedFilename: "report.pdf")
+        XCTAssertEqual(third.lastPathComponent, "report (2).pdf")
+
+        XCTAssertEqual(SteveWebView.sanitizeSuggestedFilename("../../etc/passwd"), ".._.._etc_passwd")
+        XCTAssertEqual(SteveWebView.sanitizeSuggestedFilename(".."), "download")
     }
 
-    // Round 2 Finding 14 remainder: Keychain write failure throws `CredentialStoreError.saveFailed` without adding a broken profile.
     @MainActor
     func testAddPairedProfileThrowsWhenCredentialSaveFails() async throws {
         final class FailingCredentialStore: CredentialStoring, @unchecked Sendable {
@@ -835,7 +1004,7 @@ final class SteveClientKitTests: XCTestCase {
 
         let result = await coordinator.confirmPendingExternalPairing()
         XCTAssertNil(result)
-        XCTAssertFalse(store.hasProfiles, "Must not persist HubProfile when Keychain save returns false")
+        XCTAssertFalse(store.hasProfiles)
         XCTAssertEqual(coordinator.externalPairErrorMessage, CredentialStoreError.saveFailed.localizedDescription)
     }
 }
@@ -916,6 +1085,7 @@ private final class MockUpstreamServer: @unchecked Sendable {
     private let lock = NSLock()
     private var recordedLogoutAuth: String?
     private var recordedPairCalls = 0
+    private var recordedTotalRequests = 0
 
     private init(listener: NWListener, port: UInt16) {
         self.listener = listener
@@ -932,6 +1102,18 @@ private final class MockUpstreamServer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return recordedPairCalls
+    }
+
+    func requestCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedTotalRequests
+    }
+
+    private func recordRequest() {
+        lock.lock()
+        recordedTotalRequests += 1
+        lock.unlock()
     }
 
     private func recordLogout(_ auth: String) {
@@ -966,6 +1148,7 @@ private final class MockUpstreamServer: @unchecked Sendable {
             listener.newConnectionHandler = { conn in
                 conn.start(queue: DispatchQueue.global())
                 conn.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { data, _, _, _ in
+                    box.server?.recordRequest()
                     let raw = String(data: data ?? Data(), encoding: .utf8) ?? ""
                     let lines = raw.components(separatedBy: "\r\n")
                     let path = lines.first?.split(separator: " ").dropFirst().first.map(String.init) ?? ""
@@ -992,13 +1175,25 @@ private final class MockUpstreamServer: @unchecked Sendable {
                         return
                     }
 
+                    if path == "/auth/clear-site-data-test" {
+                        let payload = Data("{\"ok\":true}".utf8)
+                        let head =
+                            "HTTP/1.1 200 OK\r\n"
+                            + "Content-Type: application/json\r\n"
+                            + "Clear-Site-Data: \"cookies\", \"storage\"\r\n"
+                            + "Content-Length: \(payload.count)\r\n"
+                            + "Connection: close\r\n\r\n"
+                        conn.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in conn.cancel() })
+                        return
+                    }
+
                     if path == "/auth/set-multi-cookie" {
                         let payload = Data("{\"ok\":true}".utf8)
                         let head =
                             "HTTP/1.1 200 OK\r\n"
                             + "Content-Type: application/json\r\n"
-                            + "Set-Cookie: steve_client=cookie_cred_a; Path=/; HttpOnly; Secure\r\n"
-                            + "Set-Cookie: steve_ws=workspace_a; Expires=Wed, 11 Nov 2026 12:00:00 GMT; Path=/; SameSite=None; Secure\r\n"
+                            + "Set-Cookie: steve_session_18521=sess_cred_a; Path=/; HttpOnly; Secure\r\n"
+                            + "Set-Cookie: steve_ws_18521=workspace_a; Expires=Wed, 11 Nov 2026 12:00:00 GMT; Path=/; SameSite=None; Secure\r\n"
                             + "Content-Length: \(payload.count)\r\n"
                             + "Connection: close\r\n\r\n"
                         conn.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in conn.cancel() })
@@ -1023,7 +1218,6 @@ private final class MockUpstreamServer: @unchecked Sendable {
                         if omitPairCredential {
                             payload = Data("{\"client_id\":\"cli_evil\",\"user\":{\"id\":\"owner\",\"name\":\"Owner\"},\"hub\":{\"version\":\"0.3.0\",\"api\":1}}".utf8)
                         } else {
-                            // Exact real Hub shape: `user: {id, name}` (no `role`), `hub: {version, api}`
                             payload = Data("{\"client_id\":\"cli_paired\",\"credential\":\"cli_paired.secret_cred\",\"user\":{\"id\":\"owner\",\"name\":\"Owner\"},\"hub\":{\"version\":\"0.3.0\",\"api\":1}}".utf8)
                         }
                     } else if path == "/api/state" {

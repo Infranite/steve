@@ -164,9 +164,8 @@ struct MacMenuBarPopoverView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button(L10n.tr("添加 / 管理…", "Manage…")) {
-                    activateMainWindow(route: nil)
-                    coordinator.isHubSwitcherPresented = true
+                Button(L10n.tr("添加 Hub…", "Add Hub…")) {
+                    activateMainWindow(route: "#/hub/add")
                 }
                 .buttonStyle(.link)
                 .font(.caption)
@@ -210,10 +209,9 @@ struct MacMenuBarPopoverView: View {
                 .controlSize(.regular)
 
                 Button {
-                    activateMainWindow(route: nil)
-                    coordinator.isPairQRPresented = true
+                    activateMainWindow(route: "#/hub/pair")
                 } label: {
-                    Label(L10n.tr("手机扫码配对", "Pair Phone"), systemImage: "qrcode")
+                    Label(L10n.tr("配对新设备…", "Pair Device…"), systemImage: "qrcode")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -287,7 +285,7 @@ struct MacMenuBarPopoverView: View {
         switch coordinator.summary.route {
         case .publicNetwork: return "globe"
         case .lan: return "wifi"
-        case .tailnet: return "point.3.connected.trianglepath.dotted"
+        case .privateOverlay: return "point.3.connected.trianglepath.dotted"
         case .loopback: return "laptopcomputer"
         case .proxy: return "arrow.left.arrow.right"
         case .unknown: return "network"
