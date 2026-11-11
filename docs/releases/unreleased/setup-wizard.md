@@ -1,7 +1,0 @@
-- `steve setup` 在终端里是一个向导：先把问题问完（角色、谁能连到这个 Hub、装哪些 ACP 适配器），再一步步执行并显示进度，结束时可以直接启动 Hub、等它就绪并打开浏览器。不在终端里（管道、`TERM=dumb`、`STEVE_PLAIN=1`）时仍是逐行输出，只注册服务、不启动。
-- 安装时不再询问浏览器地址：它由监听地址推出，需要别的地址时用 `--public-url URL`，之后用 `steve setup --reconfigure` 改。
-- 适配器可以选：向导里勾选，或 `--adapters claude-code,codex|all|none`；之后用 `steve adapters install <id>…` 补装。没选的适配器不会被自动安装或升级，启动检查也不再为它报缺失。
-- 数据目录里已经有另一个版本的安装时，向导会问是否全新安装；`--fresh` 直接这样做：停掉并注销旧服务，把整个目录改名为 `<目录>.bak-<时间>` 保留，不删除任何数据。
-- macOS 上登录钥匙串里留有上一次安装的签名密码时，Hub 启动时用当前安装的密码替换它，不再因为“密码不一致”卡住升级签名。
-- `steve hub status` 和 `steve hub doctor` 在终端里显示正在运行的版本（来自 Hub 自己的 `/healthz`）；`--json` 输出不变。
-- `steve` 命令行的全部文字有中文和英文两套：`--lang zh-CN|en` 优先，其次是 `STEVE_LANG`、`LC_ALL`、`LC_MESSAGES`、`LANG`，macOS 上再看系统语言，都没有时用中文。
