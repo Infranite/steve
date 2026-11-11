@@ -231,6 +231,26 @@ mod tests {
             Some("Haiku")
         );
         assert_eq!(pick(&[""], None, &mixed), None);
+        // what a Codex behind a gateway offered on 2026-11-11: no `mini` at all, the quick tier
+        // under another word, with and without a route, and a default on a route that has none
+        let codex = [
+            "gpt-6.1-sol",
+            "gw/gemini-3-flash",
+            "codex/gpt-5.6-luna",
+            "codex/gpt-6-luna",
+            "passthrough/local/mac-mini/qwen-3",
+            "gpt-6-luna",
+            "gpt-5.6-luna",
+        ];
+        assert_eq!(pick(&["mini"], Some("gw/gemini-4"), &codex), None);
+        assert_eq!(
+            pick(&["luna", "mini"], Some("gw/gemini-4"), &codex).as_deref(),
+            Some("codex/gpt-6-luna")
+        );
+        assert_eq!(
+            pick(&["luna", "mini"], Some("gpt-6.1-sol"), &codex).as_deref(),
+            Some("gpt-6-luna")
+        );
         // nothing before a probe has answered
         let mut h = offering(&["haiku"], None, &claude);
         h.ready = None;

@@ -456,7 +456,8 @@ const BUILTINS: &[Builtin] = &[
             fallback_models: vec![],
             fallback_efforts: strings(&["low", "medium", "high", "xhigh", "max", "ultra"]),
             model_fallback: false,
-            fast_models: strings(&["mini"]),
+            // what Codex calls its quick tier now, then what it called it before
+            fast_models: strings(&["luna", "mini"]),
         },
     },
 ];
