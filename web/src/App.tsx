@@ -8,8 +8,8 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
 import { api, signIn } from "@/api"
-import { API, currentHub, hello, hubBase, hubUrl, nativeBridge, rememberHub, setHub } from "@/hub"
-import { HubChooser, HubLine, HubLostBanner, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
+import { API, currentHub, hello, hubBase, HubError, hubUrl, nativeBridge, openUrl, rememberHub, setHub } from "@/hub"
+import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command"
 import { BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, Building2Icon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LockIcon, QrCodeIcon, UsersRoundIcon, WorkflowIcon, InboxIcon, ListTodoIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, PlugIcon, PlusIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon } from "lucide-react"
 import { st, useStore, start } from "@/store"
@@ -133,19 +133,22 @@ function TokenSignIn() {
   const [user, setUser] = useState("")
   const [token, setToken] = useState("")
   const [error, setError] = useState("")
+  /* the browser did not keep the sign-in of a Hub on another address: that Hub's own page can */
+  const [there, setThere] = useState(false)
   const [busy, setBusy] = useState(false)
   const go = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!user.trim() || !token.trim() || busy) return
-    setBusy(true); setError("")
+    setBusy(true); setError(""); setThere(false)
     try { await api.tokenSignIn(user.trim(), token.trim(), st.webVersion); location.reload() }
-    catch (x) { setError((x as Error).message); setBusy(false) }
+    catch (x) { setError(hubErrorText(x)); setThere(x instanceof HubError && x.code === "no-session" && !!hubBase()); setBusy(false) }
   }
   return (
     <form onSubmit={go} className="flex w-full max-w-xs flex-col gap-2 text-left" data-token-sign-in>
       <Input value={user} onChange={(e) => setUser(e.target.value)} placeholder={t("shell:app.userName")} autoComplete="username" autoFocus />
       <Input value={token} onChange={(e) => setToken(e.target.value)} placeholder={t("shell:app.accessToken")} type="password" autoComplete="current-password" />
-      {error && <div className="type-footnote text-destructive">{error}</div>}
+      {error && <div className="type-footnote text-destructive" role="alert" data-sign-in-error>{error}</div>}
+      {there && <Button type="button" variant="outline" onClick={() => { location.href = openUrl(hubBase()) }} data-sign-in-there>{t("shell:hub.pairOpenThere")}</Button>}
       <Button type="submit" disabled={busy || !user.trim() || !token.trim()}>{busy ? <Spinner className="size-4" /> : t("shell:app.signIn")}</Button>
       <div className="type-footnote text-muted-foreground">{t("shell:app.tokenHint")}</div>
     </form>
@@ -193,7 +196,9 @@ export default function App() {
   }, [a, b])
   useEffect(() => {
     if (!intent || !up) return
-    openSheet(intent === "pair" ? "pairClient" : "hubs", { add: true }); setIntent("")
+    /* in a browser anyone's link can carry the route: the code is made on a click. In a shell it is the shell's menu */
+    if (intent === "pair") openSheet("pairClient", { ask: !nativeBridge() }); else openSheet("hubs", { add: true })
+    setIntent("")
   }, [intent, up])
   const pairing = usePairRequest()
   const title = (sub: string) => <><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>
@@ -252,7 +257,7 @@ export default function App() {
         {sh?.kind === "import" && <ImportDialog />}
         {sh?.kind === "deleteBot" && <DeleteBotDialog k={sh.payload.k} />}
         {sh?.kind === "pair" && <PairDialog />}
-        {sh?.kind === "pairClient" && <PairDeviceDialog />}
+        {sh?.kind === "pairClient" && <PairDeviceDialog ask={sh.payload?.ask === true} />}
         {sh?.kind === "hubs" && <HubsDialog add={sh.payload?.add} />}
         <HubsOfferDialog />
         {sh?.kind === "tag" && <TagDialog id={sh.payload?.id} item={sh.payload?.item} name={sh.payload?.name} />}

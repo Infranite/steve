@@ -1,7 +1,7 @@
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
-import { clientInfo, hubUrl } from "./hub"
+import { clientInfo, hubBase, hubUrl, signedIn } from "./hub"
 import type { Workflow } from "./workflow"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
@@ -320,6 +320,7 @@ export const api = {
     const r = await fetch(hubUrl("/auth/token"), { method: "POST", headers: { "content-type": "application/json", "accept-language": lang() }, credentials: "include",
       body: JSON.stringify({ user, token, cookie: true, client: clientInfo(version) }) })
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error ?? t("shell:http.failed", { status: r.status })) }
+    await signedIn(hubBase())
   },
 }
 /** the live stream; `cursor` is the watermark of the state on screen, `onOpen(resumed)` is false when the Hub could not

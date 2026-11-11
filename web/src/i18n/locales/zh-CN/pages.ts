@@ -42,6 +42,7 @@ export default {
     pairSub: "让另一台设备登录当前账号：用它的相机或 Steve App 扫描二维码，或在它的浏览器里打开配对链接。二维码和链接 5 分钟内有效，只能用一次。",
     pairButton: "生成配对二维码",
     pairRefresh: "刷新二维码",
+    pairShow: "显示配对二维码",
     pairCopyUri: "复制配对链接",
     pairAddress: "另一台设备将连接到",
     pairAddressPick: "另一台设备将连接到（它连不上时换一个地址）",
