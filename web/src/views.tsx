@@ -35,7 +35,7 @@ import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
 import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
-import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
+import { BotAvatar, BotName, Chips, closeSheet, useScrollMore, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
 import { YoloPill, yoloState } from "@/yolo/switch"
@@ -119,6 +119,32 @@ const FILTER = (set: boolean) => cn("h-7 px-2 text-[12.5px] [&>svg]:opacity-60",
 export const showItems = (f: "全部" | "等你" | "进行中", project?: string, bot?: string) => { filt = f === "等你" ? "wait" : f === "进行中" ? "run" : "all"; projF = project ?? "all"; botF = bot ?? "all"; tagF = "all"; kindF = "all"; q = ""; itemsView = "list"; go("#/items") }
 export const showTag = (id: string) => { if (isKind(tag(id))) kindF = id; else tagF = id; filt = "all"; itemsView = "list"; go("#/items") }
 const PRI_ORDER: Record<string, number> = { 高: 0, 中: 1, 低: 2 }
+/** the board: a column per open status. An empty column takes less room than one with cards, so the usual few busy
+ *  statuses fit the page; when they still don't, the board scrolls sideways in its own area, columns snapping to its
+ *  edge and the side with more fading out, and the page itself never scrolls sideways. */
+function ItemsBoard({ groups, xs }: { groups: [Item["st"], string][]; xs: Item[] }) {
+  const t = useT(), [ref, more] = useScrollMore<HTMLDivElement>("x")
+  const cols = groups.map(([s, l]) => [s, l, xs.filter((i) => itemDisplayStatus(i) === s)] as const)
+  return (
+    <div ref={ref} className="-mx-1 grid snap-x snap-proximity scroll-px-1 grid-flow-col gap-3 overflow-x-auto px-1 pb-2 data-[more~=end]:mask-r-from-[calc(100%-3rem)] data-[more~=start]:mask-l-from-[calc(100%-3rem)]"
+      style={{ gridTemplateColumns: cols.map(([, , g]) => (g.length ? "minmax(13.5rem,1fr)" : "minmax(8.5rem,0.6fr)")).join(" ") }} data-items-board data-more={more}>
+        {cols.map(([s, l, g]) => (
+        <div key={s} className="flex min-h-72 min-w-0 snap-start flex-col gap-2 rounded-xl bg-muted/60 p-2" data-board-col={s}>
+          <div className="flex items-center gap-2 px-2 py-1.5 type-label"><StatusDot s={s} />{l}<span className="tabular-nums text-muted-foreground">{g.length}</span></div>
+          {g.map((i) => { const relation = workflowRelation(i, st.items); return (
+            <button key={i.id} type="button" onClick={() => go("#/items/" + i.id)} className="rounded-lg border bg-card p-3 text-left transition-shadow duration-150 hover:shadow-md" data-kanban-card={i.id}>
+              <ItemNo id={i.id} /><div className="mt-0.5 type-callout font-medium">{i.t}</div>
+              {relation && <div className="mt-1 type-footnote font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</div>}
+              {relation?.kind !== "paused" && relation?.kind !== "previous" && <div className="mt-1 line-clamp-2 type-footnote text-muted-foreground">{i.now}</div>}
+              <Tags ids={i.tags} max={2} className="mt-2" />
+              {/* the plan bar keeps its own corner so a narrow card never wraps it under a dangling separator */}
+              <div className="mt-2 flex items-center gap-2 type-footnote text-muted-foreground"><Meta className="min-w-0 flex-1"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}</Meta>{i.plan && <PlanBar i={i} />}</div>
+            </button>
+          ) })}
+        </div>))}
+    </div>
+  )
+}
 export function ItemsView() {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
@@ -183,24 +209,7 @@ export function ItemsView() {
                 <Group>{(fold ? g.slice(0, CLOSED_SHOWN) : g).map(rowOf)}</Group>
               </section>) : null })}</div>)
         : <Empty title={arch ? t("views:items.emptyArch") : st.items.length ? t("views:items.emptyFiltered") : t("views:items.emptyNone")} sub={arch ? (st.cfg.archDays === "0" ? t("views:items.archManual") : t("views:items.archAuto", { count: Number(st.cfg.archDays) })) : st.items.length ? undefined : t("views:items.emptyNoneSub")} />)}
-      {itemsView === "board" && (
-        <div className="-mx-1 grid auto-cols-[minmax(232px,1fr)] grid-flow-col gap-3 overflow-x-auto px-1 pb-2">
-          {groups.filter((g) => g[0] !== "drop" && g[0] !== "fail").map(([s, l]) => { const g = xs.filter((i) => itemDisplayStatus(i) === s); return (
-            <div key={s} className="flex min-h-72 flex-col gap-2 rounded-xl bg-muted/60 p-2">
-              <div className="flex items-center gap-2 px-2 py-1.5 type-label"><StatusDot s={s} />{l}<span className="tabular-nums text-muted-foreground">{g.length}</span></div>
-              {g.map((i) => { const relation = workflowRelation(i, st.items); return (
-                <button key={i.id} type="button" onClick={() => go("#/items/" + i.id)} className="rounded-lg border bg-card p-3 text-left transition-shadow duration-150 hover:shadow-md" data-kanban-card={i.id}>
-                  <ItemNo id={i.id} /><div className="mt-0.5 type-callout font-medium">{i.t}</div>
-                  {relation && <div className="mt-1 type-footnote font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</div>}
-                  {relation?.kind !== "paused" && relation?.kind !== "previous" && <div className="mt-1 line-clamp-2 type-footnote text-muted-foreground">{i.now}</div>}
-                  <Tags ids={i.tags} max={2} className="mt-2" />
-                  {/* the plan bar keeps its own corner so a narrow card never wraps it under a dangling separator */}
-                  <div className="mt-2 flex items-center gap-2 type-footnote text-muted-foreground"><Meta className="min-w-0 flex-1"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}</Meta>{i.plan && <PlanBar i={i} />}</div>
-                </button>
-              ) })}
-            </div>) })}
-        </div>
-      )}
+      {itemsView === "board" && <ItemsBoard groups={groups.filter((g) => g[0] !== "drop" && g[0] !== "fail")} xs={xs} />}
       {itemsView === "graph" && (
         <div className="flex flex-col gap-3">
           <GraphLegend />

@@ -2,7 +2,7 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ItemRow } from "../../src/view-shared"
 import { ItemsView } from "../../src/views"
-import { SidebarProvider } from "../../src/components/ui/sidebar"
+import { SidebarInset, SidebarProvider } from "../../src/components/ui/sidebar"
 import { st, useStore, type Item, type Bot, type Wait } from "../../src/store"
 
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
@@ -38,4 +38,4 @@ function Fixture() {
   useStore()
   return <main style={{ maxWidth: 880, margin: "auto", padding: 20 }} className="flex flex-col">{st.items.map((i) => <ItemRow key={i.id} i={i} />)}</main>
 }
-createRoot(document.getElementById("root")!).render(new URLSearchParams(location.search).has("groups") ? <SidebarProvider><ItemsView /></SidebarProvider> : <Fixture />)
+createRoot(document.getElementById("root")!).render(new URLSearchParams(location.search).has("groups") ? <SidebarProvider><SidebarInset className="relative min-w-0 overflow-hidden"><ItemsView /></SidebarInset></SidebarProvider> : <Fixture />)

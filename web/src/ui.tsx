@@ -293,22 +293,31 @@ const NAV: { h: string; l: "chat" | "inbox" | "items" | "projects" | "sessions" 
   { h: "auto", l: "auto", I: WorkflowIcon, group: "automate" },
   { h: "signals", l: "signals", I: RadioIcon, group: "automate" },
 ]
+/** which ends of a scroll area have more beyond them ("start", "end", both or neither), for `data-more` and a fade
+ *  on that edge, so content that runs on reads as scrolled rather than cut off */
+export function useScrollMore<T extends HTMLElement>(axis: "x" | "y") {
+  const ref = useRef<T>(null), [more, setMore] = useState<string | undefined>()
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const look = () => {
+      const [at, size, all] = axis === "y" ? [el.scrollTop, el.clientHeight, el.scrollHeight] : [Math.abs(el.scrollLeft), el.clientWidth, el.scrollWidth]
+      setMore([at > 1 && "start", at + size < all - 1 && "end"].filter(Boolean).join(" ") || undefined)
+    }
+    const ro = new ResizeObserver(look)
+    ro.observe(el); for (const c of el.children) ro.observe(c)
+    el.addEventListener("scroll", look, { passive: true }); look()
+    return () => { ro.disconnect(); el.removeEventListener("scroll", look) }
+  }, [axis])
+  return [ref, more] as const
+}
 export function Sidebar({ route: full }: { route: string }) {
   const t = useT()
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
   const S = st.bots.steve ?? Object.values(st.bots)[0], n = pendingCards().length
   const people = usePeopleOn(), meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
   const cnt: Record<string, number> = { inbox: n, items: st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length }
-  const nav = useRef<HTMLDivElement>(null), [more, setMore] = useState("")
-  useEffect(() => {
-    const el = nav.current
-    if (!el) return
-    const look = () => setMore([el.scrollTop > 1 && "above", el.scrollTop + el.clientHeight < el.scrollHeight - 1 && "below"].filter(Boolean).join(" "))
-    const ro = new ResizeObserver(look)
-    ro.observe(el); for (const c of el.children) ro.observe(c)
-    el.addEventListener("scroll", look, { passive: true }); look()
-    return () => { ro.disconnect(); el.removeEventListener("scroll", look) }
-  }, [])
+  const [nav, more] = useScrollMore<HTMLDivElement>("y")
   /* the page you are on stays in view when the groups scroll */
   useEffect(() => {
     const el = nav.current, on = el?.querySelector('[aria-current="page"]')
@@ -347,7 +356,7 @@ export function Sidebar({ route: full }: { route: string }) {
       </SidebarHeader>
       {/* a short window gives the groups less room than they need: they scroll between header and footer. The edge
        *  with more beyond it fades and the footer keeps a hairline, so the lower groups read as scrolled, not cut off */}
-      <SidebarContent ref={nav} className="[scrollbar-width:thin]! data-[more~=below]:mask-b-from-[calc(100%-2rem)] data-[more~=above]:mask-t-from-[calc(100%-2rem)]" data-sidebar-nav data-more={more || undefined}>
+      <SidebarContent ref={nav} className="[scrollbar-width:thin]! data-[more~=end]:mask-b-from-[calc(100%-2rem)] data-[more~=start]:mask-t-from-[calc(100%-2rem)]" data-sidebar-nav data-more={more}>
         {NAV_GROUPS.map((group) => <SidebarGroup key={group} className="py-1">
           <SidebarGroupLabel className="h-6 text-[11px] text-muted-foreground">{t(`core:navGroup.${group}`)}</SidebarGroupLabel>
           <SidebarGroupContent><SidebarMenu>{NAV.filter((x) => x.group === group).map((x) => item(x.h, t(`core:nav.${x.l}`), x.I, (route === x.h && !(x.h === "contacts" && meOn)) || (x.h === "contacts" && (route === "orgs" || route === "teams"))))}</SidebarMenu></SidebarGroupContent>

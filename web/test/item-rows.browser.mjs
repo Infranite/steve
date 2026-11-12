@@ -61,8 +61,16 @@ try {
     assert.equal(await grouped.locator('[data-items-group="run"] [data-item-row="ST-44"]').count(), 1)
     assert.equal(await grouped.locator('[data-items-group="run"] [data-item-row="ST-10"]').count(), 0)
     assert.equal(await grouped.locator('[data-items-group="fail"] [data-item-row="ST-43"]').count(), 1, "failed items have their own group")
+    // the board stays in its own area: it may scroll sideways there, the page never does
+    await grouped.locator("[data-seg=board]:visible").click()
+    const board = grouped.locator("[data-items-board]")
+    await board.waitFor()
+    const fit = await board.evaluate((el) => ({ right: el.getBoundingClientRect().right, scrolls: el.scrollWidth > el.clientWidth, more: el.dataset.more ?? "" }))
+    assert.ok(fit.right <= width + 0.5, `board reaches past the window at ${width}px`)
+    assert.equal(fit.scrolls ? /end/.test(fit.more) : true, true, "a board wider than its area says there is more")
+    assert.equal(await grouped.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `page scrolls sideways with the board at ${width}px`)
     await grouped.close()
   }
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["new cycle waiting for your word", "running after take-up", "approval reason and entry", "question entry", "no overflow", "1066/390px", "dark/light"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["new cycle waiting for your word", "running after take-up", "approval reason and entry", "question entry", "no overflow", "board in its own area", "1066/390px", "dark/light"] }))
 } finally { await browser.close() }
