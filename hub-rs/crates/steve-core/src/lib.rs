@@ -149,6 +149,9 @@ pub(crate) struct State {
     /// (the gateway-retry wait ends with a turn end), so a lifecycle stop never cancels under the lock.
     /// The turn is frozen when the stop is asked for, so a turn started meanwhile is left alone.
     cancels: Vec<(runtime::Running, String)>,
+    /// Work-unit sessions whose turn the graph stopped (a pause): that turn ending cancelled is the
+    /// pause, not the unit failing, even when the graph was resumed before the end came back.
+    graph_stops: std::collections::HashSet<String>,
     /// Items whose completion rule is being checked against the remote now (`takeover`).
     probing: HashMap<String, takeover::Looking>,
     /// Numbers the looks in `probing`, so a look that comes back is told from a newer one.

@@ -605,6 +605,7 @@ impl Tx<'_> {
             // Freeze the attempt now; cancellation is sent outside the core lock.
             if let Some(turn) = self.rt().running(&s.id) {
                 self.st.cancels.push((turn, child.into()));
+                self.st.graph_stops.insert(s.id.clone());
             }
         }
         Ok(())
@@ -1097,6 +1098,7 @@ impl Tx<'_> {
         let Some(child) = s.item_id.as_deref() else {
             return Ok(false);
         };
+        let paused_here = self.st.graph_stops.remove(&s.id) && end.stop_reason == "cancelled";
         let item = self.item(child)?;
         if !self.workflow_child(&item)? {
             return Ok(false);
@@ -1113,6 +1115,8 @@ impl Tx<'_> {
         } else {
             if unit.status == "running"
                 && !g.paused
+                /* the pause stopped it; resumed meanwhile, the same session goes on (workflow_drive) */
+                && !paused_here
                 && !self
                     .db()
                     .decisions_of_item(child)?

@@ -290,6 +290,28 @@ fn a_graph_its_coordinator_paused_without_asking_waits_for_you() {
     assert_eq!(k.status(&parent).0, "wait");
 }
 
+/// A pause stops the units' turns; when the graph is resumed before the stopped turn's end comes
+/// back, that end is still the pause, not the unit failing: the same session goes on.
+#[test]
+fn a_turn_the_pause_stopped_is_no_failure_after_a_quick_resume() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let sid = unit(&k, &parent, "a").session_id.unwrap();
+    change(&k, &parent, "pause", None);
+    change(&k, &parent, "resume", None);
+    let before = k.rt.prompts_of(&sid).len();
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    let a = unit(&k, &parent, "a");
+    assert_eq!((a.status.as_str(), a.reason), ("running", None));
+    assert_eq!(k.rt.prompts_of(&sid).len(), before + 1, "resumed in place");
+    assert_eq!(work(&k, &parent).0, "running");
+    assert!(k.open_fails(&parent).is_empty());
+
+    // a turn you stop yourself, with no pause, is the unit's failure as before
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    assert_eq!(unit(&k, &parent, "a").status, "failed");
+}
+
 /// Units that wait for their turn (here: the Hub holds new turns) are queued work, not a stop.
 #[test]
 fn queued_units_are_waited_for() {
