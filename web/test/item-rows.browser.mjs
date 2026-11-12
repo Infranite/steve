@@ -69,6 +69,13 @@ try {
     assert.ok(fit.right <= width + 0.5, `board reaches past the window at ${width}px`)
     assert.equal(fit.scrolls ? /end/.test(fit.more) : true, true, "a board wider than its area says there is more")
     assert.equal(await grouped.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `page scrolls sideways with the board at ${width}px`)
+    // an empty status folds to a rail, so a few busy ones fit beside the sidebar without scrolling
+    const cols = await board.evaluate((el) => [...el.querySelectorAll("[data-board-col]")].map((c) => ({ empty: c.hasAttribute("data-board-empty"), cards: c.querySelectorAll("[data-kanban-card]").length, w: c.getBoundingClientRect().width })))
+    for (const c of cols) assert.equal(c.empty, c.cards === 0)
+    assert.ok(cols.filter((c) => c.empty).every((c) => c.w <= 41), "an empty column is a narrow rail")
+    const need = cols.reduce((n, c) => n + (c.empty ? 40 : 176), 12 * (cols.length - 1))
+    if (need <= (await board.evaluate((el) => el.clientWidth))) assert.equal(fit.scrolls, false, `the busy columns fit but scroll at ${width}px`)
+    if (width === 1066) assert.equal(fit.scrolls, false, "four busy columns fit 1066px")
     await grouped.close()
   }
   assert.deepEqual(errors, [])

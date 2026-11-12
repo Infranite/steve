@@ -119,16 +119,20 @@ const FILTER = (set: boolean) => cn("h-7 px-2 text-[12.5px] [&>svg]:opacity-60",
 export const showItems = (f: "全部" | "等你" | "进行中", project?: string, bot?: string) => { filt = f === "等你" ? "wait" : f === "进行中" ? "run" : "all"; projF = project ?? "all"; botF = bot ?? "all"; tagF = "all"; kindF = "all"; q = ""; itemsView = "list"; go("#/items") }
 export const showTag = (id: string) => { if (isKind(tag(id))) kindF = id; else tagF = id; filt = "all"; itemsView = "list"; go("#/items") }
 const PRI_ORDER: Record<string, number> = { 高: 0, 中: 1, 低: 2 }
-/** the board: a column per open status. An empty column takes less room than one with cards, so the usual few busy
- *  statuses fit the page; when they still don't, the board scrolls sideways in its own area, columns snapping to its
- *  edge and the side with more fading out, and the page itself never scrolls sideways. */
+/** the board: a column per open status. An empty column folds to a narrow rail with its name down the side, and the
+ *  columns with cards share the rest (each at least 11rem), so three busy statuses fit a 1066px window beside the
+ *  sidebar; when they still don't, the board scrolls sideways in its own area, columns snapping to its edge and the
+ *  side with more fading out, and the page itself never scrolls sideways. */
 function ItemsBoard({ groups, xs }: { groups: [Item["st"], string][]; xs: Item[] }) {
   const t = useT(), [ref, more] = useScrollMore<HTMLDivElement>("x")
   const cols = groups.map(([s, l]) => [s, l, xs.filter((i) => itemDisplayStatus(i) === s)] as const)
   return (
     <div ref={ref} className="-mx-1 grid snap-x snap-proximity scroll-px-1 grid-flow-col gap-3 overflow-x-auto px-1 pb-2 data-[more~=end]:mask-r-from-[calc(100%-3rem)] data-[more~=start]:mask-l-from-[calc(100%-3rem)]"
-      style={{ gridTemplateColumns: cols.map(([, , g]) => (g.length ? "minmax(13.5rem,1fr)" : "minmax(8.5rem,0.6fr)")).join(" ") }} data-items-board data-more={more}>
-        {cols.map(([s, l, g]) => (
+      style={{ gridTemplateColumns: cols.map(([, , g]) => (g.length ? "minmax(11rem,1fr)" : "2.5rem")).join(" ") }} data-items-board data-more={more}>
+        {cols.map(([s, l, g]) => !g.length ? (
+        <div key={s} className="flex min-h-72 snap-start flex-col items-center gap-2 rounded-xl bg-muted/60 py-3.5 text-muted-foreground" title={l} data-board-col={s} data-board-empty>
+          <StatusDot s={s} /><span className="type-label [writing-mode:vertical-rl]">{l}</span><span className="type-label tabular-nums">0</span>
+        </div>) : (
         <div key={s} className="flex min-h-72 min-w-0 snap-start flex-col gap-2 rounded-xl bg-muted/60 p-2" data-board-col={s}>
           <div className="flex items-center gap-2 px-2 py-1.5 type-label"><StatusDot s={s} />{l}<span className="tabular-nums text-muted-foreground">{g.length}</span></div>
           {g.map((i) => { const relation = workflowRelation(i, st.items); return (
