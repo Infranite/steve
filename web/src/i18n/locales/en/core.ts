@@ -17,6 +17,8 @@ export default {
   avatarColor: { mist: "Mist blue", lavender: "Lavender", teal: "Teal", amber: "Amber", coral: "Coral", slate: "Slate", navy: "Navy slate", walnut: "Walnut" },
   kind: { bug: "Fix", feat: "Feature", doc: "Docs", refactor: "Refactor", ops: "Ops", chore: "Chore" },
   tagCat: { project: "Project", kind: "Type", delivery: "Delivery", domain: "Domain", client: "Client", topic: "Topic" },
+  delivery: { plan: "Plan", code: "Code", report: "Report", content: "Content", data: "Data", operation: "Operation" },
+  tagDesc: { bug: "Fixing errors, failures or unexpected behavior", feat: "New capabilities, interactions or feature improvements", doc: "Writing and updating docs, proposals and explanations", refactor: "Code restructuring that doesn't change external behavior", ops: "Deployment, upgrades, operations and environment setup", chore: "Dependency upkeep, tool configuration and other chores", plan: "Designs, prototypes or implementation plans", code: "Code, configuration or scripts kept in Git", report: "Findings from research, audits, tests or analysis", content: "Finished content such as manuals, images or slides", data: "Spreadsheets, datasets or exports", operation: "Hands-on operations such as deploys, upgrades or configuration changes" },
   error: { generic: "Something went wrong", loadRetry: "Couldn't load, retrying: {{msg}}", network: "Network error" },
   defaultModel: "Default model",
   unknownHarness: "Unknown harness",

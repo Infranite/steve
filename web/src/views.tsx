@@ -34,7 +34,7 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, useScrollMore, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -86,12 +86,12 @@ export function InboxView() {
             return g.length ? <section key={ty}><SectionLabel>{WT[ty]} · {g.length}</SectionLabel><div className="flex flex-col gap-3">{g.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} />)}</div></section> : null
           })}
           {sz.length > 0 && <section data-snoozed><SectionLabel>{t("views:inbox.snoozed", { count: sz.length })}</SectionLabel>
-            <Group>{sz.map((i) => <Row key={i.id} title={<><ItemNo id={i.id} className="mr-2" />{i.t}</>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: lang() === "zh-CN" ? i.snooze : nearTime(i.snoozeUntil) })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>)}</Group></section>}
+            <Group>{sz.map((i) => <Row key={i.id} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0">{i.t}</span></span>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: lang() === "zh-CN" ? i.snooze : nearTime(i.snoozeUntil) })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>)}</Group></section>}
         </div>
       </>}
       {ibTab === "done" && (st.done.length ? <>
         <Group>{st.done.map((d, n) => (
-          <Row key={n} title={<><ItemNo id={d.id} className="mr-2" />{d.q}</>} sub={d.rel ? <span className="flex min-w-0 flex-wrap items-center gap-x-1">{WT[d.type]} · <RelNote rel={d.rel} className="inline-flex" /> · {d.tm}</span>
+          <Row key={n} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={d.id} /><span className="min-w-0">{d.q}</span></span>} sub={d.rel ? <span className="flex min-w-0 flex-wrap items-center gap-x-1">{WT[d.type]} · <RelNote rel={d.rel} className="inline-flex" /> · {d.tm}</span>
             : d.yolo !== undefined ? <span className="flex min-w-0 flex-wrap items-center gap-x-1">{WT[d.type]} · <YoloMark /> {d.yolo ? t("views:inbox.yoloChoseWhy", { choice: choiceText(d.choice), reason: d.yolo }) : t("views:inbox.yoloChose", { choice: choiceText(d.choice) })} · {d.tm}{d.undone ? ` · ${t("views:inbox.undone")}` : ""}</span>
             : `${WT[d.type]} · ${d.how === "dismissed" ? t("views:inbox.dismissed") : d.how === "expired" ? t("views:inbox.expired", { choice: d.choice }) : t("views:inbox.chose", { choice: d.choice })}${d.via ? ` · ${t("views:inbox.via", { client: d.via })}` : ""} · ${d.tm}${d.undone ? ` · ${t("views:inbox.undone")}` : ""}`} data-done-row={d.id}>
             {d.canUndo && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => undoDecision(n)} data-undo-decision><RotateCcwIcon />{t("views:inbox.undo")}</Button>}
@@ -332,7 +332,7 @@ function TagPicker({ i }: { i: Item }) {
   const t = useT()
   const [q, setQ] = useState("")
   const has = new Set(i.tags ?? [])
-  const xs = st.tags.filter((x) => !isKind(x) && !has.has(x.id) && (!q || [x.name, x.cat, x.desc].some((v) => v.toLowerCase().includes(q.toLowerCase()))))
+  const xs = st.tags.filter((x) => !isKind(x) && !has.has(x.id) && (!q || [x.name, tagLabel(x), x.cat, x.desc, tagDesc(x)].some((v) => v.toLowerCase().includes(q.toLowerCase()))))
   const domain = (i.tags ?? []).filter((x) => !isKind(tag(x)))
   return (
     <DropdownMenu onOpenChange={(o) => !o && setQ("")}>
@@ -340,7 +340,7 @@ function TagPicker({ i }: { i: Item }) {
       <DropdownMenuContent align="start" className="max-h-80 w-72">
         <div className="p-1"><Input autoFocus className="h-8 rounded-md text-[13px]" placeholder={t("views:item.tagSearch")} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} data-tag-search /></div>
         {DOMAIN_CATS.map((c) => { const g = xs.filter((x) => x.cat === c); return g.length ? <div key={c}><div className="px-2 pb-0.5 pt-2 type-footnote text-muted-foreground">{tagCatLabel(c)}</div>
-          {g.map((x) => <DropdownMenuItem key={x.id} onClick={() => setTags(i.id, [...(i.tags ?? []), x.id])} data-tag-opt={x.name} className="flex-col items-start gap-0"><span className="type-callout">{x.name}</span><span className="line-clamp-1 type-footnote text-muted-foreground">{x.desc}</span></DropdownMenuItem>)}</div> : null })}
+          {g.map((x) => <DropdownMenuItem key={x.id} onClick={() => setTags(i.id, [...(i.tags ?? []), x.id])} data-tag-opt={x.name} className="flex-col items-start gap-0"><span className="type-callout">{tagLabel(x)}</span><span className="line-clamp-1 type-footnote text-muted-foreground">{tagDesc(x)}</span></DropdownMenuItem>)}</div> : null })}
         {!xs.length && <div className="px-2 py-2 type-footnote text-muted-foreground">{t("views:item.tagNoMatch")}</div>}
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={() => openSheet("tag", { item: i.id, name: q })} data-new-tag><PlusIcon />{q ? t("views:item.newTagNamed", { name: q }) : t("views:item.newTag")}</DropdownMenuItem>
@@ -560,7 +560,7 @@ export function ItemView({ id }: { id: string }) {
           <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
             <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} />{B && <div className="type-footnote text-muted-foreground">{B.h} · {B.m}</div>}</Prop>
             <ItemPeopleProp id={i.id} Prop={Prop} />
-            <Prop label={t("views:item.propKind")}><Select quiet testId="kind" value={kindOf(i) ?? ""} onChange={(k) => setKind(i.id, k)} options={kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))} />{kindOf(i) && <div className="type-footnote text-muted-foreground">{tag(kindOf(i)!)?.desc}</div>}</Prop>
+            <Prop label={t("views:item.propKind")}><Select quiet testId="kind" value={kindOf(i) ?? ""} onChange={(k) => setKind(i.id, k)} options={kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))} />{kindOf(i) && tag(kindOf(i)!) && <div className="type-footnote text-muted-foreground">{tagDesc(tag(kindOf(i)!)!)}</div>}</Prop>
             <Prop label={t("views:item.propTags")}><div className="flex flex-col gap-1.5 pt-1" data-item-tags>
               <Tags ids={(i.tags ?? []).filter((x) => !isKind(tag(x)))} onRemove={(id) => setTags(i.id, (i.tags ?? []).filter((x) => x !== id))} />
               <TagPicker i={i} /></div></Prop>

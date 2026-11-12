@@ -1110,7 +1110,19 @@ export function patchProject(id: string, p: Partial<RProject>, msg = t("common:s
 
 /* ───────── tags ───────── */
 export const tag = (id: string) => st.tags.find((t) => t.id === id)
-export const tagName = (id: string) => tag(id)?.name ?? id
+/* the built-in tags the Hub seeds in Chinese (ST-34): the six delivery tags by name (core:delivery in zh-CN), and the
+ * default descriptions of those and of the six categories (core:tagDesc, in either language the Hub seeded them in).
+ * A description someone wrote stays as it is. */
+let seeded: { names: Record<string, string>; descs: Record<string, string> } | null = null
+const seededTags = () => seeded ??= {
+  names: Object.fromEntries(Object.entries(i18n.getResource("zh-CN", "core", "delivery") ?? {}).map(([k, v]) => [v as string, k])),
+  descs: Object.fromEntries(["zh-CN", "en"].flatMap((l) => Object.entries(i18n.getResource(l, "core", "tagDesc") ?? {}).map(([k, v]) => [v as string, k]))),
+}
+/** a tag's name in the UI language: a built-in delivery tag translated, any other as it was named */
+export const tagLabel = (tg: Pick<Tag, "name" | "cat">): string => { const k = tg.cat === "交付" && seededTags().names[tg.name]; return k ? t(`core:delivery.${k}` as "core:delivery.plan") : tg.name }
+/** a tag's description in the UI language when it is still the one the Hub seeded */
+export const tagDesc = (tg: Pick<Tag, "desc">): string => { const k = seededTags().descs[tg.desc]; return k ? t(`core:tagDesc.${k}` as "core:tagDesc.bug") : tg.desc }
+export const tagName = (id: string) => { const tg = tag(id); return tg ? tagLabel(tg) : id }
 export const tagUses = (id: string) => st.tagUses[id] ?? 0
 /** tag categories as the Hub stores them (Chinese values); show one with tagCatLabel */
 export const TAG_CATS = ["项目", "类型", "交付", "领域", "客户", "主题"]

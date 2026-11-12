@@ -40,7 +40,7 @@ import { Markdown } from "@/components/markdown"
 import { PermissionDetails, PermissionRecord } from "@/components/permission"
 import { LOADED_WEB_VERSION, permissionDecision, useStore } from "@/store"
 import { shortVersion } from "@/updates"
-import { st, emit, briefHead, pendingCards, acceptChoosesRelease, ST, SS, WT, FAIL_CHOICE, SNOOZE_KEYS, snoozeLabel, tagCatLabel, botName, decide, dismiss, setSt, snooze, tag, isKind, kindColor, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
+import { st, emit, briefHead, pendingCards, acceptChoosesRelease, ST, SS, WT, FAIL_CHOICE, SNOOZE_KEYS, snoozeLabel, tagCatLabel, tagLabel, tagDesc, botName, decide, dismiss, setSt, snooze, tag, isKind, kindColor, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import { YoloPill } from "@/yolo/switch"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
@@ -135,7 +135,7 @@ export function BotName({ k, className }: { k: string | null; className?: string
 export function KindTag({ id, className }: { id: string; className?: string }) {
   const tr = useT(), t = tag(id)
   if (!t) return null
-  return <span title={tr("core:tag.kindTitle", { desc: t.desc })} className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-border bg-background px-1.5 font-mono text-[11px] leading-none text-foreground", className)} data-kind={t.name}>
+  return <span title={tr("core:tag.kindTitle", { desc: tagDesc(t) })} className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-border bg-background px-1.5 font-mono text-[11px] leading-none text-foreground", className)} data-kind={t.name}>
     <span aria-hidden className="size-1.5 rounded-full" style={{ background: kindColor(t.name) }} />{t.name}</span>
 }
 /** tags: type first, then delivery and domain; delivery nature stays visible without a hover */
@@ -149,8 +149,8 @@ export function Tags({ ids, className, onRemove, max }: { ids?: string[]; classN
     <span className={cn("inline-flex flex-wrap items-center gap-1", className)} data-tags>
       {kinds.map((t) => <KindTag key={t.id} id={t.id} />)}
       {shown.map((t) => (
-        <span key={t.id} title={tr("core:tag.title", { cat: tagCatLabel(t.cat), desc: t.desc })} className={cn("inline-flex h-5 items-center gap-0.5 rounded-full px-2 text-[11.5px] leading-none", t.cat === "交付" ? "border border-border bg-background text-foreground" : "bg-muted text-muted-foreground")} data-tag={t.name} data-delivery={t.cat === "交付" || undefined}>
-          {t.cat === "交付" && <span className="mr-0.5 text-muted-foreground">{tagCatLabel(t.cat)} ·</span>}{t.name}{onRemove && <button type="button" aria-label={tr("core:tag.remove", { name: t.name })} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-muted hover:text-foreground"><XIcon className="size-3" /></button>}
+        <span key={t.id} title={tr("core:tag.title", { cat: tagCatLabel(t.cat), desc: tagDesc(t) })} className={cn("inline-flex h-5 items-center gap-0.5 rounded-full px-2 text-[11.5px] leading-none", t.cat === "交付" ? "border border-border bg-background text-foreground" : "bg-muted text-muted-foreground")} data-tag={t.name} data-delivery={t.cat === "交付" || undefined}>
+          {t.cat === "交付" && <span className="mr-0.5 text-muted-foreground">{tagCatLabel(t.cat)} ·</span>}{tagLabel(t)}{onRemove && <button type="button" aria-label={tr("core:tag.remove", { name: tagLabel(t) })} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-muted hover:text-foreground"><XIcon className="size-3" /></button>}
         </span>))}
       {max && rest.length > max && <span className="text-[11.5px] text-muted-foreground">+{rest.length - max}</span>}
     </span>
@@ -585,7 +585,7 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
           {model && <span className="px-1.5 type-footnote text-muted-foreground" data-model>{model}</span>}
           {left}
           <span className="flex-1" />
-          <span className="mr-1 hidden items-center gap-1 type-footnote text-tertiary lg:inline-flex">{chat && <><Kbd>#</Kbd>{tr("core:composer.hintItem")}<Kbd>@</Kbd>Bot<Kbd>/</Kbd>{tr("core:composer.hintCommand")}</>}{!chat && <><Kbd>⏎</Kbd>{tr("core:composer.hintSend")}<Kbd>⇧⏎</Kbd>{tr("core:composer.hintNewline")}</>}</span>
+          <span className={cn("mr-1 hidden items-center gap-1 whitespace-nowrap type-footnote text-tertiary", chat ? "lg:inline-flex" : "xl:inline-flex")}>{chat && <><Kbd>#</Kbd>{tr("core:composer.hintItem")}<Kbd>@</Kbd>Bot<Kbd>/</Kbd>{tr("core:composer.hintCommand")}</>}{!chat && <><Kbd>⏎</Kbd>{tr("core:composer.hintSend")}<Kbd>⇧⏎</Kbd>{tr("core:composer.hintNewline")}</>}</span>
           {queues && <Tooltip><TooltipTrigger render={<InputGroupButton size="icon-sm" variant="outline" aria-label={tr(stopping ? "core:composer.stopping" : "core:composer.stop")} data-stop data-stopping={stopping || undefined} onClick={stop} disabled={stopping} className="rounded-full" />}>
             {stopping ? <Spinner className="size-4" /> : <SquareIcon className="size-3 fill-current" />}</TooltipTrigger><TooltipContent>{stopping ? tr("core:composer.stoppingTip") : <>{tr("core:composer.stopTip")} <Kbd>Esc</Kbd></>}</TooltipContent></Tooltip>}
           <InputGroupButton size="icon-sm" variant="default" aria-label={tr(sending ? "core:composer.submitting" : queues ? "core:composer.queueSend" : "core:composer.send")} title={queues ? tr("core:composer.queueSendTip") : undefined} data-send data-send-queues={queues || undefined} onClick={() => void send()} disabled={sending || up.uploading || (!v.trim() && !up.ready.length) || disabled} className="rounded-full disabled:opacity-25">{sending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" strokeWidth={2.25} />}</InputGroupButton>

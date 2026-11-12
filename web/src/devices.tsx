@@ -53,6 +53,8 @@ function useRemoteNodes() {
 /** a Node's link at a glance: green linked, orange waiting or paused, grey otherwise */
 const NodeDot = ({ node, stale }: { node: RNode; stale: boolean }) => <span aria-hidden className={cn("size-2 shrink-0 rounded-full", stale || node.state === "revoked" ? "bg-muted-foreground" : node.state === "pending" || node.state === "paused" ? "bg-attention" : node.linked ? "bg-success" : "bg-muted-foreground")} />
 
+/** a role the Hub records for a device: "Hub" as it is, the runner role (seeded in Chinese) in the UI language */
+const roleLabel = (r: string) => (r === "执行节点" ? t("shell:devices.roleRunner") : r)
 export function DevicesView() {
   const t = useT()
   const { nodes, error, loading, reload } = useRemoteNodes()
@@ -71,7 +73,7 @@ export function DevicesView() {
       <div className="flex flex-col gap-4">
         {hub && <Panel k="hub" icon={<ServerIcon />} data-device-row={hub.name}
           title={<span className="inline-flex items-center gap-2">{hub.name}<span className="font-mono text-[11px] font-normal text-muted-foreground">Hub</span></span>}
-          sub={<Meta><span>{hub.roles.filter((r) => r !== "Hub").join(" · ") || "Hub"}</span>{hub.version && <span className="font-mono" data-hub-version>{hub.version}</span>}<span>{st.runtimes.filter((r) => r.ok).map((r) => r.name).join(t("shell:list.sep")) || t("shell:devices.noHarness")}</span></Meta>}
+          sub={<Meta><span>{hub.roles.filter((r) => r !== "Hub").map(roleLabel).join(" · ") || "Hub"}</span>{hub.version && <span className="font-mono" data-hub-version>{hub.version}</span>}<span>{st.runtimes.filter((r) => r.ok).map((r) => r.name).join(t("shell:list.sep")) || t("shell:devices.noHarness")}</span></Meta>}
           right={<><Tag tone={hub.status === "暂停接活" ? "wait" : "ok"} data-hub-state><span className="size-1.5 rounded-full bg-current" />{stateText(hub)}</Tag><OwnerChip objectType="device" objectId={hub.id} bare /></>}>
           <VitalsStrip node="local" />
           <PanelFoot meta={<>{t("shell:devices.whereSub")}{hubSessions > 0 && <> · {t("shell:devices.running", { count: hubSessions })}</>}</>}>
@@ -80,7 +82,7 @@ export function DevicesView() {
         </Panel>}
         <Panel k="others" icon={<MonitorSmartphoneIcon />} title={nodes !== null && !error ? t("shell:devices.others", { count: rest.length + nodes.length }) : t("shell:devices.othersTitle")} sub={t("shell:devices.othersSub")}
           right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={loading} onClick={reload} data-refresh-nodes>{loading ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.refreshNodes")}</Button>}>
-          {(rest.length > 0 || !!nodes?.length) && <div className="py-1.5">{rest.map((d) => <PanelRow key={d.id} title={d.name} sub={d.roles.join(" · ")} onClick={() => go("#/devices/" + d.id)}><OwnerChip objectType="device" objectId={d.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
+          {(rest.length > 0 || !!nodes?.length) && <div className="py-1.5">{rest.map((d) => <PanelRow key={d.id} title={d.name} sub={d.roles.map(roleLabel).join(" · ")} onClick={() => go("#/devices/" + d.id)}><OwnerChip objectType="device" objectId={d.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
             {nodes?.map(n => <PanelRow key={n.node_id} data-node-row={n.node_id} onClick={() => setSelected(n.node_id)}
               title={<span className="inline-flex items-center gap-2"><NodeDot node={n} stale={!!error} />{n.name}</span>}
               sub={<Meta><span>{connection(n)}</span>{!n.linked && n.link_error && <span className="line-clamp-1 text-destructive" title={n.link_error.error}>{n.link_error.error}</span>}<span className="font-mono">{n.node_id}</span></Meta>}><Tag tone={regTone(n)}>{registration(n)}</Tag><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
@@ -126,7 +128,7 @@ export function DeviceView({ id }: { id: string }) {
   const pauseButton = <Button size="sm" variant="outline" onClick={pause} data-pause-device>{paused ? <><PlayIcon />{t("shell:devices.resume")}</> : <><PauseIcon />{t("shell:devices.pause")}</>}</Button>
   const stateTag = <Tag tone={paused ? "wait" : "ok"}><span className="size-1.5 rounded-full bg-current" />{stateText(d)}</Tag>
   return (
-    <Page title={d.name} back={["#/devices", t("shell:devices.title")]} max={760} sub={<Meta><span>{d.roles.join(" · ")}</span><span>{d.os}</span><span className="font-mono">{d.version}</span></Meta>}
+    <Page title={d.name} back={["#/devices", t("shell:devices.title")]} max={760} sub={<Meta><span>{d.roles.map(roleLabel).join(" · ")}</span><span>{d.os}</span><span className="font-mono">{d.version}</span></Meta>}
       actions={pauseButton}>
       <div className="flex flex-col gap-4">
         {isHub ? <VitalsSection node="local" right={stateTag}>

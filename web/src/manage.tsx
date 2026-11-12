@@ -21,7 +21,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Robot, Face, AVATAR_COLORS } from "@/robot"
 import {
-  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, finishOnboarding, emit, closedSt,
 } from "@/store"
 import { api, type RKindReview } from "@/api"
@@ -332,7 +332,7 @@ export function SettingsView() {
     <Page title={wide ? t("manage:settings.title") : C[1]} back={wide ? undefined : ["#/settings", t("manage:settings.title")]} max={960}>
       <div className="grid gap-10 md:grid-cols-[200px_minmax(0,1fr)]">
         {wide && <div className="-mt-1">{nav}</div>}
-        <div className="min-w-0 max-w-[640px]" data-settings-pane={cur}>
+        <div className="min-w-0 max-w-[640px] [&_[data-slot=item-description]]:line-clamp-none" data-settings-pane={cur}>
           {wide && <h2 className="mb-5 type-title">{C[1]}</h2>}
           {PH_KEYS[cur] && <AskSteve key={cur} className="mb-8" ctx={cur === "tags" || cur === "models" ? { kind: cur as "tags" | "models" } : { kind: "settings", id: cur }} placeholder={t(`manage:settings.${PH_KEYS[cur]}`)} />}
           <Pane id={cur} />
@@ -503,7 +503,7 @@ function TagsPane() {
     {TAG_CATS.filter((c) => tagCat === "全部" || c === tagCat).map((c) => { const kind = c === KIND_CAT; const xs = kind ? kindTags() : st.tags.filter((tg) => tg.cat === c); return xs.length ? (
       <section key={c}><SectionLabel>{kind ? t("manage:tags.kindSection") : catLabel(t, c)} · {xs.length}</SectionLabel>
         <Group>{xs.map((tg) => (
-          <Row key={tg.id} title={<span className="inline-flex items-center gap-2">{kind ? <KindTag id={tg.id} /> : tg.name}<span className="type-footnote text-muted-foreground">{t("manage:tags.uses", { count: tagUses(tg.id) })}</span>{kind ? <span className="type-footnote text-tertiary">{t("manage:tags.builtin")}</span> : tg.by === "Steve" && <span className="type-footnote text-tertiary">{t("manage:tags.bySteve", { created: tg.created })}</span>}</span>} sub={tg.desc} data-tag-row={tg.name}>
+          <Row key={tg.id} title={<span className="inline-flex items-center gap-2">{kind ? <KindTag id={tg.id} /> : tagLabel(tg)}<span className="type-footnote text-muted-foreground">{t("manage:tags.uses", { count: tagUses(tg.id) })}</span>{kind ? <span className="type-footnote text-tertiary">{t("manage:tags.builtin")}</span> : tg.by === "Steve" && <span className="type-footnote text-tertiary">{t("manage:tags.bySteve", { created: tg.created })}</span>}</span>} sub={tagDesc(tg)} data-tag-row={tg.name}>
             <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-tag-menu={tg.name} />}><MoreHorizontalIcon /></DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-40">
                 <DropdownMenuItem onClick={() => showTag(tg.id)} data-show-tag>{t("manage:tags.showItems")}</DropdownMenuItem>

@@ -91,6 +91,7 @@ export default {
     onlinePaused: "Online · Not taking work",
     running_one: "{{count}} conversation running",
     running_other: "{{count}} conversations running",
+    roleRunner: "Runs sessions",
     noHarness: "No harness available",
     others_one: "Other devices · {{count}}",
     others_other: "Other devices · {{count}}",

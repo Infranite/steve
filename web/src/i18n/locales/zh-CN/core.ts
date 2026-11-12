@@ -23,6 +23,8 @@ export default {
   kind: { bug: "修复", feat: "功能", doc: "文档", refactor: "重构", ops: "运维", chore: "杂项" },
   /* the tag categories the Hub knows (the stored value stays Chinese; this is how it reads) */
   tagCat: { project: "项目", kind: "类型", delivery: "交付", domain: "领域", client: "客户", topic: "主题" },
+  delivery: { plan: "方案", code: "代码", report: "报告", content: "内容", data: "数据", operation: "操作" },
+  tagDesc: { bug: "修复错误、故障或不符合预期的行为", feat: "新增能力、交互或功能改进", doc: "文档、方案、说明的编写与更新", refactor: "不改变外部行为的代码重构", ops: "部署、升级、运维与环境配置", chore: "依赖维护、工具配置等杂项", plan: "设计稿、原型或实施方案", code: "Git 管理的代码、配置或脚本", report: "调研、审计、测试或分析结论", content: "手册、图片、演示稿等成品内容", data: "表格、数据集或导出结果", operation: "部署、升级或配置变更等实际操作" },
   error: { generic: "出错了", loadRetry: "载入失败，正在重试：{{msg}}", network: "网络出错" },
   defaultModel: "默认模型",
   unknownHarness: "未知 harness",

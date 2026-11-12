@@ -84,6 +84,7 @@ export default {
     online: "在线",
     onlinePaused: "在线 · 暂停接活",
     running_other: "{{count}} 个会话运行中",
+    roleRunner: "执行节点",
     noHarness: "没有可用的 harness",
     others_other: "其他设备 · {{count}}",
     othersTitle: "其他设备",
