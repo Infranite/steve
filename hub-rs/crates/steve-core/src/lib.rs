@@ -149,7 +149,9 @@ pub(crate) struct State {
     cancels: Vec<(runtime::Running, String)>,
     /// Work-unit sessions whose turn the graph stopped (a pause): that turn ending cancelled is the
     /// pause, not the unit failing, even when the graph was resumed before the end came back.
-    graph_stops: std::collections::HashSet<String>,
+    /// Kept per turn (session and attempt): only the end of that very turn is the pause's; a later
+    /// turn of the session (resumed meanwhile) stopped by you fails its unit as any other.
+    graph_stops: Vec<runtime::Running>,
     /// Items whose completion rule is being checked against the remote now (`takeover`).
     probing: HashMap<String, takeover::Looking>,
     /// Numbers the looks in `probing`, so a look that comes back is told from a newer one.

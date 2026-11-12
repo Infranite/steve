@@ -604,8 +604,10 @@ impl Tx<'_> {
         for s in self.db().sessions_of_item(child)? {
             // Freeze the attempt now; cancellation is sent outside the core lock.
             if let Some(turn) = self.rt().running(&s.id) {
+                if !self.st.graph_stops.contains(&turn) {
+                    self.st.graph_stops.push(turn.clone());
+                }
                 self.st.cancels.push((turn, child.into()));
-                self.st.graph_stops.insert(s.id.clone());
             }
         }
         Ok(())
@@ -1093,12 +1095,48 @@ impl Tx<'_> {
         Ok(())
     }
 
+    /// The end of the session's turn `attempt` (`None`: the backend names none) came: whether the
+    /// graph stopped that very turn (a pause). Every mark of the session goes: an older turn's end
+    /// that is still to come is a stale one, never this session's current turn.
+    pub(crate) fn graph_stop_take(&mut self, sid: &str, attempt: Option<&str>) -> bool {
+        let marks = std::mem::take(&mut self.st.graph_stops);
+        let mut hit = false;
+        for t in marks {
+            if t.session != sid {
+                self.st.graph_stops.push(t);
+                continue;
+            }
+            hit |= match attempt {
+                Some(a) => self.rt().same_turn(
+                    &t,
+                    &crate::runtime::Running {
+                        session: sid.into(),
+                        attempt: a.into(),
+                    },
+                ),
+                None => true,
+            };
+        }
+        hit
+    }
+
+    /// A stale end of turn `e` came: a pause's mark of that turn goes, the others stay.
+    pub(crate) fn graph_stop_drop(&mut self, e: &crate::runtime::Running) {
+        let marks = std::mem::take(&mut self.st.graph_stops);
+        for t in marks {
+            if !(t.session == e.session && self.rt().same_turn(&t, e)) {
+                self.st.graph_stops.push(t);
+            }
+        }
+    }
+
     /// Work-unit turn ends do not trigger the ordinary item takeover/release path.
     pub(crate) fn workflow_turn_end(&mut self, s: &Session, end: &TurnEnd) -> Result<bool> {
         let Some(child) = s.item_id.as_deref() else {
             return Ok(false);
         };
-        let paused_here = self.st.graph_stops.remove(&s.id) && end.stop_reason == "cancelled";
+        let paused_here =
+            self.graph_stop_take(&s.id, end.attempt.as_deref()) && end.stop_reason == "cancelled";
         let item = self.item(child)?;
         if !self.workflow_child(&item)? {
             return Ok(false);

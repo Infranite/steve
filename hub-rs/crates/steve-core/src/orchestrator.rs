@@ -2004,6 +2004,8 @@ impl Tx<'_> {
             {
                 self.st.pending.remove(sid);
             }
+            /* a pause's mark of that old turn goes with it: it never stands for the turn now */
+            self.graph_stop_drop(e);
             self.diagnostic_session(
                 sid,
                 t.attempt.as_deref(),
@@ -2028,6 +2030,7 @@ impl Tx<'_> {
             && k.attempt.as_deref().is_some_and(|a| a != e.attempt)
             && !self.db().sent_after(&session.id, k.seq.unwrap_or(0))?
         {
+            self.graph_stop_drop(e);
             self.diagnostic_session(
                 &session.id,
                 t.attempt.as_deref(),

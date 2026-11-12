@@ -1022,3 +1022,44 @@ fn a_late_old_turn_end_does_not_undo_your_stop_but_your_message_does() {
     assert_eq!(k.rt.prompts_of(&s).len(), 3, "continued by Steve");
     assert_eq!(steve_lines(&k, &i).len(), 1);
 }
+
+/// ST-25 #5: a pause stops turn A and the graph is resumed at once; the resumed turn B starts before
+/// A's end comes back, and that late end is a stale one. The pause's mark is A's alone: when you
+/// stop B yourself, the unit fails as any unit whose turn you stopped, nothing resumes it.
+#[test]
+fn a_late_end_of_the_paused_turn_does_not_swallow_your_stop_of_the_next() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let sid = unit(&k, &parent, "a").session_id.unwrap();
+    let a_turn = k.rt.running(&sid).unwrap();
+    change(&k, &parent, "pause", None);
+    change(&k, &parent, "resume", None);
+    // A is over on the runtime, its end not told yet; the graph resumes the session: B
+    {
+        let mut st = k.rt.st();
+        st.turning.remove(&sid);
+        st.attempts.remove(&sid);
+    }
+    k.db().session_patch(&sid, patch![status: "idle"]).unwrap();
+    k.core.tx().workflow_tick().unwrap();
+    let b_turn = k.rt.running(&sid).expect("B runs");
+    assert_ne!(a_turn, b_turn);
+    let prompts = k.rt.prompts_of(&sid).len();
+    // A's end, late: stale
+    k.core
+        .on_turn_end(crate::TurnEnd {
+            session_id: sid.clone(),
+            attempt: Some(a_turn.attempt.clone()),
+            stop_reason: "cancelled".into(),
+            error: None,
+        })
+        .unwrap();
+    assert_eq!(unit(&k, &parent, "a").status, "running");
+    // you stop B
+    assert!(k.core.cancel_turn(&sid).unwrap());
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    let a = unit(&k, &parent, "a");
+    assert_eq!(a.status, "failed", "{a:?}");
+    assert_eq!(k.rt.prompts_of(&sid).len(), prompts, "not resumed");
+    assert_eq!(work(&k, &parent).0, "failed");
+}
