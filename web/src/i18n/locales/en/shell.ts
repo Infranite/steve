@@ -234,6 +234,7 @@ export default {
     refreshNodes: "Refresh nodes",
     linked: "Connected",
     disconnected: "Disconnected",
+    linkError: "Last link failure",
     checkFingerprint: "Enter the full fingerprint actually displayed by the target device CLI:",
     confirmFingerprint: "Fingerprint matches, confirm access",
     nodeState: {"pending": "Pending confirmation", "active": "Active", "paused": "Paused", "revoked": "Revoked"},

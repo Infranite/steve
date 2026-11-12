@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::lifecycle::{settle, stop_card, supersede_where};
 use crate::repo::NewDecision;
 use crate::util::{js_head, now};
-use crate::work::{LastStop, Work};
+use crate::work::{LastStop, NODE_WAIT, Work};
 use crate::{Core, Tx};
 
 /// How long an item may sit in `run` with nothing going on before it gets the card.
@@ -118,6 +118,13 @@ impl Tx<'_> {
                 /* the item's work, not the session alone: a coordinator idle while its graph runs,
                  * queues, waits for you or is paused has not stopped */
                 let work = self.work(&i)?;
+                /* input waiting on a Node that has no link says so, and stops once it links */
+                if let Some(t) = work.text()
+                    && (t.starts_with(NODE_WAIT) || i.now.starts_with(NODE_WAIT))
+                    && i.now != t
+                {
+                    self.db().item_patch(&i.id, crate::patch![now: t])?;
+                }
                 if work.waiting() {
                     continue;
                 }

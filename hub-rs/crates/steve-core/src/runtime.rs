@@ -193,6 +193,12 @@ pub trait AgentRuntime: Send + Sync {
         let _ = (session_id, mode);
         Ok(Configured::NotRunning)
     }
+    /// The session runs on a Node that has no link now: why, as far as is known (shown on what
+    /// waits for it). `None`: it is linked, or runs elsewhere.
+    fn node_offline(&self, session_id: &str) -> Option<String> {
+        let _ = session_id;
+        None
+    }
     /// The session's last attempt has an outcome nobody can tell yet (reconciliation decides).
     fn uncertain(&self, session_id: &str) -> bool {
         let _ = session_id;

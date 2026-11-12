@@ -523,3 +523,30 @@ fn an_agent_waiting_for_your_own_action_is_not_continued() {
     assert!(steve_lines(&k, &i).is_empty());
     assert_eq!(k.open_fails(&i).len(), 1, "the card is yours");
 }
+
+/// 2026-11-12: the Node could not link for hours and input waited with only "queued" to show. What
+/// waits on it says the Node is not linked and why, and stops saying so once it links.
+#[test]
+fn input_waiting_on_an_unlinked_node_says_why() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.db().queue_add(&s, "继续", "me", &[]).unwrap();
+    assert_eq!(work(&k, &i), ("queued", Some("有排队输入等待发送".into())));
+    k.rt.st().node_offline =
+        Some("internal: control message hello is 69214 bytes, over the 65536 limit".into());
+    let (code, why) = work(&k, &i);
+    assert_eq!(code, "queued");
+    assert_eq!(
+        why.as_deref(),
+        Some(
+            "等待 Node 连接：internal: control message hello is 69214 bytes, over the 65536 limit"
+        )
+    );
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert_eq!(k.status(&i).2, why.unwrap());
+    assert!(k.open_fails(&i).is_empty(), "a wait, not a stop");
+    k.rt.st().node_offline = None;
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert_eq!(k.status(&i).2, "有排队输入等待发送");
+}

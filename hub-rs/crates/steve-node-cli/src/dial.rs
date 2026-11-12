@@ -1,5 +1,6 @@
 //! Pairing, and the dial loop: the Node always dials, the Hub never reaches in.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -237,9 +238,11 @@ pub async fn run(home: &Home) -> Result<()> {
 }
 
 /// [`run`] for a Node whose pairing and trust its host gives (the Hub's own Node in a process of
-/// its own, B1): linked until Ctrl-C or SIGTERM, then shut down as a `steve-node` is.
+/// its own, B1): linked until Ctrl-C or SIGTERM, then shut down as a `steve-node` is. `home`: where
+/// it notes why its last link failed ([`LINK_STATUS`]), for its Hub to show.
 pub async fn serve_until_stopped(
     node: LocalNode,
+    home: Option<&Path>,
     p: &Pairing,
     id: &Identity,
     trust: &Trust,
@@ -256,7 +259,13 @@ pub async fn serve_until_stopped(
         #[cfg(not(unix))]
         tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")
     };
-    run_until(&node, serve_at(node.clone(), None, p, id, trust), stopping).await
+    let status = LinkStatus(home.map(|h| h.join(LINK_STATUS)));
+    run_until(
+        &node,
+        serve_with(node.clone(), None, status, p, id, trust),
+        stopping,
+    )
+    .await
 }
 
 fn key_of(hex_key: &str) -> Option<[u8; 32]> {
@@ -329,10 +338,58 @@ pub async fn serve(node: LocalNode, p: &Pairing, id: &Identity, trust: &Trust) -
     serve_at(node, None, p, id, trust).await
 }
 
-/// [`serve`], keeping in `home`'s pairing the Hub key a first signed welcome proves.
+/// [`serve`], keeping in `home`'s pairing the Hub key a first signed welcome proves, and in its
+/// [`LINK_STATUS`] why the last link failed.
 pub async fn serve_at(
     node: LocalNode,
     home: Option<Home>,
+    p: &Pairing,
+    id: &Identity,
+    trust: &Trust,
+) -> Result<()> {
+    let status = LinkStatus(home.as_ref().map(|h| h.0.join(LINK_STATUS)));
+    serve_with(node, home, status, p, id, trust).await
+}
+
+/// The file in a Node's home that says why its last link to the Hub failed,
+/// `{"at": <ms>, "error": "…"}`; gone once it links. Its Hub shows its own Node's (a remote
+/// Node's reason stays in that Node's log: it never reached the Hub).
+pub const LINK_STATUS: &str = "link-status.json";
+
+/// Why the Node in `home` could not link last, and when (ms): `None` once it linked.
+pub fn link_status(home: &Path) -> Option<(i64, String)> {
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.join(LINK_STATUS)).ok()?).ok()?;
+    Some((v["at"].as_i64()?, v["error"].as_str()?.to_string()))
+}
+
+/// Where the dial loop notes how linking went ([`LINK_STATUS`]); `None`: nowhere.
+struct LinkStatus(Option<PathBuf>);
+
+impl LinkStatus {
+    fn failed(&self, why: &str) {
+        let Some(path) = &self.0 else { return };
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let body = json!({ "at": at, "error": why }).to_string();
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, path)) {
+            tracing::warn!("noting the link failure in {}: {e}", path.display());
+        }
+    }
+
+    fn linked(&self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+async fn serve_with(
+    node: LocalNode,
+    home: Option<Home>,
+    status: LinkStatus,
     p: &Pairing,
     id: &Identity,
     trust: &Trust,
@@ -404,7 +461,11 @@ pub async fn serve_at(
                     pins_learnt: &pins_learnt,
                 };
                 let trust = trust_now.lock().unwrap().clone();
-                link_once(&node, &server, &link, &url, &node_id, hub, id, &trust).await
+                let linked = || status.linked();
+                link_once(
+                    &node, &server, &link, &url, &node_id, hub, id, &trust, &linked,
+                )
+                .await
             }
             Err(e) => Err(Stop::Retry(format!("{e:#}"))),
         };
@@ -413,9 +474,18 @@ pub async fn serve_at(
             Ok(()) => backoff = Duration::from_millis(200),
             Err(Stop::Refused(e)) => {
                 link.set(None);
+                status.failed(&format!("the hub refused this node: {e}"));
                 bail!("the hub refused this node: {e}");
             }
-            Err(Stop::Retry(e)) => tracing::info!("hub link: {e}"),
+            Err(Stop::Retry(e)) => {
+                status.failed(&e);
+                tracing::info!("hub link: {e}");
+            }
+            // dialling again alone will not mend it: say so where it is seen
+            Err(Stop::Fault(e)) => {
+                status.failed(&e);
+                tracing::error!("hub link failed, trying again: {e}");
+            }
         }
         link.set(None);
         // spread out: every Node of a restarted Hub dials again at once otherwise
@@ -430,7 +500,11 @@ const CONNECT: Duration = Duration::from_secs(30);
 #[derive(Debug, PartialEq)]
 enum Stop {
     Refused(String),
+    /// The link dropped or the Hub was away: dialled again, quietly.
     Retry(String),
+    /// Something on either side failed (`internal`: a hello over its limit, a Hub whose store
+    /// failed; `invalid`): dialled again too, but logged as an error, since it may never pass.
+    Fault(String),
 }
 
 /// Only a verdict ends the loop: `denied` (unknown, pending, revoked, another Hub) or no common
@@ -439,8 +513,10 @@ enum Stop {
 fn stop_for(e: &handshake::Refused) -> Stop {
     if e.code == handshake::DENIED || e.code == "unsupported" {
         Stop::Refused(e.to_string())
-    } else {
+    } else if e.code == "offline" {
         Stop::Retry(e.to_string())
+    } else {
+        Stop::Fault(e.to_string())
     }
 }
 
@@ -465,6 +541,7 @@ async fn link_once(
     hub: HubOf<'_>,
     id: &Identity,
     trust: &Trust,
+    linked: &(dyn Fn() + Sync),
 ) -> Result<(), Stop> {
     // the TCP connect alone proves little (a tunnel's local end, a proxy): the upgrade is bounded too
     let (mut sink, mut stream) = tokio::time::timeout(CONNECT, tls::connect(url, trust))
@@ -517,6 +594,7 @@ async fn link_once(
         },
     );
     tracing::info!(generation = welcome.generation, "linked to the hub");
+    linked();
     link.set(Some(conn.clone()));
     let (code, reason) = conn.closed().await;
     link.set(None);
@@ -618,12 +696,29 @@ mod tests {
         again.shutdown().await;
     }
 
+    /// Why the last link failed is kept in the home until a link succeeds.
+    #[test]
+    fn the_last_link_failure_is_noted_until_it_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = LinkStatus(Some(dir.path().join(LINK_STATUS)));
+        assert_eq!(link_status(dir.path()), None);
+        status.failed("internal: control message hello is 69214 bytes, over the 65536 limit");
+        let (at, why) = link_status(dir.path()).unwrap();
+        assert!(at > 0);
+        assert!(why.contains("hello is 69214 bytes"), "{why}");
+        status.linked();
+        assert_eq!(link_status(dir.path()), None);
+        LinkStatus(None).failed("nowhere");
+    }
+
     #[test]
     fn only_a_verdict_stops_the_node() {
         assert!(matches!(stop_for(&r(handshake::DENIED)), Stop::Refused(_)));
         assert!(matches!(stop_for(&r("unsupported")), Stop::Refused(_)));
-        for code in [handshake::INTERNAL, "offline", "invalid"] {
-            assert!(matches!(stop_for(&r(code)), Stop::Retry(_)), "{code}");
+        assert!(matches!(stop_for(&r("offline")), Stop::Retry(_)));
+        // a hello over its limit fails the same way every time: an error, still dialled again
+        for code in [handshake::INTERNAL, "invalid"] {
+            assert!(matches!(stop_for(&r(code)), Stop::Fault(_)), "{code}");
         }
     }
 

@@ -57,6 +57,8 @@ pub struct FakeState {
     pub recovers_itself: HashSet<String>,
     /// Why new sessions cannot run ([`AgentRuntime::refusal`]); `None`: they run.
     pub refuse: Option<String>,
+    /// Every session's Node has no link, for this reason.
+    pub node_offline: Option<String>,
     /// `flush` takes nothing and answers false (a session still opening, say).
     pub flush_stuck: bool,
     /// The next `stop` comes too late: the turn it names ended just before and took the queue as
@@ -330,6 +332,9 @@ impl AgentRuntime for FakeRuntime {
     }
     fn uncertain(&self, sid: &str) -> bool {
         self.st().uncertain.contains(sid)
+    }
+    fn node_offline(&self, _sid: &str) -> Option<String> {
+        self.st().node_offline.clone()
     }
     fn recovers_itself(&self, sid: &str) -> bool {
         self.st().recovers_itself.contains(sid)

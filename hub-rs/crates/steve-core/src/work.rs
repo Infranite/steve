@@ -12,6 +12,9 @@ use crate::repo::Item;
 use crate::util::js_head;
 use crate::{Result, Tx};
 
+/// How input waiting on a Node with no link reads (followed by why).
+pub(crate) const NODE_WAIT: &str = "等待 Node 连接：";
+
 /// How many unit titles a line names.
 const NAMES: usize = 3;
 
@@ -136,7 +139,10 @@ impl Tx<'_> {
                 return Ok(Work::Running("回合执行中".into()));
             }
             if !self.db().queued(&s.id)?.is_empty() {
-                return Ok(Work::Queued("有排队输入等待发送".into()));
+                return Ok(Work::Queued(match self.rt().node_offline(&s.id) {
+                    Some(why) => format!("{NODE_WAIT}{}", js_head(&why, 160)),
+                    None => "有排队输入等待发送".into(),
+                }));
             }
         }
         if let Some(d) = self

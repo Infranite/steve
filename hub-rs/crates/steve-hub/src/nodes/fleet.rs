@@ -245,6 +245,26 @@ impl NodeFleet {
             .and_then(|e| e.runtime.clone())
     }
 
+    /// Why `node` could not link last, and when (ms), while it is not linked. Only the Hub's own
+    /// Node says (it notes it in its home); a remote Node's reason stays in its own log.
+    pub fn link_failure(&self, node: &str) -> Option<(i64, String)> {
+        if node != crate::wire::local_service::NODE_ID {
+            return None;
+        }
+        steve_node_cli::dial::link_status(&self.data_dir.join("node"))
+    }
+
+    /// `node` has no live link: why, as far as the Hub knows. `None`: it is linked.
+    pub fn offline(&self, node: &NodeId) -> Option<String> {
+        if self.remote(node).generation().is_some() {
+            return None;
+        }
+        Some(match self.link_failure(node.as_str()) {
+            Some((_, why)) => why,
+            None => "未连接".into(),
+        })
+    }
+
     pub fn nodes(&self) -> Vec<String> {
         self.nodes.lock().unwrap().keys().cloned().collect()
     }

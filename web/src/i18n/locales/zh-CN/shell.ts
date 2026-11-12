@@ -221,6 +221,7 @@ export default {
     refreshNodes: "刷新节点状态",
     linked: "已连接",
     disconnected: "未连接",
+    linkError: "最近一次连接失败",
     checkFingerprint: "填写目标设备命令行实际显示的完整指纹，核对一致后确认：",
     confirmFingerprint: "指纹一致，确认接入",
     nodeState: {"pending": "等待确认", "active": "已启用", "paused": "已暂停", "revoked": "已撤销"},

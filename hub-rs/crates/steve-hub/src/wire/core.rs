@@ -1153,6 +1153,19 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node.as_ref().is_some_and(|n| n.is_holding())
             || self.fleet.as_ref().is_some_and(|f| f.is_holding())
     }
+    fn node_offline(&self, session_id: &str) -> Option<String> {
+        let node = node_of(&self.store, session_id).filter(|n| !n.is_empty())?;
+        // the Node in the Hub's own process is always there
+        if self
+            .node
+            .as_ref()
+            .is_some_and(|n| n.node_id().as_str() == node)
+        {
+            return None;
+        }
+        let id = steve_node_api::NodeId::new(node).ok()?;
+        self.fleet.as_ref()?.offline(&id)
+    }
     fn uncertain(&self, session_id: &str) -> bool {
         self.node_for(session_id)
             .is_some_and(|n| n.is_uncertain(session_id))
@@ -2414,6 +2427,60 @@ mod routed_tests {
             rt.set_mode("s1", "auto").unwrap(),
             steve_core::Configured::Unsupported
         ));
+    }
+
+    /// The Hub's own Node in a process of its own could not link: a session bound to it is waiting
+    /// for it, with the reason that Node noted in its home; once it links, it is not.
+    #[tokio::test]
+    async fn a_session_on_an_unlinked_node_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = routed(dir.path());
+        let fleet = crate::nodes::NodeFleet::new(
+            rt.store.clone(),
+            dir.path().to_path_buf(),
+            Some(Arc::new(super::super::node_tools::tests::Ends)),
+            None,
+        );
+        rt.fleet = Some(fleet.clone());
+        rt.store
+            .transaction::<_, steve_store::StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','claude-code','.','active',1,1)",
+                    [],
+                )?;
+                steve_store::runtime::bind_session_in(
+                    tx,
+                    &steve_store::runtime::SessionBinding {
+                        session: "s1",
+                        node: "local",
+                        workspace: &serde_json::json!({"node": "local", "id": "w1"}),
+                        node_session: "s1",
+                        config_revision: "r1",
+                    },
+                    1,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(rt.node_offline("s1").as_deref(), Some("未连接"));
+        assert_eq!(rt.node_offline("unbound"), None);
+        let home = dir.path().join("node");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(steve_node_cli::dial::LINK_STATUS),
+            r#"{"at":5,"error":"internal: control message hello is 69214 bytes, over the 65536 limit"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            rt.node_offline("s1").as_deref(),
+            Some("internal: control message hello is 69214 bytes, over the 65536 limit")
+        );
+        assert_eq!(fleet.link_failure("local").map(|f| f.0), Some(5));
+        assert_eq!(
+            fleet.link_failure("n2"),
+            None,
+            "a remote Node's stays with it"
+        );
     }
 
     /// A RoutedRuntime with the local Node on (a fake one), item `i1` with an idle session `s1`

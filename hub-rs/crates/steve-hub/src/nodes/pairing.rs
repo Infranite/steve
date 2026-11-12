@@ -390,6 +390,9 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             let linked = svc.registry.current(&n.node_id).is_some();
             let mut v = serde_json::to_value(&n).unwrap_or(Value::Null);
             v["linked"] = json!(linked);
+            if !linked && let Some((at, why)) = svc.fleet.link_failure(&n.node_id) {
+                v["link_error"] = json!({ "at": at, "error": why });
+            }
             // from the key, at today's length: a Node paired before M4 stored 16 digits
             if let Ok(k) = <[u8; 32]>::try_from(n.pubkey.as_slice()) {
                 v["fingerprint"] = json!(identity::fingerprint(&k));
