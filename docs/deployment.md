@@ -188,7 +188,7 @@ The web page can run on its own origin instead of the Hub's port.
 
 Opened somewhere no Hub answers, it asks for the Hub's address once, checks it with `/auth/hello`, keeps it in the browser, and then shows the sign-in.
 
-- **Cross-origin access.** The Hub answers cross-origin calls with credentials only from the origins of web clients that signed in there, and from those listed in `STEVE_CLIENT_ORIGINS` (comma-separated). The sign-in paths and a `401` are readable from any origin.
+- **Cross-origin access.** The Hub answers cross-origin calls with credentials only from the origins of web clients that signed in there, and from those listed in `STEVE_CLIENT_ORIGINS` (comma-separated). The sign-in paths and a `401` are readable from any origin; a `401` to an origin that is not let in also carries `x-steve-origin: refused`, and the web client then offers signing in by token, which lets that origin in (a browser sign-in returns only to the Hub's own addresses). A page whose calls are refused outright (a preflight answered `403`) is shown the same sign-in when the Hub still answers `/auth/hello`.
 - **Same machine.** A Hub on the same host as the page (another port) is the same site, so its sign-in cookie works over plain HTTP.
 - **Another machine.** A Hub on another host needs HTTPS: the Hub then sets its cookie with `SameSite=None; Secure`.
 - **Cookie names.** Browsers keep cookies per host, whatever the port. The Hub therefore names its cookies with its port (`steve_client_8440`, `steve_session_8440`, …), so several Hubs on one host stay signed in side by side.

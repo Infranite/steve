@@ -1,7 +1,7 @@
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
-import { clientInfo, hubBase, hubUrl, signedIn } from "./hub"
+import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
 import type { Workflow } from "./workflow"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
@@ -175,13 +175,24 @@ export const withWs = (path: string) => { const url = hubUrl(path); return pageW
 
 /** what the Hub's last 401 offered: its sign-in page (`link`: OIDC or the local development login) and/or signing in
  * with a user's name and an access token (`token`, A1) */
-export const signIn: { link: string | null; token: boolean } = { link: null, token: false }
+export const signIn: { link: string | null; token: boolean; /** the Hub does not let this page's origin in yet (it says so on a 401, or refuses the call outright, below): a
+   * browser sign-in could not come back here, signing in by token lets the origin in */ refused: boolean } = { link: null, token: false, refused: false }
 export class Unauthenticated extends Error { login: string | null; constructor(login: string | null, token?: boolean) { super("unauthenticated"); this.login = login; signIn.link = login; if (token !== undefined) signIn.token = token } }
+/** A Hub on another origin refuses a page it has not let in yet before the call is made (its preflight answers 403),
+ * and the page sees only a failed fetch, never the 401. When the Hub still answers `hello` (open to any origin), the
+ * page is not signed in there rather than cut off: it is shown how to sign in, by token, which lets its origin in. */
+async function refused(e: unknown): Promise<never> {
+  if (hubBase() && e instanceof TypeError) {
+    const h = await hello(hubBase(), 4000).catch(() => null)
+    if (h) { signIn.refused = true; throw new Unauthenticated(null, h.login.token) }
+  }
+  throw e
+}
 const CUT = {}
 async function req<T>(method: string, path: string, body?: unknown, seen?: (r: Response) => void): Promise<T> {
   /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever */
-  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined })
-  if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null, j.token === true) }
+  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined }).catch(refused)
+  if (r.status === 401) { const j = await r.json().catch(() => ({})); if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j.login ?? null, j.token === true) }
   const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
   if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
   if (!r.ok) throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
@@ -210,7 +221,7 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
   /* the session's own 401 carries `login`; a 401 from a module (e.g. 请重新登录后再登记) is an ordinary error */
-  if (r.status === 401 && (!j || j.error === "unauthenticated" || "login" in j)) throw new Unauthenticated(j?.login ?? null, j?.token === true)
+  if (r.status === 401 && (!j || j.error === "unauthenticated" || "login" in j)) { if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j?.login ?? null, j?.token === true) }
   if (!json) {
     if (r.ok && method !== "GET") return {} as T // 204, or an empty body
     if (r.ok || r.status === 404 || r.status === 405) throw new NotWired()

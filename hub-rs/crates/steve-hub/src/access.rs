@@ -920,7 +920,7 @@ pub async fn cors(
         );
         h.insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static("x-steve-cursor, content-disposition"),
+            HeaderValue::from_static("x-steve-cursor, content-disposition, x-steve-origin"),
         );
         h.append(header::VARY, HeaderValue::from_static("origin"));
     };
@@ -949,9 +949,14 @@ pub async fn cors(
     }
     let mut res = next.run(req).await;
     /* a page not signed in yet must be able to read that it is not (a 401 says nothing else), or it
-     * never shows its sign-in */
+     * never shows its sign-in; one whose origin is not let in also reads that, for only signing in by
+     * token there lets it in (a browser sign-in returns to the Hub's own addresses, not to it) */
     if allowed || res.status() == StatusCode::UNAUTHORIZED {
         mark(&mut res);
+    }
+    if !allowed && res.status() == StatusCode::UNAUTHORIZED {
+        res.headers_mut()
+            .insert("x-steve-origin", HeaderValue::from_static("refused"));
     }
     res
 }

@@ -299,6 +299,14 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 401);
     assert_eq!(r.headers().get("access-control-allow-origin").unwrap(), web);
+    // …and that its origin is not let in, so the page offers the token sign-in that lets it in
+    assert_eq!(r.headers().get("x-steve-origin").unwrap(), "refused");
+    assert!(
+        r.headers()["access-control-expose-headers"]
+            .to_str()
+            .unwrap()
+            .contains("x-steve-origin")
+    );
     // signed in from that origin: the API answers it
     let st = e.store();
     let owner = st.access().owner().unwrap().expect("owner");
@@ -315,6 +323,17 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
     assert_eq!(preflight("/api/state").await, (204, Some(web.into())));
+    let r = e
+        .http
+        .get(format!("{}/api/me", e.base))
+        .header("origin", web)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        r.headers().get("x-steve-origin").is_none(),
+        "a let-in origin is not told it is refused"
+    );
     // another origin still is not
     let r = e
         .http

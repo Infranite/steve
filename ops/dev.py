@@ -31,6 +31,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -166,9 +167,8 @@ def seed_harness():
                 shutil.copy2(own / f, d / f)
 
 
-def dev_env_file():
+def env_file(p):
     out = {}
-    p = DEV / "steve.env"
     if p.is_file():
         for line in p.read_text().splitlines():
             line = line.strip()
@@ -176,6 +176,29 @@ def dev_env_file():
                 k, v = line.split("=", 1)
                 out[k.strip()] = v.strip().strip("'\"")
     return out
+
+
+def dev_env_file():
+    return env_file(DEV / "steve.env")
+
+
+def origin_of(url):
+    u = urllib.parse.urlsplit(url.strip())
+    return f"{u.scheme}://{u.netloc}" if u.scheme in ("http", "https") and u.netloc else ""
+
+
+def client_origins(mode):
+    # pages on this machine that may call the development Hub directly (a Hub switched to it, a web client on its
+    # own port): the development web server, the installed Hub's pages (its own steve.env says where they are, the
+    # snapshot's source when there is one), Vite's default port, and `STEVE_DEV_CLIENT_ORIGINS`
+    src = Path(mode.split(" ", 1)[1]) if mode.startswith("snapshot ") else HOME / ".steve"
+    inst = env_file(src / "steve.env")
+    ports = {str(WEB_PORT), inst.get("STEVE_PORT") or "8440", "8441", "5174"}
+    out = [f"http://{h}:{p}" for p in sorted(ports) for h in ("127.0.0.1", "localhost")]
+    for u in ",".join([inst.get("STEVE_PUBLIC_URL", ""), inst.get("STEVE_PUBLIC_URLS", ""), os.environ.get("STEVE_DEV_CLIENT_ORIGINS", "")]).split(","):
+        if origin_of(u):
+            out.append(origin_of(u))
+    return ",".join(dict.fromkeys(out))
 
 
 def hub_env(mode):
@@ -204,6 +227,7 @@ def hub_env(mode):
         env["STEVE_NODE"] = shutil.which("node")
     if mode.startswith("snapshot"):
         env["STEVE_NO_RESUME"] = "1"
+    env["STEVE_CLIENT_ORIGINS"] = client_origins(mode)
     env.update(dev_env_file())
     return env
 

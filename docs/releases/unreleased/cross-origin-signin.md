@@ -1,0 +1,2 @@
+- A web client on another origin that the Hub does not let in yet shows how to sign in, by token, instead of "Can't reach Steve". Signing in by token lets that origin in; the browser sign-in, which could not return there, is no longer offered on that screen.
+- For contributors: `ops/dev.py` lets this machine's usual client pages call the development Hub directly: the installed Hub's own pages, the web dev servers, and `STEVE_DEV_CLIENT_ORIGINS`.
