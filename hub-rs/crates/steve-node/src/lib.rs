@@ -2832,8 +2832,10 @@ impl ExecutionControl for LocalNode {
     }
 
     async fn snapshot(&self, page: PageRequest) -> ApiResult<Snapshot> {
-        let limit = page.limit.max(1) as usize;
-        let (token, offset) = match &page.cursor {
+        // limit=0 opts into bounded head pages. Older Hubs still receive the original complete
+        // heads vector; a new Hub uses the cursor to request both entry and head pages.
+        let limit = if page.limit == 0 { 100 } else { page.limit as usize };
+        let (token, offset, head_offset, paged_heads) = match &page.cursor {
             None => {
                 // the operations, their waits and the stream heads, as of one moment
                 let (entries, heads) = self.0.j.read(|t| {
@@ -2863,16 +2865,25 @@ impl ExecutionControl for LocalNode {
                         next: None,
                     },
                 );
-                (token, 0usize)
+                (token, 0usize, 0usize, page.limit == 0)
             }
             Some(c) => {
                 let bad = || ApiError::new(ErrorCode::Invalid, "not a snapshot cursor");
-                let (t, o) = c
+                let (t, rest) = c
                     .as_str()
                     .strip_prefix("snap")
                     .and_then(|r| r.split_once('.'))
                     .ok_or_else(bad)?;
-                (t.parse().map_err(|_| bad())?, o.parse().map_err(|_| bad())?)
+                let (o, h) = match rest.split_once('.') {
+                    Some((o, h)) => (o, Some(h)),
+                    None => (rest, None),
+                };
+                (
+                    t.parse().map_err(|_| bad())?,
+                    o.parse().map_err(|_| bad())?,
+                    h.map(|h| h.parse().map_err(|_| bad())).transpose()?.unwrap_or(0),
+                    h.is_some(),
+                )
             }
         };
         let snaps = self.0.snapshots.lock().unwrap();
@@ -2884,11 +2895,22 @@ impl ExecutionControl for LocalNode {
         };
         let entries: Vec<SnapshotEntry> =
             s.entries.iter().skip(offset).take(limit).cloned().collect();
-        let more = offset + entries.len() < s.entries.len();
+        let heads: Vec<StreamHead> = if paged_heads {
+            s.heads.iter().skip(head_offset).take(limit).cloned().collect()
+        } else {
+            s.heads.clone()
+        };
+        let more = offset + entries.len() < s.entries.len()
+            || (paged_heads && head_offset + heads.len() < s.heads.len());
+        let next_head = head_offset + heads.len();
         Ok(Snapshot {
-            heads: s.heads.clone(),
+            heads,
             next: if more {
-                Some(id(format!("snap{token}.{}", offset + entries.len()))?)
+                Some(id(if paged_heads {
+                    format!("snap{token}.{}.{}", offset + entries.len(), next_head)
+                } else {
+                    format!("snap{token}.{}", offset + entries.len())
+                })?)
             } else {
                 None
             },

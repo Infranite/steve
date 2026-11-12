@@ -361,9 +361,10 @@ pub struct SnapshotEntry {
     pub cancel_requested: bool,
 }
 
-/// One page of a snapshot. All pages of one snapshot (same cursor chain) show the same moment, and
-/// `heads` are the streams' positions at that moment: replaying from them after reading the snapshot
-/// misses nothing that happened since.
+/// One page of a snapshot. All pages of one cursor chain show the same moment. A request with
+/// `limit=0` starts bounded pages of both entries and stream heads; older Nodes return one entry
+/// and the complete heads vector. Replaying from the collected heads misses nothing since that
+/// snapshot moment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub entries: Vec<SnapshotEntry>,

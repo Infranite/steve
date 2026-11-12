@@ -528,7 +528,7 @@ The Hub's own Node, which runs every session on the Hub's machine, runs as `stev
 
 - The Hub starts the process when no Node is linked: in a session of its own and, when the Hub runs under systemd, in a scope of its own (`systemd-run --user --scope`). A restart or upgrade of the Hub's service therefore leaves it running. `steve hub stop` (and so the stop before `steve hub uninstall`) stops it too.
 - It keeps the Node's id (`local`) and home (`<data>/node`), so sessions from before carry on there.
-- It links to the Hub on `127.0.0.1:<STEVE_LOCAL_NODE_PORT>` (default: Hub port + 3), whatever addresses the Hub's own port listens on. It checks the Hub's signed welcome.
+- It links to the Hub on `127.0.0.1:<STEVE_LOCAL_NODE_PORT>` (default: Hub port + 3), whatever addresses the Hub's own port listens on. It checks the Hub's signed welcome. The hello stays bounded as stream history grows; the Hub reconciles stream positions from snapshot pages after linking.
 - The Hub registers it as its own paired Node, with a key in the Node's home (`service-identity.key`).
 - Its roots follow the Hub's projects through `<data>/node/host-roots.json`.
 - Its log is `<data>/node/logs/local-node.log`, and its pid is in `<data>/node/service.pid`.

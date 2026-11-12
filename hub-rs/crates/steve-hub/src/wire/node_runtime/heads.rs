@@ -45,12 +45,16 @@ pub struct NodeSnapshot {
 /// (three times at most).
 pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapshot> {
     let mut entries: HashMap<String, SnapshotEntry> = HashMap::new();
-    let (mut cursor, mut restarts) = (None, 0);
+    let mut heads: HashMap<String, StreamHead> = HashMap::new();
+    let (mut cursor, mut restarts, mut paged_heads) = (None, 0, true);
     loop {
         match node
             .snapshot(PageRequest {
                 cursor: cursor.clone(),
-                limit,
+                // Zero on the first page asks a new Node to paginate stream heads too. An
+                // older Node treats it as one entry and still sends its complete heads; later
+                // pages use the usual limit and duplicate heads are folded by stream id.
+                limit: if cursor.is_none() && paged_heads { 0 } else { limit },
             })
             .await
         {
@@ -58,13 +62,17 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
                 for e in page.entries {
                     entries.insert(e.receipt.operation.to_string(), e);
                 }
+                for head in page.heads {
+                    heads.insert(head.stream.as_str().to_string(), head);
+                }
                 match page.next {
                     Some(c) => cursor = Some(c),
-                    // every page shows the same heads
                     None => {
+                        let mut heads: Vec<_> = heads.into_values().collect();
+                        heads.sort_by(|a, b| a.stream.as_str().cmp(b.stream.as_str()));
                         return Ok(NodeSnapshot {
                             entries,
-                            heads: page.heads,
+                            heads,
                         });
                     }
                 }
@@ -72,7 +80,12 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
             Err(e) if e.code == ErrorCode::Expired && restarts < 3 => {
                 restarts += 1;
                 entries.clear();
+                heads.clear();
                 cursor = None;
+            }
+            Err(e) if e.code == ErrorCode::Invalid && cursor.is_none() && paged_heads => {
+                // A third-party older Node may reject zero rather than clamp it to one.
+                paged_heads = false;
             }
             Err(e) => return Err(e),
         }
