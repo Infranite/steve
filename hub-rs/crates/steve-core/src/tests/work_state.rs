@@ -1231,3 +1231,462 @@ fn a_late_end_of_an_old_attempt_does_not_finish_the_new_one() {
     assert_eq!(k.rt.prompts_of(&coord).len(), told, "no stale update");
     assert_eq!(work(&k, &parent).0, "running");
 }
+
+/// The runtime finished the session's turn but its end is not told yet (held up on the way).
+fn over_untold(k: &Kit, sid: &str) {
+    {
+        let mut st = k.rt.st();
+        st.turning.remove(sid);
+        st.attempts.remove(sid);
+    }
+    k.db().session_patch(sid, patch![status: "idle"]).unwrap();
+}
+
+fn end_of(core: &crate::Core, sid: &str, attempt: &str, stop: &str) {
+    core.on_turn_end(crate::TurnEnd {
+        session_id: sid.into(),
+        attempt: Some(attempt.into()),
+        stop_reason: stop.into(),
+        error: None,
+    })
+    .unwrap();
+}
+
+/// ST-37 #1 at the turn end and Steve's continue (takeover): asked to type a code before going on,
+/// or to use a passkey, the agent waits on you. Steve spends no continue on it and the stall watch
+/// does not either; a report of how the code step was built is continued as usual.
+#[test]
+fn a_code_to_type_or_a_passkey_is_not_continued() {
+    let k = kit(2);
+    for said in [
+        "输入验证码后继续",
+        "Use your passkey",
+        "登录页已打开。Use your passkey to sign in, then reply.",
+    ] {
+        let i = k.item("run", "执行", None);
+        let s = k.session(&i, "idle");
+        k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+        k.rt.say(&s, said);
+        k.rt.end_turn(&k.core, &s, "end_turn", None);
+        assert_eq!(k.rt.prompts_of(&s).len(), 1, "{said}: not continued");
+        assert!(steve_lines(&k, &i).is_empty(), "{said}");
+        assert_eq!(k.open_fails(&i).len(), 1, "{said}: the card is yours");
+        assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+        assert_eq!(k.rt.prompts_of(&s).len(), 1, "{said}");
+    }
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.rt.say(
+        &s,
+        "已实现：用户输入验证码后继续登录，passkey 也支持了，测试通过。",
+    );
+    k.rt.end_turn(&k.core, &s, "end_turn", None);
+    assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
+    assert!(k.open_fails(&i).is_empty());
+}
+
+/// ST-37 #2 at the Core: the same end of the same attempt told again after a restart (the same
+/// SQLite file opened afresh) is the same end: your Stop stays, the stall watch gives you the card
+/// and Steve continues nothing. Your new message lifts it.
+#[test]
+fn a_replayed_end_after_a_restart_keeps_your_stop() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    let a = k.rt.running(&s).unwrap().attempt;
+    assert!(k.core.cancel_turn(&s).unwrap());
+    // your Stop and the turn's completion race: it ends end_turn
+    k.rt.end_turn(&k.core, &s, "end_turn", None);
+    assert!(k.db().store().sessions().stop(&s).unwrap().unwrap().yours);
+
+    let core = k.reopened();
+    core.recover().unwrap();
+    end_of(&core, &s, &a, "end_turn");
+    let kept = core.store().store().sessions().stop(&s).unwrap().unwrap();
+    assert!(kept.yours, "{kept:?}");
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
+    core.tx().check_stalls(later()).unwrap();
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
+    assert!(steve_lines(&k, &i).is_empty());
+
+    core.session_message(&s, "接着做", false, &[]).unwrap();
+    k.rt.say(&s, "改了一半");
+    k.rt.end_turn(&core, &s, "end_turn", None);
+    assert!(!crate::work::held(
+        &core.store().store().sessions().stop(&s).unwrap().unwrap()
+    ));
+    assert_eq!(k.rt.prompts_of(&s).len(), 3, "continued by Steve");
+}
+
+/// ST-37 #3: turn A's end is held up on the way; your message starts B and you stop B, which
+/// is already idle when A's end comes, then B's. A's late end does not use up the Stop you asked
+/// for B, nor becomes the session's last end; B's own end does, and it is yours.
+#[test]
+fn old_end_must_not_consume_new_stop_request() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    let a = k.rt.running(&s).unwrap().attempt;
+    over_untold(&k, &s);
+    k.core.session_message(&s, "换个做法", false, &[]).unwrap();
+    let b = k.rt.running(&s).expect("B runs").attempt;
+    assert_ne!(a, b);
+    assert!(k.core.cancel_turn(&s).unwrap());
+    // B is idle by now (busy → idle), its end not told yet either
+    over_untold(&k, &s);
+    let prompts = k.rt.prompts_of(&s).len();
+
+    end_of(&k.core, &s, &a, "end_turn");
+    let mid = k.db().store().sessions().stop(&s).unwrap().unwrap();
+    assert_eq!(mid.stop_asked.as_deref(), Some(b.as_str()), "{mid:?}");
+    assert_ne!(mid.attempt.as_deref(), Some(a.as_str()), "{mid:?}");
+    assert_eq!(
+        k.rt.prompts_of(&s).len(),
+        prompts,
+        "A's end continues nothing"
+    );
+    assert!(k.open_fails(&i).is_empty(), "nor opens a card");
+
+    end_of(&k.core, &s, &b, "end_turn");
+    let after = k.db().store().sessions().stop(&s).unwrap().unwrap();
+    assert_eq!(
+        (
+            after.attempt.as_deref(),
+            after.stop_reason.as_deref(),
+            after.yours,
+            after.stop_asked.as_deref()
+        ),
+        (Some(b.as_str()), Some("end_turn"), true, None),
+        "{after:?}"
+    );
+    assert_eq!(
+        k.rt.prompts_of(&s).len(),
+        prompts,
+        "your Stop: not continued"
+    );
+    assert!(steve_lines(&k, &i).is_empty());
+
+    // the order reversed after a restart changes nothing: A's end, told again, is the same end
+    let core = k.reopened();
+    end_of(&core, &s, &a, "end_turn");
+    let again = core.store().store().sessions().stop(&s).unwrap().unwrap();
+    assert_eq!(again.attempt.as_deref(), Some(b.as_str()));
+    assert!(again.yours);
+}
+
+/// ST-37 #3 contrast: a Stop asked for one turn, then your message starts another before any end
+/// came. That newer turn's end is not yours: it uses the old request up and is judged as usual.
+#[test]
+fn a_newer_turns_end_after_your_message_is_not_your_stop() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    assert!(k.core.cancel_turn(&s).unwrap());
+    over_untold(&k, &s);
+    k.core.session_message(&s, "接着做", false, &[]).unwrap();
+    k.rt.say(&s, "改了一半");
+    k.rt.end_turn(&k.core, &s, "end_turn", None);
+    let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();
+    assert!(!crate::work::held(&kept), "{kept:?}");
+    assert_eq!(k.rt.prompts_of(&s).len(), 3, "continued by Steve");
+}
+
+/// ST-37 #4: a pause stops unit a's turn A and the graph is resumed at once; the Hub restarts
+/// (the same SQLite file opened afresh) before A's cancelled end comes back. That end is still the
+/// pause's, not the unit failing: the session's backend recovers it by itself (a Node's) and the
+/// same session goes on. After that, a turn you stop yourself fails the unit as before, also across
+/// another restart. On a backend the restart cut (the Hub's own), the turn's restart card is the
+/// restart's business; the unit is not failed for the pause either.
+#[test]
+fn pause_resume_restart_then_late_end() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let sid = unit(&k, &parent, "a").session_id.unwrap();
+    k.rt.st().recovers_itself.insert(sid.clone());
+    change(&k, &parent, "pause", None);
+    change(&k, &parent, "resume", None);
+    let before = k.rt.prompts_of(&sid).len();
+
+    let core = k.reopened();
+    core.recover().unwrap();
+    k.rt.end_turn(&core, &sid, "cancelled", None);
+    let a = unit(&k, &parent, "a");
+    assert_eq!(
+        (a.status.as_str(), a.reason),
+        ("running", None),
+        "the pause's"
+    );
+    assert_eq!(k.rt.prompts_of(&sid).len(), before + 1, "resumed in place");
+    assert!(k.open_fails(&parent).is_empty());
+
+    // B, the resumed turn: you stop it after another restart; the unit fails
+    let core = k.reopened();
+    core.recover().unwrap();
+    assert!(core.cancel_turn(&sid).unwrap());
+    k.rt.end_turn(&core, &sid, "cancelled", None);
+    let a = unit(&k, &parent, "a");
+    assert_eq!(a.status, "failed", "{a:?}");
+    assert_eq!(k.rt.prompts_of(&sid).len(), before + 1, "not resumed");
+
+    // the Hub's own runtime: the restart cut the turn
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let sid = unit(&k, &parent, "a").session_id.unwrap();
+    change(&k, &parent, "pause", None);
+    change(&k, &parent, "resume", None);
+    let core = k.reopened();
+    core.recover().unwrap();
+    k.rt.end_turn(&core, &sid, "cancelled", None);
+    let a = unit(&k, &parent, "a");
+    assert_eq!(
+        (a.status.as_str(), a.reason),
+        ("running", None),
+        "the pause's"
+    );
+}
+
+/// ST-37 #4 contrast without a restart: the next turn you stop yourself fails the unit.
+#[test]
+fn after_a_quick_resume_your_stop_of_the_next_turn_fails_the_unit() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let sid = unit(&k, &parent, "a").session_id.unwrap();
+    change(&k, &parent, "pause", None);
+    change(&k, &parent, "resume", None);
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    assert_eq!(unit(&k, &parent, "a").status, "running");
+    assert!(k.core.cancel_turn(&sid).unwrap());
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    assert_eq!(unit(&k, &parent, "a").status, "failed");
+}
+
+/// ST-37 #5: unit a reports its failure itself; its turn is over on the runtime but the end is held
+/// up; a is retried (the failed attempt retired) and the old end comes late. The old child closes
+/// as failed with the failure's own reason, never as cancelled by the reset; the new attempt keeps
+/// running and the coordinator hears nothing old. A snapshot archived as cancelled (rows retired
+/// before this fix) reads as failed from the graph's history too.
+#[test]
+fn late_failed_end_before_retired_tidy_preserves_failed_outcome() {
+    for legacy in [false, true] {
+        let k = kit(2);
+        let parent = planned(&k, &["a"]);
+        let coord = k.session(&parent, "idle");
+        let old = unit(&k, &parent, "a");
+        let old_child = old.item_id.clone().unwrap();
+        let old_sid = old.session_id.clone().unwrap();
+        let attempt = k.rt.running(&old_sid).unwrap().attempt;
+        let s = k.db().session(&old_sid).unwrap().unwrap();
+        k.core
+            .tool_workflow(&s, json!({"action":"fail","reason":"实测失败证据"}))
+            .unwrap();
+        over_untold(&k, &old_sid);
+        change(&k, &parent, "retry", Some("a"));
+        let new = unit(&k, &parent, "a");
+        assert_eq!((new.status.as_str(), new.attempt), ("running", 2));
+        if legacy {
+            k.db()
+                .store()
+                .with_conn(|c| {
+                    c.execute(
+                        "UPDATE workflow_attempts SET snapshot=json_set(snapshot,'$.status','cancelled','$.reason','尝试已失效：调整') WHERE item_id=?",
+                        [&old_child],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let (_, retired) = k
+            .db()
+            .store()
+            .workflows()
+            .by_child(&old_child)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (retired.status.as_str(), retired.reason.as_deref()),
+            ("failed", Some("实测失败证据")),
+            "legacy {legacy}"
+        );
+        let told = k.rt.prompts_of(&coord).len();
+
+        end_of(&k.core, &old_sid, &attempt, "end_turn");
+        let i = k.db().item(&old_child).unwrap().unwrap();
+        assert_eq!(
+            (i.phase.as_str(), i.outcome.as_deref()),
+            ("closed", Some("failed")),
+            "legacy {legacy}: {i:?}"
+        );
+        let new = unit(&k, &parent, "a");
+        assert_eq!((new.status.as_str(), new.attempt), ("running", 2));
+        assert_eq!(k.phase(new.item_id.as_deref().unwrap()), "active");
+        assert_eq!(k.rt.prompts_of(&coord).len(), told, "no stale update");
+        assert_eq!(work(&k, &parent).0, "running");
+    }
+}
+
+/// ST-37 #5 contrast: the old end never comes; after a restart the tidy closes the retired failed
+/// attempt as failed with its reason, and leaves the new attempt running.
+#[test]
+fn a_retired_failed_attempt_is_closed_failed_after_a_restart() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let old = unit(&k, &parent, "a");
+    let old_child = old.item_id.clone().unwrap();
+    let old_sid = old.session_id.clone().unwrap();
+    let s = k.db().session(&old_sid).unwrap().unwrap();
+    k.core
+        .tool_workflow(&s, json!({"action":"fail","reason":"实测失败证据"}))
+        .unwrap();
+    over_untold(&k, &old_sid);
+    change(&k, &parent, "retry", Some("a"));
+    let core = k.reopened();
+    core.recover().unwrap();
+    core.tx().workflow_tick().unwrap();
+    let i = k.db().item(&old_child).unwrap().unwrap();
+    assert_eq!(
+        (i.phase.as_str(), i.outcome.as_deref()),
+        ("closed", Some("failed")),
+        "{i:?}"
+    );
+    assert_eq!(unit(&k, &parent, "a").status, "running");
+}
+
+/// ST-37 #6: the agent asked you to scan, then a tool call made that moot (a local substitute, no
+/// authorization needed), and the turn ended with nothing said after the call. Its final reply is
+/// empty: the obsolete request is not read as a wait on you, Steve continues it. A long request
+/// streamed after the last tool call is read whole and stays yours.
+#[test]
+fn no_final_text_after_tool_does_not_revive_obsolete_request() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.rt.say(&s, "请扫码授权，完成后告诉我。");
+    k.db()
+        .event_add(
+            &s,
+            steve_transcript::TOOL,
+            json!({"tool": {"id": "t1", "status": "completed", "title": "改用本地替代，无需授权"}}),
+        )
+        .unwrap();
+    assert_eq!(k.db().final_reply(&s).unwrap(), "");
+    k.rt.end_turn(&k.core, &s, "end_turn", None);
+    assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
+    assert!(k.open_fails(&i).is_empty());
+
+    // the same with an ACP tool_call row
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.rt.say(&s, "请扫码授权，完成后告诉我。");
+    k.db()
+        .event_add(
+            &s,
+            "tool_call",
+            json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "status": "completed"}),
+        )
+        .unwrap();
+    assert_eq!(k.db().final_reply(&s).unwrap(), "");
+
+    // after the last tool call: a long request, streamed in pieces, read whole and yours
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.db()
+        .event_add(&s, steve_transcript::TOOL, json!({"tool": {"id": "t1"}}))
+        .unwrap();
+    k.rt.say(&s, "请扫码授权，");
+    k.rt.say(&s, "完成后告诉我。");
+    for _ in 0..120 {
+        k.rt.say(&s, "阅读说明。");
+    }
+    k.rt.say(&s, "我在这里等着");
+    let reply = k.db().final_reply(&s).unwrap();
+    assert!(
+        reply.starts_with("请扫码授权，完成后告诉我。") && reply.ends_with("我在这里等着"),
+        "{}",
+        reply.len()
+    );
+    k.rt.end_turn(&k.core, &s, "end_turn", None);
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
+    assert_eq!(k.open_fails(&i).len(), 1, "the card is yours");
+
+    // an update of a call begun before the reply, coming after it, does not hide the reply
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.db()
+        .event_add(
+            &s,
+            steve_transcript::TOOL,
+            json!({"tool": {"id": "t9", "status": "in_progress"}}),
+        )
+        .unwrap();
+    k.rt.say(&s, "请扫码授权，完成后告诉我。");
+    k.db()
+        .event_add(
+            &s,
+            steve_transcript::TOOL,
+            json!({"tool": {"id": "t9", "status": "completed"}}),
+        )
+        .unwrap();
+    assert_eq!(
+        k.db().final_reply(&s).unwrap(),
+        "请扫码授权，完成后告诉我。"
+    );
+}
+
+/// Your Stop whose outcome the backend could not tell (its answer an error): the Stop stays kept,
+/// never weakened into an ordinary stop Steve continues. The idle session is yours at the stall
+/// watch, and the turn's end when it comes is yours too. A Stop the backend says reached nothing
+/// (the turn was over) is withdrawn: the next end is judged as usual.
+#[test]
+fn a_stop_with_an_unknown_outcome_stays_yours() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    let a = k.rt.running(&s).unwrap().attempt;
+    k.rt.st().user_stop_error = true;
+    assert!(k.core.cancel_turn(&s).is_err());
+    let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();
+    assert_eq!(kept.stop_asked.as_deref(), Some(a.as_str()), "kept");
+    // the turn is gone without an end told: the stall watch gives you the card
+    over_untold(&k, &s);
+    assert_eq!(
+        k.core.tx().check_stalls(later()).unwrap(),
+        std::slice::from_ref(&i)
+    );
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
+    assert!(steve_lines(&k, &i).is_empty());
+    let cards = k.open_fails(&i);
+    assert!(cards[0].contains("你要求停止这一回合"), "{cards:?}");
+    // its end comes after all: yours
+    end_of(&k.core, &s, &a, "end_turn");
+    assert!(k.db().store().sessions().stop(&s).unwrap().unwrap().yours);
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
+
+    // a Stop that reached nothing is withdrawn
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.st().user_stop_error = false;
+    assert!(!k.core.cancel_turn(&s).unwrap());
+    assert_eq!(
+        k.db()
+            .store()
+            .sessions()
+            .stop(&s)
+            .unwrap()
+            .unwrap()
+            .stop_asked,
+        None
+    );
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.rt.say(&s, "改了一半");
+    k.rt.end_turn(&k.core, &s, "end_turn", None);
+    assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
+}

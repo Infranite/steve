@@ -332,7 +332,7 @@ impl Engine {
                             .sessions()
                             .stop(sid)
                             .map_err(|e| ce(e.into()))?
-                            .is_some_and(|k| k.stop_reason.is_some() && crate::work::yours(&k)),
+                            .is_some_and(|k| crate::work::held(&k)),
                         None => false,
                     },
                 })

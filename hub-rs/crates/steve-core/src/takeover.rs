@@ -341,7 +341,7 @@ impl Tx<'_> {
             .store()
             .sessions()
             .stop(&s.id)?
-            .is_some_and(|k| k.stop_reason.is_some() && crate::work::yours(&k))
+            .is_some_and(|k| crate::work::held(&k))
         {
             self.diagnostic_session(
                 &s.id,

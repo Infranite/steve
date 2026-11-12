@@ -39,6 +39,9 @@ pub struct FakeState {
     pub pending_permissions: HashSet<String>,
     /// Every answer fails (the backend's store, say).
     pub answer_error: bool,
+    /// The user's stop fails: the backend cannot tell whether it reached the turn (its Node
+    /// unreachable, say). Recorded in `stopped`, nothing is cancelled.
+    pub user_stop_error: bool,
     pub answered: Vec<(String, Option<String>)>,
     pub holding: bool,
     /// `set_mode` calls: (session, mode)
@@ -246,7 +249,13 @@ impl AgentRuntime for FakeRuntime {
         Ok(stop)
     }
     fn user_stop(&self, sid: &str) -> Result<Stop> {
-        self.st().stopped.push(sid.into());
+        {
+            let mut st = self.st();
+            st.stopped.push(sid.into());
+            if st.user_stop_error {
+                return Err(msg("Node 没有回应，不知道停止是否送达"));
+            }
+        }
         self.cancel(sid)
     }
     fn is_busy(&self, sid: &str) -> bool {
@@ -525,6 +534,21 @@ impl Kit {
     }
     pub fn db(&self) -> &Store {
         self.core.store()
+    }
+    /// A Hub restart: a new core on the same SQLite file opened afresh (nothing kept in memory),
+    /// with the same runtime, gateway and settings.
+    pub fn reopened(&self) -> Core {
+        let raw = steve_store::Store::open(
+            self.dir.path().join("data/steve.sqlite3"),
+            steve_store::NoPublisher,
+        )
+        .unwrap();
+        Core::new(
+            Store::new(raw),
+            self.rt.clone(),
+            self.gw.clone(),
+            self.core.config().clone(),
+        )
     }
     /// One outbox pass with Work's consumers (`work.tidy`), as the Hub's dispatcher does after a commit.
     pub fn pump_outbox(&self) -> steve_store::outbox::Pumped {

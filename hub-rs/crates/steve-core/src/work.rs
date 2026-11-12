@@ -88,6 +88,9 @@ impl Work {
 pub(crate) fn stopped(stop: Option<&SessionStop>) -> (String, bool) {
     match stop {
         Some(s) if yours(s) => ("你中断了这一回合".into(), true),
+        Some(s) if s.stop_asked.is_some() => {
+            ("你要求停止这一回合，还没有确认它已停下".into(), true)
+        }
         Some(SessionStop {
             error: Some(e),
             stop_reason: Some(_),
@@ -108,6 +111,13 @@ pub(crate) fn stopped(stop: Option<&SessionStop>) -> (String, bool) {
 /// cancels, a pause or a steer, leave nothing idle to judge).
 pub(crate) fn yours(s: &SessionStop) -> bool {
     s.yours || s.stop_reason.as_deref() == Some("cancelled")
+}
+
+/// Your Stop holds the session: its last turn was stopped by you ([`yours`]), or you asked for a
+/// Stop whose turn end has not come (the backend could not confirm it, or that turn's end is still
+/// on its way). Either way going on is yours, never Steve's or YOLO's.
+pub(crate) fn held(s: &SessionStop) -> bool {
+    s.stop_reason.is_some() && yours(s) || s.stop_asked.is_some()
 }
 
 fn names(xs: &[String]) -> String {

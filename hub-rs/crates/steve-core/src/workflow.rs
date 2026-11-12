@@ -604,9 +604,12 @@ impl Tx<'_> {
         for s in self.db().sessions_of_item(child)? {
             // Freeze the attempt now; cancellation is sent outside the core lock.
             if let Some(turn) = self.rt().running(&s.id) {
-                if !self.st.graph_stops.contains(&turn) {
-                    self.st.graph_stops.push(turn.clone());
-                }
+                /* kept with the turn, not in memory: its cancelled end is the pause's also after a
+                 * quick resume and a restart in between (`graph_stop_take`) */
+                self.db()
+                    .store()
+                    .sessions()
+                    .turn_paused(&s.id, &turn.attempt)?;
                 self.st.cancels.push((turn, child.into()));
             }
         }
@@ -1093,37 +1096,49 @@ impl Tx<'_> {
 
     /// The end of the session's turn `attempt` (`None`: the backend names none) came: whether the
     /// graph stopped that very turn (a pause). Every mark of the session goes: an older turn's end
-    /// that is still to come is a stale one, never this session's current turn.
-    pub(crate) fn graph_stop_take(&mut self, sid: &str, attempt: Option<&str>) -> bool {
-        let marks = std::mem::take(&mut self.st.graph_stops);
-        let mut hit = false;
-        for t in marks {
-            if t.session != sid {
-                self.st.graph_stops.push(t);
-                continue;
-            }
-            hit |= match attempt {
-                Some(a) => self.rt().same_turn(
-                    &t,
-                    &crate::runtime::Running {
-                        session: sid.into(),
-                        attempt: a.into(),
-                    },
-                ),
-                None => true,
-            };
+    /// that is still to come is a stale one, never this session's current turn. The marks are kept
+    /// with the session's turns (`session_turns`), so a restart between the pause, a quick resume
+    /// and the end changes nothing.
+    pub(crate) fn graph_stop_take(&mut self, sid: &str, attempt: Option<&str>) -> Result<bool> {
+        let sessions = self.db().store().sessions();
+        let marks = sessions.turns_paused(sid)?;
+        if marks.is_empty() {
+            return Ok(false);
         }
-        hit
+        sessions.turn_unpaused(sid, None)?;
+        Ok(match attempt {
+            Some(a) => {
+                let end = crate::runtime::Running {
+                    session: sid.into(),
+                    attempt: a.into(),
+                };
+                marks.into_iter().any(|m| {
+                    self.rt().same_turn(
+                        &crate::runtime::Running {
+                            session: sid.into(),
+                            attempt: m,
+                        },
+                        &end,
+                    )
+                })
+            }
+            None => true,
+        })
     }
 
     /// A stale end of turn `e` came: a pause's mark of that turn goes, the others stay.
-    pub(crate) fn graph_stop_drop(&mut self, e: &crate::runtime::Running) {
-        let marks = std::mem::take(&mut self.st.graph_stops);
-        for t in marks {
-            if !(t.session == e.session && self.rt().same_turn(&t, e)) {
-                self.st.graph_stops.push(t);
+    pub(crate) fn graph_stop_drop(&mut self, e: &crate::runtime::Running) -> Result<()> {
+        let sessions = self.db().store().sessions();
+        for m in sessions.turns_paused(&e.session)? {
+            let t = crate::runtime::Running {
+                session: e.session.clone(),
+                attempt: m,
+            };
+            if self.rt().same_turn(&t, e) {
+                sessions.turn_unpaused(&e.session, Some(&t.attempt))?;
             }
         }
+        Ok(())
     }
 
     /// Work-unit turn ends do not trigger the ordinary item takeover/release path.
@@ -1132,7 +1147,7 @@ impl Tx<'_> {
             return Ok(false);
         };
         let paused_here =
-            self.graph_stop_take(&s.id, end.attempt.as_deref()) && end.stop_reason == "cancelled";
+            self.graph_stop_take(&s.id, end.attempt.as_deref())? && end.stop_reason == "cancelled";
         let item = self.item(child)?;
         if !self.workflow_child(&item)? {
             return Ok(false);
@@ -1178,9 +1193,15 @@ impl Tx<'_> {
             }
         }
         self.workflow_drive(&parent)?;
-        let latest = self.db().store().workflows().by_child(child)?;
+        /* only the graph's current attempt is news: a retired one keeps its outcome (a failure
+         * stays failed) but the coordinator already decided what came after it */
+        let latest = self.db().store().workflows().get(&parent)?.and_then(|g| {
+            g.units
+                .into_iter()
+                .find(|u| u.item_id.as_deref() == Some(child))
+        });
         if !g.paused
-            && latest.is_some_and(|(_, u)| matches!(u.status.as_str(), "succeeded" | "failed"))
+            && latest.is_some_and(|u| matches!(u.status.as_str(), "succeeded" | "failed"))
             && let Some(coordinator) = self
                 .active_session(&parent)?
                 .filter(|s| s.status != "ended")

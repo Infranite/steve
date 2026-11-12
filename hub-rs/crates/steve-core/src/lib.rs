@@ -128,8 +128,6 @@ pub(crate) struct State {
     /// The session's last Steve tool call, with the turn it was made in (`None`: none ran then).
     pending: HashMap<String, (Mark, Option<runtime::Running>)>,
     tokens: HashMap<String, String>,
-    /// The last turn end each session had (its attempt): the same end told again is ignored.
-    ended: HashMap<String, String>,
     /// Items whose turn failed on a model quota that is back later (`quota`).
     quota_waits: HashMap<String, quota::QuotaWait>,
     releasing: Option<Releasing>,
@@ -147,11 +145,6 @@ pub(crate) struct State {
     /// (the gateway-retry wait ends with a turn end), so a lifecycle stop never cancels under the lock.
     /// The turn is frozen when the stop is asked for, so a turn started meanwhile is left alone.
     cancels: Vec<(runtime::Running, String)>,
-    /// Work-unit sessions whose turn the graph stopped (a pause): that turn ending cancelled is the
-    /// pause, not the unit failing, even when the graph was resumed before the end came back.
-    /// Kept per turn (session and attempt): only the end of that very turn is the pause's; a later
-    /// turn of the session (resumed meanwhile) stopped by you fails its unit as any other.
-    graph_stops: Vec<runtime::Running>,
     /// Items whose completion rule is being checked against the remote now (`takeover`).
     probing: HashMap<String, takeover::Looking>,
     /// Numbers the looks in `probing`, so a look that comes back is told from a newer one.
@@ -270,6 +263,11 @@ impl Core {
         let sessions = self.0.store.store().sessions();
         let asked = self.0.runtime.running(session_id).map(|r| r.attempt);
         sessions.stop_asked(session_id, Some(asked.as_deref().unwrap_or("")))?;
+        /* only a backend that says the turn was over withdraws your Stop. One that fails to answer
+         * (its Node unreachable, its store failing) leaves the outcome unknown: the turn may still
+         * stop or end, so your Stop stays kept and that end, or the idle session, is yours to go on
+         * with. Steve never weakens a Stop it could not confirm into an ordinary stop it continues;
+         * your next message starts another turn and lifts it (`Tx::on_turn_end`) */
         let stopped = self.0.runtime.user_stop(session_id)? == Stop::Requested;
         if !stopped {
             sessions.stop_asked(session_id, None)?;

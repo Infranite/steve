@@ -324,3 +324,177 @@ fn a_turn_you_stopped_is_not_continued_by_yolo() {
     );
     assert_eq!(t.kit.rt.prompts_of(&sid).len(), 1, "not continued");
 }
+
+/// The open card the turn end left on `item`.
+fn turn_end_card(t: &super::engine_tests::T, item: &str) -> String {
+    t.kit
+        .db()
+        .decisions_of_item(item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.kind == "fail")
+        .expect("the turn end left a card")
+        .id
+}
+
+/// ST-37 #1 (ST-34): “输入验证码后继续” and “Use your passkey” ask for what only you can do. Left in
+/// plain text at a turn end, YOLO does not continue them; asked on a card, it does not answer them.
+/// A report on how the code step was built, or a design question about codes, is answered and
+/// continued as usual.
+#[test]
+fn a_code_to_type_or_a_passkey_is_yours_in_yolo() {
+    for said in ["输入验证码后继续", "Use your passkey"] {
+        let t = t();
+        let (item, sid, _) = t.item();
+        t.kit
+            .gw
+            .set(|_, _| panic!("no model call for what only you can do"));
+        t.kit.rt.prompt(&sid, "做事", "me", &[]).unwrap();
+        t.kit.rt.say(&sid, said);
+        t.kit.rt.end_turn(&t.kit.core, &sid, "end_turn", None);
+        let d = turn_end_card(&t, &item);
+        let a = t.engine.consider(&d).unwrap().unwrap();
+        assert_eq!(
+            (a.outcome.as_str(), a.rule.as_str()),
+            ("declined", "limit.7"),
+            "{said}: {a:?}"
+        );
+        assert_eq!(t.kit.rt.prompts_of(&sid).len(), 1, "{said}: not continued");
+        assert_eq!(t.decision(&d).status, "open");
+
+        // asked on a card
+        let (item, sid, _) = t.item();
+        let d = t.card(
+            &item,
+            &sid,
+            "ask",
+            "question",
+            said,
+            "",
+            &["已完成", "稍后"],
+        );
+        let a = t.engine.consider(&d).unwrap().unwrap();
+        assert_eq!(
+            (a.outcome.as_str(), a.rule.as_str()),
+            ("declined", "limit.7"),
+            "{said}"
+        );
+        assert!(
+            t.kit.rt.prompts_of(&sid).is_empty(),
+            "{said}: nothing submitted"
+        );
+    }
+
+    // a report of the code step: continued as any other stop
+    let t = t();
+    let (item, sid, _) = t.item();
+    t.kit.rt.prompt(&sid, "做事", "me", &[]).unwrap();
+    t.kit.rt.say(
+        &sid,
+        "已实现：用户输入验证码后继续登录，passkey 也支持了，测试通过。",
+    );
+    t.kit.rt.end_turn(&t.kit.core, &sid, "end_turn", None);
+    let d = turn_end_card(&t, &item);
+    let a = t.engine.consider(&d).unwrap().unwrap();
+    assert_eq!(
+        (a.outcome.as_str(), a.rule.as_str()),
+        ("decided", "continue.stall"),
+        "{a:?}"
+    );
+    assert_eq!(t.kit.rt.prompts_of(&sid).len(), 2);
+
+    // a design question about the code step: answered
+    let (item, sid, _) = t.item();
+    let r = reply("answer", "输入后自动提交", Some("输入后自动提交"), 0.9);
+    t.kit.gw.set(move |_, _| Ok(r.clone()));
+    let d = t.card(
+        &item,
+        &sid,
+        "ask",
+        "question",
+        "输入验证码后的校验放在前端还是后端？要不要支持用 passkey 登录？",
+        "",
+        &["输入后自动提交", "点按钮提交"],
+    );
+    let a = t.engine.consider(&d).unwrap().unwrap();
+    assert_eq!(
+        (a.outcome.as_str(), a.rule.as_str()),
+        ("decided", "ask.main"),
+        "{a:?}"
+    );
+}
+
+/// ST-37 #2 (ST-34): your Stop and the turn's own completion race: the turn ends `end_turn`
+/// after you asked to stop it, so its end is yours. The Hub restarts (the same SQLite file opened
+/// afresh, nothing kept in memory) and the same end of the same attempt is told again. That replay
+/// is the same end: it neither takes your Stop from you nor is judged again, and YOLO declines to
+/// continue the card. Your own message afterwards starts another turn; its end is an ordinary stop.
+#[test]
+fn replay_after_restart_must_preserve_stop() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    t.kit.rt.prompt(&sid, "做事", "me", &[]).unwrap();
+    let a = t.kit.rt.running(&sid).unwrap();
+    assert!(t.kit.core.cancel_turn(&sid).unwrap());
+    // the turn completed before the stop reached it
+    t.kit.rt.say(&sid, "改了一半");
+    t.kit.rt.end_turn(&t.kit.core, &sid, "end_turn", None);
+    let kept = t.kit.db().store().sessions().stop(&sid).unwrap().unwrap();
+    assert!(kept.yours, "{kept:?}");
+    let d = turn_end_card(&t, &item);
+
+    let core = t.kit.reopened();
+    core.recover().unwrap();
+    core.on_turn_end(crate::TurnEnd {
+        session_id: sid.clone(),
+        attempt: Some(a.attempt.clone()),
+        stop_reason: "end_turn".into(),
+        error: None,
+    })
+    .unwrap();
+    let kept = core.store().store().sessions().stop(&sid).unwrap().unwrap();
+    assert!(
+        kept.yours && kept.attempt.as_deref() == Some(a.attempt.as_str()),
+        "the replay kept your Stop: {kept:?}"
+    );
+    // YOLO on the restarted core: the card is yours, not continued
+    let yolo = super::Yolo::with_clock(core.store().clone(), None, t.kit.home(), t.clock.clone());
+    let engine = super::engine::Engine::new(core.clone(), yolo);
+    let r = engine.consider(&d).unwrap().unwrap();
+    assert_eq!(
+        (r.outcome.as_str(), r.rule.as_str()),
+        ("declined", "continue.yours"),
+        "{r:?}"
+    );
+    assert_eq!(t.kit.rt.prompts_of(&sid).len(), 1, "not continued");
+    assert_eq!(t.decision(&d).status, "open");
+    // your own message: another turn, whose end is an ordinary stop that YOLO continues
+    core.session_message(&sid, "接着做", false, &[]).unwrap();
+    assert_eq!(t.kit.rt.prompts_of(&sid).len(), 2);
+    t.kit.rt.say(&sid, "又改了一些");
+    t.kit.rt.end_turn(&core, &sid, "end_turn", None);
+    let kept = core.store().store().sessions().stop(&sid).unwrap().unwrap();
+    assert!(!crate::work::held(&kept), "{kept:?}");
+    let d = t
+        .kit
+        .db()
+        .decisions_of_item(&item)
+        .unwrap()
+        .into_iter()
+        .find(|x| x.status == "open" && x.kind == "fail" && x.id != d)
+        .expect("a card for the new stop")
+        .id;
+    // you were here a moment ago (your message): YOLO waits until you are away (the fake clock
+    // started with the test, the message carries the real time)
+    t.clock.set(steve_store::now() + 181_000);
+    let r = engine.consider(&d).unwrap().unwrap();
+    assert_eq!(
+        (r.outcome.as_str(), r.rule.as_str()),
+        ("decided", "continue.stall"),
+        "{r:?}"
+    );
+    assert_eq!(
+        t.kit.rt.prompts_of(&sid).last().map(String::as_str),
+        Some(CONTINUE_STALL)
+    );
+}

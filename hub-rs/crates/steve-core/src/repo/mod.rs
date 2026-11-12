@@ -432,9 +432,19 @@ impl Db {
     }
     /// The agent's final reply: what it said after its last tool call in the turn that ended (since
     /// the last message it was sent), whole however long it is or however many events it streamed in.
-    /// What it waits for now is said there, not somewhere on the way.
+    /// What it waits for now is said there, not somewhere on the way. A turn that ended on a tool call
+    /// with nothing said after it has no final reply (empty): what it said before that call (a request
+    /// the call may have made moot) is never read as what it waits for now. Only a call's update that
+    /// comes late (the call began before the reply) does not count as a call after the reply.
     pub fn final_reply(&self, session: &str) -> Result<String> {
-        let mut parts: Vec<String> = vec![];
+        /// How far back a turn is read: a call whose beginning lies further back counts as new.
+        const SCAN: usize = 5000;
+        enum Seen {
+            Text(String),
+            Tool(Option<String>),
+        }
+        // the turn, newest first
+        let mut turn: Vec<Seen> = vec![];
         let mut before = 0;
         'back: loop {
             let page = self.s.events().before(session, before, 500)?;
@@ -444,19 +454,50 @@ impl Db {
             before = oldest.seq;
             for e in &page {
                 if let Some(t) = steve_transcript::assistant_text(&e.kind, &e.data) {
-                    parts.push(t.to_string());
+                    turn.push(Seen::Text(t.to_string()));
                     continue;
                 }
                 let user = e.kind == "user"
                     || e.kind == "user_message_chunk"
                     || e.kind == steve_transcript::TEXT
                         && e.data.get("role").and_then(Value::as_str) == Some("user");
-                let tool = matches!(
+                if user || turn.len() >= SCAN {
+                    break 'back;
+                }
+                if matches!(
                     e.kind.as_str(),
                     steve_transcript::TOOL | "tool_call" | "tool_call_update"
-                );
-                if user || tool && !parts.is_empty() {
-                    break 'back;
+                ) {
+                    let call = e
+                        .data
+                        .pointer("/tool/id")
+                        .or_else(|| e.data.get("toolCallId"))
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    turn.push(Seen::Tool(call));
+                }
+            }
+        }
+        // how many events of each call are older than the one looked at
+        let mut older: std::collections::HashMap<&str, usize> = Default::default();
+        for s in &turn {
+            if let Seen::Tool(Some(c)) = s {
+                *older.entry(c.as_str()).or_default() += 1;
+            }
+        }
+        let mut parts: Vec<&str> = vec![];
+        for s in &turn {
+            match s {
+                Seen::Text(t) => parts.push(t),
+                Seen::Tool(call) => {
+                    let late_update = call.as_deref().is_some_and(|c| {
+                        let n = older.get_mut(c).expect("counted");
+                        *n -= 1;
+                        *n > 0
+                    });
+                    if !late_update {
+                        break;
+                    }
                 }
             }
         }

@@ -158,6 +158,10 @@ static OWN_ACTION: LazyLock<Regex> = LazyLock::new(|| {
         r"|((请|麻烦|帮我)[^。？?！!\n]{0,6}|你(来|去|再)?)(输入|提供|发|告诉|填|报)[^。？?！!\n]{0,8}(验证码|动态码|短信码|校验码|一次性密码|otp|2fa|mfa)",
         r"|(把|将)[^。？?！!\n]{0,6}(验证码|动态码|短信码|校验码|一次性密码|otp)[^。？?！!\n]{0,4}(发|告诉|给|报)",
         r"|(验证码|动态码|短信码|校验码|一次性密码)[^。？?！!\n]{0,6}(发我|发给我|发过来|告诉我|给我|是多少)",
+        // typing it is the step before going on (said as a step of yours, not a report of the flow)
+        r"|(^|[。！？!?\n；;：:，,]\s*)(请|麻烦)?(你|您)?(先|再|重新)?(输入|填写|填入|提供)[^。？?！!\n]{0,8}(验证码|动态码|短信码|校验码|一次性密码|otp|2fa|mfa)[^。？?！!\n]{0,6}(后|之后|以后|然后|再)[^。？?！!\n的]{0,4}(继续|告诉|回复|通知|说一声|提交|重试|登录)",
+        // a passkey, an authenticator or a security key of yours
+        r"|((请|麻烦)[^。？?！!\n]{0,6}|(你|您)(来|去|再|先)?)(用|使用)(你的|您的)?\s*(通行密钥|passkey|安全密钥|硬件密钥|身份验证器|验证器\s*app|authenticator)",
         r"|(完成|通过|进行)[^。？?！!\n]{0,4}(两步验证|双重验证|二次验证|2fa|mfa)",
         r"|(用|按|插上|插入|刷|录入)[^。？?！!\n]{0,4}(指纹|面容|touch ?id|face ?id|硬件密钥|yubikey|u盾)",
         r"|插(上|入|好)(手机|设备|硬件|数据线|u盘|网线|电源)|重新插拔",
@@ -179,6 +183,8 @@ static OWN_ACTION: LazyLock<Regex> = LazyLock::new(|| {
         r"|\b(enter|type|send( me)?|give me|provide|share|paste|tell me|read me)\b[^.?!\n]{0,20}\b(verification|one-time|otp|2fa|mfa|sms|security|login|auth|authentication) ?(code|password|pin)\b",
         r"|\b(enter|type|send( me)?|give me|provide|share|paste|tell me)\b[^.?!\n]{0,20}\b(the |your )?(otp|2fa|mfa)\b",
         r"|\bscan (the |this |that |a )?(qr ?code|code)\b",
+        r"|(^|[.!?\n:]\s*)(please\s+)?(enter|type|input)\s+(the|your|this)\s+(\w+\s+){0,2}code\b",
+        r"|\b(use|tap|touch|insert|present|confirm with|verify with|approve with|sign in with|log in with|authenticate with|unlock with)\s+your\s+(passkey|security key|hardware key|authenticator( app)?|yubikey|fingerprint|face ?id|touch ?id)\b",
         r"|\b(insert|plug in|touch|tap)\b[^.?!\n]{0,15}\b(yubikey|security key|touch ?id|face ?id)\b",
         r"|\b(approve|confirm|tap|accept|check|scan|enter|type|sign|log|click|allow|unlock)\b[^.?!\n]{0,40}\bon your (phone|device|computer|laptop|browser|watch)\b",
     ))
@@ -2109,6 +2115,15 @@ mod tests {
             "Send me the OTP from your authenticator.",
             "Scan the QR code with your phone, then reply.",
             "The user has already confirmed on the phone.",
+            // ST-37 #1: a code to type before going on, a passkey of yours
+            "输入验证码后继续",
+            "收到短信后，输入验证码后告诉我。",
+            "Use your passkey",
+            "Use your passkey to sign in, then reply.",
+            "Please confirm with your security key.",
+            "Enter the code we sent to your phone and continue.",
+            "请用 passkey 完成验证",
+            "你先用通行密钥登录一下",
         ] {
             assert!(own_action(t).is_some(), "{t}");
         }
@@ -2138,6 +2153,16 @@ mod tests {
             "I fixed the login flow and the tests are done.",
             "Login to the dashboard is slow; should we cache the session?",
             "需要扫描所有文件吗？",
+            // ST-37 #1: designing and reporting on codes and passkeys is ordinary work
+            "已实现：用户输入验证码后继续登录，测试通过。",
+            "输入验证码后的校验逻辑放在哪一层？",
+            "验证码输入框做好了，输入后自动提交。",
+            "要不要支持用 passkey 登录？",
+            "你觉得用通行密钥还是短信验证码？",
+            "Users can now sign in with their passkey.",
+            "Should we let users use a passkey instead of a password?",
+            "The enter-the-code screen now validates 6 digits.",
+            "I added passkey support and the tests pass.",
         ] {
             assert!(own_action(t).is_none(), "{t}");
         }
