@@ -1108,8 +1108,8 @@ export const tag = (id: string) => st.tags.find((t) => t.id === id)
 export const tagName = (id: string) => tag(id)?.name ?? id
 export const tagUses = (id: string) => st.tagUses[id] ?? 0
 /** tag categories as the Hub stores them (Chinese values); show one with tagCatLabel */
-export const TAG_CATS = ["项目", "类型", "领域", "客户", "主题"]
-const TAG_CAT_KEY: Record<string, "project" | "kind" | "domain" | "client" | "topic"> = { 项目: "project", 类型: "kind", 领域: "domain", 客户: "client", 主题: "topic" }
+export const TAG_CATS = ["项目", "类型", "交付", "领域", "客户", "主题"]
+const TAG_CAT_KEY: Record<string, "project" | "kind" | "delivery" | "domain" | "client" | "topic"> = { 项目: "project", 类型: "kind", 交付: "delivery", 领域: "domain", 客户: "client", 主题: "topic" }
 /** a tag category in the UI language; an unknown one as it is */
 export const tagCatLabel = (cat: string) => (TAG_CAT_KEY[cat] ? t(`core:tagCat.${TAG_CAT_KEY[cat]}`) : cat)
 /* item categories (ST-34): every item has exactly one of these six tags of category 类型, the Hub refuses
@@ -1126,7 +1126,10 @@ export const kindColor = (name: string) => KINDS.find(([n]) => n === name)?.[2] 
 /** the item's category tag id; the Hub keeps exactly one */
 export const kindOf = (i: Pick<Item, "tags">) => (i.tags ?? []).find((x) => isKind(tag(x)))
 /** the category first, then the domain tags as they were added */
-export const sortTags = (ids: string[] = []) => [...ids].sort((a, b) => +isKind(tag(b)) - +isKind(tag(a)))
+export const sortTags = (ids: string[] = []) => [...ids].sort((a, b) => {
+  const rank = (id: string) => isKind(tag(id)) ? 0 : tag(id)?.cat === "交付" ? 1 : 2
+  return rank(a) - rank(b)
+})
 export function setTags(id: string, ids: string[]) { void call(api.patchItem(id, { tags: ids })) }
 /** switch the category in one write: the old one goes as the new one comes, never none in between */
 export const loadKindsReview = () => api.kindsReview().catch(() => [] as RKindReview[])

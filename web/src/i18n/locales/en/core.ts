@@ -16,7 +16,7 @@ export default {
   perm: { plan: "Read-only: plans only, no file changes", default: "Ask before every file change or command", acceptEdits: "Can edit files in the project; asks before commands", auto: "Can edit files and run commands; outside actions still need your approval", bypassPermissions: "Never asks: tools run directly, contained by the OS sandbox" },
   avatarColor: { mist: "Mist blue", lavender: "Lavender", teal: "Teal", amber: "Amber", coral: "Coral", slate: "Slate", navy: "Navy slate", walnut: "Walnut" },
   kind: { bug: "Fix", feat: "Feature", doc: "Docs", refactor: "Refactor", ops: "Ops", chore: "Chore" },
-  tagCat: { project: "Project", kind: "Type", domain: "Domain", client: "Client", topic: "Topic" },
+  tagCat: { project: "Project", kind: "Type", delivery: "Delivery", domain: "Domain", client: "Client", topic: "Topic" },
   error: { generic: "Something went wrong", loadRetry: "Couldn't load, retrying: {{msg}}", network: "Network error" },
   defaultModel: "Default model",
   unknownHarness: "Unknown harness",

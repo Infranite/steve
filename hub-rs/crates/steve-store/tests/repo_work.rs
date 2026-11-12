@@ -57,6 +57,79 @@ fn new_session(s: &Store, item: Option<&str>, token: &str) -> Session {
 }
 
 #[test]
+fn delivery_tags_are_multi_select_and_do_not_change_the_item_type() {
+    let t = with_steve();
+    let s = &t.store;
+    let kind = s.tags().by_name(WS, "doc").unwrap().unwrap();
+    let item = s
+        .items()
+        .create(
+            WS,
+            &NewItem {
+                title: "设计方案与数据报表".into(),
+                goal: "先设计，再交报告".into(),
+                bot_id: "steve".into(),
+                tags: vec![kind.id.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let names = |s: &Store| -> Vec<String> {
+        s.tags()
+            .of_item(&item.id)
+            .unwrap()
+            .into_iter()
+            .map(|id| s.tags().get(&id).unwrap().unwrap().name)
+            .collect()
+    };
+    let labels = names(s);
+    for name in ["doc", "方案", "数据", "报告"] {
+        assert!(labels.contains(&name.to_string()), "{name}: {labels:?}");
+    }
+    s.artifacts()
+        .add_as(&item.id, "部署记录", "升级完成", None, Some("result"))
+        .unwrap();
+    let labels = names(s);
+    assert!(labels.contains(&"操作".to_string()));
+    assert_eq!(
+        labels
+            .iter()
+            .filter(
+                |name| ["bug", "feat", "doc", "refactor", "ops", "chore"].contains(&name.as_str())
+            )
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn old_items_receive_delivery_tags_once_and_manual_removal_stays_removed() {
+    let t = with_steve();
+    let s = &t.store;
+    let item = new_item(s, WS, "设计报告");
+    s.with_conn(|c| {
+        Ok(c.execute(
+            "DELETE FROM settings WHERE workspace_id=? AND key='__delivery_tags_backfilled_v1'",
+            [WS],
+        )?)
+    })
+    .unwrap();
+    s.tags().kinds(WS).unwrap();
+    let report = s.tags().by_name(WS, "报告").unwrap().unwrap();
+    assert!(s.tags().of_item(&item.id).unwrap().contains(&report.id));
+    s.with_conn(|c| {
+        Ok(c.execute(
+            "DELETE FROM item_tags WHERE item_id=? AND tag_id=?",
+            [&item.id, &report.id],
+        )?)
+    })
+    .unwrap();
+    s.tags().kinds(WS).unwrap();
+    assert!(!s.tags().of_item(&item.id).unwrap().contains(&report.id));
+}
+
+#[test]
 fn item_numbers_are_global_per_prefix() {
     let t = with_steve();
     let s = &t.store;
@@ -833,11 +906,19 @@ fn messages_written_in_the_same_millisecond_list_in_the_order_written() {
     let s = &t.store;
     let texts: Vec<String> = (0..200).map(|n| format!("m{n}")).collect();
     for text in &texts {
-        s.messages().add(WS, "me", text, None, &Value::Null, "steve").unwrap();
+        s.messages()
+            .add(WS, "me", text, None, &Value::Null, "steve")
+            .unwrap();
     }
     let ms = s.messages().list(WS, "steve", 500).unwrap();
-    assert_eq!(ms.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), texts);
-    assert!(ms.windows(2).all(|w| w[0].created < w[1].created), "no two share a time");
+    assert_eq!(
+        ms.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        texts
+    );
+    assert!(
+        ms.windows(2).all(|w| w[0].created < w[1].created),
+        "no two share a time"
+    );
 }
 
 #[test]

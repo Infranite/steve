@@ -777,6 +777,14 @@ impl Tx<'_> {
         {
             return Err(conflict("集成验收需至少一项实际操作检查（operated: true）"));
         }
+        // The full prose lives in the durable output file. The graph keeps its location for
+        // downstream work instead of duplicating the report body in SQLite.
+        let stored_summary = outputs
+            .iter()
+            .find(|o| o.title == "交付正文")
+            .and_then(|o| o.location.as_deref())
+            .map(|path| format!("完整交付正文：{path}。请打开该文件查看。"));
+        let stored_summary = stored_summary.as_deref().unwrap_or(summary);
         let output_json = serde_json::to_value(outputs)?;
         let check_json = serde_json::to_value(checks)?;
         let duplicate = unit.status == if passed { "succeeded" } else { "failed" };
@@ -785,7 +793,7 @@ impl Tx<'_> {
             self.db().store().workflows().deliver(
                 child,
                 &s.id,
-                summary,
+                stored_summary,
                 &output_json,
                 &check_json,
                 passed,
@@ -806,7 +814,7 @@ impl Tx<'_> {
                         tx,
                         child,
                         &s.id,
-                        summary,
+                        stored_summary,
                         &output_json,
                         &check_json,
                         true,
@@ -827,7 +835,7 @@ impl Tx<'_> {
                         s.bot_id.as_deref().unwrap_or("agent"),
                         "sys",
                         &format!(
-                            "{} 已交付，等待执行结束后交给下游\n{summary}",
+                            "{} 已交付，等待执行结束后交给下游\n{stored_summary}",
                             unit.spec.title
                         ),
                         Some(&s.id),

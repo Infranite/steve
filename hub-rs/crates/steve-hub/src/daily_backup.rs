@@ -6,7 +6,8 @@
 //! - `daily-YYYYMMDD-files.tar`: what the database alone cannot bring back, readable by the owner
 //!   only: attachments (`data/files`), the signing identity (`signing`, without the keychain's
 //!   password: a copy in a file would unlock the identity for anyone who reads the backup), the
-//!   secret files (`secrets`) and the configuration (`steve.env`), as far as they are in the home.
+//!   secret files (`secrets`), item deliverables (`workspaces`) and the configuration
+//!   (`steve.env`), as far as they are in the home.
 //!
 //! Same disk, no restore drill: a copy against mistakes and a corrupt database, not disaster
 //! recovery. The names are those of `ops/backup.sh`, the job of a source-based installation: where
@@ -34,7 +35,13 @@ const FIRST: Duration = Duration::from_secs(300);
 /// After a copy that failed (a full disk): not before this many ticks.
 const RETRY_TICKS: u32 = 6;
 /// What the tar takes of the home, where it is there.
-const PARTS: [&str; 4] = ["data/files", "signing", "secrets", "steve.env"];
+const PARTS: [&str; 5] = [
+    "data/files",
+    "signing",
+    "secrets",
+    "workspaces",
+    "steve.env",
+];
 /// How often the files are tried for a day's copy.
 const TAR_TRIES: u32 = 3;
 /// What the name of a copy still being written ends in (SQLite's journal comes after it).
@@ -370,6 +377,8 @@ mod tests {
         fs::create_dir_all(h.join("signing/keys")).unwrap();
         fs::write(h.join("signing/keys/id"), "k").unwrap();
         fs::write(h.join("signing").join(NOT_COPIED), "p").unwrap();
+        fs::create_dir_all(h.join("workspaces/ST-8/outputs")).unwrap();
+        fs::write(h.join("workspaces/ST-8/outputs/report.md"), "design").unwrap();
 
         let m = make(h, &db, "20260102").unwrap();
         assert_eq!(m.database, h.join("backups/daily-20260102.sqlite3"));
@@ -390,6 +399,10 @@ mod tests {
                 "signing/keys",
                 "signing/keys/id",
                 "steve.env",
+                "workspaces",
+                "workspaces/ST-8",
+                "workspaces/ST-8/outputs",
+                "workspaces/ST-8/outputs/report.md",
             ]
         );
         for p in [&h.join("backups"), &m.database, &files] {
