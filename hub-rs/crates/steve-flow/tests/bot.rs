@@ -3,33 +3,19 @@
 //! drafted graph validates and is stored disabled; `edit-draft` returns a graph without saving.
 //! No real model is ever called.
 
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::params;
 use serde_json::{Value, json};
-use steve_flow::nodes::bot::{self, BotNode, Guard};
+use steve_flow::nodes::bot::{self, BotNode};
 use steve_flow::testkit::FlowEnv;
 use steve_flow::{EventSink, RawEvent, Scheduler};
 use steve_modules::Tier;
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
 
-struct SecretGuard;
-impl Guard for SecretGuard {
-    fn scan(&self, text: &str) -> Vec<Range<usize>> {
-        text.match_indices("sk-live-123456")
-            .map(|(i, m)| i..i + m.len())
-            .collect()
-    }
-}
-
 fn env() -> FlowEnv {
-    let e = FlowEnv::with(
-        Vec::new(),
-        vec![Arc::new(BotNode::new(Arc::new(SecretGuard)))],
-        Vec::new(),
-    );
+    let e = FlowEnv::with(Vec::new(), vec![Arc::new(BotNode)], Vec::new());
     e.env
         .store()
         .with_conn(|c| {
@@ -174,7 +160,7 @@ async fn branch_and_reason_reach_the_event() {
         [&evt],
     );
     assert_eq!(question, "可以，改到 2 点。");
-    // one fast-tier call; the prompt has the event, the branches, never the secret
+    // one fast-tier call; the prompt has the event as it came and the branches
     let calls = e.env.gateway.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, Tier::Fast);
@@ -182,8 +168,7 @@ async fn branch_and_reason_reach_the_event() {
     assert!(p.starts_with("你是「Steve」"), "{p}");
     assert!(p.contains("Sarah：周五能改到 2 点吗？"));
     assert!(p.contains(r#"["需要回复","其他"]"#));
-    assert!(!p.contains("sk-live-123456"));
-    assert!(p.contains(bot::REDACTED));
+    assert!(p.contains("sk-live-123456"));
     // the step output carries branch, reason and fields
     let run = run_of(&e, &evt);
     let out: String = q(

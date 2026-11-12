@@ -2,7 +2,7 @@
 //!
 //! One call to the model gateway's fast tier (60 s, no ACP session). The prompt is the bot's duty
 //! (`role`) and working rules (`rules`), the instruction, the event's summary and original text
-//! (≤ 8000 characters, scanned by the secret [`Guard`] first) and the branch list; the answer must be
+//! (≤ 8000 characters) and the branch list; the answer must be
 //! `{"branch","reason","fields"}`. A branch that is not in the list fails the node (its `on_fail`
 //! decides); a gateway error or timeout makes the run try again in 10 minutes, once
 //! ([`NodeOutcome::Retry`]). The reason becomes the event's triage reason and the bot its
@@ -13,8 +13,6 @@
 //!
 //! Dry runs never get here: the engine picks the branch by `prefer`.
 
-use std::ops::Range;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -32,8 +30,6 @@ pub const KIND: &str = "bot";
 pub const TIMEOUT: Duration = Duration::from_secs(60);
 /// The event text (summary and original) a prompt carries at most, in characters.
 pub const TEXT_MAX: usize = 8000;
-/// What every secret the guard finds is replaced with before the text reaches the model.
-pub const REDACTED: &str = "［已拦下的机密］";
 /// The start of every judgement prompt (tests script the fake gateway by it).
 pub const PROMPT_START: &str = "你是「";
 
@@ -46,69 +42,9 @@ pub const RESERVED_FIELDS: [&str; 2] = ["branch", "reason"];
 const INSTRUCTION_MAX: usize = 2000;
 const REASON_MAX: usize = 200;
 
-/// `steve_vault::guard::scan` as this node needs it: byte ranges of things that look like
-/// passwords or tokens. The integrator wraps the real scanner; [`NoGuard`] finds nothing.
-pub trait Guard: Send + Sync {
-    fn scan(&self, text: &str) -> Vec<Range<usize>>;
-}
-
-/// A scanner that finds nothing (until the vault's guard is wired).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoGuard;
-
-impl Guard for NoGuard {
-    fn scan(&self, _: &str) -> Vec<Range<usize>> {
-        Vec::new()
-    }
-}
-
-/// Replaces every range the guard reports with [`REDACTED`]. Unsorted, overlapping or
-/// off-boundary ranges are tolerated (widened to whole characters).
-pub fn redact(guard: &dyn Guard, text: &str) -> String {
-    let mut ranges = guard.scan(text);
-    if ranges.is_empty() {
-        return text.to_string();
-    }
-    ranges.sort_by_key(|r| r.start);
-    let mut out = String::with_capacity(text.len());
-    let mut pos = 0;
-    for r in ranges {
-        let mut start = r.start.min(text.len()).max(pos);
-        while !text.is_char_boundary(start) {
-            start -= 1;
-        }
-        let mut end = r.end.min(text.len());
-        while !text.is_char_boundary(end) {
-            end += 1;
-        }
-        if end <= start {
-            continue;
-        }
-        out.push_str(&text[pos..start]);
-        out.push_str(REDACTED);
-        pos = end;
-    }
-    out.push_str(&text[pos..]);
-    out
-}
-
 /// The `bot` node kind.
-pub struct BotNode {
-    guard: Arc<dyn Guard>,
-}
-
-impl Default for BotNode {
-    fn default() -> Self {
-        Self::new(Arc::new(NoGuard))
-    }
-}
-
-impl BotNode {
-    /// With the secret scanner the event text goes through before the model sees it.
-    pub fn new(guard: Arc<dyn Guard>) -> Self {
-        Self { guard }
-    }
-}
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BotNode;
 
 /// The bot a judgement runs as.
 #[derive(Debug, Clone, PartialEq)]
@@ -205,8 +141,8 @@ fn cut(s: &str, n: usize) -> String {
 }
 
 /// The event as the prompt shows it: summary, sender, original text; `input` for runs without an
-/// event. Scanned, then cut to [`TEXT_MAX`].
-fn event_text(guard: &dyn Guard, event: &Value, sender: &Value, input: &Value) -> String {
+/// event. Cut to [`TEXT_MAX`].
+fn event_text(event: &Value, sender: &Value, input: &Value) -> String {
     let mut s = String::new();
     if event.is_null() {
         if !input.is_null() {
@@ -235,7 +171,7 @@ fn event_text(guard: &dyn Guard, event: &Value, sender: &Value, input: &Value) -
             s.push_str(&raw);
         }
     }
-    cut(&redact(guard, &s), TEXT_MAX)
+    cut(&s, TEXT_MAX)
 }
 
 /// The judgement prompt.
@@ -410,7 +346,7 @@ impl NodeKind for BotNode {
         }
         let fields = str_list(cfg, "fields").unwrap_or_default();
         let instruction = cx.render(cfg["instruction"].as_str().unwrap_or(""), input);
-        let text = event_text(self.guard.as_ref(), &event, &cx.sender, input);
+        let text = event_text(&event, &cx.sender, input);
         let p = prompt(&bot, &instruction, &text, &branches, &fields);
         let gateway = cx.flow.modules.gateway.clone();
         // the gateway is told the limit; the outer timeout covers one that ignores it
@@ -456,15 +392,6 @@ impl NodeKind for BotNode {
 mod tests {
     use super::*;
 
-    struct Secret;
-    impl Guard for Secret {
-        fn scan(&self, text: &str) -> Vec<Range<usize>> {
-            text.match_indices("sk-secret")
-                .map(|(i, m)| i..i + m.len())
-                .collect()
-        }
-    }
-
     fn b(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
@@ -493,12 +420,11 @@ mod tests {
     }
 
     #[test]
-    fn event_text_is_scanned_and_cut() {
+    fn event_text_is_cut() {
         let ev = json!({"source": "mail", "type": "mail.new", "summary": "密钥",
                         "payload": {"text": format!("key sk-secret {}", "长".repeat(9000))}});
-        let t = event_text(&Secret, &ev, &json!({"name": "Sarah"}), &Value::Null);
-        assert!(!t.contains("sk-secret"));
-        assert!(t.contains(REDACTED));
+        let t = event_text(&ev, &json!({"name": "Sarah"}), &Value::Null);
+        assert!(t.contains("key sk-secret"));
         assert!(t.contains("发件人：Sarah"));
         assert_eq!(t.chars().count(), TEXT_MAX);
     }

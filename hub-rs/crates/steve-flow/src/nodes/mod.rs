@@ -1,6 +1,6 @@
 //! Node kinds as a registry: the built-in `trigger`, `filter`, `table`,
 //! `flow`, `wait`, `approve`, `action`, `script`, `cmd`, `http` (S3) and `bot` (S4) here; the
-//! vault-backed `http`, `cmd` with `STEVE_HOME`, the guarded `bot` and the channel actions are
+//! vault-backed `http`, `cmd` with `STEVE_HOME`, the `bot` and the channel actions are
 //! registered through [`crate::FlowSetup`].
 
 pub mod action;
@@ -256,8 +256,7 @@ impl NodeRegistry {
         r.add(Arc::new(wait::Wait));
         r.add(Arc::new(approve::Approve));
         r.add(Arc::new(action::ActionNode::new(actions)));
-        // without the vault's guard until the integrator registers `BotNode::new(guard)`
-        r.add(Arc::new(bot::BotNode::default()));
+        r.add(Arc::new(bot::BotNode));
         r.add(Arc::new(script::Script));
         // the integrator replaces these with `Cmd::new(steve_home)` and `Http::new(vault)`
         r.add(Arc::new(cmd::Cmd::default()));

@@ -1,6 +1,5 @@
 //! Bot use of secrets: `steve_secret_use` asks, the user approves (or a
-//! grant covers it), Steve runs the command with the values injected and gives back the redacted
-//! output.
+//! grant covers it), Steve runs the command with the values injected and gives back its output.
 //!
 //! - Every use is a decision `{kind:"approve", subject_type:"secret_use"}` unless an open grant of this
 //!   bot on this item covers the session's scope (its project, or `{"scratch":true}`). `high` items and
@@ -15,8 +14,6 @@
 //! - The request itself (command, directory, injections) is held in memory between asking and
 //!   answering: no table has columns for it and the schema is frozen. On restart open requests are
 //!   expired ([`SecretUses::start`]) and their sessions told so.
-//! - After a run, the values are registered with the session redactor for an hour
-//!   (`steve_vault::redact::register`).
 //!
 //! Nothing here holds a value except [`SecretUses::execute`], between decrypting and the end of the
 //! run.
@@ -24,7 +21,7 @@
 //! On a Node (N0e-E7, with [`SecretUses::set_nodes`]): when [`UseNodes::place`] says the session
 //! works on a Node, the command runs there instead, in the session's workspace (`cwd` relative to
 //! it), and the Node takes each value from the Hub when it starts ([`UseValues`]: decrypted then,
-//! once, and registered with the session redactor). A Node that may not write files (any but the
+//! once). A Node that may not write files (any but the
 //! Hub's own machine) gets no `files`: the request is refused before anything is asked or run.
 //! Without one, or for a session the Hub runs itself, nothing changes.
 
@@ -88,15 +85,6 @@ pub trait UseNodes: Send + Sync {
     async fn run(&self, u: NodeUse, values: Arc<dyn UseValues>) -> RunOutput;
 }
 
-/// Whether `command` holds a secret written into it (the paste guard's hits, but a `$VAR` after
-/// `password=` is a reference, not a value). A Node keeps the command it runs as it is (the Hub's
-/// ledger, the Node's journal), so such a command is not run on one.
-pub fn pasted_secret(command: &str) -> bool {
-    steve_vault::guard::scan(command)
-        .iter()
-        .any(|s| !(s.kind == "said" && command[s.range()].starts_with('$')))
-}
-
 /// The Node a session works on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodePlace {
@@ -125,13 +113,11 @@ pub trait UseValues: Send + Sync {
     fn value(&self, label: &str) -> VaultResult<super::secret::SecretBytes>;
 }
 
-/// The values of one approved use (`labels` of `item`), registered with the session redactor as
-/// they are taken.
+/// The values of one approved use (`labels` of `item`).
 struct Values {
     vault: Vault,
     ws: String,
     item: String,
-    session: Option<String>,
     labels: Vec<String>,
 }
 
@@ -146,9 +132,6 @@ impl UseValues for Values {
         let (_, value) = v
             .pop()
             .ok_or_else(|| VaultError::internal("no value for a field"))?;
-        if let Some(s) = &self.session {
-            steve_vault::redact::register(s, label, value.expose());
-        }
         Ok(value)
     }
 }
@@ -198,7 +181,7 @@ pub fn approved_message(title: &str, out: &RunOutput) -> String {
     let all = out.combined();
     let cut: String = all.chars().take(MESSAGE_OUTPUT).collect();
     format!(
-        "用户批准了使用「{title}」。命令已执行，退出码 {}。输出（机密已打码）：\n{cut}",
+        "用户批准了使用「{title}」。命令已执行，退出码 {}。输出：\n{cut}",
         out.code()
     )
 }
@@ -246,7 +229,7 @@ impl From<&crate::contacts::mcp::McpCx> for UseCx {
 /// What became of a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UseOutcome {
-    /// A grant covered it; this is the (redacted) result.
+    /// A grant covered it; this is the result.
     Ran { use_id: String, out: RunOutput },
     /// A decision is open.
     Asked { use_id: String, decision_id: String },
@@ -593,13 +576,6 @@ impl SecretUses {
         let (cwd, node) = match place {
             None => (resolve_cwd(Path::new(&workdir), r.cwd.as_deref())?, None),
             Some(p) => {
-                // the Node keeps the command as it is: a token in it would be stored
-                if pasted_secret(&r.command) {
-                    return Err(ApiError::rule(steve_i18n::t!(
-                        "modules.vault.command_secret_node"
-                    ))
-                    .into());
-                }
                 if !p.files && injections.iter().any(|i| i.how == How::File) {
                     return Err(ApiError::rule(steve_i18n::t!("modules.vault.files_remote")).into());
                 }
@@ -639,8 +615,7 @@ impl SecretUses {
             },
             node,
         };
-        // a token pasted into the command itself is not stored
-        let shown = steve_vault::guard::redact(&r.command).unwrap_or_else(|| r.command.clone());
+        let shown = r.command.clone();
         let at = now();
         let mut row = UseRecord {
             id: use_id.clone(),
@@ -743,15 +718,13 @@ impl SecretUses {
         }
     }
 
-    /// Decrypts, runs, registers the values with the session redactor, records the result. The
-    /// values exist only inside this call.
+    /// Decrypts, runs, records the result. The values exist only inside this call.
     async fn execute(&self, use_id: &str, p: &Pending) -> RunOutput {
         if let (Some(cwd), Some(nodes)) = (&p.node, self.0.nodes.get()) {
             let values = Arc::new(Values {
                 vault: self.0.vault.clone(),
                 ws: p.ws.clone(),
                 item: p.item_id.clone(),
-                session: p.session_id.clone(),
                 labels: p.labels(),
             });
             let u = NodeUse {
@@ -773,15 +746,7 @@ impl SecretUses {
             .blocking(move |v| v.injection_values(&ws, &item, &labels))
             .await;
         let out = match values {
-            Ok(values) => {
-                let out = inject::run(&self.0.home, &p.spec, &values).await;
-                if let Some(s) = &p.session_id {
-                    for (label, v) in &values {
-                        steve_vault::redact::register(s, label, v.expose());
-                    }
-                }
-                out
-            }
+            Ok(values) => inject::run(&self.0.home, &p.spec, &values).await,
             Err(e) => RunOutput {
                 exit_code: None,
                 timed_out: false,

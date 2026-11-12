@@ -35,7 +35,7 @@ Steve sits above Claude Code and Codex and keeps that record. It is one Rust bin
 | **Permission prompts** | Whichever tab you happen to look at | One Inbox, or YOLO within hard limits |
 | **"Done"** | The agent says so | Checks passed, plan closed, proof from the goal |
 | **Merging** | By hand, one branch at a time | Merge lanes: batched, fast-forward only |
-| **Secrets** | Pasted into the prompt | Used through the vault, output redacted |
+| **Secrets** | Pasted into the prompt | Kept in the vault, injected into the command |
 
 <div align="center">
 
@@ -77,9 +77,9 @@ YOLO only decides things that stay on your machine and can be undone. Money, hig
 <tr>
 <td width="33%" valign="top">
 
-#### 🗝️ Agents use secrets without seeing them
+#### 🗝️ Agents use secrets without reading the vault
 
-Steve runs the command with the secret and hands the agent redacted output. The redactor also catches base64, URL, hex and JSON-escaped copies.
+Steve runs the command with the secret in its environment, stdin or a temporary file, and hands the agent the command's output as it is. Steve never masks or filters what you type or what a model says.
 
 </td>
 <td width="33%" valign="top">
@@ -184,7 +184,7 @@ Steve keeps contacts, organizations and teams. Identities are matched by handle,
 
 Each workspace has a master key in the OS key store (macOS Keychain, Linux Secret Service, or a protected directory). Each item has its own data key, and fields are encrypted with XChaCha20-Poly1305. Templates cover logins, cards, API credentials, SSH keys and more, and the template, not the client, decides which fields are secret. Revealing a secret takes a passkey (Touch ID or Face ID) with a single-use challenge bound to that field.
 
-Bots use secrets through `steve_secret_use` without reading them. Each use needs an approval or a time-boxed grant, is recorded, and returns redacted output. Cards and high-sensitivity items can never be granted. A paste guard strips card numbers, API tokens and private keys before anything reaches a model.
+Bots use secrets through `steve_secret_use` without reading them. Each use needs an approval or a time-boxed grant, is recorded, and returns the command's exit code and output. Cards and high-sensitivity items can never be granted. Steve does not scan, mask or refuse content: what you type reaches the model as typed, and a model that repeats a secret is a reason to switch harness or model.
 
 ### ⚡ Automation
 
@@ -396,7 +396,7 @@ hub-rs/          Rust workspace: the Hub binary and its crates
   crates/steve-github     GitHub App/token, webhooks, PRs, checks, effects
   crates/steve-knowledge  knowledge base, retrieval, citations, memories
   crates/steve-flow       signals, flows, schedules
-  crates/steve-vault      redaction and paste guard; steve-keyhelper holds the macOS key
+  crates/steve-vault      what a launched harness may not read; steve-keyhelper holds the macOS key
   crates/steve-stats      usage, cost and delivery metrics
   crates/steve-node*      the Hub–Node protocol and the Node runtime that runs every session
   crates/steve-store      SQLite schema and migrations

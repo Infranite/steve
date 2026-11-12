@@ -4,16 +4,14 @@
 //! main thread never shows private knowledge; MCP cannot read another user's private document.
 //! Plus `/kb/uses` and the read tool's paging.
 
-use std::sync::Arc;
-
 use axum::Router;
 use serde_json::{Value, json};
+use steve_knowledge::Knowledge;
 use steve_knowledge::context::{
     self, CHAT_HEAD, CHAT_RULES, KnowledgeContext, SESSION_HEAD, SESSION_MAX, SESSION_RULES,
 };
 use steve_knowledge::tools::{self, LEVELS, READ, SEARCH};
 use steve_knowledge::uses;
-use steve_knowledge::{Knowledge, NoGuard};
 use steve_modules::Registry;
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::context::{Cite, PromptContext};
@@ -29,7 +27,7 @@ struct Env {
 
 fn setup() -> Env {
     let env = TestEnv::new(|_| {});
-    let kb = Knowledge::new(Arc::new(NoGuard), |_| {});
+    let kb = Knowledge::new(|_| {});
     let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
     Env { env, kb, app }
 }

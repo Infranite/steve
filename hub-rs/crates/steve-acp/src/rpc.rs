@@ -525,9 +525,7 @@ impl Conn {
 /// The longest stderr line read at once; the rest of an overlong line is drained, not logged.
 const STDERR_LINE_MAX: u64 = 64 * 1024;
 
-/// Logs an adapter's stderr a line at a time, scrubbed and cut to 500 characters. Whole lines
-/// matter: an adapter's stderr can echo what a command printed, and an injected secret split
-/// across two reads would slip past the redactor (V4).
+/// Logs an adapter's stderr a line at a time, cut to 500 characters.
 async fn stderr_lines(stderr: impl tokio::io::AsyncRead + Unpin, mut log: impl FnMut(&str)) {
     let mut r = BufReader::new(stderr);
     let mut line = Vec::new();
@@ -551,9 +549,7 @@ async fn stderr_lines(stderr: impl tokio::io::AsyncRead + Unpin, mut log: impl F
         let t = String::from_utf8_lossy(&line);
         let t = t.trim();
         if !t.is_empty() {
-            // scrubbed before the cut, so a value straddling the 500th character is caught too
-            let t = steve_vault::redact::scrub_any(t);
-            log(js_slice(&t, 500));
+            log(js_slice(t, 500));
         }
     }
 }
@@ -564,13 +560,12 @@ mod stderr_tests {
     use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
-    async fn a_secret_split_across_reads_is_still_scrubbed() {
-        let secret = "sk-test-stderr-split-0123456789abcdef";
-        steve_vault::redact::register("rpc-stderr-test", "API_KEY", secret.as_bytes());
+    async fn a_line_split_across_reads_is_logged_whole() {
+        let word = "stderr-split-0123456789abcdef";
         // a tiny pipe, so the reader sees the line in several pieces
         let (mut w, r) = tokio::io::duplex(8);
         let feed = tokio::spawn(async move {
-            let text = format!("token is {secret} ok\nnext line\n");
+            let text = format!("token is {word} ok\nnext line\n");
             for piece in text.as_bytes().chunks(5) {
                 w.write_all(piece).await.unwrap();
                 tokio::task::yield_now().await;
@@ -579,13 +574,8 @@ mod stderr_tests {
         let mut got = Vec::new();
         stderr_lines(r, |t| got.push(t.to_string())).await;
         feed.await.unwrap();
-        steve_vault::redact::forget("rpc-stderr-test");
         assert_eq!(got.len(), 2, "{got:?}");
-        assert!(!got[0].contains("sk-test"), "{got:?}");
-        assert!(
-            got[0].starts_with("token is ") && got[0].ends_with(" ok"),
-            "{got:?}"
-        );
+        assert_eq!(got[0], format!("token is {word} ok"));
         assert_eq!(got[1], "next line");
     }
 

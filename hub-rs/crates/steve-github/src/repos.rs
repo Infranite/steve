@@ -46,7 +46,7 @@ pub const REPO_HOOK_EVENTS: [&str; 9] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// `ask_pr|open_pr|none`. `open_pr`: accepting the item opens its draft PR without asking, for a
-    /// private repository whose push passed the leak check (anything else still asks).
+    /// private repository whose item's worktree is on this machine (anything else still asks).
     pub after_accept: String,
     /// `accepted|merged`.
     pub finish_on: String,

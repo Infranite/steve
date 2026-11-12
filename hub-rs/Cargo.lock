@@ -4977,7 +4977,6 @@ dependencies = [
  "steve-modules",
  "steve-node-wire",
  "steve-store",
- "steve-vault",
  "subtle",
  "tempfile",
  "thiserror 2.0.21",
@@ -5081,7 +5080,6 @@ dependencies = [
  "steve-modules",
  "steve-node-api",
  "steve-store",
- "steve-vault",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -5215,7 +5213,6 @@ dependencies = [
  "steve-modules",
  "steve-node-api",
  "steve-store",
- "steve-vault",
  "tempfile",
  "text-splitter",
  "thiserror 2.0.21",
@@ -5308,7 +5305,6 @@ dependencies = [
  "steve-i18n",
  "steve-mail",
  "steve-store",
- "steve-vault",
  "subtle",
  "tempfile",
  "thiserror 2.0.21",
@@ -5450,7 +5446,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "steve-i18n",
- "steve-vault",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -5482,11 +5477,7 @@ dependencies = [
 name = "steve-vault"
 version = "0.1.0"
 dependencies = [
- "aho-corasick",
- "data-encoding",
- "regex",
  "serde_json",
- "zeroize",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 //! V4 acceptance tests: no grant → decision + END; `grant_1h` and the second
-//! use runs directly; injected values and their base64 are masked; cwd escape 400; `high` grants
+//! use runs directly; output comes back as the command wrote it; cwd escape 400; `high` grants
 //! 400; temp dir gone after the run; bank cards always ask; deny; restart expires waiting requests;
-//! pasted `ghp_…` intercepted and not in the database; no value in any table or file.
+//! no value in any table or file.
 //!
 //! Every command runs in a temp dir created here.
 
@@ -22,7 +22,7 @@ use steve_modules::vault::items::{NewField, NewItem};
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::vault::mcp::{self, ToolOut};
 use steve_modules::vault::r#use::{NO_SUCH, SUBJECT, denied_message};
-use steve_modules::vault::{SecretUses, SessionSink, UseCx, Vault, guard, redact, use_api};
+use steve_modules::vault::{SecretUses, SessionSink, UseCx, Vault, use_api};
 use steve_modules::{Modules, Registry, decisions};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -342,12 +342,15 @@ async fn ask_then_grant_then_direct_run() {
     assert_eq!(status, "pending");
     assert_eq!(e.uses.waiting(), 1);
 
-    // the user grants an hour: the command runs and the session hears the redacted result
+    // the user grants an hour: the command runs and the session hears its output
     e.answer(&su, "grant_1h").unwrap();
     let msgs = e.sink.wait(1).await;
     assert_eq!(
         msgs[0],
-        "用户批准了使用「GitHub 令牌」。命令已执行，退出码 0。输出（机密已打码）：\nt=[已打码：令牌]\n[已打码：令牌]\n"
+        format!(
+            "用户批准了使用「GitHub 令牌」。命令已执行，退出码 0。输出：\nt={TOKEN}\n{}\n",
+            BASE64.encode(TOKEN.as_bytes())
+        )
     );
     let (status, code): (String, i64) = e
         .env
@@ -376,21 +379,16 @@ async fn ask_then_grant_then_direct_run() {
     let left = until - steve_store::now();
     assert!(left > 3_590_000 && left <= 3_600_000, "{left}");
 
-    // the session redactor now knows the value and its forms
-    let mut ev = json!({"text": format!("I saw {TOKEN} and {}", BASE64.encode(TOKEN.as_bytes()))});
-    redact::scrub(SESSION, &mut ev);
-    assert_eq!(ev["text"], "I saw [已打码：令牌] and [已打码：令牌]");
-
     // second use: covered by the grant, runs directly
     let out = e
         .tool(
             mcp::USE,
-            use_args("GitHub 令牌", "printf %s \"$GH_TOKEN\" | xxd -p; exit 4"),
+            use_args("GitHub 令牌", "printf %s \"$GH_TOKEN\"; echo; exit 4"),
         )
         .await
         .unwrap();
     assert!(!out.awaiting_approval);
-    assert_eq!(out.text, "Exit code 4.\n[已打码：令牌]\n");
+    assert_eq!(out.text, format!("Exit code 4.\n{TOKEN}\n"));
     let open: i64 = e.q(
         "SELECT COUNT(*) FROM decisions WHERE subject_type = 'secret_use' AND status = 'open'",
         [],
@@ -490,8 +488,9 @@ async fn files_and_stdin_temp_dir_gone_cwd_checked() {
     assert_eq!(
         out.text,
         format!(
-            "Exit code 0.\n{}\nf=[已打码：临时文件]/TOKF\n600\n[已打码：令牌]\nin=[已打码：令牌]\nTOKF\n",
-            sub.display()
+            "Exit code 0.\n{}\nf={}/TOKF\n600\n{TOKEN}\nin={TOKEN}\nTOKF\n",
+            sub.display(),
+            e.temp_root().join(e.last_use()).display()
         )
     );
     assert!(dir_empty(&e.temp_root()), "temp dir left behind");
@@ -585,11 +584,11 @@ async fn high_items_and_bank_cards_always_ask() {
     // a grant choice is not an option
     let err = e.answer(&su, "grant_1h").unwrap_err();
     assert!(err.starts_with("400"), "{err}");
-    // once: runs, card number masked
+    // once: runs
     e.answer(&su, "once").unwrap();
     let msgs = e.sink.wait(1).await;
     assert!(
-        msgs[0].ends_with("退出码 0。输出（机密已打码）：\n[已打码：卡号]"),
+        msgs[0].ends_with(&format!("退出码 0。输出：\n{CARD}")),
         "{}",
         msgs[0]
     );
@@ -743,7 +742,7 @@ async fn restart_expires_waiting_requests_and_cleans_temp_dirs() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pasted_token_is_intercepted_and_no_value_reaches_the_database() {
+async fn no_value_reaches_the_database() {
     let e = Env::new();
     let item = e.token_item();
     let card = e.card_item();
@@ -768,22 +767,9 @@ async fn pasted_token_is_intercepted_and_no_value_reaches_the_database() {
     e.answer(&e.last_use(), "once").unwrap();
     e.sink.wait(1).await;
 
-    // pasting a token into the conversation: what the integrator stores is the guarded text
-    let pasted = "帮我推一下，令牌是 ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-    let i = guard::intercept(pasted);
-    assert!(i.blocked);
-    assert_eq!(i.text, "帮我推一下，令牌是 ［已拦下的机密］");
     e.env
         .store()
         .with_conn(|c| {
-            c.execute(
-                "INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES ('msg_1', ?, 'thread', 'me', ?, 1)",
-                params![WS, i.text],
-            )?;
-            c.execute(
-                "INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES ('msg_2', ?, 'thread', 'steve', ?, 2)",
-                params![WS, guard::ROUTED],
-            )?;
             c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
             Ok(())
         })
@@ -796,13 +782,7 @@ async fn pasted_token_is_intercepted_and_no_value_reaches_the_database() {
     bytes.extend(LOGS.lock().unwrap().iter());
     assert!(!LOGS.lock().unwrap().is_empty(), "no logs captured");
     let hay = String::from_utf8_lossy(&bytes);
-    for secret in [
-        "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-        TOKEN,
-        CARD,
-        CVV,
-        &BASE64.encode(TOKEN.as_bytes()),
-    ] {
+    for secret in [TOKEN, CARD, CVV, &BASE64.encode(TOKEN.as_bytes())] {
         assert!(
             !hay.contains(secret),
             "{secret} found in the database files or logs"
@@ -898,7 +878,7 @@ impl steve_modules::vault::UseNodes for FakeNodes {
         steve_modules::vault::inject::RunOutput {
             exit_code: Some(0),
             timed_out: false,
-            stdout: "on the node [已打码：令牌]\n".into(),
+            stdout: "on the node\n".into(),
             stderr: String::new(),
             error: None,
         }
@@ -937,27 +917,6 @@ async fn a_session_on_a_node_runs_there_and_a_remote_one_gets_no_files() {
         "这个会话在另一台设备上运行，机密不能以文件方式交给它；请改用 env 或 stdin"
     );
     assert_eq!(count(&e), (0, 0));
-    // a token written into the command: the Node would keep it, so refused the same way
-    let err = e
-        .tool(
-            mcp::USE,
-            json!({"item": item, "purpose": "x", "env": {"T": "令牌"},
-                   "command": "curl -H 'Authorization: Bearer ghp_PastedIntoTheCommand0123456789abcd' x"}),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(
-        err,
-        "命令里有像机密的内容。这个会话的命令会原样记录在运行它的设备上，请不要把机密写进命令，改用 env 或 stdin 注入"
-    );
-    assert_eq!(count(&e), (0, 0));
-    assert!(steve_modules::vault::pasted_secret("x --password=hunter22"));
-    assert!(!steve_modules::vault::pasted_secret(
-        "x --password=$GH_TOKEN"
-    ));
-    assert!(!steve_modules::vault::pasted_secret(
-        "x --password=\"${GH_TOKEN}\""
-    ));
     // a directory leaving the workspace, relative or absolute
     for bad in ["..", "sub/../..", "/tmp", "/"] {
         let err = e
@@ -991,7 +950,7 @@ async fn a_session_on_a_node_runs_there_and_a_remote_one_gets_no_files() {
     let msgs = e.sink.wait(1).await;
     assert_eq!(
         msgs[0],
-        "用户批准了使用「GitHub 令牌」。命令已执行，退出码 0。输出（机密已打码）：\non the node [已打码：令牌]\n"
+        "用户批准了使用「GitHub 令牌」。命令已执行，退出码 0。输出：\non the node\n"
     );
     let ran = nodes.ran.lock().unwrap().clone();
     assert_eq!(ran.len(), 1);
@@ -1011,11 +970,6 @@ async fn a_session_on_a_node_runs_there_and_a_remote_one_gets_no_files() {
     );
     let status: String = e.q("SELECT status FROM secret_uses WHERE id = ?", [&su]);
     assert_eq!(status, "ok");
-    // the values taken are known to the session redactor
-    assert_eq!(
-        redact::scrub_text(SESSION, &format!("x {TOKEN}")),
-        "x [已打码：令牌]"
-    );
     // no temp file on the Hub for a Node's use
     assert!(dir_empty(&e.temp_root()));
 }

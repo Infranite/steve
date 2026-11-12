@@ -363,11 +363,10 @@ struct Prepared {
 
 impl Mail {
     /// `steve_mail_thread`: oldest first, headers, the new text of each message (together at most
-    /// 20000 characters, newest kept first, through the guard), attachments.
+    /// 20000 characters, newest kept first), attachments.
     pub fn tool_thread(&self, cx: &McpCx, thread: Option<&str>) -> Result<String, String> {
         let (_, threads) = scope(self, cx)?;
         let t = pick(&threads, thread)?;
-        let guard = self.0.guard.clone();
         let item = cx.item_id.clone().unwrap_or_default();
         self.0
             .m
@@ -385,8 +384,7 @@ impl Mail {
                         ),
                         Some(_) if left == 0 => "(earlier text left out; it is too long)".into(),
                         Some(b) => {
-                            let b = steve_knowledge::state::redact(guard.as_ref(), b.trim());
-                            let b = cut_chars(&b, left);
+                            let b = cut_chars(b.trim(), left);
                             left = left.saturating_sub(b.chars().count());
                             b
                         }

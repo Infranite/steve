@@ -603,10 +603,9 @@ async fn a_secret_use_runs_after_its_decision() {
     assert_eq!((status.as_deref(), code), (Some("ok"), Some(0)));
 }
 
-/// The paste guard: a pasted password or token is replaced before the message is stored, the rest of
-/// the message goes on, and Steve's note says where to keep the secret; `/api/config/draft` refuses it.
+/// What you type is stored and routed as typed: a token in it is not masked or refused.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_paste_guard_keeps_secrets_out_of_the_thread() {
+async fn a_pasted_token_is_kept_as_typed() {
     let e = start().await;
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let (s, v) = e
@@ -619,21 +618,9 @@ async fn the_paste_guard_keeps_secrets_out_of_the_thread() {
     assert_eq!(s, 200, "{v}");
     let (_, st) = e.call("GET", "/api/state", None).await;
     let thread = st["thread"].to_string();
-    assert!(!thread.contains(token), "{thread}");
-    assert!(thread.contains(steve_vault::guard::REPLACEMENT), "{thread}");
-    assert!(thread.contains(steve_vault::guard::ROUTED), "{thread}");
-    // the message itself went on: stored as the person's, with the rest of the text
-    assert!(thread.contains("帮我记一下"), "{thread}");
-    let (s, v) = e
-        .call(
-            "POST",
-            "/api/config/draft",
-            Some(json!({"target": {"kind": "global"}, "text": format!("把令牌改成 {token}")})),
-        )
-        .await;
-    assert_eq!(
-        (s, v["error"].as_str()),
-        (400, Some(steve_vault::guard::REPLY))
+    assert!(
+        thread.contains(&format!("这是我的令牌 {token} 帮我记一下")),
+        "{thread}"
     );
 }
 

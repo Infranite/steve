@@ -14,7 +14,7 @@
 //!   `http.proxy`, `insteadOf`, credential helpers) plays no part;
 //! - the credential, taken from the Hub ([`crate::secrets`]) once, right before, goes in as
 //!   `http.<url>.extraheader` through `GIT_CONFIG_COUNT` environment variables: not on the command
-//!   line, not in a file, not in the journal, and masked in what git prints;
+//!   line, not in a file, not in the journal;
 //! - the target is the canonical `url`, as a fast-forward or under the `expected_remote` lease;
 //! - it is a command like [`crate::exec`]: its process group is journaled before git starts, killed
 //!   at the deadline, and a Node that died while it ran leaves it `unknown` (never pushed again).
@@ -32,7 +32,6 @@ use std::time::{Duration, Instant};
 
 use sha2::Digest as _;
 use steve_node_api::*;
-use steve_vault::redact::Redactor;
 use zeroize::Zeroizing;
 
 use crate::workspace::{Commands, Failed};
@@ -1192,7 +1191,6 @@ pub(crate) fn push_run(
     bare: &Bare,
     plan: &PushPlan,
     header: Option<Zeroizing<Vec<u8>>>,
-    mask: Option<Redactor>,
     deadline: i64,
 ) -> crate::exec::Run {
     let mut env: Vec<(String, String)> = vec![
@@ -1243,7 +1241,6 @@ pub(crate) fn push_run(
         cap: PUSH_OUTPUT,
         secret_env,
         stdin: None,
-        mask,
         confined: false,
         readable: vec![],
     }

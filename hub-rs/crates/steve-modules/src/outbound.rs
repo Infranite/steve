@@ -120,8 +120,6 @@ pub enum Verdict {
     Pass,
     /// Possibly reveals something (see `spans`).
     Leak,
-    /// Contains a registered secret value: must not be sent at all.
-    Blocked,
     /// No check is installed.
     Unchecked,
 }

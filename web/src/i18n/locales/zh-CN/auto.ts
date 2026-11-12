@@ -312,7 +312,7 @@ export default {
     method: "请求方法",
     body: "请求体",
     /* <steps>{{steps}}</steps> and <secrets>{{secrets}}</secrets> are the template syntax, filled in by the page */
-    hint: "用 <steps>{{steps}}</steps> 引用前面步骤的输出，用 <secrets>{{secrets}}</secrets> 引用保险箱里的机密（只能写在请求头和请求体里），机密值不会显示。",
+    hint: "用 <steps>{{steps}}</steps> 引用前面步骤的输出，用 <secrets>{{secrets}}</secrets> 引用保险箱里的机密（只能写在请求头和请求体里），Steve 不会把机密值写进步骤输入和日志。",
     effect: "会写入或发送数据",
     effectOn: "每次执行前进待处理等你批准",
     effectOff: "只读请求，直接执行",

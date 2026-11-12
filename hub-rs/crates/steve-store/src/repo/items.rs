@@ -670,13 +670,8 @@ pub(super) fn timeline_on(
     session_id: Option<&str>,
     files: &[FileRef],
 ) -> Result<()> {
-    // V4: a session's injected values never reach the timeline (agent text, tool output)
-    let text = match session_id {
-        Some(sid) => steve_vault::redact::scrub_text(sid, text),
-        None => std::borrow::Cow::Borrowed(text),
-    };
     c.prepare_cached("INSERT INTO timeline (item_id, ts, actor, kind, text, session_id, files) VALUES (?, ?, ?, ?, ?, ?, ?)")?
-        .execute(params![item_id, now(), actor, kind, text.as_ref(), session_id, file_refs(files)?])?;
+        .execute(params![item_id, now(), actor, kind, text, session_id, file_refs(files)?])?;
     Ok(())
 }
 

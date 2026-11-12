@@ -19,7 +19,7 @@ use crate::sources;
 use crate::state::Knowledge;
 use crate::sync;
 
-/// `400` for a search text that looks like a secret.
+/// What a document and a note are called in messages.
 pub const NOUN_DOC: &str = "文档";
 pub const NOUN_NOTE: &str = "笔记";
 
@@ -87,11 +87,6 @@ pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> Api
             .ok_or_else(|| ApiError::invalid("limit"))?,
     };
     Check::new().len("q", q.trim(), 1, 200).done()?;
-    if !kb.guard.scan(&q).is_empty() {
-        return Err(ApiError::rule(steve_i18n::t!(
-            "knowledge.search.secret_query"
-        )));
-    }
     prepare(m, who)?;
     let kinds: Option<Vec<String>> = p
         .kind
@@ -401,7 +396,6 @@ pub fn create_note(m: &Modules, kb: &Knowledge, who: &Caller, b: NoteBody) -> Ap
         check_about(tx, who, &b.about)?;
         let id = notes::create(
             tx,
-            kb.guard.as_ref(),
             &who.ws,
             &who.me,
             &NewNote {
@@ -451,15 +445,7 @@ pub fn update_note(
         if s.kind != "notes" {
             return Err(ApiError::not_found(NOUN_NOTE));
         }
-        notes::update(
-            tx,
-            kb.guard.as_ref(),
-            &d,
-            &who.me,
-            title,
-            b.body.as_deref(),
-            now,
-        )?;
+        notes::update(tx, &d, &who.me, title, b.body.as_deref(), now)?;
         let (d, s) = own_doc_any(tx, id)?;
         doc_json_bare(tx, &d, &s)
     })?;

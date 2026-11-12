@@ -147,7 +147,7 @@ async fn setup() -> H {
         key: "k".into(),
         account: "steve".into(),
     });
-    let kb = Knowledge::new(Arc::new(steve_knowledge::NoGuard), |_| {});
+    let kb = Knowledge::new(|_| {});
     kb.set_store(Arc::new(Hybrid {
         keywords: SqliteStore,
         meaning: ov.clone(),
@@ -382,7 +382,7 @@ async fn a_server_that_is_down_leaves_the_keywords_flagged_and_is_skipped_for_a_
     assert!(!ok.semantic_down);
 
     // the chat context says so, even when the keywords found nothing
-    let kb = Knowledge::new(Arc::new(steve_knowledge::NoGuard), |_| {});
+    let kb = Knowledge::new(|_| {});
     kb.set_store(Arc::new(Hybrid {
         keywords: SqliteStore,
         meaning: down.clone(),

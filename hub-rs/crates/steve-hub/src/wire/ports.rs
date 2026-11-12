@@ -1,8 +1,7 @@
-//! steve-core and the Hub as the module crates need them: one secret scanner for every module, the
+//! steve-core and the Hub as the module crates need them: the
 //! session sink of agent-facing tools, the item wrap-up of GitHub and mail, the attachment store,
 //! and the hooks that turn item and Bot changes into module events.
 
-use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -19,48 +18,6 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| e.to_string())?
-}
-
-// ---------------------------------------------------------------- the secret scanner
-
-/// `steve_vault::guard::scan` behind the scanner traits of knowledge, the flow `bot` node and the
-/// channels / mail (all the same shape): one scanner for everything a model may see.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct VaultGuard;
-
-fn scan(text: &str) -> Vec<Range<usize>> {
-    steve_vault::guard::scan(text)
-        .into_iter()
-        .map(|s| s.range())
-        .collect()
-}
-
-impl steve_knowledge::Guard for VaultGuard {
-    fn scan(&self, text: &str) -> Vec<Range<usize>> {
-        scan(text)
-    }
-}
-
-impl steve_flow::nodes::bot::Guard for VaultGuard {
-    fn scan(&self, text: &str) -> Vec<Range<usize>> {
-        scan(text)
-    }
-}
-
-/// E3: an outgoing mail must not carry a value injected into any session (the V4 redactor's set).
-pub struct RedactorScan;
-
-impl steve_mail::SecretScan for RedactorScan {
-    fn find(&self, _ws: &str, text: &str) -> Vec<String> {
-        steve_vault::redact::find_labels(text)
-    }
-}
-
-/// C5/C6: an outgoing channel message must not carry a registered value either.
-impl steve_channels::disclosure::SecretScan for RedactorScan {
-    fn find(&self, _ws: &str, text: &str) -> Vec<String> {
-        steve_vault::redact::find_labels(text)
-    }
 }
 
 // ---------------------------------------------------------------- sessions

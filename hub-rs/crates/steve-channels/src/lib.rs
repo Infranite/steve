@@ -22,7 +22,7 @@
 //! generate, `create_item` creates and links the item and answers its number), [`deliver`] (the
 //! [`deliver::Outbound`] hand-off to C6; [`deliver::DraftOnly`] until then — C4 never sends),
 //! [`flow_actions`] (`reply_as`, `send_to_space`).
-//! C5 (disclosure and basis): [`disclosure`] (B1's `OutboundCheck`: secrets blocked, levels for
+//! C5 (disclosure and basis): [`disclosure`] (B1's `OutboundCheck`: levels for
 //! the audience, the rule check, the check model, the rewrite prompt; [`disclosure::space_audience`]),
 //! [`basis`] (`reply_basis`, the `basis` of a `ChanMessage`).
 //! C6 (outbound): [`outbound`] — [`Outbox`] (the real [`deliver::Outbound`]: check → rewrite →
@@ -59,7 +59,6 @@
 //!     .adapter(feishu.clone())
 //!     .media(Arc::new(steve_channels::adapters::feishu::FeishuMedia::new("feishu_app")))
 //!     .flow(flow.clone())               // C3: to-flow validates against the registered node kinds
-//!     .guard(vault_guard.clone())       // C3: `guard::scan` before the `intent` judgement
 //!     .responder(replies.clone())       // C4 + C6
 //!     .build();
 //! late.set(&channels);                                                 // C4 flow actions, C6 hook

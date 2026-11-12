@@ -1,7 +1,7 @@
 //! MCP tool of the flow module: `steve_event_get`, the original email,
 //! message or alert an item came from. Only events the session's item has a `from` link to
 //! (`links(item, 'from', 'event', evt)`, written by `item.create`, `item.link` and “转成事项”)
-//! can be read; the text goes through the vault's `guard::scan` first.
+//! can be read.
 //!
 //! Serving it is steve-mcp's (integrator), like the knowledge tools: list [`tools`] after the Steve
 //! tools and route names for which [`handles`] is true to [`call`] with the session's [`McpCx`].
@@ -15,7 +15,6 @@ use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult};
 
 use crate::FlowCx;
-use crate::nodes::bot::redact;
 use crate::schedules::{local, workspace_tz};
 use crate::signals::source_label;
 
@@ -175,8 +174,7 @@ pub fn event_get(cx: &FlowCx, mcp: &McpCx, event: Option<&str>) -> ApiResult<Str
         let ev = load(c, &mcp.ws, &id)?.ok_or_else(|| ApiError::rule(NOT_LINKED))?;
         Ok((ev, workspace_tz(c, &mcp.ws)?))
     })?;
-    let guard = cx.guard.as_ref();
-    let summary = redact(guard, &ev.summary);
+    let summary = &ev.summary;
     if ev.purged {
         return Ok(format!("{PURGED}{summary}"));
     }
@@ -207,7 +205,7 @@ pub fn event_get(cx: &FlowCx, mcp: &McpCx, event: Option<&str>) -> ApiResult<Str
     if text.trim().is_empty() {
         out.push_str("\n(no original text)");
     } else {
-        let (text, more) = cut(&redact(guard, &text), TEXT_MAX);
+        let (text, more) = cut(&text, TEXT_MAX);
         out.push_str("\nOriginal:\n");
         out.push_str(&text);
         if more {

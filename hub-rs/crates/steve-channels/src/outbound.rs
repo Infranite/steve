@@ -7,15 +7,13 @@
 //!    was written with (a fixed receipt gets the local checks only); a generated text that may leak and
 //!    could go out without a draft is rewritten once by the drafting model; still leaking → a draft with
 //!    the suspicious parts named, even when a grant or a rule would have let it out. A text that becomes
-//!    a draft anyway is not rewritten: its card offers “改写后再看” ([`REWRITE`]). A secret value →
-//!    `blocked`, never sent and never drafted;
+//!    a draft anyway is not rewritten: its card offers “改写后再看” ([`REWRITE`]);
 //! 2. **authorization**: a bot account's `reply` rule, a flow's `msg.send` grant or the engine's
 //!    approval of the step, your own trigger words, or your approval of this very message. Your own
 //!    account never sends without your approval, except the trigger words you typed yourself.
 //!    Everything else is a draft with an `approve` decision (“以你本人 / 以<身份>发到「<空间>」”);
 //! 3. **send** ([`Outbox::send`]): the authorization is checked against the store again, the final
-//!    text (persona signature, “（由 Steve 代发）”) passes the vault guard and the redactor's values,
-//!    the message is claimed once (`sent` set while `pending`), the adapter is called with
+//!    text gets the persona signature or “（由 Steve 代发）”, the message is claimed once (`sent` set while `pending`), the adapter is called with
 //!    `uuid = cm_…` (a retry cannot double-send), then `sent` / `failed` + a `fail` decision
 //!    (retry / discard), the basis record and the audit.
 //!
@@ -62,7 +60,7 @@ use crate::channel::{
 };
 use crate::compose::PinnedModel;
 use crate::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Outbound, Purpose};
-use crate::disclosure::{self, MAX_REWRITES, NoSecrets, SecretScan};
+use crate::disclosure::{self, MAX_REWRITES};
 use crate::flow_actions::{LateChannels, plan_of};
 use crate::personas::{self, PersonaRow};
 use crate::respond::{self, DRAFT_OPTIONS, SUBJECT_MESSAGE};
@@ -111,7 +109,6 @@ pub const PROXY_MARK: &str = "（由 Steve 代发）";
 pub const TEXT_MAX: usize = 4000;
 
 pub const MSG_ALREADY_SENT: &str = "消息已经发出，不能撤销";
-pub const ERR_SECRET: &str = "正文里有机密值，已拦下";
 pub const ERR_NO_RECALL: &str = "这个渠道不支持撤回";
 
 /// `chan_messages.status` of a draft you said no to.
@@ -662,8 +659,7 @@ async fn rewrite_draft(
         }
         let mut q = format!("{}发到「{}」", p.speaker, space_name(&p.space));
         let text = match (&new, &checked) {
-            // a rewrite with a secret in it is not shown: the text stays as it was
-            (Some(t), Some(r)) if r.verdict != Verdict::Blocked => {
+            (Some(t), Some(r)) => {
                 let leak = r.verdict != Verdict::Pass;
                 let mut rewrites: Vec<Rewrite> =
                     serde_json::from_value(b.rewrites.clone()).unwrap_or_default();
@@ -945,8 +941,6 @@ pub enum SendOutcome {
     Sent { external_id: Option<String> },
     /// The authorization did not hold: back to a draft with its approval.
     Drafted { decision_id: String },
-    /// A secret value: `blocked`, a `fail` decision with “discard”.
-    Blocked { decision_id: String },
     /// The provider failed: `failed`, a `fail` decision (retry / discard).
     Failed { error: String, decision_id: String },
     /// Sent without an answer: `unknown`, it may be out (sent again under the same dedupe key
@@ -964,7 +958,6 @@ type Unknown = (String, Option<Duration>, Option<i64>);
 pub struct Outbox {
     link: OutLink,
     as_user: BTreeMap<String, Arc<dyn ActAsUser>>,
-    secrets: Arc<dyn SecretScan>,
     pinned: Option<Arc<dyn PinnedModel>>,
     /// Drafts being rewritten now (“改写后再看”), each on a task of its own.
     rewriting: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -975,7 +968,6 @@ impl Outbox {
         Self {
             link,
             as_user: BTreeMap::new(),
-            secrets: Arc::new(NoSecrets),
             pinned: None,
             rewriting: Arc::default(),
         }
@@ -1008,12 +1000,6 @@ impl Outbox {
     /// The adapters it sends as you on.
     pub fn as_user_ids(&self) -> Vec<String> {
         self.as_user.keys().cloned().collect()
-    }
-
-    /// The redactor's registered values (checked again on the final text).
-    pub fn secrets(mut self, s: Arc<dyn SecretScan>) -> Self {
-        self.secrets = s;
-        self
     }
 
     /// Rewrites on the drafting model when it was a pinned one.
@@ -1072,7 +1058,7 @@ impl Outbox {
             },
             draft_model: draft_model.clone(),
             audience_said: said,
-            // a fixed receipt (“收到，已记为 …”, “我请 … 来看。”) no model wrote: secrets and the rules only
+            // a fixed receipt (“收到，已记为 …”, “我请 … 来看。”) no model wrote: the rules only
             skip_model: template(req),
             // a bot's own reply whose knowledge was tracked (a generation) may skip the model for the
             // workspace's own people; text without one (an agent's, a flow's) and anything said as you
@@ -1126,56 +1112,6 @@ impl Outbox {
         }
         let now = ch.now();
         let proxy = req.purpose == Purpose::Trigger;
-        if res.verdict == Verdict::Blocked {
-            let (id, d) = ch.store().transaction(|tx| -> ChannelResult<_> {
-                let shown = steve_vault::guard::redact(&text)
-                    .unwrap_or_else(|| steve_vault::guard::REPLACEMENT.to_string());
-                let id = insert_out(
-                    tx,
-                    &NewOut {
-                        t,
-                        p: &p,
-                        text: &shown,
-                        status: "blocked",
-                        proxy,
-                    },
-                    now,
-                )?;
-                let row = out_row(tx, &id)?.ok_or_else(|| ApiError::not_found("消息"))?;
-                let d = open_fail(
-                    tx,
-                    &row,
-                    format!(
-                        "发到「{}」的消息里有机密值，已拦下，没有发出",
-                        space_name(&p.space)
-                    ),
-                    &BLOCKED_OPTIONS,
-                )?;
-                base::audit(
-                    tx,
-                    &t.ws,
-                    "steve",
-                    "chan_message.send.blocked",
-                    &id,
-                    &json!({"reason": "secret", "space": t.space_id}),
-                )?;
-                messages::event(tx, &t.ws, &t.space_id, &id);
-                Ok((id, d))
-            })?;
-            if completes(req.purpose)
-                && let Some(src) = &t.source_message_id
-            {
-                ch.react_finish(src, crate::reactions::Finish::Failed).await;
-            }
-            return Ok((
-                Delivered::Blocked {
-                    message_id: id,
-                    decision_id: d,
-                },
-                Some(res),
-            ));
-        }
-
         // 2. authorization
         let leak = res.verdict != Verdict::Pass;
         let direct = !leak && !req.approve && direct_ok(p.mode, &req.auth);
@@ -1263,10 +1199,6 @@ impl Outbox {
                 message_id: id,
                 decision_id,
             },
-            SendOutcome::Blocked { decision_id } => Delivered::Blocked {
-                message_id: id,
-                decision_id,
-            },
             SendOutcome::Failed { decision_id, .. } => Delivered::Failed {
                 message_id: id,
                 decision_id,
@@ -1301,8 +1233,8 @@ impl Outbox {
     }
 
     /// Sends one `pending` outbound message. The only caller of an adapter's `send(`: checks
-    /// `auth` against the store, claims the message once, scans the final text for secrets, sends
-    /// with `uuid = cm_…`, records the result.
+    /// `auth` against the store, claims the message once, sends with `uuid = cm_…`, records the
+    /// result.
     pub async fn send(&self, ch: &Channels, id: &str, auth: &Auth) -> ChannelResult<SendOutcome> {
         self.send_as(ch, id, auth, false).await
     }
@@ -1483,38 +1415,6 @@ impl Outbox {
             Ok(x) => x,
             Err(e) => return self.failed(ch, &row, &e.to_string(), claim),
         };
-        let secrets = disclosure::secret_spans(self.secrets.as_ref(), &row.ws, &text);
-        if !secrets.is_empty() {
-            let d = ch.store().transaction(|tx| -> ChannelResult<String> {
-                tx.execute(
-                    "UPDATE chan_messages SET status = 'blocked', sent = NULL, text = ? WHERE id = ?",
-                    params![
-                        steve_vault::guard::redact(&row.text)
-                            .unwrap_or_else(|| steve_vault::guard::REPLACEMENT.into()),
-                        row.id
-                    ],
-                )?;
-                let d = open_fail(
-                    tx,
-                    &row,
-                    format!("发到「{}」的消息里有机密值，已拦下，没有发出", space_name(&space)),
-                    &BLOCKED_OPTIONS,
-                )?;
-                base::audit(
-                    tx,
-                    &row.ws,
-                    "steve",
-                    "chan_message.send.blocked",
-                    &row.id,
-                    &json!({"reason": "secret"}),
-                )?;
-                messages::event(tx, &row.ws, &row.space_id, &row.id);
-                Ok(d)
-            })?;
-            ch.react_answered(&row.id, false).await;
-            return Ok(SendOutcome::Blocked { decision_id: d });
-        }
-
         // the adapter, on the connection as it is now: paused, to be authorized again or revoked, or
         // (in your name) sending as you turned off since the approval → not sent
         let cap = (mode == Mode::Own).then_some(spaces::SEND_AS_USER_CAP);
@@ -2124,7 +2024,6 @@ impl Outbox {
         let (d, r) = self.deliver_checked(ch, &req).await?;
         Ok(match d {
             Delivered::Sent { .. } => SRC_POSTED.into(),
-            Delivered::Blocked { .. } => "Not posted: it contains a secret value.".into(),
             Delivered::Failed { .. } => {
                 "Not posted: the chat did not accept it. The user can retry.".into()
             }
@@ -2495,8 +2394,6 @@ impl MessageDecisions {
                 set_status(tx, &row.id, &["unknown"], DISCARDED)?;
                 send_state::forget(tx, &row.id)?;
             }
-            // a blocked message stays blocked; “discard” only closes the card
-            ("discard", "blocked") => {}
             _ => return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled"))),
         }
         base::audit(
@@ -2603,7 +2500,6 @@ impl DecisionHandler for MessageDecisions {
             ("fail", "discard") if row.status == DISCARDED => {
                 set_status(tx, &row.id, &[DISCARDED], "failed")?;
             }
-            ("fail", "discard") if row.status == "blocked" => {}
             _ => {
                 return Err(ApiError::conflict(steve_i18n::t!(
                     "channels.error.already_sent"

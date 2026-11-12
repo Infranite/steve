@@ -3,9 +3,6 @@
 //! GitHub comments.
 //!
 //! For one text and its audience:
-//! 0. secrets: what the vault's guard calls a secret (`guard::scan`: tokens, keys, card numbers,
-//!    “密码是 …”) or a value the redactor knows ([`SecretScan`]) → [`Verdict::Blocked`], never
-//!    rewritten;
 //! 1. effective levels: knowledge whose visibility the audience is entirely inside counts as
 //!    `public` (quoting this group's own discussion back to it);
 //! 2. the rule check: names of contacts and organizations (and their aliases) not in the audience,
@@ -66,7 +63,6 @@ pub const TIMEOUT: Duration = Duration::from_secs(20);
 const MIN_NAME: usize = 2;
 
 /// Span reasons (verbatim in the inbox).
-pub const R_SECRET: &str = "包含机密值";
 pub const R_UNBOUND: &str = "披露检查还没有接上";
 pub const R_MODEL_FAILED: &str = "检查模型没有给出结果";
 /// A leak the check model did not tie to anything (kept: fail closed).
@@ -74,37 +70,14 @@ pub const R_NO_BASIS: &str = "检查模型判为可能泄露，但没有说明�
 /// The most of the audience's own message the check model sees.
 pub const SAID_MAX: usize = 2_000;
 
-/// The audience's own message for the prompt: what the guard calls a secret masked, cut to
-/// [`SAID_MAX`]; nothing at all when it holds a value the vault knows (those can be found, not
-/// located), so a secret in it never reaches the check model.
-pub fn audience_said(secrets: &dyn SecretScan, ws: &str, said: Option<&str>) -> Option<String> {
-    let said = said?.to_string();
-    if !secrets.find(ws, &said).is_empty() {
-        return None;
-    }
-    let masked = steve_vault::guard::redact(&said).unwrap_or(said);
-    let t: String = masked.trim().chars().take(SAID_MAX).collect();
+/// The audience's own message for the prompt, cut to [`SAID_MAX`].
+pub fn audience_said(said: Option<&str>) -> Option<String> {
+    let t: String = said?.trim().chars().take(SAID_MAX).collect();
     (!t.is_empty()).then_some(t)
-}
-
-/// The vault redactor's registered values, as the check needs them: the field labels of values found
-/// in `text`. The integrator wires the vault's; default none (the guard still runs).
-pub trait SecretScan: Send + Sync {
-    fn find(&self, ws: &str, text: &str) -> Vec<String>;
-}
-
-/// No registered values.
-pub struct NoSecrets;
-
-impl SecretScan for NoSecrets {
-    fn find(&self, _: &str, _: &str) -> Vec<String> {
-        Vec::new()
-    }
 }
 
 struct Inner {
     bound: OnceLock<(Store, Arc<dyn Gateway>)>,
-    secrets: OnceLock<Arc<dyn SecretScan>>,
     pinned: OnceLock<Arc<dyn PinnedModel>>,
     /// Candidate check models, in order (from the environment unless set).
     models: Vec<String>,
@@ -143,7 +116,6 @@ impl Disclosure {
     pub fn with_models(models: Vec<String>) -> Self {
         Self(Arc::new(Inner {
             bound: OnceLock::new(),
-            secrets: OnceLock::new(),
             pinned: OnceLock::new(),
             models,
         }))
@@ -153,11 +125,6 @@ impl Disclosure {
     /// ignored. Unbound, every check is a leak ([`R_UNBOUND`]).
     pub fn bind(&self, store: Store, gateway: Arc<dyn Gateway>) {
         let _ = self.0.bound.set((store, gateway));
-    }
-
-    /// The vault's registered values.
-    pub fn secrets(&self, s: Arc<dyn SecretScan>) {
-        let _ = self.0.secrets.set(s);
     }
 
     /// Runs the check on a specific model (when the gateway can pin one).
@@ -520,11 +487,10 @@ pub fn check_prompt_with(
         "\n级别：可以引用 = 能直接说；可转述结论 = 只能说结论，不能提来源、人名、数字和细节；仅用于推理 = 不能出现在回复里；不可使用 = 完全不能用。\n\
          算泄露的只有这几类：\n\
          1. 上面某条知识的内容，超出了它对这些听众的级别（包括几句话合起来推出来、用“根据之前和某某的讨论”这类话指出来源、或暗示某条不能说的知识存在）；\n\
-         2. 机密值：密码、令牌、密钥、卡号之类；\n\
-         3. 上面知识没有给出（或超出其级别）的内部细节：事项的进展和内容，系统、文档、文件、群的名字，ID、权限范围、错误码、路径、配置，谁限制了什么、为什么——上面知识对这些听众“可以引用”的内容（包括事项的名称、编号和进展）照常能说，“可转述结论”的能说结论；\n\
-         4. 不在听众里的其他人、其他客户、其他群的信息。\n\
-         不算泄露：回复只是笼统地说自己没查到、查询失败或超时、没有权限或不方便查、需要确认、会请人来看，或者请对方说清楚——只要没有说出被限制的是什么、在哪里、为什么。回复中性地照着提到听众这次自己说出的标识或原话（比如他们问的事项编号、请他们说清楚某个词）不算泄露；但这不给这件事的内容任何权限：回复确认、否认或补充他们的说法或猜测（比如来信猜测要裁员、回复证实），以及事项的进展和细节，照常按上面的知识级别判断。来信里出现的机密值在回复里重复也算泄露。\n\
-         每个片段都要写依据 basis：对应的知识编号（数字），或 \"secret\"、\"internal_detail\"、\"other_party\" 之一。\n\
+         2. 上面知识没有给出（或超出其级别）的内部细节：事项的进展和内容，系统、文档、文件、群的名字，ID、权限范围、错误码、路径、配置，谁限制了什么、为什么——上面知识对这些听众“可以引用”的内容（包括事项的名称、编号和进展）照常能说，“可转述结论”的能说结论；\n\
+         3. 不在听众里的其他人、其他客户、其他群的信息。\n\
+         不算泄露：回复只是笼统地说自己没查到、查询失败或超时、没有权限或不方便查、需要确认、会请人来看，或者请对方说清楚——只要没有说出被限制的是什么、在哪里、为什么。回复中性地照着提到听众这次自己说出的标识或原话（比如他们问的事项编号、请他们说清楚某个词）不算泄露；但这不给这件事的内容任何权限：回复确认、否认或补充他们的说法或猜测（比如来信猜测要裁员、回复证实），以及事项的进展和细节，照常按上面的知识级别判断。\n\
+         每个片段都要写依据 basis：对应的知识编号（数字），或 \"internal_detail\"、\"other_party\" 之一。\n\
          只回答 JSON：{\"verdict\": \"pass\" 或 \"leak\", \"spans\": [{\"text\": \"回复里的原文片段\", \"reason\": \"为什么\", \"basis\": 1 或 \"internal_detail\"}]}",
     );
     p
@@ -546,7 +512,6 @@ fn basis_label(b: &Value, knowledge: &[KnowledgeUse]) -> Option<String> {
         return Some(format!("知识 [{n}] {label}"));
     }
     match b.as_str()?.trim() {
-        "secret" => Some("机密值".into()),
         "internal_detail" => Some("内部细节".into()),
         "other_party" => Some("其他人的信息".into()),
         _ => None,
@@ -554,7 +519,7 @@ fn basis_label(b: &Value, knowledge: &[KnowledgeUse]) -> Option<String> {
 }
 
 /// Reads the check model's answer against the knowledge it was shown: every span says what it is
-/// based on (a knowledge number, `secret`, `internal_detail`, `other_party`); a span without a usable
+/// based on (a knowledge number, `internal_detail`, `other_party`); a span without a usable
 /// basis, or a `leak` without spans, still counts — marked [`R_NO_BASIS`] — so an unexplained leak
 /// never passes. `None` when it is not an answer.
 pub fn judge_check(answer: &str, knowledge: &[KnowledgeUse]) -> Option<(bool, Vec<Span>)> {
@@ -635,24 +600,6 @@ pub fn parse_rewrite(answer: &str) -> Option<String> {
     (!t.is_empty() && !t.starts_with('{')).then(|| t.to_string())
 }
 
-/// What the guard and the redactor find; the spans never contain the value itself.
-pub fn secret_spans(secrets: &dyn SecretScan, ws: &str, text: &str) -> Vec<Span> {
-    let mut out: Vec<Span> = steve_vault::guard::scan(text)
-        .into_iter()
-        .map(|s| Span {
-            text: steve_vault::guard::REPLACEMENT.into(),
-            reason: format!("{R_SECRET}（{}）", s.kind),
-        })
-        .collect();
-    for label in secrets.find(ws, text) {
-        out.push(Span {
-            text: steve_vault::redact::mask(&label),
-            reason: format!("{R_SECRET}（保险箱：{label}）"),
-        });
-    }
-    out
-}
-
 fn result(
     verdict: Verdict,
     entries: Vec<BasisEntry>,
@@ -702,27 +649,9 @@ impl OutboundCheck for Disclosure {
                 }
             };
 
-        // 0. secrets: blocked outright
-        let secrets: Arc<dyn SecretScan> = self
-            .0
-            .secrets
-            .get()
-            .cloned()
-            .unwrap_or_else(|| Arc::new(NoSecrets));
-        let found = secret_spans(secrets.as_ref(), &cx.ws, text);
-        if !found.is_empty() {
-            let (_, flagged) = rule_check(text, audience, knowledge, &names);
-            return result(
-                Verdict::Blocked,
-                entries(text, audience, knowledge, &names, &flagged),
-                found,
-                None,
-            );
-        }
-
         // Only the workspace's owner reads it (their private chat with Steve). Nobody else hears anything, so
         // there is nothing to disclose: no names rule, no model check, no rewrite (it held or reworded answers
-        // to the owner for seconds). Secrets above and never-level knowledge still count. Decided by the user
+        // to the owner for seconds). Never-level knowledge still counts. Decided by the user
         // on 2026-11-03.
         if private(audience) {
             let mut spans = Vec::new();
@@ -778,7 +707,7 @@ impl OutboundCheck for Disclosure {
                 None,
             );
         }
-        let said = audience_said(secrets.as_ref(), &cx.ws, cx.audience_said.as_deref());
+        let said = audience_said(cx.audience_said.as_deref());
         let prompt = check_prompt_with(audience, text, &usable, said.as_deref());
         let (leak, model) = match self.run_model(cx, &prompt).await {
             Ok((answer, model)) => match judge_check(&answer, &usable) {
@@ -1066,7 +995,7 @@ mod tests {
         assert!(leak);
         assert_eq!(s[0].reason, "r（依据：知识 [1] 事项 ST-23）");
         assert_eq!(s[1].reason, "r（依据：知识 [1] 事项 ST-23）");
-        assert_eq!(s[2].reason, "r（依据：机密值）");
+        assert!(s[2].reason.contains(R_NO_BASIS), "not a basis");
         assert!(s[3].reason.contains(R_NO_BASIS), "out of range");
         assert!(s[4].reason.contains(R_NO_BASIS), "missing");
         let (leak, s) = judge_check(r#"{"verdict":"leak","spans":[]}"#, &ks).unwrap();
@@ -1095,32 +1024,15 @@ mod tests {
         assert!(p.contains("没有权限或不方便查"));
         assert!(p.contains("不给这件事的内容任何权限"));
         assert!(!check_prompt(&a, "没查到。", &[]).contains("<<<来信"));
-        // secrets in the asker's words are masked; a vault value drops the context entirely
-        struct Vault;
-        impl SecretScan for Vault {
-            fn find(&self, _: &str, text: &str) -> Vec<String> {
-                if text.contains("hunter2") {
-                    vec!["数据库密码".into()]
-                } else {
-                    vec![]
-                }
-            }
-        }
-        let t = audience_said(
-            &NoSecrets,
-            "ws",
-            Some("令牌 ghp_abcdefghijklmnopqrstuvwxyz0123 帮我查"),
-        )
-        .unwrap();
-        assert!(!t.contains("ghp_"), "{t}");
-        assert_eq!(audience_said(&Vault, "ws", Some("密码是 hunter2")), None);
-        assert_eq!(audience_said(&NoSecrets, "ws", Some("   ")), None);
+        // the asker's words as they are, cut
+        assert_eq!(
+            audience_said(Some("密码是 hunter2")).as_deref(),
+            Some("密码是 hunter2")
+        );
+        assert_eq!(audience_said(Some("   ")), None);
         let long = "字".repeat(SAID_MAX + 10);
         assert_eq!(
-            audience_said(&NoSecrets, "ws", Some(&long))
-                .unwrap()
-                .chars()
-                .count(),
+            audience_said(Some(&long)).unwrap().chars().count(),
             SAID_MAX
         );
     }
@@ -1131,16 +1043,5 @@ mod tests {
         assert_eq!(d.check_model(Some("haiku")).as_deref(), Some("sonnet"));
         assert_eq!(d.check_model(Some("opus")).as_deref(), Some("haiku"));
         assert_eq!(Disclosure::with_models(vec![]).check_model(None), None);
-    }
-
-    #[test]
-    fn secrets_are_found_without_their_value() {
-        let s = secret_spans(
-            &NoSecrets,
-            "ws",
-            "令牌是 ghp_abcdefghijklmnopqrstuvwxyz0123",
-        );
-        assert_eq!(s.len(), 1);
-        assert!(!s[0].text.contains("ghp_"));
     }
 }

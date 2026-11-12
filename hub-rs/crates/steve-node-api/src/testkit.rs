@@ -11,7 +11,7 @@
 //! - events are numbered per stream, kept until acknowledged, replayable, never renumbered;
 //! - a readonly root is listed, read and scanned, never prepared, run in or changed by git;
 //! - a scan is complete only on its last page and only with no issue; its pages share a manifest;
-//! - a secret is taken once from the Hub, under the operation that uses it, and masked in output.
+//! - a secret is taken once from the Hub, under the operation that uses it.
 //!
 //! What it does not simulate it refuses (`unsupported`) instead of pretending. Tests drive what the
 //! harness would do ([`FakeNode::emit`], [`FakeNode::finish`], [`FakeNode::ask_permission`]) and can
@@ -289,7 +289,7 @@ impl FakeNode {
         self.st().git.insert(w.id.clone(), facts);
     }
 
-    /// What the next exec prints and exits with (before secrets are masked).
+    /// What the next exec prints and exits with.
     pub fn answer_exec(&self, r: ExecResult) {
         self.st().exec_answers.push_back(r);
     }
@@ -1161,18 +1161,6 @@ fn page_of<T: Clone>(items: &[T], page: &PageRequest) -> ApiResult<(Vec<T>, Opti
     Ok((items[from..to].to_vec(), next))
 }
 
-/// Replaces every secret's text in `s` (output is masked before it leaves the Node).
-fn mask(s: &str, secrets: &[SecretBytes]) -> String {
-    let mut out = s.to_string();
-    for x in secrets {
-        let t = String::from_utf8_lossy(x.expose());
-        if !t.is_empty() {
-            out = out.replace(t.as_ref(), "***");
-        }
-    }
-    out
-}
-
 /// A Hub's secrets for tests: each given to one operation, taken once.
 #[derive(Default)]
 pub struct FakeSecrets {
@@ -1973,7 +1961,7 @@ impl WorkspaceExecutor for FakeNode {
         .await
     }
 
-    /// Answers what the test gave ([`FakeNode::answer_exec`]), with its secrets masked.
+    /// Answers what the test gave ([`FakeNode::answer_exec`]).
     async fn exec(&self, c: Command<ExecSpec>) -> ApiResult<Receipt> {
         self.mine(&c.body.workspace)?;
         if c.body
@@ -1991,18 +1979,13 @@ impl WorkspaceExecutor for FakeNode {
             }
             Ok(())
         };
-        self.accept_taking("exec", &c, &c.body.secrets, check, |st, secrets| {
+        self.accept_taking("exec", &c, &c.body.secrets, check, |st, _secrets| {
             let r = st.exec_answers.pop_front().unwrap_or(ExecResult {
                 exit_code: Some(0),
                 stdout: String::new(),
                 stderr: String::new(),
                 truncated: false,
             });
-            let r = ExecResult {
-                stdout: mask(&r.stdout, secrets),
-                stderr: mask(&r.stderr, secrets),
-                ..r
-            };
             let mut d = Decided::done(OperationResult::Exec(r));
             d.workspace = Some(c.body.workspace.clone());
             Ok(d)

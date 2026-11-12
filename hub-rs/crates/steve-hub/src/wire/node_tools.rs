@@ -605,10 +605,7 @@ impl HubTools for NodeTools {
                     Err(text) => ToolResult::Failed {
                         error: ApiError::new(
                             ErrorCode::Invalid,
-                            super::tool_service::bound_result(
-                                &q.name,
-                                steve_vault::redact::scrub_any(&text).to_string(),
-                            ),
+                            super::tool_service::bound_result(&q.name, text),
                         ),
                     },
                 },

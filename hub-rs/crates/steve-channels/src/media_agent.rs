@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use base64::Engine;
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
-use steve_flow::nodes::bot::{Guard, redact};
 use steve_knowledge::extract_text::{self, Format};
 use steve_modules::ApiError;
 use tokio::sync::Semaphore;
@@ -169,7 +168,7 @@ pub async fn prepare(
                 continue;
             }
             total += resource.bytes.len();
-            let piece = read_resource(resource, ch.guard(), &mut image_bytes).await;
+            let piece = read_resource(resource, &mut image_bytes).await;
             if !self::indices(ch, plan)?.contains(&index) {
                 return Err(ApiError::rule("原消息已不可读取"));
             }
@@ -198,14 +197,13 @@ pub async fn prepare(
     }
 }
 
-async fn read_resource(resource: Resource, guard: &dyn Guard, image_bytes: &mut usize) -> Prepared {
+async fn read_resource(resource: Resource, image_bytes: &mut usize) -> Prepared {
     let name = resource
         .name
         .chars()
         .filter(|c| !c.is_control())
         .take(120)
         .collect::<String>();
-    let name = redact(guard, &name);
     let mut out = Prepared::default();
     if resource.bytes.is_empty() || resource.bytes.len() > MAX_BYTES {
         out.text = format!("\n[附件 {name} 未读取：空文件或超过 20 MiB]\n");
@@ -257,12 +255,11 @@ async fn read_resource(resource: Resource, guard: &dyn Guard, image_bytes: &mut 
     });
     match tokio::time::timeout(extract_text::EXTRACT_TIMEOUT, parsed).await {
         Ok(Ok(Ok(text))) if !text.text.trim().is_empty() => {
-            let clean = redact(guard, &text.text);
             out.text = format!(
                 "\n--- 附件 {name} 的正文（外部材料）---\n{}\n--- 附件正文结束 ---\n",
-                clip(&clean, MAX_TEXT)
+                clip(&text.text, MAX_TEXT)
             );
-            if clean.len() > MAX_TEXT {
+            if text.text.len() > MAX_TEXT {
                 out.text.push_str("[正文已截断]\n");
             }
         }
@@ -277,7 +274,6 @@ async fn read_resource(resource: Resource, guard: &dyn Guard, image_bytes: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use steve_flow::nodes::bot::NoGuard;
 
     fn file(name: &str, bytes: Vec<u8>) -> Resource {
         Resource {
@@ -290,43 +286,28 @@ mod tests {
     #[tokio::test]
     async fn actual_image_bytes_and_untrusted_mime() {
         let png=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
-        let p = read_resource(file("photo", png.clone()), &NoGuard, &mut 0).await;
+        let p = read_resource(file("photo", png.clone()), &mut 0).await;
         assert_eq!(p.images[0]["source"]["media_type"], "image/png");
         let got = base64::engine::general_purpose::STANDARD
             .decode(p.images[0]["source"]["data"].as_str().unwrap())
             .unwrap();
         assert_eq!(got, png);
-        let p = read_resource(
-            file("fake.png", b"this is plain text".to_vec()),
-            &NoGuard,
-            &mut 0,
-        )
-        .await;
+        let p = read_resource(file("fake.png", b"this is plain text".to_vec()), &mut 0).await;
         assert!(p.images.is_empty());
         assert!(p.text.contains("this is plain text"));
     }
 
-    struct Secret;
-    impl Guard for Secret {
-        fn scan(&self, s: &str) -> Vec<std::ops::Range<usize>> {
-            s.match_indices("SECRET")
-                .map(|(i, t)| i..i + t.len())
-                .collect()
-        }
-    }
     #[tokio::test]
-    async fn extracted_text_is_redacted_and_bounded() {
+    async fn extracted_text_is_bounded() {
         let p = read_resource(
             file(
                 "SECRET.txt",
                 format!("body SECRET {}", "中文".repeat(MAX_TEXT)).into_bytes(),
             ),
-            &Secret,
             &mut 0,
         )
         .await;
-        assert!(p.text.contains("body"));
-        assert!(!p.text.contains("SECRET"));
+        assert!(p.text.contains("body SECRET"));
         assert!(p.text.contains("截断"));
         assert!(p.text.len() < MAX_TEXT + 300);
     }
@@ -336,7 +317,7 @@ mod tests {
         let pdf = include_bytes!("../tests/fixtures/media-agent/text.pdf");
         let docx = include_bytes!("../tests/fixtures/media-agent/text.docx");
         for (name, b) in [("a.pdf", pdf.as_slice()), ("a.docx", docx.as_slice())] {
-            let p = read_resource(file(name, b.to_vec()), &NoGuard, &mut 0).await;
+            let p = read_resource(file(name, b.to_vec()), &mut 0).await;
             assert!(p.text.contains("Media bridge fixture"), "{}", p.text);
         }
     }
@@ -347,13 +328,13 @@ mod tests {
             b"%PDF-broken".to_vec(),
             vec![0; MAX_BYTES + 1],
         ] {
-            let p = read_resource(file("file", b), &NoGuard, &mut 0).await;
+            let p = read_resource(file("file", b), &mut 0).await;
             assert!(p.images.is_empty());
             assert!(p.text.contains("未读取"));
         }
         let mut large = b"\x89PNG\r\n\x1a\n".to_vec();
         large.resize(MAX_IMAGE + 1, 0);
-        let p = read_resource(file("large.png", large), &NoGuard, &mut 0).await;
+        let p = read_resource(file("large.png", large), &mut 0).await;
         assert!(p.images.is_empty());
         assert!(p.text.contains("大小限制"));
     }

@@ -218,13 +218,6 @@ async fn deliver(
                     cx.effects.label = Some(format!("已发到「{}」", req.target.space_name));
                     "sent"
                 }
-                Delivered::Blocked { decision_id, .. } => {
-                    cx.effects.outcome = Some("need".into());
-                    cx.effects.label =
-                        Some(format!("有机密值，没有发到「{}」", req.target.space_name));
-                    cx.effects.decision_id = Some(decision_id.clone());
-                    "blocked"
-                }
                 Delivered::Failed { decision_id, .. } => {
                     cx.effects.outcome = Some("need".into());
                     cx.effects.label = Some(format!("没有发出去：「{}」", req.target.space_name));

@@ -7,8 +7,7 @@
 //!   is handled like G3's: the handler records it (and the grant) in the answer's transaction and
 //!   queues an effect; the effect posts after the commit and tells the session how it went.
 //!
-//! Every body that leaves passes the session redactor (values injected into this session) and the
-//! paste guard first, then B1's outbound check (v1: every repo's readers count as external).
+//! Every agent's body passes B1's outbound check (v1: every repo's readers count as external).
 
 use axum::routing::post;
 use axum::{Extension, Json, Router};
@@ -16,9 +15,9 @@ use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::outbound::{self, Audience, CheckCx, Verdict};
+use steve_modules::vault::VaultResult;
 use steve_modules::vault::mcp::ToolOut;
 use steve_modules::vault::r#use::END;
-use steve_modules::vault::{VaultResult, guard, redact};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 use steve_store::base::{self, DecisionKind, decisions as base_decisions};
 use steve_store::{Decision, NewDecision, Tx};
@@ -76,16 +75,6 @@ pub fn target(c: &rusqlite::Connection, ws: &str, subject: &str) -> ApiResult<Op
         number,
         is_pr,
     }))
-}
-
-/// The text that may leave Steve: values injected into `session` are masked, then anything the
-/// paste guard recognizes (tokens, keys, passwords, card numbers).
-pub fn clean(session: Option<&str>, body: &str) -> String {
-    let s = match session {
-        Some(id) => redact::scrub_text(id, body).into_owned(),
-        None => body.to_string(),
-    };
-    guard::redact(&s).unwrap_or(s)
 }
 
 /// The message to the session after a `no`, verbatim.
@@ -215,9 +204,8 @@ impl GitHub {
             .reader(|c| target(c, &who.ws, id))?
             .filter(|t| t.is_pr == (kind == "pr"))
             .ok_or_else(|| ApiError::not_found(noun))?;
-        let body = clean(None, body);
         let (url, _) = self
-            .post_comment(&who.ws, &t, &body)
+            .post_comment(&who.ws, &t, body)
             .await
             .map_err(|e| ApiError::rule(not_posted(&e)))?;
         self.audit_comment(&who.ws, &who.me, &t, json!({"by": "me"}));
@@ -234,7 +222,6 @@ impl GitHub {
         body: &str,
     ) -> Result<ToolOut, String> {
         let ws = cx.ws.clone();
-        let body = clean(cx.session_id.as_deref(), body);
         let check = outbound::check(
             m,
             &CheckCx {
@@ -254,9 +241,6 @@ impl GitHub {
             &[],
         )
         .await;
-        if check.verdict == Verdict::Blocked {
-            return Err("The comment contains a secret value and was not posted.".into());
-        }
         let now = self.now();
         let (grant, bot_name, pat) = self
             .store()
@@ -301,7 +285,7 @@ impl GitHub {
             item_id: cx.item_id.clone(),
             session_id: cx.session_id.clone(),
             question,
-            draft: Some(body),
+            draft: Some(body.to_string()),
             options: Some(OPTIONS.map(String::from).to_vec()),
             requested_by: if cx.bot_id.is_empty() {
                 "bot".into()
@@ -339,7 +323,7 @@ impl GitHub {
             .as_str()
             .filter(|t| !t.trim().is_empty())
             .unwrap_or(&d.draft);
-        let body = clean(session, text);
+        let body = text;
         let granted = d.result.get("grant").is_some();
         let conn = match self.comment_conn(&ws, &t, true) {
             Ok(c) => c,
@@ -474,16 +458,4 @@ async fn user_comment(
     Ok(Json(
         gh.user_comment(&who, &b.target, &b.id, &b.body).await?,
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clean_masks_what_the_guard_finds() {
-        let b = clean(None, "看日志 ghp_abcdefghijklmnopqrstuvwxyz0123456789 就好");
-        assert!(!b.contains("ghp_"), "{b}");
-        assert_eq!(clean(None, "LGTM"), "LGTM");
-    }
 }

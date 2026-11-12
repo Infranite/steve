@@ -523,9 +523,9 @@ async fn call_owned_inner(
                 .map_err(|e| e.to_string()),
         },
         Owner::Remember => {
-            let (m, kb) = (x.modules.clone(), x.kb.clone());
+            let m = x.modules.clone();
             tokio::task::spawn_blocking(move || {
-                steve_knowledge::candidates::remember(&m, &kb, &cx, &args)
+                steve_knowledge::candidates::remember(&m, &cx, &args)
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))

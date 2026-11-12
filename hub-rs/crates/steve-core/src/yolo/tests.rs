@@ -1375,7 +1375,7 @@ fn every_row_of_the_table() {
                 &["discard"],
                 Subject::Chan(outbound(
                     Identity::Bot,
-                    Disclosure::Blocked,
+                    Disclosure::Unchecked,
                     false,
                     OutboundStage::Blocked,
                 )),
@@ -2025,7 +2025,7 @@ fn limited_subjects(pl: &Place) -> Vec<(&'static str, Facts, u8)> {
                 &all_ids,
                 Subject::Chan(o(
                     Identity::SelfAccount,
-                    Disclosure::Blocked,
+                    Disclosure::Unchecked,
                     true,
                     OutboundStage::Blocked,
                 )),

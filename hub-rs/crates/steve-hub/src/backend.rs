@@ -956,11 +956,6 @@ pub trait Domain: Send + Sync + 'static {
         }
         self.say(ws, user, text, files, mentions).await
     }
-    /// The paste guard's note under a message whose secret was replaced before it was routed
-    /// (`guard::ROUTED`, linking to the vault).
-    async fn say_guard_note(&self, ws: &str) -> BResult<()> {
-        todo_backend!("say_guard_note")
-    }
     async fn stop(&self, ws: &str) -> BResult<bool> {
         todo_backend!("stop")
     }

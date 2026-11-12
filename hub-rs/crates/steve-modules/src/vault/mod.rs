@@ -19,8 +19,7 @@
 //!
 //! Slice V4 (bot use of secrets): [`grants`], [`r#use`] (requests, the `secret_use`
 //! decision handler, the job that runs approved commands), [`inject`] (Steve runs the command),
-//! [`mcp`] (`steve_secret_list`, `steve_secret_use`), [`use_api`] (grants and the use log), and the
-//! store-free [`redact`] and [`guard`] re-exported from steve-vault. Integration:
+//! [`mcp`] (`steve_secret_list`, `steve_secret_use`) and [`use_api`] (grants and the use log). Integration:
 //! `let uses = SecretUses::new(vault.clone(), steve_home, Arc::new(<steve-core send>));`,
 //! `registry.decision(r#use::SUBJECT, uses.decision_handler())`, `uses.start()` once the runtime is
 //! up, merge [`use_api::routes`]`(vault)`, route [`mcp::tools`] to [`mcp::call`].
@@ -47,8 +46,6 @@ pub mod webauthn;
 pub use api::routes;
 pub use error::{VaultError, VaultResult};
 pub use service::{KeyStoreInfo, Keychain, NewItemKey, Rotation, Status, Vault, ensure_active};
-pub use steve_vault::{guard, redact};
 pub use r#use::{
-    NodePlace, NodeUse, SecretUses, SessionSink, UseCx, UseNodes, UseOutcome, UseRequest,
-    UseValues, pasted_secret,
+    NodePlace, NodeUse, SecretUses, SessionSink, UseCx, UseNodes, UseOutcome, UseRequest, UseValues,
 };

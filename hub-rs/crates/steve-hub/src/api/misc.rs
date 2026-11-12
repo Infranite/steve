@@ -369,16 +369,10 @@ pub async fn thread_say(
         .dedupe
         .once(&c.ws, &c.me, "thread", client_id, move || async move {
             let (st, c) = (st2, c2);
-            // V4 paste guard: a password or token is replaced before the message is stored or
-            // routed; the rest of it goes on as usual, with Steve's note on where to keep the secret
-            let guarded = steve_vault::guard::intercept(&text);
             let refs = super::files::refs(&st, &c.ws, files).await?;
             st.domain
-                .say_to(&c.ws, &c.me, &guarded.text, refs, checked, item, reply_to)
+                .say_to(&c.ws, &c.me, &text, refs, checked, item, reply_to)
                 .await?;
-            if guarded.blocked {
-                st.domain.say_guard_note(&c.ws).await?;
-            }
             Ok::<_, ApiError>(json!({ "ok": true }))
         })
         .await?;
@@ -457,13 +451,7 @@ pub async fn thread_queued_edit(
     if text.is_empty() {
         return Err(ApiError::Invalid(vec!["text".into()]));
     }
-    // V4 paste guard: what is sent is guarded, so is what it is changed to (the secret replaced)
-    let guarded = steve_vault::guard::intercept(&text);
-    if !st
-        .domain
-        .thread_queued_edit(&c.ws, &id, &guarded.text)
-        .await?
-    {
+    if !st.domain.thread_queued_edit(&c.ws, &id, &text).await? {
         return Err(ApiError::Json(409, steve_i18n::t!("hub.queued.gone")));
     }
     ok_true()
@@ -984,13 +972,6 @@ pub async fn config_draft(
     }
     let text = k.str("text", Str::len(1, 4000));
     k.finish()?;
-    // V4 paste guard: no draft (and no model call) from a text with a password or token in it
-    if steve_vault::guard::intercept(&text).blocked {
-        return Ok(crate::error::json_response(
-            400,
-            &json!({ "error": steve_vault::guard::REPLY, "href": steve_vault::guard::REPLY_HREF }),
-        ));
-    }
     let kind = target
         .get("kind")
         .and_then(Value::as_str)

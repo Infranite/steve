@@ -1,6 +1,5 @@
-//! G4 acceptance: an item without a linked repo gets the fixed hint; a fake token
-//! (and the connection's own token, and a value injected into the session) in a CI log comes back
-//! masked; an agent's comment without a grant is a decision and END, `grant_8h` posts it and lets
+//! G4 acceptance: an item without a linked repo gets the fixed hint; a CI log comes back as GitHub
+//! has it (a token in it too); an agent's comment without a grant is a decision and END, `grant_8h` posts it and lets
 //! the second one through directly; the panel JSON has the expected shape; `rerun_failed` reruns the
 //! failed workflow; an agent's `steve_github_open_pr` opens a draft PR after your yes and tells
 //! the session.
@@ -404,7 +403,7 @@ async fn an_unlinked_item_gets_the_fixed_hint() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn status_and_a_redacted_ci_log() {
+async fn status_and_a_ci_log() {
     let h = setup().await;
     let id = item(&h, 1, Some(PROJECT), Some(BRANCH));
     let c = cx(Some(&id), BOT);
@@ -417,22 +416,10 @@ async fn status_and_a_redacted_ci_log() {
         )
     );
 
-    // the connection's own token and a value injected into this session, in the log too
-    let token =
-        h.gh.conn(WS, &h.conn)
-            .expect("conn")
-            .cx()
-            .access_token()
-            .await
-            .expect("token")
-            .expose()
-            .to_string();
-    steve_modules::vault::redact::register(SESSION, "API 密钥", b"s3cr3t-injected-value");
+    // a token in the log too: the log comes back as GitHub has it
     let mut log: Vec<String> = (0..400).map(|i| format!("step {i}")).collect();
     log[50] = format!("export GITHUB_TOKEN={FAKE_TOKEN}");
     log[60] = "##[error]Process completed with exit code 1.".into();
-    log[61] = format!("auth header: {token}");
-    log[62] = "curl -H 'X-Key: s3cr3t-injected-value'".into();
     let (n, job) = pr_with_failure(&h, &log.join("\n")).await;
 
     let o = tool(&h, &c, mcp::STATUS, json!({})).await.expect("status");
@@ -459,20 +446,11 @@ async fn status_and_a_redacted_ci_log() {
             .expect("log");
         let t = &o.text;
         assert!(
-            t.starts_with(&format!(
-                "Log of build (job {job}) on PR #{n}, secrets removed:\n"
-            )),
+            t.starts_with(&format!("Log of build (job {job}) on PR #{n}:\n")),
             "{t}"
         );
         assert!(t.contains("##[error]Process completed with exit code 1."));
-        assert!(!t.contains(FAKE_TOKEN), "the fake token is masked");
-        assert!(!t.contains(&token), "the installation token is masked");
-        assert!(
-            !t.contains("s3cr3t-injected-value"),
-            "the injected value is masked"
-        );
-        assert!(t.contains("［已拦下的机密］"), "{t}");
-        assert!(t.contains("[已打码：API 密钥]"), "{t}");
+        assert!(t.contains(FAKE_TOKEN), "{t}");
         // error context and the tail; the start of the log is left out
         assert!(t.contains("step 40\n") && t.contains("step 399"));
         assert!(!t.contains("step 39\n"));
@@ -503,7 +481,6 @@ async fn status_and_a_redacted_ci_log() {
         ),
         json!(0)
     );
-    steve_modules::vault::redact::forget(SESSION);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -530,8 +507,8 @@ async fn a_comment_asks_first_then_grant_8h_lets_the_next_through() {
     let (dec, question, draft) = open_decision(&h, comment::COMMENT).expect("asked");
     assert_eq!(question, format!("前端 Bot 想在 PR #{n} 评论"));
     assert!(
-        !draft.contains(FAKE_TOKEN),
-        "the draft is redacted: {draft}"
+        draft.contains(FAKE_TOKEN),
+        "the draft is as written: {draft}"
     );
     assert_eq!(
         q(

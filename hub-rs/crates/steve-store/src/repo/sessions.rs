@@ -276,8 +276,6 @@ impl Sessions<'_> {
             tx.run("DELETE FROM view_shadow WHERE session_id = ?", [id])?;
             tx.run("DELETE FROM sessions WHERE id = ?", [id])?;
             tx.commit()?;
-            // the session's injected values go with it (V4 redactor)
-            steve_vault::redact::forget(id);
             w.publish(ChangeEvent::Session {
                 id: id.into(),
                 item_id: None,
@@ -314,11 +312,8 @@ impl Events<'_> {
     /// Appends an event and returns its `seq`. The published event carries `data` as stored.
     ///
     /// The one place session events are written (transcript entries, Steve tools, core), always in
-    /// Steve's own terms (`steve.v1`): values injected
-    /// into the session (V4 `steve_secret_use`) are scrubbed from `data` first, so they reach
-    /// neither the table nor the SSE stream.
-    pub fn add(&self, session_id: &str, kind: &str, mut data: Value) -> Result<i64> {
-        steve_vault::redact::scrub(session_id, &mut data);
+    /// Steve's own terms (`steve.v1`).
+    pub fn add(&self, session_id: &str, kind: &str, data: Value) -> Result<i64> {
         let (stored, payloads) = crate::event_payload::split(kind, &data)?;
         let stored = to_json(&stored)?;
         self.0.write(|w| {

@@ -878,19 +878,18 @@ pub struct EventSource<'a> {
     pub seq: i64,
 }
 
-/// [`crate::Events::add`] inside the caller's transaction, for a given `format`: scrubbed, split into
+/// [`crate::Events::add`] inside the caller's transaction, for a given `format`: split into
 /// payloads, published after the commit. With a source, the same Node event again is a no-op
 /// (`None`).
 pub fn add_event_in(
     tx: &Tx<'_>,
     session: &str,
     kind: &str,
-    mut data: Value,
+    data: Value,
     format: &str,
     source: Option<EventSource<'_>>,
     now: i64,
 ) -> Result<Option<i64>> {
-    steve_vault::redact::scrub(session, &mut data);
     let (stored, payloads) = crate::event_payload::split(kind, &data)?;
     let stored = to_json(&stored)?;
     let inserted = tx.execute(

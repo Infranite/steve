@@ -208,7 +208,6 @@ export default {
     sent: "Sent",
     pending: "Sending",
     draft: "Sends once you approve",
-    blocked: "Held back: contains a secret",
     failed: "Not sent",
     unknown: "May have been sent, checking",
     discarded: "You didn't send it",

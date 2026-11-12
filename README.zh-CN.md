@@ -35,7 +35,7 @@ Steve 架在 Claude Code 和 Codex 之上，负责把这些记下来、管起来
 | **权限确认** | 刚好看到哪个标签页就答哪个 | 统一进“待处理”，或交给有硬边界的 YOLO |
 | **算不算完成** | 智能体说完成就算 | 检查通过、计划走完、拿出目标要求的证据 |
 | **合并** | 手动一个个合 | 合并通道：成批合并，只做快进 |
-| **密钥** | 直接贴进提示词 | 通过保险箱使用，输出脱敏 |
+| **密钥** | 直接贴进提示词 | 放在保险箱里，注入到命令中 |
 
 <div align="center">
 
@@ -77,9 +77,9 @@ YOLO 只决定留在本机、能撤销的事。涉及钱、高敏感密钥、推
 <tr>
 <td width="33%" valign="top">
 
-#### 🗝️ 用密钥，但看不到密钥
+#### 🗝️ 用密钥，但不读保险箱
 
-Steve 带着密钥执行命令，交给智能体的只有脱敏后的输出。base64、URL 编码、十六进制和 JSON 转义过的副本也会被认出来。
+Steve 把密钥放进命令的环境变量、标准输入或临时文件来执行，命令的输出原样交给智能体。Steve 不对你输入的内容或模型说的话做任何打码或过滤。
 
 </td>
 <td width="33%" valign="top">
@@ -178,7 +178,7 @@ Steve 管理联系人、组织和团队。身份依次按账号、邮箱、姓�
 
 每个工作区一把主密钥，放在系统密钥库里（macOS 钥匙串、Linux Secret Service，或受保护的目录）。每个条目有自己的数据密钥，字段用 XChaCha20-Poly1305 加密。模板覆盖登录、银行卡、API 凭据、SSH 密钥等，哪些字段是密文由模板决定，不由客户端决定。查看密文要用通行密钥（Touch ID / Face ID），挑战一次有效，且绑定到具体字段。
 
-Bot 通过 `steve_secret_use` 使用密钥，但读不到它。每次使用都要审批或有时限的授权，会留记录，拿回来的是脱敏输出。银行卡和高敏感条目永远不能授权。粘贴守卫会在内容到达模型之前去掉卡号、API token 和私钥。
+Bot 通过 `steve_secret_use` 使用密钥，但读不到它。每次使用都要审批或有时限的授权，会留记录，拿回来的是命令的退出码和输出。银行卡和高敏感条目永远不能授权。Steve 不扫描、不打码、不拦截内容：你输入的内容原样交给模型；模型复述了密钥，就该换一个 harness 或模型。
 
 ### ⚡ 自动化
 
@@ -364,7 +364,7 @@ hub-rs/          Rust workspace：Hub 可执行文件和各 crate
   crates/steve-github     GitHub App / token、webhook、PR、检查、外部操作
   crates/steve-knowledge  知识库、检索、引用、记忆
   crates/steve-flow       信号、流程、定时
-  crates/steve-vault      脱敏和粘贴守卫；steve-keyhelper 持有 macOS 密钥
+  crates/steve-vault      启动的 harness 不能读取的内容；steve-keyhelper 持有 macOS 密钥
   crates/steve-stats      用量、花费和交付指标
   crates/steve-node*      Hub–Node 协议和运行所有会话的 Node 运行时
   crates/steve-store      SQLite 表结构和迁移

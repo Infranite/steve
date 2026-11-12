@@ -15,7 +15,7 @@ use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Modules};
 use steve_store::base::{Level, Viewer};
 
-use crate::context::{item_viewer, scrub_query};
+use crate::context::{item_viewer, query_text};
 use crate::retrieve::{Hit, Purpose, Query, SEMANTIC_DOWN_NOTE, record_use, retrieve_all};
 use crate::service::own_doc;
 use crate::state::Knowledge;
@@ -207,14 +207,9 @@ pub fn search(
     if q.is_empty() {
         return Err(ApiError::rule("Give a search query."));
     }
-    if !kb.guard.scan(q).is_empty() {
-        return Err(ApiError::rule(
-            "The query looks like it contains a password or token. Search without it.",
-        ));
-    }
     let k = limit.map_or(SEARCH_DEFAULT, |l| (l.max(1.0) as usize).min(SEARCH_MAX));
     let viewer = session_viewer(m, cx)?;
-    let text = scrub_query(kb.guard.as_ref(), q);
+    let text = query_text(q);
     let now = m.clock.now();
     let (hits, semantic_down) = m.store.reader(|c| {
         let mut query = Query::new(kb.store(), &viewer, &text, Purpose::Agent);

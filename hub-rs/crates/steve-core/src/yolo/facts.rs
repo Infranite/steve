@@ -472,11 +472,10 @@ impl Engine {
         } else {
             Identity::Bot
         };
-        let disclosure = match (status.as_str(), verdict.as_deref()) {
-            ("blocked", _) => Disclosure::Blocked,
-            (_, Some("pass")) => Disclosure::Pass,
-            (_, Some("rewritten")) => Disclosure::Rewritten,
-            (_, Some("drafted")) => Disclosure::Leak,
+        let disclosure = match verdict.as_deref() {
+            Some("pass") => Disclosure::Pass,
+            Some("rewritten") => Disclosure::Rewritten,
+            Some("drafted") => Disclosure::Leak,
             _ => Disclosure::Unchecked,
         };
         let has = |o: &str| d.options.iter().any(|x| x == o);
@@ -525,7 +524,6 @@ impl Engine {
         let disclosure = match verdict.as_deref() {
             Some("pass") => Disclosure::Pass,
             Some("leak") => Disclosure::Leak,
-            Some("blocked") => Disclosure::Blocked,
             _ => Disclosure::Unchecked,
         };
         let mut addrs = Vec::new();

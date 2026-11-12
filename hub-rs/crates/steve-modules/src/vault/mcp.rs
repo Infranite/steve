@@ -1,7 +1,7 @@
 //! MCP tools of the vault: `steve_secret_list` and `steve_secret_use`.
 //! Definitions in the `{name, description, inputSchema}` shape of steve-mcp's `tools.json`; serving
 //! them is the integrator's (list after the Steve tools, route the names to [`call`] with the
-//! session's [`UseCx`]). Results never contain a value: only metadata, or redacted command output.
+//! session's [`UseCx`]). Results hold metadata, or the command output.
 
 use std::sync::LazyLock;
 

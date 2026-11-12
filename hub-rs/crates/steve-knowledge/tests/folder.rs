@@ -1,6 +1,6 @@
 //! K2 acceptance: every refusal of the folder path check, links out of the
 //! folder are not read, changed files are re-chunked and vanished ones become `deleted`, front
-//! matter `steve.level: never` takes effect, tokens are stored as “［已拦下的机密］”; plus the
+//! matter `steve.level: never` takes effect, tokens are indexed as written; plus the
 //! source writes and `POST /kb/files`.
 
 use std::fs;
@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use steve_knowledge::repo;
 use steve_knowledge::sources::files::blob_path;
 use steve_knowledge::sources::folder::{self, FolderPolicy, OUTSIDE, check_path};
-use steve_knowledge::{FilesLoader, Knowledge, TokenGuard, index};
+use steve_knowledge::{FilesLoader, Knowledge, index};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_store::base::Visibility;
 
@@ -36,7 +36,6 @@ fn setup() -> Env {
         fs::create_dir_all(home.join(d)).unwrap();
     }
     let kb = Knowledge::with_loaders(
-        Arc::new(TokenGuard),
         |_| {},
         vec![Arc::new(FilesLoader::new(env.dir.path().join("data")))],
     );
@@ -595,7 +594,7 @@ async fn front_matter_visibility_only_narrows() {
 }
 
 #[tokio::test]
-async fn tokens_are_stored_redacted() {
+async fn tokens_are_indexed_as_written() {
     let e = setup();
     write(
         &e.wiki().join("ci.md"),
@@ -604,15 +603,10 @@ async fn tokens_are_stored_redacted() {
     let s = e.add_folder(&e.wiki(), json!({})).await;
     let d = e.doc_by_ref(s["id"].as_str().unwrap(), "ci.md");
     let texts = e.chunk_texts(&d.id);
-    assert_eq!(texts, ["发布用的令牌是 ［已拦下的机密］，别外传。"]);
-    let (_, doc) = e.me("GET", &format!("/kb/docs/{}", d.id), None).await;
-    assert!(!doc.to_string().contains("ghp_"), "{doc}");
+    assert_eq!(texts, [format!("发布用的令牌是 {TOKEN}，别外传。")]);
     assert_eq!(e.search(ME, "令牌").await.len(), 1);
-    let (st, v) = e.me("GET", &format!("/kb/search?q={TOKEN}"), None).await;
-    assert_eq!(
-        (st, refusal(&v).as_str()),
-        (400, "检索词里像是有密码或令牌")
-    );
+    let (st, _) = e.me("GET", &format!("/kb/search?q={TOKEN}"), None).await;
+    assert_eq!(st, 200);
 }
 
 /// An upload as files.ts `store` leaves it: bytes under `data/files`, a `files` row.
@@ -677,7 +671,7 @@ async fn files_are_added_indexed_and_removed() {
     assert_eq!(doc["status"], "active");
     assert_eq!(
         doc["preview"][0]["text"],
-        "服务器令牌 ［已拦下的机密］，值班表在共享盘。"
+        format!("服务器令牌 {TOKEN}，值班表在共享盘。")
     );
     let hits = e.search(ME, "值班表").await;
     assert_eq!(hits.len(), 1);

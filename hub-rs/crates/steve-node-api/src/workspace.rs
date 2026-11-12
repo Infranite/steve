@@ -425,7 +425,7 @@ pub struct ExecSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecResult {
     pub exit_code: Option<i32>,
-    /// Bounded and with secrets masked.
+    /// Bounded.
     pub stdout: String,
     pub stderr: String,
     pub truncated: bool,

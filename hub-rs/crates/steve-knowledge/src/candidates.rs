@@ -25,7 +25,6 @@ use steve_store::{Decision, Tx};
 
 use crate::extract::Names;
 use crate::service::{mem_json, prepare};
-use crate::state::{Knowledge, redact};
 use crate::sync;
 
 /// `subject_type` of memory confirm decisions.
@@ -755,7 +754,7 @@ pub fn remember_tool() -> Value {
 /// `steve_remember`: no model call, the text becomes a candidate of the user the
 /// agent works for. `Ok` is the result text, `Err` the `isError` text. Synchronous: call it from a
 /// blocking task.
-pub fn remember(m: &Modules, kb: &Knowledge, cx: &McpCx, args: &Value) -> Result<String, String> {
+pub fn remember(m: &Modules, cx: &McpCx, args: &Value) -> Result<String, String> {
     let s = |k: &str| args.get(k).and_then(Value::as_str);
     let mut issues = Vec::new();
     if s("text").is_none() {
@@ -779,7 +778,7 @@ pub fn remember(m: &Modules, kb: &Knowledge, cx: &McpCx, args: &Value) -> Result
             issues.join("; ")
         ));
     }
-    let text = redact(kb.guard.as_ref(), s("text").unwrap_or_default().trim());
+    let text = s("text").unwrap_or_default().trim().to_string();
     let n = text.chars().count();
     if n == 0 || n > 2000 {
         return Err("text must be 1 to 2000 characters.".into());

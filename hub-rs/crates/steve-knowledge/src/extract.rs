@@ -25,7 +25,7 @@ use tokio::sync::Semaphore;
 
 use crate::candidates::{self, MAX_PER_ORIGIN, NewCandidate, Origin, OriginKind};
 use crate::retrieve::{self, Purpose, Query};
-use crate::state::{Knowledge, redact};
+use crate::state::Knowledge;
 
 /// Model time limit (smart tier).
 pub const TIMEOUT: Duration = Duration::from_secs(90);
@@ -533,7 +533,7 @@ pub async fn run(
     item: Option<&str>,
     task: Task<'_>,
 ) -> ApiResult<Vec<Mem>> {
-    let text = redact(kb.guard.as_ref(), &clip(text, MAX_INPUT));
+    let text = clip(text, MAX_INPUT);
     if text.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -621,7 +621,7 @@ pub async fn run(
     if chosen.is_empty() {
         return Ok(Vec::new());
     }
-    let (guard, origin) = (kb.guard.clone(), origin.clone());
+    let origin = origin.clone();
     m.blocking(move |m| {
         let made = m.store.transaction(|tx| {
             chosen
@@ -632,7 +632,6 @@ pub async fn run(
                     c.owner_said = origin.kind == OriginKind::Chat
                         && c.kind != "event"
                         && candidates::owner_said(&text, OWNER_LINE, &c.evidence);
-                    c.evidence = redact(guard.as_ref(), &c.evidence);
                     candidates::propose(tx, &origin, &c)
                 })
                 .collect::<ApiResult<Vec<_>>>()

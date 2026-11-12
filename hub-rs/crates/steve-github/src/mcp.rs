@@ -18,7 +18,6 @@ use steve_modules::ApiError;
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::vault::mcp::ToolOut;
 use steve_modules::vault::r#use::END;
-use steve_modules::vault::{guard, redact};
 use steve_store::base::DecisionKind;
 use steve_store::base::decisions as base_decisions;
 use steve_store::{Item, NewDecision};
@@ -425,7 +424,7 @@ pub fn excerpt(log: &str) -> String {
     out
 }
 
-/// `steve_github_ci_log`: the job's log, secrets removed, cut to what matters.
+/// `steve_github_ci_log`: the job's log, cut to what matters.
 async fn ci_log(gh: &GitHub, cx: &McpCx, l: &Linked, job: &str) -> Result<String, String> {
     if job.trim().is_empty() {
         return Err("Give a check name or job id from steve_github_status.".into());
@@ -443,29 +442,15 @@ async fn ci_log(gh: &GitHub, cx: &McpCx, l: &Linked, job: &str) -> Result<String
         ));
     };
     let conn = gh.conn(&cx.ws, &r.connection_id).map_err(internal)?;
-    let raw = conn
+    let text = conn
         .get_text(
             &format!("/repos/{}/actions/jobs/{job_id}/logs", r.full_name),
             LOG_DOWNLOAD,
         )
         .await
         .map_err(|e| format!("Could not read the log: {e}"))?;
-    // The connection's own token, the values injected into this session, then the paste guard.
-    let token = conn.cx().access_token().await.ok();
-    let mut text = match &token {
-        Some(t) => redact::Redactor::new([("GitHub 令牌", t.expose().as_bytes())])
-            .scrub_str(&raw)
-            .into_owned(),
-        None => raw,
-    };
-    if let Some(sid) = cx.session_id.as_deref() {
-        text = redact::scrub_text(sid, &text).into_owned();
-    }
-    if let Some(t) = guard::redact(&text) {
-        text = t;
-    }
     Ok(format!(
-        "Log of {} (job {job_id}) on PR #{}, secrets removed:\n{}",
+        "Log of {} (job {job_id}) on PR #{}:\n{}",
         k.name,
         p.number,
         excerpt(&text).trim_end()
@@ -568,10 +553,7 @@ fn open_pr(
     let Some(branch) = l.item.branch.as_deref().filter(|b| !b.is_empty()) else {
         return Err("This item has no branch to open a pull request from.".into());
     };
-    let title: String = comment::clean(cx.session_id.as_deref(), title.trim())
-        .chars()
-        .take(TITLE_MAX)
-        .collect();
+    let title: String = title.trim().chars().take(TITLE_MAX).collect();
     if title.trim().is_empty() || title.contains('\n') {
         return Err("Give a one-line title.".into());
     }
@@ -585,7 +567,7 @@ fn open_pr(
             p.url
         ));
     }
-    let body = comment::clean(cx.session_id.as_deref(), body.trim());
+    let body = body.trim();
     let ws = cx.ws.clone();
     let d = NewDecision {
         workspace_id: ws.clone(),

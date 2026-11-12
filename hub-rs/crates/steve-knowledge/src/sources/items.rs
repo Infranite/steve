@@ -246,13 +246,7 @@ pub fn extract_text(f: &ItemFacts) -> String {
 }
 
 /// Writes (or rewrites) the item's document and indexes it, in one transaction. Returns its id.
-pub fn write_doc(
-    tx: &Tx,
-    kb: &Knowledge,
-    f: &ItemFacts,
-    text: &str,
-    now: i64,
-) -> ApiResult<String> {
+pub fn write_doc(tx: &Tx, f: &ItemFacts, text: &str, now: i64) -> ApiResult<String> {
     let src = sources::builtin(tx, &f.ws, KIND, &f.user, now)?;
     let title = format!("{} {}", f.id, f.title);
     let id = match repo::doc_by_ref(tx, &src.id, &f.id)? {
@@ -283,15 +277,7 @@ pub fn write_doc(
         }
     };
     let doc = repo::doc(tx, &id)?.ok_or_else(|| ApiError::not_found("文档"))?;
-    index::index_doc(
-        tx,
-        kb.guard.as_ref(),
-        &doc,
-        &src,
-        &markdown(text),
-        now,
-        false,
-    )?;
+    index::index_doc(tx, &doc, &src, &markdown(text), now, false)?;
     Ok(id)
 }
 
@@ -318,11 +304,10 @@ pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<V
     let mark = format!("extract:item:{}", f.id);
     let stamp = f.stamp.to_string();
     // chunking the document happens inside the write: off the runtime
-    let k = kb.clone();
     let (f, doc, fresh) = m
         .blocking(move |m| {
             let (doc, fresh) = m.store.transaction(|tx| {
-                let doc = write_doc(tx, &k, &f, &text, now)?;
+                let doc = write_doc(tx, &f, &text, now)?;
                 let fresh = repo::mark(tx, &f.ws, &mark)?.as_deref() != Some(stamp.as_str());
                 if fresh {
                     repo::set_mark(tx, &f.ws, &mark, &stamp, now)?;

@@ -3,8 +3,7 @@
 //! Every format ends as normalized UTF-8 text plus a [`TextKind`] telling the chunker whether
 //! to look for Markdown headings. Parsers of untrusted binary formats (PDF, docx) run under
 //! `catch_unwind`; [`extract_isolated`] additionally moves them off the async runtime and gives
-//! up after 30 s. The secret scan (`steve_vault::guard::scan`) runs on the result at index
-//! time and is not part of this module.
+//! up after 30 s.
 
 use std::io::{Cursor, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind};

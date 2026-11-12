@@ -94,7 +94,6 @@ export default {
     failed: "没发出去",
     unknown: "可能已发出，正在核对",
     recalled: "已撤回",
-    blocked: "已拦下",
   },
   /* what cleaning up an identity removes (api/cleanup.ts) */
   cleanup: {

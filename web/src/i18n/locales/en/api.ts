@@ -90,7 +90,6 @@ export default {
     failed: "Not sent",
     unknown: "May have been sent, checking",
     recalled: "Recalled",
-    blocked: "Blocked",
   },
   cleanup: {
     keep: "Keep everything",

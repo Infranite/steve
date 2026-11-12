@@ -5,10 +5,9 @@
 //!
 //! The one exception is yours to grant, per repository: `after_accept=open_pr` takes accepting the
 //! item as the `yes` to its PR, only for a private repository, only as a draft, only from the item's
-//! own branch, and only when what the push would publish passed the leak check; the `gh_pr_open`
-//! decision is opened and answered in one transaction, so the push goes through the same effect
-//! queue and its history shows it. Anything else (a public repository, a hit, an item on a Node)
-//! gets the card. Merging always asks.
+//! own branch, and only when its worktree is on this machine; the `gh_pr_open` decision is opened
+//! and answered in one transaction, so the push goes through the same effect queue and its history
+//! shows it. Anything else (a public repository, an item on a Node) gets the card. Merging always asks.
 //!
 //! Decision handlers run inside the answer's transaction and cannot reach GitHub, so they only
 //! check the answer and record the write ([`crate::effects`]); the runner does it after the commit,
@@ -344,10 +343,7 @@ impl GitHub {
                     repo::add_timeline(
                         tx,
                         &item.id,
-                        &format!(
-                            "验收后自动开草稿 PR（{}：私有仓库，提交已过泄露检查）",
-                            r.full_name
-                        ),
+                        &format!("验收后自动开草稿 PR（{}：私有仓库）", r.full_name),
                         now,
                     )?;
                     tx.publish(steve_store::ChangeEvent::Item {
@@ -380,8 +376,7 @@ impl GitHub {
 
     /// Whether accepting the item may open its PR without asking (`after_accept=open_pr`): the
     /// repository is private, the branch is the item's own (not the default one), its worktree is
-    /// here to look at, and what the push would publish passed the leak check
-    /// ([`push::leaks`]). The commit checked, or why it asks instead (said on the card).
+    /// here to look at. The commit to push, or why it asks instead (said on the card).
     async fn auto_pr(
         &self,
         r: &RepoRow,
@@ -397,36 +392,13 @@ impl GitHub {
             return Err(format!("{branch} 不是事项自己的分支"));
         }
         let Some(cwd) = cwd.map(str::to_string) else {
-            return Err("事项不在这台机器上，没法先做泄露检查".into());
+            return Err("事项不在这台机器上，开 PR 前要你确认".into());
         };
-        let (base, b) = (r.default_branch.clone(), branch.to_string());
-        let checked = tokio::task::spawn_blocking(move || {
-            let dir = std::path::Path::new(&cwd);
-            let head = push::head_of(dir, &b)?;
-            let found = push::leaks(dir, &base, &head)?;
-            Ok::<_, push::PushError>((head, found))
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-        match checked {
-            Ok((head, found)) if found.is_empty() => Ok(head),
-            Ok((_, found)) if found.iter().all(|k| k == "binary") => {
-                Err("提交里有二进制改动，泄露检查看不了，开 PR 前要你确认".into())
-            }
-            Ok((_, found)) => Err(format!(
-                "泄露检查在提交里发现疑似机密（{}），开 PR 前要你确认",
-                found
-                    .iter()
-                    .map(|k| if k == "binary" {
-                        "二进制改动"
-                    } else {
-                        k.as_str()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("、")
-            )),
-            Err(e) => Err(format!("泄露检查没做成（{e}），开 PR 前要你确认")),
-        }
+        let b = branch.to_string();
+        tokio::task::spawn_blocking(move || push::head_of(std::path::Path::new(&cwd), &b))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("没读到分支的提交（{e}），开 PR 前要你确认"))
     }
 
     /// Whether GitHub says `r` is private right now (any error or missing flag is "no"). A change

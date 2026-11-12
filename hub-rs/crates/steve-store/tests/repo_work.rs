@@ -995,47 +995,6 @@ fn item_deleted_hook_runs_in_the_delete_transaction() {
     );
 }
 
-#[test]
-fn injected_values_are_scrubbed_from_events_and_timeline() {
-    let t = with_steve();
-    let s = &t.store;
-    let item = new_item(s, WS, "secret");
-    let ses = new_session(s, Some(&item.id), "tok-secret");
-    steve_vault::redact::register(&ses.id, "GitHub·token", b"ghp_injectedvalue0123456789");
-    let seq = s
-        .events()
-        .add(
-            &ses.id,
-            "tool",
-            json!({"out": "token=ghp_injectedvalue0123456789 ok"}),
-        )
-        .unwrap();
-    let ev = s.events().after(&ses.id, seq - 1, 10).unwrap();
-    let text = serde_json::to_string(&ev[0].data).unwrap();
-    assert!(!text.contains("ghp_injectedvalue0123456789"), "{text}");
-    s.timeline()
-        .add(
-            &item.id,
-            "steve",
-            "agent",
-            "用了 ghp_injectedvalue0123456789",
-            Some(&ses.id),
-            &[],
-        )
-        .unwrap();
-    let tl = s.timeline().list(&item.id).unwrap();
-    assert!(
-        tl.iter()
-            .all(|e| !e.text.contains("ghp_injectedvalue0123456789"))
-    );
-    // without a session nothing is touched
-    s.timeline()
-        .add(&item.id, "me", "me", "plain", None, &[])
-        .unwrap();
-    s.sessions().remove(&ses.id).unwrap();
-    assert!(!steve_vault::redact::is_registered(&ses.id));
-}
-
 #[tokio::test]
 async fn maintenance_admission_is_persistent_and_waiters_resume_on_cancel() {
     let t = with_steve();

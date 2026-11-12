@@ -2,8 +2,7 @@
 //! `{{secrets.<item>.<field>}}` at send time. Same rules as a bot's use with
 //! the flow as the subject: a `secret.use` grant with `subject_type='flow'` lets it go ahead,
 //! otherwise you approve the step. `high` items and bank cards are never covered by a grant. Each
-//! release writes one `secret_uses` row (`actor_type=flow`, `run_id`, `mode=internal`). The values
-//! never leave the caller's request; it redacts them with [`steve_vault::redact::Redactor`].
+//! release writes one `secret_uses` row (`actor_type=flow`, `run_id`, `mode=internal`).
 
 use rusqlite::{OptionalExtension, params};
 use steve_store::{now, uid};

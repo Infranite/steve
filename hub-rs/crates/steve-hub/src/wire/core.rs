@@ -1841,18 +1841,6 @@ impl Domain for CoreDomain {
         })
         .await
     }
-    async fn say_guard_note(&self, ws: &str) -> BResult<()> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        blocking(move || {
-            c.say_note(
-                &ws,
-                steve_vault::guard::ROUTED,
-                steve_vault::guard::REPLY_HREF,
-            )
-            .map(|_| ())
-        })
-        .await
-    }
     async fn stop(&self, ws: &str) -> BResult<bool> {
         let (c, ws) = (self.core.clone(), ws.to_string());
         blocking(move || c.stop(&ws)).await
@@ -2220,9 +2208,7 @@ impl steve_mcp::Backend for CoreMcp {
                             || goal.contains("分析")
                             || goal.contains("调研");
                         if referenced || text_result || report_goal || summary.len() > 2000 {
-                            let safe = steve_vault::redact::scrub_text(&s.id, &summary);
-                            let report =
-                                super::output_files::save_report(&home, item, safe.as_ref())?;
+                            let report = super::output_files::save_report(&home, item, &summary)?;
                             let location = report.to_string_lossy().into_owned();
                             for o in &mut outputs {
                                 if super::output_files::summary_reference(o.location.as_deref())

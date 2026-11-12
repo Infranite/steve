@@ -1829,7 +1829,7 @@ impl LocalNode {
     /// remote, the branch at `expected_local`, HEAD and the revision the Hub saw), checked again
     /// right before it runs; then a command in a throwaway repository like [`Self::exec`], with
     /// its credential taken once. Succeeded: git took it (its facts after). Failed: git refused
-    /// it (its complaint, masked). Timed out, interrupted or unknown: it may have landed, and it
+    /// it (its complaint). Timed out, interrupted or unknown: it may have landed, and it
     /// is never pushed again.
     async fn push_apply(&self, c: Command<GitApply>) -> ApiResult<Receipt> {
         if self.0.cfg.capacity.execs == 0 {
@@ -1922,12 +1922,12 @@ impl LocalNode {
             Err(e) => return failed(e),
         };
         // taken now, under this operation, once: a resend was answered by its receipt
-        let (header, mask) = match &auth {
-            None => (None, None),
+        let header = match &auth {
+            None => None,
             Some(r) => {
                 let hub = self.0.secrets.lock().unwrap().clone();
                 match secrets::header(hub, op, r).await {
-                    Ok((h, m)) => (Some(h), Some(m)),
+                    Ok(h) => Some(h),
                     Err(e) => return not_run(ErrorCode::Denied, format!("not pushed: {e}")),
                 }
             }
@@ -1937,7 +1937,7 @@ impl LocalNode {
         let op2 = op.clone();
         let ran = tokio::task::spawn_blocking(move || {
             let bare = git::bare(&inner.cfg.home, &op2, &plan)?;
-            let run = git::push_run(&bare, &plan, header, mask, deadline);
+            let run = git::push_run(&bare, &plan, header, deadline);
             let ran = exec::run(&inner, &op2, &run);
             // the repository goes once git (and all it started) is done
             if !ran.as_ref().is_ok_and(|r| r.gone) {
@@ -3514,7 +3514,6 @@ impl WorkspaceExecutor for LocalNode {
             cap: (c.body.limits.max_output_bytes as usize).min(1 << 20),
             secret_env: vec![],
             stdin: None,
-            mask: None,
             confined: true,
             readable: vec![],
         };
@@ -3529,7 +3528,6 @@ impl WorkspaceExecutor for LocalNode {
                 Ok(given) => {
                     run.secret_env = given.env;
                     run.stdin = given.stdin;
-                    run.mask = given.mask;
                     let temp = given.temp;
                     run.readable = temp.iter().map(|t| t.path().to_path_buf()).collect();
                     tokio::task::spawn_blocking(move || {

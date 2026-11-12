@@ -318,7 +318,7 @@ export default {
   http: {
     method: "Request method",
     body: "Request body",
-    hint: "Use <steps>{{steps}}</steps> to reference earlier steps' output and <secrets>{{secrets}}</secrets> for secrets in the vault (headers and body only). Secret values are never shown.",
+    hint: "Use <steps>{{steps}}</steps> to reference earlier steps' output and <secrets>{{secrets}}</secrets> for secrets in the vault (headers and body only). Steve does not write secret values into a step's input or logs.",
     effect: "Writes or sends data",
     effectOn: "Goes to your inbox for approval before each run",
     effectOff: "Read-only request, runs directly",

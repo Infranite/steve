@@ -11,7 +11,6 @@ use crate::extract_text::markdown;
 use crate::index::{self, BoxFuture, DocLoader, Loaded};
 use crate::repo::{self, DocRow, NewDoc, SourceRow};
 use crate::sources;
-use crate::state::Guard;
 
 /// Reads a note's text from its row (for re-indexing through the queue).
 pub struct NotesLoader;
@@ -42,7 +41,7 @@ pub struct NewNote {
 }
 
 /// (Re)indexes a note from its stored body. Front matter tags are kept on the document.
-fn index_note(tx: &Tx, guard: &dyn Guard, doc_id: &str, now: i64, force: bool) -> Result<()> {
+fn index_note(tx: &Tx, doc_id: &str, now: i64, force: bool) -> Result<()> {
     let Some(doc) = repo::doc(tx, doc_id)? else {
         return Ok(());
     };
@@ -57,19 +56,12 @@ fn index_note(tx: &Tx, guard: &dyn Guard, doc_id: &str, now: i64, force: bool) -
                 doc.id
             ])?;
     }
-    index::index_doc(tx, guard, &doc, &src, &ex, now, force)?;
+    index::index_doc(tx, &doc, &src, &ex, now, force)?;
     Ok(())
 }
 
 /// Creates and indexes a note in `ws` written by `me`. Returns the document id.
-pub fn create(
-    tx: &Tx,
-    guard: &dyn Guard,
-    ws: &str,
-    me: &str,
-    n: &NewNote,
-    now: i64,
-) -> Result<String> {
+pub fn create(tx: &Tx, ws: &str, me: &str, n: &NewNote, now: i64) -> Result<String> {
     let src = sources::builtin(tx, ws, "notes", me, now)?;
     let id = uid("kd");
     repo::insert_doc(
@@ -91,7 +83,7 @@ pub fn create(
         now,
     )?;
     repo::set_doc_about(tx, ws, &id, &n.about)?;
-    index_note(tx, guard, &id, now, true)?;
+    index_note(tx, &id, now, true)?;
     base::audit(
         tx,
         ws,
@@ -106,7 +98,6 @@ pub fn create(
 /// Changes title and/or body; writes a revision (`object_type=kb_note`) with both versions.
 pub fn update(
     tx: &Tx,
-    guard: &dyn Guard,
     doc: &DocRow,
     me: &str,
     title: Option<&str>,
@@ -132,7 +123,7 @@ pub fn update(
         me,
     )?;
     // The title is part of every chunk's FTS row and label, so a title change re-chunks too.
-    index_note(tx, guard, &doc.id, now, new_title != doc.title)?;
+    index_note(tx, &doc.id, now, new_title != doc.title)?;
     base::audit(
         tx,
         &doc.workspace_id,

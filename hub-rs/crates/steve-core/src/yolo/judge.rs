@@ -183,7 +183,6 @@ pub enum Disclosure {
     Pass,
     Rewritten,
     Leak,
-    Blocked,
     /// Not checked (yet).
     Unchecked,
 }

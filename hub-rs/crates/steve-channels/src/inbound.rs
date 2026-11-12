@@ -1494,7 +1494,6 @@ impl Channels {
             .collect();
         let judge = GatewayJudge {
             gateway: self.modules().gateway.as_ref(),
-            guard: self.guard(),
             message: &m.text,
             sender: if m.sender_name.is_empty() {
                 "某人"

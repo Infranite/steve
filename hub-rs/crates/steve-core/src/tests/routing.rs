@@ -1378,7 +1378,9 @@ fn a_notice_written_in_a_transaction_stays_or_goes_with_it() {
             if keep {
                 Ok(())
             } else {
-                Err(steve_store::StoreError::NotFound("the rest of the write failed"))
+                Err(steve_store::StoreError::NotFound(
+                    "the rest of the write failed",
+                ))
             }
         })
     };
@@ -1390,7 +1392,10 @@ fn a_notice_written_in_a_transaction_stays_or_goes_with_it() {
     assert_eq!((n.len(), n[0].text.as_str()), (1, "写下来了"));
     // a failure without an item also leaves its line in the conversation, pointing at the notice
     let ms = k.db().messages(WS).unwrap();
-    assert_eq!((ms.len(), &ms[0].meta["notice"]["ref"]), (1, &json!(n[0].id)));
+    assert_eq!(
+        (ms.len(), &ms[0].meta["notice"]["ref"]),
+        (1, &json!(n[0].id))
+    );
 }
 
 #[test]
@@ -1399,10 +1404,6 @@ fn a_message_lost_before_routing_gets_a_rerun_notice_once() {
     let lost = k
         .db()
         .message_add(WS, "me", "这条还没路由", None, None)
-        .unwrap();
-    let guarded = k
-        .core
-        .say_guarded(WS, "粘贴里有密钥 ***", "已拦下", "#/vault")
         .unwrap();
     k.core.thread_recover().unwrap();
     k.core.thread_recover().unwrap();
@@ -1413,10 +1414,6 @@ fn a_message_lost_before_routing_gets_a_rerun_notice_once() {
         .collect();
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert_eq!(notes[0].meta["rerun"], json!(lost));
-    assert!(
-        !msgs.iter().any(|m| m.meta["rerun"] == json!(guarded)),
-        "a guarded paste is not lost"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

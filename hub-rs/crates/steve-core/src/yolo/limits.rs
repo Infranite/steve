@@ -198,7 +198,7 @@ pub fn action_outside(text: &str) -> Option<String> {
 }
 
 fn outbound(f: &Facts, o: &Outbound) -> Option<Limit> {
-    if matches!(o.disclosure, Disclosure::Leak | Disclosure::Blocked)
+    if o.disclosure == Disclosure::Leak
         || matches!(o.stage, OutboundStage::LeakDraft | OutboundStage::Blocked)
     {
         return Some(Limit::new(6, "披露检查判为泄露或拦截"));
