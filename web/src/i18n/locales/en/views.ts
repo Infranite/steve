@@ -224,6 +224,7 @@ export default {
     deliveredTo: "Delivered to conversation #{{n}}",
     fromThread: "From conversation",
     composer: "Add to {{id}}…  Type # to reference another item",
+    writeFeedback: "Write feedback or next steps",
     idCopied: "Copied {{id}}",
     updated: "Updated {{time}}",
     deleteTitle: "Delete {{id}} permanently?",

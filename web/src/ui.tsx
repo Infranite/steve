@@ -401,7 +401,7 @@ export function markText(v: string, at: (ins: string) => "bot" | "party" | undef
   return out
 }
 /** what a page may do with its composer: a withdrawn queued message goes back into it when it is empty */
-export type ComposerHandle = { empty: () => boolean; fill: (text: string, files: RFile[]) => void }
+export type ComposerHandle = { empty: () => boolean; fill: (text: string, files: RFile[]) => void; focus: () => void }
 type ComposerProps = {
   handle?: { current: ComposerHandle | null }
   draftKey?: string
@@ -441,7 +441,7 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
   const live = useRef({ v, n: up.list.length }); live.current = { v, n: up.list.length }
   useEffect(() => {
     if (!handle) return
-    handle.current = { empty: () => !live.current.v.trim() && !live.current.n, fill: (t, fs) => { setV(t); up.put(fs); requestAnimationFrame(() => { ta.current?.focus(); ta.current?.setSelectionRange(t.length, t.length) }) } }
+    handle.current = { empty: () => !live.current.v.trim() && !live.current.n, focus: () => ta.current?.focus(), fill: (t, fs) => { setV(t); up.put(fs); requestAnimationFrame(() => { ta.current?.focus(); ta.current?.setSelectionRange(t.length, t.length) }) } }
     return () => { handle.current = null }
   }, [handle])
   const send = async () => {
@@ -1066,6 +1066,11 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
     <CardContent className="pb-4">{draft}{rework && <Textarea autoFocus className="mt-3 min-h-16 rounded-lg" placeholder={t("core:card.nextPlaceholder")} value={txt} onChange={(e) => setTxt(e.target.value)} />}</CardContent>
     {foot(<>{w.options.filter((o) => FAIL[o]).sort((a, b) => Object.keys(FAIL).indexOf(a) - Object.keys(FAIL).indexOf(b)).map((o) => (
       <Button key={o} variant={FAIL[o]} disabled={busy} className={cn(o === "look" && "mr-auto text-muted-foreground")} onClick={() => (o === "continue" && !rework ? setRework(true) : act(o, o === "continue" ? txt.trim() : undefined))} data-fail={o}>{o === "continue" && rework ? t("core:card.sendContinue") : FAIL_CHOICE[o]}</Button>))}</>)}
+  </>
+  else if (w.type === "ask" && w.subject === "design_implementation") body = <>
+    {head(w.q)}
+    <CardContent className="pb-4">{draft}<Textarea className="mt-3 min-h-20 rounded-lg" placeholder={t("core:card.designFeedback")} value={txt} onChange={(e) => setTxt(e.target.value)} data-design-feedback /></CardContent>
+    {foot(w.options.map((o, n) => <Button key={o} variant={n === 0 ? "default" : "outline"} disabled={busy || (n === 2 && !txt.trim())} onClick={() => void act(o, txt.trim())} data-design-choice={n}>{t(n === 0 ? "core:card.designImplement" : n === 1 ? "core:card.designKeep" : "core:card.designRevise")}</Button>))}
   </>
   /* a typed answer is not one of the questionnaire's answer controls, so its validation would block the submit; send it directly */
   else if (w.type === "ask") { const typed = free || !w.opts?.length; body = <>

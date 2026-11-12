@@ -72,7 +72,7 @@ const files = { ...pics, a_docx: docx, a_xlsx: xlsx, a_pptx: pptx }
 const errors = []
 /** the fake Hub's data, carried from the first page to the later ones (each page has its own storage) */
 let hub = null
-async function open(width, theme, fresh) {
+async function open(width, theme, fresh, design = false) {
   const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme, hasTouch: width === 390 })
   if (!fresh && hub) await page.addInitScript((h) => { if (!localStorage.getItem("fx-hub")) localStorage.setItem("fx-hub", h) }, hub)
   page.on("pageerror", (e) => errors.push(e.message))
@@ -81,7 +81,7 @@ async function open(width, theme, fresh) {
     const body = m && files[u.searchParams.get("path") ? `${m[1]}/${u.searchParams.get("path")}` : m[1]]
     return body ? route.fulfill({ status: 200, body, contentType: m[1].startsWith("a_img") || u.searchParams.get("path") ? "image/png" : "application/octet-stream" }) : route.fulfill({ status: 503, json: { error: "fixture" } })
   })
-  await page.goto(base + "/test/fixtures/outputs.html")
+  await page.goto(base + "/test/fixtures/outputs.html" + (design ? "?design=1" : ""))
   if (fresh) { await page.evaluate(() => localStorage.removeItem("fx-hub")); await page.reload() }
   await page.locator("[data-title]").first().waitFor()
   return page
@@ -91,6 +91,14 @@ const dialog = (page) => page.locator("[data-preview]")
 const noOverflow = async (page, what) => assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${what}: nothing widens the page`)
 
 try {
+  const designPage = await open(390, "light", true, true)
+  const revise = designPage.locator('[data-design-choice="2"]')
+  assert.equal(await revise.isDisabled(), true, "revision needs written feedback")
+  await designPage.locator("[data-design-feedback]").fill("请调整手机布局")
+  await revise.click()
+  assert.deepEqual((await designPage.evaluate(() => window.__calls)).filter((c) => c.choice), [{ choice: "修改设计", text: "请调整手机布局" }])
+  await designPage.close()
+
   /* ── 1440 light: the whole flow ── */
   let page = await open(1440, "light", true)
   await tab(page, "产出")
@@ -103,6 +111,13 @@ try {
   const first = await page.locator("[data-out-delivery='1']").innerText()
   assert.match(first, /自查截图[\s\S]*过程记录/); assert.match(first, /方案[\s\S]*旧版本[\s\S]*v1/); assert.match(first, /steve\/st-9[\s\S]*旧版本/)
   if (shots) await page.screenshot({ path: `${shots}/outputs-list-1440-light.png`, fullPage: true })
+
+  // The report preview has a direct route back to the item's feedback input.
+  await page.locator("[data-out-id=a_plan]").click()
+  await dialog(page).locator("[data-output-review]").click()
+  await dialog(page).waitFor({ state: "detached" })
+  await page.waitForFunction(() => document.activeElement?.closest('[data-composer="item"]'))
+  assert.match(await page.locator("[data-item-feedback-label]").innerText(), /写评审意见/)
 
   // pictures: the arrow keys, the buttons, a swipe and the strip
   await page.locator("[data-out-id=a_img1]").click()
@@ -245,6 +260,10 @@ try {
       await page.waitForFunction(() => document.querySelector("[data-gallery-count]")?.textContent === "2 / 3")
     }
     await noOverflow(page, `${width} ${theme} dialog`)
+    await dialog(page).locator("[data-output-review]").click()
+    await dialog(page).waitFor({ state: "detached" })
+    await page.waitForFunction(() => document.activeElement?.closest('[data-composer="item"]'))
+    await page.locator("[data-out-id=a_img2]").click()
     if (shots) await page.screenshot({ path: `${shots}/outputs-picture-${width}-${theme}.png` })
     await page.keyboard.press("Escape")
     if (width === 390 && theme === "light") {

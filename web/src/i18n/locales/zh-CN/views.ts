@@ -218,6 +218,7 @@ export default {
     deliveredTo: "已送达会话 #{{n}}",
     fromThread: "来自对话",
     composer: "补充给 {{id}}…  输入 # 引用其他事项",
+    writeFeedback: "写评审意见或下一步要求",
     idCopied: "已复制 {{id}}",
     updated: "更新于 {{time}}",
     deleteTitle: "永久删除 {{id}}？",

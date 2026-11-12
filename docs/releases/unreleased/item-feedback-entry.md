@@ -1,0 +1,1 @@
+The item page now labels its feedback input, and each output preview offers a direct way to write item feedback after reading a report. Design confirmation cards now submit the selected decision and optional written feedback together; requesting a design revision requires a written instruction.

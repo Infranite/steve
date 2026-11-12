@@ -11,6 +11,8 @@ import { ItemView } from "../../src/views"
  * real Hub keeps them. Raw files (pictures, Office files) are served by the test; every other /api call fails. */
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const ID = "ST-9", T1 = Date.parse("2026-11-04T10:00:00+08:00"), T2 = T1 + 3_600_000
+const design = new URLSearchParams(location.search).has("design")
+const designDecision = { id: "design-1", kind: "ask" as const, subject_type: "design_implementation", subject_id: "{}", item_id: ID, session_id: null, question: "设计报告已交付，下一步？", draft: "请先查看产出。", options: ["按方案实现", "只保留设计", "修改设计"], status: "open" as const, result: null, requested_by: "dev", created: T2, resolved: null, undo: null }
 const art = (id: string, kind: string, title: string, location: string | null, created: number) => ({ id, kind, title, location, created })
 const artifacts = [
   art("a_branch1", "分支", "steve/st-9", null, T1), art("a_shots", "文件", "自查截图", "/tmp/st9/shots", T1 + 1), art("a_plan1", "文档", "方案", "docs/plan.md", T1 + 2),
@@ -38,12 +40,13 @@ const save = (h: Hub) => localStorage.setItem("fx-hub", JSON.stringify(h))
 const calls: unknown[] = ((window as any).__calls = [])
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const item: RItem = { id: ID, workspace_id: "default", no: 9, title: "产出预览与批注", status: "wait", stage: "交付与验收", bot_id: "dev", project_id: null, cwd: null, branch: "steve/st-9", plan: [], now: "交付了，等你验收", accept_mode: null, priority: "中", archived: false, star: false, due: null, snooze: null,
-  source: ["对话", "chat"], parent: null, created: T1 - 1000, updated: T2, goal: "产出预览与批注", goals: 1, tags: [], deps: [], sessionIds: [], open: [], queued: 0, live: false }
-const state = { version: "fixture", web_version: "fixture", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items: [item], decisions: [], recent: [],
+  source: ["对话", "chat"], parent: null, created: T1 - 1000, updated: T2, goal: "产出预览与批注", goals: 1, tags: [], deps: [], sessionIds: [], open: design ? [designDecision.id] : [], queued: 0, live: false }
+const state = { version: "fixture", web_version: "fixture", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items: [item], decisions: design ? [designDecision] : [], recent: [],
   bots: [{ id: "dev", name: "开发", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "default", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
   allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [], runtimes: [] } as unknown as State
 api.state = async () => state
-api.item = async () => { const h = load(); return { ...item, goalsList: [{ version: 1, text: item.goal, created: T1 }], planRounds: [], timeline: h.timeline, artifacts, artifactRoles: roles, annotations: h.anns, decisions: [], dependents: [], thread: null } }
+api.item = async () => { const h = load(); return { ...item, goalsList: [{ version: 1, text: item.goal, created: T1 }], planRounds: [], timeline: h.timeline, artifacts, artifactRoles: roles, annotations: h.anns, decisions: design ? [designDecision] : [], dependents: [], thread: null } }
+api.decide = async (_id, choice, text) => { calls.push({ choice, text }); return { ...designDecision, status: "resolved", result: { answer: choice, text }, resolved: Date.now() } }
 api.events = async () => []
 api.outPreview = async (_i, a, path) => { await wait(30); const p = previews[path ? `${a}/${path}` : a]; if (!p) throw new Error("没有这个产出"); return p }
 let n = 0
