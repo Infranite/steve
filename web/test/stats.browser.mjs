@@ -60,6 +60,17 @@ const hourSeries = (metric) => {
 const itemRow = (no, status) => ({ item_id: `ST-${no}`, no, title: `完成的事项 ${no}`, status, bot_id: "dev", project_id: "p1", created: Date.now() - no * H, done_at: Date.now() - H, lead_ms: no * H, cycle_ms: H, wait_ms: H / 2, agent_ms: H, turns: 4, reworks: 0, first_pass: true, tokens: 100000 * no, est: no * 0.4, reported: 0 })
 const usageRow = (key, label) => ({ ...usage, key, label, priced: true })
 
+/* the event explorer: 96 buckets over the page's range, 2 events per bucket, one turn failing in bucket 90; the list is the window */
+const eventsFixture = (p) => {
+  const lo = p.lo ? Number(p.lo) : Date.parse(days[0] + "T00:00:00+08:00"), hi = p.hi ? Number(p.hi) : Date.parse(days.at(-1) + "T00:00:00+08:00") + 86400000
+  const n = 96, step = Math.ceil((hi - lo) / n), a = p.a ? Number(p.a) : lo, b = p.b ? Number(p.b) : hi
+  const evs = Array.from({ length: n * 2 }, (_, i) => ({ id: "e" + i, ts: lo + Math.floor(i / 2) * step + (i % 2) * 1000, kind: i % 2 ? "decision" : "turn", what: i === 180 ? "error" : i % 2 ? "accept" : "end_turn", to: i % 2 ? "resolved" : null, bad: i === 180, open: false, item_id: "ST-1", no: 1, title: "一件事", session_id: "s1", dur_ms: 60000, tools: 3, tool_errors: 0, tokens: 1000, by: i % 2 ? "me" : null }))
+  const histogram = { start: lo, step, turn: Array(n).fill(1), decision: Array(n).fill(1), mark: Array(n).fill(0), bad: Array.from({ length: n }, (_, i) => (i === 90 ? 1 : 0)) }
+  const rows = evs.filter((e) => e.ts >= a && e.ts < b).sort((x, y) => y.ts - x.ts)
+  const counts = { turn: rows.filter((e) => e.kind === "turn").length, decision: rows.filter((e) => e.kind === "decision").length, mark: 0, bad: rows.filter((e) => e.bad).length }
+  return { lo, hi, a, b, histogram, counts, rows: rows.slice(0, 200), total: rows.length, capped: false }
+}
+
 const errors = [], calls = []
 try {
   for (const width of [1440, 390]) for (const theme of ["light", "dark"]) {
@@ -79,7 +90,8 @@ try {
         const rows = p.hour != null ? Array.from({ length: (p.only === "done" ? hDone : hCreated)[Number(p.hour)] ?? 0 }, (_, i) => itemRow(40 + i, p.only === "done" ? "done" : "run"))
           : p.only === "done" && p.range === "custom" ? [itemRow(21, "done")] : p.only === "done" ? Array.from({ length: sum(done) }, (_, i) => itemRow(20 + i, "done")) : p.only === "created" ? [itemRow(30, "run"), itemRow(31, "wait")] : [itemRow(1, "run"), itemRow(8, "done")]
         data = { rows, total: rows.length, next: null }
-      } else return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "fixture" }) })
+      } else if (u.pathname === "/api/stats/events") data = eventsFixture(p)
+      else return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "fixture" }) })
       await route.fulfill({ contentType: "application/json", body: JSON.stringify(data) })
     })
     await page.goto(base + `/test/fixtures/stats.html${theme === "dark" ? "?theme=dark" : ""}`)
@@ -116,6 +128,26 @@ try {
     for (const k of ["flow", "lead", "usage"]) assert.match(await page.locator(`[data-chart-head="${k}"] [data-chart-meta]`).innerText(), new RegExp(range), k)
     assert.match(await page.locator('[data-chart-head="flow"]').innerText(), new RegExp(`新建 ${sum(created)} 件[\\s\\S]*完成 ${sum(done)} 件[\\s\\S]*件 / 天`))
     assert.equal(await page.locator('[data-chart="group"] [data-bar]').count(), days.length)
+    // the event explorer: a window dragged on the histogram narrows the list, the counts and the label agree, zoom fills the window
+    if (width === 1440) {
+      const ev = page.locator("[data-events]")
+      await ev.locator("[data-brush] svg").scrollIntoViewIfNeeded()
+      assert.equal(await ev.locator('[data-stat="turn"]').innerText().then((x) => x.replace(/\s+/g, " ")), "回合 96")
+      assert.equal(await ev.locator("[data-bad]").count(), 1, "the failing bucket is marked")
+      const bb = await ev.locator("[data-brush] svg").boundingBox()
+      await page.mouse.move(bb.x + bb.width * 0.5, bb.y + 120); await page.mouse.down()
+      await page.mouse.move(bb.x + bb.width * 0.75, bb.y + 120, { steps: 6 }); await page.mouse.up()
+      await ev.locator("[data-events-window]").waitFor()
+      await page.waitForFunction(() => document.querySelector('[data-events] [data-stat="turn"]')?.textContent?.includes("24"))
+      assert.ok(calls.some((c) => c.startsWith("/api/stats/events") && c.includes("a=") && c.includes("b=")), "the window is asked for")
+      assert.match(await ev.locator("[data-brush-label]").innerText(), /48 个事件/)
+      assert.equal(await ev.locator("[data-event]").count(), 48)
+      await ev.locator("[data-zoom-in]").click()
+      await ev.locator('[data-zoom-level="0"]').waitFor()
+      assert.equal(await ev.locator("[data-events-window]").count(), 0, "zooming in fills the histogram with the window")
+      await ev.locator("[data-zoom-out]").click()
+      await page.waitForFunction(() => !document.querySelector('[data-events] [data-zoom-level]'))
+    }
     // status distribution matches the overview, and opens the same list
     const bars = Object.fromEntries(await page.locator('[data-hbars="status"] [data-hbar]').evaluateAll((xs) => xs.map((x) => [x.getAttribute("data-hbar"), x.textContent])))
     assert.match(bars.run, /3$/); assert.match(bars.wait, /2$/); assert.match(bars.block, /1$/); assert.match(bars.pause, /1$/)
@@ -123,6 +155,7 @@ try {
     assert.equal(await page.locator('[data-drill="status:run"] [data-drill-row]').count(), 3)
     // a day on the flow chart drills to that day's items
     if (width === 1440) {
+      await page.locator('[data-chart="group"] svg').scrollIntoViewIfNeeded()
       const box = await page.locator('[data-chart="group"] svg').boundingBox()
       await page.mouse.move(box.x + 48 + (box.width - 60) * (5.5 / 7), box.y + 100)
       await page.locator("[data-chart-tip]").waitFor()
@@ -175,7 +208,7 @@ try {
     await page.waitForFunction(() => { const c = document.querySelector('[data-flow-chart] [data-chart="group"]'), v = c?.querySelector("svg"); return !!v && Math.round(v.getBoundingClientRect().width) === c.clientWidth && Number(v.getAttribute("width")) === c.clientWidth })
     if (width === 1440) {
       // measured each time: the drill panel above moves the chart down
-      const at = async (h) => { const box = await g.locator("svg").boundingBox(); return [box.x + 48 + (box.width - 60) * ((h + 0.5) / 24), box.y + 100] }
+      const at = async (h) => { await g.locator("svg").scrollIntoViewIfNeeded(); const box = await g.locator("svg").boundingBox(); return [box.x + 48 + (box.width - 60) * ((h + 0.5) / 24), box.y + 100] }
       await page.mouse.move(...(await at(20)))
       await page.locator("[data-chart-tip] [data-tip-future]").waitFor()
       assert.match(await page.locator("[data-chart-tip]").innerText(), /11月5日 20:00–21:00[\s\S]*还没到这个小时/)
@@ -201,6 +234,7 @@ try {
       // the usage trend: pick an hour, the usage table follows it
       await page.locator('[data-trend] [data-chart] svg').scrollIntoViewIfNeeded()
       await page.waitForFunction(() => { const c = document.querySelector("[data-trend] [data-chart]"), v = c?.querySelector("svg"); return !!v && Math.round(v.getBoundingClientRect().width) === c.clientWidth && Number(v.getAttribute("width")) === c.clientWidth })
+      await page.locator('[data-trend] [data-chart] svg').scrollIntoViewIfNeeded()
       const ub = await page.locator('[data-trend] [data-chart] svg').boundingBox()
       const asked = page.waitForRequest((r) => r.url().includes("/api/stats/breakdown") && r.url().includes("hour=9") && r.url().includes("from=2026-11-05"))
       await page.mouse.move(ub.x + 48 + (ub.width - 60) * (9.5 / 24), ub.y + 100)
@@ -257,5 +291,5 @@ try {
   if (shots) await page.screenshot({ path: `${shots}/inbox-paused-390.png`, animations: "disabled" })
   await page.close()
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "运行状态 replaces the top bar (counts, 记录, 调整)", "core figures = drill lists", "flow legend = summary; day drill", "status bars = overview", "unit + range on every chart", "model trend folds into 其他", "paused alert with 恢复", "no horizontal overflow", "今天 by hour: 24 local hours, current marked, future empty, table sums = day totals, hour drill (items + usage)"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "运行状态 replaces the top bar (counts, 记录, 调整)", "core figures = drill lists", "flow legend = summary; day drill", "status bars = overview", "unit + range on every chart", "model trend folds into 其他", "paused alert with 恢复", "no horizontal overflow", "event explorer: drag a window, list = window, zoom in and out", "今天 by hour: 24 local hours, current marked, future empty, table sums = day totals, hour drill (items + usage)"] }))
 } finally { await browser.close() }

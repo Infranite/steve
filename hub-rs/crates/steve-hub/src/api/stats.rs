@@ -112,6 +112,7 @@ pub fn routes(api: StatsApi) -> Router {
         .route("/stats/items", get(items))
         .route("/stats/items/{id}", get(item))
         .route("/stats/tree/{id}", get(tree))
+        .route("/stats/events", get(events))
         .route("/stats/sessions/{id}", get(session))
         .route("/stats/prices", get(prices_get).put(prices_put))
         .route("/stats/prices/sync", post(prices_sync))
@@ -418,6 +419,70 @@ async fn items(
         let page =
             views::items(db, &q, &sort, only.as_deref(), hour, limit, cursor).map_err(serr)?;
         serde_json::to_value(page).map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+}
+
+/// Longest span the event explorer reads at once.
+const EVENTS_SPAN_MAX: i64 = 400 * 86_400_000;
+
+/// `GET /stats/events`: the event explorer. The span is the page's range (`range`, `from`, `to`), or `lo`/`hi`
+/// (ms) once zoomed in; `a`/`b` (ms) the window the list covers; `kind` (turn, decision, mark) and `item` narrow
+/// it, `buckets` sets the histogram's resolution (12–240, 96 by default).
+async fn events(
+    State(api): State<StatsApi>,
+    Extension(c): Extension<Ctx>,
+    Query(p): Query<Params>,
+) -> ApiResult {
+    let ms = |k: &str| -> Result<Option<i64>, ApiError> {
+        p.get(k)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.parse::<i64>().map_err(|_| invalid(k)))
+            .transpose()
+    };
+    let (lo, hi, a, b) = (ms("lo")?, ms("hi")?, ms("a")?, ms("b")?);
+    if lo.is_some() != hi.is_some()
+        || lo
+            .zip(hi)
+            .is_some_and(|(l, h)| h <= l || h - l > EVENTS_SPAN_MAX)
+    {
+        return Err(invalid("lo"));
+    }
+    if a.is_some() != b.is_some() {
+        return Err(invalid("a"));
+    }
+    let kind = p.get("kind").filter(|v| !v.is_empty()).cloned();
+    if kind
+        .as_deref()
+        .is_some_and(|k| !steve_stats::events::KINDS.contains(&k))
+    {
+        return Err(invalid("kind"));
+    }
+    let buckets = match p.get("buckets").filter(|v| !v.is_empty()) {
+        None => 96,
+        Some(v) => v.parse::<usize>().map_err(|_| invalid("buckets"))?,
+    };
+    let item = p.get("item").filter(|v| !v.is_empty()).cloned();
+    let k = key(&c.ws, "events", &p);
+    api.cached(k, move |db| {
+        let q = query(db, &c.ws, &p)?;
+        let (lo, hi) = match lo.zip(hi) {
+            Some(x) => x,
+            None => {
+                let tz = steve_stats::refresh::tz_of(db, &c.ws).map_err(serr)?;
+                views::window(&q, None, tz).ok_or_else(|| invalid("range"))?
+            }
+        };
+        let scope = steve_stats::events::Scope {
+            workspace_id: c.ws.clone(),
+            project: q.project,
+            bot: q.bot,
+            kind,
+            item,
+        };
+        let e = steve_stats::events::events(db, &scope, lo, hi, a.zip(b), buckets, now())
+            .map_err(serr)?;
+        serde_json::to_value(e).map_err(|e| ApiError::internal(e.to_string()))
     })
     .await
 }

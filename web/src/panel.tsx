@@ -34,9 +34,9 @@ export function Panel({ icon, title, sub, right, children, className, k, ...rest
   return (
     <section className={cn("flex min-w-0 flex-col overflow-hidden rounded-2xl border bg-card text-card-foreground", className)} data-panel={k} {...rest}>
       {title != null && (
-        <header className="flex items-center gap-3 px-5 py-4">
+        <header className="flex flex-wrap items-center gap-x-3 gap-y-3 px-5 py-4">
           {icon && <PanelIcon>{icon}</PanelIcon>}
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 basis-40">
             <h2 className="truncate text-[15px] font-medium leading-5 text-foreground">{title}</h2>
             {sub && <div className="mt-0.5 line-clamp-2 type-footnote text-muted-foreground">{sub}</div>}
           </div>

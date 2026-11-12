@@ -15,10 +15,10 @@ import { t, useT } from "@/i18n"
 import { fmtMs, fmtN, fmtPct, fmtUsd, time, useStats } from "@/stats/format"
 
 /* labels for the Hub's values, built at render so they follow the language */
-const STOP = (): Record<string, string> => ({ end_turn: t("stats:drill.stop.endTurn"), cancelled: t("stats:drill.stop.cancelled"), max_tokens: t("stats:drill.stop.maxTokens"), refusal: t("stats:drill.stop.refusal"), error: t("stats:drill.stop.error"), interrupted: t("stats:drill.stop.interrupted") })
-const DECISION = (): Record<string, string> => ({ accept: t("stats:drill.decision.accept"), ask: t("stats:drill.decision.ask"), approve: t("stats:drill.decision.approve"), fail: t("stats:drill.decision.fail"), propose: t("stats:drill.decision.propose"), confirm: t("stats:drill.decision.confirm") })
+export const STOP = (): Record<string, string> => ({ end_turn: t("stats:drill.stop.endTurn"), cancelled: t("stats:drill.stop.cancelled"), max_tokens: t("stats:drill.stop.maxTokens"), refusal: t("stats:drill.stop.refusal"), error: t("stats:drill.stop.error"), interrupted: t("stats:drill.stop.interrupted") })
+export const DECISION = (): Record<string, string> => ({ accept: t("stats:drill.decision.accept"), ask: t("stats:drill.decision.ask"), approve: t("stats:drill.decision.approve"), fail: t("stats:drill.decision.fail"), propose: t("stats:drill.decision.propose"), confirm: t("stats:drill.decision.confirm") })
 const CHOICE = (): Record<string, string> => ({ pass: t("stats:drill.choice.pass"), rework: t("stats:drill.choice.rework") })
-const RELEASE = (): Record<string, string> => ({ released: t("stats:drill.release.released"), failed: t("stats:drill.release.failed"), not_released: t("stats:drill.release.notReleased"), rolled_back: t("stats:drill.release.rolledBack"), unknown: t("stats:drill.release.unknown") })
+export const RELEASE = (): Record<string, string> => ({ released: t("stats:drill.release.released"), failed: t("stats:drill.release.failed"), not_released: t("stats:drill.release.notReleased"), rolled_back: t("stats:drill.release.rolledBack"), unknown: t("stats:drill.release.unknown") })
 
 export function StatsItemView({ id }: { id: string }) {
   const t = useT()

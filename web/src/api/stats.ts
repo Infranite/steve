@@ -74,6 +74,22 @@ const f = (x: Filter) => qs({ range: x.range, from: x.range === "custom" ? x.fro
 /** the filter (it always has `range`) plus more parameters */
 const and = (x: Filter, o: Record<string, string | number | undefined>) => { const a = qs(o); return f(x) + (a ? "&" + a.slice(1) : "") }
 
+/** the event explorer (`GET /stats/events`): one turn, decision card or item mark */
+export type StatEvent = {
+  id: string; ts: number; kind: "turn" | "decision" | "mark"; what: string; to: string | null; bad: boolean; open: boolean
+  item_id: string | null; no: number | null; title: string | null; session_id: string | null
+  dur_ms: number | null; tools: number | null; tool_errors: number | null; tokens: number | null; by: string | null
+}
+export type EventKind = StatEvent["kind"]
+export type Events = {
+  lo: number; hi: number; a: number; b: number
+  histogram: { start: number; step: number; turn: number[]; decision: number[]; mark: number[]; bad: number[] }
+  counts: { turn: number; decision: number; mark: number; bad: number }
+  rows: StatEvent[]; total: number; capped: boolean
+}
+/** the span (`lo`/`hi`, ms; the filter's range when absent), the window the list covers (`a`/`b`), a kind */
+export type EventQuery = { lo?: number; hi?: number; a?: number; b?: number; kind?: EventKind; item?: string; buckets?: number }
+
 export const stats = {
   summary: (x: Filter) => req<Summary>("GET", "/stats/summary" + f(x)),
   /** `hourly`: per local hour (only for a one-day range) */
@@ -84,6 +100,7 @@ export const stats = {
   items: (x: Filter, sort: ItemSort, cursor?: string, limit = 50, only?: ItemOnly) => req<{ rows: ItemRow[]; total: number; next: string | null }>("GET", "/stats/items" + and(x, { sort, cursor, limit, only })),
   item: (id: string, brief = false) => req<ItemDetail>("GET", `/stats/items/${encodeURIComponent(id)}` + (brief ? "?brief=1" : "")),
   tree: (id: string) => req<TreeStats>("GET", `/stats/tree/${encodeURIComponent(id)}`),
+  events: (x: Filter, e: EventQuery) => req<Events>("GET", "/stats/events" + and({ ...x, hour: undefined }, e)),
   session: (id: string) => req<SessionTotals>("GET", `/stats/sessions/${encodeURIComponent(id)}`),
   prices: () => req<Prices>("GET", "/stats/prices"),
   setPrices: (prices: Price[] | null) => req<{ ok: true; prices: Price[] }>("PUT", "/stats/prices", { prices }),

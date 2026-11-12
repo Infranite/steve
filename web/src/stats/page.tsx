@@ -22,6 +22,7 @@ import { ItemsTable } from "@/stats/items"
 import { CoreKpis, DrillPanel, FlowChart, StatusBars, type Drill } from "@/stats/overview"
 import { RunState } from "@/yolo/status"
 import { StatsItemView } from "@/stats/drill"
+import { EventExplorer } from "@/stats/events"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 import { fmtN, fmtRange, fmtUsd, hhmm, oneDay, time, zoneName, useStats } from "@/stats/format"
@@ -116,6 +117,7 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
         {drill && <DrillPanel key={drill} d={drill} f={f} fkey={fkey} live={live} rangeName={rangeName} close={() => setDrill(null)} />}
         <RunState className="px-5 py-3" />
       </Panel>
+      <EventExplorer f={f} fkey={fkey} live={live} />
       <Section k="items" title={t("stats:page.items")} meta={oneDay(f) ? t("stats:page.itemsMetaHourly", { range }) : t("stats:page.itemsMetaDaily", { range })}>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           <FlowChart s={s} f={f} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />
