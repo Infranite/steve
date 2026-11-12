@@ -1,0 +1,5 @@
+- In English, the built-in delivery tags (Plan, Code, Report, Content, Data, Operation), the default descriptions of the item categories and delivery tags, a device's runner role and tool permission questions ("Allow running: …") are no longer shown in Chinese. Settings now call the pages Inbox and Chat, as the sidebar does.
+- Settings show each option's full explanation instead of cutting it after two lines.
+- On a phone, contact and organization details put the value and its controls on their own line, the GitHub app row stays readable, a long option in a dialog's select stays inside the dialog, and an item row's workflow note no longer pushes its other notes past the edge.
+- Rows that hold their own buttons (a space's flow, a running flow run, an unverified account owner, a paired device) no longer nest one button inside another. Before, React reported an error on those pages.
+- GitHub shows a connection that needs reauthorization as "Needs reauthorization" instead of the raw status. Modules that are not built yet say they are planned for a later release, without internal phase names.
