@@ -1,6 +1,7 @@
 import type { RAnnotation } from "@/api"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
 import { groupOuts, isImageOut, type OutV } from "@/out-groups"
 import { OutPreview } from "@/outputs"
 import { tm, type Out } from "@/store"
@@ -54,7 +55,7 @@ export function OutList({ outs, anns, open }: { outs: Out[]; anns: RAnnotation[]
 }
 
 /** an output in a dialog; the pictures delivered with it are its neighbours */
-export function OutDialog({ item, outs, anns, view, setView }: { item: string; outs: Out[]; anns: RAnnotation[]; view: OutOpen | null; setView: (v: OutOpen | null) => void }) {
+export function OutDialog({ item, outs, anns, view, setView, onReview }: { item: string; outs: Out[]; anns: RAnnotation[]; view: OutOpen | null; setView: (v: OutOpen | null) => void; onReview?: () => void }) {
   const g = groupOuts(outs), t = useT()
   const all = [...g.final, ...g.records.flatMap((r) => r.outs)]
   const x = view && all.find((y) => y.o[3] === view.o[3])
@@ -65,7 +66,8 @@ export function OutDialog({ item, outs, anns, view, setView }: { item: string; o
     <Dialog open={!!view} onOpenChange={(o) => !o && setView(null)}>
       <DialogContent className="flex max-h-[92dvh] flex-col gap-3 rounded-2xl max-sm:max-w-[calc(100%-1rem)] max-sm:p-4 sm:max-w-[960px]" data-preview>
         <DialogHeader><DialogTitle className="type-headline break-words pr-6">{view?.o[1]}</DialogTitle>
-          <DialogDescription className="type-callout">{view?.o[0]} · {t("shell:outs.from", { item })}{x && x.vs > 1 && <span className={cn(x.v < x.vs && "text-attention")} data-preview-ver> · {x.v < x.vs ? t("shell:outs.versionOfOld", { v: x.v, count: x.vs }) : t("shell:outs.versionOf", { v: x.v, count: x.vs })}</span>}{x?.record && " · " + t("shell:outs.record")}</DialogDescription></DialogHeader>
+          <DialogDescription className="type-callout">{view?.o[0]} · {t("shell:outs.from", { item })}{x && x.vs > 1 && <span className={cn(x.v < x.vs && "text-attention")} data-preview-ver> · {x.v < x.vs ? t("shell:outs.versionOfOld", { v: x.v, count: x.vs }) : t("shell:outs.versionOf", { v: x.v, count: x.vs })}</span>}{x?.record && " · " + t("shell:outs.record")}</DialogDescription>
+          {onReview && <Button size="sm" variant="outline" className="self-start" onClick={onReview} data-output-review>{t("views:item.writeFeedback")}</Button>}</DialogHeader>
         {view && <OutPreview key={view.o[3]} o={view.o} item={item} anns={anns} focus={view.focus} siblings={siblings} outs={outs} onOpen={(o, focus) => setView({ o, focus })} />}
       </DialogContent>
     </Dialog>

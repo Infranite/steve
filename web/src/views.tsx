@@ -441,6 +441,7 @@ export function ItemView({ id }: { id: string }) {
       : <span className="cursor-text" onDoubleClick={() => setTitleEdit(true)} data-title>{i.t}</span>} back={["#/items", t("views:items.title")]} actions={actions} toolbar={quick} toolbarTop max={1080}
       footer={<div className="w-full shrink-0 border-t bg-background/85 backdrop-blur-xl"><div className="mx-auto w-full px-4 pb-[76px] pt-3 sm:px-8 md:pb-4" style={{ maxWidth: 1080 + 64 }}><div className="lg:pr-[296px]">
         {i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} />}
+        <div className="mb-2 type-footnote font-medium text-foreground/80" data-item-feedback-label>{t("views:item.writeFeedback")}</div>
         <Composer draftKey={draftKey(st.workspace?.id, "item", i.id)} handle={itemComposer} placeholder={t("views:item.composer", { id: i.id })} testId="item" onSend={(text, files) => supp(i.id, text, target, files)}
           left={<Segmented size="sm" value={targets.includes(target) ? target : "auto"} onChange={setTarget} options={targets.map((x) => [x, targetLabel[x]] as const)} />} />
       </div></div></div>}
@@ -453,7 +454,7 @@ export function ItemView({ id }: { id: string }) {
           <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { go("#/items"); deleteItem(i.id) }}>{t("common:action.delete")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <OutDialog item={i.id} outs={i.outs} anns={i.anns} view={preview} setView={setPreview} />
+      <OutDialog item={i.id} outs={i.outs} anns={i.anns} view={preview} setView={setPreview} onReview={() => { setPreview(null); window.setTimeout(() => itemComposer.current?.focus(), 250) }} />
       {i.arch && <div className="mb-6 flex items-center gap-3 rounded-xl border px-4 py-2.5 type-callout" data-arch-banner><ArchiveIcon className="size-4 text-muted-foreground" /><span className="flex-1">{t("views:item.archived")}</span><Button size="sm" variant="ghost" onClick={() => archive([i.id], false)}>{t("views:item.restore")}</Button></div>}
       <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_248px]">
         <div className="flex min-w-0 flex-col gap-10">
