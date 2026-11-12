@@ -153,7 +153,7 @@ impl Tx<'_> {
     }
 
     /// The graph's part: `None` when every unit is through and only the coordinator is left to act.
-    fn graph_work(&self, g: &Workflow) -> Result<Option<Work>> {
+    pub(crate) fn graph_work(&self, g: &Workflow) -> Result<Option<Work>> {
         if g.paused {
             return Ok(Some(Work::Paused("协作已暂停".into())));
         }
