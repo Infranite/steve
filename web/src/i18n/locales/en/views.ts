@@ -67,7 +67,7 @@ export default {
     blockers: "The parent item cannot finish yet",
     attempt: "Attempt {{n}}/{{max}}",
     depends: "Depends on: {{names}}", resources: "Shared scope: {{names}}",
-    details: "Goal and delivery", outputs: "Shared outputs",
+    details: "Goal and delivery", outputs: "Reported outputs", outputResult: "Result", outputRecord: "Work record", outputUnspecified: "Role unspecified",
     checkPassed: "Passed", checkFailed: "Failed", operated: "Actually operated",
     history_one: "Plan changes ({{count}}; showing up to 20 latest)", history_other: "Plan changes ({{count}}; showing up to 20 latest)", revision: "Revision {{n}}",
     single: "Use single-session acceptance",

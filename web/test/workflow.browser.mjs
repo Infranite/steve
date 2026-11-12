@@ -19,6 +19,7 @@ try {
     await page.locator('[data-workflow-unit="api"] summary').click()
     await page.locator("[data-workflow-outputs]").waitFor()
     assert.match(await page.locator('[data-workflow-unit="api"]').innerText(), /实际操作/)
+    assert.match(await page.locator("[data-workflow-outputs]").innerText(), /正式成果.*工作图 API.*过程记录.*构建记录/s)
     await page.locator('[data-workflow-rework="api"]').click()
     await page.getByRole("alertdialog", { name: "返工影响预览" }).waitFor()
     assert.match(await page.getByRole("alertdialog", { name: "返工影响预览" }).innerText(), /独立复核依赖门控与恢复/, "rework previews downstream review")
