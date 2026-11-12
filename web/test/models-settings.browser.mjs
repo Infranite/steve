@@ -34,6 +34,9 @@ const view = () => ({
   agents: [{ harness: 'claude-code', name: 'Claude Code', models: [], default: 'claude-sonnet-5-5', value: null }, { harness: 'codex', name: 'Codex', models: [], default: null, value: null }],
 })
 const catalog = (h) => ({ harness: h, name: h, source: 'mock', default: harnesses.find((x) => x.id === h).default_models[0], families: ['main'], models: (h === 'codex' ? ['gpt-6-astra', 'gpt-7'] : ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5']).map((id) => ({ id, label: id, family: 'main', via: null, note: null, efforts: [] })) })
+/* the Hub's state as far as the pane reads it: the harnesses by name */
+const state = () => ({ version: 'fixture', web_version: 'fixture', workspace: { id: 'default', name: '默认', description: '', item_prefix: 'ST', sort: 0, created: 0 }, workspaces: [], items: [], decisions: [], recent: [], bots: [], allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [],
+  runtimes: harnesses.map((h) => ({ id: h.id, name: h.name, ok: true, version: '', path: '', models: h.default_models, note: '' })) })
 const patches = []
 
 const run = async ({ width, height, scheme, flow }) => {
@@ -50,6 +53,7 @@ const run = async ({ width, height, scheme, flow }) => {
       data = view()
     } else if (u.pathname === '/api/settings/models') data = view()
     else if (u.pathname === '/api/system/models') data = catalog(u.searchParams.get('harness'))
+    else if (u.pathname === '/api/state') data = state()
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) })
   })
   const fits = async () => assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `overflow at ${width}px`)
