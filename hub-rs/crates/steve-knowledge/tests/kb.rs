@@ -771,6 +771,43 @@ fn mem_rows_follow_their_memory_scope() {
     assert_eq!((vis.as_str(), level.as_str()), ("workspace", "reasoning"));
 }
 
+/// A memory's fixed stored source (“你写的”) reads in the request's language; the row keeps it as stored.
+#[test]
+fn mem_source_label_in_the_request_language() {
+    let env = TestEnv::new(|_| {});
+    let shown = env
+        .store()
+        .transaction(|tx| {
+            let m = mems::create(
+                tx,
+                WS,
+                &NewMem {
+                    text: "周会改到周二".into(),
+                    source_type: "me".into(),
+                    source_label: "你写的".into(),
+                    created_by: ME.into(),
+                    ..Default::default()
+                },
+            )?;
+            let en = steve_i18n::with("en", || steve_knowledge::service::mem_json(tx, &m));
+            let zh = steve_knowledge::service::mem_json(tx, &m);
+            Ok::<_, StoreError>((
+                en["source_label"].clone(),
+                zh["source_label"].clone(),
+                m.source_label,
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        shown,
+        (
+            json!("Written by you"),
+            json!("你写的"),
+            "你写的".to_string()
+        )
+    );
+}
+
 /// A store that answers with anything (a broken or foreign store): the Hub's second filter keeps
 /// only what the viewer may read, and never `never`.
 struct Leaky;

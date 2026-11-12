@@ -471,7 +471,8 @@ pub fn update_note(
 // ---- memories
 
 /// `Mem`, with `source_type` and the name of every `about` object (like
-/// `Doc.about`; an unknown object has an empty name).
+/// `Doc.about`; an unknown object has an empty name). A fixed stored `source_label`
+/// (“你写的”) comes in the request's language.
 pub fn mem_json(c: &Connection, m: &Mem) -> Value {
     let about: Vec<Value> = m
         .about
@@ -483,7 +484,7 @@ pub fn mem_json(c: &Connection, m: &Mem) -> Value {
         .collect();
     json!({
         "id": m.id, "kind": m.kind, "text": m.text, "source_type": m.source_type,
-        "source_label": m.source_label, "level": m.level, "status": m.status,
+        "source_label": steve_modules::shown::source_label(&m.source_label), "level": m.level, "status": m.status,
         "visibility": m.visibility, "about": about, "created": m.created,
     })
 }
