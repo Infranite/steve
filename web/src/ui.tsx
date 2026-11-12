@@ -6,6 +6,7 @@ import { cue } from "@/bus"
 import { clockDur } from "@/i18n/format"
 import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
+import { itemDisplayStatus } from "@/item-workflow-relation"
 import { BookOpenIcon, ChartNoAxesColumnIcon,
   ArrowUpIcon, BrainIcon, CheckIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon,
   MessageCircleIcon, MoonIcon, PencilIcon, RadioIcon, SearchIcon, SettingsIcon, SquareTerminalIcon,
@@ -281,7 +282,7 @@ export function Sidebar({ route: full }: { route: string }) {
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
   const S = st.bots.steve ?? Object.values(st.bots)[0], n = pendingCards().length
   const people = usePeopleOn(), meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
-  const cnt: Record<string, number> = { inbox: n, items: st.items.filter((i) => i.st === "run" && !i.arch).length }
+  const cnt: Record<string, number> = { inbox: n, items: st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length }
   const item = (h: string, l: string, I: any, on: boolean) => (
     <SidebarMenuItem key={h}>
       <SidebarMenuButton isActive={on} tooltip={l} render={<a href={"#/" + h} data-nav={h || "chat"} aria-current={on ? "page" : undefined} />} className="text-[14px] text-foreground/85 data-active:font-medium data-active:text-foreground">

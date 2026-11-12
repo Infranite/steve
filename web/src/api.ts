@@ -8,8 +8,9 @@ export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type RItem = {
   id: string; workspace_id: string; no: number; title: string; status: ItemStatus; stage: string; bot_id: string | null; project_id: string | null; cwd: string | null; branch: string | null
   plan: PlanStep[]; now: string; accept_mode: string | null; priority: string; archived: boolean; star: boolean; due: string | null; snooze: { label: string; until: number } | null
-  source: [string, string]; parent: { item?: string | null; session?: string | null; at?: number | null } | null; phase?: "ready" | "active" | "closing" | "closed"; created: number; updated: number
+  source: [string, string]; parent: { item?: string | null; session?: string | null; at?: number | null } | null; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; created: number; updated: number
   goal: string; goals: number; tags: string[]; deps: string[]; sessionIds: string[]; open: string[]; queued: number; live: boolean
+  workflow_paused?: boolean; workflow_cycle?: number; workflow_failed?: string[]
 }
 export type DependencyWait = {
   item_id: string; status: ItemStatus; phase: string; cycle: number

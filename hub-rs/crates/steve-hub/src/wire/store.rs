@@ -190,6 +190,16 @@ impl Repo for StoreBackend {
                 counts.insert(r.get(0)?, r.get::<_, i64>(1)? as usize);
                 Ok(())
             })?;
+            each(c, &format!("SELECT w.item_id, w.paused, w.cycle FROM workflows w WHERE w.item_id IN ({ITEMS})"), ws, |r| {
+                let x = m.entry(r.get(0)?).or_default();
+                x.workflow_paused = Some(r.get(1)?);
+                x.workflow_cycle = Some(r.get(2)?);
+                Ok(())
+            })?;
+            each(c, &format!("SELECT u.workflow_id, u.item_id FROM workflow_units u JOIN workflows w ON w.item_id = u.workflow_id JOIN items i ON i.id = w.item_id AND i.cycle = w.cycle AND i.phase != 'closed' WHERE u.status = 'failed' AND u.item_id IS NOT NULL AND u.workflow_id IN ({ITEMS}) ORDER BY u.workflow_id, u.position"), ws, |r| {
+                m.entry(r.get(0)?).or_default().workflow_failed.push(r.get(1)?);
+                Ok(())
+            })?;
             for x in m.values_mut() {
                 if let Some((sid, _)) = x.sessions.iter().rev().find(|(_, st)| st != "ended") {
                     x.queued = counts.get(sid).copied().unwrap_or(0);
@@ -1004,5 +1014,36 @@ mod event_page_tests {
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].1["tool"]["name"], "Read");
         assert_eq!(tail[0].1["tool"]["phase"], "succeeded");
+    }
+}
+
+#[cfg(test)]
+mod workflow_summary_tests {
+    use super::*;
+    use rusqlite::params;
+
+    #[test]
+    fn state_extras_identify_paused_current_graph_and_ignore_old_cycle_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite3");
+        let store = s::Store::open(&path, s::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        let c = rusqlite::Connection::open(&path).unwrap();
+        for (id, no) in [("ST-1", 1), ("ST-2", 2)] {
+            c.execute("INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES (?1, ?2, ?3, 'task', 'test', 'run', '定义', 1, 1)", params![id, s::WS, no]).unwrap();
+        }
+        c.execute("INSERT INTO workflows (item_id, revision, cycle, paused, max_parallel, max_attempts, created, updated) VALUES ('ST-1', 1, 1, 1, 1, 3, 1, 1)", []).unwrap();
+        c.execute("INSERT INTO workflow_units (workflow_id, id, position, spec, status, item_id) VALUES ('ST-1', 'review', 0, '{}', 'failed', 'ST-2')", []).unwrap();
+        let backend = StoreBackend::new(store).unwrap();
+        let read = || backend.item_extras(s::WS).unwrap().unwrap().remove("ST-1").unwrap();
+        let current = read();
+        assert_eq!(current.workflow_paused, Some(true));
+        assert_eq!(current.workflow_cycle, Some(1));
+        assert_eq!(current.workflow_failed, ["ST-2"]);
+
+        c.execute("UPDATE items SET cycle = 2 WHERE id = 'ST-1'", []).unwrap();
+        let previous = read();
+        assert_eq!(previous.workflow_cycle, Some(1));
+        assert!(previous.workflow_failed.is_empty());
     }
 }

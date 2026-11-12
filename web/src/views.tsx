@@ -1,6 +1,6 @@
 import { api } from "@/api"
 import { WorkflowPanel } from "@/workflow-panel"
-import { workflowRelation } from "@/item-workflow-relation"
+import { itemDisplayStatus, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
 import { usePeopleOn } from "@/api/people"
@@ -124,7 +124,7 @@ export function ItemsView() {
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const [confirmDel, setConfirmDel] = useState<string | null>(null)
   const arch = filt === "arch"
-  let xs = st.items.filter((i) => (arch ? i.arch : !i.arch) && (arch || filt === "all" || (filt === "wait" && ["wait", "prop"].includes(i.st)) || (filt === "run" && i.st === "run") || (filt === "star" && i.star))
+  let xs = st.items.filter((i) => (arch ? i.arch : !i.arch) && (arch || filt === "all" || (filt === "wait" && ["wait", "prop"].includes(i.st)) || (filt === "run" && itemDisplayStatus(i) === "run") || (filt === "star" && i.star))
     && (botF === "all" || i.b === botF) && (tagF === "all" || !!i.tags?.includes(tagF)) && (kindF === "all" || !!i.tags?.includes(kindF)) && (projF === "all" || (projF === "none" ? !i.project : i.project === projF)) && (!q || i.t.includes(q) || i.id.toLowerCase().includes(q.toLowerCase())))
   if (sortBy === "due") xs = [...xs].sort((a, b) => (a.due ? 0 : 1) - (b.due ? 0 : 1))
   if (sortBy === "pri") xs = [...xs].sort((a, b) => PRI_ORDER[a.pri ?? "中"] - PRI_ORDER[b.pri ?? "中"])
@@ -143,7 +143,7 @@ export function ItemsView() {
         <Button size="xs" variant="ghost" className="text-destructive" onClick={() => setConfirmDel(i.id)} data-delete-item={i.id}>{t("common:action.delete")}</Button></div>
     : <ItemRow key={i.id} i={i} pick={pick(i.id)} proj={multiProj} bot={multiBot} />
   return (
-    <Page title={t("views:items.title")} sub={arch ? t("views:items.subArch") : t("views:items.sub", { run: st.items.filter((i) => i.st === "run" && !i.arch).length, wait: pending().length })} max={itemsView === "list" ? 880 : 1120}
+    <Page title={t("views:items.title")} sub={arch ? t("views:items.subArch") : t("views:items.sub", { run: st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length, wait: pending().length })} max={itemsView === "list" ? 880 : 1120}
       actions={<>{itemsView === "list" && !arch && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { selecting = !selecting; selected.clear(); r() }} data-select-mode>{selecting ? t("views:items.selectDone") : t("views:items.select")}</Button>}<Button size="sm" onClick={() => openSheet("newItem")} data-new-item><PlusIcon />{t("views:items.newItem")}</Button></>}
       toolbar={<span className="hidden sm:block">{seg}</span>}>
       <AlertDialog open={!!confirmDel} onOpenChange={(o) => !o && setConfirmDel(null)}>
@@ -174,7 +174,7 @@ export function ItemsView() {
       {itemsView === "list" && (xs.length ? (arch || sortBy !== "updated"
         ? <Group>{xs.map(rowOf)}</Group>
         : <div className="flex flex-col gap-5">{groups.map(([s, l]) => {
-            const g = xs.filter((i) => i.st === s), fold = (s === "done" || s === "drop") && !openGroups.has(s) && g.length > CLOSED_SHOWN + 2
+            const g = xs.filter((i) => itemDisplayStatus(i) === s), fold = (s === "done" || s === "drop") && !openGroups.has(s) && g.length > CLOSED_SHOWN + 2
             return g.length ? (
               <section key={s} data-items-group={s}>
                 <SectionLabel className="mb-1 px-0.5" right={fold || openGroups.has(s) ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { openGroups.has(s) ? openGroups.delete(s) : openGroups.add(s); r() }} data-group-more={s}>{fold ? t("views:items.showAll", { count: g.length }) : t("views:items.collapse")}</Button> : undefined}>
@@ -185,14 +185,14 @@ export function ItemsView() {
         : <Empty title={arch ? t("views:items.emptyArch") : st.items.length ? t("views:items.emptyFiltered") : t("views:items.emptyNone")} sub={arch ? (st.cfg.archDays === "0" ? t("views:items.archManual") : t("views:items.archAuto", { count: Number(st.cfg.archDays) })) : st.items.length ? undefined : t("views:items.emptyNoneSub")} />)}
       {itemsView === "board" && (
         <div className="-mx-1 grid auto-cols-[minmax(232px,1fr)] grid-flow-col gap-3 overflow-x-auto px-1 pb-2">
-          {groups.filter((g) => g[0] !== "drop").map(([s, l]) => { const g = xs.filter((i) => i.st === s); return (
+          {groups.filter((g) => g[0] !== "drop").map(([s, l]) => { const g = xs.filter((i) => itemDisplayStatus(i) === s); return (
             <div key={s} className="flex min-h-72 flex-col gap-2 rounded-xl bg-muted/60 p-2">
               <div className="flex items-center gap-2 px-2 py-1.5 type-label"><StatusDot s={s} />{l}<span className="tabular-nums text-muted-foreground">{g.length}</span></div>
               {g.map((i) => { const relation = workflowRelation(i, st.items); return (
                 <button key={i.id} type="button" onClick={() => go("#/items/" + i.id)} className="rounded-lg border bg-card p-3 text-left transition-shadow duration-150 hover:shadow-md" data-kanban-card={i.id}>
                   <ItemNo id={i.id} /><div className="mt-0.5 type-callout font-medium">{i.t}</div>
-                  {relation && <div className="mt-1 type-footnote font-medium text-foreground/80" data-workflow-relation={relation.kind}>{relation.kind === "parent" ? t("shell:item.waitingFor", { ids: relation.children.join(t("shell:item.relationSep")) }) : t("shell:item.childOf", { id: relation.parent })}</div>}
-                  <div className="mt-1 line-clamp-2 type-footnote text-muted-foreground">{i.now}</div>
+                  {relation && <div className="mt-1 type-footnote font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</div>}
+                  {relation?.kind !== "paused" && relation?.kind !== "previous" && <div className="mt-1 line-clamp-2 type-footnote text-muted-foreground">{i.now}</div>}
                   <Tags ids={i.tags} max={2} className="mt-2" /><Meta className="mt-2"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}{i.plan && <PlanBar i={i} />}</Meta>
                 </button>
               ) })}
