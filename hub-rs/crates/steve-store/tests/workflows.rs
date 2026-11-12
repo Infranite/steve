@@ -836,7 +836,7 @@ fn migration_applies_once_on_v40_and_leaves_existing_items_unchanged() {
 }
 
 #[test]
-fn new_goal_or_cycle_cannot_reuse_old_results_and_budget_increase_allows_reset() {
+fn new_goal_or_cycle_archives_old_results_without_reusing_them() {
     let (t, parent, specs) = setup();
     t.store
         .workflows()
@@ -855,38 +855,19 @@ fn new_goal_or_cycle_cannot_reuse_old_results_and_budget_increase_allows_reset()
         t.store
             .workflows()
             .replace(&parent, graph.revision, "新目标", &specs, 2, 1),
-        "重置旧成果",
+        "先暂停",
     );
     is_conflict(t.store.workflows().reset(&parent, "a", "重做"), "尝试预算");
-    let raised = t
-        .store
-        .workflows()
-        .replace(
-            &parent,
-            graph.revision,
-            "为新目标增加重试预算",
-            &specs,
-            2,
-            2,
-        )
-        .unwrap();
-    assert_eq!((raised.cycle, raised.goal_version), (1, 1));
-    is_conflict(t.store.workflows().claim(&parent, "a"), "重新规划");
-    t.store
-        .workflows()
-        .reset(&parent, "a", "实现重新验证")
-        .unwrap();
-    t.store
-        .workflows()
-        .reset(&parent, "b", "独立部分重新验证")
-        .unwrap();
-    let reset = t.store.workflows().get(&parent).unwrap().unwrap();
+    let paused = t.store.workflows().pause(&parent, true, "新目标待规划").unwrap();
     let replanned = t
         .store
         .workflows()
-        .replace(&parent, reset.revision, "采用新目标", &specs, 2, 2)
+        .replace(&parent, paused.revision, "采用新目标", &specs, 2, 2)
         .unwrap();
     assert_eq!((replanned.cycle, replanned.goal_version), (1, 2));
+    assert!(replanned.units.iter().all(|u| u.status == "pending" && u.attempt == 0));
+    assert!(replanned.paused);
+    t.store.workflows().pause(&parent, false, "开始新目标").unwrap();
     let a = start(&t, &parent, "a");
     finish(&t, &a, true);
     t.store
@@ -900,9 +881,13 @@ fn new_goal_or_cycle_cannot_reuse_old_results_and_budget_increase_allows_reset()
         t.store
             .workflows()
             .replace(&parent, old.revision, "新周期", &specs, 2, 2),
-        "执行周期",
+        "先暂停",
     );
     is_conflict(t.store.workflows().claim(&parent, "b"), "执行周期");
+    let paused = t.store.workflows().pause(&parent, true, "新周期待规划").unwrap();
+    let next = t.store.workflows().replace(&parent, paused.revision, "采用新周期", &specs, 2, 2).unwrap();
+    assert_eq!((next.cycle, next.goal_version), (2, 2));
+    assert!(next.units.iter().all(|u| u.status == "pending" && u.attempt == 0));
 }
 
 #[test]
