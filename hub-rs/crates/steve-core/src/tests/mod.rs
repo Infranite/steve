@@ -34,6 +34,7 @@ mod stats_marks;
 mod supersede;
 mod takeover;
 mod thread;
+mod work_state;
 mod workflow;
 mod workflow_review;
 mod workspace;

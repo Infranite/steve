@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::CreateItem;
 use crate::cycle::{self, OP_BUILD, OP_RELEASE};
 use crate::git::tests::{branch_with, g, repo};
 use crate::repo::{Release, WS};
@@ -14,6 +13,7 @@ use crate::runtime::TurnEnd;
 use crate::takeover::{LINE, STEVE_TRIED};
 use crate::testkit::Kit;
 use crate::upstream;
+use crate::{AgentRuntime, CreateItem};
 
 fn kit(continues: u32) -> Kit {
     Kit::with(|c| c.takeover_continues = continues)
@@ -262,11 +262,11 @@ fn an_idle_session_is_continued_but_one_you_interrupted_is_not() {
     // the same with the turn stopped by you: the card, Steve does not undo your stop
     let j = k.item("run", "执行", None);
     let t = k.session(&j, "idle");
-    k.db()
-        .event_add(&t, "system", json!({"text": "你中断了当前回合"}))
-        .unwrap();
+    k.rt.prompt(&t, "做事", "me", &[]).unwrap();
+    k.rt.end_turn(&k.core, &t, "cancelled", None);
+    let asked = k.rt.prompts_of(&t).len();
     assert_eq!(k.core.tx().check_stalls(later).unwrap(), vec![j.clone()]);
-    assert!(k.rt.prompts_of(&t).is_empty());
+    assert_eq!(k.rt.prompts_of(&t).len(), asked, "not continued");
 }
 
 /* ── the frozen result ── */
@@ -1285,12 +1285,11 @@ fn lane_wait_preserves_questions_and_manual_interrupts() {
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
     lane_request(&k, &i, "collecting");
-    k.db()
-        .event_add(&s, "system", json!({"text": "你中断了当前回合"}))
-        .unwrap();
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.rt.end_turn(&k.core, &s, "cancelled", None);
     let later = crate::util::now() + crate::stall::STALL_AFTER_MS + 1_000;
     assert_eq!(k.core.tx().check_stalls(later).unwrap(), vec![i]);
-    assert!(k.rt.prompts_of(&s).is_empty());
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
 }
 
 #[test]

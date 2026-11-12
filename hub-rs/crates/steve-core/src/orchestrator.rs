@@ -1393,12 +1393,7 @@ impl Tx<'_> {
             crate::lifecycle::supersede_where(
                 self.db(),
                 item_id,
-                |d| {
-                    d.kind == "fail"
-                        && matches!(d.subject_type.as_str(), "item" | crate::stall::STALL)
-                        && !crate::cycle::unknown_effect_card(d)
-                        && !d.options.iter().any(|o| o.starts_with("release_"))
-                },
+                crate::lifecycle::stop_card,
                 "有了新的情况",
             )?;
             let mut opts: Vec<String> = vec!["continue".into(), "delivered".into(), "look".into()];
@@ -1944,6 +1939,13 @@ impl Tx<'_> {
         let Some(session) = self.db().session(&t.session_id)? else {
             return Ok(());
         };
+        self.st.stops.insert(
+            session.id.clone(),
+            crate::work::LastStop {
+                stop_reason: t.stop_reason.clone(),
+                error: t.error.clone().filter(|e| !e.is_empty()),
+            },
+        );
         let Some(item_id) = session.item_id.as_deref() else {
             self.st.pending.remove(&session.id);
             return Ok(());
@@ -2037,8 +2039,38 @@ impl Tx<'_> {
             );
             return settle(self.db(), item_id);
         }
-        if error.is_none() && t.stop_reason == "end_turn" && self.workflow_waiting(item_id)? {
-            return Ok(());
+        /* a coordinator's turn ended: its graph decides whether that is a wait or a stop. Running,
+         * queued, waiting for you or paused work is waited for; a failed unit is a failure it owns */
+        let mut graph_failed = None;
+        if t.stop_reason != "cancelled"
+            && self
+                .db()
+                .store()
+                .workflows()
+                .get(item_id)?
+                .is_some_and(|g| !g.single_session())
+        {
+            let work = self.work(&item)?;
+            if work.waiting() {
+                self.diagnostic_session(
+                    &session.id,
+                    t.attempt.as_deref(),
+                    "turn.end_evaluated",
+                    "work_waiting",
+                    true,
+                    steve_store::diagnostics::Details {
+                        to_state: Some(work.code().into()),
+                        ..Default::default()
+                    },
+                );
+                if let Some(text) = work.text() {
+                    self.db().item_patch(item_id, patch![now: text])?;
+                }
+                return Ok(());
+            }
+            if let crate::work::Work::Failed(why) = work {
+                graph_failed = Some(why);
+            }
         }
         if t.stop_reason == "cancelled" {
             self.diagnostic_session(
@@ -2092,6 +2124,23 @@ impl Tx<'_> {
                     }
                 } else {
                     why
+                }
+            }
+            None if graph_failed.is_some() => {
+                let why = graph_failed.unwrap_or_default();
+                /* it may have stopped to ask you about it */
+                let last = self.last_agent_text(&session.id)?;
+                if crate::yolo::answer::looks_like_question(&last).is_some()
+                    || answered_you
+                    || crate::yolo::limits::own_action(&last).is_some()
+                {
+                    format!("{why}；Agent 停下来等你：{}", js_head(&last, 160))
+                } else {
+                    let stop = crate::takeover::Stop::Workflow { why };
+                    match self.takeover(item_id, &session.id, stop)? {
+                        Some(why) => why,
+                        None => return Ok(()),
+                    }
                 }
             }
             None => {

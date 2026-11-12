@@ -5,7 +5,6 @@ use crate::repo::HubEvent;
 use crate::stall::{STALL, STALL_AFTER_MS};
 use crate::testkit::Kit;
 use crate::util::now;
-use serde_json::json;
 
 fn later() -> i64 {
     now() + STALL_AFTER_MS + 1_000
@@ -20,15 +19,15 @@ fn stall_cards(k: &Kit, item: &str) -> Vec<crate::repo::Decision> {
         .collect()
 }
 
-/// A cancelled turn leaves the item `run` with an idle session: after two minutes it gets the card, once.
+/// A cancelled turn leaves the item `run` with an idle session: after two minutes it gets the card, once,
+/// saying how the turn ended.
 #[test]
-fn a_stopped_item_gets_one_card_with_the_last_system_line() {
+fn a_stopped_item_gets_one_card_with_how_its_turn_ended() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
-    k.db()
-        .event_add(&s, "system", json!({"text": "你中断了当前回合"}))
-        .unwrap();
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.rt.end_turn(&k.core, &s, "cancelled", None);
     assert!(
         k.core.tx().check_stalls(now()).unwrap().is_empty(),
         "not yet"
@@ -40,7 +39,7 @@ fn a_stopped_item_gets_one_card_with_the_last_system_line() {
     let d = &stall_cards(&k, &i)[0];
     assert_eq!(
         (d.kind.as_str(), d.question.as_str(), d.status.as_str()),
-        ("fail", "它停下了：你中断了当前回合", "open")
+        ("fail", "它停下了：你中断了这一回合", "open")
     );
     assert_eq!(d.options, ["continue", "look", "drop"]);
     assert_eq!(d.session_id.as_deref(), Some(s.as_str()));

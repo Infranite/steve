@@ -10,15 +10,18 @@ impl Core {
     /// Read-only facts, not a model's diagnosis. Core's state lock is not a SQL snapshot:
     /// release state is sampled separately and a changed item revision is reported explicitly.
     pub fn diagnostic_snapshot(&self, item_id: &str) -> Result<Value> {
-        let (observed_at, cycle, revision, lifecycle, dependencies) = {
+        let (observed_at, cycle, revision, lifecycle, dependencies, work) = {
             let t = self.tx();
             let item = t.item(item_id)?;
+            // the same judgement the turn end, the stall watch and Steve's continues make
+            let work = t.work(&item)?;
             (
                 steve_store::now(),
                 item.cycle,
                 item.revision,
                 t.lc_view(&item)?,
                 t.dependency_view(item_id)?,
+                json!({"state": work.code(), "why": work.text()}),
             )
         };
         let lane = self.lane_status_of_item(item_id)?;
@@ -26,7 +29,7 @@ impl Core {
         let changed = current.is_none_or(|i| i.cycle != cycle || i.revision != revision);
         Ok(json!({
             "observed_at":observed_at,"item_id":item_id,"cycle":cycle,"revision":revision,
-            "lifecycle":lifecycle,"dependencies":dependencies,"lane":lane,
+            "lifecycle":lifecycle,"dependencies":dependencies,"work":work,"lane":lane,
             "sampled_until":steve_store::now(),"changed_during_read":changed
         }))
     }

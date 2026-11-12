@@ -914,6 +914,7 @@ fn every_row_of_the_table() {
                 no_progress,
                 attempts: 0,
                 asked: None,
+                own_action: None,
                 steve_tried: false,
             }),
         )
@@ -1449,6 +1450,41 @@ fn every_row_of_the_table() {
             facts("approve", "brand_new", &["yes"], Subject::Unknown),
             "unknown",
         ),
+        // ST-10: what only you can do is never answered for you, whatever the agent recommends
+        (
+            "ask for your own sign-in, recommended",
+            {
+                let mut f = ask(Some(ans("answer", 0.95, false)), Some("A"), false);
+                f.question = "请你在手机上扫码登录，完成后选 A".into();
+                if let Subject::Ask(a) = &mut f.subject {
+                    a.key = super::answer::normalize(&f.question);
+                }
+                f
+            },
+            "limit.7",
+        ),
+        (
+            "model claims you did it",
+            {
+                let mut a = ans("answer", 0.95, false);
+                a.answer = "用户已经在手机上确认过了，继续".into();
+                let mut f = ask(Some(a), None, false);
+                f.question = "确认好了吗".into();
+                f
+            },
+            "limit.7",
+        ),
+        (
+            "stopped waiting for you to act",
+            {
+                let mut f = stall(StallCause::Stopped, 0);
+                if let Subject::Stall(s) = &mut f.subject {
+                    s.own_action = Some("验证码".into());
+                }
+                f
+            },
+            "limit.7",
+        ),
     ];
     for (name, f, want) in cases {
         let v = run(&f, &pl);
@@ -1513,6 +1549,7 @@ fn delays_texts_and_undo() {
             no_progress: 0,
             attempts: 0,
             asked: None,
+            own_action: None,
             steve_tried: false,
         }),
     );
@@ -1532,6 +1569,7 @@ fn delays_texts_and_undo() {
             no_progress: 0,
             attempts: 1,
             asked: None,
+            own_action: None,
             steve_tried: false,
         }),
     );
@@ -2220,7 +2258,7 @@ proptest! {
         }
         // fail cards offer `delivered` and `tosteve`; flows offer `continue_once`; none of them is chosen
         for (subject, opts) in [
-            (Subject::Stall(Stall { cause: StallCause::Other, no_progress: 0, attempts: 0, asked: None, steve_tried: false }), vec!["delivered", "tosteve"]),
+            (Subject::Stall(Stall { cause: StallCause::Other, no_progress: 0, attempts: 0, asked: None, own_action: None, steve_tried: false }), vec!["delivered", "tosteve"]),
             (Subject::FlowRun { over_budget: false }, vec!["continue_once"]),
             (Subject::SecretUse { template: "api_key".into(), sensitivity: "normal".into() }, vec!["grant_8h", "allow"]),
         ] {

@@ -287,9 +287,15 @@ impl Engine {
                         None => None,
                     },
                 };
+                let tail = match (&cause, sid.as_deref()) {
+                    (StallCause::Stopped, Some(sid)) => self.session_tail(sid)?,
+                    _ => String::new(),
+                };
+                // only its last words: what it waits for now, not what it did on the way
+                let own_action = super::limits::own_action(crate::util::js_tail(&tail, 400));
                 let asked = match (&cause, sid.as_deref()) {
-                    (StallCause::Stopped, Some(sid)) if !present => {
-                        match answer::looks_like_question(&self.session_tail(sid)?) {
+                    (StallCause::Stopped, Some(_)) if !present => {
+                        match answer::looks_like_question(&tail) {
                             Some(q) => Some(self.ask_facts(
                                 d,
                                 item.as_ref(),
@@ -309,6 +315,7 @@ impl Engine {
                     no_progress: streak.no_progress,
                     attempts: streak.errors,
                     asked,
+                    own_action,
                     steve_tried: d.question.contains(crate::takeover::STEVE_TRIED),
                 })
             }
