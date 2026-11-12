@@ -364,12 +364,13 @@ impl AuthSessions<'_> {
 pub struct Settings<'a>(&'a Store);
 
 impl Settings<'_> {
-    /// Every stored key, values parsed (unparsable → null).
+    /// Operator settings, values parsed (unparsable → null). The private delivery-tag
+    /// backfill marker is an implementation checkpoint, not a user setting.
     pub fn all(&self, ws: &str) -> Result<Map<String, Value>> {
         self.0.read(|c| {
             let rows: Vec<(String, Option<String>)> = all(
                 c,
-                "SELECT key, value FROM settings WHERE workspace_id = ?",
+                "SELECT key, value FROM settings WHERE workspace_id = ? AND key <> '__delivery_tags_backfilled_v1'",
                 [ws],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;

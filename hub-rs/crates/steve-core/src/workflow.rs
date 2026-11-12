@@ -8,6 +8,48 @@ use crate::cycle::{CANCEL, CLOSED, FAIL, Policy, conflict};
 use crate::repo::{Item, Session};
 use crate::{Check, Core, ItemAction, Mark, Output, Result, TurnEnd, Tx, patch};
 
+// A workflow response is a navigation surface, not an archive of every earlier revision.
+// The unabridged history stays in the store; large reports belong to child artifacts.
+const VIEW_TEXT: usize = 2_000;
+const VIEW_HISTORY: usize = 20;
+
+fn excerpt(s: &str, limit: usize) -> String {
+    if s.chars().count() <= limit {
+        return s.to_string();
+    }
+    format!(
+        "{}…（内容已截断，请打开工作单元事项查看完整产出）",
+        s.chars().take(limit).collect::<String>()
+    )
+}
+
+fn permanent_provider_failure(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("blocked by upstream usage policy")
+        || lower.contains("400 the request was rejected as invalid")
+}
+
+pub(crate) fn workflow_error(error: &str) -> String {
+    if error.starts_with("上游使用策略拒绝了请求") || error.starts_with("模型服务拒绝了本次请求")
+    {
+        return error.to_string();
+    }
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("blocked by upstream usage policy") {
+        return format!(
+            "上游使用策略拒绝了请求；已完成成果保留。需处理上游策略后由用户决定是否重试评审。原始错误：{}",
+            excerpt(error, 300)
+        );
+    }
+    if lower.contains("400 the request was rejected as invalid") {
+        return format!(
+            "模型服务拒绝了本次请求（API 400）；本次没有评审结论。请检查请求、模型和适配器配置后由用户决定是否重试。原始错误：{}",
+            excerpt(error, 300)
+        );
+    }
+    error.to_string()
+}
+
 fn required_text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key]
         .as_str()
@@ -171,7 +213,43 @@ impl Tx<'_> {
         let Some(g) = self.db().store().workflows().get(item)? else {
             return Ok(Value::Null);
         };
-        let mut out = serde_json::to_value(&g)?;
+        let mut visible = g.clone();
+        for unit in &mut visible.units {
+            unit.summary = excerpt(
+                &if unit.status == "failed" {
+                    workflow_error(&unit.summary)
+                } else {
+                    unit.summary.clone()
+                },
+                VIEW_TEXT,
+            );
+            unit.spec.goal = excerpt(&unit.spec.goal, VIEW_TEXT);
+            if let Some(reason) = &unit.reason {
+                unit.reason = Some(excerpt(
+                    &if unit.status == "failed" {
+                        workflow_error(reason)
+                    } else {
+                        reason.clone()
+                    },
+                    VIEW_TEXT,
+                ));
+            }
+        }
+        let history_total = visible.history.len();
+        visible.history = visible
+            .history
+            .into_iter()
+            .rev()
+            .take(VIEW_HISTORY)
+            .collect();
+        visible.history.reverse();
+        for entry in &mut visible.history {
+            entry.reason = excerpt(&entry.reason, VIEW_TEXT);
+            entry.detail = Value::Null;
+        }
+        let mut out = serde_json::to_value(&visible)?;
+        out["history_total"] = json!(history_total);
+        out["current_cycle"] = json!(self.workflow_current(&g)?);
         let mut blockers = self.workflow_blockers(item, true)?;
         let ready = self.rt().check_workflow_execution(item);
         if let Err(e) = &ready
@@ -199,9 +277,23 @@ impl Tx<'_> {
                 todo.extend(u.spec.depends_on.clone());
             }
         }
+        let mut upstream_units: Vec<WorkUnit> = g
+            .units
+            .iter()
+            .filter(|u| upstream.contains(&u.spec.id))
+            .cloned()
+            .collect();
+        for u in &mut upstream_units {
+            u.summary = excerpt(&u.summary, VIEW_TEXT);
+            u.spec.goal = excerpt(&u.spec.goal, VIEW_TEXT);
+            if let Some(reason) = &u.reason {
+                u.reason = Some(excerpt(reason, VIEW_TEXT));
+            }
+        }
         json!({
             "item_id": g.item_id, "revision": g.revision, "unit": unit,
-            "upstream": g.units.iter().filter(|u| upstream.contains(&u.spec.id)).collect::<Vec<_>>()
+            "upstream": upstream_units,
+            "note": "长内容仅显示摘要；通过上游单元的事项及产出打开完整报告。"
         })
     }
 
@@ -236,6 +328,13 @@ impl Tx<'_> {
         }
         let reason = required_text(&args, "reason")?;
         if matches!(action, "resume" | "retry") {
+            if let Some(g) = &graph
+                && !self.workflow_current(g)?
+            {
+                return Err(conflict(
+                    "这是上一执行周期的工作图；先确认下一步并重新规划，不能直接恢复或重试",
+                ));
+            }
             if graph.as_ref().is_some_and(Workflow::single_session) {
                 return Err(conflict(
                     "当前为单会话验收；恢复协作前必须重新规划独立评审与集成验收",
@@ -344,6 +443,12 @@ impl Tx<'_> {
                     .find(|u| u.spec.id == id)
                     .ok_or_else(|| conflict("工作单元不存在"))?;
                 if action == "retry" {
+                    if permanent_provider_failure(&unit.summary) && self.db().bot(actor)?.is_some()
+                    {
+                        return Err(conflict(
+                            "这是上游永久拒绝；请先处理服务策略或无效请求，再由用户确认重试。已成功的单元保持原样",
+                        ));
+                    }
                     if unit.attempt >= g.max_attempts {
                         return Err(conflict(
                             "工作单元已达到尝试预算；需要重规划提高预算后再重试",
@@ -715,7 +820,7 @@ impl Tx<'_> {
             graph.item_id,
             u.spec.id,
             u.spec.kind,
-            goal,
+            excerpt(&goal, 4_000),
             serde_json::to_string_pretty(&self.workflow_context(graph, u))?
         ))
     }
@@ -901,7 +1006,7 @@ impl Tx<'_> {
                     } else {
                         "工作单元停止但未交付，请核对进度后重试"
                     });
-                self.workflow_report(s, reason, &[], &[], false)?;
+                self.workflow_report(s, &workflow_error(reason), &[], &[], false)?;
             }
             if item.phase != CLOSED
                 && let Some((_, settled)) = self.db().store().workflows().by_child(child)?

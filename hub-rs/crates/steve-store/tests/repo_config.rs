@@ -150,7 +150,7 @@ fn workspaces_users_auth() {
         )
         .unwrap();
     assert_eq!((w.sort, w.item_prefix.as_str()), (1, "WK"));
-    // a new workspace comes with the six item categories (ST-34)
+    // a new workspace comes with six item categories and six delivery tags
     let ev = t.events.take();
     assert_eq!(
         ev.last(),
@@ -160,7 +160,7 @@ fn workspaces_users_auth() {
         ev.iter()
             .filter(|e| matches!(e, ChangeEvent::Tag { .. }))
             .count(),
-        6
+        12
     );
     let mine = s.workspaces().of_user(&me).unwrap();
     assert_eq!(
@@ -609,9 +609,15 @@ fn tags() {
         .unwrap();
     assert_eq!(renamed.name, "Web");
     s.tags().remove(&a.id).unwrap();
-    // the category stays: it cannot be removed, and only it is left
+    // the fixed item categories and delivery tags remain after removing a custom tag
     assert_eq!(s.tags().of_item(&i1).unwrap(), [feat.clone()]);
-    assert!(s.tags().list(WS).unwrap().iter().all(|t| t.cat == "类型"));
+    assert!(
+        s.tags()
+            .list(WS)
+            .unwrap()
+            .iter()
+            .all(|t| t.cat == "类型" || t.cat == "交付")
+    );
 }
 
 #[test]
