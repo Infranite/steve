@@ -6,6 +6,6 @@ export function questionLead(question: string, cmds: string[]): string {
   if (!first) return question
   const at = question.indexOf(first.slice(0, 24))
   if (at < 0) return question
-  const lead = question.slice(0, at).replace(/[\s:：]+$/, "")
+  const lead = question.slice(0, at).replace(/[\s:\uFF1A]+$/, "") /* ASCII or full-width colon */
   return lead || question
 }
