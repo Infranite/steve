@@ -79,8 +79,8 @@ export default {
   rerun: "Answer again",
   queued: "Queued",
   quote: {
-    me: "You at {{time}}: “{{text}}”",
-    steve: "Steve at {{time}}: “{{text}}”",
+    me: "You, {{time}}: “{{text}}”",
+    steve: "Steve, {{time}}: “{{text}}”",
   },
   update: {
     done: "Done: {{title}}",

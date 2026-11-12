@@ -9,6 +9,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Trail, useTick, type StepState, type ToolStep, type TrailItem } from "@/components/work-trail"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
+import { clip as clipPlain } from "@/thread/topics"
 import { STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
 import { ItemRef, DecisionCard, ItemNo, StatusDot, AlertClose, go } from "@/ui"
 import { jumpToMsg, threadMsg } from "@/thread/history"
@@ -146,7 +147,8 @@ export function QueuedNote({ m }: { m: Msg }) {
 
 /** scroll to a message and flash it; the conversation offers the way back (ST-50) */
 export function jumpTo(id: string) { jumpToMsg(id, threadMsg(id)?.created) }
-const clip = (t: string, n = 24) => { const x = t.replace(/\s+/g, " ").trim(); return x.length > n ? x.slice(0, n) + "…" : x }
+/* a quoted message in one line, its Markdown marks dropped */
+const clip = (t: string, n = 24) => clipPlain(t, n)
 /** "↳ 你 18:09 说的「…」": the message this one answers or quotes */
 export function QuoteHead({ id, className }: { id?: string; className?: string }) {
   const t = useT()

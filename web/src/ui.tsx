@@ -233,7 +233,8 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
       <header className={cn("relative z-10 flex h-12 shrink-0 items-center gap-2 px-3 transition-[border-color,background-color] duration-200 sm:px-5", scrolled || noTitle ? "border-b bg-background/80 backdrop-blur-xl" : "border-b border-transparent")}>
         <SidebarTrigger className="-ml-1 hidden text-muted-foreground md:inline-flex" />
         {back ? (
-          <Breadcrumb className="min-w-0">
+          /* beside a custom bar the way back keeps its width and the bar truncates; it used to slide under the bar */
+          <Breadcrumb className={bar ? "shrink-0" : "min-w-0"}>
             <BreadcrumbList className="flex-nowrap">
               <BreadcrumbItem className="shrink-0"><BreadcrumbLink href={back[0]} className="inline-flex items-center gap-0.5 whitespace-nowrap" data-back><ChevronLeftIcon className="size-4 md:hidden" />{back[1]}</BreadcrumbLink></BreadcrumbItem>
               {!bar && <><BreadcrumbSeparator className={cn("transition-opacity", scrolled || noTitle ? "opacity-100" : "opacity-0")} />
@@ -901,7 +902,8 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
       {run ? <span className="relative flex size-4 shrink-0 items-center justify-center"><span className="absolute size-4 animate-ping rounded-full bg-blue/25" /><span className="size-2 rounded-full bg-blue" /></span>
         : tone === "wait" ? <StatusDot s="wait" className="mx-1" /> : tone === "done" ? <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /> : tone === "stop" ? <CircleSlashIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /> : <StatusDot s="ended" className="mx-1" />}
       <span className={cn("shrink-0 font-medium", tone === "run" ? "text-blue" : tone === "wait" ? "text-attention" : "text-foreground/85")}>{label}</span>
-      {what && <span className={cn("flex min-w-0 items-baseline gap-1.5 truncate", run ? "text-foreground/85" : "text-muted-foreground")} data-doing>{what}</span>}
+      {/* plain text in its own box: a flex row cuts text off without the ellipsis */}
+      {what && <span className={cn("flex min-w-0 items-baseline gap-1.5 truncate", run ? "text-foreground/85" : "text-muted-foreground")} data-doing>{typeof what === "string" ? <span className="min-w-0 truncate">{what}</span> : what}</span>}
       <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">{run ? clock(now - t0) : endAt && t0 ? t("core:runBar.took", { dur: fmtDur(endAt - t0) }) : ""}</span>
       {run && onStop && <Button size="xs" variant="outline" className="shrink-0 bg-background" onClick={onStop} data-interrupt><SquareIcon className="fill-current" />{t("core:runBar.interrupt")}</Button>}
     </div>

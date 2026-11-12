@@ -114,7 +114,7 @@ function MeActions({ m }: { m: Msg }) {
         </DropdownMenuContent>
       </DropdownMenu>
       <Popover open={toItem} onOpenChange={setToItem}>
-        <PopoverTrigger render={<span className="size-0" aria-hidden />} />
+        <PopoverTrigger nativeButton={false} render={<span className="size-0" aria-hidden />} />
         <PopoverContent align="end" className="w-60 gap-2 rounded-2xl p-3" data-reroute-popover>
           <div className="type-callout font-medium">{t("pages:chat.whichItem")}</div>
           <Input autoFocus placeholder="ST-12" value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} className="h-8" data-reroute-item />

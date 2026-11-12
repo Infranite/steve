@@ -4,7 +4,7 @@ export default {
   /* ── store.ts ── */
   /* how often a bot may interrupt you (the bot's proactive level 0, 1, 2) */
   proactive: { rare: "只在必要时", moderate: "适中", active: "积极" },
-  itemStatus: { prop: "提议", block: "等前置", run: "进行中", wait: "等你", pause: "已暂停", done: "已完成", drop: "已放弃" },
+  itemStatus: { prop: "提议", block: "等前置", run: "进行中", wait: "等你", pause: "已暂停", done: "已完成", drop: "已放弃", fail: "已失败" },
   sessStatus: { run: "运行中", wait: "等你", idle: "空闲", ended: "已结束" },
   /* the kind of card that waits on you */
   waitType: { approve: "审批", ask: "问题", accept: "验收", propose: "提议", fail: "异常", confirm: "确认" },

@@ -115,7 +115,7 @@ function Hit({ m, q, on, onClick }: { m: Msg; q: string; on: boolean; onClick: (
   return (
     <Row on={on} onClick={onClick} test={{ "data-history-hit": m.id! }}>
       <span className="flex min-w-0 items-baseline gap-2 type-footnote text-muted-foreground"><span className="font-medium text-foreground/85">{m.k === "me" ? t("thread:who.me") : st.bots.steve?.n ?? "Steve"}</span>{m.item && <span className="font-mono">{m.item}</span>}<span className="ml-auto shrink-0 tabular-nums">{m.created ? hm(m.created) : ""}</span></span>
-      <span className="line-clamp-2 break-all type-callout text-foreground/90">{text}</span>
+      <span className="line-clamp-2 wrap-anywhere type-callout text-foreground/90">{text}</span>
     </Row>
   )
 }

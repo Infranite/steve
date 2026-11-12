@@ -191,7 +191,7 @@ function RailBody() {
     return (
       <Line key={n.id} onClick={() => n.item_id ? go("#/items/" + n.item_id) : n.text.startsWith("YOLO") ? go("#/yolo") : undefined} test={"notice-" + n.id}>
         <I className={cn("mt-0.5 size-4 shrink-0 self-start", n.level === "fail" && !n.closed ? "text-destructive" : n.level === "fail" ? "text-muted-foreground" : n.level === "success" ? "text-success" : "text-muted-foreground")} strokeWidth={1.75} />
-        <span className="min-w-0 flex-1"><span title={n.text} className={cn("line-clamp-2 break-all type-callout", isNew ? "font-medium text-foreground" : "text-foreground/80")}>{n.text}</span>
+        <span className="min-w-0 flex-1"><span title={n.text} className={cn("line-clamp-2 wrap-anywhere type-callout", isNew ? "font-medium text-foreground" : "text-foreground/80")}>{n.text}</span>
           <span className="mt-0.5 block type-footnote text-muted-foreground">{n.item_id && <span className="mr-1.5 font-mono">{n.item_id}</span>}{tm(n.created)}</span></span>
         {isNew && <span className="mt-1.5 size-2 shrink-0 self-start rounded-full bg-blue" aria-label={t("shell:chat.unread")} data-unread-dot />}
       </Line>

@@ -2,6 +2,7 @@ import { lazyView } from "@/lazy"
 import { ChatView } from "@/chat-view"
 import { Toaster, toast as sonnerToast } from "sonner"
 import { useEffect, useState } from "react"
+import { Trans } from "react-i18next"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { Button } from "@/components/ui/button"
@@ -150,7 +151,7 @@ function TokenSignIn() {
       {error && <div className="type-footnote text-destructive" role="alert" data-sign-in-error>{error}</div>}
       {there && <Button type="button" variant="outline" onClick={() => { location.href = openUrl(hubBase()) }} data-sign-in-there>{t("shell:hub.pairOpenThere")}</Button>}
       <Button type="submit" disabled={busy || !user.trim() || !token.trim()}>{busy ? <Spinner className="size-4" /> : t("shell:app.signIn")}</Button>
-      <div className="type-footnote text-muted-foreground">{t("shell:app.tokenHint")}</div>
+      <div className="type-footnote text-muted-foreground"><Trans t={t} i18nKey="shell:app.tokenHint" components={{ c: <code className="font-mono text-[11.5px] wrap-anywhere text-foreground/80" /> }} /></div>
     </form>
   )
 }

@@ -44,6 +44,10 @@ try {
     await page.goto(base + "/test/fixtures/chat-layout.html?long")
     await page.locator('[data-msg="long"]').waitFor()
     await page.waitForTimeout(500)
+    // Emphasis closes between a full-width mark and a Han character (CJK-friendly parsing), and a quote shows plain words.
+    assert.ok((await page.locator('[data-msg="long"] [data-streamdown="strong"]').allTextContents()).includes("“执行中”没有具体活动。"))
+    assert.ok(!(await page.locator('[data-msg="long"]').innerText()).includes("**"))
+    assert.doesNotMatch(await page.locator('[data-quote="long"]').innerText(), /\*\*|###/)
     const header = page.locator("[data-chat-header]")
     const before = await header.boundingBox()
     const scroller = page.locator("[data-chat-scroll]")

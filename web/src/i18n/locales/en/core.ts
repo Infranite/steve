@@ -2,7 +2,7 @@
 export default {
   /* ── store.ts ── */
   proactive: { rare: "Only when needed", moderate: "Moderate", active: "Proactive" },
-  itemStatus: { prop: "Proposed", block: "Blocked", run: "In progress", wait: "Needs you", pause: "Paused", done: "Done", drop: "Dropped" },
+  itemStatus: { prop: "Proposed", block: "Blocked", run: "In progress", wait: "Needs you", pause: "Paused", done: "Done", drop: "Dropped", fail: "Failed" },
   sessStatus: { run: "Running", wait: "Needs you", idle: "Idle", ended: "Ended" },
   waitType: { approve: "Approval", ask: "Question", accept: "Review", propose: "Proposal", fail: "Problem", confirm: "Confirm" },
   waitAction: { accept: "Review", approve: "Approve", ask: "Answer", propose: "Decide", fail: "View", confirm: "Confirm" },
