@@ -2,11 +2,12 @@ import { useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { DependencyWaitPanel } from "../../src/dependency-wait-panel"
-import { WorkflowPanel } from "../../src/workflow-panel"
+import { AgentDetailPanel, AgentTree, useAgentTree, useSelectedNode } from "../../src/agent-tree-view"
+import { stats } from "../../src/api/stats"
 import { RelationGraph } from "../../src/graph"
 import { st, type Item } from "../../src/store"
 import type { Workflow, WorkflowUnit } from "../../src/workflow"
-import { api, type RItemDetail, type DependencyWait } from "../../src/api"
+import { api, Unauthenticated, type DependencyWait } from "../../src/api"
 import { setLang } from "../../src/i18n"
 
 setLang("zh-CN")
@@ -52,8 +53,9 @@ function Fixture() {
     setWait(next)
     return next
   }
-  // The panel refreshes after an action. Keep fixture interactions off every real Hub.
-  api.item = async () => ({} as RItemDetail)
+  // The page reloads the item after an action. Keep fixture interactions off every real Hub, and keep the
+  // fixture's items (a loaded detail would rebuild the store from nothing; a signed-out answer is not retried).
+  api.item = async () => { throw new Unauthenticated(null) }
   api.workflowChange = async (_id, args) => {
     if (args.action === "single_session" && query.has("conflict")) throw new Error("工作图已变化，请刷新后重新确认验收方式")
     const single = args.action === "single_session"
@@ -81,6 +83,29 @@ function Fixture() {
     workflow.units[1].item_id = "ST-61"
     return <main className="mx-auto max-w-4xl p-5"><RelationGraph focus="ST-60" scope="comp" onOpen={(n) => { (window as any).__graphOpened = n.id }} /></main>
   }
-  return <main className="mx-auto max-w-3xl p-5"><WorkflowPanel item="ST-60" workflow={workflow} /></main>
+  return <TreeFixture workflow={workflow} fork={query.has("fork")} />
+}
+
+/* the item page's collaboration area: a coordinator, its units (with their child items), a fork and figures */
+function TreeFixture({ workflow, fork }: { workflow: Workflow; fork: boolean }) {
+  const child = (id: string, t: string, unit: string, st: Item["st"]) => ({ id, t, st, b: workflow.units.find((u) => u.id === unit)!.bot_id, src: ["Steve", "workflow"], parent: { item: "ST-60" }, waits: unit === "web" ? [{}] : [], ss: [] })
+  st.items = [
+    { id: "ST-60", t: "协作改造工作图", st: "run", b: "主控 Bot", src: ["Steve", "chat"], waits: [], ss: [] },
+    child("ST-61", "实现接口与主体检查", "api", "done"), child("ST-62", "实现协作进度界面", "web", "run"), child("ST-63", "独立复核依赖门控与恢复", "review", "drop"),
+    { id: "ST-old", t: "旧接口尝试", st: "drop", b: "开发 Bot", src: ["Steve", "workflow"], parent: { item: "ST-60" }, waits: [], ss: [], arch: true },
+    ...(fork ? [{ id: "ST-64", t: "把进度界面拆成独立组件", st: "run", b: "开发 Bot", src: ["Steve", "fork"], parent: { item: "ST-62", s: "s-62", at: 9 }, waits: [], ss: [] }] : []),
+  ] as unknown as Item[]
+  const ids: Record<string, string> = { api: "ST-61", web: "ST-62", review: "ST-63" }
+  const wf = { ...workflow, units: workflow.units.map((u) => ids[u.id] && u.status !== "pending" ? { ...u, item_id: ids[u.id] } : u) }
+  const T = Date.now()
+  stats.tree = async () => ({ truncated: false, nodes: [
+    { item_id: "ST-60", parent_id: null, depth: 0, tokens: 900, est: 0.42, reported: 0, agent_ms: 60_000, first_turn: T - 300_000, done_at: null, dropped_at: null },
+    { item_id: "ST-61", parent_id: "ST-60", depth: 1, tokens: 500, est: 0.29, reported: 0, agent_ms: 45_000, first_turn: T - 280_000, done_at: T - 235_000, dropped_at: null },
+    { item_id: "ST-62", parent_id: "ST-60", depth: 1, tokens: 400, est: 0.19, reported: 0, agent_ms: 30_000, first_turn: T - 69_000, done_at: null, dropped_at: null },
+    { item_id: "ST-old", parent_id: "ST-60", depth: 1, tokens: 100, est: 0.04, reported: 0, agent_ms: 27_000, first_turn: T - 400_000, done_at: null, dropped_at: T - 373_000 },
+  ] })
+  const at = useAgentTree("ST-60", wf)
+  const [node, select] = useSelectedNode(at)
+  return <main className="mx-auto max-w-[1080px] p-5"><AgentTree at={at} selected={node?.key ?? null} onSelect={select} /><AgentDetailPanel at={at} node={node} onClose={() => select(null)} /></main>
 }
 createRoot(document.getElementById("root")!).render(<Fixture />)

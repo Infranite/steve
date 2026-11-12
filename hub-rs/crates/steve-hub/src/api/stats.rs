@@ -111,6 +111,7 @@ pub fn routes(api: StatsApi) -> Router {
         .route("/stats/breakdown", get(breakdown))
         .route("/stats/items", get(items))
         .route("/stats/items/{id}", get(item))
+        .route("/stats/tree/{id}", get(tree))
         .route("/stats/sessions/{id}", get(session))
         .route("/stats/prices", get(prices_get).put(prices_put))
         .route("/stats/prices/sync", post(prices_sync))
@@ -436,6 +437,21 @@ async fn item(
             _ => Err(ApiError::not_found(Noun::Item.missing())),
         },
     )
+    .await
+}
+
+/// `root` and the items started from it, each with its own usage and agent time (the agent tree).
+async fn tree(
+    State(api): State<StatsApi>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    api.read(move |db| match views::tree(db, &id).map_err(serr)? {
+        Some((ws, t)) if ws == c.ws => {
+            ok(serde_json::to_value(t).map_err(|e| ApiError::internal(e.to_string()))?)
+        }
+        _ => Err(ApiError::not_found(Noun::Item.missing())),
+    })
     .await
 }
 

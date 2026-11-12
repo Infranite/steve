@@ -700,6 +700,93 @@ pub fn items(
     })
 }
 
+/// How deep and how large `GET /stats/tree/{id}` reads below its root.
+pub const TREE_DEPTH: i64 = 8;
+pub const TREE_MAX: usize = 200;
+
+/// One item of an item's tree: who started it (`parent_id`, from the child's `parent.item`) and what it
+/// cost by itself. A parent's own row does not include its children; the client sums the subtree.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TreeNode {
+    pub item_id: String,
+    pub parent_id: Option<String>,
+    pub depth: i64,
+    pub tokens: i64,
+    pub est: f64,
+    pub reported: f64,
+    pub agent_ms: Option<i64>,
+    pub first_turn: Option<i64>,
+    pub done_at: Option<i64>,
+    pub dropped_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Tree {
+    pub nodes: Vec<TreeNode>,
+    /// More than [`TREE_MAX`] items, or deeper than [`TREE_DEPTH`]: the rest is left out.
+    pub truncated: bool,
+}
+
+/// `root` and the items started from it, breadth first, read from `item_stats` (refreshed in the
+/// background, so a running item may lag by a refresh). The workspace is returned for the caller's
+/// access check; `None` if the root does not exist.
+pub fn tree(c: &Connection, root: &str) -> Result<Option<(String, Tree)>> {
+    let Some(ws) = c
+        .prepare_cached("SELECT workspace_id FROM items WHERE id = ?")?
+        .query_row([root], |r| r.get::<_, String>(0))
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let tz = tz_of(c, &ws)?;
+    let prices = metrics::book_of(c, &ws)?;
+    let mut deeper = false;
+    let mut nodes: Vec<TreeNode> = c
+        .prepare_cached(
+            "WITH RECURSIVE t(id, parent_id, depth) AS (
+               SELECT id, NULL, 0 FROM items WHERE id = ?1
+               UNION
+               SELECT i.id, t.id, t.depth + 1 FROM items i JOIN t
+                 ON CASE WHEN json_valid(i.parent) THEN json_extract(i.parent, '$.item') END = t.id
+               WHERE i.workspace_id = ?2 AND t.depth <= ?3
+             )
+             SELECT t.id, t.parent_id, t.depth, coalesce(s.input + s.output + s.cache_read + s.cache_write, 0),
+                    coalesce(s.models, '{}'), coalesce(s.cost_reported, 0), s.agent_ms, s.first_turn, s.done_at, s.dropped_at
+             FROM t LEFT JOIN item_stats s ON s.item_id = t.id
+             ORDER BY t.depth, t.id LIMIT ?4",
+        )?
+        .query_map(params![root, ws, TREE_DEPTH, TREE_MAX as i64 + 1], |r| {
+            let models: BTreeMap<String, [i64; 4]> =
+                serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default();
+            let done_at: Option<i64> = r.get(8)?;
+            let as_of = done_at.map_or_else(|| prices.today().to_string(), |t| day(t, tz));
+            Ok(TreeNode {
+                item_id: r.get(0)?,
+                parent_id: r.get(1)?,
+                depth: r.get(2)?,
+                tokens: r.get(3)?,
+                est: item_est(&models, &prices, &as_of),
+                reported: r.get(5)?,
+                agent_ms: r.get(6)?,
+                first_turn: r.get(7)?,
+                done_at,
+                dropped_at: r.get(9)?,
+            })
+        })?
+        .filter(|n| match n {
+            // The recursion reads one level past the limit only to learn that it exists.
+            Ok(n) if n.depth > TREE_DEPTH => {
+                deeper = true;
+                false
+            }
+            _ => true,
+        })
+        .collect::<rusqlite::Result<_>>()?;
+    let truncated = deeper || nodes.len() > TREE_MAX;
+    nodes.truncate(TREE_MAX);
+    Ok(Some((ws, Tree { nodes, truncated })))
+}
+
 /// The `[lo, hi)` of a query in Unix ms, or of one local hour of its (one) day.
 pub fn window(q: &Query, hour: Option<u32>, tz: Option<chrono_tz::Tz>) -> Option<(i64, i64)> {
     match hour {

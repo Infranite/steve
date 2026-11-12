@@ -32,15 +32,3 @@ export function orderedUnits(units: WorkflowUnit[]): WorkflowUnit[] {
   }
   return out
 }
-
-export function workflowProgress(workflow: Workflow) {
-  const required = workflow.units.filter((u) => u.required)
-  if (workflow.current_cycle === false) return { passed: 0, total: required.length, running: 0, active_unconfirmed: 0, waiting: 0 }
-  return {
-    passed: required.filter((u) => u.status === "succeeded").length,
-    total: required.length,
-    running: workflow.units.filter((u) => u.status === "running" && u.activity?.state === "confirmed").length,
-    active_unconfirmed: workflow.units.filter((u) => ["running", "dispatching"].includes(u.status) && u.activity?.state !== "confirmed").length,
-    waiting: workflow.units.filter((u) => u.status === "pending" && !!u.waiting_on?.length).length,
-  }
-}

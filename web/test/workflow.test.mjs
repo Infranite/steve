@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { orderedUnits, workflowProgress } from "../src/workflow.ts"
+import { orderedUnits } from "../src/workflow.ts"
 
 const unit = (id, depends_on = [], status = "pending", required = true) => ({ id, depends_on, status, required })
 
@@ -14,15 +14,4 @@ test("malformed historical dependencies remain visible and cannot hang the item 
   const units = [unit("a", ["b"]), unit("b", ["a"]), unit("missing", ["old"])]
   assert.equal(orderedUnits(units).length, 3)
   assert.equal(orderedUnits(units)[0].id, "missing")
-})
-
-test("completion progress counts required successful work only", () => {
-  const workflow = { units: [unit("work", [], "succeeded"), unit("review", ["work"], "failed"), unit("optional", [], "succeeded", false), unit("other", [], "running")] }
-  assert.deepEqual(workflowProgress(workflow), { passed: 1, total: 3, running: 0, active_unconfirmed: 1, waiting: 0 })
-  workflow.units[3].activity = { state: "confirmed" }
-  assert.deepEqual(workflowProgress(workflow), { passed: 1, total: 3, running: 1, active_unconfirmed: 0, waiting: 0 })
-  workflow.units[0].activity = { state: "confirmed" }
-  assert.equal(workflowProgress(workflow).running, 1, "terminal results never become running work")
-  workflow.current_cycle = false
-  assert.deepEqual(workflowProgress(workflow), { passed: 0, total: 3, running: 0, active_unconfirmed: 0, waiting: 0 }, "prior-cycle work is not current progress")
 })

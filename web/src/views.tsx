@@ -1,5 +1,5 @@
 import { api } from "@/api"
-import { WorkflowPanel } from "@/workflow-panel"
+import { AgentDetailPanel, AgentTree, hasAgentTree, useAgentTree, useSelectedNode } from "@/agent-tree-view"
 import { itemDisplayStatus, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
@@ -280,7 +280,7 @@ export function LinkDialog({ k }: { k: string }) {
 }
 /* ═════════ 事项详情 ═════════ */
 /* tab values stay the original words: they are the data-seg hooks the browser tests click; labels are translated */
-let dtab: "动态" | "产出" | "关系图" = "动态"; let lastItem = ""; let feedMode: "key" | "all" = "all"
+let dtab: "动态" | "产出" = "动态"; let lastItem = ""; let feedMode: "key" | "all" = "all"
 /* system lines worth keeping in the “重要” view; the rest (建立、来自信号…) is shown only in “全部” */
 const KEY_SYS = /派生|交付|目标更新|前置|开新会话|交接|自动开始|暂停|放弃|继续|关联|发布|rebase|冲突|失败|回到 /
 function Prop({ label, children, top }: { label: string; children: ReactNode; top?: boolean }) {
@@ -367,6 +367,10 @@ export function ItemView({ id }: { id: string }) {
   /* replies to comments are read from the sessions' events */
   const latest = i && (active(i)?.id ?? i.ss.at(-1))
   useEffect(() => { if (latest) void loadEvents(latest) }, [latest])
+  /* the collaboration area: the tree of everything this item started; a selected agent's detail replaces the
+   * properties in the side column (a sheet on narrow pages) */
+  const at = useAgentTree(id, i?.workflow)
+  const [agent, selectAgent] = useSelectedNode(at)
   if (!i) return <Page title={t("views:item.title")} back={["#/items", t("views:items.title")]}><Empty title={t("views:item.notFound")} sub={t("views:item.notFoundSub")} /></Page>
   const designReview = i.waits.find((w) => w.subject === "design_implementation")
   const dependents = st.items.filter((x) => i.dependents.includes(x.id) || (x.deps || []).includes(i.id))
@@ -416,6 +420,27 @@ export function ItemView({ id }: { id: string }) {
       </Popover>
     </div>
   )
+  const tree = hasAgentTree(at)
+  const top = <>
+          {/* 1 — goal reads as the description of the title */}
+          <section data-goal className="-mt-3">
+            {editing ? (
+              <Field><Textarea className="min-h-24 rounded-lg" value={gtxt} onChange={(e) => setG(e.target.value)} data-goal-input autoFocus />
+                <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => { saveGoal(i.id, gtxt.trim()); setEditing(false) }}>{t("views:item.saveAs", { n: i.goals.length + 1 })}</Button><Button size="sm" variant="ghost" onClick={() => setEditing(false)}>{t("common:action.cancel")}</Button><FieldDescription className="type-footnote">{t("views:item.goalHint")}</FieldDescription></div></Field>
+            ) : (
+              <div className="group/goal">
+                <Markdown text={i.goals[i.goals.length - 1]} className="type-body text-foreground/80" />
+                <div className="mt-1 flex items-center gap-2 type-footnote text-muted-foreground">
+                  <span>{t("views:item.goalVersion", { n: i.goals.length })}</span>
+                  {i.goals.length > 1 && <Collapsible><CollapsibleTrigger className="hover:text-foreground">{t("views:item.history")}</CollapsibleTrigger><CollapsibleContent className="mt-1">{i.goals.slice(0, -1).map((g, n) => <div key={n}>{t("views:item.historyRow", { n: n + 1, goal: g })}</div>)}</CollapsibleContent></Collapsible>}
+                  <button type="button" className="opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/goal:opacity-100 [@media(hover:none)]:opacity-100" data-edit-goal onClick={() => { setG(i.goals[i.goals.length - 1]); setEditing(true) }}>{t("views:item.edit")}</button>
+                </div>
+              </div>
+            )}
+          </section>
+          {/* 2 — what needs you is the only boxed element on the page */}
+          {i.waits.length > 0 && <section className="flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</section>}
+  </>
   const replies: Reply[] = i.tl.flatMap((e) => e[0] === "reply" && e[1] ? [e[1]] : [])
   const entry = ({ e, n }: { e: any[]; n: number }) => {
     if (e[0] === "sess") return <SessionBlock key={e[1]} k={e[1]} defaultOpen={false} replies={replies} />
@@ -457,26 +482,12 @@ export function ItemView({ id }: { id: string }) {
       <OutDialog item={i.id} outs={i.outs} anns={i.anns} view={preview} setView={setPreview} reviewLabel={t(designReview ? "views:item.reviewDesign" : "views:item.messageBot")}
         onReview={() => { setPreview(null); window.setTimeout(() => { if (designReview) document.querySelector<HTMLTextAreaElement>("[data-design-feedback]")?.focus(); else itemComposer.current?.focus() }, 250) }} />
       {i.arch && <div className="mb-6 flex items-center gap-3 rounded-xl border px-4 py-2.5 type-callout" data-arch-banner><ArchiveIcon className="size-4 text-muted-foreground" /><span className="flex-1">{t("views:item.archived")}</span><Button size="sm" variant="ghost" onClick={() => archive([i.id], false)}>{t("views:item.restore")}</Button></div>}
+      {/* an item that started others leads with its collaboration, across the page: a tree needs the width */}
+      {tree && <div className="mb-12 flex flex-col gap-10">{top}<AgentTree at={at} selected={agent?.key ?? null} onSelect={selectAgent} /></div>}
+      <AgentDetailPanel at={at} node={agent} onClose={() => selectAgent(null)} />
       <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_248px]">
         <div className="flex min-w-0 flex-col gap-10">
-          {/* 1 — goal reads as the description of the title */}
-          <section data-goal className="-mt-3">
-            {editing ? (
-              <Field><Textarea className="min-h-24 rounded-lg" value={gtxt} onChange={(e) => setG(e.target.value)} data-goal-input autoFocus />
-                <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => { saveGoal(i.id, gtxt.trim()); setEditing(false) }}>{t("views:item.saveAs", { n: i.goals.length + 1 })}</Button><Button size="sm" variant="ghost" onClick={() => setEditing(false)}>{t("common:action.cancel")}</Button><FieldDescription className="type-footnote">{t("views:item.goalHint")}</FieldDescription></div></Field>
-            ) : (
-              <div className="group/goal">
-                <Markdown text={i.goals[i.goals.length - 1]} className="type-body text-foreground/80" />
-                <div className="mt-1 flex items-center gap-2 type-footnote text-muted-foreground">
-                  <span>{t("views:item.goalVersion", { n: i.goals.length })}</span>
-                  {i.goals.length > 1 && <Collapsible><CollapsibleTrigger className="hover:text-foreground">{t("views:item.history")}</CollapsibleTrigger><CollapsibleContent className="mt-1">{i.goals.slice(0, -1).map((g, n) => <div key={n}>{t("views:item.historyRow", { n: n + 1, goal: g })}</div>)}</CollapsibleContent></Collapsible>}
-                  <button type="button" className="opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/goal:opacity-100 [@media(hover:none)]:opacity-100" data-edit-goal onClick={() => { setG(i.goals[i.goals.length - 1]); setEditing(true) }}>{t("views:item.edit")}</button>
-                </div>
-              </div>
-            )}
-          </section>
-          {/* 2 — what needs you is the only boxed element on the page */}
-          {i.waits.length > 0 && <section className="flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</section>}
+          {!tree && top}
           <section data-now>
             <div className="mb-1.5 flex flex-wrap items-center gap-x-1 gap-y-1 type-footnote" data-stage={stageOf(i)}>
               {STAGES.slice(2).map((g, n, arr) => { const cur = STAGES.indexOf(stageOf(i) as any), me = STAGES.indexOf(g); return (
@@ -487,11 +498,10 @@ export function ItemView({ id }: { id: string }) {
             {(i.plan || i.rounds.length > 0) && <Plan i={i} />}
           </section>
           {i.dependencyWait && !!i.deps?.length && <DependencyWaitPanel key={`${i.id}:${i.dependencyWait.cycle}`} item={i.id} wait={i.dependencyWait} /> }
-          {i.workflow && <WorkflowPanel item={i.id} workflow={i.workflow} />}
           {/* 3 — activity, newest at the bottom, older entries folded */}
           <section className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
-              <Segmented size="sm" value={dtab} onChange={(v) => { dtab = v; r() }} options={[["动态", t("views:item.tabActivity")], ["产出", t("views:item.tabOutputs")], ["关系图", t("views:item.tabGraph")]] as const} />
+              <Segmented size="sm" value={dtab} onChange={(v) => { dtab = v; r() }} options={[["动态", t("views:item.tabActivity")], ["产出", t("views:item.tabOutputs")]] as const} />
               {dtab === "动态" && <Chips value={feedMode === "key" ? t("views:item.feedKey") : t("views:item.feedAll")} onChange={(v) => { feedMode = v === t("views:item.feedKey") ? "key" : "all"; setOlder(false); r() }} options={[t("views:item.feedKey"), t("views:item.feedAll")]} />}
             </div>
             {dtab === "动态" && (
@@ -501,7 +511,6 @@ export function ItemView({ id }: { id: string }) {
               </div>
             )}
             {dtab === "产出" && <OutList outs={i.outs} anns={i.anns} open={(o) => setPreview({ o })} />}
-            {dtab === "关系图" && <div className="flex flex-col gap-3"><GraphLegend /><RelationGraph key={id} focus={id} scope="comp" height={460} onOpen={openNode} /></div>}
           </section>
         </div>
         {/* properties: one aligned label column, controls stay quiet until hovered */}

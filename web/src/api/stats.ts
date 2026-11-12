@@ -1,6 +1,7 @@
 /* 统计（Rust Hub，steve-stats，stats.md §4）：汇总、趋势、分组用量、事项表和下钻、会话用量、价格表。
  * TS Hub 没有这些接口：404、HTML 回落或网络错误一律是 NotWired，页面显示“还没有接入”。费用全是估算。 */
 import { modReq as req, qs } from "@/api"
+import type { TreeStat } from "@/agent-tree"
 
 export type RangeKind = "today" | "7d" | "30d" | "custom"
 /** `hour` (0–23): one local hour of a one-day range — the drill-down of an hourly bar (items, usage) */
@@ -53,6 +54,8 @@ export type ItemDetail = {
   decisions?: { id: string; kind: string; status: string; created: number; resolved: number | null; by: "me" | "yolo" | null; choice: string | null }[]
   by_model?: (Usage & { model: string; label: string })[]
 }
+/** `GET /stats/tree/{id}`: the item and everything started from it, each with its own figures */
+export type TreeStats = { nodes: TreeStat[]; truncated: boolean }
 export type SessionTotals = { session_id: string; turns: number; usage: Usage }
 export type Price = { match: string; input: number; output: number; cache_read: number; cache_write: number; note?: string }
 /** `table`: the price table (own rows or the built-in defaults), wins; `models_dev`: synced from Models.dev */
@@ -80,6 +83,7 @@ export const stats = {
   /** `only`: just the items behind `throughput.done` / `throughput.created` (the drill-down lists) */
   items: (x: Filter, sort: ItemSort, cursor?: string, limit = 50, only?: ItemOnly) => req<{ rows: ItemRow[]; total: number; next: string | null }>("GET", "/stats/items" + and(x, { sort, cursor, limit, only })),
   item: (id: string, brief = false) => req<ItemDetail>("GET", `/stats/items/${encodeURIComponent(id)}` + (brief ? "?brief=1" : "")),
+  tree: (id: string) => req<TreeStats>("GET", `/stats/tree/${encodeURIComponent(id)}`),
   session: (id: string) => req<SessionTotals>("GET", `/stats/sessions/${encodeURIComponent(id)}`),
   prices: () => req<Prices>("GET", "/stats/prices"),
   setPrices: (prices: Price[] | null) => req<{ ok: true; prices: Price[] }>("PUT", "/stats/prices", { prices }),
