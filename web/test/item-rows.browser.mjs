@@ -26,6 +26,9 @@ try {
     assert.equal(await row("ST-26").locator('[data-workflow-relation="child"]').innerText(), "协作子项 · ST-5")
     assert.equal(await row("ST-27").locator("[data-workflow-relation]").count(), 0, "a completed workflow child does not keep its parent waiting")
     assert.equal(await row("ST-28").locator("[data-workflow-relation]").count(), 0, "an ordinary fork is not a workflow child")
+    const rel31 = row("ST-31").locator('[data-workflow-relation="child"]')
+    assert.equal(await rel31.evaluate((el) => el.scrollWidth <= el.clientWidth), true, `a long summary does not squeeze the relation away at ${width}px`)
+    assert.equal(await row("ST-43").getAttribute("data-dense"), "true", "an item closed as failed folds like other closed ones")
     // a real wait: what the card asks and the way to it, not the stale summary
     const r = row("ST-52")
     assert.match(await r.locator('[data-item-wait="approve"]').innerText(), /^审批：合并 PR #12 并打 tag 发版 等 2 件$/)
@@ -33,7 +36,7 @@ try {
     assert.equal((await r.locator("[data-item-wait-go]").innerText()).trim(), "去审批")
     assert.equal((await row("ST-53").locator("[data-item-wait-go]").innerText()).trim(), "去回答")
     // nothing reaches past the row
-    for (const id of ["ST-49", "ST-48", "ST-52", "ST-53", "ST-5", "ST-26"]) {
+    for (const id of ["ST-49", "ST-48", "ST-52", "ST-53", "ST-5", "ST-26", "ST-31"]) {
       const over = await row(id).evaluate(el => { const b = el.getBoundingClientRect(); return [...el.querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > b.right + 1).map(e => e.outerHTML.slice(0, 80)) })
       assert.deepEqual(over, [], `${id} overflows at ${width}px`)
     }
@@ -49,6 +52,7 @@ try {
     await grouped.locator('[data-items-group="pause"] [data-item-row="ST-10"]').waitFor()
     assert.equal(await grouped.locator('[data-items-group="run"] [data-item-row="ST-44"]').count(), 1)
     assert.equal(await grouped.locator('[data-items-group="run"] [data-item-row="ST-10"]').count(), 0)
+    assert.equal(await grouped.locator('[data-items-group="fail"] [data-item-row="ST-43"]').count(), 1, "failed items have their own group")
     await grouped.close()
   }
   assert.deepEqual(errors, [])

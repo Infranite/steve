@@ -468,7 +468,7 @@ export default {
     askPh: "e.g. hand off to the dev bot by default; add “frontend uses shadcn” to the description",
     active: "In progress · {{count}}",
     noActive: "Nothing in progress",
-    recentDone: "Recently done",
+    recentDone: "Recently closed",
     settings: "Settings",
     descHint: "Steve uses this description to decide whether an item belongs in this project",
     defaultBot: "Default bot",

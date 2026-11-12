@@ -15,10 +15,11 @@ import { t, useT } from "@/i18n"
 /** how a choice reads on the card */
 const CHOICE = {
   pass: () => t("yolo:choice.pass"), rework: () => t("yolo:choice.rework"), yes: () => t("yolo:choice.yes"), continue: () => t("yolo:choice.continue"),
-  retry: () => t("yolo:choice.retry"), send: () => t("yolo:choice.send"), once: () => t("yolo:choice.once"), approved: () => t("yolo:choice.once"),
+  retry: () => t("yolo:choice.retry"), send: () => t("yolo:choice.send"), once: () => t("yolo:choice.once"), approved: () => t("yolo:choice.once"), allow_once: () => t("yolo:choice.once"),
 } as Record<string, () => string>
+/* a tool-call card's option ids are the agent's own (`allow_once`, `allow`, …); YOLO only ever picks the allow-once one */
 export const choiceText = (c: string | null | undefined, subject?: string) =>
-  !c ? "" : subject === "release" && c === "yes" ? t("yolo:choice.releaseYes") : Object.hasOwn(CHOICE, c) ? CHOICE[c]() : c
+  !c ? "" : subject === "release" && c === "yes" ? t("yolo:choice.releaseYes") : subject === "tool_call" ? t("yolo:choice.once") : Object.hasOwn(CHOICE, c) ? CHOICE[c]() : c
 
 /** the small grey “⚡ YOLO” in front of what YOLO did */
 export function YoloMark({ className }: { className?: string }) {
@@ -148,7 +149,8 @@ export function YoloItemSwitch({ i }: { i: Item }) {
       <span className="pl-0.5">{t("yolo:scope.away")}</span>
       <ScopeMenu type="item" id={i.id} cur={cur} inherit={t("yolo:scope.inheritNow", { level: levelWord() })} label={t("yolo:scope.itemMenu")}>
         <Dot s={eff.state} /><span className="font-medium">{now}</span>
-        {eff.why && <span className="max-w-[28ch] truncate text-muted-foreground">{t("yolo:scope.why", { why: eff.why })}</span>}
+        {/* forced off or paused already says why in the word itself */}
+        {eff.why && eff.state !== "forced" && eff.state !== "paused" && <span className="max-w-[28ch] truncate text-muted-foreground">{t("yolo:scope.why", { why: eff.why })}</span>}
       </ScopeMenu>
     </div>
   )

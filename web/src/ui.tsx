@@ -209,7 +209,7 @@ export function Chips<T extends string>({ value, onChange, options, className }:
 /** `action`: what to do about it, inside the empty state rather than a page-height below it */
 export function Empty({ title, sub, icon, action }: { title: string; sub?: string; icon?: ReactNode; action?: ReactNode }) {
   return (
-    <UIEmpty className="py-16">
+    <UIEmpty className="px-4 py-16 sm:px-12">
       <EmptyHeader>
         {icon && <EmptyMedia variant="icon">{icon}</EmptyMedia>}
         <EmptyTitle className="type-headline">{title}</EmptyTitle>

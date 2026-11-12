@@ -4,6 +4,7 @@ import dagre from "@dagrejs/dagre"
 import { ReactFlow, Controls, Handle, Position, MarkerType, type Edge, type Node, type NodeProps } from "@xyflow/react"
 import { FileTextIcon, TerminalIcon, GitBranchIcon, CircleHelpIcon } from "lucide-react"
 import { gRelation, gComps, gNear, ST, SS, st, botName, type GNode, type GEdge } from "@/store"
+import { itemDisplayStatus } from "@/item-workflow-relation"
 import { StatusDot } from "@/ui"
 import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
@@ -58,6 +59,8 @@ export function RelationGraph({ focus, scope = "comp", height = 420, hideSimple 
   const [picked, setPicked] = useState<string | null>(focus ?? null)
   const graphFocus = mode === "blocking" && focus && st.S[focus]?.item ? st.S[focus].item : focus
   const { N, E } = gRelation(mode, focus)
+  /* an item whose work graph is paused reads as paused here too, as in the lists */
+  for (const i of st.items) if (N[i.id]?.k === "item") N[i.id].st = itemDisplayStatus(i)
   const ids = useMemo(() => {
     if (scope === "near" && graphFocus) return gNear(graphFocus, E).filter((id) => N[id])
     let cs = gComps(N, E)
@@ -77,20 +80,24 @@ export function RelationGraph({ focus, scope = "comp", height = 420, hideSimple 
         <Button size="sm" variant={mode === "blocking" ? "default" : "outline"} aria-pressed={mode === "blocking"} onClick={() => { setMode("blocking"); setPicked(focus ?? null) }}>{t("shell:graph.blocking")}</Button>
         <Button size="sm" variant={mode === "lineage" ? "default" : "outline"} aria-pressed={mode === "lineage"} onClick={() => { setMode("lineage"); setPicked(focus ?? null) }}>{t("shell:graph.lineage")}</Button>
       </div>
-      <div className="hidden overflow-hidden rounded-xl border bg-canvas-graph sm:block" style={{ height }} data-graph>
+      {/* nothing related in this view: say so instead of an empty canvas */}
+      {ids.length === 0 && <div className="flex min-h-32 items-center justify-center rounded-xl border border-dashed px-4 py-8 text-center type-footnote text-muted-foreground" data-graph-empty>{t(mode === "blocking" ? "shell:graph.emptyBlocking" : "shell:graph.emptyLineage")}</div>}
+      {ids.length > 0 && <div className="hidden overflow-hidden rounded-xl border bg-canvas-graph sm:block" style={{ height }} data-graph>
       <ReactFlow key={mode + ":" + ids.join()} nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.3} maxZoom={1.6}
         nodesConnectable={false} elementsSelectable={false} proOptions={{ hideAttribution: true }} panOnScroll={false} zoomOnScroll={!minimal} preventScrolling={!minimal}
         onNodeClick={(_, node) => setPicked(node.id)}>
         {!minimal && <Controls showInteractive={false} position="bottom-right" />}
       </ReactFlow>
-      </div>
+      </div>}
       <div className="space-y-2 sm:hidden" data-graph-list>{ids.map((id) => {
         const n = N[id], incoming = E.filter(([, b]) => b === id).map(([a, , kind]) => `${relationLabel(kind)}: ${N[a]?.title ?? a}`)
         const outgoing = E.filter(([a]) => a === id).map(([, b, kind]) => `${relationLabel(kind)} → ${N[b]?.title ?? b}`)
+        const kind = n.k === "item" ? t("shell:graph.item") : n.k === "work" ? t("shell:graph.work") : n.k === "sess" ? t("shell:graph.session") : ""
         const status = n.k === "item" ? ST[n.st]?.[0] : n.k === "sess" ? SS[n.st]?.[0] : n.k === "work" ? t(`shell:graph.workStatus.${n.st}` as any) : t("shell:graph.missing")
         return <button key={id} type="button" onClick={() => setPicked(id)} aria-pressed={selected === id} className="w-full rounded-lg border bg-card p-3 text-left type-footnote" data-graph-list-node={id}>
-          <span className="block break-words font-medium">{n.title}</span>
-          <span className="mt-1 block break-words text-muted-foreground">{status}{n.b && ` · ${botName(n.b)}`}{n.arch && ` · ${t("shell:graph.archived")}`}</span>
+          <span className="block break-words font-medium">{n.k === "item" && <span className="mr-1.5 font-mono font-normal text-muted-foreground">{n.id}</span>}{n.title}</span>
+          {/* the kind first, as on a card: an item and the work unit it came from often share a title */}
+          <span className="mt-1 block break-words text-muted-foreground">{kind && `${kind} · `}{status}{n.b && ` · ${botName(n.b)}`}{n.arch && ` · ${t("shell:graph.archived")}`}</span>
           {incoming.length > 0 && <span className="mt-1 block break-words text-muted-foreground">{incoming.join(" · ")}</span>}
           {outgoing.length > 0 && <span className="mt-1 block break-words text-muted-foreground">{outgoing.join(" · ")}</span>}
         </button>
@@ -112,7 +119,8 @@ export function GraphLegend() {
       {[[t("shell:graph.dep"), "var(--foreground)", ""], [t("shell:graph.source"), "var(--blue)", "5 4"], [t("shell:graph.contains"), "var(--border)", "2 5"]].map(([l, c, d]) => (
         <span key={l} className="inline-flex items-center gap-1.5"><svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke={c} strokeWidth="1.5" strokeDasharray={d} /></svg>{l}</span>
       ))}
-      <span>{t("shell:graph.hint")}</span>
+      {/* a phone gets a list, not a canvas to drag */}
+      <span className="max-sm:hidden">{t("shell:graph.hint")}</span>
     </div>
   )
 }

@@ -22,7 +22,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Robot, Face, AVATAR_COLORS } from "@/robot"
 import {
   st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
-  setSetting, toast, finishOnboarding, emit,
+  setSetting, toast, finishOnboarding, emit, closedSt,
 } from "@/store"
 import { api, type RKindReview } from "@/api"
 import { go, Page, BotAvatar, Group, ItemNo, KindTag, Row, SectionLabel, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute } from "@/ui"
@@ -108,7 +108,7 @@ export function DeleteBotDialog({ k }: { k: string }) {
   const b = st.bots[k]
   const [to, setTo] = useState("steve"), [mem, setMem] = useState<"删除" | "导出">("导出")
   if (!b) return null
-  const mine = st.items.filter((i) => i.b === k && !["done", "drop"].includes(i.st))
+  const mine = st.items.filter((i) => i.b === k && !closedSt(i.st))
   return (
     <AlertDialog open onOpenChange={(o) => !o && closeSheet()}>
       <AlertDialogContent className="sm:max-w-[480px]!">
@@ -208,7 +208,7 @@ export function BotView({ k }: { k: string }) {
   const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
   const effort = fm.reasoningEffort ?? b.reasoningEffort ?? ""
   const set = (p: any) => setForm({ ...fm, reasoningEffort: effort, ...p })
-  const mine = st.items.filter((i) => i.b === k && !["done", "drop"].includes(i.st) && !i.arch)
+  const mine = st.items.filter((i) => i.b === k && !closedSt(i.st) && !i.arch)
   const tabs = BOT_TABS.map(([v, l]) => [v, t(`manage:detail.${l}`)] as const)
   return (
     <Page title={b.main ? b.n : t("manage:bot.name", { name: b.n })} back={["#/bots", "Bot"]} max={720}

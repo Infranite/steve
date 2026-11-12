@@ -460,7 +460,7 @@ export default {
     askPh: "例如：默认交给开发 Bot；说明里加上“前端用 shadcn”",
     active: "进行中的事项 · {{count}}",
     noActive: "没有进行中的事项",
-    recentDone: "最近完成",
+    recentDone: "最近结束",
     settings: "设置",
     descHint: "Steve 按这段说明判断事项该不该放进这个项目",
     defaultBot: "默认 Bot",

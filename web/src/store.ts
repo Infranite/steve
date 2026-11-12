@@ -112,6 +112,8 @@ type Tone = "accent" | "orange" | "green" | "neutral" | "red"
 /* fail: an item the Hub closed as failed (its cycle ended in failure) */
 const ST_TONE = { prop: "accent", block: "neutral", run: "accent", wait: "orange", pause: "neutral", done: "green", drop: "neutral", fail: "red" } as const
 export const ST: Record<string, [string, Tone]> = live(Object.keys(ST_TONE) as (keyof typeof ST_TONE)[], (k) => [t(`core:itemStatus.${k}`), ST_TONE[k]])
+/** a closed item's status: done, dropped, or closed as failed (the Hub's outcome `failed`) */
+export const closedSt = (s?: string) => s === "done" || s === "drop" || s === "fail"
 const SS_TONE = { run: "accent", wait: "orange", idle: "neutral", ended: "neutral" } as const
 export const SS: Record<string, [string, "accent" | "orange" | "green" | "neutral"]> = live(Object.keys(SS_TONE) as (keyof typeof SS_TONE)[], (k) => [t(`core:sessStatus.${k}`), SS_TONE[k]])
 const WAIT_TYPES = ["approve", "ask", "accept", "propose", "fail", "confirm"] as const
@@ -336,7 +338,7 @@ function itemRel(id: string, ds: RDecision[]): Rel | undefined {
  * went on or finished, or you closed it. Closed ones are remembered by the Hub with the closed notifications (setting
  * noticeDismissed: notification ids and decision ids), so a refresh or another device does not bring them back.
  * The failure itself stays in the item's timeline and in the notifications. */
-const finished = (s?: string) => s === "done" || s === "drop"
+const finished = closedSt
 export function alertClosed(key?: string) {
   const xs = raw.state?.settings.noticeDismissed as unknown
   return !!key && Array.isArray(xs) && xs.includes(key)
@@ -785,7 +787,7 @@ export const isThinking = () => st.thinking
 export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? t("common:state.none")
 export const depsOpen = (i: Item) => (i.deps || []).filter((d) => st.items.find((x) => x.id === d)?.st !== "done")
 export function stageOf(i: Item): string {
-  if (i.st === "prop") return "分流"; if (i.st === "block") return "规划"; if (i.st === "done" || i.st === "drop") return "收尾"
+  if (i.st === "prop") return "分流"; if (i.st === "block") return "规划"; if (closedSt(i.st)) return "收尾"
   if (i.wait?.type === "accept") return "交付与验收"; if (i.wait?.type === "propose") return "规划"
   if (/发布/.test(i.now)) return "收尾"
   if (/^正在开始|刚开始/.test(i.now)) return "定义"; return "执行"
@@ -1014,7 +1016,7 @@ export async function qSendNow(sid: string, qid: string) {
 export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void call(api.goal(id, v), t("core:toast.goalUpdated")) }
 export function reassign(id: string, k: string) { if (k === it(id).b) return; void call(api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
 export function setSt(id: string, s: Item["st"]) {
-  const i = it(id), action = s === "pause" ? "pause" : s === "drop" ? "drop" : ["done", "drop"].includes(i.st) ? "reopen" : "resume"
+  const i = it(id), action = s === "pause" ? "pause" : s === "drop" ? "drop" : closedSt(i.st) ? "reopen" : "resume"
   void call(api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", reopen: "core:toast.reopened", resume: "core:toast.resumed" } as const)[action]))
 }
 /** mark done right away; the toast can take it back (the Hub restores the item as it was) */

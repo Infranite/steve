@@ -10,9 +10,10 @@ import { Textarea } from "@/components/ui/textarea"
 import { AskSteve } from "@/config-ui"
 import { crumbs, emptyNote, lookUp, nameOf, narrowed, projectNodes } from "@/dir-browse"
 import { GitHubLine } from "@/github/index"
+import { itemDisplayStatus } from "@/item-workflow-relation"
 import { LaneSection } from "@/lane"
 import { RecentStats } from "@/stats/drill"
-import { botName, newProject, newWorkspace, patchProject, st, toast } from "@/store"
+import { botName, closedSt, newProject, newWorkspace, patchProject, st, toast } from "@/store"
 import { BotName, closeSheet, Empty, go, Group, Meta, openSheet, Page, Row, SectionLabel } from "@/ui"
 import { ItemRowExport as ItemRow, Select } from "@/view-shared"
 import { YoloProjectSelect } from "@/yolo/badges"
@@ -46,7 +47,7 @@ export function NewWorkspaceDialog() {
 /* ── 项目 ── */
 export function ProjectsView() {
   const t = useT()
-  const ps = st.projects, running = (id: string) => st.items.filter((i) => i.project === id && ["run", "wait", "block"].includes(i.st) && !i.arch).length
+  const ps = st.projects, running = (id: string) => st.items.filter((i) => i.project === id && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
   return (
     <Page title={t("pages:projects.title")} sub={t("pages:projects.sub", { space: st.workspace?.name })} max={720}
       actions={<Button size="sm" onClick={() => openSheet("newProject")} data-new-project><PlusIcon />{t("pages:projects.newProject")}</Button>}>
@@ -67,7 +68,7 @@ export function ProjectView({ id }: { id: string }) {
   const [n, setN] = useState(p?.name ?? ""), [d, setD] = useState(p?.description ?? "")
   useEffect(() => { setN(p?.name ?? ""); setD(p?.description ?? "") }, [p?.updated])
   if (!p) return <Page title={t("pages:projects.title")} back={["#/projects", t("pages:projects.title")]}><Empty title={t("pages:projects.notFound")} sub={t("pages:projects.notFoundSub")} /></Page>
-  const mine = st.items.filter((i) => i.project === p.id && !["done", "drop"].includes(i.st) && !i.arch), done = st.items.filter((i) => i.project === p.id && ["done", "drop"].includes(i.st) && !i.arch).slice(0, 5)
+  const mine = st.items.filter((i) => i.project === p.id && !closedSt(i.st) && !i.arch), done = st.items.filter((i) => i.project === p.id && closedSt(i.st) && !i.arch).slice(0, 5)
   const dirty = n.trim() !== p.name || d.trim() !== p.description
   return (
     <Page title={p.name} back={["#/projects", t("pages:projects.title")]} max={720} sub={<Meta><span className="font-mono">{home(p.path)}</span><span>{p.kind === "git" ? t("pages:projects.gitRepo") : t("pages:projects.plainDir")}</span><span>{t("pages:projects.onDevice", { device: st.devices.find((x) => x.id === p.device_id)?.name ?? "Hub" })}</span><RecentStats project={p.id} /></Meta>}

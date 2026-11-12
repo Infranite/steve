@@ -42,7 +42,7 @@ const ACTIVE: AgentStatus[] = ["starting", "running", "unconfirmed"]
 export const isActive = (s: AgentStatus) => ACTIVE.includes(s)
 export const isOver = (s: AgentStatus) => s === "done" || s === "failed" || s === "stopped"
 
-const ITEM_STATUS: Record<string, AgentStatus> = { prop: "proposed", run: "running", wait: "asking", pause: "paused", block: "blocked", done: "done", drop: "stopped" }
+const ITEM_STATUS: Record<string, AgentStatus> = { prop: "proposed", run: "running", wait: "asking", pause: "paused", block: "blocked", done: "done", drop: "stopped", fail: "failed" }
 export function itemStatus(item: TreeItem): AgentStatus {
   return ITEM_STATUS[item.st] ?? "pending"
 }

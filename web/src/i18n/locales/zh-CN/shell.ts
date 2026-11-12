@@ -826,7 +826,9 @@ export default {
     dep: "依赖",
     project: "项目",
     run: "执行",
-    hint: "· 选择节点查看详情，再显式打开；可拖动和缩放",
+    hint: "选择节点查看详情，再显式打开；可拖动和缩放",
+    emptyBlocking: "事项之间还没有前后置或阻塞关系。",
+    emptyLineage: "事项还没有来源或派生关系。",
   },
   /* workspace-switcher.tsx */
   space: {

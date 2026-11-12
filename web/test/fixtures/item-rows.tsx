@@ -27,6 +27,10 @@ st.items = [
   item("ST-18", "旧评审", { phase: "closed", src: ["协作工作", "workflow"], parent: { item: "ST-5" }, now: "已失败但保留旧状态" }),
   item("ST-27", "另一项", { now: "正在处理" }),
   item("ST-28", "普通派生", { parent: { item: "ST-27" }, now: "独立工作" }),
+  /* a child whose summary is a long error: the relation still reads in full */
+  item("ST-31", "独立审查状态判定", { src: ["协作工作", "workflow"], parent: { item: "ST-10" }, now: "失败：Internal error: API Error: 400 the request was rejected as invalid because the upstream refused it" }),
+  /* closed as failed: a finished row in its own group, not lost from the list */
+  item("ST-43", "独立审查回归覆盖", { st: "fail", phase: "closed", now: "失败：评审不通过" }),
   item("ST-29", "已结束的旧单元", { st: "done", phase: "closed", src: ["协作工作", "workflow"], parent: { item: "ST-27" }, now: "已完成" }),
 ]
 st.items[3].waits = [st.items[3].wait!]

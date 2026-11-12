@@ -57,3 +57,8 @@ test("cost rolls up the Hub's whole subtree; time runs until the end", () => {
   assert.equal(elapsed(stat("A", null, 0, { first_turn: 1000 }), "failed", 9000), 5, "an ended node without an end mark shows its agent time")
   assert.equal(elapsed(undefined, "running", 9000), null)
 })
+
+test("an item closed as failed is a failed node, not one still to start", () => {
+  const tree = buildAgentTree("ST-1", [item("ST-1"), item("ST-2", { st: "fail", parent: { item: "ST-1" } })])
+  assert.equal(tree.children[0].status, "failed")
+})

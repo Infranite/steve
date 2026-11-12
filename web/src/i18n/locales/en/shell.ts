@@ -861,7 +861,9 @@ export default {
     dep: "Depends on",
     project: "Project",
     run: "Runs",
-    hint: "· Select a node for details, then open it explicitly; drag and zoom to explore",
+    hint: "Select a node for details, then open it explicitly; drag and zoom to explore",
+    emptyBlocking: "No items depend on or block each other yet.",
+    emptyLineage: "No items have a source or derived work yet.",
   },
   space: {
     tooltip: "Space · {{name}}",

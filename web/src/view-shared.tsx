@@ -4,7 +4,7 @@ import { Field, FieldContent, FieldDescription, FieldLabel, FieldTitle } from "@
 import { Progress } from "@/components/ui/progress"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { SelectContent, SelectItem, SelectTrigger, SelectValue, Select as UISelect } from "@/components/ui/select"
-import { botName, closeRel, depsOpen, kindOf, st, WACT, waitLine, type Item } from "@/store"
+import { botName, closedSt, closeRel, depsOpen, kindOf, st, WACT, waitLine, type Item } from "@/store"
 import { itemDisplayStatus, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
 import { BotAvatar, go, ItemNo, KindTag, Meta, RelNote, StatusDot, Tags } from "@/ui"
 import { cn } from "cn"
@@ -50,14 +50,14 @@ export function PlanBar({ i, warn }: { i: Item; warn?: boolean }) {
  *  `proj` / `bot` off: the list is already about one project or bot, so the row doesn't repeat it */
 export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: () => void; proj?: boolean; bot?: boolean }) {
   const t = useT()
-  const on = selected.has(i.id), closed = i.st === "done" || i.st === "drop", w = i.wait
+  const on = selected.has(i.id), closed = closedSt(i.st), w = i.wait
   const relation = workflowRelation(i, st.items)
   const planOpen = !!i.plan?.length && i.plan.some((x) => x[1] !== 1)
   const extra = [
-    i.ss.length > 1 && <span key="ss">{t("shell:item.sessions", { count: i.ss.length })}</span>,
-    i.q.length > 0 && <span key="q">{t("shell:item.queued", { count: i.q.length })}</span>,
-    i.parent && <span key="p" className="inline-flex items-center gap-1"><GitBranchIcon className="size-3" />{t("shell:item.forked")}</span>,
-    !!i.deps?.length && <span key="d">{t("shell:item.deps", { done: i.deps.length - depsOpen(i).length, total: i.deps.length })}</span>,
+    i.ss.length > 1 && <span key="ss" className="shrink-0 whitespace-nowrap">{t("shell:item.sessions", { count: i.ss.length })}</span>,
+    i.q.length > 0 && <span key="q" className="shrink-0 whitespace-nowrap">{t("shell:item.queued", { count: i.q.length })}</span>,
+    i.parent && <span key="p" className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap"><GitBranchIcon className="size-3" />{t("shell:item.forked")}</span>,
+    !!i.deps?.length && <span key="d" className="shrink-0 whitespace-nowrap">{t("shell:item.deps", { done: i.deps.length - depsOpen(i).length, total: i.deps.length })}</span>,
   ].filter(Boolean)
   const side = (
     <span className="ml-auto flex shrink-0 items-center gap-2.5 pl-2 type-footnote text-muted-foreground">
@@ -93,7 +93,7 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
         )}
         {!closed && !w && (i.now || relation || extra.length > 0) && (
           <Meta className="mt-0.5 flex-nowrap pl-14">
-            {relation && <span className="min-w-0 truncate type-callout font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</span>}
+            {relation && <span className="min-w-0 max-w-[60%] shrink-0 truncate type-callout font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</span>}
             {i.now && relation?.kind !== "paused" && relation?.kind !== "previous" && <span className="min-w-0 truncate type-callout" data-item-now>{i.now}</span>}
             {extra}
           </Meta>

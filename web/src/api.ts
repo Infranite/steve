@@ -3,7 +3,7 @@ import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
 import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
 import type { Workflow } from "./workflow"
-export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"
+export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "fail" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type RItem = {
   id: string; workspace_id: string; no: number; title: string; status: ItemStatus; stage: string; bot_id: string | null; project_id: string | null; cwd: string | null; branch: string | null

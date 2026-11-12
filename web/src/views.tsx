@@ -34,7 +34,7 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -129,7 +129,7 @@ export function ItemsView() {
   if (sortBy === "due") xs = [...xs].sort((a, b) => (a.due ? 0 : 1) - (b.due ? 0 : 1))
   if (sortBy === "pri") xs = [...xs].sort((a, b) => PRI_ORDER[a.pri ?? "中"] - PRI_ORDER[b.pri ?? "中"])
   if (sortBy === "no") xs = [...xs].sort((a, b) => +b.id.split("-")[1] - +a.id.split("-")[1])
-  const groups: [Item["st"], string][] = [["wait", t("views:items.groupWait")], ["prop", t("views:items.groupProp")], ["run", t("views:items.groupRun")], ["block", t("views:items.groupBlock")], ["pause", t("views:items.groupPause")], ["done", t("views:items.groupDone")], ["drop", t("views:items.groupDrop")]]
+  const groups: [Item["st"], string][] = [["wait", t("views:items.groupWait")], ["prop", t("views:items.groupProp")], ["run", t("views:items.groupRun")], ["block", t("views:items.groupBlock")], ["pause", t("views:items.groupPause")], ["done", t("views:items.groupDone")], ["fail", t("views:items.groupFail")], ["drop", t("views:items.groupDrop")]]
   const seg = <Segmented value={itemsView} onChange={(v) => { itemsView = v; selecting = false; selected.clear(); r() }} options={[["list", t("views:items.viewList")], ["board", t("views:items.viewBoard")], ["graph", t("views:items.viewGraph")]] as const} />
   const pick = selecting ? (id: string) => () => { selected.has(id) ? selected.delete(id) : selected.add(id); r() } : () => undefined
   const ids = [...selected]
@@ -152,7 +152,8 @@ export function ItemsView() {
         </AlertDialogContent>
       </AlertDialog>
       <div className="mb-4 sm:hidden">{seg}</div>
-      <div className="mb-4 flex flex-wrap items-center gap-1.5 border-b pb-3" data-items-toolbar>
+      {/* the graph draws every item's relations, so the list filters would only look like they apply */}
+      {itemsView !== "graph" && <div className="mb-4 flex flex-wrap items-center gap-1.5 border-b pb-3" data-items-toolbar>
         <Chips value={filtLabel(filt)} onChange={(v) => { filt = FILTS.find((k) => filtLabel(k) === v) ?? "all"; done() }} options={FILTS.map(filtLabel)} />
         <span className="flex-1" />
         <Select quiet className={FILTER(kindF !== "all")} testId="kind-filter" value={tag(kindF) ? kindF : "all"} onChange={(v) => { kindF = v; r() }} options={[{ v: "all", l: t("views:items.allKinds") }, ...kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))]} />
@@ -161,7 +162,7 @@ export function ItemsView() {
         <Select quiet className={FILTER(botF !== "all")} testId="bot-filter" value={botF} onChange={(v) => { botF = v; r() }} options={[{ v: "all", l: t("views:items.allBots") }, ...Object.keys(st.bots).map((k) => ({ v: k, l: <BotName k={k} /> }))]} />
         {itemsView === "list" && <Select quiet className={FILTER(sortBy !== "updated")} testId="sort" value={sortBy} onChange={(v) => { sortBy = v as ItemsSort; r() }} options={SORTS.map((v) => ({ v, l: sortLabel(v) }))} />}
         <label className="relative"><SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-tertiary" /><Input className={cn("h-7 rounded-lg pl-8 text-[13px] transition-[width] duration-200", q ? "w-40" : "w-8 cursor-pointer border-transparent bg-transparent placeholder:text-transparent focus:w-40 focus:cursor-text focus:border-border focus:placeholder:text-muted-foreground")} placeholder={t("views:items.search")} aria-label={t("views:items.search")} data-items-search defaultValue={q} onChange={(e) => { q = e.target.value; r() }} /></label>
-      </div>
+      </div>}
       {selecting && (
         <div className="sticky top-0 z-10 mb-4 flex flex-wrap items-center gap-2 rounded-xl border bg-background/95 px-3 py-2 backdrop-blur" data-bulk-bar>
           <span className="type-callout">{t("views:items.selected", { count: ids.length })}</span>
@@ -173,7 +174,7 @@ export function ItemsView() {
       {itemsView === "list" && (xs.length ? (arch || sortBy !== "updated"
         ? <Group>{xs.map(rowOf)}</Group>
         : <div className="flex flex-col gap-5">{groups.map(([s, l]) => {
-            const g = xs.filter((i) => itemDisplayStatus(i) === s), fold = (s === "done" || s === "drop") && !openGroups.has(s) && g.length > CLOSED_SHOWN + 2
+            const g = xs.filter((i) => itemDisplayStatus(i) === s), fold = closedSt(s) && !openGroups.has(s) && g.length > CLOSED_SHOWN + 2
             return g.length ? (
               <section key={s} data-items-group={s}>
                 <SectionLabel className="mb-1 px-0.5" right={fold || openGroups.has(s) ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { openGroups.has(s) ? openGroups.delete(s) : openGroups.add(s); r() }} data-group-more={s}>{fold ? t("views:items.showAll", { count: g.length }) : t("views:items.collapse")}</Button> : undefined}>
@@ -184,7 +185,7 @@ export function ItemsView() {
         : <Empty title={arch ? t("views:items.emptyArch") : st.items.length ? t("views:items.emptyFiltered") : t("views:items.emptyNone")} sub={arch ? (st.cfg.archDays === "0" ? t("views:items.archManual") : t("views:items.archAuto", { count: Number(st.cfg.archDays) })) : st.items.length ? undefined : t("views:items.emptyNoneSub")} />)}
       {itemsView === "board" && (
         <div className="-mx-1 grid auto-cols-[minmax(232px,1fr)] grid-flow-col gap-3 overflow-x-auto px-1 pb-2">
-          {groups.filter((g) => g[0] !== "drop").map(([s, l]) => { const g = xs.filter((i) => itemDisplayStatus(i) === s); return (
+          {groups.filter((g) => g[0] !== "drop" && g[0] !== "fail").map(([s, l]) => { const g = xs.filter((i) => itemDisplayStatus(i) === s); return (
             <div key={s} className="flex min-h-72 flex-col gap-2 rounded-xl bg-muted/60 p-2">
               <div className="flex items-center gap-2 px-2 py-1.5 type-label"><StatusDot s={s} />{l}<span className="tabular-nums text-muted-foreground">{g.length}</span></div>
               {g.map((i) => { const relation = workflowRelation(i, st.items); return (
@@ -192,7 +193,9 @@ export function ItemsView() {
                   <ItemNo id={i.id} /><div className="mt-0.5 type-callout font-medium">{i.t}</div>
                   {relation && <div className="mt-1 type-footnote font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</div>}
                   {relation?.kind !== "paused" && relation?.kind !== "previous" && <div className="mt-1 line-clamp-2 type-footnote text-muted-foreground">{i.now}</div>}
-                  <Tags ids={i.tags} max={2} className="mt-2" /><Meta className="mt-2"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}{i.plan && <PlanBar i={i} />}</Meta>
+                  <Tags ids={i.tags} max={2} className="mt-2" />
+                  {/* the plan bar keeps its own corner so a narrow card never wraps it under a dangling separator */}
+                  <div className="mt-2 flex items-center gap-2 type-footnote text-muted-foreground"><Meta className="min-w-0 flex-1"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}</Meta>{i.plan && <PlanBar i={i} />}</div>
                 </button>
               ) })}
             </div>) })}
@@ -221,14 +224,15 @@ function Modal({ open, title, desc, children, footer, wide }: { open: boolean; t
 }
 export function ForkDialog({ k, at }: { k: string; at: number }) {
   const t = useT()
-  const s = st.S[k], e = s?.ev[at]
+  /* the last thing said up to the fork point (a turn's end or a tool call has no words to show) */
+  const s = st.S[k], said = s?.ev.slice(0, at + 1).findLast((x) => ["u", "a", "ask"].includes(x?.[0]) && typeof x[1] === "string" && x[1].trim())?.[1] as string | undefined
   const [mode, setMode] = useState<"item" | "sess">("item"), [g, setG] = useState(""), [busy, setBusy] = useState(false)
   useEffect(() => { if (s && !s.loaded) void loadEvents(k) }, [k])
   if (!s) return null
   return (
     <Modal open title={t("views:fork.title")} desc={t("views:fork.desc")}
       footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="fork-go" disabled={busy} onClick={async () => { setBusy(true); const to = await doFork(k, at, g.trim(), mode === "sess"); closeSheet(); go(to) }}>{busy && <Spinner className="size-3.5" />}{t("views:fork.go")}</Button></>}>
-      {e && <div className="line-clamp-3 rounded-lg bg-muted px-3.5 py-2.5 type-callout text-muted-foreground">{String(e[1])}</div>}
+      {said && <div className="line-clamp-3 rounded-lg bg-muted px-3.5 py-2.5 type-callout text-muted-foreground" data-fork-quote>{said}</div>}
       <FieldGroup className="gap-4">
         <Field><FieldLabel>{t("views:fork.as")}</FieldLabel>
           <ChoiceCards value={mode} onChange={setMode} cols={s.item ? 2 : 1} options={[{ v: "item", t: t("views:fork.asItem"), d: t("views:fork.asItemDesc") }, ...(s.item ? [{ v: "sess" as const, t: t("views:fork.asSess"), d: t("views:fork.asSessDesc") }] : [])]} /></Field>
@@ -272,7 +276,7 @@ export function LinkDialog({ k }: { k: string }) {
   const t = useT()
   return (
     <Modal open title={t("views:link.title")} desc={t("views:link.desc")}>
-      <Group>{st.items.filter((i) => !["done", "drop"].includes(i.st)).map((i) => (
+      <Group>{st.items.filter((i) => !closedSt(i.st)).map((i) => (
         <Row key={i.id} title={i.t} onClick={() => { link(k, i.id); closeSheet() }}><Status s={i.st} /></Row>
       ))}</Group>
     </Modal>
@@ -283,6 +287,30 @@ export function LinkDialog({ k }: { k: string }) {
 let dtab: "动态" | "产出" = "动态"; let lastItem = ""; let feedMode: "key" | "all" = "all"
 /* system lines worth keeping in the “重要” view; the rest (建立、来自信号…) is shown only in “全部” */
 const KEY_SYS = /派生|交付|目标更新|前置|开新会话|交接|自动开始|暂停|放弃|继续|关联|发布|rebase|冲突|失败|回到 /
+/* a long goal (a pasted brief) folds to its first lines so the page still opens on what is happening */
+function GoalText({ text, children }: { text: string; children: ReactNode }) {
+  const t = useT()
+  const ref = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false), [long, setLong] = useState(false)
+  useEffect(() => { setOpen(false) }, [text])
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const measure = () => setLong(el.scrollHeight > el.clientHeight + 1)
+    measure()
+    const ro = new ResizeObserver(measure); ro.observe(el)
+    return () => ro.disconnect()
+  }, [text, open])
+  return <>
+    <div ref={ref} className={cn(!open && "max-h-48 overflow-hidden", !open && long && "[mask-image:linear-gradient(to_bottom,black_70%,transparent)]")} data-goal-text>
+      <Markdown text={text} className="type-body text-foreground/80" />
+    </div>
+    <div className="mt-1 flex items-center gap-2 type-footnote text-muted-foreground">
+      {(long || open) && <button type="button" className="font-medium text-foreground/80 hover:text-foreground" onClick={() => setOpen(!open)} aria-expanded={open} data-goal-more>{open ? t("views:item.goalLess") : t("views:item.goalMore")}</button>}
+      {children}
+    </div>
+  </>
+}
 function Prop({ label, children, top }: { label: string; children: ReactNode; top?: boolean }) {
   return <><dt className={cn("pt-1.5 type-footnote text-muted-foreground", top && "pt-1")}>{label}</dt><dd className="min-w-0 type-callout">{children}</dd></>
 }
@@ -397,13 +425,13 @@ export function ItemView({ id }: { id: string }) {
         <DropdownMenuItem onClick={() => { const k = i.ss[i.ss.length - 1]; openSheet("fork", { k, at: Math.max(0, (st.S[k]?.seqs.length ?? 1) - 1) }) }} disabled={!i.ss.length}>{t("views:item.fork")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => { navigator.clipboard?.writeText(location.href).catch(() => {}); toast(t("views:item.linkCopied")) }}><LinkIcon />{t("views:item.copyLink")}</DropdownMenuItem>
         <DropdownMenuSeparator />
-        {["done", "drop"].includes(i.st) && <DropdownMenuItem onClick={() => { archive([i.id], !i.arch); if (!i.arch) return; go("#/items") }} data-archive><ArchiveIcon />{i.arch ? t("views:item.restore") : t("views:item.archive")}</DropdownMenuItem>}
+        {closedSt(i.st) && <DropdownMenuItem onClick={() => { archive([i.id], !i.arch); if (!i.arch) return; go("#/items") }} data-archive><ArchiveIcon />{i.arch ? t("views:item.restore") : t("views:item.archive")}</DropdownMenuItem>}
         {i.arch && <DropdownMenuItem variant="destructive" onClick={() => setConfirmDel(true)} data-delete><TrashIcon />{t("views:item.deleteForever")}</DropdownMenuItem>}
       </DropdownMenuContent>
     </DropdownMenu>
   </>
   /* always-visible quick actions beside the title; labels fold into icons on narrow screens */
-  const over = ["done", "drop"].includes(i.st)
+  const over = closedSt(i.st)
   const [pl, PI, pa] = over ? [t("views:item.reopen"), RotateCcwIcon, () => setSt(i.id, "run")] as const
     : i.st === "pause" ? [t("views:item.resume"), PlayIcon, () => setSt(i.id, "run")] as const
     : [t("views:item.pause"), PauseIcon, () => setSt(i.id, "pause")] as const
@@ -429,12 +457,11 @@ export function ItemView({ id }: { id: string }) {
                 <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => { saveGoal(i.id, gtxt.trim()); setEditing(false) }}>{t("views:item.saveAs", { n: i.goals.length + 1 })}</Button><Button size="sm" variant="ghost" onClick={() => setEditing(false)}>{t("common:action.cancel")}</Button><FieldDescription className="type-footnote">{t("views:item.goalHint")}</FieldDescription></div></Field>
             ) : (
               <div className="group/goal">
-                <Markdown text={i.goals[i.goals.length - 1]} className="type-body text-foreground/80" />
-                <div className="mt-1 flex items-center gap-2 type-footnote text-muted-foreground">
+                <GoalText text={i.goals[i.goals.length - 1]}>
                   <span>{t("views:item.goalVersion", { n: i.goals.length })}</span>
                   {i.goals.length > 1 && <Collapsible><CollapsibleTrigger className="hover:text-foreground">{t("views:item.history")}</CollapsibleTrigger><CollapsibleContent className="mt-1">{i.goals.slice(0, -1).map((g, n) => <div key={n}>{t("views:item.historyRow", { n: n + 1, goal: g })}</div>)}</CollapsibleContent></Collapsible>}
                   <button type="button" className="opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/goal:opacity-100 [@media(hover:none)]:opacity-100" data-edit-goal onClick={() => { setG(i.goals[i.goals.length - 1]); setEditing(true) }}>{t("views:item.edit")}</button>
-                </div>
+                </GoalText>
               </div>
             )}
           </section>
@@ -470,7 +497,7 @@ export function ItemView({ id }: { id: string }) {
         <Composer draftKey={draftKey(st.workspace?.id, "item", i.id)} handle={itemComposer} placeholder={t("views:item.composer", { id: i.id })} testId="item" onSend={(text, files) => supp(i.id, text, target, files)}
           left={<Segmented size="sm" value={targets.includes(target) ? target : "auto"} onChange={setTarget} options={targets.map((x) => [x, targetLabel[x]] as const)} />} />
       </div></div></div>}
-      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><Status s={i.st} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span></Meta>}>
+      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><Status s={itemDisplayStatus(i)} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span></Meta>}>
       {st.yolo && !over && <div className="-mt-3 mb-5"><YoloItemSwitch i={i} /></div>}
       {debugOpen && <ItemDebugDialog item={i.id} onClose={() => setDebugOpen(false)} />}
       <AlertDialog open={confirmDel} onOpenChange={setConfirmDel}>
@@ -493,7 +520,7 @@ export function ItemView({ id }: { id: string }) {
               {STAGES.slice(2).map((g, n, arr) => { const cur = STAGES.indexOf(stageOf(i) as any), me = STAGES.indexOf(g); return (
                 <span key={g} className="inline-flex items-center gap-1"><span className={cn(me === cur ? "font-medium text-foreground" : me < cur ? "text-muted-foreground" : "text-tertiary")}>{t(STAGE_LABEL[g])}</span>{n < arr.length - 1 && <ChevronRightIcon className="size-3 text-tertiary" />}</span>) })}
             </div>
-            <div className="flex items-center gap-2"><StatusDot s={i.st} /><span className={cn("type-headline", i.st === "run" && "shimmer shimmer-once")}>{i.now}</span></div>
+            <div className="flex items-center gap-2"><StatusDot s={itemDisplayStatus(i)} /><span className={cn("type-headline", itemDisplayStatus(i) === "run" && "shimmer shimmer-once")}>{i.now}</span></div>
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-2" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
             {(i.plan || i.rounds.length > 0) && <Plan i={i} />}
           </section>
@@ -515,16 +542,18 @@ export function ItemView({ id }: { id: string }) {
         </div>
         {/* properties: one aligned label column, controls stay quiet until hovered */}
         <aside className="flex flex-col gap-8">
-          <dl className="grid grid-cols-[64px_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5">
-            <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} />{B && <div className="pl-2 type-footnote text-muted-foreground">{B.h} · {B.m}</div>}</Prop>
+          {/* the label column fits the longest label (English runs wider than 64px); quiet selects pull their padding
+            * into the gap so every value starts on the same edge */}
+          <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
+            <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} />{B && <div className="type-footnote text-muted-foreground">{B.h} · {B.m}</div>}</Prop>
             <ItemPeopleProp id={i.id} Prop={Prop} />
-            <Prop label={t("views:item.propKind")}><Select quiet testId="kind" value={kindOf(i) ?? ""} onChange={(k) => setKind(i.id, k)} options={kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))} />{kindOf(i) && <div className="pl-2 type-footnote text-muted-foreground">{tag(kindOf(i)!)?.desc}</div>}</Prop>
+            <Prop label={t("views:item.propKind")}><Select quiet testId="kind" value={kindOf(i) ?? ""} onChange={(k) => setKind(i.id, k)} options={kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))} />{kindOf(i) && <div className="type-footnote text-muted-foreground">{tag(kindOf(i)!)?.desc}</div>}</Prop>
             <Prop label={t("views:item.propTags")}><div className="flex flex-col gap-1.5 pt-1" data-item-tags>
               <Tags ids={(i.tags ?? []).filter((x) => !isKind(tag(x)))} onRemove={(id) => setTags(i.id, (i.tags ?? []).filter((x) => x !== id))} />
               <TagPicker i={i} /></div></Prop>
             <Prop label={t("views:item.propPri")}><Select quiet testId="pri" value={i.pri ?? "中"} onChange={(v) => patchItem(i.id, { pri: v as Item["pri"] })} options={["高", "中", "低"].map((v) => ({ v, l: labelOf(PRI_LABEL, v) }))} /></Prop>
             <Prop label={t("views:item.propDue")}><Select quiet testId="due" value={i.due ?? "无"} onChange={(v) => patchItem(i.id, { due: v === "无" ? undefined : v })} options={[...new Set(["无", i.due ?? "无", "今天 18:00", "明天", "周五", "下周一"])].map((v) => ({ v, l: dueLabel(v) }))} /></Prop>
-            <Prop label={t("views:item.propAcc")}><Select quiet testId="acc" value={accKey(i.acc)} onChange={(v) => setAcc(i.id, v)} options={["inherit", "manual", "auto"].map((k) => ({ v: k, l: ACC[k] }))} />{accKey(i.acc) === "inherit" && <div className="pl-2 type-footnote text-muted-foreground">{t("views:item.accEffective", { mode: accOf(i) })}</div>}</Prop>
+            <Prop label={t("views:item.propAcc")}><Select quiet testId="acc" value={accKey(i.acc)} onChange={(v) => setAcc(i.id, v)} options={["inherit", "manual", "auto"].map((k) => ({ v: k, l: ACC[k] }))} />{accKey(i.acc) === "inherit" && <div className="type-footnote text-muted-foreground">{t("views:item.accEffective", { mode: accOf(i) })}</div>}</Prop>
             <Prop label={t("views:item.propDeps")}>
               <div className="flex flex-col gap-1 pt-1" data-deps>
                 {(i.deps || []).filter((d) => st.items.some((x) => x.id === d)).map((d) => { const x = it(d); return (
@@ -545,7 +574,7 @@ export function ItemView({ id }: { id: string }) {
               <NativeIdLine k={k} label="ID" /></div>) : <span className="text-muted-foreground">{t("common:state.empty")}</span>}</div></Prop>
             <ItemStatsRows id={i.id} render={(u, time, href) => <><Prop label={t("views:item.propUsage")}><a href={href} className="block pt-1 hover:underline" data-item-usage>{u}</a></Prop><Prop label={t("views:item.propTime")}><a href={href} className="block pt-1 hover:underline" data-item-time>{time}</a></Prop></>} />
             <Prop label={t("views:item.propProject")}><Select quiet testId="project" value={i.project ?? "none"} onChange={(v) => patchItem(i.id, { project: v === "none" ? null : v })} options={[{ v: "none", l: t("common:state.none") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} />
-              {i.projNext && <div className="pl-2 type-footnote text-muted-foreground">{t("views:item.projNext")}</div>}</Prop>
+              {i.projNext && <div className="type-footnote text-muted-foreground">{t("views:item.projNext")}</div>}</Prop>
             {i.cwd && <Prop label={t("views:item.propCwd")}><span className="block break-all pt-1 font-mono text-[12px] text-muted-foreground" data-cwd>{i.cwd.replace(/^\/Users\/[^/]+/, "~")}</span></Prop>}
             {i.branch && <Prop label={t("views:item.propBranch")}><span className="block break-all pt-1 font-mono text-[12px]" data-branch>{i.branch}</span></Prop>}
             <Prop label={t("views:item.propSource")}><span className="block pt-1">{i.parent?.item ? <a href={"#/items/" + i.parent.item} className="hover:underline">{t("views:item.forkedFrom", { id: i.parent.item })}</a> : i.src[1] === "chat" ? <a href="#/" className="hover:underline">{t("views:item.fromChat")}</a> : i.src[0]}</span>
