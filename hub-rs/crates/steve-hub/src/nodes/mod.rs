@@ -218,3 +218,24 @@ pub fn api_router(svc: Arc<NodeService>) -> Router {
         .route("/nodes/{id}/{action}", post(pairing::act))
         .with_state(svc)
 }
+
+/// With remote Nodes off (`STEVE_NODE_LISTEN=0`, or a `STEVE_NO_RESUME` copy) the owner's routes still answer
+/// in JSON — an empty list that says so, and a refusal for the rest — instead of falling through to the web page.
+pub fn off_router() -> Router {
+    Router::new()
+        .route(
+            "/nodes",
+            get(|| async {
+                crate::error::json_response(200, &serde_json::json!({ "nodes": [], "off": true }))
+            }),
+        )
+        .route(
+            "/nodes/{*rest}",
+            axum::routing::any(|| async {
+                axum::response::IntoResponse::into_response(crate::error::ApiError::Json(
+                    409,
+                    steve_i18n::t!("hub.node.off"),
+                ))
+            }),
+        )
+}

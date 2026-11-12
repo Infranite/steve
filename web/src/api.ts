@@ -307,7 +307,8 @@ export const api = {
   /** declares a harness adapter in the Hub's manifest (in force after the Hub restarts) */
   addHarness: (p: { id: string; name?: string; command: string; args?: string[]; env?: Record<string, string>; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),
-  nodes: () => get<{ nodes: RNode[] }>("/nodes"),
+  /** `off`: this Hub does not listen for remote Nodes (STEVE_NODE_LISTEN=0, or a read-only copy) */
+  nodes: () => get<{ nodes: RNode[]; off?: boolean }>("/nodes"),
   createPairing: () => post<RPairing>("/nodes/pairings"),
   vitals: () => get<{ nodes: Record<string, RVitals> }>("/vitals"),
   nodeTags: () => get<{ tags: Record<string, string[]> }>("/node-tags"),

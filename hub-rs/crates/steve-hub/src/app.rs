@@ -204,7 +204,7 @@ pub fn app(
             crate::nodes::node_router(svc.clone()),
             modules.merge(crate::nodes::api_router(svc)),
         ),
-        None => (Router::new(), modules),
+        None => (Router::new(), modules.merge(crate::nodes::off_router())),
     };
     base.merge(root)
         // `version` is the Hub (ops/release.sh waits for it after a restart); the web build is released on its own
@@ -514,7 +514,10 @@ mod cookie_tests {
         );
         // another Hub on this host, a name from before the ports, a port that only ends alike
         assert_eq!(
-            read(&["steve_client_9000=b; steve_client=old", "steve_session_18440=c"]),
+            read(&[
+                "steve_client_9000=b; steve_client=old",
+                "steve_session_18440=c"
+            ]),
             None
         );
         assert_eq!(
@@ -525,7 +528,10 @@ mod cookie_tests {
             super::cookie_out("steve_client=x; Max-Age=1; Path=/; HttpOnly", "_8440").as_deref(),
             Some("steve_client_8440=x; Max-Age=1; Path=/; HttpOnly")
         );
-        assert_eq!(super::cookie_out("sidebar_state=true; Path=/", "_8440"), None);
+        assert_eq!(
+            super::cookie_out("sidebar_state=true; Path=/", "_8440"),
+            None
+        );
     }
 
     #[tokio::test]

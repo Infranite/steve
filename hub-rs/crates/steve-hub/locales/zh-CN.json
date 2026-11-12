@@ -183,6 +183,7 @@
   "hub.node.tag_unmet": "没有可用的设备带标签「%{tag}」，这个会话按通常的方式安排",
   "hub.node.tags_owner_only": "仅实例管理员可以修改设备标签",
   "hub.node.tag_bad": "标签只能包含字母、数字和 - _ . :，最长 40 个字符，最多 32 个",
+  "hub.node.off": "这个 Hub 没有开启远程 Node（STEVE_NODE_LISTEN=0，或是只读的数据副本）",
   "hub.node.handed_over": "设备「%{name}」已离线 %{minutes} 分钟，等它处理的消息已转到新会话继续",
   "hub.node.takeover_suspected": "设备「%{name}」的连接在一分钟内被反复抢占，像是有另一方持有它的密钥。Steve 已暂停这台设备接活。请在设备页检查：如果确实只有你自己的那台机器在运行，在那台机器上运行 steve-node rotate 更换密钥；否则直接撤销这台设备。",
   "hub.node.remote.not_owner": "远程 Node 只运行其所有者本人的工作，而这台 Node 不是由这个工作区的所有者配对的",

@@ -26,7 +26,7 @@ const stateText = (d: RDevice) => (d.status === "暂停接活" ? t("shell:device
 /** Node registration is separate from the legacy device inventory. Only the owner's Node API
  * establishes its visible identities and current transport links; Hub harnesses are not Node caps. */
 function useRemoteNodes() {
-  const [nodes, setNodes] = useState<RNode[] | null>(null)
+  const [nodes, setNodes] = useState<RNode[] | null>(null), [off, setOff] = useState(false)
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(true)
   const [revision, setRevision] = useState(0)
@@ -38,7 +38,7 @@ function useRemoteNodes() {
       busy = true; setLoading(true)
       try {
         const r = await api.nodes()
-        if (live) { setNodes([...new Map(r.nodes.filter(n => !n.local).map(n => [n.node_id, n])).values()]); setError("") }
+        if (live) { setNodes([...new Map(r.nodes.filter(n => !n.local).map(n => [n.node_id, n])).values()]); setOff(!!r.off); setError("") }
       } catch (e) { if (live) setError((e as Error).message) }
       finally { if (live) { busy = false; setLoading(false); timer = setTimeout(() => void load(), 10_000) } }
     }
@@ -47,7 +47,7 @@ function useRemoteNodes() {
     document.addEventListener("visibilitychange", visible)
     return () => { live = false; clearTimeout(timer); document.removeEventListener("visibilitychange", visible) }
   }, [revision])
-  return { nodes, error, loading, reload: () => setRevision(x => x + 1) }
+  return { nodes, off, error, loading, reload: () => setRevision(x => x + 1) }
 }
 
 /** a Node's link at a glance: green linked, orange waiting or paused, grey otherwise */
@@ -57,7 +57,7 @@ const NodeDot = ({ node, stale }: { node: RNode; stale: boolean }) => <span aria
 const roleLabel = (r: string) => (r === "执行节点" ? t("shell:devices.roleRunner") : r)
 export function DevicesView() {
   const t = useT()
-  const { nodes, error, loading, reload } = useRemoteNodes()
+  const { nodes, off, error, loading, reload } = useRemoteNodes()
   const [selected, setSelected] = useState<string | null>(null)
   const ids = new Set(nodes?.map(n => n.node_id))
   const ds = st.devices, hub = ds.find((d) => d.roles.includes("Hub")), rest = ds.filter((d) => d !== hub && !ids.has(d.id))
@@ -80,7 +80,7 @@ export function DevicesView() {
             <Button size="sm" variant="outline" onClick={() => go("#/devices/" + hub.id)} data-device-open>{t("shell:devices.details")}<ChevronRightIcon /></Button>
           </PanelFoot>
         </Panel>}
-        <Panel k="others" icon={<MonitorSmartphoneIcon />} title={nodes !== null && !error ? t("shell:devices.others", { count: rest.length + nodes.length }) : t("shell:devices.othersTitle")} sub={t("shell:devices.othersSub")}
+        <Panel k="others" icon={<MonitorSmartphoneIcon />} title={nodes !== null && !error ? t("shell:devices.others", { count: rest.length + nodes.length }) : t("shell:devices.othersTitle")} sub={off ? t("shell:devices.nodesOff") : t("shell:devices.othersSub")}
           right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={loading} onClick={reload} data-refresh-nodes>{loading ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.refreshNodes")}</Button>}>
           {(rest.length > 0 || !!nodes?.length) && <div className="py-1.5">{rest.map((d) => <PanelRow key={d.id} title={d.name} sub={d.roles.map(roleLabel).join(" · ")} onClick={() => go("#/devices/" + d.id)} controls><OwnerChip objectType="device" objectId={d.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
             {nodes?.map(n => <PanelRow key={n.node_id} data-node-row={n.node_id} onClick={() => setSelected(n.node_id)}

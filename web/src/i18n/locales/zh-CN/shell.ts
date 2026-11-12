@@ -123,6 +123,7 @@ export default {
     runningOf: "运行 {{n}} / {{max}}",
     moreSessions_other: "再显示 {{count}} 个",
     details: "详情",
+    nodesOff: "这个 Hub 没有开启远程 Node（STEVE_NODE_LISTEN=0，或是只读的数据副本），只能用它自己的 Node",
     othersSub: "配对的电脑和 Node：可以替你跑会话",
     runtimesSub: "{{ok}} / {{count}} 个 harness 可用",
     projectsTitle: "项目目录",

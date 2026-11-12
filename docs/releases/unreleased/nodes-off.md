@@ -1,0 +1,1 @@
+- With remote Nodes off (STEVE_NODE_LISTEN=0 or a read-only copy), the Devices page says so instead of failing, and the Node API answers in JSON.

@@ -133,6 +133,7 @@ export default {
     moreSessions_one: "Show {{count}} more",
     moreSessions_other: "Show {{count}} more",
     details: "Details",
+    nodesOff: "Remote Nodes are off on this Hub (STEVE_NODE_LISTEN=0, or a read-only copy of its data); only its own Node runs work",
     othersSub: "Paired computers and Nodes that can run conversations for you",
     runtimesSub: "{{ok}} of {{count}} harnesses available",
     projectsTitle: "Project folders",
