@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use rusqlite::params;
 use steve_store::{UnitSpec, WorkUnit, Workflow};
 
 use crate::testkit::Kit;
@@ -42,6 +43,49 @@ fn plan(k: &Kit, item: &str, specs: &[UnitSpec]) -> Value {
 
 fn graph(k: &Kit, item: &str) -> Workflow {
     k.db().store().workflows().get(item).unwrap().unwrap()
+}
+
+#[test]
+fn confirmed_workflow_activity_needs_the_current_applied_attempt_and_fresh_agent_event() {
+    let k = Kit::new();
+    let child = k.item("run", "执行", None);
+    let sid = k.session(&child, "idle");
+    let at = 2_000_000_i64;
+    let store = k.db().store();
+    store.with_conn(|c| {
+        c.execute("INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created,last_seen) VALUES ('n','me','node',zeroblob(32),'fingerprint','active',?1,?1)", [at])?;
+        c.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES (?1,'n','{}',?1,'r','active','a_current',?2)", params![sid, at])?;
+        c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,active_attempt,created,updated) VALUES ('t_current',?1,'running','a_current',?2,?2)", params![sid, at])?;
+        c.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a_current','t_current',0,'n','op','{}','{}','digest','running',?1,?1)", [at])?;
+        c.execute("INSERT INTO node_streams(node_id,stream,epoch,durable,applied) VALUES ('n','stream','epoch',10,10)", [])?;
+        Ok(())
+    }).unwrap();
+    let event = |seq: i64, received: i64, attempt: &str, body: Value| {
+        let payload = json!({"subject":{"of":"execution","type":"turn","session":sid,"turn":"t_current","attempt":attempt},"body":body}).to_string();
+        store.with_conn(|c| {
+            c.execute("INSERT INTO node_event_inbox(node_id,stream,epoch,seq,event_id,payload,applied,received) VALUES ('n','stream','epoch',?1,?2,?3,1,?4)", params![seq, format!("event-{seq}"), payload, received])?;
+            Ok(())
+        }).unwrap();
+    };
+    event(1, at - 900_000, "a_current", json!({"type":"attempt_started"}));
+    event(2, at - 599_000, "a_current", json!({"type":"message_started","message":"assistant","block":"b","role":"assistant"}));
+    assert!(store.workflows().confirmed_activity(&child, &sid, at).unwrap().is_some());
+    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_000).unwrap().is_none(), "600 seconds is stale");
+    event(3, at + 1_001, "a_current", json!({"type":"message_started","message":"user","block":"b","role":"user"}));
+    event(4, at + 1_002, "a_retired", json!({"type":"tool_changed","tool":{}}));
+    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_003).unwrap().is_none());
+    event(5, at + 1_004, "a_current", json!({"type":"tool_changed","tool":{}}));
+    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_005).unwrap().is_some());
+    store.with_conn(|c| { c.execute("UPDATE node_streams SET fault='gap' WHERE node_id='n'", [])?; Ok(()) }).unwrap();
+    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_005).unwrap().is_none(), "a faulted event stream cannot confirm activity");
+    store.with_conn(|c| { c.execute("UPDATE node_streams SET fault=NULL WHERE node_id='n'", [])?; Ok(()) }).unwrap();
+    store.with_conn(|c| { c.execute("UPDATE runtime_attempts SET cancel_requested=1 WHERE attempt_id='a_current'", [])?; Ok(()) }).unwrap();
+    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_005).unwrap().is_none());
+    store.with_conn(|c| { c.execute("UPDATE runtime_attempts SET cancel_requested=0 WHERE attempt_id='a_current'", [])?; Ok(()) }).unwrap();
+    event(6, at + 20_000, "a_current", json!({"type":"tool_changed","tool":{}}));
+    assert!(store.workflows().confirmed_activity(&child, &sid, at + 10_000).unwrap().is_some(), "future evidence must not replace a valid earlier event");
+    store.with_conn(|c| { c.execute("DELETE FROM node_event_inbox WHERE seq=5", [])?; Ok(()) }).unwrap();
+    assert!(store.workflows().confirmed_activity(&child, &sid, at + 10_000).unwrap().is_none(), "future evidence cannot confirm activity");
 }
 
 #[test]
@@ -388,6 +432,7 @@ fn single_session_confirmation_cannot_waive_a_new_goal_or_cycle() {
         assert!(k.finish(&parent).is_err());
         assert!(change(&k, &parent, "single_session", None).is_err());
         assert!(change(&k, &parent, "resume", None).is_err());
+        assert!(change(&k, &parent, "cancel", Some("a")).is_err());
         let view = k.core.workflow_get(&parent).unwrap();
         assert_eq!(view["current_cycle"], false);
         assert!(
@@ -674,6 +719,12 @@ fn restart_finishes_a_retired_failed_attempt_after_its_turn_ends() {
         .reset(&parent, "a", "重试旧结果")
         .unwrap();
     assert!(unit(&k, &parent, "a").item_id.is_none());
+    let history = k.core.workflow_get(&parent).unwrap();
+    assert_eq!(history["history_attempts_total"], 1);
+    assert_eq!(history["history_attempts"][0]["item_id"], child);
+    assert_eq!(history["history_attempts"][0]["snapshot"]["session_id"], sid);
+    assert_eq!(history["history_attempts"][0]["snapshot"]["status"], "cancelled");
+    assert!(history["history_attempts"][0]["snapshot"].get("outputs").is_none(), "history view stays compact");
 
     k.core.tx().workflow_tick().unwrap();
     assert_eq!(k.phase(&child), "active", "live turn still owns its child");

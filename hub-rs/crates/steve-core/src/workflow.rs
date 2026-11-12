@@ -248,10 +248,45 @@ impl Tx<'_> {
             entry.detail = Value::Null;
         }
         let mut out = serde_json::to_value(&visible)?;
-        out["history_total"] = json!(history_total);
-        out["current_cycle"] = json!(self.workflow_current(&g)?);
-        let mut blockers = self.workflow_blockers(item, true)?;
+        let current_cycle = self.workflow_current(&g)?;
         let ready = self.rt().check_workflow_execution(item);
+        if let Some(units) = out["units"].as_array_mut() {
+            for (row, unit) in units.iter_mut().zip(&g.units) {
+                row["waiting_on"] = json!(unit.spec.depends_on.iter().filter(|id| {
+                    g.units.iter().find(|other| &other.spec.id == *id).is_none_or(|other| other.status != "succeeded")
+                }).collect::<Vec<_>>());
+                row["stop_pending"] = json!(matches!(unit.status.as_str(), "succeeded" | "failed" | "cancelled") && self.workflow_busy(unit)?);
+                if matches!(unit.status.as_str(), "running" | "dispatching") {
+                    // A workflow row and a busy Node are not proof of fresh execution. The runtime
+                    // evidence contract may only upgrade this state for the exact active attempt.
+                    row["activity"] = json!({"state":"unconfirmed"});
+                    if unit.status == "running" && current_cycle && ready.is_ok()
+                        && let (Some(child), Some(session)) = (&unit.item_id, &unit.session_id)
+                        && !self.rt().uncertain(session)
+                        && let Some(activity) = self.db().store().workflows().confirmed_activity(child, session, steve_store::now())?
+                    {
+                        row["activity"] = json!(activity);
+                    }
+                }
+            }
+        }
+        let (archived, archived_total) = self.db().store().workflows().archived_attempts_recent(item, 50)?;
+        out["history_attempts"] = json!(archived.into_iter().map(|old| json!({
+            "item_id": old.item_id,
+            "unit_id": old.unit_id,
+            "created": old.created,
+            "snapshot": {
+                "title": excerpt(&old.snapshot.spec.title, VIEW_TEXT),
+                "status": old.snapshot.status,
+                "attempt": old.snapshot.attempt,
+                "session_id": old.snapshot.session_id,
+                "reason": old.snapshot.reason.map(|r| excerpt(&r, VIEW_TEXT)),
+            },
+        })).collect::<Vec<_>>());
+        out["history_attempts_total"] = json!(archived_total);
+        out["history_total"] = json!(history_total);
+        out["current_cycle"] = json!(current_cycle);
+        let mut blockers = self.workflow_blockers(item, true)?;
         if let Err(e) = &ready
             && !g.single_session()
         {
@@ -327,7 +362,7 @@ impl Tx<'_> {
             )));
         }
         let reason = required_text(&args, "reason")?;
-        if matches!(action, "resume" | "retry") {
+        if matches!(action, "resume" | "retry" | "cancel") {
             if let Some(g) = &graph
                 && !self.workflow_current(g)?
             {
@@ -340,9 +375,11 @@ impl Tx<'_> {
                     "当前为单会话验收；恢复协作前必须重新规划独立评审与集成验收",
                 ));
             }
-            self.rt()
-                .check_workflow_execution(item)
-                .map_err(|e| conflict(e.to_string()))?;
+            if matches!(action, "resume" | "retry") {
+                self.rt()
+                    .check_workflow_execution(item)
+                    .map_err(|e| conflict(e.to_string()))?;
+            }
         }
         match action {
             "single_session" => {

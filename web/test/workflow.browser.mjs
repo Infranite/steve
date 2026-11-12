@@ -5,7 +5,7 @@ const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIG
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5189"
 const errors = []
 try {
-  for (const width of [1066, 390]) for (const theme of ["dark", "light"]) {
+  for (const width of [1066, 390, 375, 320]) for (const theme of ["dark", "light"]) {
     const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 950 }, colorScheme: theme })
     page.on("pageerror", (e) => errors.push(e.message))
     await page.route(/\/api\/[^/]+$/, (route) => {
@@ -19,6 +19,11 @@ try {
     await page.locator('[data-workflow-unit="api"] summary').click()
     await page.locator("[data-workflow-outputs]").waitFor()
     assert.match(await page.locator('[data-workflow-unit="api"]').innerText(), /实际操作/)
+    await page.locator('[data-workflow-rework="api"]').click()
+    await page.getByRole("alertdialog", { name: "返工影响预览" }).waitFor()
+    assert.match(await page.getByRole("alertdialog", { name: "返工影响预览" }).innerText(), /独立复核依赖门控与恢复/, "rework previews downstream review")
+    assert.deepEqual(await page.evaluate(() => window.__workflowChanges ?? []), [], "preview does not mutate the workflow")
+    await page.getByRole("alertdialog", { name: "返工影响预览" }).locator('[data-slot="alert-dialog-cancel"]').click()
     await page.locator("[data-workflow-toggle]").click()
     await page.getByText("编排已暂停，恢复后按当前计划继续。").waitFor()
     await page.locator("[data-workflow-toggle]").click()
@@ -28,6 +33,22 @@ try {
       { action: "pause", expected_revision: 7 }, { action: "resume", expected_revision: 8 }, { action: "retry", expected_revision: 9 },
     ])
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
+    await page.goto(base + "/test/fixtures/workflow.html?prior")
+    await page.locator("[data-workflow-prior-cycle]").waitFor()
+    assert.match(await page.locator("[data-workflow-overview]").innerText(), /必需通过 0\/4/, "old delivery is not current progress")
+    assert.equal(await page.locator('[data-workflow-cancel="web"]').isDisabled(), true, "old-cycle work cannot be stopped from the current page")
+    await page.goto(base + "/test/fixtures/workflow.html?archive")
+    assert.match(await page.locator("[data-workflow-history]").innerText(), /旧接口尝试.*ST-old/)
+    assert.match(await page.locator("[data-workflow-history]").innerText(), /最近 1 条旧尝试，共 2 条/)
+    await page.goto(base + "/test/fixtures/workflow.html?rework")
+    await page.locator('[data-workflow-rework="api"]').click()
+    await page.locator("[data-workflow-rework-confirm]").click()
+    assert.deepEqual(await page.evaluate(() => window.__workflowChanges.map(({ action, unit_id, expected_revision }) => ({ action, unit_id, expected_revision }))), [{ action: "retry", unit_id: "api", expected_revision: 7 }])
+    await page.goto(base + "/test/fixtures/workflow.html?reworkActive")
+    await page.locator('[data-workflow-rework="api"]').click()
+    assert.match(await page.locator("[data-workflow-rework-confirm]").innerText(), /先停止受影响工作/)
+    await page.locator("[data-workflow-rework-confirm]").click()
+    assert.deepEqual(await page.evaluate(() => window.__workflowChanges.map(({ action, unit_id, expected_revision }) => ({ action, unit_id, expected_revision }))), [{ action: "cancel", unit_id: "review", expected_revision: 7 }])
     await page.goto(base + "/test/fixtures/workflow.html?unavailable")
     await page.locator("[data-workflow-unavailable]").waitFor()
     assert.match(await page.locator("[data-workflow-unavailable]").innerText(), /协作执行暂不可用/)
@@ -83,9 +104,23 @@ try {
     await page.getByRole("alert").waitFor()
     assert.match(await page.getByRole("alert").innerText(), /刷新/)
     assert.match(await page.locator("[data-wait-policy]").innerText(), /尚未单独登记/, "a conflict must not display a saved policy")
+    await page.goto(base + "/test/fixtures/workflow.html?graph")
+    await page.locator('[data-graph-mode="blocking"]').waitFor()
+    assert.equal(await page.locator('[data-graph-list-node="missing:ST-missing"]').count(), 1, "missing dependencies stay visible")
+    if (width < 640) {
+      await page.locator('[data-graph-list-node="work:ST-60:api"]').click()
+      assert.match(await page.locator("[data-graph-detail]").innerText(), /实现接口与主体检查/)
+      await page.locator("[data-graph-detail] button").click()
+      assert.equal(await page.evaluate(() => window.__graphOpened), "ST-61")
+    }
+    await page.getByRole("button", { name: "来源与派生" }).click()
+    await page.locator('[data-graph-mode="lineage"]').waitFor()
+    assert.equal(await page.locator('[data-graph-list-node="session-old"]').count(), 1, "source session is retained")
+    if (width < 640) { await page.locator('[data-graph-list-node="ST-61"]').click(); assert.match(await page.locator("[data-graph-detail]").innerText(), /来源位置 23/) }
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
     if (process.env.STEVE_TEST_SHOTS) await page.screenshot({ path: `${process.env.STEVE_TEST_SHOTS}/workflow-${width}-${theme}.png`, fullPage: true })
     await page.close()
   }
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["dependency order", "acceptance blockers", "shared outputs", "pause/resume/retry revisions", "unavailable execution disables resume and retry", "explicit single-session confirmation, cancellation and conflict", "persisted wait policy and scheduling hold", "cycle conflict keeps unsaved state", "1066/390px", "dark/light"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["dependency order", "acceptance blockers", "shared outputs", "pause/resume/retry revisions", "rework preview, reset and stop first", "prior-cycle isolation and archived attempts", "unavailable execution disables resume and retry", "explicit single-session confirmation, cancellation and conflict", "persisted wait policy and scheduling hold", "cycle conflict keeps unsaved state", "blocking/provenance graph and mobile list", "1066/390/375/320px", "dark/light"] }))
 } finally { await browser.close() }

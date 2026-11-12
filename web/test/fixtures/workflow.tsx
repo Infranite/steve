@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { DependencyWaitPanel } from "../../src/dependency-wait-panel"
 import { WorkflowPanel } from "../../src/workflow-panel"
+import { RelationGraph } from "../../src/graph"
+import { st, type Item } from "../../src/store"
 import type { Workflow, WorkflowUnit } from "../../src/workflow"
 import { api, type RItemDetail, type DependencyWait } from "../../src/api"
 import { setLang } from "../../src/i18n"
@@ -27,8 +29,11 @@ const initial: Workflow = {
 }
 
 function Fixture() {
-  const [workflow, setWorkflow] = useState(initial)
   const query = new URLSearchParams(location.search)
+  const [workflow, setWorkflow] = useState<Workflow>({ ...initial, current_cycle: query.has("prior") ? false : undefined,
+    units: initial.units.map((u) => query.has("rework") && u.id === "web" ? { ...u, status: "failed" } : query.has("reworkActive") && u.id === "review" ? { ...u, status: "running" } : u),
+    history_attempts: query.has("archive") ? [{ item_id: "ST-old", unit_id: "api", created: 1, snapshot: { title: "旧接口尝试", status: "cancelled", attempt: 1, session_id: "old-session", reason: "已被返工替代" } }] : [],
+    history_attempts_total: query.has("archive") ? 2 : 0 })
   const [wait, setWait] = useState<DependencyWait>({
     item_id: "ST-60", status: "block", phase: "active", cycle: 11,
     dependencies: [{ id: "ST-59", status: "run", phase: "active" }], open_dependencies: ["ST-59"],
@@ -66,6 +71,16 @@ function Fixture() {
     return next
   }
   if (query.has("wait")) return <main className="mx-auto max-w-3xl p-5"><DependencyWaitPanel item="ST-60" wait={wait} /></main>
+  if (query.has("graph")) {
+    st.items = [
+      { id: "ST-60", t: "主事项", st: "run", b: "steve", project: "project", deps: ["ST-missing"], workflow },
+      { id: "ST-61", t: "实现接口", st: "run", b: "steve", project: "project", deps: [], parent: { item: "ST-60", s: "session-old", at: 23 }, arch: true },
+    ] as Item[]
+    st.S = { "session-old": { title: "设计来源会话", st: "done", b: "steve", n: 1 } } as typeof st.S
+    st.projects = [{ id: "project", name: "示例项目" }] as typeof st.projects
+    workflow.units[1].item_id = "ST-61"
+    return <main className="mx-auto max-w-4xl p-5"><RelationGraph focus="ST-60" scope="comp" onOpen={(n) => { (window as any).__graphOpened = n.id }} /></main>
+  }
   return <main className="mx-auto max-w-3xl p-5"><WorkflowPanel item="ST-60" workflow={workflow} /></main>
 }
 createRoot(document.getElementById("root")!).render(<Fixture />)

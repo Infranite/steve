@@ -789,6 +789,17 @@ export default {
   },
   /* graph.tsx: the relation graph */
   graph: {
+    modeLabel: "关系图视图",
+    blocking: "前后置与阻塞",
+    lineage: "来源与派生",
+    source: "来源",
+    sourceAt: "来源位置 {{n}}",
+    contains: "归属",
+    work: "工作单元",
+    missing: "引用缺失",
+    archived: "历史事项",
+    open: "打开事项或会话",
+    workStatus: { pending: "待开始", dispatching: "正在分派", running: "进行中", succeeded: "已完成", failed: "失败", cancelled: "已取消", canceled: "已取消", blocked: "受阻", paused: "已暂停" },
     projectItems_other: "项目 · {{count}} 个事项",
     item: "事项",
     session: "会话",
@@ -798,7 +809,7 @@ export default {
     dep: "依赖",
     project: "项目",
     run: "执行",
-    hint: "· 点节点进入，可拖动和缩放",
+    hint: "· 选择节点查看详情，再显式打开；可拖动和缩放",
   },
   /* workspace-switcher.tsx */
   space: {

@@ -36,7 +36,7 @@ export type Out = [string, string, string | null, string, number?, ("record" | "
 export type PlanRound = { n: number; steps: [string, number][]; end: "done" | "replaced"; at: string }
 export type Item = {
   id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
-  goals: string[]; now: string; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item: string; s?: string; at?: number } | null
+  goals: string[]; now: string; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item?: string; s?: string; at?: number } | null
   due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
   rel?: Rel
@@ -446,7 +446,7 @@ function itemOf(i: RItem): Item {
     dependencyWait: det?.dependency_wait,
     wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5]]) : [], anns: det?.annotations ?? [],
     q: act?.queued ?? [], qs: act?.id ?? null,
-    parent: i.parent?.item ? { item: i.parent.item, s: i.parent.session ?? undefined, at: undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, snoozeUntil: snoozed ? i.snooze!.until : undefined, tags: i.tags,
+    parent: i.parent?.item || i.parent?.session ? { item: i.parent.item ?? undefined, s: i.parent.session ?? undefined, at: i.parent.at ?? undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, snoozeUntil: snoozed ? i.snooze!.until : undefined, tags: i.tags,
     /* the hub clears cwd when the project changes; a session still running then is in the old directory */
     branch: i.branch, cwd: i.cwd, projNext: !i.cwd && !!act, detail: !!det, dependents: det?.dependents ?? [], created: i.created, updated: i.updated,
     /* an open release card wins (it is the newest); a settled one says what happened */
@@ -1147,8 +1147,51 @@ export function mergeTag(from: string, into: string) { const a = tagName(from); 
 export function setSetting(p: Record<string, string>, msg = t("common:state.saved")) { void call(api.settings(p), msg) }
 
 /* ───────── relation graph model ───────── */
-export type GNode = { id: string; k: "item" | "sess" | "proj"; title: string; st: string; n?: number; b?: string | null; project?: string | null }
+export type GNode = { id: string; k: "item" | "sess" | "proj" | "work" | "missing"; title: string; st: string; n?: number; b?: string | null; project?: string | null; itemId?: string | null; group?: string; arch?: boolean; sourceAt?: number }
 export type GEdge = [string, string, string]
+/** Dependency and provenance are different questions. Do not infer handoffs from session order. */
+export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
+  const N: Record<string, GNode> = {}, E: GEdge[] = []
+  const missing = (id: string) => {
+    const key = `missing:${id}`
+    N[key] ??= { id: key, k: "missing", title: id, st: "" }
+    return key
+  }
+  for (const i of st.items) N[i.id] = { id: i.id, k: "item", title: i.t, st: i.st, b: i.b, project: i.project, itemId: i.id, arch: !!i.arch, sourceAt: i.parent?.at }
+  if (mode === "blocking") {
+    for (const i of st.items) {
+      for (const dep of i.deps ?? []) E.push([N[dep] ? dep : missing(dep), i.id, "dependency"])
+      const workflow = i.workflow
+      if (!workflow) continue
+      const keyOf = (id: string) => {
+        const unit = workflow.units.find((u) => u.id === id)
+        return unit ? `work:${i.id}:${id}` : missing(id)
+      }
+      for (const unit of workflow.units) {
+        const key = keyOf(unit.id)
+        N[key] = { id: key, k: "work", title: unit.title, st: unit.status, b: unit.bot_id, project: i.project, itemId: unit.item_id, group: i.id }
+        E.push([i.id, key, "contains"])
+        if (unit.item_id) E.push([key, N[unit.item_id] ? unit.item_id : missing(unit.item_id), "contains"])
+        for (const dep of unit.depends_on) E.push([keyOf(dep), key, "dependency"])
+      }
+    }
+  } else {
+    if (focus && st.S[focus]) {
+      const s = st.S[focus]
+      N[focus] = { id: focus, k: "sess", title: s.title, st: s.st, b: s.b, n: s.n }
+    }
+    for (const i of st.items) {
+      if (!i.parent) continue
+      if (i.parent.s) {
+        const s = st.S[i.parent.s]
+        if (s) N[i.parent.s] = { id: i.parent.s, k: "sess", title: s.title, st: s.st, b: s.b, n: s.n }
+        E.push([s ? i.parent.s : missing(i.parent.s), i.id, "source"])
+      }
+      if (i.parent.item) E.push([N[i.parent.item] ? i.parent.item : missing(i.parent.item), i.id, "source"])
+    }
+  }
+  return { N, E }
+}
 export function gBuild() {
   const N: Record<string, GNode> = {}, E: GEdge[] = []
   st.items.filter((i) => !i.arch).forEach((i) => {
@@ -1160,7 +1203,10 @@ export function gBuild() {
       E.push(prev ? [prev, k, "交接"] : [i.id, k, ""]); prev = k
     })
     ;(i.deps || []).forEach((d) => E.push([d, i.id, "依赖"]))
-    if (i.parent) E.push(i.parent.s && st.S[i.parent.s] ? [i.parent.s, i.id, "派生"] : [i.parent.item, i.id, "派生"])
+    if (i.parent) {
+      const origin = i.parent.s && st.S[i.parent.s] ? i.parent.s : i.parent.item
+      if (origin) E.push([origin, i.id, "派生"])
+    }
   })
   Object.keys(st.S).forEach((k) => { const s = st.S[k]; if (!s.item) N[k] = { id: k, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b } })
   return { N, E: E.filter((e) => N[e[0]] && N[e[1]]) }
