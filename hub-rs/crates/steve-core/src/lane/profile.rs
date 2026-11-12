@@ -119,49 +119,103 @@ pub fn profile(
     release: Option<&Release>,
     gh: &Path,
 ) -> Result<Profile, String> {
-    let target = target_of(dir, branch)?;
-    let remote = format!("refs/remotes/origin/{}", target.branch);
-    let local = format!("refs/heads/{}", target.branch);
-    let at = if crate::git::git_test(dir, &["rev-parse", "--verify", "--quiet", &remote])? {
-        remote
-    } else if crate::git::git_test(dir, &["rev-parse", "--verify", "--quiet", &local])? {
-        local
-    } else {
-        return Err(steve_i18n::t!(
-            "core.lane.no_branch",
-            branch = target.branch
-        ));
-    };
-    let commit = git(dir, &["rev-parse", &at])?;
-    let reads = format!(
-        "{} {}",
-        at.trim_start_matches("refs/remotes/")
-            .trim_start_matches("refs/heads/"),
-        &commit[..commit.len().min(7)]
-    );
-    let files: Vec<String> = local_git(dir, &["ls-tree", "-r", "-z", "--name-only", &commit])?
-        .split('\0')
-        .filter(|f| !f.is_empty())
-        .map(String::from)
-        .collect();
-    let show = |f: &str| local_git(dir, &["show", &format!("{commit}:{f}")]);
+    profile_with(dir, branch, release, gh, || {})
+}
 
+/// [`profile`] after fetching `origin` (`fetch` runs it, its error is the first part): the host's
+/// rules are read while the fetch runs, the repository after it.
+pub fn profile_fetched(
+    dir: &Path,
+    branch: Option<&str>,
+    release: Option<&Release>,
+    gh: &Path,
+    fetch: impl FnOnce() -> Result<(), String>,
+) -> (Option<String>, Result<Profile, String>) {
+    let mut fetched = None;
+    let p = profile_with(dir, branch, release, gh, || fetched = fetch().err());
+    (fetched, p)
+}
+
+fn profile_with(
+    dir: &Path,
+    branch: Option<&str>,
+    release: Option<&Release>,
+    gh: &Path,
+    before: impl FnOnce(),
+) -> Result<Profile, String> {
+    let target = match target_of(dir, branch) {
+        Ok(t) => t,
+        Err(e) => {
+            before();
+            return Err(e);
+        }
+    };
     let host = host_of(&target);
-    let rules = match &host {
-        Host::GitHub(slug) => Some(github_rules(gh, slug, &target.branch)),
-        _ => None,
-    };
-    let workflows = workflows(&files, &show);
-
-    Ok(Profile {
-        merge: merge_fact(&host, rules.as_ref()),
-        checks: checks_fact(&host, rules.as_ref(), &workflows, &files, &show),
-        ship: ship_fact(release, &workflows),
-        numbered: numbered(dir, &files),
-        pace: pace(dir, &commit)?,
-        reads,
-        target,
+    std::thread::scope(|s| {
+        // GitHub answers while the fetch and the reads of the repository run
+        let rules = match &host {
+            Host::GitHub(slug) => {
+                Some(s.spawn(steve_i18n::carry(|| github_rules(gh, slug, &target.branch))))
+            }
+            _ => None,
+        };
+        before();
+        let local = Local::read(dir, &target);
+        let rules = rules.map(|h| h.join().unwrap_or_else(|_| Err("gh: panicked".to_string())));
+        let l = local?;
+        let show = |f: &str| local_git(dir, &["show", &format!("{}:{f}", l.commit)]);
+        let workflows = workflows(&l.files, &show);
+        Ok(Profile {
+            merge: merge_fact(&host, rules.as_ref()),
+            checks: checks_fact(&host, rules.as_ref(), &workflows, &l.files, &show),
+            ship: ship_fact(release, &workflows),
+            numbered: numbered(dir, &l.files),
+            pace: pace(dir, &l.commit)?,
+            reads: l.reads,
+            target: target.clone(),
+        })
     })
+}
+
+/// The commit of the target a profile reads, and its files.
+struct Local {
+    commit: String,
+    reads: String,
+    files: Vec<String>,
+}
+
+impl Local {
+    fn read(dir: &Path, target: &Target) -> Result<Local, String> {
+        let remote = format!("refs/remotes/origin/{}", target.branch);
+        let local = format!("refs/heads/{}", target.branch);
+        let at = if crate::git::git_test(dir, &["rev-parse", "--verify", "--quiet", &remote])? {
+            remote
+        } else if crate::git::git_test(dir, &["rev-parse", "--verify", "--quiet", &local])? {
+            local
+        } else {
+            return Err(steve_i18n::t!(
+                "core.lane.no_branch",
+                branch = target.branch
+            ));
+        };
+        let commit = git(dir, &["rev-parse", &at])?;
+        let reads = format!(
+            "{} {}",
+            at.trim_start_matches("refs/remotes/")
+                .trim_start_matches("refs/heads/"),
+            &commit[..commit.len().min(7)]
+        );
+        let files: Vec<String> = local_git(dir, &["ls-tree", "-r", "-z", "--name-only", &commit])?
+            .split('\0')
+            .filter(|f| !f.is_empty())
+            .map(String::from)
+            .collect();
+        Ok(Local {
+            commit,
+            reads,
+            files,
+        })
+    }
 }
 
 /// How changes get into `target` by its host's rules alone (the lane asks before it pushes): the
@@ -208,8 +262,35 @@ struct Rules {
 fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
     let mut r = Rules::default();
     let b = encode(branch);
+    let (owner, name) = slug.split_once('/').unwrap_or((slug, ""));
+    /* the four reads go out at once (each is a round trip to GitHub): the classic protection and
+    the merge-queue query are asked before it is known whether they are wanted, and used only then */
+    let (rules, br, protection, queue) = std::thread::scope(|s| {
+        let ask = |args: Vec<String>| {
+            s.spawn(move || gh_api(gh, &args.iter().map(String::as_str).collect::<Vec<_>>()))
+        };
+        let rules = ask(vec![format!("repos/{slug}/rules/branches/{b}")]);
+        let br = ask(vec![format!("repos/{slug}/branches/{b}")]);
+        let protection = ask(vec![format!("repos/{slug}/branches/{b}/protection")]);
+        let queue = ask(vec![
+            "graphql".into(),
+            "-f".into(),
+            "query=query($o:String!,$n:String!,$b:String!){repository(owner:$o,name:$n){mergeQueue(branch:$b){id}}}".into(),
+            "-f".into(),
+            format!("o={owner}"),
+            "-f".into(),
+            format!("n={name}"),
+            "-f".into(),
+            format!("b={branch}"),
+        ]);
+        let join = |h: std::thread::ScopedJoinHandle<'_, Result<Value, GhError>>| {
+            h.join()
+                .unwrap_or_else(|_| Err(GhError::Other("gh: panicked".into())))
+        };
+        (join(rules), join(br), join(protection), join(queue))
+    });
     /* rulesets */
-    let rules = gh_api(gh, &[&format!("repos/{slug}/rules/branches/{b}")]).map_err(|e| {
+    let rules = rules.map_err(|e| {
         steve_i18n::t!(
             "core.lane.gh_rules_unread",
             branch = branch,
@@ -236,7 +317,7 @@ fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
     }
     /* classic branch protection: `protected` is also true for rulesets alone, whose branch then has
     no classic protection to read (404) */
-    let br = gh_api(gh, &[&format!("repos/{slug}/branches/{b}")]).map_err(|e| {
+    let br = br.map_err(|e| {
         steve_i18n::t!(
             "core.lane.gh_branch_unread",
             branch = branch,
@@ -244,7 +325,7 @@ fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
         )
     })?;
     if br["protected"].as_bool() == Some(true) {
-        match gh_api(gh, &[&format!("repos/{slug}/branches/{b}/protection")]) {
+        match protection {
             Ok(p) => {
                 if p.get("required_pull_request_reviews").is_some() {
                     r.pr = true;
@@ -269,21 +350,7 @@ fn github_rules(gh: &Path, slug: &str, branch: &str) -> Result<Rules, String> {
     }
     /* a merge queue may be set up either way; GraphQL tells for both */
     if !r.queue {
-        let (owner, name) = slug.split_once('/').unwrap_or((slug, ""));
-        match gh_api(
-            gh,
-            &[
-                "graphql",
-                "-f",
-                "query=query($o:String!,$n:String!,$b:String!){repository(owner:$o,name:$n){mergeQueue(branch:$b){id}}}",
-                "-f",
-                &format!("o={owner}"),
-                "-f",
-                &format!("n={name}"),
-                "-f",
-                &format!("b={branch}"),
-            ],
-        ) {
+        match queue {
             Ok(v) if v["data"]["repository"].is_object() => {
                 r.queue = v["data"]["repository"]["mergeQueue"].is_object();
             }

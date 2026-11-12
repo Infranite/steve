@@ -548,9 +548,11 @@ pub async fn lane(
     let gh = st.cfg.gh.clone().unwrap_or_else(steve_core::config::gh_cli);
     let mut v = blocking(move || {
         let dir = lane_dir(&path)?;
-        let fetch = steve_core::upstream::fetch(dir).err();
-        let prof = steve_core::lane::profile::profile(dir, None, release.as_ref(), &gh)
-            .map_err(ApiError::bad_request)?;
+        let (fetch, prof) =
+            steve_core::lane::profile::profile_fetched(dir, None, release.as_ref(), &gh, || {
+                steve_core::upstream::fetch(dir)
+            });
+        let prof = prof.map_err(ApiError::bad_request)?;
         let mut v = json!(prof);
         v["fetch_error"] = json!(fetch);
         Ok(v)
