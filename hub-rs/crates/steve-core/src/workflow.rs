@@ -575,7 +575,25 @@ impl Tx<'_> {
                 .store()
                 .workflows()
                 .bind_session(&graph.item_id, &u.spec.id, child, &s.id)?;
-            let prompt = self.workflow_opening(graph, u)?;
+            // A crash may have committed the session before its Node binding. Re-admit and
+            // idempotently bind it, as in the fresh-session path, before sending its first turn.
+            self.rt().created(&s.id, None);
+            if let Some(why) = self.rt().refusal(&s.id) {
+                self.db().session_patch(&s.id, patch![status: "ended"])?;
+                self.db()
+                    .event_add(&s.id, "system", json!({"text": why, "refused": true}))?;
+                return Err(conflict(why));
+            }
+            let child_item = self.item(child)?;
+            let bot = self
+                .db()
+                .bot(&u.spec.bot_id)?
+                .ok_or_else(|| conflict("执行 Bot 已不存在"))?;
+            let prompt = format!(
+                "{}\n\n{}",
+                self.protocol(&child_item, &bot, &s)?,
+                self.workflow_opening(graph, u)?
+            );
             self.rt().prompt(&s.id, &prompt, "workflow.start", &[])?;
             return Ok(());
         }

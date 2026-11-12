@@ -514,7 +514,7 @@ impl RoutedRuntime {
         Ok(self.route_to(node_of_strict(&self.store, session_id)?))
     }
 
-    /// An unbound work unit cannot be adopted onto a Node before its isolation checks pass.
+    /// An unbound work unit cannot be adopted before same-principal and Node admission pass.
     /// Read failures likewise cannot establish that a session is ordinary work.
     fn workflow_item(&self, session_id: &str) -> Result<Option<String>, steve_store::StoreError> {
         let Some(item) = self
@@ -733,6 +733,7 @@ fn unbound_why(u: super::node_binding::Unbound) -> Option<String> {
         Unbound::Bot => steve_i18n::t!("hub.node.unbound.bot"),
         Unbound::Mode(m) => steve_i18n::t!("hub.node.unbound.mode", mode = m),
         Unbound::OutsideRoots => steve_i18n::t!("hub.node.unbound.outside_roots"),
+        Unbound::Workflow(why) => why,
     })
 }
 
@@ -785,6 +786,130 @@ impl RoutedRuntime {
 }
 
 impl steve_core::AgentRuntime for RoutedRuntime {
+    fn check_workflow_execution(&self, item_id: &str) -> steve_core::Result<()> {
+        if let Some(why) = self
+            .store
+            .reader(|c| steve_store::workflow_gate::item_blocker(c, item_id))?
+        {
+            return Err(CoreError::Msg(why));
+        }
+        let item = self
+            .store
+            .items()
+            .get(item_id)?
+            .ok_or_else(|| CoreError::Msg("协作事项不存在。".into()))?;
+        let graph = match self.store.workflows().by_child(item_id)? {
+            Some((parent, _)) => self.store.workflows().get(&parent)?,
+            None => self.store.workflows().get(item_id)?,
+        }
+        .ok_or_else(|| CoreError::Msg("协作工作图不存在，无法确认请求主体。".into()))?;
+        // Use the ordinary principal contract after the strict durable gate has ruled out its
+        // departed-member fallback. NULL requester is an explicit workspace service principal.
+        let principal = self
+            .store
+            .reader(|c| super::principal::of_item(c, item_id))?
+            .ok_or_else(|| CoreError::Msg("无法确认协作请求主体。".into()))?;
+        let parent = self
+            .store
+            .reader(|c| super::principal::of_item(c, &graph.item_id))?;
+        if parent.as_ref() != Some(&principal) {
+            return Err(CoreError::Msg("工作单元与主事项的请求主体不一致。".into()));
+        }
+        if graph.item_id == item_id {
+            for unit in &graph.units {
+                if matches!(unit.status.as_str(), "dispatching" | "running")
+                    && let Some(child) = unit.item_id.as_deref()
+                {
+                    // Each existing unit keeps its own binding and inherited routing. A usable
+                    // parent Node cannot hide an offline or no-longer-authorized child Node.
+                    self.check_workflow_execution(child)?;
+                }
+            }
+        }
+        if let Some(project) = item.project_id.as_deref() {
+            let project = self
+                .store
+                .projects()
+                .get(project)?
+                .ok_or_else(|| CoreError::Msg("协作项目不存在。".into()))?;
+            if project.device_id != super::workspaces::HUB_DEVICE {
+                return Err(CoreError::Msg(
+                    "当前 Node 路由仅支持本机项目的独立 Git worktree。".into(),
+                ));
+            }
+        }
+        // Before a child exists, prove that its inherited routing constraints have an eligible
+        // Node. Actual sessions still go through ordinary binding, roots, policy and ceiling.
+        let eligible = |node: &str| -> steve_core::Result<bool> {
+            let tag = self
+                .store
+                .reader(|c| steve_store::nodes::item_tag(c, item_id))?;
+            if let Some(tag) = tag {
+                let nodes = self
+                    .store
+                    .reader(|c| steve_store::nodes::with_tag(c, &tag))?;
+                if !nodes.iter().any(|n| n == node) {
+                    return Ok(false);
+                }
+            }
+            if node == "local" {
+                return Ok(self.node.as_ref().is_some_and(|n| !n.is_stopped())
+                    && (item.project_id.is_none() || self.worktrees.is_some()));
+            }
+            if item.project_id.is_some() {
+                return Ok(false);
+            }
+            let Some(f) = &self.fleet else {
+                return Ok(false);
+            };
+            let Ok(id) = steve_node_api::NodeId::new(node.to_string()) else {
+                return Ok(false);
+            };
+            Ok(self
+                .store
+                .reader(|c| super::node_binding::node_takes(c, node, &item.workspace_id))?
+                && f.remote(&id).generation().is_some())
+        };
+        // Recovery keeps the bound Node; availability on some other Node is no substitute.
+        for session in self.store.sessions().of_item(item_id)? {
+            if session.status != "ended"
+                && let Some(node) = node_of_strict(&self.store, &session.id)?
+                && !eligible(&node)?
+            {
+                return Err(CoreError::Msg(
+                    "协作会话绑定的 Node 不可用或不再获授权。".into(),
+                ));
+            }
+        }
+        if eligible("local")? {
+            return Ok(());
+        }
+        let mut targets = Vec::new();
+        if let Some(target) = &self.bind_remote {
+            targets.push(target.as_str().to_string());
+        }
+        if let Some(target) = self.spread_target().filter(|_| self.spread) {
+            targets.push(target.as_str().to_string());
+        }
+        if let Some(tag) = self
+            .store
+            .reader(|c| steve_store::nodes::item_tag(c, item_id))?
+        {
+            targets.extend(
+                self.store
+                    .reader(|c| steve_store::nodes::with_tag(c, &tag))?,
+            );
+        }
+        for node in targets {
+            if eligible(&node)? {
+                return Ok(());
+            }
+        }
+        Err(CoreError::Msg(
+            "协作工作没有可用且获授权的 Node；请检查设备连接、路由标签与项目 worktree 配置。"
+                .into(),
+        ))
+    }
     fn makes_worktrees(&self) -> bool {
         self.node.is_some() && self.worktrees.is_some()
     }
@@ -822,8 +947,8 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     /// directory outside its roots, a failed bind) it is bound nowhere, and [`Self::refusal`]
     /// says why. `after` (a predecessor's release on its way): it opens only once that is done.
     fn created(&self, session_id: &str, after: Option<&str>) {
-        // The current Node protocol has no execution principal and its session driver cannot
-        // enforce a nonempty Required sandbox. Never bind, prepare or fall back for these units.
+        // Workflow coordinates ordinary Node sessions. Confirm its authority before any binding
+        // or preparation; no Hub execution fallback is available.
         if let Err(e) = self.check_workflow_session(session_id) {
             tracing::warn!(session_id, "协作运行未就绪：{e}");
             return;
@@ -852,6 +977,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                         .add(session_id, "system", serde_json::json!({"text": text}))
                 {
                     tracing::warn!("{session_id}: {e}");
+                }
+                // A workflow must not lose its required Node tag through the ordinary fallback.
+                if !matches!(self.workflow_item(session_id), Ok(None)) {
+                    return;
                 }
             }
         }
@@ -1048,7 +1177,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
         use super::node_runtime::Planned;
         if let Err(e) = self.check_workflow_session(session_id) {
-            tracing::warn!(session_id, "协作队列等待隔离 Node：{e}");
+            tracing::warn!(session_id, "协作队列等待主体或 Node 准入：{e}");
             return steve_core::Flushed::Held;
         }
         match self.route(session_id) {
