@@ -724,7 +724,8 @@ impl Tx<'_> {
                 // A crash can land after the graph recorded a failure but before the turn-end
                 // callback closed its child. The failed attempt is durable; finish that item once
                 // its session is no longer running, including failures from older installations.
-                if u.status == "failed"
+                // A cancelled unit's child likewise, once its turn is over.
+                if matches!(u.status.as_str(), "failed" | "cancelled")
                     && let Some(child) = u.item_id.as_deref()
                     && self
                         .db()
@@ -732,13 +733,8 @@ impl Tx<'_> {
                         .is_some_and(|i| i.phase == crate::cycle::ACTIVE)
                     && !self.unit_turn(u)?
                 {
-                    let reason = u
-                        .reason
-                        .as_deref()
-                        .filter(|s| !s.trim().is_empty())
-                        .or_else(|| (!u.summary.trim().is_empty()).then_some(u.summary.as_str()))
-                        .unwrap_or("工作单元未通过");
-                    self.lc_stop(child, FAIL, "workflow", reason, None)?;
+                    let (kind, why) = unit_end(u);
+                    self.lc_stop(child, kind, "workflow", &why, None)?;
                 }
                 if (g.paused
                     || parent.status == "pause"
@@ -1173,11 +1169,12 @@ impl Tx<'_> {
             }
             if item.phase != CLOSED
                 && let Some((_, settled)) = self.db().store().workflows().by_child(child)?
-                && settled.status == "failed"
+                && matches!(settled.status.as_str(), "failed" | "cancelled")
             {
-                // Both explicit failure and a turn ending without delivery finish this attempt.
-                // Its evidence remains on the graph; a retry claims a new child.
-                self.lc_stop(child, FAIL, "workflow", &settled.summary, None)?;
+                // Explicit failure, a turn ending without delivery and a cancel all finish this
+                // attempt. Its evidence remains on the graph; a retry claims a new child.
+                let (kind, why) = unit_end(&settled);
+                self.lc_stop(child, kind, "workflow", &why, None)?;
             }
         }
         self.workflow_drive(&parent)?;
@@ -1261,4 +1258,18 @@ pub fn plan_notes(specs: &[UnitSpec], max_parallel: Option<usize>) -> Vec<String
         ));
     }
     out
+}
+
+/// How a failed or cancelled unit's child item ends, and why (its own reason when it gave one).
+fn unit_end(u: &WorkUnit) -> (&'static str, String) {
+    let said = u
+        .reason
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| (!u.summary.trim().is_empty()).then_some(u.summary.as_str()));
+    if u.status == "cancelled" {
+        (CANCEL, said.unwrap_or("工作单元已取消").into())
+    } else {
+        (FAIL, said.unwrap_or("工作单元未通过").into())
+    }
 }

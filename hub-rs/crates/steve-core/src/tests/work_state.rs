@@ -1120,3 +1120,111 @@ fn a_unit_out_of_attempts_holds_its_successors_as_failed() {
         }
     }
 }
+
+/// ST-25 #7: a unit that reports failure itself (steve_workflow action=fail) and ends its turn: its
+/// child item is closed as failed (its result stays on the graph, the coordinator is told), and the
+/// ordinary watch has nothing left of it.
+#[test]
+fn a_unit_failing_itself_closes_its_child_and_tells_the_coordinator() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let coord = k.session(&parent, "idle");
+    let a = unit(&k, &parent, "a");
+    let child = a.item_id.clone().unwrap();
+    let sid = a.session_id.clone().unwrap();
+    let s = k.db().session(&sid).unwrap().unwrap();
+    k.core
+        .tool_workflow(&s, json!({"action":"fail","reason":"评审未通过：缺少回归"}))
+        .unwrap();
+    k.rt.say(&sid, "已报告失败。");
+    k.rt.end_turn(&k.core, &sid, "end_turn", None);
+    let i = k.db().item(&child).unwrap().unwrap();
+    assert_eq!(
+        (i.phase.as_str(), i.outcome.as_deref()),
+        ("closed", Some("failed"))
+    );
+    let a = unit(&k, &parent, "a");
+    assert_eq!(a.status, "failed");
+    assert_eq!(a.reason.as_deref(), Some("评审未通过：缺少回归"), "kept");
+    assert!(
+        k.rt.prompts_of(&coord)
+            .iter()
+            .any(|p| p.contains("协作工作 a 已更新")),
+        "the coordinator was told"
+    );
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert!(k.open_fails(&child).is_empty());
+}
+
+/// ST-25 #7: a unit cancelled while its turn runs: once that turn ends, its child item is closed as
+/// cancelled; after a restart that lost the turn end, the next pass closes it.
+#[test]
+fn a_cancelled_units_child_is_closed_after_its_turn_and_after_a_restart() {
+    let k = kit(2);
+    let parent = planned(&k, &["a", "b"]);
+    let a = unit(&k, &parent, "a");
+    let child = a.item_id.clone().unwrap();
+    let sid = a.session_id.clone().unwrap();
+    change(&k, &parent, "cancel", Some("a"));
+    assert_eq!(unit(&k, &parent, "a").status, "cancelled");
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    let i = k.db().item(&child).unwrap().unwrap();
+    assert_eq!(
+        (i.phase.as_str(), i.outcome.as_deref()),
+        ("closed", Some("cancelled")),
+        "{i:?}"
+    );
+
+    // b: cancelled, the Hub restarted before its turn end was handled
+    let b = unit(&k, &parent, "b");
+    let child = b.item_id.clone().unwrap();
+    let sid = b.session_id.clone().unwrap();
+    change(&k, &parent, "cancel", Some("b"));
+    k.rt.st().turning.remove(&sid);
+    k.db()
+        .session_patch(&sid, crate::patch![status: "idle"])
+        .unwrap();
+    let core = restarted(&k);
+    core.recover().unwrap();
+    core.tx().workflow_tick().unwrap();
+    let i = k.db().item(&child).unwrap().unwrap();
+    assert_eq!(
+        (i.phase.as_str(), i.outcome.as_deref()),
+        ("closed", Some("cancelled")),
+        "{i:?}"
+    );
+}
+
+/// ST-25 #7: after a retry the unit runs again in a new child. The old attempt's turn end, coming
+/// late, finishes only the old child: the new attempt keeps running and the coordinator is not told
+/// of an update that is old.
+#[test]
+fn a_late_end_of_an_old_attempt_does_not_finish_the_new_one() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let coord = k.session(&parent, "idle");
+    let old = unit(&k, &parent, "a");
+    let old_child = old.item_id.clone().unwrap();
+    let old_sid = old.session_id.clone().unwrap();
+    k.rt.end_turn(&k.core, &old_sid, "error", Some("检查失败"));
+    assert_eq!(k.phase(&old_child), "closed");
+    change(&k, &parent, "retry", Some("a"));
+    let new = unit(&k, &parent, "a");
+    assert_eq!(new.status, "running");
+    let new_child = new.item_id.clone().unwrap();
+    assert_ne!(new_child, old_child);
+    let told = k.rt.prompts_of(&coord).len();
+    // the old attempt's end again, late (a redelivery after a restart)
+    let core = restarted(&k);
+    core.on_turn_end(crate::TurnEnd {
+        session_id: old_sid.clone(),
+        attempt: Some("a-old".into()),
+        stop_reason: "error".into(),
+        error: Some("检查失败".into()),
+    })
+    .unwrap();
+    assert_eq!(k.phase(&new_child), "active");
+    assert_eq!(unit(&k, &parent, "a").status, "running");
+    assert_eq!(k.rt.prompts_of(&coord).len(), told, "no stale update");
+    assert_eq!(work(&k, &parent).0, "running");
+}
