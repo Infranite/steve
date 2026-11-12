@@ -18,8 +18,8 @@ const candidates = [
 ]
 const expired = [{ mem: mem('x1', 'rule', '周报每周五下午发给团队。', { status: 'stale', source_label: '10-01 的对话' }), origin_label: '10-01 的对话', evidence: '以后周报周五下午发', expired: 1 }]
 const added = [], restored = []
-const run = async ({ width, height, scheme }) => {
-  const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height }, colorScheme: scheme, reducedMotion: 'reduce' })
+const run = async ({ width, height, scheme, locale = "zh-CN" }) => {
+  const page = await browser.newPage({ locale, viewport: { width, height }, colorScheme: scheme, reducedMotion: 'reduce' })
   page.setDefaultTimeout(10000)
   const errors = []; page.on('pageerror', (e) => errors.push(e.message))
   await page.route('**/*', async (route) => {
@@ -42,6 +42,8 @@ const run = async ({ width, height, scheme }) => {
     // 长期记忆: preferences and rules only
     await page.locator('[data-mem="m1"]').waitFor()
     assert.equal(await page.locator('[data-mem]').count(), 2)
+    // the tabs are ids, not labels: in English the same memories are on the same tabs
+    if (locale !== "zh-CN") { await page.locator('[data-seg="知识条目"]').click(); await page.locator('[data-kb-tab="知识条目"] [data-mem="m3"]').waitFor(); assert.deepEqual(errors, []); return }
     assert.equal(await page.locator('[data-mem="m3"]').count(), 0)
     await page.getByText('一次性要求留在那件事的记录里', { exact: false }).waitFor()
     await fits(); await shot('kb-long-term')
@@ -85,6 +87,6 @@ const run = async ({ width, height, scheme }) => {
   } finally { await page.close() }
 }
 try {
-  for (const v of [{ width: 1280, height: 900, scheme: 'light' }, { width: 390, height: 844, scheme: 'dark' }]) await run(v)
+  for (const v of [{ width: 1280, height: 900, scheme: 'light' }, { width: 390, height: 844, scheme: 'dark' }, { width: 1280, height: 900, scheme: 'light', locale: 'en' }]) await run(v)
   console.log('knowledge ok')
 } finally { await browser.close() }

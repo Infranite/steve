@@ -18,7 +18,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Page, SectionLabel, Group, Row, Segmented, Chips, Empty, StatusDot, go } from "@/ui"
 import { toast, tm } from "@/store"
 import { useUploads } from "@/attach"
-import { kb, levelLabel, visLabel, memKind, recordOf, MEM_KINDS, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
+import { kb, levelLabel, visLabel, memKind, recordOf, LONG_TERM, MEM_KINDS, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
 import { KbGate, LevelSel, VisSel, errMsg } from "@/knowledge/fields"
 import { DocView, NoteView } from "@/knowledge/doc"
 import { t as tt, useT } from "@/i18n"
@@ -125,6 +125,8 @@ const RECORD: Record<RecordName, { kind: string; key: "mem" | "entry" }> = {
   长期记忆: { kind: "rule", key: "mem" },
   知识条目: { kind: "fact", key: "entry" },
 }
+/** the tab a memory of `kind` lives on (an id; `recordOf` is its label in the UI language) */
+const recordTab = (kind: string): RecordName => (LONG_TERM.includes(kind) ? "长期记忆" : "知识条目")
 const aboutKey = (m: Mem) => m.about.map((a) => a.type + ":" + a.id).sort().join(",")
 const aboutName = (a: Mem["about"][number]) => a.name ?? (a.type === "party" ? tt("knowledge:mems.aboutParty", { id: a.id }) : a.type === "item" ? tt("knowledge:mems.aboutItem", { id: a.id }) : a.id)
 const aboutLabel = (m: Mem) => (m.about.length ? tt("knowledge:mems.aboutLabel", { names: m.about.map(aboutName).join(tt("knowledge:listSep")) }) : tt("knowledge:mems.general"))
@@ -139,7 +141,7 @@ function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: strin
   useHubEvents(["mm"], () => void load())
   /* a linked memory opens on the tab it belongs to */
   const focused = focus ? xs?.find((m) => m.id === focus) : undefined
-  useEffect(() => { if (focused && recordOf(focused.kind) !== record) onRecord(recordOf(focused.kind) as RecordName) }, [focused, record, onRecord])
+  useEffect(() => { if (focused && recordTab(focused.kind) !== record) onRecord(recordTab(focused.kind)) }, [focused, record, onRecord])
   useEffect(() => { if (focus && xs) document.querySelector(`[data-mem="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: "center" }) }, [focus, xs])
   const add = async () => {
     const text = v.trim(); if (!text || busy) return
@@ -148,7 +150,7 @@ function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: strin
   }
   const patch = async (m: Mem, p: Parameters<typeof kb.patchMem>[1]) => { try { const n = await kb.patchMem(m.id, p); setXs((a) => a?.map((x) => (x.id === m.id ? { ...x, ...n } : x)) ?? null) } catch (e) { toast(errMsg(e)) } }
   const remove = async (m: Mem) => { try { await kb.deleteMem(m.id); setXs((a) => a?.filter((x) => x.id !== m.id) ?? null); toast(t("knowledge:mems.deleted")) } catch (e) { toast(errMsg(e)) } }
-  const mine = (xs ?? []).filter((m) => recordOf(m.kind) === record)
+  const mine = (xs ?? []).filter((m) => recordTab(m.kind) === record)
   const all = t("knowledge:all")
   const kinds = [all, ...MEM_KINDS.filter(([c]) => mine.some((m) => m.kind === c)).map(([, l]) => l)]
   const shown = mine.filter((m) => !kind || memKind(m.kind) === kind)

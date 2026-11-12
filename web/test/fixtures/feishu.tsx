@@ -10,8 +10,13 @@ function RaceFixture() {
   return <div data-fixture-app={app}><SelfButtons app={app} /></div>
 }
 const race = new URLSearchParams(location.search).has("race")
+/* the Hub's two Feishu adapters: the bot, and the side acting as you that pairs with it (device code first, OAuth too) */
+const adapters = [
+  { id: "feishu_app", name: "飞书应用机器人", identity: "bot" as const, auth: "credential" as const, device: false, capabilities: [] },
+  { id: "feishu_user", name: "飞书个人授权", identity: "self" as const, auth: "oauth" as const, device: true, capabilities: [], pairing: { with: ["feishu_app"], required: true } },
+]
 createRoot(document.getElementById("root")!).render(<StrictMode>
   <main style={{ maxWidth: 760, margin: "auto", padding: 20 }}>
-    {race ? <RaceFixture /> : <FeishuGuide adapters={[]} bots={existing ? [{ id: "con_fixture", name: "测试机器人", domain: new URLSearchParams(location.search).has("lark") ? "lark" : "feishu" }] : []} selfDone={false} callbackUrls={new URLSearchParams(location.search).has("callback") ? ["https://steve.example.test/auth/connect/callback"] : []} />}
+    {race ? <RaceFixture /> : <FeishuGuide adapters={adapters} bots={existing ? [{ id: "con_fixture", name: "测试机器人", domain: new URLSearchParams(location.search).has("lark") ? "lark" : "feishu" }] : []} selfDone={false} callbackUrls={new URLSearchParams(location.search).has("callback") ? ["https://steve.example.test/auth/connect/callback"] : []} />}
   </main>
 </StrictMode>)
