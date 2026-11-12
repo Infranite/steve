@@ -45,6 +45,28 @@ export const bucketTick = (b: string) => (isHour(b) ? b.slice(11, 16) : shortDay
 /** the zone an hourly chart is cut in, for its subtitle: “北京时间” for Asia/Shanghai, else the IANA name */
 export const zoneName = (tz?: string | null) => (!tz || tz === "local" ? t("stats:zone.hub") : tz === "Asia/Shanghai" ? t("stats:zone.beijing") : tz)
 
+/* 时间轴的刻度（事件浏览器、事项报告的时间轴）：整点、整分或本地零点，不是跨度的几分之几 */
+const DAY = 86400000
+/** tick steps of the time axis: round minutes and hours, then whole days */
+const STEPS = [60000, 300000, 900000, 1800000, 3600000, 3 * 3600000, 6 * 3600000, 12 * 3600000, DAY, 2 * DAY, 7 * DAY, 14 * DAY]
+/** round local times in [lo, hi) for an axis `w` pixels wide: whole hours or local midnights, not fractions of the span
+ *  (the span ends at the next midnight, which belongs to the day after, so it gets no tick) */
+export function timeTicks(lo: number, hi: number, w: number): number[] {
+  const want = Math.max(4, Math.floor(w / 90))
+  const step = STEPS.find((s) => (hi - lo) / s <= want) ?? STEPS[STEPS.length - 1]
+  const out: number[] = []
+  if (step < DAY) {
+    const d = new Date(lo); d.setHours(0, 0, 0, 0)
+    for (let ts = d.getTime(); ts < hi && out.length < 200; ts += step) if (ts >= lo) out.push(ts)
+  } else {
+    const d = new Date(lo); d.setHours(0, 0, 0, 0)
+    if (d.getTime() < lo) d.setDate(d.getDate() + 1)
+    for (let k = 0; d.getTime() < hi && k < 400; k++, d.setDate(d.getDate() + 1)) if (k % (step / DAY) === 0) out.push(d.getTime())
+  }
+  return out
+}
+/** a tick's label: the date at midnight, else the clock time */
+export const tickLabel = (ts: number) => { const d = new Date(ts); return d.getHours() === 0 && d.getMinutes() === 0 ? `${d.getMonth() + 1}/${d.getDate()}` : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}` }
 export type Load<T> = { s: "loading" } | { s: "absent" } | { s: "error"; msg: string } | { s: "ok"; v: T; at: number }
 /** loads `f` now, whenever `deps` change and on every `stats` stream event (`live` = only while it can matter) */
 export function useStats<T>(f: () => Promise<T>, deps: unknown[], live = true): [Load<T>, () => void] {

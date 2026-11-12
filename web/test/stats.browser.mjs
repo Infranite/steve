@@ -134,6 +134,10 @@ try {
       await ev.locator("[data-brush] svg").scrollIntoViewIfNeeded()
       assert.equal(await ev.locator('[data-stat="turn"]').innerText().then((x) => x.replace(/\s+/g, " ")), "回合 96")
       assert.equal(await ev.locator("[data-bad]").count(), 1, "the failing bucket is marked")
+      // the axis is cut at local midnights (whole days over a week), and the range's exclusive end gets no tick of its own
+      const ticks = await ev.locator("[data-tick]").evaluateAll((xs) => xs.map((x) => { const ts = Number(x.getAttribute("data-tick")), d = new Date(ts); return { ts, midnight: d.getHours() === 0 && d.getMinutes() === 0, label: x.textContent } }))
+      assert.ok(ticks.length >= 4 && ticks.every((x) => x.midnight && /^\d+\/\d+$/.test(x.label)), JSON.stringify(ticks))
+      assert.ok(ticks.every((x) => x.ts < Date.parse(days.at(-1) + "T00:00:00+08:00") + 86400000), "no tick at the end of the range")
       const bb = await ev.locator("[data-brush] svg").boundingBox()
       await page.mouse.move(bb.x + bb.width * 0.5, bb.y + 120); await page.mouse.down()
       await page.mouse.move(bb.x + bb.width * 0.75, bb.y + 120, { steps: 6 }); await page.mouse.up()

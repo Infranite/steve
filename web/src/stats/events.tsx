@@ -13,7 +13,7 @@ import { go, ItemNo, Segmented } from "@/ui"
 import { Panel, PanelFoot, StatStrip } from "@/panel"
 import { Loading } from "@/stats/overview"
 import { DECISION, RELEASE, STOP } from "@/stats/drill"
-import { fmtMs, fmtN, useStats } from "@/stats/format"
+import { fmtMs, fmtN, tickLabel, timeTicks, useStats } from "@/stats/format"
 import { t, useT } from "@/i18n"
 
 type Win = [number, number]
@@ -54,10 +54,11 @@ export function EventExplorer({ f, fkey, live }: { f: Filter; fkey: string; live
   const v = d.s === "ok" && d.v.histogram ? d.v : null
   /* a Hub without the explorer: no panel */
   if (d.s === "absent") return null
-  const long = v ? v.hi - v.lo > 2 * 86400000 : false
+  /* the date goes with the clock time once the span covers more than one day */
+  const long = v ? new Date(v.lo).toDateString() !== new Date(v.hi - 1).toDateString() : false
   const zoomIn = (w: Win) => { setZoom([...zoom, w]); setSel(null) }
   return (
-    <Panel k="events" data-events icon={<RadarIcon />} title={t("stats:events.title")} sub={t("stats:events.sub")}
+    <Panel k="events" className="@container/events" data-events icon={<RadarIcon />} title={t("stats:events.title")} sub={t("stats:events.sub")}
       right={<Segmented size="sm" value={kind} onChange={(k) => setKind(k)} options={[["all", t("stats:events.all")], ["turn", t("stats:events.turns")], ["decision", t("stats:events.decisions")], ["mark", t("stats:events.marks")]] as const} />}>
       <div className="flex min-h-12 flex-wrap items-center gap-2 px-5 py-2.5" data-events-crumbs>
         <span className="type-footnote text-muted-foreground">{t("stats:events.span")}</span>
@@ -102,6 +103,12 @@ function Brush({ v, sel, long, onSel, onZoom, canOut, onOut }: { v: Events; sel:
   /* the window while dragging, then the one asked for */
   const [live, setLive] = useState<Win | null>(null)
   const [hover, setHover] = useState<number | null>(null)
+  /* what a press here would do, shown as the pointer: resize at an edge of the window, slide inside it, else draw a new one */
+  const [cursor, setCursor] = useState("cursor-crosshair")
+  /* the floating labels over the window, measured so they stay inside the chart on a phone */
+  const label = useRef<HTMLDivElement>(null)
+  const [lw, setLw] = useState(0)
+  useLayoutEffect(() => { setLw(label.current?.offsetWidth ?? 0) })
   const win = live ?? sel
   const drag = useRef<{ mode: "new" | "move" | "a" | "b"; x0: number; w0: Win } | null>(null)
   const inWin = (i: number) => !!win && h.start + (i + 1) * h.step > win[0] && h.start + i * h.step < win[1]
@@ -114,7 +121,7 @@ function Brush({ v, sel, long, onSel, onZoom, canOut, onOut }: { v: Events; sel:
       const [xa, xb] = [x(win[0]), x(win[1])]
       if (Math.abs(p - xa) < 7) { drag.current = { mode: "a", x0: p, w0: win }; return }
       if (Math.abs(p - xb) < 7) { drag.current = { mode: "b", x0: p, w0: win }; return }
-      if (p > xa && p < xb) { drag.current = { mode: "move", x0: p, w0: win }; return }
+      if (p > xa && p < xb) { drag.current = { mode: "move", x0: p, w0: win }; setCursor("cursor-grabbing"); return }
     }
     const ts = tsOf(p)
     drag.current = { mode: "new", x0: p, w0: [ts, ts] }
@@ -123,7 +130,12 @@ function Brush({ v, sel, long, onSel, onZoom, canOut, onOut }: { v: Events; sel:
   const move = (e: RPointerEvent<SVGSVGElement>) => {
     const p = px(e)
     const g = drag.current
-    if (!g) { setHover(Math.min(n - 1, Math.max(0, Math.floor((p / w) * n)))); return }
+    if (!g) {
+      setHover(Math.min(n - 1, Math.max(0, Math.floor((p / w) * n))))
+      const [xa, xb] = win ? [x(win[0]), x(win[1])] : [NaN, NaN]
+      setCursor(Math.abs(p - xa) < 7 || Math.abs(p - xb) < 7 ? "cursor-ew-resize" : p > xa && p < xb ? "cursor-grab" : "cursor-crosshair")
+      return
+    }
     const dt = ((p - g.x0) / w) * span
     const [a, b] = g.w0
     if (g.mode === "new") { const t1 = tsOf(p); setLive(t1 < a ? [t1, a] : [a, t1]) }
@@ -135,6 +147,7 @@ function Brush({ v, sel, long, onSel, onZoom, canOut, onOut }: { v: Events; sel:
     const g = drag.current
     drag.current = null
     if (!g) return
+    if (g.mode === "move") setCursor("cursor-grab")
     const l = live ?? g.w0
     setLive(null)
     if (g.mode === "new" && Math.abs(x(l[1]) - x(l[0])) < 4) {
@@ -161,13 +174,15 @@ function Brush({ v, sel, long, onSel, onZoom, canOut, onOut }: { v: Events; sel:
   }
   const slot = w / n, bw = Math.max(1, slot - (slot > 5 ? 2 : 1)), base = H - AXIS
   const scale = (c: number) => (c ? Math.max(2, (c / max) * (base - TOP)) : 0)
-  const ticks = (w < 520 ? [0, 0.5, 1] : [0, 0.25, 0.5, 0.75, 1]).map((k) => v.lo + k * span)
+  const ticks = timeTicks(v.lo, v.hi, w)
   const xa = win ? x(win[0]) : 0, xb = win ? x(win[1]) : 0
+  /** the left of a label of width `lw` centred on `c`, kept inside the chart */
+  const place = (c: number) => Math.max(0, Math.min(c - lw / 2, w - lw))
   return (
     <div ref={box} className="relative w-full select-none" data-brush>
       {win && !live && (
-        <div className="absolute top-0 z-10 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-lg border bg-popover/95 py-0.5 pr-0.5 pl-2 text-popover-foreground shadow-sm backdrop-blur"
-          style={{ left: Math.min(Math.max((xa + xb) / 2, 120), Math.max(120, w - 120)) }} data-brush-label>
+        <div ref={label} className="absolute top-0 z-10 flex items-center gap-1 whitespace-nowrap rounded-lg border bg-popover/95 py-0.5 pr-0.5 pl-2 text-popover-foreground shadow-sm backdrop-blur"
+          style={{ left: place((xa + xb) / 2) }} data-brush-label>
           <span className="font-mono text-[11.5px] tabular-nums">{at(win[0], long)} – {at(win[1], long)}</span>
           <span className="type-footnote text-muted-foreground">· {t("stats:events.count", { count: v.a === win[0] && v.b === win[1] ? v.total : winCount })}</span>
           <Button size="icon-xs" variant="ghost" aria-label={t("stats:events.zoomIn")} title={t("stats:events.zoomIn")} onClick={() => onZoom(win)} data-zoom-in><ZoomInIcon /></Button>
@@ -175,12 +190,12 @@ function Brush({ v, sel, long, onSel, onZoom, canOut, onOut }: { v: Events; sel:
           <Button size="icon-xs" variant="ghost" aria-label={t("stats:events.clear")} title={t("stats:events.clear")} onClick={() => onSel(null)}><XIcon /></Button>
         </div>
       )}
-      {live && <div className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-foreground px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-background" style={{ left: Math.min(Math.max((xa + xb) / 2, 90), Math.max(90, w - 90)) }}>{at(live[0], long)} – {at(live[1], long)} · {winCount}</div>}
+      {live && <div ref={label} className="pointer-events-none absolute top-1 z-10 whitespace-nowrap rounded-md bg-foreground px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-background" style={{ left: place((xa + xb) / 2) }}>{at(live[0], long)} – {at(live[1], long)} · {t("stats:events.count", { count: winCount })}</div>}
       {!win && canOut && <Button size="xs" variant="ghost" className="absolute top-0 right-0 z-10 text-muted-foreground" onClick={onOut} data-zoom-out><ZoomOutIcon />{t("stats:events.zoomOut")}</Button>}
       <svg width={w} height={H} role="img" aria-label={t("stats:events.aria")} tabIndex={0} onKeyDown={key}
-        className="block cursor-crosshair touch-none overflow-visible rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className={cn("block touch-none overflow-visible rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring", cursor)}
         onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={() => { drag.current = null; setLive(null) }} onPointerLeave={() => setHover(null)}>
-        {win && <rect x={xa} y={TOP - 6} width={Math.max(1, xb - xa)} height={base - TOP + 6} fill="var(--foreground)" opacity={0.05} className="cursor-grab" />}
+        {win && <rect x={xa} y={TOP - 6} width={Math.max(1, xb - xa)} height={base - TOP + 6} fill="var(--foreground)" opacity={0.05} />}
         {counts.map((c, i) => {
           const hh = scale(c), lit = win ? inWin(i) : hover === i
           return <rect key={i} x={i * slot + (slot - bw) / 2} y={base - hh} width={bw} height={hh} rx={Math.min(2, bw / 2)}
@@ -197,11 +212,14 @@ function Brush({ v, sel, long, onSel, onZoom, canOut, onOut }: { v: Events; sel:
           <line x1={xb} x2={xb} y1={TOP - 8} y2={base} stroke="var(--foreground)" strokeWidth={1.5} className="cursor-ew-resize" />
         </>}
         <line x1={0} x2={w} y1={base} y2={base} stroke="var(--border)" />
-        {ticks.map((ts, i) => <text key={i} x={x(ts)} y={H - 5} textAnchor={i === 0 ? "start" : i === ticks.length - 1 ? "end" : "middle"} className="fill-muted-foreground font-mono text-[10.5px] tabular-nums">{at(ts, long)}</text>)}
+        {ticks.map((ts) => { const tx = x(ts); return <g key={ts} data-tick={ts}>
+          <line x1={tx} x2={tx} y1={base} y2={base + 4} stroke="var(--border)" />
+          <text x={tx} y={H - 5} textAnchor={tx < 24 ? "start" : tx > w - 24 ? "end" : "middle"} className="fill-muted-foreground font-mono text-[10.5px] tabular-nums">{tickLabel(ts)}</text>
+        </g> })}
       </svg>
       {hover != null && !win && !drag.current && counts[hover] > 0 && (
         <div className="pointer-events-none absolute z-10 rounded-md border bg-popover px-2 py-1 font-mono text-[11px] tabular-nums text-popover-foreground shadow-sm" style={{ left: Math.min(Math.max(0, hover * slot - 50), w - 170), top: TOP - 4 }} data-brush-tip>
-          {at(h.start + hover * h.step, long)} · {t("stats:events.count", { count: counts[hover] })}{h.bad[hover] ? <span className="text-destructive"> · {t("stats:events.badN", { count: h.bad[hover] })}</span> : null}
+          {at(h.start + hover * h.step, long)} – {at(Math.min(v.hi, h.start + (hover + 1) * h.step), long)} · {t("stats:events.count", { count: counts[hover] })}{h.bad[hover] ? <span className="text-destructive"> · {t("stats:events.badN", { count: h.bad[hover] })}</span> : null}
         </div>
       )}
     </div>
@@ -219,16 +237,16 @@ function EventList({ v, long }: { v: Events; long: boolean }) {
           ? [e.dur_ms != null ? fmtMs(e.dur_ms) : "", e.tokens ? fmtN(e.tokens) + " tokens" : "", e.tools ? t("stats:events.tools", { count: e.tools }) + (e.tool_errors ? " · " + t("stats:events.toolErrors", { count: e.tool_errors }) : "") : ""].filter(Boolean).join(" · ")
           : e.kind === "decision" ? (e.dur_ms != null ? t("stats:events.answered", { dur: fmtMs(e.dur_ms) }) : "") : e.by ?? ""
         return (
-          <button key={e.kind + e.id} type="button" onClick={open} className="grid w-full grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)] items-center gap-x-4 px-5 py-2 text-left transition-colors hover:bg-muted/40 sm:grid-cols-[7.5rem_minmax(0,14rem)_minmax(0,1fr)_auto]" data-event={e.kind} data-event-bad={e.bad || undefined}>
+          <button key={e.kind + e.id} type="button" onClick={open} className="grid w-full grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)] items-center gap-x-4 px-5 py-2 text-left transition-colors hover:bg-muted/40 @3xl/events:grid-cols-[7.5rem_minmax(0,14rem)_minmax(0,1fr)_auto]" data-event={e.kind} data-event-bad={e.bad || undefined}>
             <span className="font-mono text-[12px] tabular-nums text-muted-foreground">{at(e.ts, long, true)}</span>
             <span className="flex min-w-0 items-center gap-2 type-callout">
               <span aria-hidden className={cn("size-2 shrink-0 rounded-[3px]", e.open && "animate-pulse")} style={{ background: e.bad ? "var(--destructive)" : KIND_COLOR[e.kind] }} />
               <span className={cn("truncate", e.bad && "text-destructive")}>{eventLabel(e)}</span>
             </span>
-            <span className="col-span-2 flex min-w-0 items-center gap-2 pl-[8.5rem] sm:col-span-1 sm:pl-0">
+            <span className="col-span-2 flex min-w-0 items-center gap-2 pl-[8.5rem] @3xl/events:col-span-1 @3xl/events:pl-0">
               {e.item_id ? <><ItemNo id={e.item_id} /><span className="truncate type-callout text-foreground/85">{e.title}</span></> : <span className="type-footnote text-tertiary">{t("stats:events.noItem")}</span>}
             </span>
-            <span className="hidden truncate text-right font-mono text-[11.5px] tabular-nums text-muted-foreground sm:block">{detail}</span>
+            <span className="hidden max-w-80 truncate text-right font-mono text-[11.5px] tabular-nums text-muted-foreground @3xl/events:block" title={detail || undefined}>{detail}</span>
           </button>
         )
       })}

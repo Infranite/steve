@@ -46,7 +46,7 @@ function Tile({ k, label, scope, value, foot, def, tone, on, onClick }: { k: str
   return (
     <Tooltip>
       <TooltipTrigger render={<button type="button" onClick={onClick} aria-pressed={on} aria-label={t("stats:overview.tileAria", { label, scope })}
-        className={cn("relative min-w-0 border-border px-5 py-4 text-left outline-none transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 [&:not(:first-child)]:border-l max-lg:[&:nth-child(3)]:border-l-0 max-lg:[&:nth-child(n+3)]:border-t", on && "bg-muted/60 hover:bg-muted/60")} data-kpi={k} />}>
+        className={cn("relative min-w-0 border-border px-5 py-4 text-left outline-none transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 [&:not(:first-child)]:border-l @max-3xl/stats:[&:nth-child(3)]:border-l-0 @max-3xl/stats:[&:nth-child(n+3)]:border-t", on && "bg-muted/60 hover:bg-muted/60")} data-kpi={k} />}>
         {on && <span aria-hidden className="absolute inset-x-0 top-0 h-0.5" style={{ background: tone }} />}
         <span className="flex items-center gap-1.5 type-footnote text-muted-foreground"><span aria-hidden className="size-2 shrink-0 rounded-[3px]" style={{ background: tone }} />{label}<span className="text-tertiary">· {scope}</span></span>
         <span className="mt-2 block truncate font-mono text-[28px] leading-8 tabular-nums tracking-[-0.03em] text-foreground">{value}</span>
@@ -64,7 +64,7 @@ export function CoreKpis({ s, f, prevName, rangeName, drill, setDrill }: { s: Su
   const toggle = (d: Drill) => setDrill(drill === d ? null : d)
   const d = delta(s.throughput.done, s.prev?.throughput.done)
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4" data-core-kpis>
+    <div className="grid grid-cols-2 @3xl/stats:grid-cols-4" data-core-kpis>
       <Tile k="run" label={t("stats:overview.run")} scope={t("stats:overview.now")} value={now.run.length} tone={STATE.run} foot={t("stats:overview.runFoot", { count: now.by("run").length + now.by("wait").length + now.by("block").length + now.by("pause").length })}
         def={t("stats:overview.runDef")} on={drill === "run"} onClick={() => toggle("run")} />
       <Tile k="wait" label={t("stats:overview.wait")} scope={t("stats:overview.now")} value={now.cards.length} tone={STATE.wait} foot={now.cards.length ? t("stats:overview.waitFoot", { count: new Set(now.cards.map((c) => c.i.id || c.w.decision)).size }) : t("stats:overview.noneWaiting")}

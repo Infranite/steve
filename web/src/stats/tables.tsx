@@ -15,8 +15,8 @@ import { Panel, PanelFoot, PanelSection } from "@/panel"
 import { harnessName } from "@/model-picker"
 import { t, useT } from "@/i18n"
 
-export const th = "py-2 font-medium text-muted-foreground"
-export const num = "py-2 pl-4 text-right font-mono text-[12.5px] tabular-nums"
+export const th = "whitespace-nowrap py-2 font-medium text-muted-foreground"
+export const num = "whitespace-nowrap py-2 pl-4 text-right font-mono text-[12.5px] tabular-nums"
 
 /** a part of the page: its panels, under a heading only screen readers need (each panel names itself and its range) */
 export function Section({ title, meta, children, k }: { title: ReactNode; meta?: ReactNode; children: ReactNode; k: string }) {
@@ -100,8 +100,8 @@ export function TimeSection({ s, f, fkey, live, range }: { s: Summary; f: Filter
   const releases = tm.releases + tm.not_released > 0 && [t("stats:time.releases", { count: tm.releases, pct: fmtPct(tm.release_success_rate) }), tm.not_released ? t("stats:time.notReleased", { count: tm.not_released }) : "", tm.accept_to_release.p50 != null ? t("stats:time.acceptToRelease", { dur: fmtMs(tm.accept_to_release.p50) }) : ""].filter(Boolean).join(" · ")
   return (
     <Section k="time" title={t("stats:time.title")} meta={t("stats:time.meta", { count: tm.lead.n, range })}>
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        <Panel k="lead" data-lead-chart>
+      <div className="grid grid-cols-1 gap-4 @4xl/stats:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <Panel k="lead" className="@container" data-lead-chart>
           <ChartHead k="lead" icon={<TimerIcon />} title={t("stats:time.leadTitle")} sub={t("stats:panel.leadSub")} meta={hourly ? t("stats:time.leadMetaHourly", { unit, range, zone: zoneName(s.range.tz) }) : t("stats:time.leadMetaDaily", { unit, range })}
             legend={[{ label: t("stats:time.median"), c: SERIES[0], line: true }, { label: t("stats:time.medianToP85"), c: STATE.band }]} right={<ModeSwitch table={table} set={setTable} />} />
           <ChartBody>
@@ -148,8 +148,8 @@ export function QualityHuman({ s, f, fkey, live, range, prevName }: { s: Summary
   const failN = fails.reduce((a, [, n]) => a + n, 0), failLabel = FAIL_LABEL()
   return (
     <Section k="quality" title={t("stats:quality.title")} meta={range}>
-      <Panel k="quality" icon={<ShieldCheckIcon />} title={t("stats:quality.title")} sub={t("stats:panel.qualitySub")}>
-        <div className="grid grid-cols-1 md:grid-cols-2 md:[&>*+*]:border-l max-md:[&>*+*]:border-t">
+      <Panel k="quality" className="@container" icon={<ShieldCheckIcon />} title={t("stats:quality.title")} sub={t("stats:panel.qualitySub")}>
+        <div className="grid grid-cols-1 @2xl:grid-cols-2 @2xl:[&>*+*]:border-l @max-2xl:[&>*+*]:border-t">
           <PanelSection k="fails" label={t("stats:quality.fails")} meta={t("stats:quality.failsMeta", { count: failN })}>
             <div data-fails>
               {failN === 0 ? <div className="py-4 type-callout text-muted-foreground">{t("stats:quality.failsEmpty")}</div>
@@ -159,7 +159,7 @@ export function QualityHuman({ s, f, fkey, live, range, prevName }: { s: Summary
           <PanelSection k="decisions" label={t("stats:quality.decisions")} meta={t("stats:quality.decisionsMeta", { count: h.decisions })}>
             <div data-human>
               {dk.s !== "ok" ? <Loading h={96} err={dk.s === "loading" ? null : t("stats:quality.decisionsFailed")} /> : dk.v.rows.length === 0 ? <div className="py-4 type-callout text-muted-foreground">{t("stats:quality.decisionsEmpty")}</div>
-                : <div className="-mx-1.5"><HBars k="decisions" label={t("stats:quality.decisionsAria")} rows={dk.v.rows.map((r: CountRow) => ({ key: r.key, label: r.label, value: r.count, c: STATE.wait, sub: r.response?.p50 != null ? fmtMs(r.response.p50) : "—", title: r.response?.p85 != null ? `p85 ${fmtMs(r.response.p85)}` : undefined }))} /></div>}
+                : <div className="-mx-1.5"><HBars k="decisions" vw="w-28" label={t("stats:quality.decisionsAria")} rows={dk.v.rows.map((r: CountRow) => ({ key: r.key, label: r.label, value: r.count, c: STATE.wait, sub: r.response?.p50 != null ? fmtMs(r.response.p50) : "—", title: r.response?.p85 != null ? `p85 ${fmtMs(r.response.p85)}` : undefined }))} /></div>}
             </div>
           </PanelSection>
         </div>
@@ -194,7 +194,7 @@ export function AgentSection({ s, f, fkey, live, range }: { s: Summary; f: Filte
   const shown = all ? kinds : kinds.slice(0, 10)
   return (
     <Section k="agents" title="Agent" meta={range}>
-      <Panel k="agents" icon={<BotIcon />} title="Agent" sub={t("stats:panel.agentSub")}>
+      <Panel k="agents" className="@container" icon={<BotIcon />} title="Agent" sub={t("stats:panel.agentSub")}>
         <div className={kpiRow(8)} data-agent-lines>
           <Kpi k="turns" label={t("stats:agent.turns")} value={fmtN(a.turns)} foot={a.tokens_per_turn != null ? t("stats:agent.tokensPerTurn", { n: fmtN(a.tokens_per_turn) }) : undefined} def={t("stats:agent.turns")} />
           <Kpi k="turn_ms" label={t("stats:agent.turnMs")} value={fmtMs(a.turn_ms.p50)} foot={`p85 ${fmtMs(a.turn_ms.p85)}`} def={t("stats:agent.turnMs")} />
@@ -207,8 +207,8 @@ export function AgentSection({ s, f, fkey, live, range }: { s: Summary; f: Filte
         </div>
         <PanelSection k="tools" label={t("stats:agent.toolKinds")} meta={t("stats:agent.toolKindsMeta", { n: fmtN(total) })}>
           {!kinds.length ? <div className="py-4 type-callout text-muted-foreground">{t("stats:agent.toolKindsEmpty")}</div>
-            : <div className="-mx-1.5 grid grid-cols-1 gap-x-10 lg:grid-cols-2">{[shown.slice(0, Math.ceil(shown.length / 2)), shown.slice(Math.ceil(shown.length / 2))].map((half, i) => half.length > 0 &&
-              <HBars key={i} k="tools" label={t("stats:agent.toolKindsAria")} fmt={fmtN} total={kinds[0]?.count} rows={half.map((r) => ({ key: r.key, label: r.dim === "mcp" ? `Steve · ${r.label}` : r.label, title: r.label, value: r.count, c: SERIES[0], sub: total ? fmtPct(r.count / total) : undefined }))} />)}</div>}
+            : <div className="-mx-1.5 grid grid-cols-1 gap-x-10 @3xl/stats:grid-cols-2">{[shown.slice(0, Math.ceil(shown.length / 2)), shown.slice(Math.ceil(shown.length / 2))].map((half, i) => half.length > 0 &&
+              <HBars key={i} k="tools" lw="w-32 sm:w-48" label={t("stats:agent.toolKindsAria")} fmt={fmtN} total={kinds[0]?.count} rows={half.map((r) => ({ key: r.key, label: r.dim === "mcp" ? `Steve · ${r.label}` : r.label, title: r.dim === "mcp" ? `Steve · ${r.label}` : r.label, value: r.count, c: SERIES[0], sub: total ? fmtPct(r.count / total) : undefined }))} />)}</div>}
           {kinds.length > shown.length && <button type="button" className="mt-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setAll(true)} data-tool-kinds-more>{t("stats:overview.showMore", { count: kinds.length - shown.length })}</button>}
         </PanelSection>
         {names.length > 0 && (

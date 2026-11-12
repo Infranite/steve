@@ -54,8 +54,8 @@ export function PanelSection({ label, meta, right, children, className, flush, k
     <div className={cn(flush ? "py-3" : "px-5 py-4", className)} data-panel-section={k}>
       {(label != null || meta != null || right != null) && (
         <div className={cn("mb-3 flex min-h-5 flex-wrap items-center gap-x-3 gap-y-1", flush && "px-5")}>
-          {label != null && <span className="min-w-0 flex-1 type-footnote text-muted-foreground">{label}</span>}
-          {meta != null && <span className="shrink-0 font-mono text-[12px] tabular-nums text-muted-foreground">{meta}</span>}
+          {label != null && <span className="min-w-0 flex-auto type-footnote text-muted-foreground">{label}</span>}
+          {meta != null && <span className="min-w-0 font-mono text-[12px] tabular-nums text-muted-foreground">{meta}</span>}
           {right}
         </div>
       )}

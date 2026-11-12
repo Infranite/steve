@@ -28,10 +28,12 @@ export function Kpi({ label, value, foot, def, badge, k, tone }: { label: string
 }
 /** a strip's cell and its row: hairlines between cells, wrapping to two per row on a phone */
 export const KPI_CELL = "min-w-0 border-border px-5 py-3.5 [&:not(:first-child)]:border-l"
-export const kpiRow = (n: number) => cn("grid", n === 3 ? "grid-cols-3" : n === 6 ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-6" : "grid-cols-2 sm:grid-cols-4",
-  n !== 3 && "max-sm:[&>*:nth-child(2n+1)]:border-l-0 max-sm:[&>*:nth-child(n+3)]:border-t",
-  n === 6 && "sm:max-lg:[&>*:nth-child(3n+1)]:border-l-0 sm:max-lg:[&>*:nth-child(n+4)]:border-t",
-  n === 8 && "sm:[&>*:nth-child(4n+1)]:border-l-0 sm:[&>*:nth-child(n+5)]:border-t")
+/*  The columns follow the panel's width, not the window's (the panel is an `@container`): a panel in a two-column row is
+ *  narrow on a wide screen, and four durations side by side would be cut off there. */
+export const kpiRow = (n: number) => cn("grid", n === 3 ? "grid-cols-3" : n === 6 ? "grid-cols-2 @lg:grid-cols-3 @4xl:grid-cols-6" : "grid-cols-2 @xl:grid-cols-4",
+  n !== 3 && (n === 6 ? "@max-lg:[&>*:nth-child(2n+1)]:border-l-0 @max-lg:[&>*:nth-child(n+3)]:border-t" : "@max-xl:[&>*:nth-child(2n+1)]:border-l-0 @max-xl:[&>*:nth-child(n+3)]:border-t"),
+  n === 6 && "@lg:@max-4xl:[&>*:nth-child(3n+1)]:border-l-0 @lg:@max-4xl:[&>*:nth-child(n+4)]:border-t",
+  n === 8 && "@xl:[&>*:nth-child(4n+1)]:border-l-0 @xl:[&>*:nth-child(n+5)]:border-t")
 
 /** “Agent 62% · 网关 18%”: the total hides that a few large gateway calls can sink it */
 function HitSplit({ rows }: { rows: UsageRow[] }) {

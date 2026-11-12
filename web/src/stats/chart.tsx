@@ -240,17 +240,19 @@ export function ChartTable({ data, fmt, picked, onPick }: { data: Series; fmt: (
 export type BarRow = { key: string; label: ReactNode; value: number; c: string; sub?: ReactNode; title?: string }
 /** a distribution as horizontal bars: label, bar, value — every bar is labelled, so colour is never the only key.
  *  `onPick` makes each row a button (下钻); `total` sets the 100% (defaults to the largest bar). */
-export function HBars({ rows, fmt = String, onPick, picked, label, total, k, vw = "w-14" }: {
+export function HBars({ rows, fmt = String, onPick, picked, label, total, k, vw = "w-14", lw = "w-[5.5rem] sm:w-32" }: {
   rows: BarRow[]; fmt?: (v: number) => string; onPick?: (key: string) => void; picked?: string | null; label: string; total?: number; k?: string
   /** the width of the value column */
   vw?: string
+  /** the width of the label column */
+  lw?: string
 }) {
   const max = Math.max(1, total ?? Math.max(0, ...rows.map((r) => r.value)))
   return (
     <div role={onPick ? "group" : "list"} aria-label={label} className="flex flex-col" data-hbars={k}>
       {rows.map((r) => {
         const body = <>
-          <span className="w-[5.5rem] shrink-0 truncate text-left type-callout sm:w-28" title={r.title}>{r.label}</span>
+          <span className={cn(lw, "shrink-0 truncate text-left type-callout")} title={r.title}>{r.label}</span>
           <span className="relative h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-muted/70" aria-hidden>
             {r.value > 0 && <span className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${Math.max(1.5, (r.value / max) * 100)}%`, background: r.c }} />}
           </span>

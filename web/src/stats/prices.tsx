@@ -110,19 +110,19 @@ export function StatsSettingsPane() {
           <p className="mb-3 type-callout text-muted-foreground">{t("stats:prices.modelsIntro")}</p>
           <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
             <table className="w-full min-w-[620px] type-callout" aria-label={t("stats:prices.modelsAria")}>
-              <thead className="border-b text-left type-footnote text-muted-foreground"><tr><th className="py-2 font-medium">{t("stats:col.model")}</th><th className="py-2 pl-2 font-medium">{t("stats:col.source")}</th>{cols.map(([, l]) => <th key={l} className="whitespace-nowrap py-2 pl-2 text-right font-medium">{l}</th>)}<th className="py-2 pl-2 text-right font-medium">tokens</th><th className="w-16" /></tr></thead>
+              <thead className="border-b text-left type-footnote text-muted-foreground"><tr><th className="py-2 font-medium">{t("stats:col.model")}</th><th className="py-2 pl-2 font-medium">{t("stats:col.source")}</th>{cols.map(([, l]) => <th key={l} className="whitespace-nowrap py-2 pl-3 text-right font-medium">{l}</th>)}<th className="whitespace-nowrap py-2 pl-3 text-right font-medium">tokens</th><th className="w-16" /></tr></thead>
               <tbody>{v.models.map((m) => {
                 const q = m.price
                 return (
                   <tr key={m.model} className="border-b last:border-0" data-price-model={m.model} data-price-source={q?.source ?? "none"}>
                     <td className="max-w-56 truncate py-2 font-mono text-[12.5px]" title={m.model}>{m.model || t("stats:word.unknownModel")}</td>
-                    <td className="py-2 pl-2" title={q?.note || undefined}>
+                    <td className="min-w-40 max-w-64 py-2 pl-2" title={q?.note || undefined}>
                       {q ? <span className={q.source === "models_dev" ? "text-foreground" : "text-muted-foreground"}>{q.source === "models_dev" ? "Models.dev" : t("stats:prices.table")}</span> : <span className="text-attention">{t("stats:word.unpriced")}</span>}
                       {q?.via && <span className="ml-1 type-footnote text-muted-foreground">{t("stats:prices.estBy", { match: q.match })}</span>}
                       {q?.note && <div className="type-footnote text-muted-foreground">{q.note}</div>}
                     </td>
-                    {cols.map(([k]) => <td key={k} className="py-2 pl-2 text-right tabular-nums">{q ? money(q[k] as number) : "—"}</td>)}
-                    <td className="py-2 pl-2 text-right tabular-nums text-muted-foreground">{fmtN(m.tokens)}</td>
+                    {cols.map(([k]) => <td key={k} className="py-2 pl-3 text-right tabular-nums">{q ? money(q[k] as number) : "—"}</td>)}
+                    <td className="py-2 pl-3 text-right tabular-nums text-muted-foreground">{fmtN(m.tokens)}</td>
                     <td className="py-2 pl-1 text-right">{m.model && q?.source !== "table" && <Button size="xs" variant="ghost" className="text-blue" disabled={inTable(m.model)} onClick={() => add(m.model, q)} data-price-override={m.model}>{q ? t("stats:prices.override") : t("stats:prices.addPrice")}</Button>}</td>
                   </tr>
                 )

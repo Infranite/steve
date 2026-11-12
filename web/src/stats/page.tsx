@@ -110,7 +110,7 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
   const range = fmtRange(s.range.from, s.range.to), rangeName = NAME(f.range), prevName = PREV(f.range)
   const [src] = useStats(() => stats.usage(f, "source"), [fkey], live)
   return (
-    <div className="flex flex-col gap-10" data-stats>
+    <div className="@container/stats flex flex-col gap-10" data-stats>
       <Panel k="overview" data-overview icon={<GaugeIcon />} title={t("stats:panel.overview")} sub={t("stats:panel.overviewSub", { name: rangeName, range })}
         right={live ? <Tag tone="ok" data-live><span className="size-1.5 animate-pulse rounded-full bg-current" />{t("stats:panel.live")}</Tag> : <Tag>{t("stats:panel.past")}</Tag>}>
         <CoreKpis s={s} f={f} prevName={prevName} rangeName={rangeName} drill={drill} setDrill={setDrill} />
@@ -119,7 +119,7 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
       </Panel>
       <EventExplorer f={f} fkey={fkey} live={live} />
       <Section k="items" title={t("stats:page.items")} meta={oneDay(f) ? t("stats:page.itemsMetaHourly", { range }) : t("stats:page.itemsMetaDaily", { range })}>
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div className="grid grid-cols-1 gap-4 @4xl/stats:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           <FlowChart s={s} f={f} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />
           <StatusBars f={f} drill={drill} setDrill={setDrill} />
         </div>

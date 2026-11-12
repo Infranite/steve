@@ -12,7 +12,7 @@ import { Unwired } from "@/unwired"
 import { Kpi, Est, kpiRow } from "@/stats/kpi"
 import { Table, num, th } from "@/stats/tables"
 import { t, useT } from "@/i18n"
-import { fmtMs, fmtN, fmtPct, fmtUsd, time, useStats } from "@/stats/format"
+import { fmtMs, fmtN, fmtPct, fmtUsd, tickLabel, time, timeTicks, useStats } from "@/stats/format"
 
 /* labels for the Hub's values, built at render so they follow the language */
 export const STOP = (): Record<string, string> => ({ end_turn: t("stats:drill.stop.endTurn"), cancelled: t("stats:drill.stop.cancelled"), max_tokens: t("stats:drill.stop.maxTokens"), refusal: t("stats:drill.stop.refusal"), error: t("stats:drill.stop.error"), interrupted: t("stats:drill.stop.interrupted") })
@@ -26,7 +26,7 @@ export function StatsItemView({ id }: { id: string }) {
   if (d.s === "absent") return <Unwired id="stats" />
   const title = d.s === "ok" ? d.v.title : st.items.find((i) => i.id === id)?.t ?? id
   return (
-    <Page title={<span className="inline-flex min-w-0 items-baseline gap-2"><ItemNo id={id} className="text-[15px]" /><span className="truncate">{title}</span></span>} back={["#/stats", t("stats:page.title")]} max={1040}
+    <Page title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={id} className="text-[15px]" /><span className="min-w-0 break-words">{title}</span></span>} back={["#/stats", t("stats:page.title")]} max={1040}
       sub={<a href={"#/items/" + id} className="inline-flex items-center gap-0.5 text-blue hover:underline" data-item-link>{t("stats:drill.openItem")}<ChevronRightIcon className="size-3.5" /></a>}>
       {d.s === "loading" ? <div className="flex justify-center py-24"><Spinner className="size-5 text-muted-foreground" /></div>
         : d.s === "error" ? <Empty title={t("stats:drill.loadFailed")} sub={d.msg} />
@@ -43,7 +43,7 @@ function Drill({ d }: { d: ItemDetail }) {
   const open = f.done_at == null && f.dropped_at == null
   return (
     <div className="flex flex-col gap-4" data-drill>
-      <Panel k="report" icon={<ChartGanttIcon />} title={t("stats:drill.report")} sub={t("stats:drill.reportSub", { created: time(f.created) })}
+      <Panel k="report" className="@container" icon={<ChartGanttIcon />} title={t("stats:drill.report")} sub={t("stats:drill.reportSub", { created: time(f.created) })}
         right={open ? <Tag tone="run"><span className="size-1.5 animate-pulse rounded-full bg-current" />{t("stats:word.running")}</Tag> : f.done_at ? <Tag tone="ok">{t("stats:drill.doneMark")}</Tag> : <Tag>{t("stats:drill.dropMark")}</Tag>}>
         <Timeline d={d} />
         <div className={kpiRow(6)}>
@@ -103,10 +103,11 @@ function Timeline({ d }: { d: ItemDetail }) {
   const show = (at: number, y: number, text: string) => setTip({ x: x(at), y, text })
   const decision = DECISION(), choice = CHOICE(), release = RELEASE()
   const LANE = 30, Y = { turns: 14, decs: 14 + LANE, marks: 14 + LANE * 2 }, AXIS = 14 + LANE * 3, H = AXIS + 22
-  /* five ticks: clock times within a day, dates beyond */
-  const span = t1 - t0, multiDay = span > 20 * 3600000
-  const tickAt = [0, 0.25, 0.5, 0.75, 1].map((k) => t0 + k * span)
-  const tickText = (ts: number) => { const dt = new Date(ts); return multiDay ? `${dt.getMonth() + 1}/${dt.getDate()} ${String(dt.getHours()).padStart(2, "0")}:00` : `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}` }
+  /* the two ends at their exact time (with the date once the span covers more than one day), round times between them */
+  const multiDay = new Date(t0).toDateString() !== new Date(t1).toDateString()
+  const edge = (ts: number) => { const dt = new Date(ts), hm = `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`; return multiDay ? `${dt.getMonth() + 1}/${dt.getDate()} ${hm}` : hm }
+  const room = multiDay ? 104 : 64, inner = timeTicks(t0, t1, W).filter((ts, i, xs) => x(ts) - x(t0) > room && x(t1) - x(ts) > room && (i === 0 || x(ts) - x(xs[i - 1]) > 48))
+  const tickAt: [number, string, boolean][] = [[t0, edge(t0), true], ...inner.map((ts): [number, string, boolean] => [ts, tickLabel(ts), false]), [t1, edge(t1), true]]
   const lanes: [keyof typeof Y, string][] = [["turns", t("stats:drill.laneTurns")], ["decs", t("stats:drill.laneDecisions")], ["marks", t("stats:drill.laneMarks")]]
   return (
     <section className="px-5 pt-4 pb-3" data-timeline>
@@ -116,9 +117,9 @@ function Timeline({ d }: { d: ItemDetail }) {
       </div>
       <div ref={box} className="relative" onMouseLeave={() => setTip(null)}>
         <svg width={w} height={H} role="img" aria-label={t("stats:drill.timelineAria")} className="block overflow-visible">
-          {tickAt.map((ts, i) => <g key={i}>
-            <line x1={x(ts)} x2={x(ts)} y1={0} y2={AXIS} stroke="var(--border)" strokeDasharray={i === 0 || i === 4 ? undefined : "2 3"} />
-            <text x={x(ts)} y={AXIS + 15} textAnchor={i === 0 ? "start" : i === 4 ? "end" : "middle"} className="fill-muted-foreground font-mono text-[10.5px] tabular-nums">{tickText(ts)}</text>
+          {tickAt.map(([ts, label, end], i) => <g key={i}>
+            <line x1={x(ts)} x2={x(ts)} y1={0} y2={AXIS} stroke="var(--border)" strokeDasharray={end ? undefined : "2 3"} />
+            <text x={x(ts)} y={AXIS + 15} textAnchor={i === 0 ? "start" : i === tickAt.length - 1 ? "end" : "middle"} className="fill-muted-foreground font-mono text-[10.5px] tabular-nums">{label}</text>
           </g>)}
           {lanes.map(([k, label]) => <g key={k}>
             {LABEL > 0 && <text x={0} y={Y[k]} dy="0.35em" className="fill-muted-foreground text-[11.5px]">{label}</text>}

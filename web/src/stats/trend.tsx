@@ -16,7 +16,7 @@ import { bucketName, fmtN, fmtPct, fmtRange, fmtUsd, oneDay, zoneName, useStats 
 
 type Tab = "tokens" | "cost" | "hit_rate"
 const TABS = () => [["tokens", "tokens"], ["cost", t("stats:trend.tab.cost")], ["hit_rate", t("stats:trend.tab.hitRate")]] as const
-/** “tokens趋势”: the chart's title and its label */
+/** “tokens 趋势”: the chart's title and its label */
 const TITLE = (tab: Tab) => (tab === "tokens" ? t("stats:trend.title.tokens") : tab === "cost" ? t("stats:trend.title.cost") : t("stats:trend.title.hitRate"))
 const KIND: Record<Tab, Kind> = { tokens: "stack", cost: "stack", hit_rate: "line" }
 const FMT: Record<Tab, (v: number) => string> = { tokens: fmtN, cost: (v) => (v === 0 ? "$0" : fmtUsd(v)), hit_rate: (v) => fmtPct(v) }

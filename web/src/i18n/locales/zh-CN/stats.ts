@@ -240,7 +240,7 @@ export default {
       hitRate: "命中率",
     },
     title: {
-      tokens: "tokens趋势",
+      tokens: "tokens 趋势",
       cost: "费用趋势",
       hitRate: "命中率趋势",
     },
@@ -387,7 +387,7 @@ export default {
     laneDecisions: "决定",
     laneMarks: "交付与发布",
     report: "这件事项的报告",
-    reportSub: "{{created}} 建，到现在每一步花在哪",
+    reportSub: "{{created}} 新建；时间花在了哪一步",
     turnsSub: "每个回合的用时、工具和用量；点一行打开会话",
     byModelSub: "这件事项在各个模型上的用量",
     stop: {
@@ -493,8 +493,8 @@ export default {
     aria: "事件直方图：拖动选择时间窗口，左右键滑动，Shift+左右键改宽，回车放大，Esc 清除",
     count_other: "{{count}} 个事件",
     badN_other: "{{count}} 个出错",
-    shown_other: "窗口里 {{count}} 个事件，列出最新 {{shown}} 个",
-    all_n_other: "窗口里 {{count}} 个事件",
+    shown_other: "共 {{count}} 个事件，列出最新 {{shown}} 个",
+    all_n_other: "共 {{count}} 个事件",
     capped: "这段时间事件太多，只统计了最新的一部分，放大可以看全",
     empty: "这段时间没有事件",
     tools_other: "{{count}} 次工具",

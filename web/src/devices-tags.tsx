@@ -32,7 +32,7 @@ export function NodeTags({ node }: { node: string }) {
         <div className="flex flex-wrap items-center gap-1.5">
           {tags.map(tag => <Badge key={tag} variant="outline" className="h-6 gap-1 rounded-md font-mono text-[12px] font-normal">{tag}
             <button type="button" aria-label={t("shell:devices.tags.remove", { tag })} onClick={() => void save(tags.filter(x => x !== tag))}><XIcon className="size-3" /></button></Badge>)}
-          <input className="min-w-28 flex-1 bg-transparent type-callout outline-none placeholder:text-tertiary" value={draft} placeholder={t("shell:devices.tags.add")}
+          <input className="min-w-28 flex-1 bg-transparent type-callout outline-none placeholder:text-tertiary" value={draft} placeholder={t("shell:devices.tags.add")} aria-label={t("shell:devices.tags.add")}
             onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); add() } }} onBlur={add} data-node-tag-input />
         </div>
         {error && <div className="mt-1.5 type-footnote text-destructive" role="alert">{error}</div>}

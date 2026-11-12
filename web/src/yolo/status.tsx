@@ -22,7 +22,7 @@ export function RunState({ className }: { className?: string }) {
   )
   return (
     <div role={s === "paused" ? "alert" : "status"} className={cn("flex flex-wrap items-center gap-x-3 gap-y-1 type-footnote text-muted-foreground", className)} data-run-state={s}>
-      <span className="inline-flex min-w-0 items-center gap-2"><Dot s={s} className="size-2" /><span className="font-medium text-foreground">{label(s)}</span><span className="min-w-0 truncate">{what}</span></span>
+      <span className="inline-flex min-w-0 items-center gap-2"><Dot s={s} className="size-2 shrink-0" /><span className="shrink-0 whitespace-nowrap font-medium text-foreground">{label(s)}</span><span className="min-w-0 break-words">{what}</span></span>
       {live && <span className="inline-flex flex-wrap items-baseline gap-x-3" data-run-counts>
         {n(y.counts.decided, t("yolo:run.decided"), "decided", "decided")}
         {n(y.counts.declined, t("yolo:run.declined"), "declined", "declined")}
