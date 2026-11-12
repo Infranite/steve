@@ -422,11 +422,16 @@ fn record(
     Ok(())
 }
 
+/// Keeps a retired attempt's snapshot, cancelled by the reset or replan (a success is invalidated
+/// with it). A failure stays failed with its own reason: it is the authoritative outcome of that
+/// attempt, and a turn end that comes late closes its child as failed, never as cancelled.
 fn archive_attempt(tx: &Tx<'_>, parent: &str, unit: &WorkUnit, reason: &str) -> Result<()> {
     if let Some(child) = &unit.item_id {
         let mut old = unit.clone();
-        old.status = "cancelled".into();
-        old.reason = Some(format!("尝试已失效：{reason}"));
+        if old.status != "failed" {
+            old.status = "cancelled".into();
+            old.reason = Some(format!("尝试已失效：{reason}"));
+        }
         tx.execute(
             "INSERT OR IGNORE INTO workflow_attempts(item_id,workflow_id,unit_id,snapshot,created)
              VALUES (?,?,?,?,?)",
@@ -618,17 +623,34 @@ impl Workflows<'_> {
             if current.is_some() {
                 return Ok(current);
             }
+            // a retired attempt: an authoritative failure in the append-only history stands over a
+            // snapshot archived as cancelled (rows archived before failed snapshots were kept)
             one(
                 c,
-                "SELECT workflow_id,snapshot FROM workflow_attempts WHERE item_id=?",
+                "SELECT a.workflow_id,a.snapshot,
+                        (SELECT h.reason FROM workflow_history h
+                         WHERE h.workflow_id=a.workflow_id AND h.action='deliver'
+                           AND json_extract(h.detail,'$.child')=a.item_id
+                           AND json_extract(h.detail,'$.status')='failed'
+                         ORDER BY h.revision DESC LIMIT 1) AS failed
+                 FROM workflow_attempts a WHERE a.item_id=?",
                 [child],
-                |r| Ok((r.get("workflow_id")?, decode(r, "snapshot")?)),
+                |r| {
+                    let mut u: WorkUnit = decode(r, "snapshot")?;
+                    if let Some(why) = r.get::<_, Option<String>>("failed")?
+                        && u.status != "failed"
+                    {
+                        u.status = "failed".into();
+                        u.reason = Some(why);
+                    }
+                    Ok((r.get("workflow_id")?, u))
+                },
             )
         })
     }
 
-    /// Retired attempts whose child item was left active. A failed delivery remains identifiable
-    /// in the append-only history even though archiving changes the snapshot status to cancelled.
+    /// Retired attempts whose child item was left active. A failed delivery is identified from the
+    /// append-only history (older rows archived a failed attempt's snapshot as cancelled).
     pub fn retired_open(&self) -> Result<Vec<(WorkUnit, bool)>> {
         self.0.read(|c| {
             all(

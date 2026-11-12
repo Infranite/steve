@@ -520,6 +520,9 @@ pub struct SessionStop {
     pub ended: Option<i64>,
     /// The session's last event then: a message sent after it began another turn.
     pub seq: Option<i64>,
+    /// The session's last event when your pending Stop was asked for (migration 63): a message
+    /// sent after it began a newer turn than the one you stopped.
+    pub asked_seq: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
