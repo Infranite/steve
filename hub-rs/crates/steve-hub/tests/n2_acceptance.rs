@@ -1102,6 +1102,16 @@ async fn an_auto_bot_session_skips_a_remote_node_that_predates_auto() {
         .await
         .expect("the upgraded Node links");
     fake.connect(Arc::new(RemoteSink(link.link.clone())));
+    // A successful WebSocket dial precedes replay of the old session. Routing deliberately
+    // excludes the Node until that replay has finished, so create the new item afterwards.
+    assert!(
+        wait(30, || h.log().contains(&format!(
+            "node {node}: reconciled after its restart"
+        )))
+        .await,
+        "the upgraded Node finishes recovery before routing new work; hub:\n{}",
+        h.log()
+    );
     let sid = c.item_on(&h, "B1a 自动 升级后", &auto).await;
     assert!(
         wait(30, || on_node(&sid) == 1).await,
