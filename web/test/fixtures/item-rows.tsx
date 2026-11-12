@@ -18,6 +18,11 @@ st.items = [
   /* a real wait: the card's question and the way to it, instead of the stale summary */
   item("ST-52", "发布脚本加上回滚", { st: "wait", now: "交付了，等你验收", plan: [["改脚本", 1], ["测试", 1]], wait: approve, waits: [approve, wait("ask", "回滚保留几个版本？")] }),
   item("ST-53", "选择数据库迁移方案", { st: "wait", now: "等你回答", wait: wait("ask", "迁移要在白天还是晚上做？这会影响要不要先停写入，一个很长的问题，看看会不会把行撑出去"), waits: [] }),
+  item("ST-5", "修复权限状态", { now: "协作执行中：统一边界" }),
+  item("ST-26", "统一边界", { src: ["协作工作", "workflow"], parent: { item: "ST-5" }, now: "正在执行检查" }),
+  item("ST-27", "另一项", { now: "正在处理" }),
+  item("ST-28", "普通派生", { parent: { item: "ST-27" }, now: "独立工作" }),
+  item("ST-29", "已结束的旧单元", { st: "done", src: ["协作工作", "workflow"], parent: { item: "ST-27" }, now: "已完成" }),
 ]
 st.items[3].waits = [st.items[3].wait!]
 function Fixture() {
