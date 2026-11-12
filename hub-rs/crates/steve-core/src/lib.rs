@@ -45,6 +45,7 @@ pub mod takeover;
 pub mod thread;
 pub mod upstream;
 pub mod util;
+mod work;
 pub mod workflow;
 pub mod workspace;
 mod worktrees;
@@ -126,6 +127,8 @@ pub(crate) struct State {
     tokens: HashMap<String, String>,
     /// The last turn end each session had (its attempt): the same end told again is ignored.
     ended: HashMap<String, String>,
+    /// How each session's last turn ended, for a stall later on (`work::LastStop`).
+    stops: HashMap<String, work::LastStop>,
     releasing: Option<Releasing>,
     release_generation: u64,
     /// An acceptance answered with 验收并发布 `(item, who)`: its release requirement starts the

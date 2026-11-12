@@ -1,5 +1,6 @@
-//! Items that stopped without saying so: `run`, but their session has been idle for a while with no
-//! turn, nothing queued and no open card (a cancelled turn, an agent that died). They get one card,
+//! Items that stopped without saying so: `run`, but their session has been idle for a while and their
+//! work ([`crate::work`]) neither runs, queues, waits for you, is paused nor waits on prerequisites (a
+//! cancelled turn, an agent that died, a coordinator left with a failed unit). They get one card,
 //! “它停下了：…”, with 让它继续 / 我来看看 / 放弃; it expires as soon as a turn starts again.
 
 use std::time::Duration;
@@ -10,6 +11,7 @@ use crate::error::Result;
 use crate::lifecycle::settle;
 use crate::repo::NewDecision;
 use crate::util::{js_head, now};
+use crate::work::{LastStop, Work};
 use crate::{Core, Tx};
 
 /// How long an item may sit in `run` with nothing going on before it gets the card.
@@ -67,30 +69,35 @@ impl Tx<'_> {
                 let Some(s) = self.active_session(&i.id)? else {
                     continue;
                 };
-                if self.busy(&s.id)
-                    || !self.db().queued(&s.id)?.is_empty()
-                    || self
-                        .db()
-                        .decisions_of_item(&i.id)?
-                        .iter()
-                        .any(|d| d.status == "open")
-                {
+                /* a unit's session belongs to its graph: the graph resumes it or reports it */
+                if self.workflow_child(&i)? || self.st.probing.contains_key(&i.id) {
+                    continue;
+                }
+                /* the item's work, not the session alone: a coordinator idle while its graph runs,
+                 * queues, waits for you or is paused has not stopped */
+                let work = self.work(&i)?;
+                if work.waiting() {
                     continue;
                 }
                 let last = self.db().last_event_ts(&s.id)?.unwrap_or(0).max(s.updated);
                 if at - last < STALL_AFTER_MS {
                     continue;
                 }
-                let why = self
-                    .db()
-                    .last_system_text(&s.id)?
-                    .filter(|t| !t.trim().is_empty())
-                    .unwrap_or_else(|| "会话空闲，没有在运行，也没有交付或提问".into());
+                /* the cause from state, never the session's last system line */
+                let (why, yours) = match &work {
+                    Work::Failed(why) => (why.clone(), false),
+                    _ => LastStop::cause(self.st.stops.get(&s.id)),
+                };
                 let mut question = format!("它停下了：{}", js_head(&why, 200));
                 /* Steve looks first, unless it was you who stopped it */
-                if !why.starts_with("你中断了") {
-                    let stop = crate::takeover::Stop::Idle {
-                        why: question.clone(),
+                if !yours {
+                    let stop = match work {
+                        Work::Failed(_) => crate::takeover::Stop::Workflow {
+                            why: question.clone(),
+                        },
+                        _ => crate::takeover::Stop::Idle {
+                            why: question.clone(),
+                        },
                     };
                     match self.takeover(&i.id, &s.id, stop)? {
                         Some(q) => question = q,
@@ -139,6 +146,23 @@ impl Tx<'_> {
         }
         if !open.is_empty() {
             settle(self.db(), &item)?;
+        }
+        /* a unit at work again: the coordinator's card about a stop (its own, or a unit's failure)
+         * no longer describes the parent either */
+        /* by_child also finds retired attempts: only the graph's current one counts */
+        if let Some((parent, _)) = self.db().store().workflows().by_child(&item)?
+            && let Some(unit) = self.db().store().workflows().get(&parent)?.and_then(|g| {
+                g.units
+                    .into_iter()
+                    .find(|u| u.session_id.as_deref() == Some(session_id))
+            })
+        {
+            crate::lifecycle::supersede_where(
+                self.db(),
+                &parent,
+                crate::lifecycle::stop_card,
+                &format!("协作工作 {} 又开始执行了", unit.spec.title),
+            )?;
         }
         Ok(())
     }

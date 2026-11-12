@@ -54,6 +54,15 @@ pub fn supersede(db: &Store, item: &str, kinds: &[&str], why: &str) -> Result<us
     supersede_where(db, item, |d| kinds.contains(&d.kind.as_str()), why)
 }
 
+/// A card saying the agent stopped (its turn ended without a delivery, it failed, it sat idle): it
+/// gives way when there is news. A card about an effect nobody knows, or about a release, waits on you.
+pub fn stop_card(d: &steve_store::Decision) -> bool {
+    d.kind == "fail"
+        && matches!(d.subject_type.as_str(), "item" | crate::stall::STALL)
+        && !crate::cycle::unknown_effect_card(d)
+        && !d.options.iter().any(|o| o.starts_with("release_"))
+}
+
 /// [`supersede`] for the open cards of `item` that `pick` picks.
 pub fn supersede_where(
     db: &Store,

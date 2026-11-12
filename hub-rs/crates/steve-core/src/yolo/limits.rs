@@ -7,7 +7,11 @@
 //!    (a program that sends as the user from the agent's shell — `lark-cli`, `sendmail`, `osascript`… — never is);
 //! 4. deleting, moving or writing outside the item's own directory; touching `STEVE_HOME`, port 8440, launchd;
 //! 5. pushing to a remote or publishing (only the user's own Steve deployment is exempt);
-//! 6. outbound content the disclosure check judged Leak or Blocked.
+//! 6. outbound content the disclosure check judged Leak or Blocked;
+//! 7. what only the user can do in person (sign in, scan a code, type a one-time code, confirm on a
+//!    device, plug something in), or a claim that they did: a question about it, or an agent that
+//!    stopped waiting for it, stays with the user. Nobody's text, the agent's or the model's, counts
+//!    as the user having done it.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
@@ -23,7 +27,7 @@ pub use steve_modules::outbound::{AI_PREFIX, strip_ai_prefix, with_ai_prefix};
 /// A hard limit that was hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limit {
-    /// 1–6, as numbered in the module docs.
+    /// 1–7, as numbered in the module docs.
     pub n: u8,
     pub what: String,
 }
@@ -79,6 +83,28 @@ fn outward_ask(text: &str, full: bool) -> Option<regex::Match<'_>> {
         OUTWARD_ASK.find(text)
     }
 }
+/// Hard limit 7: something the user has to do themselves, or to say they did.
+static OWN_ACTION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?i)本人|亲自|手动(操作|完成|确认|登录|点击|执行|授权|批准|输入|扫码)",
+        r"|扫码|扫一扫|二维码|验证码|动态码|短信码|一次性密码|两步验证|双重验证|二次验证|\b(2fa|mfa|otp)\b",
+        r"|指纹|面容|touch ?id|face ?id|硬件密钥|yubikey|u盾",
+        r"|插(上|入|好)(手机|设备|硬件|数据线|u盘|网线|电源)|重新插拔",
+        r"|你[^。？?！!\n]{0,8}(在|用|到)(你的)?(手机|电脑|浏览器|设备|app|应用|系统设置|钥匙串|终端)",
+        r"|(登录|授权|操作|扫码|确认|安装|批准|验证)(完|好)?(了|后|之后|以后)[^。？?\n]{0,4}(告诉|通知|回复|跟|叫)我",
+        r"|(在|用)(手机|设备|手表|平板)(上|里)?[^。？?\n]{0,4}(确认|登录|授权|批准|扫|点|验证|输入)",
+        r"|(你|用户|本人)[^。？?\n]{0,4}已(经)?[^。？?\n]{0,6}(登录|扫码|确认|授权|批准|操作|验证)",
+        r"|\b(qr ?code|verification code|one-time (code|password)|passkey|in person|yourself)\b",
+        r"|\bon your (phone|device|computer|laptop|browser)\b|\b(sign|log) ?in (manually|yourself)\b",
+    ))
+    .expect("valid regex")
+});
+
+/// What in `text` asks for (or claims) the user's own action: hard limit 7.
+pub fn own_action(text: &str) -> Option<String> {
+    OWN_ACTION.find(text).map(|m| m.as_str().to_string())
+}
+
 static LAUNCHD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)launchctl|launchd|LaunchAgents|LaunchDaemons").expect("valid regex")
 });
@@ -119,7 +145,11 @@ pub fn check(f: &Facts, env: &Env) -> Option<Limit> {
         Subject::Tool(t) => tool(t, env),
         // a question about pushing, publishing, sending or deleting is never YOLO's to answer
         Subject::Ask(a) => ask(f, a),
-        Subject::Stall(s) => s.asked.as_ref().and_then(|a| ask(f, a)),
+        Subject::Stall(s) => s
+            .own_action
+            .as_ref()
+            .map(|w| Limit::new(7, format!("它在等你本人操作（{w}）")))
+            .or_else(|| s.asked.as_ref().and_then(|a| ask(f, a))),
         _ => None,
     }
 }
@@ -134,6 +164,12 @@ fn ask(f: &Facts, a: &super::judge::Ask) -> Option<Limit> {
     for t in words.into_iter().flatten() {
         if let Some(w) = money(t) {
             return Some(Limit::new(1, format!("涉及付款（{w}）")));
+        }
+    }
+    // the answer's own words included: a model that says it was done is no proof that it was
+    for t in words.into_iter().flatten() {
+        if let Some(w) = own_action(t) {
+            return Some(Limit::new(7, format!("需要你本人操作或确认（{w}）")));
         }
     }
     outward_ask(&f.question, a.full)
@@ -1526,6 +1562,34 @@ mod tests {
         ] {
             assert!(money_or_outside_words(q, false).is_some(), "{q}");
             assert!(money_or_outside_words(q, true).is_some(), "{q}");
+        }
+    }
+
+    /// ST-10: what only the user can do (or a claim that they did) is hard limit 7; ordinary coding
+    /// questions are not.
+    #[test]
+    fn your_own_action_is_spotted_but_coding_questions_are_not() {
+        for t in [
+            "需要你本人在手机上确认登录，完成后告诉我。",
+            "请扫码授权 GitHub App",
+            "把短信验证码发我",
+            "请你在浏览器里登录 Apple 开发者账号",
+            "插上手机后我再继续",
+            "授权好了之后告诉我",
+            "用户已经在手机上确认过了",
+            "Please sign in yourself, then reply",
+            "approve the prompt on your phone",
+        ] {
+            assert!(own_action(t).is_some(), "{t}");
+        }
+        for t in [
+            "用 a 还是 b？",
+            "要不要把登录页拆成两个组件？",
+            "测试全部通过，可以交付吗？",
+            "Should the login handler return 401 or 403?",
+            "我在浏览器里打开了预览，截图已保存",
+        ] {
+            assert!(own_action(t).is_none(), "{t}");
         }
     }
 }

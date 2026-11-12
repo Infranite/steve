@@ -63,12 +63,14 @@ pub(crate) enum Stop {
     },
     /// The session sat idle with nothing going on (`crate::stall`).
     Idle { why: String },
+    /// The coordinator stopped while its work graph needs it ([`crate::work::Work::Failed`]).
+    Workflow { why: String },
 }
 
 impl Stop {
     fn why(&self) -> &str {
         match self {
-            Stop::Stopped { why, .. } | Stop::Idle { why } => why,
+            Stop::Stopped { why, .. } | Stop::Idle { why } | Stop::Workflow { why } => why,
         }
     }
 }
@@ -147,12 +149,24 @@ impl Tx<'_> {
         if let Stop::Stopped {
             last, answered_you, ..
         } = &stop
-            && (crate::yolo::answer::looks_like_question(last).is_some() || *answered_you)
+            && (crate::yolo::answer::looks_like_question(last).is_some()
+                || *answered_you
+                || crate::yolo::limits::own_action(last).is_some())
         {
+            /* and it waits for something only you can do (sign in, scan a code, confirm on a
+             * device): continuing it would only have it take the step as done */
             return Ok(Some(stop.why().into()));
         }
         if self.waiting_on_lane(item_id)? {
             return Ok(None);
+        }
+        /* the graph is not done: no completion rule can hold, the coordinator has to act */
+        if let Stop::Workflow { why } = &stop {
+            let text = format!(
+                "（Steve）协作工作图需要你处理：{}。用 steve_workflow action=get 读取当前图和各单元的结果，再重试、重规划或取消；只有用户能决定的事用 steve_ask 提问。不要重做已经通过的单元，已经完成的推送、合并、打 tag、发布不要重做。",
+                why.strip_prefix("它停下了：").unwrap_or(why)
+            );
+            return self.takeover_continue(&i, sid, why, &text);
         }
         if i.revision > 0
             && let Some(rule) = self.done_rule(&i)?
@@ -236,7 +250,7 @@ impl Tx<'_> {
     /// A persisted lane request explains an idle agent, including after a restart.
     /// The lane owns approval/release failure cards. Once it releases or returns the request,
     /// normal completion checks resume. This never suppresses explicit user messages.
-    fn waiting_on_lane(&self, item_id: &str) -> Result<bool> {
+    pub(crate) fn waiting_on_lane(&self, item_id: &str) -> Result<bool> {
         Ok(self
             .db()
             .store()
@@ -296,6 +310,26 @@ impl Tx<'_> {
                 true,
                 Default::default(),
             );
+            return Ok(None);
+        }
+        /* looked at again right before a continue is spent: the stop may be old news (a probe
+         * that came back late, a unit that started meanwhile), and a waiting item is not continued */
+        let work = self.work(&self.item(&i.id)?)?;
+        if work.waiting() {
+            self.diagnostic_session(
+                &s.id,
+                None,
+                "takeover.evaluated",
+                "work_waiting",
+                true,
+                steve_store::diagnostics::Details {
+                    to_state: Some(work.code().into()),
+                    ..Default::default()
+                },
+            );
+            if let Some(t) = work.text() {
+                self.db().item_patch(&i.id, patch![now: t])?;
+            }
             return Ok(None);
         }
         let n = self.takeover_count(&i.id)?;
@@ -853,6 +887,7 @@ fn continue_text(
                 .to_string()
         }
         Stop::Idle { .. } => "（Steve）会话停了一会儿，没有在运行，也没有交付或提问。".to_string(),
+        Stop::Workflow { why } => format!("（Steve）{why}。"),
     };
     s.push_str(
         "如果上下文压缩过，提醒你：Steve 的工具 steve_update、steve_ask、steve_deliver 仍然可用。",

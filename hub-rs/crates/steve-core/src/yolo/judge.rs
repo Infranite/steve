@@ -335,6 +335,9 @@ pub struct Stall {
     pub attempts: u32,
     /// The agent's last words look like a question; the answer comes from [`Ask`].
     pub asked: Option<Ask>,
+    /// The agent's last words wait for the user's own action (hard limit 7): what gave it away.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_action: Option<String>,
     /// Steve already continued it on its own (`crate::takeover`) and it still stopped.
     pub steve_tried: bool,
 }

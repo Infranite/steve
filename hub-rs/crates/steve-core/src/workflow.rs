@@ -205,7 +205,7 @@ impl Tx<'_> {
         })
     }
 
-    fn workflow_current(&self, graph: &Workflow) -> Result<bool> {
+    pub(crate) fn workflow_current(&self, graph: &Workflow) -> Result<bool> {
         let item = self.item(&graph.item_id)?;
         let goal = self
             .db()
@@ -872,19 +872,5 @@ impl Tx<'_> {
                 "workflow.progress", &[])?;
         }
         Ok(true)
-    }
-
-    /// A coordinator may intentionally end its turn while the durable graph is doing the work.
-    pub(crate) fn workflow_waiting(&self, item: &str) -> Result<bool> {
-        if self.db().store().workflows().get(item)?.is_some()
-            && !self.workflow_blockers(item, true)?.is_empty()
-        {
-            self.db().item_patch(
-                item,
-                patch![now: "协作工作尚未全部通过；等待执行、评审或重规划"],
-            )?;
-            return Ok(true);
-        }
-        Ok(false)
     }
 }
