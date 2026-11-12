@@ -88,7 +88,7 @@ export function SpaceView({ id }: { id: string }) {
         <section data-rules-section={rulesOff ? "off" : "on"}><SectionLabel>{t("channels:space.whenRespond")}</SectionLabel>
           <Conflicts items={s.conflicts} keys={["rules", "flow"]} className="mb-2 mt-0" />
           <div className={cn(rulesOff && "opacity-55")}>
-          {s.flow_id ? <Group><Row icon={<WorkflowIcon className="size-4 text-muted-foreground" aria-hidden />} title={t("channels:space.toFlow")} sub={t("channels:space.flowSub")} onClick={() => go("#/auto/rule/" + s.flow_id)}>
+          {s.flow_id ? <Group><Row icon={<WorkflowIcon className="size-4 text-muted-foreground" aria-hidden />} title={t("channels:space.toFlow")} sub={t("channels:space.flowSub")} onClick={() => go("#/auto/rule/" + s.flow_id)} controls>
               <Button size="xs" variant="outline" disabled={busy} onClick={(e) => { e.stopPropagation(); void act(() => channelsApi.backToRules(s.id), t("channels:space.backToRulesToast")).then((r) => r && L.reload()) }} data-back-to-rules>{t("channels:space.backToRules")}</Button></Row></Group>
             : rulesNow ? <>
               <Rules rules={rulesNow} self={me} onChange={setRules} note={t("channels:space.rulesNote")} />

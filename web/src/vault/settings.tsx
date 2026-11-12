@@ -28,7 +28,7 @@ export function VaultSettingsPane() {
   if (L.s === "unwired") return <Empty title={t("vault:settings.unwired")} sub={t("vault:settings.unwiredSub")} />
   if (L.s === "error") return <Empty title={L.err} />
   const { status: s, passkeys } = L.data
-  if (!s.initialized) return <Group><Row title={t("vault:settings.notEnabled")} sub={t("vault:settings.notEnabledSub")} onClick={() => go("#/vault")}><Button size="sm" variant="outline" tabIndex={-1}>{t("vault:settings.goEnable")}</Button></Row></Group>
+  if (!s.initialized) return <Group><Row title={t("vault:settings.notEnabled")} sub={t("vault:settings.notEnabledSub")} onClick={() => go("#/vault")} controls><Button size="sm" variant="outline" onClick={() => go("#/vault")}>{t("vault:settings.goEnable")}</Button></Row></Group>
   if (rotated) return <RecoveryCode title={t("vault:recovery.newTitle")} code={rotated} onDone={() => { setRotated(null); void L.reload() }} />
   return (
     <div className="flex flex-col gap-8" data-vault-settings-pane>

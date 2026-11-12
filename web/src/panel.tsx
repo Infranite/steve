@@ -116,7 +116,9 @@ export function Spark({ values, label, className, color = "currentColor" }: { va
 }
 
 /** a list row inside a panel: name and grey sub on the left, anything on the right (a spark, a figure with its meter) */
-export function PanelRow({ title, sub, children, onClick, className, ...rest }: { title: ReactNode; sub?: ReactNode; children?: ReactNode; onClick?: () => void; className?: string; [k: string]: unknown }) {
+/** a row of a panel; with `onClick` the row opens something. `controls`: its children are buttons of their own, so the row
+ *  is a plain box under a full-size open button instead of one button around them (no button inside a button) */
+export function PanelRow({ title, sub, children, onClick, className, controls = false, ...rest }: { title: ReactNode; sub?: ReactNode; children?: ReactNode; onClick?: () => void; className?: string; controls?: boolean; [k: string]: unknown }) {
   const body = <>
     <span className="min-w-0 flex-1">
       <span className="block truncate type-callout text-foreground">{title}</span>
@@ -125,6 +127,15 @@ export function PanelRow({ title, sub, children, onClick, className, ...rest }: 
     {children}
   </>
   const cls = cn("flex w-full min-w-0 items-center gap-4 px-5 py-2.5 text-left [&+&]:border-t [&+&]:border-border/60", onClick && "cursor-pointer transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none", className)
+  if (onClick && controls) return (
+    <div className={cn(cls, "relative has-[[data-row-cover]:focus-visible]:bg-muted/40")} {...rest}>
+      <button type="button" onClick={onClick} aria-label={typeof title === "string" ? title : undefined} className="absolute inset-0 cursor-pointer outline-none" data-row-cover />
+      <span className="pointer-events-none relative min-w-0 flex-1">
+        <span className="block truncate type-callout text-foreground">{title}</span>
+        {sub != null && <span className="mt-0.5 block truncate type-footnote text-muted-foreground">{sub}</span>}
+      </span>
+      <span className="relative flex shrink-0 items-center gap-4">{children}</span>
+    </div>)
   return onClick ? <button type="button" onClick={onClick} className={cls} {...rest}>{body}</button> : <div className={cls} {...rest}>{body}</div>
 }
 

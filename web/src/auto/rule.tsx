@@ -147,7 +147,7 @@ export function RuleView({ id }: { id: string }) {
           <section>
             <SectionLabel right={<a href="#/signals" className="font-normal hover:text-foreground">{t("auto:rule.viewInSignals")}</a>}>{t("auto:rule.recentRuns")}</SectionLabel>
             {runs.data?.length ? <Group>{runs.data.map((r) => (
-              <Row key={r.id} onClick={() => void openRun(r.id)} data-run-row={r.id}
+              <Row key={r.id} onClick={() => void openRun(r.id)} controls={r.status === "running" || r.status === "waiting"} data-run-row={r.id}
                 title={<span className="inline-flex items-center gap-1.5"><StatusDot s={RUN_STATUS[r.status]?.[1] ?? "idle"} />{r.outcome_label || RUN_STATUS[r.status]?.[0] || r.status}</span>}
                 sub={[r.dry_run ? t("auto:rule.dryRun") : "", "v" + r.flow_version, r.error ?? "", t("auto:rule.clickSteps")].filter(Boolean).join(" · ")}>
                 {(r.status === "running" || r.status === "waiting") && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={(e) => { e.stopPropagation(); void act("cancel", () => flowApi.cancelRun(r.id), t("auto:rule.runCancelled")).then(() => runs.reload()) }}>{t("common:action.cancel")}</Button>}

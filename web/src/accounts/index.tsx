@@ -152,7 +152,7 @@ function AccountDetail({ id }: { id: string }) {
       {edit && <EditAccount a={a} onClose={() => setEdit(false)} onDone={L.reload} />}
       {newItem && <NewVaultDialog account={{ id: a.id, display_name: a.display_name || a.handle }} onClose={() => setNewItem(false)} />}
       <div className="flex flex-col gap-8">
-        <Section label={t("accounts:detail.owner")}><Group><Row title={a.party.name} sub={t(a.verified ? "accounts:detail.verifiedSource" : "accounts:detail.unverifiedSource", { source: a.source_label || a.source })} onClick={() => go("#/contacts/" + a.party.id)}>
+        <Section label={t("accounts:detail.owner")}><Group><Row title={a.party.name} sub={t(a.verified ? "accounts:detail.verifiedSource" : "accounts:detail.unverifiedSource", { source: a.source_label || a.source })} onClick={() => go("#/contacts/" + a.party.id)} controls={!a.verified}>
           {!a.verified && <Button size="xs" variant="outline" disabled={busy} onClick={(e) => { e.stopPropagation(); void act(() => accountsApi.patchAccount(a.id, { verified: true }), t("accounts:detail.verified")).then((r) => r && L.reload()) }} data-verify-account>{t("common:action.confirm")}</Button>}
           <ChevronRightIcon className="size-4 text-tertiary" /></Row></Group></Section>
         {mine && c && MAIL_ADAPTERS.includes(c.adapter) && <MailSettingsSection connection={c.id} />}
