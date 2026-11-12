@@ -160,6 +160,7 @@ try {
     await page.locator(`[data-yolo-scope="${type}"]`).click()
     await page.locator('[data-yolo-scope-opt="full"]').click()
     await page.locator("[data-yolo-scope-full-ok]").click()
+    for (let n = 0; !writes.length && n < 50; n++) await page.waitForTimeout(100) // the write is sent after the click returns
     assert.deepEqual(writes, [{ path: `/api/yolo/scopes/${type}/${type === "item" ? "ST-100" : "p1"}`, body: { mode: "full", confirm: true } }])
     await page.close()
   }

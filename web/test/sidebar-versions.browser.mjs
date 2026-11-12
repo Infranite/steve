@@ -59,7 +59,9 @@ try {
       return [...el.querySelectorAll("[data-nav]")].filter((a) => { a.scrollIntoView({ block: "nearest" }); const r = a.getBoundingClientRect(), b = el.getBoundingClientRect(); return r.top < b.top - 0.5 || r.bottom > Math.min(b.bottom, foot) + 0.5 }).map((a) => a.dataset.nav)
     })
     assert.deepEqual(hidden, [], `entries out of reach at 1066×${height}`)
-    if (height === 700) assert.match(await nav.getAttribute("data-more") ?? "", /start/, "the scrolled groups show there is more above")
+    // the fade follows the scroll event, a render later
+    if (height === 700) await page.waitForFunction(() => /start/.test(document.querySelector("[data-sidebar-nav]")?.getAttribute("data-more") ?? ""), null, { timeout: 5000 })
+      .catch(() => assert.fail("the scrolled groups show there is more above"))
     await page.close()
   }
   assert.deepEqual(errors, [])
