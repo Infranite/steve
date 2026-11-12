@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 use steve_store::{UnitSpec, WorkUnit, Workflow};
 
-use crate::cycle::{CLOSED, FAIL, Policy, conflict};
+use crate::cycle::{CANCEL, CLOSED, FAIL, Policy, conflict};
 use crate::repo::{Item, Session};
 use crate::{Check, Core, ItemAction, Mark, Output, Result, TurnEnd, Tx, patch};
 
@@ -464,6 +464,32 @@ impl Tx<'_> {
     pub(crate) fn workflow_tick(&mut self) -> Result<()> {
         if self.cfg().no_resume {
             return Ok(());
+        }
+        // A retry or replan retires the old attempt. Its child can still be active when an older
+        // Hub stopped between recording the result and closing the item. The current graph no
+        // longer lists that child, so reconcile it from retained attempts and delivery history.
+        for (u, failed) in self.db().store().workflows().retired_open()? {
+            if let Some(child) = u.item_id.as_deref()
+                && !self.unit_turn(&u)?
+            {
+                let reason = if failed {
+                    u.summary.trim()
+                } else {
+                    u.reason.as_deref().unwrap_or("工作尝试已被替换").trim()
+                };
+                let reason = if reason.is_empty() {
+                    "工作尝试已被替换"
+                } else {
+                    reason
+                };
+                self.lc_stop(
+                    child,
+                    if failed { FAIL } else { CANCEL },
+                    "workflow",
+                    reason,
+                    None,
+                )?;
+            }
         }
         // Pause/cancel is a persisted intent, not just an in-memory stop request. Reconcile it
         // after every restart too; a Node may still be running the previous attempt.

@@ -550,6 +550,74 @@ fn restart_finishes_a_failed_child_after_its_turn_has_ended() {
 }
 
 #[test]
+fn restart_finishes_a_retired_failed_attempt_after_its_turn_ends() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let work = unit(&k, &parent, "a");
+    let child = work.item_id.unwrap();
+    let sid = work.session_id.unwrap();
+    let s = k.db().session(&sid).unwrap().unwrap();
+    k.core
+        .tool_workflow(&s, json!({"action":"fail","reason":"旧评审未通过"}))
+        .unwrap();
+    k.db()
+        .store()
+        .workflows()
+        .reset(&parent, "a", "重试旧结果")
+        .unwrap();
+    assert!(unit(&k, &parent, "a").item_id.is_none());
+
+    k.core.tx().workflow_tick().unwrap();
+    assert_eq!(k.phase(&child), "active", "live turn still owns its child");
+    k.rt.st().turning.remove(&sid);
+    k.db()
+        .session_patch(&sid, crate::patch![status: "idle"])
+        .unwrap();
+    k.db()
+        .queue_add(&sid, "失败前排队的输入", "me", &[])
+        .unwrap();
+    k.core.tx().workflow_tick().unwrap();
+    assert_eq!(k.phase(&child), "closed");
+    assert_eq!(k.status(&child).0, "fail");
+    assert_eq!(
+        k.db().item(&child).unwrap().unwrap().outcome.as_deref(),
+        Some("failed")
+    );
+    k.core.tx().workflow_tick().unwrap();
+    assert_eq!(k.phase(&child), "closed");
+}
+
+#[test]
+fn restart_cancels_a_retired_attempt_without_a_failed_delivery() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let work = unit(&k, &parent, "b");
+    let child = work.item_id.unwrap();
+    let sid = work.session_id.unwrap();
+    k.db()
+        .store()
+        .workflows()
+        .cancel(&parent, "b", "换一轮执行")
+        .unwrap();
+    k.db()
+        .store()
+        .workflows()
+        .reset(&parent, "b", "换一轮执行")
+        .unwrap();
+    k.rt.st().turning.remove(&sid);
+    k.db()
+        .session_patch(&sid, crate::patch![status: "idle"])
+        .unwrap();
+    k.core.tx().workflow_tick().unwrap();
+    assert_eq!(k.phase(&child), "closed");
+    assert_eq!(k.status(&child).0, "drop");
+    assert_eq!(
+        k.db().item(&child).unwrap().unwrap().outcome.as_deref(),
+        Some("cancelled")
+    );
+}
+
+#[test]
 fn lifecycle_gate_blocks_even_direct_completion_request_and_no_release_is_started() {
     let (k, parent, specs) = setup(false);
     plan(&k, &parent, &specs);
