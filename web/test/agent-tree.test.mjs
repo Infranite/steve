@@ -36,6 +36,9 @@ test("unit status: paused and unavailable graphs say so; activity decides runnin
   assert.equal(unitStatus(unit("b", "pending"), { ...wf, execution_ready: false }), "blocked")
   assert.equal(unitStatus(unit("c", "succeeded"), { ...wf, paused: true }), "done", "a result stays a result while paused")
   assert.equal(unitStatus(unit("d", "cancelled"), wf), "stopped")
+  const root = (w) => buildAgentTree("ST-1", [item("ST-1")], w).status
+  assert.equal(root({ ...wf, paused: true }), "paused", "a running coordinator of a paused graph is paused")
+  assert.equal(root({ ...wf, paused: true, current_cycle: false }), "running", "an earlier cycle's pause is history")
 })
 
 test("a missing root or a cycle of parents cannot hang the page", () => {

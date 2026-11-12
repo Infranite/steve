@@ -106,7 +106,10 @@ export function buildAgentTree(rootId: string, items: TreeItem[], workflow?: Wor
     }
   }
   children.push(...forks(rootId, 0))
-  return { ...itemNode(root, "root", 0), children }
+  const node = itemNode(root, "root", 0)
+  // a coordinator whose current graph is paused is paused, whatever its own lifecycle says (as on the items list)
+  if (workflow?.paused && workflow.current_cycle !== false && node.status === "running") node.status = "paused"
+  return { ...node, children }
 }
 
 export function walk(node: AgentNode, f: (n: AgentNode, depth: number) => void, depth = 0) {
