@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 use steve_store::{UnitSpec, WorkUnit, Workflow};
 
-use crate::cycle::{CLOSED, Policy, conflict};
+use crate::cycle::{CLOSED, FAIL, Policy, conflict};
 use crate::repo::{Item, Session};
 use crate::{Check, Core, ItemAction, Mark, Output, Result, TurnEnd, Tx, patch};
 
@@ -831,23 +831,33 @@ impl Tx<'_> {
         let g = self.db().store().workflows().get(&parent)?.unwrap();
         if unit.status == "succeeded" {
             self.lc_try_close(child)?;
-        } else if unit.status == "running"
-            && !g.paused
-            && !self
-                .db()
-                .decisions_of_item(child)?
-                .iter()
-                .any(|d| d.status == "open")
-        {
-            let reason = end
-                .error
-                .as_deref()
-                .unwrap_or(if end.stop_reason == "cancelled" {
-                    "工作单元已中断，请核对结果后重试"
-                } else {
-                    "工作单元停止但未交付，请核对进度后重试"
-                });
-            self.workflow_report(s, reason, &[], &[], false)?;
+        } else {
+            if unit.status == "running"
+                && !g.paused
+                && !self
+                    .db()
+                    .decisions_of_item(child)?
+                    .iter()
+                    .any(|d| d.status == "open")
+            {
+                let reason = end
+                    .error
+                    .as_deref()
+                    .unwrap_or(if end.stop_reason == "cancelled" {
+                        "工作单元已中断，请核对结果后重试"
+                    } else {
+                        "工作单元停止但未交付，请核对进度后重试"
+                    });
+                self.workflow_report(s, reason, &[], &[], false)?;
+            }
+            if item.phase != CLOSED
+                && let Some((_, settled)) = self.db().store().workflows().by_child(child)?
+                && settled.status == "failed"
+            {
+                // Both explicit failure and a turn ending without delivery finish this attempt.
+                // Its evidence remains on the graph; a retry claims a new child.
+                self.lc_stop(child, FAIL, "workflow", &settled.summary, None)?;
+            }
         }
         self.workflow_drive(&parent)?;
         let latest = self.db().store().workflows().by_child(child)?;
