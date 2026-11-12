@@ -1063,3 +1063,60 @@ fn a_late_end_of_the_paused_turn_does_not_swallow_your_stop_of_the_next() {
     assert_eq!(k.rt.prompts_of(&sid).len(), prompts, "not resumed");
     assert_eq!(work(&k, &parent).0, "failed");
 }
+
+/// ST-25 #6: a failed, retried while paused (pending, attempt 1 of the old 3), then the same graph is
+/// planned again with one attempt and resumed. `a` never starts again: it and everything after it
+/// (review, then integrate) are a failure the coordinator hears of, not queued work forever.
+#[test]
+fn a_unit_out_of_attempts_holds_its_successors_as_failed() {
+    for (attempts, want) in [(1, "failed"), (2, "running")] {
+        let k = kit(2);
+        let parent = planned(&k, &["a"]);
+        let a = unit(&k, &parent, "a");
+        k.rt.end_turn(
+            &k.core,
+            a.session_id.as_deref().unwrap(),
+            "error",
+            Some("检查失败"),
+        );
+        assert_eq!(unit(&k, &parent, "a").status, "failed");
+        change(&k, &parent, "pause", None);
+        change(&k, &parent, "retry", Some("a"));
+        let a = unit(&k, &parent, "a");
+        assert_eq!((a.status.as_str(), a.attempt), ("pending", 1));
+        let revision = k
+            .db()
+            .store()
+            .workflows()
+            .get(&parent)
+            .unwrap()
+            .unwrap()
+            .revision;
+        k.core
+            .workflow_change(
+                &parent,
+                json!({"action":"plan","reason":"收紧次数","expected_revision":revision,
+                    "units":graph_of(&["a"]),"max_parallel":2,"max_attempts":attempts}),
+                "me",
+            )
+            .unwrap();
+        change(&k, &parent, "resume", None);
+        let (state, why) = work(&k, &parent);
+        assert_eq!(state, want, "max_attempts {attempts}: {why:?}");
+        if attempts == 1 {
+            assert_eq!(
+                why.as_deref(),
+                Some("协作工作未通过：a 尝试次数已用完；受阻：review、integrate")
+            );
+            assert_eq!(unit(&k, &parent, "a").status, "pending");
+            // the coordinator hears of it once idle, it is not left waiting
+            let coord = k.session(&parent, "idle");
+            coordinator_turn(&k, &coord, "看一下");
+            let p = k.rt.prompts_of(&coord);
+            assert!(
+                p.last().unwrap().contains("a 尝试次数已用完"),
+                "{p:?}"
+            );
+        }
+    }
+}

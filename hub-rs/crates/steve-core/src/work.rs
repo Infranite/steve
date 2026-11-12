@@ -276,11 +276,16 @@ impl Tx<'_> {
         }
         let (mut running, mut user, mut queued, mut failed) = (vec![], vec![], vec![], vec![]);
         let mut to_start = false;
-        /* pending units downstream of a failed or cancelled one wait on nothing that will come */
+        /* pending units downstream of a failed or cancelled one, or of one out of attempts (it
+         * never starts again: workflow_drive starts only a unit with attempts left), wait on
+         * nothing that will come */
         let mut held: std::collections::HashSet<&str> = g
             .units
             .iter()
-            .filter(|u| matches!(u.status.as_str(), "failed" | "cancelled"))
+            .filter(|u| {
+                matches!(u.status.as_str(), "failed" | "cancelled")
+                    || u.status == "pending" && u.attempt >= g.max_attempts
+            })
             .map(|u| u.spec.id.as_str())
             .collect();
         loop {
@@ -317,13 +322,13 @@ impl Tx<'_> {
                 continue;
             }
             match u.status.as_str() {
-                "pending" if held.contains(u.spec.id.as_str()) => downstream.push(title),
                 "pending" if u.attempt >= g.max_attempts => {
                     failed.push(steve_i18n::t!(
                         "core.now.unit_out_of_attempts",
                         title = title
                     ));
                 }
+                "pending" if held.contains(u.spec.id.as_str()) => downstream.push(title),
                 "pending" => {
                     to_start = true;
                     queued.push(title);
