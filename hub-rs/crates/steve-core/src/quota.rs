@@ -144,7 +144,10 @@ impl Tx<'_> {
     pub(crate) fn quota_text(&self, item_id: &str) -> Option<String> {
         let w = self.st.quota_waits.get(item_id)?;
         let now = crate::util::now();
-        (w.until > now).then(|| format!("模型配额用完，{} 后继续", when(w.until, now)))
+        /* written into the item's `now`: zh-CN, shown in the reader's language by crate::now_line */
+        (w.until > now).then(|| {
+            steve_i18n::stored(|| steve_i18n::t!("core.now.quota_wait", when = when(w.until, now)))
+        })
     }
 
     /// A turn of `sid` started (you wrote to it, say): it no longer waits for the quota.

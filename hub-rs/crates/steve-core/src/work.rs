@@ -113,26 +113,34 @@ fn names(xs: &[String]) -> String {
         .take(NAMES)
         .cloned()
         .collect::<Vec<_>>()
-        .join("、");
+        .join(&steve_i18n::t!("core.now.list_sep"));
     if xs.len() > NAMES {
-        s.push_str(&format!(" 等 {} 项", xs.len()));
+        s = steve_i18n::t!("core.now.names_more", names = s, count = xs.len());
     }
     s
 }
 
 impl Tx<'_> {
     /// What `item`'s work is doing now. The Hub's own holds (a release, maintenance) are not part of
-    /// it: they delay turns, they do not explain an item.
+    /// it: they delay turns, they do not explain an item. Its words are written into the item's `now`,
+    /// so they are zh-CN whoever asks ([`crate::now_line`] shows them in the reader's language).
     pub(crate) fn work(&self, item: &Item) -> Result<Work> {
+        steve_i18n::stored(|| self.work_in(item))
+    }
+
+    fn work_in(&self, item: &Item) -> Result<Work> {
         if item.status == "pause" {
-            return Ok(Work::Paused("事项已暂停".into()));
+            return Ok(Work::Paused(steve_i18n::t!("core.now.item_paused")));
         }
         if self.dependency_waiting(&item.id)? {
             let open = crate::lifecycle::deps_open(self.db(), &item.id)?;
             return Ok(Work::Blocked(if open.is_empty() {
-                "前置事项已完成，等待续跑".into()
+                steve_i18n::t!("core.now.deps_done")
             } else {
-                format!("等待前置事项完成：{}", open.join("、"))
+                steve_i18n::t!(
+                    "core.now.deps_wait",
+                    deps = open.join(&steve_i18n::t!("core.now.list_sep"))
+                )
             }));
         }
         if let Some(s) = self.active_session(&item.id)? {
@@ -140,12 +148,12 @@ impl Tx<'_> {
                 || self.rt().uncertain(&s.id)
                 || matches!(s.status.as_str(), "running" | "starting")
             {
-                return Ok(Work::Running("回合执行中".into()));
+                return Ok(Work::Running(steve_i18n::t!("core.now.turn_running")));
             }
             if !self.db().queued(&s.id)?.is_empty() {
                 return Ok(Work::Queued(match self.rt().node_offline(&s.id) {
-                    Some(why) => format!("{NODE_WAIT}{}", js_head(&why, 160)),
-                    None => "有排队输入等待发送".into(),
+                    Some(why) => steve_i18n::t!("core.now.node_wait", why = js_head(&why, 160)),
+                    None => steve_i18n::t!("core.now.input_queued"),
                 }));
             }
         }
@@ -155,9 +163,9 @@ impl Tx<'_> {
             .into_iter()
             .find(|d| d.status == "open")
         {
-            return Ok(Work::User(format!(
-                "等你处理：{}",
-                js_head(&d.question, 80)
+            return Ok(Work::User(steve_i18n::t!(
+                "core.now.waiting_user",
+                question = js_head(&d.question, 80)
             )));
         }
         if let Some(t) = self.quota_text(&item.id) {
@@ -173,18 +181,26 @@ impl Tx<'_> {
     }
 
     /// The graph's part: `None` when every unit is through and only the coordinator is left to act.
+    /// In zh-CN like [`Self::work`].
     pub(crate) fn graph_work(&self, g: &Workflow) -> Result<Option<Work>> {
+        steve_i18n::stored(|| self.graph_work_in(g))
+    }
+
+    fn graph_work_in(&self, g: &Workflow) -> Result<Option<Work>> {
         if let Some((by, why)) = g.paused_by() {
             return Ok(Some(if by == steve_store::PAUSED_BY_AGENT {
-                Work::Halted(format!("协作已暂停，等你决定：{}", js_head(why, 160)))
+                Work::Halted(steve_i18n::t!(
+                    "core.now.workflow_halted",
+                    why = js_head(why, 160)
+                ))
             } else {
-                Work::Paused("协作已暂停".into())
+                Work::Paused(steve_i18n::t!("core.now.workflow_paused"))
             }));
         }
         if !self.workflow_current(g)? {
-            return Ok(Some(Work::Failed(
-                "主事项目标或周期已变化，工作图需要重规划".into(),
-            )));
+            return Ok(Some(Work::Failed(steve_i18n::t!(
+                "core.now.workflow_replan"
+            ))));
         }
         let (mut running, mut user, mut queued, mut failed) = (vec![], vec![], vec![], vec![]);
         let mut to_start = false;
@@ -231,14 +247,16 @@ impl Tx<'_> {
             match u.status.as_str() {
                 "pending" if held.contains(u.spec.id.as_str()) => downstream.push(title),
                 "pending" if u.attempt >= g.max_attempts => {
-                    failed.push(format!("{title} 尝试次数已用完"));
+                    failed.push(steve_i18n::t!(
+                        "core.now.unit_out_of_attempts",
+                        title = title
+                    ));
                 }
                 "pending" => {
                     to_start = true;
                     queued.push(title);
                 }
-                "failed" if u.spec.required => failed.push(format!("{title} {}", said(u))),
-                "cancelled" if u.spec.required => failed.push(format!("{title} 已取消")),
+                "failed" | "cancelled" if u.spec.required => failed.push(said(&title, u)),
                 "succeeded"
                     if u.item_id.as_deref().is_some_and(|child| {
                         self.db().item(child).ok().flatten().is_some_and(|i| {
@@ -246,49 +264,52 @@ impl Tx<'_> {
                         })
                     }) =>
                 {
-                    queued.push(format!("{title}（交付待冻结）"));
+                    queued.push(steve_i18n::t!(
+                        "core.now.unit_frozen_pending",
+                        title = title
+                    ));
                 }
                 _ => {}
             }
         }
         if failed.is_empty() && !downstream.is_empty() {
             /* held only by optional work that failed: still for the coordinator to sort out */
-            failed.push("可选工作未通过".into());
+            failed.push(steve_i18n::t!("core.now.optional_failed"));
         }
-        let held = if downstream.is_empty() {
-            String::new()
-        } else {
-            format!("；受阻：{}", names(&downstream))
-        };
         if !running.is_empty() {
-            return Ok(Some(Work::Running(format!(
-                "协作执行中：{}",
-                names(&running)
+            return Ok(Some(Work::Running(steve_i18n::t!(
+                "core.now.workflow_running",
+                names = names(&running)
             ))));
         }
         if !user.is_empty() {
-            return Ok(Some(Work::User(format!(
-                "协作工作等你处理：{}",
-                names(&user)
+            return Ok(Some(Work::User(steve_i18n::t!(
+                "core.now.workflow_user",
+                names = names(&user)
             ))));
         }
         if to_start && let Err(e) = self.rt().check_workflow_execution(&g.item_id) {
-            return Ok(Some(Work::Failed(format!(
-                "协作工作无法开始：{}",
-                js_head(&e.to_string(), 160)
+            return Ok(Some(Work::Failed(steve_i18n::t!(
+                "core.now.workflow_cannot_start",
+                why = js_head(&e.to_string(), 160)
             ))));
         }
         if !queued.is_empty() {
-            return Ok(Some(Work::Queued(format!(
-                "协作排队中：{}",
-                names(&queued)
+            return Ok(Some(Work::Queued(steve_i18n::t!(
+                "core.now.workflow_queued",
+                names = names(&queued)
             ))));
         }
         if !failed.is_empty() {
-            return Ok(Some(Work::Failed(format!(
-                "协作工作未通过：{}{held}",
-                names(&failed)
-            ))));
+            return Ok(Some(Work::Failed(if downstream.is_empty() {
+                steve_i18n::t!("core.now.workflow_failed", names = names(&failed))
+            } else {
+                steve_i18n::t!(
+                    "core.now.workflow_failed_held",
+                    names = names(&failed),
+                    held = names(&downstream)
+                )
+            })));
         }
         Ok(None)
     }
@@ -311,9 +332,9 @@ impl Tx<'_> {
 }
 
 /// A failed or cancelled unit, in a few words: its reason when it gave one.
-fn said(u: &WorkUnit) -> String {
+fn said(title: &str, u: &WorkUnit) -> String {
     if u.status == "cancelled" {
-        return "已取消".into();
+        return steve_i18n::t!("core.now.unit_cancelled", title = title);
     }
     let why = u
         .reason
@@ -322,11 +343,12 @@ fn said(u: &WorkUnit) -> String {
         .unwrap_or(u.summary.as_str())
         .trim();
     if why.is_empty() {
-        "未通过".into()
+        steve_i18n::t!("core.now.unit_failed", title = title)
     } else {
-        format!(
-            "未通过：{}",
-            js_head(&crate::workflow::workflow_error(why), 80)
+        steve_i18n::t!(
+            "core.now.unit_failed_why",
+            title = title,
+            why = js_head(&crate::workflow::workflow_error(why), 80)
         )
     }
 }

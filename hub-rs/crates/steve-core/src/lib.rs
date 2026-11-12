@@ -32,6 +32,7 @@ mod modules;
 pub mod mq;
 pub mod node_git;
 pub mod notify;
+pub mod now_line;
 mod occupancy;
 mod orchestrator;
 pub mod outbox_work;

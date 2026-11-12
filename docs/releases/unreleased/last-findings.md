@@ -1,0 +1,1 @@
+- With the interface in English, the status line of an item whose work the Hub is judging (collaboration paused, queued, failed, waiting for prerequisites, a Node or the model quota) now reads in English instead of Chinese. Text an agent writes itself is still shown as written.
