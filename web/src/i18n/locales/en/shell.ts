@@ -289,12 +289,12 @@ export default {
   unwired: {
     notWired: "Not connected yet",
     notBuilt: "This module is designed, but the backend isn't built yet. There's no data here and nothing can be created.",
-    planned: "Planned for {{phase}}.",
+    planned: "Planned for a later release ({{phase}}).",
     willHead: "Once connected, you can",
     phase: {
-      p1: "after P1, the item core",
-      p3: "P3, communication and knowledge",
-      p4: "P4, automation and extensions",
+      p1: "after the item core",
+      p3: "communication and knowledge",
+      p4: "automation and extensions",
       rustHub: "after the Rust Hub ships",
     },
     contacts: {

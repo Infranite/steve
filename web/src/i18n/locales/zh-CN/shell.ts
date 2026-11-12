@@ -272,12 +272,12 @@ export default {
   unwired: {
     notWired: "还没有接入",
     notBuilt: "这个模块的设计已经定了，后端还没有做。现在这里不会有数据，也不能新建。",
-    planned: "计划在 {{phase}}。",
+    planned: "计划在后续版本（{{phase}}）。",
     willHead: "接入后可以",
     phase: {
-      p1: "P1 事项主线之后",
-      p3: "P3 沟通与知识",
-      p4: "P4 自动化与扩展",
+      p1: "事项主线之后",
+      p3: "沟通与知识",
+      p4: "自动化与扩展",
       rustHub: "Rust Hub 上线后",
     },
     contacts: {
