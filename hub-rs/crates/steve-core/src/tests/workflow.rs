@@ -44,6 +44,104 @@ fn graph(k: &Kit, item: &str) -> Workflow {
     k.db().store().workflows().get(item).unwrap().unwrap()
 }
 
+#[test]
+fn long_workflow_history_is_bounded_without_erasing_evidence() {
+    let (k, parent, specs) = setup(false);
+    plan(&k, &parent, &specs);
+    let long_reason = "评审核对记录".repeat(1_000);
+    for _ in 0..35 {
+        k.db()
+            .store()
+            .workflows()
+            .pause(&parent, true, &long_reason)
+            .unwrap();
+        k.db()
+            .store()
+            .workflows()
+            .pause(&parent, false, "继续核对")
+            .unwrap();
+    }
+    let full = graph(&k, &parent);
+    let view = k.core.workflow_get(&parent).unwrap();
+    assert_eq!(view["history_total"], json!(full.history.len()));
+    assert_eq!(view["history"].as_array().unwrap().len(), 20);
+    assert!(serde_json::to_vec(&view).unwrap().len() < 100_000);
+    assert!(full.history.iter().any(|entry| entry.reason == long_reason));
+    assert!(
+        view["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["reason"].as_str().unwrap().contains("截断"))
+    );
+}
+
+#[test]
+fn permanent_provider_refusal_keeps_successes_and_needs_human_retry() {
+    for (error, diagnosis) in [
+        (
+            "Internal error: API Error: the request was blocked by upstream usage policy",
+            "需处理上游策略",
+        ),
+        (
+            "Internal error: API Error: 400 the request was rejected as invalid",
+            "没有评审结论",
+        ),
+    ] {
+        let (k, parent, specs) = setup(true);
+        plan(&k, &parent, &specs);
+        finish(&k, &parent, "a");
+        finish(&k, &parent, "b");
+        let reviewer = unit(&k, &parent, "review");
+        let sid = reviewer.session_id.unwrap();
+        k.rt.end_turn(&k.core, &sid, "error", Some(error));
+        let failed = unit(&k, &parent, "review");
+        assert_eq!(failed.status, "failed");
+        assert!(failed.summary.contains(diagnosis));
+        assert_eq!(unit(&k, &parent, "a").status, "succeeded");
+        assert_eq!(unit(&k, &parent, "b").status, "succeeded");
+        let args = json!({"action":"retry", "unit_id":"review", "reason":"盲目重试", "expected_revision":graph(&k,&parent).revision});
+        assert!(
+            k.core
+                .workflow_change(&parent, args.clone(), "dev")
+                .unwrap_err()
+                .to_string()
+                .contains("用户确认")
+        );
+        assert_eq!(unit(&k, &parent, "review").status, "failed");
+        k.core.workflow_change(&parent, args, "me").unwrap();
+        assert_eq!(unit(&k, &parent, "review").attempt, 2);
+        assert_eq!(unit(&k, &parent, "a").status, "succeeded");
+    }
+}
+
+#[test]
+fn older_raw_provider_failure_is_explained_without_rewriting_its_record() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    finish(&k, &parent, "a");
+    finish(&k, &parent, "b");
+    let reviewer = unit(&k, &parent, "review");
+    let session = k
+        .db()
+        .session(reviewer.session_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let raw = "Internal error: API Error: 400 the request was rejected as invalid";
+    k.core
+        .tool_workflow(&session, json!({"action":"fail", "reason":raw}))
+        .unwrap();
+    assert_eq!(unit(&k, &parent, "review").summary, raw);
+    let view = k.core.workflow_get(&parent).unwrap();
+    let review = view["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["id"] == "review")
+        .unwrap();
+    assert!(review["summary"].as_str().unwrap().contains("没有评审结论"));
+}
+
 fn unit(k: &Kit, item: &str, id: &str) -> WorkUnit {
     graph(k, item)
         .units
@@ -289,6 +387,16 @@ fn single_session_confirmation_cannot_waive_a_new_goal_or_cycle() {
         assert!(parent_deliver(&k, &parent).is_err());
         assert!(k.finish(&parent).is_err());
         assert!(change(&k, &parent, "single_session", None).is_err());
+        assert!(change(&k, &parent, "resume", None).is_err());
+        let view = k.core.workflow_get(&parent).unwrap();
+        assert_eq!(view["current_cycle"], false);
+        assert!(
+            view["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap().contains("周期"))
+        );
     }
 }
 

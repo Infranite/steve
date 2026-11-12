@@ -43,7 +43,7 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
         <p className="mt-1 type-footnote text-muted-foreground">{t("views:workflow.progress", { done: progress.passed, total: progress.total, running: progress.running, max: workflow.max_parallel, revision: workflow.revision })}</p>
       </div>
       {!single && <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="outline" disabled={busy || workflow.paused && unavailable} onClick={() => void change(workflow.paused ? "resume" : "pause")} data-workflow-toggle>
+        <Button size="sm" variant="outline" disabled={busy || workflow.paused && (unavailable || workflow.current_cycle === false)} onClick={() => void change(workflow.paused ? "resume" : "pause")} data-workflow-toggle>
           {workflow.paused ? <PlayIcon /> : <PauseIcon />}{workflow.paused ? t("views:workflow.resume") : t("views:workflow.pause")}
         </Button>
         {workflow.paused && <Button size="sm" variant="outline" disabled={busy} onClick={() => setConfirmSingle(workflow.revision)} data-workflow-single>{t("views:workflow.single")}</Button>}
@@ -64,7 +64,8 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
     {single && <p className="mb-3 rounded-xl border p-3 type-callout text-muted-foreground" data-workflow-single-mode>{t("views:workflow.singleHint")}</p>}
     {error && <p role="alert" className="mb-3 break-words type-callout text-destructive">{error}</p>}
     {unavailable && !single && <p className="mb-3 rounded-xl border p-3 type-callout text-muted-foreground" role="status" data-workflow-unavailable>{t("views:workflow.unavailable")}</p>}
-    {workflow.paused && !single && !unavailable && <p className="mb-3 type-callout text-muted-foreground">{t("views:workflow.pauseHint")}</p>}
+    {workflow.current_cycle === false && <p className="mb-3 type-callout text-muted-foreground" role="status" data-workflow-prior-cycle>{t("views:workflow.priorCycle")}</p>}
+    {workflow.paused && workflow.current_cycle !== false && !single && !unavailable && <p className="mb-3 type-callout text-muted-foreground">{t("views:workflow.pauseHint")}</p>}
     {workflow.blockers.length > 0 && <div className="mb-4 rounded-xl border bg-muted/40 p-3" data-workflow-blockers>
       <p className="type-callout font-medium">{t("views:workflow.blockers")}</p>
       <ul className="mt-1 list-disc space-y-1 pl-4 type-footnote text-muted-foreground">{workflow.blockers.map((text, n) => <li key={n} className="break-words">{text}</li>)}</ul>
@@ -80,7 +81,7 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
         </div>
         <div className="mt-1 flex items-start justify-between gap-2">
           <h3 className="min-w-0 break-words type-callout font-medium">{unit.item_id ? <a href={`#/items/${encodeURIComponent(unit.item_id)}`} className="hover:underline">{unit.title}</a> : unit.title}</h3>
-          {!single && unit.status === "failed" && <Button size="sm" variant="ghost" disabled={busy || unavailable || unit.attempt >= workflow.max_attempts} onClick={() => void change("retry", unit.id)} data-workflow-retry={unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
+          {!single && unit.status === "failed" && <Button size="sm" variant="ghost" disabled={busy || unavailable || workflow.current_cycle === false || unit.attempt >= workflow.max_attempts} onClick={() => void change("retry", unit.id)} data-workflow-retry={unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
         </div>
         {unit.depends_on.length > 0 && <p className="mt-1 break-words type-footnote text-muted-foreground">{t("views:workflow.depends", { names: unit.depends_on.map((id) => workflow.units.find((u) => u.id === id)?.title ?? id).join(" · ") })}</p>}
         {unit.resources.length > 0 && <p className="mt-1 break-words type-footnote text-muted-foreground">{t("views:workflow.resources", { names: unit.resources.join(" · ") })}</p>}
@@ -97,7 +98,7 @@ export function WorkflowPanel({ item, workflow }: { item: string; workflow: Work
       </li>)}
     </ol>
     {workflow.history.length > 0 && <details className="mt-3">
-      <summary className="cursor-pointer type-footnote text-muted-foreground">{t("views:workflow.history", { count: workflow.history.length })}</summary>
+      <summary className="cursor-pointer type-footnote text-muted-foreground">{t("views:workflow.history", { count: workflow.history_total ?? workflow.history.length })}</summary>
       <ol className="mt-2 space-y-2 border-l pl-3 type-footnote">{workflow.history.slice().reverse().map((entry, n) => <li key={n} className="break-words"><span className="text-muted-foreground">{t("views:workflow.revision", { n: entry.revision })} · </span>{entry.reason}</li>)}</ol>
     </details>}
   </section>
