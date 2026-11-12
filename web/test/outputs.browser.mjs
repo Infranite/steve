@@ -92,6 +92,11 @@ const noOverflow = async (page, what) => assert.ok(await page.evaluate(() => doc
 
 try {
   const designPage = await open(390, "light", true, true)
+  await tab(designPage, "产出")
+  await designPage.locator("[data-out-id=a_plan]").click()
+  await dialog(designPage).locator("[data-output-review]").click()
+  await dialog(designPage).waitFor({ state: "detached" })
+  await designPage.waitForFunction(() => document.activeElement?.hasAttribute("data-design-feedback"))
   const revise = designPage.locator('[data-design-choice="2"]')
   assert.equal(await revise.isDisabled(), true, "revision needs written feedback")
   await designPage.locator("[data-design-feedback]").fill("请调整手机布局")
@@ -117,7 +122,7 @@ try {
   await dialog(page).locator("[data-output-review]").click()
   await dialog(page).waitFor({ state: "detached" })
   await page.waitForFunction(() => document.activeElement?.closest('[data-composer="item"]'))
-  assert.match(await page.locator("[data-item-feedback-label]").innerText(), /写评审意见/)
+  assert.match(await page.locator("[data-item-feedback-label]").innerText(), /发送后继续处理/)
 
   // pictures: the arrow keys, the buttons, a swipe and the strip
   await page.locator("[data-out-id=a_img1]").click()
