@@ -104,9 +104,11 @@ api GET /stats/breakdown
 api GET /stats/items
 api GET /stats/items/x
 api GET /stats/prices
+api GET /stats/events
 api GET /stats/series
 api GET /stats/sessions/x
 api GET /stats/summary
+api GET /stats/tree/x
 api GET /stewards/unowned
 api GET /stewards/x/x
 api GET /systems
