@@ -13,6 +13,8 @@ export default {
     sessionQuoteLowerBound: "Only a conversation-level adapter quote (lower bound)",
     sessionQuoteIsFloor: "Only a conversation-level adapter quote, a lower bound",
     unpriced: "Unpriced",
+    estUnpriced: "{{usd}} · {{n}} unpriced",
+    estUnpricedTitle: "{{n}} tokens are on models with no price and aren't counted in the estimate",
     unknownModel: "Unknown model",
     unknown: "(unknown)",
     gateway: "Gateway",

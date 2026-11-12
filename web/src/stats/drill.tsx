@@ -12,7 +12,7 @@ import { Unwired } from "@/unwired"
 import { Kpi, Est, kpiRow } from "@/stats/kpi"
 import { Table, num, th } from "@/stats/tables"
 import { t, useT } from "@/i18n"
-import { fmtMs, fmtN, fmtPct, fmtUsd, tickLabel, time, timeTicks, useStats } from "@/stats/format"
+import { fmtEst, fmtMs, fmtN, fmtPct, fmtUsd, tickLabel, time, timeTicks, useStats } from "@/stats/format"
 
 /* labels for the Hub's values, built at render so they follow the language */
 export const STOP = (): Record<string, string> => ({ end_turn: t("stats:drill.stop.endTurn"), cancelled: t("stats:drill.stop.cancelled"), max_tokens: t("stats:drill.stop.maxTokens"), refusal: t("stats:drill.stop.refusal"), error: t("stats:drill.stop.error"), interrupted: t("stats:drill.stop.interrupted") })
@@ -48,7 +48,7 @@ function Drill({ d }: { d: ItemDetail }) {
         <Timeline d={d} />
         <div className={kpiRow(6)}>
           <Kpi k="tokens" label="tokens" value={fmtN(u.total)} foot={u.hit_rate != null ? t("stats:drill.hit", { pct: fmtPct(u.hit_rate) }) : ""} def={t("stats:drill.tokensDef")} />
-          <Kpi k="est" label={t("stats:word.estCost")} badge={<Est />} value={u.total ? fmtUsd(u.est) : u.reported ? "≥" + fmtUsd(u.reported) : "—"} foot={u.unpriced_tokens ? t("stats:drill.incomplete", { n: fmtN(u.unpriced_tokens) }) : u.reported ? t("stats:word.adapterQuote", { usd: fmtUsd(u.reported) }) : ""} def={t("stats:drill.estDef")} />
+          <Kpi k="est" label={t("stats:word.estCost")} badge={<Est />} value={u.total ? (u.unpriced_tokens ? (u.est >= 0.01 ? "≥" + fmtUsd(u.est) : "—") : fmtUsd(u.est)) : u.reported ? "≥" + fmtUsd(u.reported) : "—"} foot={u.unpriced_tokens ? t("stats:drill.incomplete", { n: fmtN(u.unpriced_tokens) }) : u.reported ? t("stats:word.adapterQuote", { usd: fmtUsd(u.reported) }) : ""} def={t("stats:drill.estDef")} />
           <Kpi k="lead" label={t("stats:drill.lead")} value={fmtMs(f.lead_ms ?? d.age_ms)} foot={f.lead_ms != null ? t("stats:drill.leadDone") : t("stats:drill.leadOpen")} def={t("stats:drill.leadDef")} />
           <Kpi k="agent" label={t("stats:drill.agent")} value={fmtMs(f.agent_ms)} foot={t("stats:drill.turns", { count: f.turns })} def={t("stats:drill.agentDef")} />
           <Kpi k="wait" label={t("stats:drill.wait")} value={fmtMs(f.wait_ms)} tone={f.wait_ms && f.agent_ms && f.wait_ms > f.agent_ms ? "wait" : undefined} foot={t("stats:drill.decisions", { count: f.decisions })} def={t("stats:drill.waitDef")} />
@@ -65,7 +65,7 @@ function Drill({ d }: { d: ItemDetail }) {
                 <td className="py-2 pl-4"><span className="inline-flex items-center gap-1.5">{(tn.stop_reason === "error" || tn.transient) && <span aria-hidden className="size-2 rounded-full bg-destructive" />}{tn.transient ? t("stats:drill.gatewayDown") : stop[tn.stop_reason ?? ""] ?? tn.stop_reason ?? "—"}</span></td>
                 <td className={num}>{tn.tools}</td><td className={num}>{tn.tool_errors || "—"}</td>
                 <td className={num}>{fmtN(tn.usage.input)}</td><td className={num}>{fmtN(tn.usage.output)}</td><td className={num}>{fmtN(tn.usage.cache_read)}</td><td className={num}>{fmtN(tn.usage.cache_write)}</td>
-                <td className={num}>{tn.usage.total ? fmtUsd(tn.usage.est) : "—"}</td>
+                <td className={num}>{tn.usage.total ? fmtEst(tn.usage.est, tn.usage.unpriced_tokens) : "—"}</td>
               </tr>
             ))}
           </Table></div>
@@ -166,7 +166,7 @@ export function ItemStatsRows({ id, render }: { id: string; render: (usage: stri
   const [d] = useStats(() => stats.item(id, true), [id, st.items.find((i) => i.id === id)?.updated])
   if (d.s !== "ok") return null
   const u = d.v.usage, f = d.v.facts
-  const usage = u.total ? (u.hit_rate != null ? t("stats:drill.usageHit", { tokens: fmtN(u.total), pct: fmtPct(u.hit_rate), usd: fmtUsd(u.est) }) : t("stats:drill.usage", { tokens: fmtN(u.total), usd: fmtUsd(u.est) })) : u.reported ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : t("stats:drill.noUsage")
+  const usage = u.total ? (u.hit_rate != null ? t("stats:drill.usageHit", { tokens: fmtN(u.total), pct: fmtPct(u.hit_rate), usd: fmtEst(u.est, u.unpriced_tokens) }) : t("stats:drill.usage", { tokens: fmtN(u.total), usd: fmtEst(u.est, u.unpriced_tokens) })) : u.reported ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : t("stats:drill.noUsage")
   const tm = t(f.done_at ? "stats:drill.timeDone" : "stats:drill.timeOpen", { agent: fmtMs(f.agent_ms ?? 0), wait: fmtMs(f.wait_ms ?? 0), age: fmtMs(d.v.age_ms) })
   return <>{render(usage, tm, "#/stats/items/" + id)}</>
 }

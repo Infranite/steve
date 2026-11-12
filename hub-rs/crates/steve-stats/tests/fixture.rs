@@ -582,6 +582,19 @@ fn invariants_hold() {
     }
     assert_eq!(sm.usage.total, 3 * 1060);
     assert_eq!(sm.spend.unpriced_tokens, 1060);
+    // the items table says how much of an item's tokens its estimate leaves out
+    let page = s
+        .with_conn(|c| views::items(c, &q, "est", None, None, 100, 0))
+        .unwrap();
+    let st1 = page.rows.iter().find(|r| r.item_id == "ST-1").unwrap();
+    assert_eq!(st1.unpriced_tokens, 1060);
+    assert!(st1.est > 0.0);
+    assert!(
+        page.rows
+            .iter()
+            .filter(|r| r.item_id != "ST-1")
+            .all(|r| r.unpriced_tokens == 0)
+    );
     assert_eq!(sm.usage.hit_rate, Some(2700.0 / 3030.0));
     assert_eq!(sm.since.tokens.as_deref(), Some("2026-11-01"));
     // a filter is a subset that adds up the same way

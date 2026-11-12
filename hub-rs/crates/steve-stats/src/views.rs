@@ -12,7 +12,7 @@ use steve_store::{Result, Tokens};
 
 use crate::day::{day, hour, hours};
 use crate::items::{self, ItemFacts};
-use crate::metrics::{self, Daily, P, Query, Summary, bounds, item_est, percentile};
+use crate::metrics::{self, Daily, P, Query, Summary, bounds, item_est, item_unpriced, percentile};
 use crate::prices::PriceBook;
 use crate::refresh::tz_of;
 
@@ -591,6 +591,8 @@ pub struct ItemRow {
     pub first_pass: Option<bool>,
     pub tokens: i64,
     pub est: f64,
+    /// Tokens on models with no price, not in `est`.
+    pub unpriced_tokens: i64,
     pub reported: f64,
 }
 
@@ -666,6 +668,7 @@ pub fn items(
                 first_pass: r.get(14)?,
                 tokens: r.get(15)?,
                 est: item_est(&models, &prices, &as_of),
+                unpriced_tokens: item_unpriced(&models, &prices, &as_of),
                 reported: r.get(17)?,
             })
         })?

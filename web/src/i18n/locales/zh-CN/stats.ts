@@ -14,6 +14,8 @@ export default {
     sessionQuoteLowerBound: "只有会话级的适配器报价（下限）",
     sessionQuoteIsFloor: "只有会话级的适配器报价，是下限",
     unpriced: "未定价",
+    estUnpriced: "{{usd}} · {{n}} 未定价",
+    estUnpricedTitle: "{{n}} tokens 用在没有价格的模型上，不计入估算",
     unknownModel: "未知模型",
     unknown: "（未知）",
     gateway: "网关",

@@ -15,6 +15,10 @@ export const fmtN = (n: number | null | undefined) => {
   return String(Math.round(n * 10) / 10)
 }
 export const fmtUsd = (n: number | null | undefined) => (n == null || !isFinite(n) ? "—" : n === 0 ? "$0" : n < 0.01 ? "<$0.01" : "$" + (n >= 1000 ? Math.round(n).toLocaleString("en-US") : n.toFixed(2)))
+/** An estimate that leaves `unpriced` tokens out: “≥$1.20 · 7.4M 未定价”, “— · 7.4M 未定价” when what is priced
+ * rounds to nothing (not “<$0.01” for millions of tokens); plain [`fmtUsd`] when every token is priced. */
+export const fmtEst = (est: number, unpriced = 0) =>
+  !unpriced ? fmtUsd(est) : t("stats:word.estUnpriced", { usd: est >= 0.01 ? "≥" + fmtUsd(est) : "—", n: fmtN(unpriced) })
 export const fmtPct = (r: number | null | undefined, digits = 0) => (r == null || !isFinite(r) ? "—" : (r * 100).toFixed(digits) + "%")
 export const fmtMs = (ms: number | null | undefined) => {
   if (ms == null || !isFinite(ms)) return "—"

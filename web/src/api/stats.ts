@@ -37,7 +37,7 @@ export type UsageRow = UsageTotals & { key: string; label: string; priced?: bool
 export type CountRow = { key: string; label: string; count: number; dim?: "kind" | "tool" | "mcp"; response?: P; subjects?: Record<string, number> }
 export type ItemRow = {
   item_id: string; no: number; title: string; status: string; bot_id: string | null; project_id: string | null; created: number; done_at: number | null
-  lead_ms: number | null; cycle_ms: number | null; wait_ms: number | null; agent_ms: number | null; turns: number; reworks: number; first_pass: boolean | null; tokens: number; est: number; reported: number
+  lead_ms: number | null; cycle_ms: number | null; wait_ms: number | null; agent_ms: number | null; turns: number; reworks: number; first_pass: boolean | null; tokens: number; est: number; unpriced_tokens: number; reported: number
 }
 export type ItemSort = "est" | "tokens" | "lead" | "wait" | "reworks" | "done_at"
 export type ItemOnly = "done" | "created"

@@ -57,7 +57,7 @@ const hourSeries = (metric) => {
   if (metric === "hit_rate") return one("命中率", measured({ 9: 0.7, 10: 0.8, 14: 0.6 }))
   return one("合计", hourly({ 1: 20000, 9: 300000, 10: 120000, 13: 50000, 14: 80000 }).map((v) => v && (metric === "cost" ? v / 400000 : v)))
 }
-const itemRow = (no, status) => ({ item_id: `ST-${no}`, no, title: `完成的事项 ${no}`, status, bot_id: "dev", project_id: "p1", created: Date.now() - no * H, done_at: Date.now() - H, lead_ms: no * H, cycle_ms: H, wait_ms: H / 2, agent_ms: H, turns: 4, reworks: 0, first_pass: true, tokens: 100000 * no, est: no * 0.4, reported: 0 })
+const itemRow = (no, status) => ({ item_id: `ST-${no}`, no, title: `完成的事项 ${no}`, status, bot_id: "dev", project_id: "p1", created: Date.now() - no * H, done_at: Date.now() - H, lead_ms: no * H, cycle_ms: H, wait_ms: H / 2, agent_ms: H, turns: 4, reworks: 0, first_pass: true, tokens: 100000 * no, est: no * 0.4, unpriced_tokens: 0, reported: 0 })
 const usageRow = (key, label) => ({ ...usage, key, label, priced: true })
 
 /* the event explorer: 96 buckets over the page's range, 2 events per bucket, one turn failing in bucket 90; the list is the window */
@@ -88,7 +88,7 @@ try {
         : [usageRow("agent", "Agent"), usageRow("gateway", "网关")] }
       else if (u.pathname === "/api/stats/items") {
         const rows = p.hour != null ? Array.from({ length: (p.only === "done" ? hDone : hCreated)[Number(p.hour)] ?? 0 }, (_, i) => itemRow(40 + i, p.only === "done" ? "done" : "run"))
-          : p.only === "done" && p.range === "custom" ? [itemRow(21, "done")] : p.only === "done" ? Array.from({ length: sum(done) }, (_, i) => itemRow(20 + i, "done")) : p.only === "created" ? [itemRow(30, "run"), itemRow(31, "wait")] : [itemRow(1, "run"), itemRow(8, "done")]
+          : p.only === "done" && p.range === "custom" ? [itemRow(21, "done")] : p.only === "done" ? Array.from({ length: sum(done) }, (_, i) => (i === 0 ? { ...itemRow(20, "done"), tokens: 7_400_000, est: 0.004, unpriced_tokens: 7_390_000 } : i === 1 ? { ...itemRow(21, "done"), unpriced_tokens: 50_000 } : itemRow(20 + i, "done"))) : p.only === "created" ? [itemRow(30, "run"), itemRow(31, "wait")] : [itemRow(1, "run"), itemRow(8, "done")]
         data = { rows, total: rows.length, next: null }
       } else if (u.pathname === "/api/stats/events") data = eventsFixture(p)
       else return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "fixture" }) })
@@ -120,6 +120,11 @@ try {
     await page.locator('[data-drill="done"] [data-items-total]').waitFor()
     assert.equal(Number(await page.locator('[data-drill="done"] [data-items-total]').getAttribute("data-items-total")), sum(done))
     assert.ok(calls.some((c) => c.startsWith("/api/stats/items") && c.includes("only=done") && c.includes("sort=done_at")))
+    // millions of tokens on an unpriced model are not “<$0.01”: the cost is unknown, the priced part a lower bound
+    const cost = (id) => page.locator(`[data-drill="done"] [data-stats-item="${id}"] td`).last().innerText()
+    assert.equal(await cost("ST-20"), "— · 7.4M 未定价")
+    assert.equal(await cost("ST-21"), "≥$8.40 · 50K 未定价")
+    assert.equal(await cost("ST-22"), "$8.80")
     await page.locator("[data-drill-close]").click()
     assert.equal(await page.locator("[data-drill]").count(), 0)
 
