@@ -513,6 +513,43 @@ fn a_work_unit_that_stops_without_delivery_closes_its_failed_child() {
 }
 
 #[test]
+fn restart_finishes_a_failed_child_after_its_turn_has_ended() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let work = unit(&k, &parent, "a");
+    let child = work.item_id.unwrap();
+    let sid = work.session_id.unwrap();
+    let s = k.db().session(&sid).unwrap().unwrap();
+    k.core
+        .tool_workflow(&s, json!({"action":"fail","reason":"历史评审未通过"}))
+        .unwrap();
+    assert_eq!(unit(&k, &parent, "a").status, "failed");
+    assert_eq!(k.phase(&child), "active");
+
+    // A live turn still owns the child even when the failure has already been recorded.
+    k.core.tx().workflow_tick().unwrap();
+    assert_eq!(k.phase(&child), "active");
+
+    // The old Hub stopped after persisting turn end, before it closed the failed child.
+    k.rt.st().turning.remove(&sid);
+    k.db()
+        .session_patch(&sid, crate::patch![status: "idle"])
+        .unwrap();
+    k.db()
+        .queue_add(&sid, "失败前排队的输入", "me", &[])
+        .unwrap();
+    k.core.tx().workflow_tick().unwrap();
+    assert_eq!(k.phase(&child), "closed");
+    assert_eq!(k.status(&child).0, "fail");
+    assert_eq!(
+        k.db().item(&child).unwrap().unwrap().outcome.as_deref(),
+        Some("failed")
+    );
+    k.core.tx().workflow_tick().unwrap();
+    assert_eq!(k.phase(&child), "closed");
+}
+
+#[test]
 fn lifecycle_gate_blocks_even_direct_completion_request_and_no_release_is_started() {
     let (k, parent, specs) = setup(false);
     plan(&k, &parent, &specs);
