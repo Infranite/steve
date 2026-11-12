@@ -286,3 +286,35 @@ fn a_design_question_about_codes_is_answered_as_usual() {
         ("declined", "limit.7")
     );
 }
+
+/// ST-25 #3/#4: the card of a turn you stopped yourself is not continued by YOLO either; your Stop is
+/// read from the session's kept stop, not from the card's words.
+#[test]
+fn a_turn_you_stopped_is_not_continued_by_yolo() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    t.kit.rt.prompt(&sid, "做事", "me", &[]).unwrap();
+    assert!(t.kit.core.cancel_turn(&sid).unwrap());
+    t.kit.rt.end_turn(&t.kit.core, &sid, "cancelled", None);
+    let later = crate::util::now() + crate::stall::STALL_AFTER_MS + 1_000;
+    assert_eq!(
+        t.kit.core.tx().check_stalls(later).unwrap(),
+        std::slice::from_ref(&item)
+    );
+    let d = t
+        .kit
+        .db()
+        .decisions_of_item(&item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open")
+        .unwrap()
+        .id;
+    let a = t.engine.consider(&d).unwrap().unwrap();
+    assert_eq!(
+        (a.outcome.as_str(), a.rule.as_str()),
+        ("declined", "continue.yours"),
+        "{a:?}"
+    );
+    assert_eq!(t.kit.rt.prompts_of(&sid).len(), 1, "not continued");
+}

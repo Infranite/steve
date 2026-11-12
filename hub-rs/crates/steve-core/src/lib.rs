@@ -130,8 +130,6 @@ pub(crate) struct State {
     tokens: HashMap<String, String>,
     /// The last turn end each session had (its attempt): the same end told again is ignored.
     ended: HashMap<String, String>,
-    /// How each session's last turn ended, for a stall later on (`work::LastStop`).
-    stops: HashMap<String, work::LastStop>,
     /// Items whose turn failed on a model quota that is back later (`quota`).
     quota_waits: HashMap<String, quota::QuotaWait>,
     releasing: Option<Releasing>,
@@ -265,7 +263,16 @@ impl Core {
     /// false if nothing was running; an error when the backend cannot tell. The user's Stop: a
     /// backend may also retire what holds the session ([`AgentRuntime::user_stop`]).
     pub fn cancel_turn(&self, session_id: &str) -> Result<bool> {
-        Ok(self.0.runtime.user_stop(session_id)? == Stop::Requested)
+        /* your Stop is kept before it goes out (its turn end may come after a restart): how that
+         * turn ends is yours to go on with, never Steve's to continue (`crate::work::stopped`) */
+        let sessions = self.0.store.store().sessions();
+        let asked = self.0.runtime.running(session_id).map(|r| r.attempt);
+        sessions.stop_asked(session_id, Some(asked.as_deref().unwrap_or("")))?;
+        let stopped = self.0.runtime.user_stop(session_id)? == Stop::Requested;
+        if !stopped {
+            sessions.stop_asked(session_id, None)?;
+        }
+        Ok(stopped)
     }
     pub fn config(&self) -> &CoreConfig {
         &self.0.config

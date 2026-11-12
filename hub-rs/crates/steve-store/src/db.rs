@@ -133,6 +133,8 @@ pub const MIGRATIONS: &[&str] = &[
     // 65: the capabilities library: MCP servers, skills and A2A agents per workspace, assigned per
     // Bot (`bot_capabilities`); 62's and 63's rows move into it.
     include_str!("../migrations/065.sql"),
+    // 66: how each session's last turn ended and whether you stopped it (`session_stops`).
+    include_str!("../migrations/066.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

@@ -489,6 +489,18 @@ impl Db {
             .is_some())
         })?)
     }
+    /// A message was sent to the session (a turn of its own began) after its event `seq`.
+    pub fn sent_after(&self, session: &str, seq: i64) -> Result<bool> {
+        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
+            Ok(c.query_row(
+                "SELECT 1 FROM events WHERE session_id = ? AND kind = 'user' AND seq > ? LIMIT 1",
+                rusqlite::params![session, seq],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+        })?)
+    }
     pub fn queued(&self, session: &str) -> Result<Vec<Queued>> {
         Ok(self.s.queued().list(session)?)
     }

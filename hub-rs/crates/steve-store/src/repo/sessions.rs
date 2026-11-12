@@ -9,7 +9,9 @@ use serde_json::Value;
 
 use super::{Sets, all, exists, must, one, to_json};
 use crate::types::{double, json_or};
-use crate::{ChangeEvent, Event, FileRef, Queued, Result, Session, Store, now, sha, uid};
+use crate::{
+    ChangeEvent, Event, FileRef, Queued, Result, Session, SessionStop, Store, now, sha, uid,
+};
 
 impl Store {
     pub fn sessions(&self) -> Sessions<'_> {
@@ -230,6 +232,60 @@ impl Sessions<'_> {
             w.c.run(
                 "UPDATE sessions SET token_hash = ? WHERE id = ?",
                 [sha(token), id.to_string()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// How the session's last turn ended and whether you stopped it (`session_stops`).
+    pub fn stop(&self, id: &str) -> Result<Option<SessionStop>> {
+        self.0.read(|c| {
+            Ok(c.query_row(
+                "SELECT attempt, stop_reason, error, yours, stop_asked, ended, seq FROM session_stops WHERE session_id = ?",
+                [id],
+                |r| {
+                    Ok(SessionStop {
+                        attempt: r.get(0)?,
+                        stop_reason: r.get(1)?,
+                        error: r.get(2)?,
+                        yours: r.get::<_, i64>(3)? != 0,
+                        stop_asked: r.get(4)?,
+                        ended: r.get(5)?,
+                        seq: r.get(6)?,
+                    })
+                },
+            )
+            .optional()?)
+        })
+    }
+
+    /// You asked to stop the session's turn `attempt` (`""`: none named; `None`: nothing was
+    /// stopped after all). Kept until a turn ends.
+    pub fn stop_asked(&self, id: &str, attempt: Option<&str>) -> Result<()> {
+        self.0.write(|w| {
+            w.c.run(
+                "INSERT INTO session_stops (session_id, stop_asked, updated) VALUES (?1, ?2, ?3) ON CONFLICT(session_id) DO UPDATE SET stop_asked = ?2, updated = ?3",
+                params![id, attempt, now()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// A turn of the session ended: how, and whether it was the one you stopped (a Stop asked for
+    /// it is used up either way).
+    pub fn stop_ended(
+        &self,
+        id: &str,
+        attempt: Option<&str>,
+        stop_reason: &str,
+        error: Option<&str>,
+        yours: bool,
+    ) -> Result<()> {
+        let at = now();
+        self.0.write(|w| {
+            w.c.run(
+                "INSERT INTO session_stops (session_id, attempt, stop_reason, error, yours, stop_asked, ended, seq, updated) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, (SELECT MAX(seq) FROM events WHERE session_id = ?1), ?6) ON CONFLICT(session_id) DO UPDATE SET attempt = ?2, stop_reason = ?3, error = ?4, yours = ?5, stop_asked = NULL, ended = ?6, seq = excluded.seq, updated = ?6",
+                params![id, attempt, stop_reason, error, yours as i64, at],
             )?;
             Ok(())
         })

@@ -2017,13 +2017,34 @@ impl Tx<'_> {
         let Some(session) = self.db().session(&t.session_id)? else {
             return Ok(());
         };
-        self.st.stops.insert(
-            session.id.clone(),
-            crate::work::LastStop {
-                stop_reason: t.stop_reason.clone(),
-                error: t.error.clone().filter(|e| !e.is_empty()),
-            },
-        );
+        /* how it ended, kept for the stall watch (durably: the same after a restart). A turn you
+         * stopped stays yours until a message starts another: the end of an older turn that comes
+         * late (no message sent since) neither takes that from you nor is judged again */
+        let sessions = self.db().store().sessions();
+        let kept = sessions.stop(&session.id)?;
+        if let (Some(e), Some(k)) = (&end, &kept)
+            && k.stop_reason.is_some()
+            && crate::work::yours(k)
+            && k.attempt.as_deref().is_some_and(|a| a != e.attempt)
+            && !self.db().sent_after(&session.id, k.seq.unwrap_or(0))?
+        {
+            self.diagnostic_session(
+                &session.id,
+                t.attempt.as_deref(),
+                "turn.end_evaluated",
+                "stale_attempt",
+                true,
+                Default::default(),
+            );
+            return Ok(());
+        }
+        sessions.stop_ended(
+            &session.id,
+            t.attempt.as_deref(),
+            &t.stop_reason,
+            t.error.as_deref().filter(|e| !e.is_empty()),
+            kept.as_ref().is_some_and(|k| k.stop_asked.is_some()),
+        )?;
         let Some(item_id) = session.item_id.as_deref() else {
             self.st.pending.remove(&session.id);
             return Ok(());

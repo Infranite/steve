@@ -12,7 +12,7 @@ use crate::error::Result;
 use crate::lifecycle::settle;
 use crate::repo::NewDecision;
 use crate::util::{js_head, now};
-use crate::work::{LastStop, NODE_WAIT, Work};
+use crate::work::{NODE_WAIT, Work, stopped};
 use crate::{Core, Tx};
 
 /// How long an item may sit in `run` with nothing going on before it gets the card.
@@ -97,11 +97,15 @@ impl Tx<'_> {
                     continue;
                 }
                 /* the cause from state, never the session's last system line */
+                /* your Stop comes first: a failure the coordinator was told of and you then stopped
+                 * is shown with its reason, and is yours to go on with (no continue spent) */
+                let (cause, yours) = stopped(self.db().store().sessions().stop(&s.id)?.as_ref());
                 let (why, yours) = match &work {
+                    Work::Failed(why) if yours => (format!("{why}；{cause}"), true),
                     Work::Failed(why) => (why.clone(), false),
                     /* the agent's own pause: it is not continued over it, you are asked */
                     Work::Halted(why) => (why.clone(), true),
-                    _ => LastStop::cause(self.st.stops.get(&s.id)),
+                    _ => (cause, yours),
                 };
                 let mut question = format!("它停下了：{}", js_head(&why, 200));
                 /* Steve looks first, unless it was you who stopped it */

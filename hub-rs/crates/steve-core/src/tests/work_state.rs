@@ -906,3 +906,119 @@ fn a_report_about_codes_is_continued() {
     assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
     assert!(k.open_fails(&i).is_empty());
 }
+
+/// ST-25 #3: a required unit failed, the coordinator was told and ran, and you stopped that turn
+/// (Core::cancel_turn, ended cancelled). Two minutes later the stall watch gives you the card with
+/// the failure's reason: your Stop comes first, nothing continues it and no continue is spent.
+#[test]
+fn your_stop_after_a_failure_notice_is_yours() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let coord = k.session(&parent, "idle");
+    let a = unit(&k, &parent, "a");
+    k.rt.end_turn(
+        &k.core,
+        a.session_id.as_deref().unwrap(),
+        "error",
+        Some("检查失败"),
+    );
+    assert_eq!(unit(&k, &parent, "a").status, "failed");
+    assert!(k.rt.st().turning.contains(&coord), "the coordinator was told");
+    let before = k.rt.prompts_of(&coord).len();
+    assert!(k.core.cancel_turn(&coord).unwrap());
+    k.rt.end_turn(&k.core, &coord, "cancelled", None);
+    assert_eq!(
+        k.core.tx().check_stalls(later()).unwrap(),
+        std::slice::from_ref(&parent)
+    );
+    assert_eq!(k.rt.prompts_of(&coord).len(), before, "not continued");
+    assert!(!k.core.is_busy(&coord), "no turn runs");
+    assert!(steve_lines(&k, &parent).is_empty(), "no continue spent");
+    let cards = k.open_fails(&parent);
+    assert_eq!(cards.len(), 1);
+    assert!(
+        cards[0].contains("协作工作未通过：a 未通过：检查失败")
+            && cards[0].contains("你中断了这一回合"),
+        "{cards:?}"
+    );
+    let snap = k.core.diagnostic_snapshot(&parent).unwrap();
+    assert_eq!(snap["work"]["last_stop"]["yours"], true, "{snap}");
+    // a voided delivery does not continue it either: the card stays yours
+    k.core.tx().takeover_invalidated(&parent, "计划已更新").unwrap();
+    assert_eq!(k.rt.prompts_of(&coord).len(), before);
+}
+
+/// ST-25 #4: you stop an ordinary item's turn and the Hub restarts before the stall watch opens a
+/// card. Your Stop is kept with the session, not in memory: after the restart the card is yours and
+/// nothing continues it.
+#[test]
+fn your_stop_is_yours_after_a_restart() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.rt.say(&s, "在改代码");
+    assert!(k.core.cancel_turn(&s).unwrap());
+    k.rt.end_turn(&k.core, &s, "cancelled", None);
+    assert!(k.open_fails(&i).is_empty(), "no card yet");
+
+    let core = restarted(&k);
+    core.recover().unwrap();
+    assert_eq!(
+        core.tx().check_stalls(later()).unwrap(),
+        std::slice::from_ref(&i)
+    );
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
+    assert!(steve_lines(&k, &i).is_empty());
+    let cards = k.open_fails(&i);
+    assert_eq!(cards.len(), 1);
+    assert!(cards[0].contains("你中断了这一回合"), "{cards:?}");
+}
+
+/// ST-25 #4: the end of an older turn that comes late does not take your Stop from you; a message
+/// of yours starts another turn, and once that one ends without delivering Steve may go on again.
+#[test]
+fn a_late_old_turn_end_does_not_undo_your_stop_but_your_message_does() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    assert!(k.core.cancel_turn(&s).unwrap());
+    k.rt.end_turn(&k.core, &s, "cancelled", None);
+    // an earlier attempt's end, late
+    k.core
+        .on_turn_end(crate::TurnEnd {
+            session_id: s.clone(),
+            attempt: Some("a-old".into()),
+            stop_reason: "end_turn".into(),
+            error: None,
+        })
+        .unwrap();
+    let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();
+    assert!(crate::work::yours(&kept), "{kept:?}");
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
+    let core = restarted(&k);
+    assert_eq!(
+        core.tx().check_stalls(later()).unwrap(),
+        std::slice::from_ref(&i)
+    );
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
+    let card = k
+        .db()
+        .decisions_of_item(&i)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open")
+        .unwrap();
+    assert!(card.question.contains("你中断了这一回合"));
+
+    // your own message: a new turn; it ends without delivering, and Steve continues it
+    core.session_message(&s, "接着做", false, &[]).unwrap();
+    assert_eq!(k.rt.prompts_of(&s).len(), 2);
+    k.rt.say(&s, "改了一半");
+    k.rt.end_turn(&core, &s, "end_turn", None);
+    let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();
+    assert!(!crate::work::yours(&kept), "{kept:?}");
+    assert_eq!(k.rt.prompts_of(&s).len(), 3, "continued by Steve");
+    assert_eq!(steve_lines(&k, &i).len(), 1);
+}

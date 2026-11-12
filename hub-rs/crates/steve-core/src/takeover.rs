@@ -334,6 +334,25 @@ impl Tx<'_> {
             }
             return Ok(None);
         }
+        /* you stopped its last turn: going on is yours, whatever stopped it besides (a failure the
+         * coordinator was told of, a voided delivery); nothing of the budget is spent */
+        if self
+            .db()
+            .store()
+            .sessions()
+            .stop(&s.id)?
+            .is_some_and(|k| k.stop_reason.is_some() && crate::work::yours(&k))
+        {
+            self.diagnostic_session(
+                &s.id,
+                None,
+                "takeover.evaluated",
+                "user_stopped",
+                false,
+                Default::default(),
+            );
+            return Ok(Some(why.into()));
+        }
         let n = self.takeover_count(&i.id)?;
         let cap = self.cfg().takeover_continues;
         if n >= cap {

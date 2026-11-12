@@ -324,6 +324,19 @@ impl Engine {
                     asked,
                     own_action,
                     steve_tried: d.question.contains(crate::takeover::STEVE_TRIED),
+                    yours: match sid.as_deref() {
+                        Some(sid) => self
+                            .core()
+                            .store()
+                            .store()
+                            .sessions()
+                            .stop(sid)
+                            .map_err(|e| ce(e.into()))?
+                            .is_some_and(|k| {
+                                k.stop_reason.is_some() && crate::work::yours(&k)
+                            }),
+                        None => false,
+                    },
                 })
             }
             ("approve", "release") => {

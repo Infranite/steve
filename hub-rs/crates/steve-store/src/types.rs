@@ -504,6 +504,24 @@ pub struct Event {
     pub data: Value,
 }
 
+/// How a session's last turn ended, and whether you stopped it (`session_stops`, migration 62).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct SessionStop {
+    /// The attempt whose end is recorded (none when the backend named none).
+    pub attempt: Option<String>,
+    /// `None` until a turn ends after the row was made (only a Stop was asked for).
+    pub stop_reason: Option<String>,
+    pub error: Option<String>,
+    /// The recorded end was the turn you stopped.
+    pub yours: bool,
+    /// The attempt your Stop was asked for (`""`: none named), until a turn ends.
+    pub stop_asked: Option<String>,
+    /// When the recorded end came.
+    pub ended: Option<i64>,
+    /// The session's last event then: a message sent after it began another turn.
+    pub seq: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Queued {
     pub id: String,

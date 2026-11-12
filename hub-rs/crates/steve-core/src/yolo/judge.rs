@@ -344,6 +344,9 @@ pub struct Stall {
     pub own_action: Option<String>,
     /// Steve already continued it on its own (`crate::takeover`) and it still stopped.
     pub steve_tried: bool,
+    /// You stopped its last turn (`session_stops`): going on is yours.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub yours: bool,
 }
 
 /// The model's answer for the user.
@@ -994,6 +997,9 @@ fn stall(s: &Stall, p: &Policy) -> Verdict {
     }
     if s.no_progress >= 3 {
         return decline("continue.stuck", "连续 3 次自动继续没有进展");
+    }
+    if s.yours {
+        return decline("continue.yours", "你自己中断了这一回合，继续与否由你决定");
     }
     if s.steve_tried {
         return decline(

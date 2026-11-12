@@ -917,6 +917,7 @@ fn every_row_of_the_table() {
                 asked: None,
                 own_action: None,
                 steve_tried: false,
+                yours: false,
             }),
         )
     };
@@ -1552,6 +1553,7 @@ fn delays_texts_and_undo() {
             asked: None,
             own_action: None,
             steve_tried: false,
+            yours: false,
         }),
     );
     let Verdict::Auto { text, .. } = run(&f, &pl) else {
@@ -1572,6 +1574,7 @@ fn delays_texts_and_undo() {
             asked: None,
             own_action: None,
             steve_tried: false,
+            yours: false,
         }),
     );
     let Verdict::Auto { text, delay_s, .. } = run(&f, &pl) else {
@@ -2259,7 +2262,7 @@ proptest! {
         }
         // fail cards offer `delivered` and `tosteve`; flows offer `continue_once`; none of them is chosen
         for (subject, opts) in [
-            (Subject::Stall(Stall { cause: StallCause::Other, no_progress: 0, attempts: 0, asked: None, own_action: None, steve_tried: false }), vec!["delivered", "tosteve"]),
+            (Subject::Stall(Stall { cause: StallCause::Other, no_progress: 0, attempts: 0, asked: None, own_action: None, steve_tried: false, yours: false }), vec!["delivered", "tosteve"]),
             (Subject::FlowRun { over_budget: false }, vec!["continue_once"]),
             (Subject::SecretUse { template: "api_key".into(), sensitivity: "normal".into() }, vec!["grant_8h", "allow"]),
         ] {

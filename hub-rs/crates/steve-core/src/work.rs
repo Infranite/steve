@@ -5,7 +5,7 @@
 //! real failure it has to act on. Never judged from the session's last words or its last
 //! system line (an old release notice says nothing about why it is idle now).
 
-use steve_store::{WorkUnit, Workflow};
+use steve_store::{SessionStop, WorkUnit, Workflow};
 
 use crate::cycle::CLOSED;
 use crate::lifecycle::{stop_card, supersede_where};
@@ -82,30 +82,32 @@ impl Work {
     }
 }
 
-/// How a session's last turn ended, kept from its turn end for the stall watch (in memory: after a
-/// restart the Hub's own recovery says what became of the turns it cut).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LastStop {
-    pub stop_reason: String,
-    pub error: Option<String>,
+/// Why an idle session is idle, from how its last turn ended (kept in `session_stops`, so the same
+/// after a restart); `true` when you stopped it yourself: it is yours to go on with, Steve does not
+/// continue it. Never from the session's last system line.
+pub(crate) fn stopped(stop: Option<&SessionStop>) -> (String, bool) {
+    match stop {
+        Some(s) if yours(s) => ("你中断了这一回合".into(), true),
+        Some(SessionStop {
+            error: Some(e),
+            stop_reason: Some(_),
+            ..
+        }) if !e.trim().is_empty() => (format!("上一回合出错：{}", js_head(e, 160)), false),
+        Some(SessionStop {
+            stop_reason: Some(_),
+            ..
+        }) => ("上一回合结束后没有交付、提问，也没有后续工作".into(), false),
+        _ => (
+            "会话空闲：没有回合在运行、没有排队输入，也没有交付或提问".into(),
+            false,
+        ),
+    }
 }
 
-impl LastStop {
-    /// Why an idle session is idle, from how its last turn ended; `true` when you stopped it
-    /// yourself (it is yours to go on with, Steve does not continue it).
-    pub(crate) fn cause(stop: Option<&LastStop>) -> (String, bool) {
-        match stop {
-            Some(s) if s.stop_reason == "cancelled" => ("你中断了这一回合".into(), true),
-            Some(LastStop { error: Some(e), .. }) if !e.trim().is_empty() => {
-                (format!("上一回合出错：{}", js_head(e, 160)), false)
-            }
-            Some(_) => ("上一回合结束后没有交付、提问，也没有后续工作".into(), false),
-            None => (
-                "会话空闲：没有回合在运行、没有排队输入，也没有交付或提问".into(),
-                false,
-            ),
-        }
-    }
+/// The last turn was stopped by you: your Stop reached it, or it ended cancelled (the Hub's own
+/// cancels, a pause or a steer, leave nothing idle to judge).
+pub(crate) fn yours(s: &SessionStop) -> bool {
+    s.yours || s.stop_reason.as_deref() == Some("cancelled")
 }
 
 fn names(xs: &[String]) -> String {
