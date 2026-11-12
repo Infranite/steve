@@ -5,7 +5,7 @@ import { Progress } from "@/components/ui/progress"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { SelectContent, SelectItem, SelectTrigger, SelectValue, Select as UISelect } from "@/components/ui/select"
 import { botName, closeRel, depsOpen, kindOf, st, WACT, waitLine, type Item } from "@/store"
-import { workflowRelation } from "@/item-workflow-relation"
+import { itemDisplayStatus, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
 import { BotAvatar, go, ItemNo, KindTag, Meta, RelNote, StatusDot, Tags } from "@/ui"
 import { cn } from "cn"
 import { FolderIcon, GitBranchIcon, StarIcon } from "lucide-react"
@@ -73,9 +73,9 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
     </span>
   )
   return (
-    <div role="button" tabIndex={0} onClick={() => (pick ? pick() : go("#/items/" + i.id))} onKeyDown={(e) => e.key === "Enter" && go("#/items/" + i.id)} data-item-row={i.id} data-dense={closed || undefined}
+    <div role="button" tabIndex={0} onClick={() => (pick ? pick() : go("#/items/" + i.id))} onKeyDown={(e) => e.key === "Enter" && go("#/items/" + i.id)} data-item-row={i.id} data-item-status={itemDisplayStatus(i)} data-dense={closed || undefined}
       className={cn("group flex cursor-pointer gap-2.5 rounded-lg px-2 transition-colors duration-150 hover:bg-accent", closed ? "items-center py-1.5" : "items-start py-2.5", pick && on && "bg-blue/5")}>
-      {pick ? <Checkbox checked={on} className={cn(!closed && "mt-[3px]")} aria-label={t("shell:item.select", { id: i.id })} data-pick={i.id} /> : <StatusDot s={i.st} className={cn(!closed && "mt-[7px]")} />}
+      {pick ? <Checkbox checked={on} className={cn(!closed && "mt-[3px]")} aria-label={t("shell:item.select", { id: i.id })} data-pick={i.id} /> : <StatusDot s={itemDisplayStatus(i)} className={cn(!closed && "mt-[7px]")} />}
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <ItemNo id={i.id} className="w-12" />
@@ -87,14 +87,14 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
         {/* a card waiting on you says what it asks and takes you to it; otherwise the row says what is going on now */}
         {!closed && w && (
           <div className="mt-0.5 flex min-w-0 items-center gap-2 pl-14">
-            <Meta className="flex-nowrap [&>*:first-child]:min-w-0 [&>*:first-child]:truncate"><span className="type-callout text-foreground/80" data-item-wait={w.type}>{waitLine(w)}{i.waits.length > 1 && <span className="text-muted-foreground">{t("shell:item.andMore", { count: i.waits.length })}</span>}</span>{extra}</Meta>
+            <Meta className="min-w-0 flex-1 flex-nowrap overflow-hidden [&>*:first-child]:min-w-0 [&>*:first-child]:truncate"><span className="type-callout text-foreground/80" data-item-wait={w.type}>{waitLine(w)}{i.waits.length > 1 && <span className="text-muted-foreground">{t("shell:item.andMore", { count: i.waits.length })}</span>}</span>{extra}</Meta>
             {!pick && <Button size="xs" variant="outline" className="shrink-0" onClick={(e) => { e.stopPropagation(); go("#/items/" + i.id) }} data-item-wait-go={i.id}>{t("shell:item.goAct", { act: WACT[w.type] ?? t("shell:item.handle") })}</Button>}
           </div>
         )}
         {!closed && !w && (i.now || relation || extra.length > 0) && (
           <Meta className="mt-0.5 flex-nowrap pl-14">
-            {relation && <span className="shrink-0 type-callout font-medium text-foreground/80" data-workflow-relation={relation.kind}>{relation.kind === "parent" ? t("shell:item.waitingFor", { ids: relation.children.join(t("shell:item.relationSep")) }) : t("shell:item.childOf", { id: relation.parent })}</span>}
-            {i.now && <span className="min-w-0 truncate type-callout" data-item-now>{i.now}</span>}
+            {relation && <span className="min-w-0 truncate type-callout font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</span>}
+            {i.now && relation?.kind !== "paused" && relation?.kind !== "previous" && <span className="min-w-0 truncate type-callout" data-item-now>{i.now}</span>}
             {extra}
           </Meta>
         )}

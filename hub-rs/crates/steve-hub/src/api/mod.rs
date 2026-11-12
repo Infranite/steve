@@ -813,6 +813,9 @@ pub(crate) fn extras_one(r: &dyn Repo, id: &str) -> BResult<ItemExtras> {
         sessions,
         open,
         queued,
+        workflow_paused: None,
+        workflow_cycle: None,
+        workflow_failed: Vec::new(),
     })
 }
 
@@ -838,6 +841,11 @@ pub(crate) fn summary_with(mut i: Obj, x: ItemExtras) -> Obj {
     i.insert("open".into(), json!(x.open));
     i.insert("queued".into(), json!(x.queued));
     i.insert("live".into(), json!(live));
+    if let Some(paused) = x.workflow_paused {
+        i.insert("workflow_paused".into(), json!(paused));
+        i.insert("workflow_cycle".into(), json!(x.workflow_cycle));
+        i.insert("workflow_failed".into(), json!(x.workflow_failed));
+    }
     i
 }
 

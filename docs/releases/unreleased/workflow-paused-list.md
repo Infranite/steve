@@ -1,0 +1,1 @@
+Paused multi-Bot work graphs now appear under Paused in the items list, even when their parent item is still open. The parent row names failed current work-unit children, while active parents continue to name only unfinished children they are waiting for. A work graph from an earlier item cycle is labeled as historical instead of being mistaken for the current cycle's pause.
