@@ -10,6 +10,7 @@ export type WorkflowUnit = {
 export type Workflow = {
   item_id: string; revision: number; paused: boolean; max_parallel: number; max_attempts: number
   units: WorkflowUnit[]; blockers: string[]; execution_ready?: boolean
+  current_cycle?: boolean; history_total?: number
   acceptance_mode?: "collaborative" | "single_session"
   history: { revision: number; reason: string; created: number; action?: string; unit_id?: string | null; detail?: unknown }[]
 }

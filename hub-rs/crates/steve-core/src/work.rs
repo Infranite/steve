@@ -300,6 +300,9 @@ fn said(u: &WorkUnit) -> String {
     if why.is_empty() {
         "未通过".into()
     } else {
-        format!("未通过：{}", js_head(why, 80))
+        format!(
+            "未通过：{}",
+            js_head(&crate::workflow::workflow_error(why), 80)
+        )
     }
 }
