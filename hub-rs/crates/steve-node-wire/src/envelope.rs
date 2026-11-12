@@ -83,10 +83,28 @@ impl Envelope {
         if s.len() > cap {
             return Err(ApiError::new(
                 ErrorCode::Exhausted,
-                format!("{} is {} bytes, over the {cap} limit", self.m, s.len()),
+                format!(
+                    "{} is {} bytes, over the {cap} limit",
+                    self.subject(),
+                    s.len()
+                ),
             ));
         }
         Ok(s)
+    }
+
+    /// What a size error names: the method, or for an answer (which carries none) what it is.
+    fn subject(&self) -> String {
+        match (self.t, self.m.is_empty()) {
+            (Kind::Res, _) => match self.re.as_deref() {
+                Some(re) => format!("the answer to request {re}"),
+                None => "an answer".into(),
+            },
+            (Kind::Ctl, false) => format!("control message {}", self.m),
+            (Kind::Req, false) => format!("request {}", self.m),
+            (Kind::Ctl, true) => "a control message".into(),
+            _ => "a message".into(),
+        }
     }
 
     /// `None`: malformed or over its class cap; the link closes with [`crate::close::MALFORMED`].
@@ -156,7 +174,27 @@ mod tests {
         );
         let mut huge = e.clone();
         huge.p = Value::String("z".repeat(MAX_FRAME));
-        assert_eq!(huge.encode().unwrap_err().code, ErrorCode::Exhausted);
+        let err = huge.encode().unwrap_err();
+        assert_eq!(err.code, ErrorCode::Exhausted);
+        assert!(
+            err.safe_detail.starts_with("request turn.start is "),
+            "{}",
+            err.safe_detail
+        );
+        // an answer carries no method: the error still names what was too big
+        huge.t = Kind::Res;
+        huge.m = String::new();
+        huge.re = Some("n_4".into());
+        let err = huge.encode().unwrap_err();
+        assert!(
+            err.safe_detail.starts_with("the answer to request n_4 is "),
+            "{}",
+            err.safe_detail
+        );
+        assert_eq!(
+            big.encode().unwrap_err().safe_detail.split(" is ").next(),
+            Some("control message hello")
+        );
         let ok = serde_json::to_string(&Outcome::Ok(serde_json::json!(1))).unwrap();
         assert_eq!(ok, r#"{"ok":1}"#);
     }

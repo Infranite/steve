@@ -596,14 +596,19 @@ impl HubTools for NodeTools {
                         }
                         ToolResult::Completed {
                             end_turn,
-                            parts: vec![Part::Text { text }],
+                            parts: vec![Part::Text {
+                                text: super::tool_service::bound_result(&q.name, text),
+                            }],
                             structured: None,
                         }
                     }
                     Err(text) => ToolResult::Failed {
                         error: ApiError::new(
                             ErrorCode::Invalid,
-                            steve_vault::redact::scrub_any(&text),
+                            super::tool_service::bound_result(
+                                &q.name,
+                                steve_vault::redact::scrub_any(&text).to_string(),
+                            ),
                         ),
                     },
                 },
@@ -869,6 +874,51 @@ pub(crate) mod tests {
         async fn call(&self, _: Session, _: &str, _: serde_json::Value) -> Result<String, String> {
             Ok("ok".into())
         }
+    }
+    /// A tool whose result is larger than one frame (a 400 KiB read).
+    struct Huge;
+    #[async_trait]
+    impl Service for Huge {
+        fn catalog(&self) -> Vec<ToolDescriptor> {
+            Plain.catalog()
+        }
+        async fn call(&self, _: Session, _: &str, _: serde_json::Value) -> Result<String, String> {
+            Ok("line \"x\"\n".repeat(40_000))
+        }
+    }
+    /// 2026-11-13: a result over the frame limit reaches the agent cut, with a note, and its answer
+    /// to the Node fits in one frame (it used to come back as " is N bytes, over the … limit").
+    #[tokio::test]
+    async fn an_oversized_result_is_cut_to_fit_a_frame() {
+        let h = fixture(vec![]).await;
+        let tools =
+            NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
+        tools.install(Arc::new(Huge)).unwrap();
+        let q = request(&tools, h.exec.clone()).await;
+        let result = tools.call(q.clone()).await.unwrap();
+        let ToolResult::Completed { parts, .. } = &result else {
+            panic!("completed: {result:?}")
+        };
+        let Part::Text { text } = &parts[0] else {
+            panic!("text")
+        };
+        assert!(text.starts_with("line \"x\"\n"), "{}", &text[..40]);
+        assert!(text.contains("[Steve cut this test result"), "cut note");
+        let answer = steve_node_wire::envelope::Envelope {
+            v: steve_node_wire::WIRE,
+            t: steve_node_wire::envelope::Kind::Res,
+            id: "h_1".into(),
+            re: Some("n_1".into()),
+            m: String::new(),
+            generation: 1,
+            trace: None,
+            deadline_at: 0,
+            p: serde_json::to_value(steve_node_wire::envelope::Outcome::Ok(
+                serde_json::to_value(&result).unwrap(),
+            ))
+            .unwrap(),
+        };
+        answer.encode().expect("the answer fits in one frame");
     }
     fn count(store: &Store, sql: &str) -> i64 {
         store

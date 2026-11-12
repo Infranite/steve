@@ -345,14 +345,21 @@ impl Shared {
     /// Answers from the reader itself (stale, unknown kind): never waits, so a full lane drops
     /// the answer and its sender meets its deadline.
     fn respond_now(&self, re: String, outcome: Outcome, generation: u64) {
-        if let Some(text) = self.response(re, outcome, generation) {
+        if let Some(text) = self.response(re, "", outcome, generation) {
             let _ = self.ctl.try_send(text, None);
         }
     }
 
     /// `generation`: a refusal of a stale request carries the request's own, so that its sender
     /// hears `stale` instead of waiting out its deadline.
-    fn response(&self, re: String, outcome: Outcome, generation: u64) -> Option<String> {
+    /// `method`: the request's, so that an answer too large to send says which call it was.
+    fn response(
+        &self,
+        re: String,
+        method: &str,
+        outcome: Outcome,
+        generation: u64,
+    ) -> Option<String> {
         let p = serde_json::to_value(&outcome).unwrap_or(Value::Null);
         let env = Envelope {
             v: crate::WIRE,
@@ -367,8 +374,13 @@ impl Shared {
         };
         let text = match env.encode() {
             Ok(t) => t,
-            Err(e) => {
+            Err(mut e) => {
                 // too large to answer: answer that instead of breaking the link
+                if !method.is_empty() {
+                    e.safe_detail =
+                        e.safe_detail
+                            .replacen("request ", &format!("{method} request "), 1);
+                }
                 let mut env = env;
                 env.p = serde_json::to_value(Outcome::Err(e)).unwrap_or(Value::Null);
                 env.encode().ok()?
@@ -583,7 +595,7 @@ async fn reader(
                     };
                     // the slot is held until the answer is queued: a slow reader of answers
                     // slows the peer's new requests too
-                    if let Some(text) = s2.response(env.id, outcome, s2.generation) {
+                    if let Some(text) = s2.response(env.id, &env.m, outcome, s2.generation) {
                         s2.lane(lane).send(text, None).await;
                     }
                     drop(permit);

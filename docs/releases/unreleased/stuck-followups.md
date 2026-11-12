@@ -1,0 +1,1 @@
+- A Steve tool result too large for one Node message (over about 256 KB) now reaches the agent cut, with a note of how much was cut and how to ask for the rest, instead of failing the call. When a message over the link is still too large, the error names the call it belonged to.
