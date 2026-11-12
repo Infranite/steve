@@ -35,7 +35,7 @@ import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
 import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
-import { BotAvatar, BotName, Chips, closeSheet, useScrollMore, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
+import { BotAvatar, BotName, permissionQuestion, Chips, closeSheet, useScrollMore, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
 import { YoloPill, yoloState } from "@/yolo/switch"
@@ -91,7 +91,7 @@ export function InboxView() {
       </>}
       {ibTab === "done" && (st.done.length ? <>
         <Group>{st.done.map((d, n) => (
-          <Row key={n} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={d.id} /><span className="min-w-0">{d.q}</span></span>} sub={d.rel ? <span className="flex min-w-0 flex-wrap items-center gap-x-1">{WT[d.type]} · <RelNote rel={d.rel} className="inline-flex" /> · {d.tm}</span>
+          <Row key={n} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={d.id} /><span className="min-w-0">{permissionQuestion(d.q)}</span></span>} sub={d.rel ? <span className="flex min-w-0 flex-wrap items-center gap-x-1">{WT[d.type]} · <RelNote rel={d.rel} className="inline-flex" /> · {d.tm}</span>
             : d.yolo !== undefined ? <span className="flex min-w-0 flex-wrap items-center gap-x-1">{WT[d.type]} · <YoloMark /> {d.yolo ? t("views:inbox.yoloChoseWhy", { choice: choiceText(d.choice), reason: d.yolo }) : t("views:inbox.yoloChose", { choice: choiceText(d.choice) })} · {d.tm}{d.undone ? ` · ${t("views:inbox.undone")}` : ""}</span>
             : `${WT[d.type]} · ${d.how === "dismissed" ? t("views:inbox.dismissed") : d.how === "expired" ? t("views:inbox.expired", { choice: d.choice }) : t("views:inbox.chose", { choice: d.choice })}${d.via ? ` · ${t("views:inbox.via", { client: d.via })}` : ""} · ${d.tm}${d.undone ? ` · ${t("views:inbox.undone")}` : ""}`} data-done-row={d.id}>
             {d.canUndo && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => undoDecision(n)} data-undo-decision><RotateCcwIcon />{t("views:inbox.undo")}</Button>}

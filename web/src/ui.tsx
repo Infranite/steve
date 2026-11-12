@@ -181,6 +181,8 @@ export function Group({ children, className }: { children: ReactNode; className?
 }
 /** `controls`: the children hold their own buttons. A button cannot contain a button, so the row's click target is
  *  then a cover button under the content, and the children sit above it. */
+/** a tool permission question as the Hub words it (“允许执行：<command>”), led in the UI language */
+export const permissionQuestion = (q: string) => (lang() === "zh-CN" ? q : q.replace(/^允许执行(?:[：:]\s*(?=\S))?/, (m) => t("core:wait.allowRun") + (m.length > 4 ? ": " : "")))
 export function Row({ title, sub, children, onClick, icon, className, controls = false, ...rest }: { title: ReactNode; sub?: ReactNode; children?: ReactNode; onClick?: () => void; icon?: ReactNode; className?: string; controls?: boolean; [k: string]: any }) {
   const id = useId(), cover = !!onClick && controls
   return (

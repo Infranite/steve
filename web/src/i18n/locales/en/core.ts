@@ -9,6 +9,7 @@ export default {
   wait: {
     tool: "Permission",
     release: "Release",
+    allowRun: "Allow running",
     other: "Pending",
     line: "{{kind}}: {{q}}",
   },

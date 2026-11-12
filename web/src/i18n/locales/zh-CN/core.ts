@@ -13,6 +13,7 @@ export default {
   wait: {
     tool: "权限",
     release: "发布",
+    allowRun: "允许执行",
     other: "待处理",
     /* "审批：推送到 main" */
     line: "{{kind}}：{{q}}",

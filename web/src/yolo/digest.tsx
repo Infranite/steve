@@ -12,7 +12,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { NotWired } from "@/api"
 import { yoloApi, type RYoloAction, type RYoloDigest, type RYoloWindow, type UndoKind } from "@/api/yolo"
 import { tm, useHubEvents, yoloUndo } from "@/store"
-import { Chips, Empty, go, ItemNo, Page } from "@/ui"
+import { Chips, Empty, go, ItemNo, Page, permissionQuestion } from "@/ui"
 import { takeDigestStart, YoloPill } from "@/yolo/switch"
 import { choiceText, YoloMark } from "@/yolo/badges"
 import { t as tr, useT } from "@/i18n"
@@ -58,7 +58,7 @@ function ActionRow({ a, reload }: { a: RYoloAction; reload: () => void }) {
       <Glyph a={a} />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-start gap-3">
-          <div className="line-clamp-2 min-w-0 flex-1 break-words type-callout" data-yolo-question>{a.question ? questionLead(a.question, cmds) : a.rule}</div>
+          <div className="line-clamp-2 min-w-0 flex-1 break-words type-callout" data-yolo-question>{a.question ? permissionQuestion(questionLead(a.question, cmds)) : a.rule}</div>
           {a.can_undo && re === null && <Button size="xs" variant="ghost" className="-my-0.5 shrink-0 text-muted-foreground" disabled={busy}
             onClick={() => (a.can_undo === "reanswer" ? setRe("") : void undo())} data-yolo-undo={a.can_undo}><RotateCcwIcon />{undoLabel(a.can_undo)}</Button>}
         </div>
