@@ -716,6 +716,8 @@ pub struct TreeNode {
     pub depth: i64,
     pub tokens: i64,
     pub est: f64,
+    /// Tokens on models without a price: `est` leaves them out.
+    pub unpriced_tokens: i64,
     pub reported: f64,
     pub agent_ms: Option<i64>,
     pub first_turn: Option<i64>,
@@ -769,6 +771,7 @@ pub fn tree(c: &Connection, root: &str) -> Result<Option<(String, Tree)>> {
                 depth: r.get(2)?,
                 tokens: r.get(3)?,
                 est: item_est(&models, &prices, &as_of),
+                unpriced_tokens: item_unpriced(&models, &prices, &as_of),
                 reported: r.get(5)?,
                 agent_ms: r.get(6)?,
                 first_turn: r.get(7)?,

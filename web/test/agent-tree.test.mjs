@@ -55,6 +55,8 @@ test("cost rolls up the Hub's whole subtree; time runs until the end", () => {
   assert.equal(r.get("A").est, 1.75)
   assert.equal(r.get("B").est, 0.75)
   assert.equal(r.get("D").known, false)
+  const u = rollup([stat("A", null, 1, { unpriced_tokens: 0 }), stat("B", "A", 0, { unpriced_tokens: 7_400_000 })])
+  assert.equal(u.get("A").unpriced, 7_400_000, "unpriced tokens under a node are part of its total")
   assert.equal(elapsed(stat("A", null, 0, { first_turn: 1000, done_at: 4000 }), "done", 9000), 3000)
   assert.equal(elapsed(stat("A", null, 0, { first_turn: 1000 }), "running", 9000), 8000)
   assert.equal(elapsed(stat("A", null, 0, { first_turn: 1000 }), "failed", 9000), 5, "an ended node without an end mark shows its agent time")

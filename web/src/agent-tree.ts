@@ -11,7 +11,7 @@ export type TreeItem = {
 }
 /** one row of `GET /stats/tree/{id}`: an item's own figures, not its children's */
 export type TreeStat = {
-  item_id: string; parent_id: string | null; depth: number; tokens: number; est: number; reported: number
+  item_id: string; parent_id: string | null; depth: number; tokens: number; est: number; unpriced_tokens?: number; reported: number
   agent_ms: number | null; first_turn: number | null; done_at: number | null; dropped_at: number | null
 }
 export type AgentStatus = "proposed" | "pending" | "waiting" | "starting" | "running" | "unconfirmed" | "asking" | "paused" | "blocked" | "done" | "failed" | "stopped"
@@ -136,7 +136,7 @@ export function summarize(root: AgentNode): TreeSummary {
   return s
 }
 
-export type Cost = { est: number; reported: number; tokens: number; known: boolean }
+export type Cost = { est: number; unpriced: number; reported: number; tokens: number; known: boolean }
 /** each item's own cost plus everything started from it, by the Hub's tree (which also holds attempts the
  * page does not draw, so a parent's total is the full spend under it) */
 export function rollup(stats: TreeStat[]): Map<string, Cost> {
@@ -147,11 +147,11 @@ export function rollup(stats: TreeStat[]): Map<string, Cost> {
     const hit = out.get(s.item_id)
     if (hit) return hit
     seen.add(s.item_id)
-    const c: Cost = { est: s.est, reported: s.reported, tokens: s.tokens, known: s.tokens > 0 || s.reported > 0 }
+    const c: Cost = { est: s.est, unpriced: s.unpriced_tokens ?? 0, reported: s.reported, tokens: s.tokens, known: s.tokens > 0 || s.reported > 0 }
     for (const k of kids.get(s.item_id) ?? []) {
       if (seen.has(k.item_id)) continue
       const x = total(k, seen)
-      c.est += x.est; c.reported += x.reported; c.tokens += x.tokens; c.known ||= x.known
+      c.est += x.est; c.unpriced += x.unpriced; c.reported += x.reported; c.tokens += x.tokens; c.known ||= x.known
     }
     out.set(s.item_id, c)
     return c

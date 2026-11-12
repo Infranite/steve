@@ -16,11 +16,11 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { useT } from "@/i18n"
 import { clockDur } from "@/i18n/format"
 import { cn } from "@/lib/utils"
-import { fmtUsd } from "@/stats/format"
+import { fmtEst, fmtUsd } from "@/stats/format"
 import { botName, loadItem, st } from "@/store"
 import { BotAvatar, useNow } from "@/ui"
 import { orderedUnits, type Workflow } from "@/workflow"
-import { buildAgentTree, elapsed, findNode, isActive, isOver, rollup, summarize, type AgentNode, type AgentStatus, type TreeItem, type TreeStat } from "@/agent-tree"
+import { buildAgentTree, elapsed, findNode, isActive, isOver, rollup, summarize, type AgentNode, type AgentStatus, type Cost, type TreeItem, type TreeStat } from "@/agent-tree"
 
 type Action = "pause" | "resume" | "retry" | "cancel" | "single_session"
 
@@ -135,11 +135,13 @@ export function AgentStatusPill({ s, className }: { s: AgentStatus; className?: 
     <I className={cn("size-3", isActive(s) && "motion-safe:animate-spin")} strokeWidth={2.25} />{t(`views:agentTree.status.${s}`)}</span>
 }
 
+/** the estimate, saying so when part of the tokens ran on models without a price; a Hub's own figure when there is no estimate */
+const usd = (c: Cost) => c.unpriced ? fmtEst(c.est, c.unpriced) : fmtUsd(c.est || c.reported)
 const model = (bot: string | null) => bot && st.bots[bot] ? st.bots[bot].m || st.bots[bot].h : ""
 
 function figures(at: AgentTreeState, n: AgentNode, now: number, t: ReturnType<typeof useT>) {
   const cost = at.total(n.item), time = elapsed(at.stat(n.item), n.status, now)
-  return [cost?.known ? t("views:agentTree.cost", { usd: fmtUsd(cost.est || cost.reported) }) : null, time != null ? clockDur(time) : null].filter(Boolean).join(" · ")
+  return [cost?.known ? t("views:agentTree.cost", { usd: usd(cost) }) : null, time != null ? clockDur(time) : null].filter(Boolean).join(" · ")
 }
 
 function Card({ at, n, selected, onSelect, open, toggle }: { at: AgentTreeState; n: AgentNode; selected: boolean; onSelect: () => void; open: boolean; toggle: () => void }) {
@@ -264,7 +266,7 @@ export function AgentTree({ at, selected, onSelect }: { at: AgentTreeState; sele
           {summary.asking.map((n) => <a key={n.key} href={`#/items/${encodeURIComponent(n.item!)}`} className="rounded-lg px-2 py-1.5 type-callout hover:bg-accent">{n.title} · {t("views:workflow.handleDecision")}</a>)}
         </PopoverContent>
       </Popover>}
-      {total?.known && <span className="type-footnote tabular-nums text-foreground" data-agent-total>{t("views:agentTree.cost", { usd: fmtUsd(total.est || total.reported) })}</span>}
+      {total?.known && <span className="type-footnote tabular-nums text-foreground" data-agent-total>{t("views:agentTree.cost", { usd: usd(total) })}</span>}
       {canAct && <div className="flex items-center gap-1">
         <Button size="sm" variant="outline" disabled={at.busy || workflow!.paused && (at.unavailable || at.old)} onClick={() => void at.change(workflow!.paused ? "resume" : "pause")} data-workflow-toggle>
           {workflow!.paused ? <PlayIcon /> : <PauseIcon />}{workflow!.paused ? t("views:workflow.resume") : t("views:workflow.pause")}</Button>
