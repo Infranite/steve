@@ -50,6 +50,18 @@ try {
     assert.equal(await v.getAttribute("title"), "客户端 20261105-120301-4d419d6a · 服务端 正在获取…")
     await page.close()
   }
+  for (const height of [700, 900]) {
+    // a short window: the groups scroll between header and footer, and every entry can be brought into view above the footer
+    const { page } = await open({ locale: "zh-CN", viewport: { width: 1066, height } })
+    const nav = page.locator("[data-sidebar-nav]")
+    const hidden = await nav.evaluate((el) => {
+      const foot = el.parentElement.querySelector("[data-slot=sidebar-footer]").getBoundingClientRect().top
+      return [...el.querySelectorAll("[data-nav]")].filter((a) => { a.scrollIntoView({ block: "nearest" }); const r = a.getBoundingClientRect(), b = el.getBoundingClientRect(); return r.top < b.top - 0.5 || r.bottom > Math.min(b.bottom, foot) + 0.5 }).map((a) => a.dataset.nav)
+    })
+    assert.deepEqual(hidden, [], `entries out of reach at 1066×${height}`)
+    if (height === 700) assert.match(await nav.getAttribute("data-more") ?? "", /above/, "the scrolled groups show there is more above")
+    await page.close()
+  }
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["light/dark", "frontend by commit, backend by version", "links to 设置 · 关于", "en", "backend not known yet"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["light/dark", "frontend by commit, backend by version", "links to 设置 · 关于", "en", "backend not known yet", "every entry reachable at 1066×700/900"] }))
 } finally { await browser.close() }

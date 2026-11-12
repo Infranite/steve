@@ -199,6 +199,8 @@ export function cardLook(i: Item, c?: ItemCardState): Look {
   const w = i.waits[0]
   if (i.st === "done") return c?.released ? { label: tr("thread:card.status.released"), version: c.released.version, dot: "done", tone: "done" } : { label: tr("thread:card.status.done"), dot: "done", tone: "done" }
   if (i.st === "drop") return { label: tr("thread:card.status.dropped"), dot: "drop", tone: "quiet" }
+  /* closed as failed: over, like done and dropped, not a wait on you */
+  if (i.st === "fail") return { label: tr("thread:card.status.closedFailed"), dot: "fail", tone: "fail" }
   if (w?.type === "fail") return { label: tr("thread:card.status.failed"), dot: "fail", tone: "fail" }
   if (w?.type === "accept") return { label: tr("thread:card.status.accept"), dot: "wait", tone: "wait" }
   if (w?.subject === "release") return { label: tr("thread:card.status.release"), dot: "wait", tone: "wait" }
@@ -260,8 +262,8 @@ export function ItemCard({ c, inText = false }: { c: ItemCardState; inText?: boo
   const d = c.delivery ? { ...c.delivery, decision: accept?.decision ?? c.delivery.decision } : accept ? { text: (accept.draft ?? "").split("\n\n")[0], decision: accept.decision } : undefined
   const reply = c.reply && (!c.delivery?.at || (c.reply.at ?? 0) > c.delivery.at) ? c.reply : undefined
   /* the failure is current only while the item stays stopped on it (you chose to look, it is paused): going on, being
-   * resumed or finishing ends it — the Hub then sets the card back to running, cards from before that are read the same way */
-  const failLine = !w && c.state === "fail" && i.st === "pause" && !alertClosed(c.decision) ? c.text : undefined
+   * resumed or finishing ends it (closing as failed keeps it) — the Hub then sets the card back to running, cards from before that are read the same way */
+  const failLine = !w && c.state === "fail" && (i.st === "pause" || i.st === "fail") && !alertClosed(c.decision) ? c.text : undefined
   return (
     <div className="mt-3 flex w-full max-w-[560px] flex-col gap-3 rounded-xl border bg-card p-3.5 anim-in" data-item-card={i.id} data-card-state={look.tone}>
       <button type="button" onClick={() => go("#/items/" + i.id)} className="-m-1 flex min-w-0 items-start gap-2.5 rounded-lg p-1 text-left hover:bg-accent/60" data-item-ref={i.id}>

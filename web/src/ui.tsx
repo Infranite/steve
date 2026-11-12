@@ -157,8 +157,15 @@ export function Tags({ ids, className, onRemove, max }: { ids?: string[]; classN
   )
 }
 export const ItemNo = ({ id, className }: { id: string; className?: string }) => <span className={cn("shrink-0 font-mono text-[12px] tabular-nums text-muted-foreground", className)} data-no>{id}</span>
+/** a "·" between parts, as its own element after each part but the last. The part keeps a dot-wide right margin and
+ *  the dot, pulled back over it, takes no width of its own: it stays on the line of the part before it (a wrapped line
+ *  never starts with one), and sits outside the part, so a part that truncates, has a border or a gap keeps it whole.
+ *  Only after a part wider than the whole line can a dot open the next line; it then lies left of the box, clipped.
+ *  Dots around a part that renders nothing collapse. */
+export const META_SEP = "overflow-x-clip [&>:not([data-meta-sep]):not(:last-child)]:mr-4 [&>[data-meta-sep]:first-child]:hidden [&>[data-meta-sep]:last-child]:hidden [&>[data-meta-sep]+[data-meta-sep]]:hidden"
+export const metaParts = (children: ReactNode) => Children.toArray(children).flatMap((c, n) => n ? [<span key={"sep" + n} data-meta-sep aria-hidden className="-ml-4 w-4 shrink-0 text-center text-tertiary">·</span>, c] : [c])
 export const Meta = ({ children, className }: { children: ReactNode; className?: string }) => (
-  <div className={cn("flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 type-footnote text-muted-foreground [&>*:not(:last-child)]:after:ml-1.5 [&>*:not(:last-child)]:after:text-tertiary [&>*:not(:last-child)]:after:content-['·']", className)}>{children}</div>
+  <div className={cn("flex min-w-0 flex-wrap items-center gap-y-1 type-footnote text-muted-foreground", META_SEP, className)}>{metaParts(children)}</div>
 )
 export function SectionLabel({ children, right, className }: { children: ReactNode; right?: ReactNode; className?: string }) {
   return <div className={cn("mb-2 flex min-h-6 items-center justify-between gap-2 type-label text-muted-foreground", className)}><span>{children}</span>{right}</div>
@@ -292,6 +299,23 @@ export function Sidebar({ route: full }: { route: string }) {
   const S = st.bots.steve ?? Object.values(st.bots)[0], n = pendingCards().length
   const people = usePeopleOn(), meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
   const cnt: Record<string, number> = { inbox: n, items: st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length }
+  const nav = useRef<HTMLDivElement>(null), [more, setMore] = useState("")
+  useEffect(() => {
+    const el = nav.current
+    if (!el) return
+    const look = () => setMore([el.scrollTop > 1 && "above", el.scrollTop + el.clientHeight < el.scrollHeight - 1 && "below"].filter(Boolean).join(" "))
+    const ro = new ResizeObserver(look)
+    ro.observe(el); for (const c of el.children) ro.observe(c)
+    el.addEventListener("scroll", look, { passive: true }); look()
+    return () => { ro.disconnect(); el.removeEventListener("scroll", look) }
+  }, [])
+  /* the page you are on stays in view when the groups scroll */
+  useEffect(() => {
+    const el = nav.current, on = el?.querySelector('[aria-current="page"]')
+    if (!el || !on) return
+    const b = el.getBoundingClientRect(), r = on.getBoundingClientRect(), fade = 32
+    if (r.top < b.top + fade || r.bottom > b.bottom - fade) el.scrollTop += r.top - b.top - (b.height - r.height) / 2
+  }, [route])
   const item = (h: string, l: string, I: any, on: boolean) => (
     <SidebarMenuItem key={h}>
       <SidebarMenuButton isActive={on} tooltip={l} render={<a href={"#/" + h} data-nav={h || "chat"} aria-current={on ? "page" : undefined} />} className="text-[14px] text-foreground/85 data-active:font-medium data-active:text-foreground">
@@ -321,13 +345,15 @@ export function Sidebar({ route: full }: { route: string }) {
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
-      <SidebarContent>
+      {/* a short window gives the groups less room than they need: they scroll between header and footer. The edge
+       *  with more beyond it fades and the footer keeps a hairline, so the lower groups read as scrolled, not cut off */}
+      <SidebarContent ref={nav} className="[scrollbar-width:thin]! data-[more~=below]:mask-b-from-[calc(100%-2rem)] data-[more~=above]:mask-t-from-[calc(100%-2rem)]" data-sidebar-nav data-more={more || undefined}>
         {NAV_GROUPS.map((group) => <SidebarGroup key={group} className="py-1">
           <SidebarGroupLabel className="h-6 text-[11px] text-muted-foreground">{t(`core:navGroup.${group}`)}</SidebarGroupLabel>
           <SidebarGroupContent><SidebarMenu>{NAV.filter((x) => x.group === group).map((x) => item(x.h, t(`core:nav.${x.l}`), x.I, (route === x.h && !(x.h === "contacts" && meOn)) || (x.h === "contacts" && (route === "orgs" || route === "teams"))))}</SidebarMenu></SidebarGroupContent>
         </SidebarGroup>)}
       </SidebarContent>
-      <SidebarFooter>
+      <SidebarFooter className="border-t border-sidebar-border">
         <SidebarMenu>
           {people && item("contacts/me", t("core:nav.me"), UserRoundIcon, meOn)}
           {item("devices", t("core:nav.devices"), ServerIcon, route === "devices")}

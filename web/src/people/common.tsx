@@ -4,7 +4,8 @@ import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Spinner } from "@/components/ui/spinner"
 import { useHubEvents, toast, st, emit } from "@/store"
 import { Unauthenticated } from "@/api"
-import { SectionLabel } from "@/ui"
+import { META_SEP, metaParts, SectionLabel } from "@/ui"
+import { cn } from "cn"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { usePeopleOn, type Level, type Visibility } from "@/api/people"
@@ -70,7 +71,7 @@ export function PeopleGate({ children }: { children: () => ReactNode }) {
 }
 /** ui's Meta as inline elements: a Row's sub is a <p>, which cannot hold Meta's <div> */
 export const SubMeta = ({ children }: { children: ReactNode }) => (
-  <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 type-footnote text-muted-foreground [&>*+*]:before:mr-1.5 [&>*+*]:before:text-tertiary [&>*+*]:before:content-['·']">{children}</span>
+  <span className={cn("flex min-w-0 flex-wrap items-center gap-y-1 type-footnote text-muted-foreground", META_SEP)}>{metaParts(children)}</span>
 )
 export const Loading = () => <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
 /** "YYYY-MM" or a date → "10-08" style */

@@ -93,6 +93,7 @@ export default {
       released: "已发布",
       done: "已完成",
       dropped: "已放弃",
+      closedFailed: "已失败",
       failed: "出错了，等你处理",
       accept: "交付了，等你验收",
       release: "等你批准发布",

@@ -95,6 +95,7 @@ export default {
       released: "Released",
       done: "Done",
       dropped: "Dropped",
+      closedFailed: "Failed",
       failed: "Failed, needs you",
       accept: "Delivered, needs your review",
       release: "Needs your release approval",

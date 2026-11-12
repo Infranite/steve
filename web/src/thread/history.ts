@@ -3,7 +3,7 @@
  * for the life of the page, so the window moving on as new messages come does not tear a gap into what you read. */
 import { useSyncExternalStore } from "react"
 import { modReq, qs, type RMessage } from "@/api"
-import { knownMsgs as known, msgOf, st, type Msg } from "@/store"
+import { closedSt, knownMsgs as known, msgOf, st, type Msg } from "@/store"
 
 let more = true, ended = false, loading = false, ver = 0, scope = ""
 const ls = new Set<() => void>()
@@ -30,7 +30,7 @@ const oldest = () => { let n = Infinity; for (const m of known.values()) n = Mat
 async function page(before: number, after?: number, limit = after ? 2000 : 100) {
   const r = await modReq<{ messages: RMessage[]; has_more: boolean }>("GET", "/thread/history" + qs({ before: Number.isFinite(before) ? before : undefined, after, limit }))
   /* as the window shows them: a failure line of a finished item is history the notifications keep */
-  const over = (id: string | null) => { const st0 = id ? st.items.find((i) => i.id === id)?.st : undefined; return st0 === "done" || st0 === "drop" }
+  const over = (id: string | null) => closedSt(id ? st.items.find((i) => i.id === id)?.st : undefined)
   for (const m of r.messages) if (!m.meta?.held && !(m.meta?.notice && over(m.item_id))) known.set(m.id, msgOf(m))
   if (!after) ended = !r.has_more
   return r.has_more

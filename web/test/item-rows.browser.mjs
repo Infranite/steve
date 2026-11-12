@@ -28,6 +28,14 @@ try {
     assert.equal(await row("ST-28").locator("[data-workflow-relation]").count(), 0, "an ordinary fork is not a workflow child")
     const rel31 = row("ST-31").locator('[data-workflow-relation="child"]')
     assert.equal(await rel31.evaluate((el) => el.scrollWidth <= el.clientWidth), true, `a long summary does not squeeze the relation away at ${width}px`)
+    // a truncated part keeps the dot after it, and the dot sits between the parts, never over one
+    for (const id of ["ST-31", "ST-18", "ST-26"]) {
+      const seps = await row(id).evaluate((el) => [...el.querySelectorAll("[data-meta-sep]")].filter((s) => s.getBoundingClientRect().width > 0).map((s) => {
+        const b = s.getBoundingClientRect(), p = s.previousElementSibling.getBoundingClientRect(), n = s.nextElementSibling.getBoundingClientRect(), m = s.parentElement.getBoundingClientRect()
+        return b.left >= p.right - 0.5 && b.right <= n.left + 0.5 && b.left >= m.left && b.right <= m.right
+      }))
+      assert.deepEqual(seps, [true, true], `${id}: both separators show between their parts at ${width}px`)
+    }
     assert.equal(await row("ST-43").getAttribute("data-dense"), "true", "an item closed as failed folds like other closed ones")
     // a real wait: what the card asks and the way to it, not the stale summary
     const r = row("ST-52")

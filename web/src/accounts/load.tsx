@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { Unauthenticated, NotWired, HubError } from "@/api"
 import { st, emit, useHubEvents, toast } from "@/store"
 import { t } from "@/i18n"
+import { META_SEP, metaParts } from "@/ui"
+import { cn } from "cn"
 
 export type Load<T> = { s: "loading" } | { s: "unwired" } | { s: "error"; err: string; status: number } | { s: "ok"; data: T }
 
@@ -45,5 +47,5 @@ export function useBusy() {
 
 /** `Meta` for a Row's subtitle: spans only, since the subtitle is a <p> */
 export const Dots = ({ children }: { children: React.ReactNode }) => (
-  <span className="inline-flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 [&>*:not(:last-child)]:after:ml-1.5 [&>*:not(:last-child)]:after:text-tertiary [&>*:not(:last-child)]:after:content-['·']">{children}</span>
+  <span className={cn("inline-flex min-w-0 flex-wrap items-center gap-y-1", META_SEP)}>{metaParts(children)}</span>
 )
