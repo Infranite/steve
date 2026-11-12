@@ -64,8 +64,8 @@ pub use error::{CoreError, Result};
 pub use gateway::{Fallback, InProcess, LocalAcp, ModelGateway, OneModel, SharedGateway, Tier};
 pub use orchestrator::{CreateItem, Forked, ItemAction, SendNow, SupplementMode};
 pub use runtime::{
-    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, Output, Prompted, Released,
-    Running, Stop, TurnEnd,
+    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, ModeState, Output, Prompted,
+    Released, Running, Stop, TurnEnd,
 };
 
 use repo::Db;

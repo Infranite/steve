@@ -4,7 +4,7 @@ import "../../src/index.css"
 import { st, useStore, type Item } from "../../src/store"
 import { getSheet } from "../../src/ui"
 import { YoloDialog, YoloPill } from "../../src/yolo/switch"
-import { YoloItemSwitch, YoloProjectSelect } from "../../src/yolo/badges"
+import { YoloItemModes, YoloItemSwitch, YoloProjectSelect } from "../../src/yolo/badges"
 
 const q = new URLSearchParams(location.search)
 document.documentElement.classList.toggle("dark", q.get("theme") === "dark")
@@ -21,6 +21,7 @@ function Fixture() {
   return <main className="p-4">
     <YoloPill />
     <YoloItemSwitch i={item} />
+    <YoloItemModes i={item} />
     <YoloProjectSelect id="p1" realDir={false} />
     {getSheet()?.kind === "yolo" && <YoloDialog />}
   </main>

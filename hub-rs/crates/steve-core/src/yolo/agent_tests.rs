@@ -423,3 +423,94 @@ fn an_own_directory_widens_default_without_yolo_too() {
         Some("default")
     );
 }
+
+/// `GET /yolo/items/{id}`: the level and the layer that decided it, and per session the mode Steve
+/// wants next to the one its backend confirmed; full access waiting for a running turn's end says
+/// so, with what the harness still asks answered by YOLO, and only a confirmed mode is applied.
+#[test]
+fn an_items_state_says_what_is_wanted_and_what_the_backend_confirmed() {
+    use crate::runtime::ModeState;
+    let k = Kit::new();
+    let y = yolo(&k);
+    switch(&y, true);
+    let (item, sid) = started(&k, &k.home().join("ops/release.sh"));
+    let state = || k.core.yolo_item_state(WS, &item).unwrap();
+    let s = state();
+    assert_eq!(
+        (s["level"].as_str(), s["source"].as_str()),
+        (Some("on"), Some("workspace"))
+    );
+    assert_eq!(s["sessions"][0]["session_id"], sid.as_str());
+    assert_eq!(
+        s["sessions"][0]["status"], "not_running",
+        "the backend cannot tell"
+    );
+    // full access while a turn runs in the mode it started with
+    full(&y);
+    k.rt.st().mode_states.insert(
+        sid.clone(),
+        ModeState {
+            applied: Some("auto".into()),
+            desired: Some("full_access".into()),
+            busy: true,
+            ..Default::default()
+        },
+    );
+    let s = state();
+    assert_eq!(s["level"], "full");
+    let row = &s["sessions"][0];
+    assert_eq!(row["wanted"], "full_access");
+    assert_eq!(row["applied"], "auto", "not shown as in force before it is");
+    assert_eq!(row["status"], "after_turn");
+    assert_eq!(row["residual"], true);
+    // confirmed
+    k.rt.st().mode_states.insert(
+        sid.clone(),
+        ModeState {
+            applied: Some("full_access".into()),
+            ..Default::default()
+        },
+    );
+    let s = state();
+    assert_eq!(s["sessions"][0]["status"], "applied");
+    assert_eq!(s["sessions"][0]["residual"], false);
+    // the item steps down on its own: the item layer decides, the bypass is no longer wanted
+    y.put_scope(WS, "me", "item", &item, &serde_json::json!({"mode": "on"}))
+        .unwrap();
+    let s = state();
+    assert_eq!(
+        (s["level"].as_str(), s["source"].as_str()),
+        (Some("on"), Some("item"))
+    );
+    assert_eq!(s["layers"]["workspace"], "full");
+    assert_eq!(s["layers"]["item"], "on");
+    assert_eq!(s["sessions"][0]["wanted"], "auto");
+    assert_eq!(s["sessions"][0]["status"], "not_sent");
+    // the Node's owner refused full access
+    y.put_scope(
+        WS,
+        "me",
+        "item",
+        &item,
+        &serde_json::json!({"mode": "inherit"}),
+    )
+    .unwrap();
+    k.rt.st().mode_states.insert(
+        sid.clone(),
+        ModeState {
+            applied: Some("auto".into()),
+            refused: Some("this node's owner allows at most permission mode auto here".into()),
+            ..Default::default()
+        },
+    );
+    let s = state();
+    assert_eq!(s["sessions"][0]["status"], "refused");
+    assert!(
+        s["sessions"][0]["refused"]
+            .as_str()
+            .unwrap()
+            .contains("at most")
+    );
+    // another workspace's item is not found
+    assert!(k.core.yolo_item_state("other", &item).is_err());
+}

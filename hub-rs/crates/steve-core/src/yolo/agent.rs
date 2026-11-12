@@ -91,6 +91,41 @@ pub fn harness_mode(bot: Option<&str>, level: Level, own_dir: bool) -> Option<St
     }
 }
 
+/// How far a session's harness is from the mode Steve wants (`wanted`, Steve's name; `None`: the
+/// harness default), given where its backend says it stands (`None`: nothing runs it here):
+/// `applied` only once the backend confirmed it.
+pub(crate) fn mode_status(
+    wanted: Option<&str>,
+    st: Option<&crate::runtime::ModeState>,
+) -> &'static str {
+    let Some(st) = st else {
+        return "not_running";
+    };
+    let wanted_now = |m: &Option<String>| m.as_deref() == wanted && wanted.is_some();
+    if st.unknown {
+        "unknown"
+    } else if wanted_now(&st.desired) {
+        if st.sending {
+            "sending"
+        } else if st.busy {
+            "after_turn"
+        } else {
+            "next_open"
+        }
+    } else if st.refused.is_some() && !wanted_now(&st.applied) {
+        "refused"
+    } else if st.desired.is_some() {
+        // a change Steve no longer wants still waits: the next sync takes it back
+        "not_sent"
+    } else if wanted.is_none() || wanted_now(&st.applied) {
+        "applied"
+    } else if st.released || st.applied.is_none() {
+        "next_open"
+    } else {
+        "not_sent"
+    }
+}
+
 fn note(from: Level, to: Level) -> Option<&'static str> {
     use Level::*;
     match (from, to) {
@@ -219,6 +254,97 @@ impl Core {
         }
         let own = y.own_dir(item.cwd.as_deref()).is_some();
         harness_mode(bot.as_deref(), self.yolo_level(&item), own)
+    }
+
+    /// The harness mode session `s` of `item` should run in now (`None`: the harness default), as
+    /// [`Core::yolo_sync`] asks for it.
+    fn wanted_mode(
+        &self,
+        y: &super::Yolo,
+        s: &crate::repo::Session,
+        item: &Item,
+    ) -> Option<String> {
+        let bot = s
+            .bot_id
+            .as_deref()
+            .and_then(|b| self.store().bot(b).ok().flatten())
+            .map(|b| b.perm_mode);
+        if s.readonly != 0 {
+            return perm_mode(bot.as_deref(), false);
+        }
+        let own = y.own_dir(item.cwd.as_deref()).is_some();
+        harness_mode(bot.as_deref(), self.yolo_level(item), own)
+    }
+
+    /// `GET /yolo/items/{id}`: what applies to the item and which layer said so, and for each of its
+    /// sessions the permission mode Steve wants, the one its backend confirmed the harness runs in,
+    /// and why they differ. Nothing reads as in force before the backend confirmed it.
+    pub fn yolo_item_state(
+        &self,
+        ws: &str,
+        item_id: &str,
+    ) -> steve_modules::ApiResult<serde_json::Value> {
+        use serde_json::json;
+        let Some(y) = self.yolo() else {
+            return Err(steve_modules::ApiError::not_found("YOLO"));
+        };
+        let item = self
+            .store()
+            .item(item_id)
+            .ok()
+            .flatten()
+            .filter(|i| i.workspace_id == ws)
+            .ok_or_else(|| steve_modules::ApiError::not_found("事项"))?;
+        let layers = y.layers(ws, Some(item_id))?;
+        let eff = super::scope::resolve(&layers);
+        let level = match Level::of(&eff) {
+            Level::Off => "off",
+            Level::On => "on",
+            Level::Full => "full",
+        };
+        let rt = &*self.0.runtime;
+        let sessions = self
+            .store()
+            .sessions_of_item(item_id)
+            .map_err(|e| steve_modules::ApiError::Internal(e.to_string()))?;
+        let list: Vec<serde_json::Value> = sessions
+            .iter()
+            .filter(|s| s.status != "ended")
+            .map(|s| {
+                let mode = self.wanted_mode(y, s, &item);
+                let wanted = mode.as_deref().and_then(|m| rt.mode_name(m));
+                let st = rt.mode_state(&s.id);
+                let status = mode_status(wanted.as_deref(), st.as_ref());
+                // full access is wanted but the harness still runs in a mode that asks: what it asks
+                // this turn YOLO answers as full access promises
+                let residual = wanted.as_deref() == Some("full_access")
+                    && st
+                        .as_ref()
+                        .is_some_and(|m| m.busy && m.applied.as_deref() != Some("full_access"));
+                json!({
+                    "session_id": s.id, "readonly": s.readonly != 0, "status": status,
+                    "wanted": wanted, "applied": st.as_ref().and_then(|m| m.applied.clone()),
+                    "desired": st.as_ref().and_then(|m| m.desired.clone()),
+                    "busy": st.as_ref().is_some_and(|m| m.busy),
+                    "refused": st.as_ref().and_then(|m| m.refused.clone()),
+                    "residual": residual,
+                })
+            })
+            .collect();
+        let mode = |m: Option<super::scope::Mode>| m.map(super::scope::Mode::as_str);
+        Ok(json!({
+            "item_id": item_id,
+            "level": level,
+            "source": eff.source,
+            "layers": {
+                "workspace": layers.workspace.as_str(),
+                "project": layers.project.map(|p| json!({ "mode": mode(p.mode), "real_dir": p.real_dir })),
+                "item": mode(layers.item),
+                "forced": layers.forced.map(super::scope::Forced::code),
+                "paused": layers.paused,
+            },
+            "sessions": list,
+        }))
     }
 
     /// The text for session `sid`, with what changed about YOLO in front of it (once).
@@ -356,6 +482,49 @@ mod tests {
             harness_mode(None, Level::Full, false).as_deref(),
             Some(BYPASS)
         );
+    }
+
+    /// Nothing reads as in force before the backend confirmed it: a mode that waits for the turn's
+    /// end, one on its way, one refused, and one the Hub has not asked for yet each say so.
+    #[test]
+    fn a_mode_is_applied_only_once_the_backend_confirmed_it() {
+        use crate::runtime::ModeState;
+        let full = Some("full_access");
+        let st = |applied: Option<&str>, desired: Option<&str>| ModeState {
+            applied: applied.map(String::from),
+            desired: desired.map(String::from),
+            ..Default::default()
+        };
+        assert_eq!(mode_status(full, None), "not_running");
+        assert_eq!(mode_status(full, Some(&st(full, None))), "applied");
+        assert_eq!(mode_status(None, Some(&st(Some("ask"), None))), "applied");
+        // a turn runs: it goes at its end
+        let mut s = st(Some("auto"), full);
+        s.busy = true;
+        assert_eq!(mode_status(full, Some(&s)), "after_turn");
+        // sent, not confirmed yet
+        s.sending = true;
+        assert_eq!(mode_status(full, Some(&s)), "sending");
+        // released: the next open carries it
+        let mut s = st(Some("auto"), full);
+        s.released = true;
+        assert_eq!(mode_status(full, Some(&s)), "next_open");
+        assert_eq!(mode_status(full, Some(&st(None, None))), "next_open");
+        // refused by the Node or the harness, falling back
+        let mut s = st(Some("auto"), None);
+        s.refused = Some("this node's owner allows at most permission mode auto".into());
+        assert_eq!(mode_status(full, Some(&s)), "refused");
+        // …but a refusal before the mode Steve wants now was confirmed says nothing
+        assert_eq!(mode_status(Some("auto"), Some(&s)), "applied");
+        // not asked for yet (the sync retries), or a change Steve no longer wants still waits
+        assert_eq!(mode_status(full, Some(&st(Some("auto"), None))), "not_sent");
+        assert_eq!(
+            mode_status(Some("auto"), Some(&st(Some("auto"), full))),
+            "not_sent"
+        );
+        let mut s = st(Some("auto"), full);
+        s.unknown = true;
+        assert_eq!(mode_status(full, Some(&s)), "unknown");
     }
 
     #[test]

@@ -155,6 +155,7 @@ No setting can widen these limits, and they are property-tested: money, high-sen
 
 - **Shell guard.** Default deny, with its own POSIX shell parser. `eval`, `sh -c`, `sudo` and command substitution are refused, and `kill` only works on processes the agent started.
 - **Countdowns and breakers.** While you're active, YOLO waits and shows *Now* and *I'll decide* buttons. It pauses the workspace after repeated failures, repeated undos, or a release it approved that went wrong.
+- **Full access.** An explicit, confirmed level above YOLO (workspace, project or item): agents' harnesses run without permission prompts. A running session switches at its next idle boundary; until then, what its harness still asks is approved within full access's own limits (Steve's data directory, port 8440 and launchd, money, pushing, speaking as you, root and `pkill` still wait for you), and each item page shows the mode Steve wants next to the one the Node has confirmed.
 - **Record and undo.** Every decision is recorded per window and item, with its cost. Five kinds of undo: revert the decision, roll back the release, recall the message, re-answer, or pause the item.
 
 <p align="center"><img src="docs/assets/screenshots/inbox.webp" alt="Inbox: acceptances, approvals and questions in one place; YOLO picks up the routine ones" width="85%"><br><sub><b>Inbox</b>: acceptances, approvals and questions in one place; YOLO picks up the routine ones</sub></p>

@@ -1,4 +1,4 @@
-//! `/api/yolo`: the workspace switch, project and item scopes, resuming after the
+//! `/api/yolo`: the workspace switch, project and item scopes, an item's permission state, resuming after the
 //! breaker (Y0), and the ledger (Y6): the digest, undo, and the cool-down buttons “现在” / “我来定”.
 //! Mounted with the module routes, so the caller comes from the `Caller` layer and errors are the
 //! module kind (`400 参数不对：…`, `404 没有这个…`, `409 …`).
@@ -19,6 +19,7 @@ pub fn routes(engine: Engine) -> Router {
     Router::new()
         .route("/yolo", get(status).put(switch))
         .route("/yolo/scopes/{ty}/{id}", put(scope))
+        .route("/yolo/items/{id}", get(item))
         .route("/yolo/resume", post(resume))
         .route("/yolo/actions", get(actions))
         .route("/yolo/actions/{id}/undo", post(undo))
@@ -59,6 +60,15 @@ async fn scope(
 ) -> ApiResult<Json<Value>> {
     let b = body(&b)?;
     run(move || e.yolo().put_scope(&who.ws, &who.me, &ty, &id, &b)).await
+}
+
+/// What applies to one item and where its sessions' permission modes stand (`Core::yolo_item_state`).
+async fn item(
+    State(e): State<Engine>,
+    who: Caller,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    run(move || e.core().yolo_item_state(&who.ws, &id)).await
 }
 
 async fn resume(State(e): State<Engine>, who: Caller) -> ApiResult<Json<Value>> {

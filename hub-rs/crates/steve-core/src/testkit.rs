@@ -79,6 +79,8 @@ pub struct FakeState {
     pub node_made: HashSet<String>,
     /// `tidy` calls: (session, keep_branch).
     pub tidies: Vec<(String, bool)>,
+    /// What [`AgentRuntime::mode_state`] says per session (none: it cannot tell).
+    pub mode_states: HashMap<String, crate::runtime::ModeState>,
 }
 
 /// acp.ts in miniature: turns are tracked, prompts queue behind a running turn or the hold, and a test
@@ -323,6 +325,22 @@ impl AgentRuntime for FakeRuntime {
         } else {
             Configured::Applied
         })
+    }
+    fn mode_state(&self, sid: &str) -> Option<crate::runtime::ModeState> {
+        self.st().mode_states.get(sid).cloned()
+    }
+    fn mode_name(&self, mode: &str) -> Option<String> {
+        Some(
+            match mode {
+                "plan" => "plan",
+                "default" => "ask",
+                "acceptEdits" => "accept_edits",
+                "auto" => "auto",
+                "bypassPermissions" => "full_access",
+                _ => return None,
+            }
+            .into(),
+        )
     }
     fn is_holding(&self) -> bool {
         self.st().holding

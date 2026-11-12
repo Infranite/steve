@@ -30,6 +30,31 @@ export type RYoloPreview = {
   would_handle: { decision_id: string; question: string; choice: string; rule: string; delay_s: number }[]
   keep_for_you: number; hard_limited: number; muted: number
 }
+/** Steve's permission modes, as a session's harness runs in them */
+export type PermMode = "plan" | "ask" | "accept_edits" | "auto" | "full_access"
+/** where one session's harness stands: `applied` only once its backend (the Node) confirmed it */
+export type ModeStatus = "applied" | "after_turn" | "sending" | "next_open" | "refused" | "unknown" | "not_sent" | "not_running"
+export type RYoloItemSession = {
+  session_id: string; readonly: boolean; status: ModeStatus
+  /** what Steve asks for now (null: the harness default) */
+  wanted: PermMode | null
+  /** what the Node confirmed the harness runs in (null: nothing confirmed yet) */
+  applied: PermMode | null
+  /** waiting for the turn's end or the next open, or on its way */
+  desired: PermMode | null
+  busy: boolean
+  /** what the Node or the harness said of a change that did not take */
+  refused: string | null
+  /** full access is wanted but this turn still runs in a mode that asks: YOLO answers what it asks as full access */
+  residual: boolean
+}
+/** GET /yolo/items/{id}: the level the item resolves to and the layer that decided, and its sessions' modes */
+export type RYoloItem = {
+  item_id: string; level: YoloLevel
+  source: "forced" | "paused" | "item" | "project" | "project_default" | "workspace"
+  layers: { workspace: YoloMode; project: { mode: YoloMode | null; real_dir: boolean } | null; item: YoloMode | null; forced: string | null; paused: boolean }
+  sessions: RYoloItemSession[]
+}
 export type UndoKind = "decision" | "rollback" | "recall" | "reanswer" | "pause"
 export type RYoloAction = {
   id: string; workspace_id: string; window_id: string | null; decision_id: string | null; item_id: string | null; session_id: string | null
@@ -58,6 +83,7 @@ export const yoloApi = {
   /** full access needs `confirm`: the Hub refuses it otherwise */
   set: (mode: YoloLevel, include_open = false) => modReq<RYolo>("PUT", "/yolo", mode === "off" ? { mode } : { mode, include_open, ...(mode === "full" ? { confirm: true } : {}) }),
   scope: (type: "project" | "item", id: string, mode: YoloMode) => modReq<RYolo>("PUT", `/yolo/scopes/${type}/${e(id)}`, mode === "full" ? { mode, confirm: true } : { mode }),
+  item: (id: string) => modReq<RYoloItem>("GET", `/yolo/items/${e(id)}`),
   resume: () => modReq<RYolo>("POST", "/yolo/resume"),
   actions: (p: { window?: string; item?: string; outcome?: string } = {}) => modReq<RYoloDigest>("GET", "/yolo/actions" + q(p)),
   undo: (id: string, text?: string) => modReq<RYoloAction>("POST", `/yolo/actions/${e(id)}/undo`, text === undefined ? {} : { text }),

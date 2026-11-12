@@ -56,6 +56,7 @@ mod workspace;
 
 pub use apply::AttemptFacts;
 pub use config::{ConfigChange, Configured};
+pub(crate) use config::mode_str;
 pub use cost::CostCaps;
 pub(crate) use cost::tokens as usage_tokens;
 pub use heads::{
@@ -529,6 +530,7 @@ impl NodeRuntime {
                             tokio::task::spawn_blocking(move || jobs.settle_orphan_jobs()).await;
                         me.reconciled.store(true, Ordering::SeqCst);
                         me.plan_waiting();
+                        me.rearm_waiting();
                         break;
                     }
                     Err(e) if e.code == ErrorCode::Offline && !waited => {

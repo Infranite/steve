@@ -90,6 +90,7 @@ fn request(pl: &Place, question: &str, raw: Value, options: &[String], pids: &[u
             project_dir: Some(pl.root.join("Agents/steve")),
             branch: Some("steve/st-21".into()),
             own_pids: pids.to_vec(),
+            full: false,
         }),
     }
 }

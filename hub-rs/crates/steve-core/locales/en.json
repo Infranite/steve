@@ -211,6 +211,7 @@
   "core.yolo.reason.presence": "You just worked on this item, so it waits for you",
   "core.yolo.reason.tool_real_dir": "This item has no workspace of its own and changes the real folder directly",
   "core.yolo.reason.tool_worktree": "An action inside the workspace that passed the guard checks",
+  "core.yolo.reason.tool_full": "Full access: the executor still asked, approved within full access's limits",
   "core.yolo.reason.action_off": "The settings do not let YOLO approve actions",
   "core.yolo.reason.action_local": "An action inside the workspace that can be redone",
   "core.yolo.reason.release_off": "The settings do not let YOLO approve releases",

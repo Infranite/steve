@@ -1227,6 +1227,20 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             _ => false,
         }
     }
+    fn mode_state(&self, session_id: &str) -> Option<steve_core::ModeState> {
+        match self.route(session_id) {
+            Backend::Node(n) => n
+                .mode_state(session_id)
+                .inspect_err(|e| tracing::error!("mode state {session_id}: {e}"))
+                .ok()
+                .flatten(),
+            Backend::Parked | Backend::Unbound => None,
+        }
+    }
+    fn mode_name(&self, mode: &str) -> Option<String> {
+        super::node_binding::permission_mode(mode)
+            .map(|p| super::node_runtime::mode_str(p).to_string())
+    }
     fn set_mode(&self, session_id: &str, mode: &str) -> steve_core::Result<steve_core::Configured> {
         use super::node_runtime::Configured as Node;
         use steve_core::Configured;
@@ -2754,6 +2768,7 @@ mod yolo_input_tests {
             project_dir: None,
             branch: None,
             own_pids: t.own_pids.unwrap_or_default(),
+            full: false,
         };
         let env = judge::Env {
             steve_home: PathBuf::from("/nonexistent/steve"),
@@ -2763,6 +2778,11 @@ mod yolo_input_tests {
         assert!(
             !matches!(guard::check(&tool, &[], &env), guard::Guard::Allow { .. }),
             "asked"
+        );
+        // under full access too: what the Node cannot place is not judged
+        assert!(
+            !matches!(guard::full(&tool), guard::Guard::Allow { .. }),
+            "asked under full access"
         );
     }
 }

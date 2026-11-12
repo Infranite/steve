@@ -12,6 +12,10 @@
 //!    device, plug something in), or a claim that they did: a question about it, or an agent that
 //!    stopped waiting for it, stays with the user. Nobody's text, the agent's or the model's, counts
 //!    as the user having done it.
+//!
+//! Under full access (完全放开) a tool request's paths outside the item's own directory, or ones
+//! that cannot be read off the text, are the agent's as the user's own ([`Places::full`]): of 4,
+//! `STEVE_HOME`, port 8440, launchd and other items' branches and worktrees still hold.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
@@ -341,6 +345,11 @@ pub(crate) struct Places {
     /// Shared temporary directories (`/tmp`, `/private/tmp`, `$TMPDIR`): files may be created and
     /// written there, not deleted or moved (other agents use them too).
     pub tmp: Vec<PathBuf>,
+    /// The item runs with full access (完全放开): a path outside its own directory, or one that
+    /// cannot be read off the text, is the agent's to change as the user's own, as it would be
+    /// without a prompt. `STEVE_HOME`, port 8440, launchd, other items' branches and worktrees, and
+    /// the other limits still hold.
+    pub full: bool,
 }
 
 impl Places {
@@ -371,6 +380,7 @@ impl Places {
             home,
             protected,
             tmp,
+            full: false,
         }
     }
 
@@ -433,6 +443,7 @@ impl Places {
         match self.resolve(w) {
             Some(p) if self.in_steve(&p) => Some(Limit::new(4, format!("碰到 STEVE_HOME：{w}"))),
             Some(p) if self.inside(&p) => None,
+            _ if self.full => None,
             Some(_) => Some(Limit::new(4, format!("改动或删除工作区以外的路径：{w}"))),
             None => Some(Limit::new(4, format!("看不出 {w} 指向哪里"))),
         }
@@ -550,6 +561,7 @@ pub(crate) fn tool_base(t: &Tool, pl: &Places) -> Option<Option<PathBuf>> {
 
 fn tool(t: &Tool, env: &Env) -> Option<Limit> {
     let mut pl = Places::new(t.cwd.as_deref(), env);
+    pl.full = t.full;
     let kind = tool_kind(t);
     let raw_text = t.raw.to_string();
     if let Some(w) = money(&raw_text) {
@@ -602,7 +614,7 @@ static STEVE_NAMED: LazyLock<Regex> = LazyLock::new(|| {
 /// Relative paths (`.steve/qa` inside the item's own directory) are left to the path checks, which
 /// resolve them.
 fn text_limits(text: &str, pl: &Places) -> Option<Limit> {
-    steve_text(text, pl, true)
+    steve_text(text, pl, !pl.full)
 }
 
 /// [`text_limits`]; `release`: Steve's release script counts too (full access leaves it out: a
@@ -838,7 +850,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
     let push = |what: &str| Some(Limit::new(5, what.to_string()));
     // writes whose target cannot be read off the text
     let unknown_targets = || {
-        if a.xargs || expands {
+        if (a.xargs || expands) && !pl.full {
             Some(Limit::new(
                 4,
                 format!("{p} 的目标来自变量或标准输入，看不出在哪"),

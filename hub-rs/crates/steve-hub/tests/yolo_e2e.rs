@@ -452,4 +452,104 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     assert_eq!(r[0][0], json!("open"), "the card waits for the user: {r:?}");
     assert_ne!(r[0][1], json!("decided"), "{r:?}");
     assert!(!texts(&e, &push).await.contains("perm:selected"));
+
+    // 等待审批时切换: plain YOLO leaves a write outside the worktree to you; switching to full
+    // access while the harness waits answers that very request once (the tool is not run again,
+    // the turn goes on), the page says the harness still runs in its old mode until the turn ends,
+    // and only once the Node confirmed the new mode does it read as applied
+    let waiting = item(
+        &e,
+        "复制 @permexec cp notes.txt /opt/steve-e2e/notes.txt @say mid @sleep 4000 @say after",
+    )
+    .await;
+    let acts = |sid: String| {
+        let db = e.db.clone();
+        move || {
+            rows(
+                &db,
+                "SELECT d.status, a.outcome, a.rule FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
+                  WHERE d.subject_type = 'tool_call' AND d.session_id = ? ORDER BY a.rowid",
+                &[&sid],
+            )
+        }
+    };
+    let waiting_acts = acts(waiting.clone());
+    assert!(
+        until(20, || async { !waiting_acts().is_empty() }).await,
+        "YOLO looked at it"
+    );
+    assert_eq!(
+        waiting_acts()[0][1],
+        json!("declined"),
+        "{:?}",
+        waiting_acts()
+    );
+    let iid = e.session(&waiting).await["item_id"]
+        .as_str()
+        .expect("item")
+        .to_string();
+    let state = || async {
+        let (s, v) = e.call("GET", &format!("/api/yolo/items/{iid}"), None).await;
+        assert_eq!(s, 200, "{v}");
+        v
+    };
+    assert_eq!(state().await["level"], "on");
+    let (s, v) = e
+        .call(
+            "PUT",
+            "/api/yolo",
+            Some(json!({"mode": "full", "confirm": true})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(
+        until(20, || async {
+            texts(&e, &waiting).await.contains("perm:selected:")
+        })
+        .await,
+        "the waiting request was answered: {}",
+        texts(&e, &waiting).await
+    );
+    let r = waiting_acts();
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert_eq!(
+        (r[1][0].clone(), r[1][1].clone(), r[1][2].clone()),
+        (json!("resolved"), json!("decided"), json!("tool.full"))
+    );
+    let cards = rows(
+        &e.db,
+        "SELECT id FROM decisions WHERE subject_type = 'tool_call' AND session_id = ?",
+        &[&waiting],
+    );
+    assert_eq!(cards.len(), 1, "one card, answered once: {cards:?}");
+    let v = state().await;
+    assert_eq!(
+        (v["level"].clone(), v["source"].clone()),
+        (json!("full"), json!("workspace")),
+        "{v}"
+    );
+    let row = &v["sessions"][0];
+    assert_eq!(row["wanted"], "full_access", "{v}");
+    assert_ne!(
+        row["applied"], "full_access",
+        "not in force while the turn runs: {v}"
+    );
+    assert_eq!(row["status"], "after_turn", "{v}");
+    assert_eq!(row["residual"], true, "{v}");
+    assert!(
+        until(30, || async {
+            let v = state().await;
+            v["sessions"][0]["status"] == "applied" && v["sessions"][0]["applied"] == "full_access"
+        })
+        .await,
+        "confirmed by the Node after the turn: {}",
+        state().await
+    );
+    let t = texts(&e, &waiting).await;
+    assert_eq!(
+        t.matches("perm:selected:").count(),
+        1,
+        "the tool was not asked again: {t}"
+    );
+    assert!(t.contains("after"), "{t}");
 }

@@ -653,6 +653,7 @@ fn tool_in(pl: &Place, kind: Option<&str>, raw: Value) -> Facts {
             project_dir: Some(pl.root.join("project")),
             branch: Some("steve/st-1".into()),
             own_pids: vec![],
+            full: false,
         }),
     );
     f.question = "允许执行：t".into();

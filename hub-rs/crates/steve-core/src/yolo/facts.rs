@@ -245,6 +245,7 @@ impl Engine {
         let subject = match (d.kind.as_str(), d.subject_type.as_str()) {
             ("approve", "tool_call") => match self.tool_input(&d.id) {
                 Some(t) => Subject::Tool(Tool {
+                    full: self.full_access(d),
                     own_pids: t.own_pids.clone().unwrap_or_default(),
                     kind: t.kind,
                     title: d.question.trim_start_matches("允许执行：").to_string(),
@@ -405,6 +406,25 @@ impl Engine {
             .map_err(ce)?
             .iter()
             .any(|x| x.kind == "accept" && x.status == "resolved" && x.result["choice"] == "pass"))
+    }
+
+    /// The tool request comes from a session that runs with full access (完全放开) now: the item's
+    /// effective setting is full and the session is not read-only (a read-only session never
+    /// bypasses prompts, so its requests stay the guard's).
+    pub(crate) fn full_access(&self, d: &Decision) -> bool {
+        let full = self
+            .yolo()
+            .effective(&d.workspace_id, d.item_id.as_deref())
+            .is_ok_and(|e| e.full);
+        full && d.item_id.is_some()
+            && d.session_id.as_deref().is_some_and(|s| {
+                self.core()
+                    .store()
+                    .session(s)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.readonly == 0)
+            })
     }
 
     /// The user acted on the item lately: a message or an answer of theirs on its timeline, or a

@@ -15,7 +15,10 @@
 //!   already given, trips it at once.
 //! - Tool permission requests are answered only while the runner waits for them: the Hub hands the
 //!   full tool input over ([`Engine::stash`]) and arms it once the runner registered the request
-//!   ([`Engine::arm`]); after a restart those requests are gone anyway.
+//!   ([`Engine::arm`]); after a restart the Hub arms again the ones a Node still waits for.
+//! - A tool request left to the user is looked at again once full access applies to it (the user
+//!   switched while the runner waited): a decline holds at the level it was made, an answer is
+//!   given once ([`Engine::kick_waiting_tools`] when the switch or a scope changes).
 //! - It never runs inside the core's critical section: every call takes the lock itself.
 
 use std::collections::{HashMap, HashSet};
@@ -109,6 +112,14 @@ fn ce(e: crate::CoreError) -> ApiError {
 fn already_handled(e: &ApiError) -> bool {
     let s = e.to_string();
     s.contains("已经处理过了") || s.contains("already been handled")
+}
+
+/// What a tool request judged under full access records as `checks.level`.
+pub(crate) const FULL_LEVEL: &str = "full";
+
+/// The action was judged under full access (a decline then does not hold for ordinary YOLO's).
+fn full_judged(a: &ActionRow) -> bool {
+    a.checks.get("level").and_then(Value::as_str) == Some(FULL_LEVEL)
 }
 
 /// Same answer: same choice by the same rule.
@@ -254,19 +265,23 @@ impl Engine {
     }
 
     /// Records `v` (a decline) for `d`: the card is left to the user, and a stuck item leaves YOLO.
+    /// `full`: a tool request judged under full access ([`full_judged`]).
     fn leave(
         &self,
         d: &Decision,
         window: Option<&str>,
         v: &Verdict,
         progress: &Value,
+        full: bool,
     ) -> ApiResult<ActionRow> {
         let Verdict::Decline { rule, reason } = v else {
             return Err(ApiError::Internal("not a decline".into()));
         };
-        let a = self.yolo().record(&ledger::new_action(
-            d, window, v, "declined", None, progress,
-        ))?;
+        let mut row = ledger::new_action(d, window, v, "declined", None, progress);
+        if full {
+            row.checks = serde_json::json!({ "level": FULL_LEVEL });
+        }
+        let a = self.yolo().record(&row)?;
         let item_out = match rule.as_str() {
             "continue.stuck" | "accept.stuck" => Some(STUCK_REASON),
             "release.rebase" => Some(REBASE_REASON),
@@ -321,11 +336,13 @@ impl Engine {
             }
             return Ok(None);
         }
+        // a tool request left to the user under ordinary YOLO is judged again once full access
+        // applies to it (the user switched while it waited): a decline holds at the level it was made
+        let full_now = d.subject_type == "tool_call" && self.full_access(&d);
         if prior.iter().any(|a| {
-            matches!(
-                a.outcome.as_str(),
-                "scheduled" | "declined" | "muted" | "failed"
-            ) || a.outcome == "cancelled" && a.reason == super::undo::USER_CANCEL
+            matches!(a.outcome.as_str(), "scheduled" | "muted" | "failed")
+                || a.outcome == "declined" && (!full_now || full_judged(a))
+                || a.outcome == "cancelled" && a.reason == super::undo::USER_CANCEL
         }) {
             return Ok(None);
         }
@@ -360,7 +377,9 @@ impl Engine {
         let window = window.map(|w| w.id);
         match &v {
             Verdict::Off | Verdict::Wait { .. } => Ok(None),
-            Verdict::Decline { .. } => self.leave(&d, window.as_deref(), &v, &g.progress).map(Some),
+            Verdict::Decline { .. } => self
+                .leave(&d, window.as_deref(), &v, &g.progress, g.facts.full_tool())
+                .map(Some),
             Verdict::Mute { .. } => Ok(Some(self.yolo().record(&ledger::new_action(
                 &d,
                 window.as_deref(),
@@ -424,7 +443,9 @@ impl Engine {
                 Verdict::Wait { .. } | Verdict::Off => return Ok(None),
                 // left to you after all: recorded like any decline
                 Verdict::Decline { .. } => {
-                    return self.leave(d, window, &v2, &again.progress).map(Some);
+                    return self
+                        .leave(d, window, &v2, &again.progress, again.facts.full_tool())
+                        .map(Some);
                 }
                 // the same answer by another rule: answered as judged now
                 Verdict::Auto { choice, .. } if matches!(v, Verdict::Auto { choice: c, .. } if c == choice) =>
@@ -632,6 +653,17 @@ impl Engine {
         out
     }
 
+    /// Looks again at every tool request of `ws` still waiting for an answer (after the switch or a
+    /// scope changed: full access answers what ordinary YOLO left to the user). Each is claimed
+    /// and answered at most once ([`Engine::consider`]).
+    pub fn kick_waiting_tools(&self, ws: &str) -> Vec<ActionRow> {
+        let open = self.core().store().decisions_open(ws).unwrap_or_default();
+        open.iter()
+            .filter(|d| d.subject_type == "tool_call")
+            .filter_map(|d| self.kick(&d.id))
+            .collect()
+    }
+
     /// Every [`TICK`]. Runs forever.
     pub async fn run_ticks(self) {
         let mut t = tokio::time::interval(TICK);
@@ -648,10 +680,14 @@ impl Engine {
     pub async fn run_events(self, mut rx: tokio::sync::mpsc::Receiver<Value>) {
         while let Some(v) = rx.recv().await {
             if v["type"] == "yolo" {
-                // the switch or a scope changed: running sessions hear of it with their next message
+                // the switch or a scope changed: running sessions hear of it with their next message,
+                // and a tool request waiting meanwhile is looked at again now (not at the next tick)
                 if let Some(ws) = v["ws"].as_str().map(String::from) {
-                    let core = self.core().clone();
-                    tokio::task::spawn_blocking(move || core.yolo_sync(&ws));
+                    let e = self.clone();
+                    tokio::task::spawn_blocking(move || {
+                        e.core().yolo_sync(&ws);
+                        e.kick_waiting_tools(&ws);
+                    });
                 }
                 continue;
             }

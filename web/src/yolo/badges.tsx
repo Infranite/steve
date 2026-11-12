@@ -2,13 +2,14 @@
  * “YOLO 替你选了「…」” once answered, a countdown with 现在 / 我来定 in the cool-down, “YOLO 没接：<原因>” when it left
  * the card to you — plus the item's and the project's own setting (跟随全局 / 关 / YOLO / 完全放开) and the mark on
  * YOLO's timeline lines. */
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { ChevronDownIcon, ZapIcon } from "lucide-react"
 import { cn } from "cn"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import type { YoloMode } from "@/api/yolo"
-import { st, yoloCancel, yoloNow, yoloScope, type Item } from "@/store"
+import { yoloApi, type PermMode, type RYoloItem, type YoloMode } from "@/api/yolo"
+import { st, useHubEvents, yoloCancel, yoloNow, yoloScope, type Item } from "@/store"
+import { modeLines } from "@/yolo/modes"
 import { Dot, fullGives, fullKeeps, levelOf, type YoloState } from "@/yolo/switch"
 import { t, useT } from "@/i18n"
 
@@ -130,7 +131,7 @@ function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project
             <AlertDialogDescription className="flex flex-col gap-2"><span className="text-foreground">{fullGives()}</span><span>{fullKeeps()}</span></AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter className="min-w-0 *:h-auto *:min-h-8 *:min-w-0 *:whitespace-normal"><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
-            <AlertDialogAction variant="attention" onClick={() => void yoloScope(type, id, "full")} data-yolo-scope-full-ok>{t("yolo:level.full")}</AlertDialogAction></AlertDialogFooter>
+            <AlertDialogAction variant="attention" onClick={() => { setAsk(false); void yoloScope(type, id, "full") }} data-yolo-scope-full-ok>{t("yolo:level.full")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
     </>
@@ -152,6 +153,35 @@ export function YoloItemSwitch({ i }: { i: Item }) {
         {/* forced off or paused already says why in the word itself */}
         {eff.why && eff.state !== "forced" && eff.state !== "paused" && <span className="max-w-[28ch] truncate text-muted-foreground">{t("yolo:scope.why", { why: eff.why })}</span>}
       </ScopeMenu>
+    </div>
+  )
+}
+
+const modeName = (m: PermMode | null) => (m ? t(`yolo:mode.name.${m}`) : t("yolo:mode.none"))
+
+/** under the item's switch: per session, the permission mode Steve wants next to the one the Node confirmed the
+ *  harness runs in; a change on its way, waiting for the turn's end or refused says so, never “in effect” */
+export function YoloItemModes({ i }: { i: Item }) {
+  const t = useT()
+  const [s, setS] = useState<RYoloItem | null>(null)
+  const load = useCallback(() => { yoloApi.item(i.id).then(setS, () => setS(null)) }, [i.id])
+  useEffect(() => { load() }, [load])
+  const ids = new Set(s?.sessions.map((x) => x.session_id) ?? [])
+  useHubEvents(["yolo", "yolo_action", "session", "decision", "event"], load, 400, {
+    filter: (e) => e.type === "yolo" || e.type === "yolo_action" || (e.type === "event" ? ids.has(e.session_id) : "item_id" in e && e.item_id === i.id),
+  })
+  const lines = s ? modeLines(s.sessions) : []
+  if (!lines.length) return null
+  const tone = { ok: "text-success", wait: "text-attention", bad: "text-destructive" }
+  return (
+    <div className="-mt-3 mb-5 flex flex-col gap-0.5 pl-0.5 type-footnote text-muted-foreground" data-yolo-modes>
+      {lines.map((l, n) => (
+        <div key={n} className="flex min-w-0 flex-col" data-yolo-mode={l.key} title={t("yolo:mode.detail", { wanted: modeName(l.wanted), applied: modeName(l.applied) })}>
+          <span className="min-w-0 break-words"><span className="font-medium text-foreground/80">{t("yolo:mode.label")}</span>{" "}
+            <span className={tone[l.tone]}>{t(`yolo:mode.${l.key}`, { wanted: modeName(l.wanted), applied: modeName(l.applied), reason: l.reason })}</span></span>
+          {l.residual && <span className="min-w-0 break-words" data-yolo-residual>{t("yolo:mode.residual")}</span>}
+        </div>
+      ))}
     </div>
   )
 }

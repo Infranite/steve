@@ -306,6 +306,81 @@ pub fn check(t: &Tool, extra: &[String], env: &Env) -> Guard {
 }
 
 /// Why fetching `url` may send data out (in its query or a long path); `None`: a plain page.
+/// Under full access (完全放开) a request the harness still asked (it runs in the mode it had before
+/// the switch until its turn ends, or its executor asks in any mode) is answered as full access
+/// promises, after the hard limits (which keep `STEVE_HOME`, port 8440, launchd, other items'
+/// worktrees and branches, payments, speaking as the user, pushing and publishing). What full
+/// access still tells the agent not to do stays with the user: root, `pkill`/`killall`, a `kill`
+/// of a process it did not start. So does whatever cannot be read (a truncated input, command
+/// substitution, an unparsable line) and tools of other MCP servers: nothing can say they keep
+/// those promises.
+pub fn full(t: &Tool) -> Guard {
+    if t.truncated || t.raw.is_null() {
+        return ask("工具输入被截断，看不全");
+    }
+    let Some(option) = t
+        .options
+        .iter()
+        .find(|(_, kind)| kind == "allow_once")
+        .map(|(id, _)| id.clone())
+    else {
+        return ask("卡上没有「允许一次」");
+    };
+    let kind = tool_kind(t);
+    if t.title.starts_with("mcp__") || kind == "other" {
+        return ask(format!("{} 不是文件或命令操作，留给你", t.title));
+    }
+    let mut commands = vec![];
+    if kind == "execute" {
+        let Some(cmd) = tool_command(t) else {
+            return ask("看不出要执行的命令");
+        };
+        if let Err(why) = full_command(&cmd, &t.own_pids) {
+            return ask(why);
+        }
+        commands.push(cmd);
+    }
+    Guard::Allow {
+        option,
+        checks: json!({ "kind": kind, "paths": tool_paths(t), "commands": commands, "matched": "full", "level": "full" }),
+    }
+}
+
+/// [`full`] for one command line.
+fn full_command(cmd: &str, pids: &[u32]) -> Result<(), String> {
+    let p = shell::parse(cmd).map_err(|e| format!("命令看不懂：{}", e.0))?;
+    full_parsed(&p, pids, 0)
+}
+
+/// [`full_command`] for what parsed, and the command lines quoted in it (`sh -c '…'`).
+fn full_parsed(p: &shell::Parsed, pids: &[u32], depth: u8) -> Result<(), String> {
+    if depth > 4 {
+        return Err("命令嵌套太深，看不清".into());
+    }
+    if let Some(what) = p.opaque.first() {
+        return Err(format!("命令里有 {what}，看不出实际会执行什么"));
+    }
+    for c in &p.cmds {
+        let Some(a) = shell::argv(&c.words) else {
+            continue;
+        };
+        if a.sudo || matches!(a.program.as_str(), "sudo" | "doas" | "su") {
+            return Err("以 root 身份运行，留给你".into());
+        }
+        match a.program.as_str() {
+            "pkill" | "killall" => {
+                return Err(format!("{} 留给你：只按 PID 停自己启动的进程", a.program));
+            }
+            "kill" => kill(&a.args, pids)?,
+            _ => {}
+        }
+        for n in shell::nested(&a.args) {
+            full_parsed(&n, pids, depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
 fn fetch_carries(url: &str) -> Option<String> {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let rest = rest.split('#').next().unwrap_or("");

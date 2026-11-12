@@ -135,6 +135,7 @@ api GET /vault/uses
 api GET /vaults
 api GET /yolo
 api GET /yolo/actions
+api GET /yolo/items/x
 api PATCH /accounts/x
 api PATCH /attr-defs/x
 api PATCH /attrs/x

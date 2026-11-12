@@ -55,6 +55,28 @@ export default {
     projectInherit: "跟随全局（{{level}}）",
     why: "· {{why}}",
   },
+  /* where the harness of an item's session stands (GET /yolo/items/{id}): applied only once the Node confirmed it */
+  mode: {
+    label: "执行器：",
+    name: {
+      plan: "只读计划",
+      ask: "每步询问",
+      accept_edits: "可直接改文件",
+      auto: "由执行器判断",
+      full_access: "完全放开",
+    },
+    none: "未确认",
+    applied: "已生效（{{wanted}}）",
+    after_turn: "待生效：本回合结束后切换到「{{wanted}}」，现在仍是「{{applied}}」",
+    sending: "正在切换到「{{wanted}}」，等 Node 确认",
+    next_open: "下次打开会话时按「{{wanted}}」",
+    refused: "没能切换到「{{wanted}}」：{{reason}}；仍是「{{applied}}」",
+    unknown: "切换结果未知，会话先停着等核实",
+    not_sent: "还没切换到「{{wanted}}」，Steve 会再试",
+    not_running: "没有运行中的会话",
+    residual: "这一回合它仍会请求权限，YOLO 按完全放开放行；碰到 Steve 的数据、推送、付款、以你名义发消息仍等你",
+    detail: "Steve 期望：{{wanted}} · Node 已应用：{{applied}}",
+  },
   /* the YOLO record, #/yolo */
   digest: {
     title: "YOLO 记录",

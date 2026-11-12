@@ -70,6 +70,9 @@ async function makePage(width, height, locale = "zh-CN", preview = "long") {
     }
     if (req.method() !== "GET") writes.push({ path, body })
     if (path === "/api/yolo/actions") return route.fulfill({ json: { windows: [], waiting: 0 } })
+    // full access chosen while a turn runs: the harness still asks until the turn ends
+    if (path === "/api/yolo/items/ST-100") return route.fulfill({ json: { item_id: "ST-100", level: "full", source: "item", layers: { workspace: "off", project: null, item: "full", forced: null, paused: false },
+      sessions: [{ session_id: "s1", readonly: false, status: "after_turn", wanted: "full_access", applied: "accept_edits", desired: "full_access", busy: true, refused: null, residual: true }] } })
     if (path === "/api/yolo" || path.startsWith("/api/yolo/scopes/")) return route.fulfill({ json: status })
     throw new Error("Unexpected API request: " + req.url())
   })
@@ -185,7 +188,15 @@ try {
     await page.locator('[data-yolo-scope-opt="full"]').click()
     await page.locator("[data-yolo-scope-full-ok]").click()
     for (let n = 0; !writes.length && n < 50; n++) await page.waitForTimeout(100) // the write is sent after the click returns
+    // confirming closes the dialog (it used to stay open over the page)
+    await page.locator("[data-yolo-scope-confirm]").waitFor({ state: "detached" })
     assert.deepEqual(writes, [{ path: `/api/yolo/scopes/${type}/${type === "item" ? "ST-100" : "p1"}`, body: { mode: "full", confirm: true } }])
+    // the executor's line: pending until the turn ends, never shown as in effect, readable on a phone
+    await page.locator('[data-yolo-mode="after_turn"] [data-yolo-residual]').waitFor()
+    if (scale === 2) await enlargeText(page, scale, "[data-yolo-modes]")
+    await layout(page, "[data-yolo-modes]")
+    assert.equal(await page.locator('[data-yolo-mode="applied"]').count(), 0)
+    await shot(page, `yolo-${type}-modes-${scale}x`)
     await page.close()
   }
   assert.deepEqual(errors, [], "no browser runtime errors")
