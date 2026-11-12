@@ -1346,3 +1346,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod workflow_tests;

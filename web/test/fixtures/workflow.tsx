@@ -18,7 +18,7 @@ const initial: Workflow = {
   item_id: "ST-60", revision: 7, paused: new URLSearchParams(location.search).has("unavailable"), execution_ready: !new URLSearchParams(location.search).has("unavailable"), max_parallel: 2, max_attempts: 3,
   units: [
     unit("integrate", "集成并统一验收", "integrate", "pending", ["review"]),
-    { ...unit("api", "实现接口与主体隔离", "work", "succeeded"), summary: "接口已实现，检查通过。", outputs: [{ kind: "文件", title: "工作图 API", location: "src/workflow.ts" }], checks: [{ name: "接口实际回读", passed: true, operated: true }] },
+    { ...unit("api", "实现接口与主体检查", "work", "succeeded"), summary: "接口已实现，检查通过。", outputs: [{ kind: "文件", title: "工作图 API", location: "src/workflow.ts" }], checks: [{ name: "接口实际回读", passed: true, operated: true }] },
     unit("web", "实现协作进度界面", "work", "running"),
     { ...unit("review", "独立复核依赖门控与恢复", "review", "failed", ["api", "web"]), reason: "刷新恢复后需要补充验证。" },
   ],

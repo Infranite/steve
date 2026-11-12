@@ -56,7 +56,7 @@ jobs:
           toolchain: 1.99.1
       - name: Install Linux test prerequisites
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
+        run: sh scripts/install-ci-zsh.sh
       - name: Verify public boundary
         run: |
           python3 scripts/check-public-boundary.py --strict

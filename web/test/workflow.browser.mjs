@@ -30,7 +30,7 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
     await page.goto(base + "/test/fixtures/workflow.html?unavailable")
     await page.locator("[data-workflow-unavailable]").waitFor()
-    assert.match(await page.locator("[data-workflow-unavailable]").innerText(), /当前版本尚未接入/)
+    assert.match(await page.locator("[data-workflow-unavailable]").innerText(), /协作执行暂不可用/)
     assert.equal(await page.locator("[data-workflow-toggle]").isDisabled(), true, "resume cannot bypass unavailable execution")
     assert.equal(await page.locator('[data-workflow-retry="review"]').isDisabled(), true)
     assert.equal(await page.getByText("编排已暂停，恢复后按当前计划继续。").count(), 0, "no false promise to resume")

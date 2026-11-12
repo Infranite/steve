@@ -1255,7 +1255,7 @@ impl Tx<'_> {
                 "事项仍在等待前置完成，不能新开执行会话",
             ));
         }
-        // Collaboration may never prepare files or fall back to a Hub process without a confined Node.
+        // Collaboration must pass same-principal and Node admission before preparing any files.
         if self.workflow_child(&self.item(item_id)?)? {
             self.rt().check_workflow_execution(item_id)?;
         }

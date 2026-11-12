@@ -401,6 +401,9 @@ impl NodeRuntime {
         c: &rusqlite::Connection,
         session: &str,
     ) -> Result<(), StoreError> {
+        if let Some(why) = steve_store::workflow_gate::session_authority_blocker(c, session)? {
+            return Err(conflict(why));
+        }
         if !self.is_remote() {
             return Ok(());
         }

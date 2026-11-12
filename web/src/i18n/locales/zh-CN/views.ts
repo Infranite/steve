@@ -39,7 +39,7 @@ export default {
     work: "工作", review: "独立评审", integrate: "集成验收", optional: "非必需",
     pause: "暂停编排", resume: "恢复编排", retry: "重试",
     pauseHint: "编排已暂停，恢复后按当前计划继续。",
-    unavailable: "当前版本尚未接入协作执行所需的完整 Node 隔离能力，计划已保留，但无法启动。恢复编排、重试或重新连接设备都不能解除这一限制；需要支持该能力的版本。",
+    unavailable: "协作执行暂不可用，计划已保留。请查看下方原因，确认请求主体、Bot、工作空间与 Node 路由均可用后再恢复或重试。",
     unavailableUnit: "执行能力尚未就绪",
     blockers: "主事项暂不能完成",
     attempt: "第 {{n}}/{{max}} 次",

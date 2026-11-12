@@ -85,6 +85,8 @@ pub enum Unbound {
     Mode(String),
     /// Its directory is not one the Node takes (none of its roots).
     OutsideRoots,
+    /// Workflow identity or its Bot/project no longer satisfies same-principal admission.
+    Workflow(String),
 }
 
 impl Unbound {
@@ -126,22 +128,14 @@ pub fn plan(
     if item.workspace_id != s.workspace_id {
         return Err(NoItem);
     }
-    // This is a pure plan, not permission to dispatch it: RoutedRuntime's workflow preflight
-    // also requires a verified execution principal before a binding can be persisted. Keep the
-    // requested sandbox explicit so a future Node cannot silently interpret ACP modes as one.
-    let sandbox = if item.source.1 == "workflow"
-        || store
-            .workflows()
-            .by_child(&item.id)
-            .map_err(|_| Unreadable)?
-            .is_some()
+    // Work units use the ordinary execution policy only after positive same-principal
+    // admission. State/attempt checks run again when the Node claims a turn.
+    if let Some(why) = store
+        .reader(|c| steve_store::workflow_gate::session_authority_blocker(c, session))
+        .map_err(|_| Unreadable)?
     {
-        SandboxRequirement::Required {
-            guarantees: vec!["os-sandbox".into(), "principal-isolation".into()],
-        }
-    } else {
-        SandboxRequirement::None
-    };
+        return Err(Workflow(why));
+    }
     // an archived project's directories are no roots any more ([`roots`]), its items' included
     if let Some(pid) = &item.project_id
         && store
@@ -247,7 +241,7 @@ pub fn plan(
             revision: Revision::new(format!("host-{}", bot.as_ref().map_or(0, |b| b.revision)))
                 .map_err(|_| Unreadable)?,
             permissions,
-            sandbox,
+            sandbox: SandboxRequirement::None,
             readable: vec![],
             network: NetworkScope::Unrestricted,
             tools: GrantId::new("hub").map_err(|_| Unreadable)?,
@@ -1144,10 +1138,10 @@ mod host_tests {
         assert_eq!(permission_mode("dontAsk"), None);
     }
 
-    /// A work graph cannot adopt an unbound ACP session onto a Node without isolation. Check the
-    /// real routed runtime, including a retired attempt whose row a replan no longer keeps.
+    /// A work graph with no Node cannot adopt a session. Its state and retired-attempt gates
+    /// still apply before routing or planning.
     #[tokio::test]
-    async fn workflow_sessions_require_isolation_and_never_fall_back() {
+    async fn workflow_sessions_without_a_node_never_fall_back() {
         use steve_core::AgentRuntime;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1175,6 +1169,8 @@ mod host_tests {
             )?;
             Ok(())
         }).unwrap();
+        store.bots().seed("test", false, &steve_store::NewBot { name: "test".into(), harness: "unused-acp".into(), ..Default::default() }, "default").unwrap();
+        store.with_conn(|c| Ok(c.execute_batch("UPDATE items SET bot_id='test' WHERE id='child'; UPDATE sessions SET bot_id='test' WHERE id='work'" )?)).unwrap();
         let host = Arc::new(super::super::core::HubHost {
             store: store.clone(),
             data_dir: cfg.data_dir.clone(),
@@ -1281,13 +1277,12 @@ mod host_tests {
                     Ok(())
                 }).unwrap();
             }
-            let planned = binding_for(&store, "work", None, &|_| true).unwrap();
-            assert_eq!(
-                planned.policy.sandbox,
-                SandboxRequirement::Required {
-                    guarantees: vec!["os-sandbox".into(), "principal-isolation".into()],
-                },
-            );
+            let planned = binding_for(&store, "work", None, &|_| true);
+            if detached {
+                assert!(planned.is_none());
+            } else {
+                assert_eq!(planned.unwrap().policy.sandbox, SandboxRequirement::None);
+            }
             routed.created("work", None);
             assert!(!super::super::node_runtime::bound(&store, "work"));
             let error = routed
@@ -1297,7 +1292,7 @@ mod host_tests {
             if detached {
                 assert!(error.contains("已被替换"));
             } else {
-                assert!(error.contains("OS 沙箱") && error.contains("主体"));
+                assert!(error.contains("Node"));
             }
             assert_eq!(routed.flush("work", None), steve_core::Flushed::Held);
             assert!(!routed.is_busy("work"), "an unbound attempt can be retired");

@@ -220,6 +220,8 @@ async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
         )?;
         Ok(())
     }).unwrap();
+    h.store.bots().seed("dev", false, &steve_store::NewBot { name: "dev".into(), harness: "fixture".into(), ..Default::default() }, "default").unwrap();
+    h.store.with_conn(|c| Ok(c.execute_batch("UPDATE items SET bot_id='dev' WHERE id='i1'; UPDATE sessions SET bot_id='dev' WHERE id='s1';")?)).unwrap();
     h._rt.prompt("s1", "排队补充", "user", &[]).unwrap();
     h.store
         .transaction::<_, StoreError>(|tx| {
