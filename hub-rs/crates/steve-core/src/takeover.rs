@@ -404,6 +404,14 @@ impl Tx<'_> {
         Ok(())
     }
 
+    /// A look at the item's remote is under way and not yet taken for lost: its answer decides.
+    pub(crate) fn probing(&self, item: &str, at: i64) -> bool {
+        self.st
+            .probing
+            .get(item)
+            .is_some_and(|l| at - l.since < PROBE_STUCK_MS)
+    }
+
     /// Starts a probe of the item's worktree against `rule` on a thread of its own (one per item at a
     /// time); the result comes back through [`Tx::probed`].
     /// `false` when it can't look (no worktree, no `HEAD`); `true` also when a look already runs.
@@ -428,12 +436,7 @@ impl Tx<'_> {
         /* one look at a time: the stop or the wait it was for is still the same one. A look begun
          * before what it looks at moved is not that one: a fresh look starts when it comes back */
         let t = now();
-        if self
-            .st
-            .probing
-            .get(&i.id)
-            .is_some_and(|l| t - l.since < PROBE_STUCK_MS)
-        {
+        if self.probing(&i.id, t) {
             return true;
         }
         self.st.probe_seq += 1;
