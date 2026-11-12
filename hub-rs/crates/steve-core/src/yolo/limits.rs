@@ -161,7 +161,7 @@ static OWN_ACTION: LazyLock<Regex> = LazyLock::new(|| {
         r"|(完成|通过|进行)[^。？?！!\n]{0,4}(两步验证|双重验证|二次验证|2fa|mfa)",
         r"|(用|按|插上|插入|刷|录入)[^。？?！!\n]{0,4}(指纹|面容|touch ?id|face ?id|硬件密钥|yubikey|u盾)",
         r"|插(上|入|好)(手机|设备|硬件|数据线|u盘|网线|电源)|重新插拔",
-        r"|你[^。？?！!\n]{0,8}(在|用|到)(你的)?(手机|电脑|浏览器|设备|app|应用|系统设置|钥匙串|终端)",
+        r"|你[^。？?！!\n]{0,8}(在|用|到)(你的)?(手机|电脑|浏览器|设备|app|应用|系统设置|钥匙串|终端)[^。？?！!\n]{0,10}(登录|确认|授权|批准|扫|点|验证|输入|操作|运行|执行|安装|允许|插)",
         r"|(登录|授权|操作|扫码|确认|安装|批准|验证)(完|好)?(了|后|之后|以后)[^。？?\n]{0,4}(告诉|通知|回复|跟|叫)我",
         r"|(在|用)(手机|设备|手表|平板)(上|里)?[^。？?\n]{0,4}(确认|登录|授权|批准|扫|点|验证|输入)",
         r"|请(你|您)?(先|再|重新)?(登录|登入)",
@@ -174,12 +174,13 @@ static OWN_ACTION: LazyLock<Regex> = LazyLock::new(|| {
         r"|(^|[.!?\n]\s*)(re-?)?(log|sign) (in|on) (to|into|with)\b",
         r"|\b(log|sign) ?(in|on) (to|into|with)\b[^.?!\n]{0,60}\b(then|and|once|when)\b[^.?!\n]{0,30}\b(reply|tell me|let me know|ping me)\b",
         r"|\b(once|when|after) you('ve| have|'re| are)?\s+(logged|signed|log|sign) ?(in|on)\b",
-        r"|\b(log|sign) ?in (manually|yourself)\b|\b(in person|yourself)\b",
+        r"|\b(log|sign) ?in (manually|yourself)\b|\bin person\b",
+        r"|\b(please|you('ll| will)? need to|you must|you have to)\b[^.?!\n]{0,40}\byourself\b",
         r"|\b(enter|type|send( me)?|give me|provide|share|paste|tell me|read me)\b[^.?!\n]{0,20}\b(verification|one-time|otp|2fa|mfa|sms|security|login|auth|authentication) ?(code|password|pin)\b",
         r"|\b(enter|type|send( me)?|give me|provide|share|paste|tell me)\b[^.?!\n]{0,20}\b(the |your )?(otp|2fa|mfa)\b",
         r"|\bscan (the |this |that |a )?(qr ?code|code)\b",
         r"|\b(insert|plug in|touch|tap)\b[^.?!\n]{0,15}\b(yubikey|security key|touch ?id|face ?id)\b",
-        r"|\bon your (phone|device|computer|laptop|browser|watch)\b",
+        r"|\b(approve|confirm|tap|accept|check|scan|enter|type|sign|log|click|allow|unlock)\b[^.?!\n]{0,40}\bon your (phone|device|computer|laptop|browser|watch)\b",
     ))
     .expect("valid regex")
 });
@@ -2130,6 +2131,10 @@ mod tests {
             "Should the verification code expire after 60 or 120 seconds?",
             "Should we render the QR code on the login page?",
             "Is a 6-digit OTP enough?",
+            // nor is a report that mentions your phone or browser
+            "The page now renders on your phone too.",
+            "你可以在浏览器里看到预览效果。",
+            "The tool formats the file by itself.",
             "I fixed the login flow and the tests are done.",
             "Login to the dashboard is slow; should we cache the session?",
             "需要扫描所有文件吗？",
