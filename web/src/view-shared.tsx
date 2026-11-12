@@ -93,7 +93,8 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
         )}
         {!closed && !w && (i.now || relation || extra.length > 0) && (
           <Meta className="mt-0.5 flex-nowrap pl-14">
-            {relation && <span className="min-w-0 max-w-[60%] truncate type-callout font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</span>}
+            {/* beside a "now" line the relation keeps its width and the line truncates; alone it yields to the counts after it */}
+            {relation && <span className={cn("min-w-0 max-w-[60%] truncate type-callout font-medium text-foreground/80", i.now && relation.kind !== "paused" && relation.kind !== "previous" && "shrink-0")} data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</span>}
             {i.now && relation?.kind !== "paused" && relation?.kind !== "previous" && <span className="min-w-0 truncate type-callout" data-item-now>{i.now}</span>}
             {extra}
           </Meta>

@@ -23,6 +23,8 @@ try {
     assert.equal(await row("ST-44").locator('[data-workflow-relation="previous"]').innerText(), "旧周期协作记录 · 当前周期待处理")
     assert.equal(await row("ST-44").getAttribute("data-item-status"), "run", "a prior cycle's pause must not pause the current item")
     assert.equal(await row("ST-44").locator('[data-item-now]').count(), 0, "a prior cycle's summary is not current work")
+    /* the relation yields to the counts after it rather than pushing them past the row's edge */
+    assert.equal(await row("ST-44").locator("[data-workflow-relation]").evaluate((el) => el.parentElement.scrollWidth <= el.parentElement.clientWidth + 1), true, `the relation line fits at ${width}px`)
     assert.equal(await row("ST-26").locator('[data-workflow-relation="child"]').innerText(), "协作子项 · ST-5")
     assert.equal(await row("ST-27").locator("[data-workflow-relation]").count(), 0, "a completed workflow child does not keep its parent waiting")
     assert.equal(await row("ST-28").locator("[data-workflow-relation]").count(), 0, "an ordinary fork is not a workflow child")
