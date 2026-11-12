@@ -8,15 +8,16 @@ import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { BookOpenIcon, ChartNoAxesColumnIcon,
-  ArrowUpIcon, BrainIcon, CheckIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon,
+  ArrowUpIcon, CheckIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon,
   MessageCircleIcon, MoonIcon, PencilIcon, RadioIcon, SearchIcon, SettingsIcon, SquareTerminalIcon,
   SunIcon, TerminalIcon, ArrowUpRightIcon, UserIcon, UserRoundIcon, ContactRoundIcon, KeyRoundIcon, UsersRoundIcon, ServerIcon, CornerDownRightIcon, MonitorIcon, WorkflowIcon, HashIcon, BotIcon, AtSignIcon, SlashIcon, XIcon, SquareIcon, AlarmClockIcon, FolderIcon, EllipsisIcon, BellOffIcon, BanIcon,
   MailIcon,
-  CircleCheckIcon, CircleIcon, CircleSlashIcon, CircleXIcon, ChevronRightIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
+  CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
   PlugIcon, MessagesSquareIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-trail"
 import { Item as UIItem, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSeparator, ItemTitle } from "@/components/ui/item"
 import { Empty as UIEmpty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
@@ -632,50 +633,36 @@ function Terminal({ cmd, out, failed }: { cmd: string; out: string; failed: bool
     </div>
   )
 }
-function PlanList({ plan }: { plan: [string, boolean][] }) {
-  return (
-    <ul className="mt-1 mb-1.5 flex max-w-[640px] flex-col gap-1 rounded-xl bg-muted/60 px-3 py-2.5 type-callout" data-plan>
-      {plan.map(([t, done], n) => <li key={n} className="flex items-start gap-2">{done ? <CircleCheckIcon className="mt-[3px] size-3.5 shrink-0 text-success" /> : <CircleIcon className="mt-[3px] size-3.5 shrink-0 text-tertiary" />}<span className={cn(done ? "text-muted-foreground" : "text-foreground")}>{t}</span></li>)}
-    </ul>
-  )
-}
-function Step({ e, live, last }: { e: any[]; live: boolean; last: boolean }) {
-  const t = useT()
-  if (e[0] === "a") return <div className="py-1 type-callout text-foreground/80" data-narration><Markdown text={e[1]} /></div>
-  if (e[0] === "th") {
-    const thinking = live && last, preview = String(e[1] || "").trim().split("\n")[0]
-    return (
-      <Collapsible data-step data-step-kind="th">
-        <CollapsibleTrigger className="group/step flex w-full min-w-0 items-center gap-2 rounded-md py-[3px] text-left type-callout text-muted-foreground hover:text-foreground">
-          <span className="flex size-4 shrink-0 items-center justify-center"><BrainIcon className="size-4" strokeWidth={1.5} /></span>
-          <span className={cn("shrink-0 text-foreground/85", thinking && "shimmer")}>{t(thinking ? "core:transcript.thinking" : "core:transcript.thought")}</span>
-          <span className="min-w-0 truncate italic">{preview}</span>
-          <ChevronRightIcon className="size-3.5 shrink-0 opacity-0 transition group-hover/step:opacity-100 group-aria-expanded/step:rotate-90 group-aria-expanded/step:opacity-100" />
-        </CollapsibleTrigger>
-        <CollapsibleContent><div className="mb-1.5 ml-[7px] min-w-0 break-words border-l-2 pl-4 text-muted-foreground" data-thought-body><Markdown text={e[1]} className="type-callout" /></div></CollapsibleContent>
-      </Collapsible>
-    )
-  }
-  const v = stepView(e), running = live && e[5] === 1, failed = e[8] === 1
-  const diff = e[1] === "edit" && e[6] != null ? <span className="shrink-0 font-mono text-[12px] tabular-nums"><span className="text-success">+{e[6]}</span>{e[7] ? <span className="ml-1 text-destructive">−{e[7]}</span> : null}</span> : null
-  const body = e[12]?.length ? <PlanList plan={e[12]} /> : v.I === TerminalIcon ? <Terminal cmd={v.full ?? v.subj} out={String(e[4] ?? "").trim()} failed={failed} /> : e[4] ? <Detail text={e[4]} /> : null
-  const head = (
-    <>
-      <span className="flex size-4 shrink-0 items-center justify-center">{running ? <Spinner className="size-3.5 text-blue" /> : failed ? <CircleXIcon className="size-4 text-destructive" strokeWidth={1.75} /> : <v.I className="size-4" strokeWidth={1.5} />}</span>
-      <span className={cn("max-w-[60%] shrink-0 truncate text-foreground/85", running && "shimmer", failed && "text-destructive")}>{v.verb}</span>
-      {v.subj && <span className={cn("min-w-0 truncate", v.mono && "font-mono text-[12px]")} title={v.full}>{v.subj}</span>}
-      {diff}
-      {failed && <span className="shrink-0 rounded-md bg-destructive/10 px-1.5 text-[11px] leading-[18px] text-destructive">{t("core:transcript.failed")}</span>}
-    </>
-  )
-  const row = "flex w-full min-w-0 items-center gap-2 rounded-md py-[3px] text-left type-callout text-muted-foreground"
-  if (!body) return <div data-step data-step-kind={e[1]} data-running={running || undefined} className={row}>{head}</div>
-  return (
-    <Collapsible data-step data-step-kind={e[1]} data-running={running || undefined} data-failed={failed || undefined}>
-      <CollapsibleTrigger className={cn(row, "group/step hover:text-foreground")}>{head}<ChevronRightIcon className="size-3.5 shrink-0 opacity-0 transition group-hover/step:opacity-100 group-aria-expanded/step:rotate-90 group-aria-expanded/step:opacity-100" /></CollapsibleTrigger>
-      <CollapsibleContent className="pl-6">{body}</CollapsibleContent>
-    </Collapsible>
-  )
+const DELEGATE = ["Task", "Agent"]
+/* Steve's tools that tell or ask you something: each stays its own line, never merged */
+const SAY = ["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish"]
+/** the turn's tuples as steps on the trail: thinking timed by the step after it, calls of one kind merged, the latest plan open */
+function trailOf(evs: any[], ts: number[], t1: number | undefined, live: boolean): TrailItem[] {
+  const lastPlan = evs.findLastIndex((e) => e[0] === "tool" && e[12]?.length)
+  return evs.map((e, j): TrailItem => {
+    const key = String(j)
+    if (e[0] === "a") return { t: "note", key, text: e[1] }
+    if (e[0] === "th") {
+      const at = ts[j] || 0, next = j + 1 < evs.length ? ts[j + 1] : t1
+      return { t: "think", key, text: String(e[1] ?? ""), live: live && j === evs.length - 1, t0: at || undefined, ms: at && next ? next - at : undefined }
+    }
+    const v = stepView(e), tool = String(e[9] ?? ""), state = e[5] === 1 ? "run" : e[8] === 1 ? "fail" : "done", web = /^Web/.test(tool)
+    const [verb, group, chip]: [[string, string], string | undefined, Chip | undefined] =
+      DELEGATE.includes(tool) ? [[t("core:trail.live.delegate"), t("core:trail.delegated")], undefined, undefined]
+      : e[1] === "read" ? [[t("core:trail.live.read"), v.verb], "read", { label: v.subj, title: v.full, mono: true, icon: FileTextIcon }]
+      : e[1] === "edit" ? [[t(tool === "Write" ? "core:trail.live.write" : "core:trail.live.edit"), v.verb], "edit", { label: v.subj, title: v.full, mono: true, icon: v.I }]
+      : e[1] === "search" ? [[t(web ? "core:trail.live.webSearch" : "core:trail.live.search"), v.verb], "search", { label: v.subj, title: v.full, mono: v.mono, icon: v.I }]
+      : v.I === TerminalIcon ? [e[10] ? [v.verb, v.verb] : [t("core:trail.live.run"), v.verb], "run", { label: e[10] || v.subj, title: v.full, mono: !e[10], icon: TerminalIcon }]
+      : [[v.verb, v.verb], e[12]?.length || SAY.includes(tool.replace(/^mcp__steve__/, "")) ? undefined : "tool:" + tool, v.subj ? { label: v.subj, mono: v.mono } : undefined]
+    const g = group?.startsWith("tool:") ? "tool" : group
+    const merged = g ? (calls: number, distinct: number, running: boolean) => g === "tool" ? t("core:trail.group.tool", { name: v.verb, count: calls })
+      : t(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : undefined
+    const plan: [string, boolean][] | undefined = e[12]?.length ? e[12] : undefined
+    const diff = e[1] === "edit" && e[6] != null ? <span className="shrink-0 font-mono text-[12px] tabular-nums"><span className="text-success">+{e[6]}</span>{e[7] ? <span className="ml-1 text-destructive">−{e[7]}</span> : null}</span> : undefined
+    const body = plan ? (j === lastPlan ? undefined : <SubSteps steps={plan} live={false} />) : v.I === TerminalIcon ? <Terminal cmd={v.full ?? v.subj} out={String(e[4] ?? "").trim()} failed={state === "fail"} /> : e[4] ? <Detail text={e[4]} /> : undefined
+    return { t: "tool", key, state, verb, subj: DELEGATE.includes(tool) ? e[10] ?? v.subj : v.subj, mono: v.mono, full: v.full, group, merged, chip, extra: diff, body,
+      below: plan && j === lastPlan ? <SubSteps steps={plan} live={live} /> : undefined, attrs: { kind: e[1] } }
+  })
 }
 /** what the agent is doing right now, in a few words */
 function Doing({ evs }: { evs: any[] }) {
@@ -690,28 +677,25 @@ const workOpen = new Map<string, boolean>()
 function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
   const t = useT()
   const key = k + ":" + g.idx
-  const [open, setOpenS] = useState(() => workOpen.get(key) ?? live), [all, setAll] = useState(false)
+  const [open, setOpenS] = useState(() => workOpen.get(key) ?? live)
   useEffect(() => { if (!workOpen.has(key)) setOpenS(live) }, [live, key])
   const setOpen = (v: boolean) => { workOpen.set(key, v); setOpenS(v) }
   const now = useNow(live)
-  const stats = workStats(g.evs), LIM = 12
-  const hidden = !all && g.evs.length > LIM && live ? g.evs.length - LIM : 0
+  const stats = workStats(g.evs)
   const ms = live ? now - (g.t0 ?? now) : (g.t1 ?? 0) - (g.t0 ?? 0)
   const cancelled = g.end === "cancelled"
+  const items = trailOf(g.evs, g.at ?? [], g.t1, live)
   return (
     <Collapsible open={open} onOpenChange={setOpen} data-work={live ? "live" : "done"} className="anim-in">
-      <CollapsibleTrigger className="group/work flex w-full min-w-0 items-center gap-2 rounded-lg py-1 text-left type-callout">
-        {live ? <span className="relative flex size-4 shrink-0 items-center justify-center"><span className="absolute size-2 rounded-full bg-blue dot-running" /></span>
-          : cancelled ? <CircleSlashIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /> : <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} />}
-        <span className={cn("shrink-0 font-medium", live ? "text-blue" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")}</span>
+      <CollapsibleTrigger className="group/work flex w-full min-w-0 items-center gap-1.5 rounded-lg py-1 text-left type-callout">
+        <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-muted-foreground transition group-aria-expanded/work:rotate-0" />
+        <span className={cn("shrink-0", live ? "text-foreground" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")}</span>
         {(ms > 0 || live) && <span className="shrink-0 tabular-nums text-muted-foreground" data-work-clock>{live ? clock(ms) : fmtDur(ms)}</span>}
         {stats.length > 0 && <span className="min-w-0 truncate text-muted-foreground">· {stats.join(" · ")}</span>}
-        <ChevronRightIcon className="ml-auto size-4 shrink-0 text-muted-foreground transition group-aria-expanded/work:rotate-90" />
       </CollapsibleTrigger>
       <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-200 data-ending-style:h-0 data-starting-style:h-0">
-        <div className="ml-[7px] mt-1 flex flex-col border-l pl-4">
-          {hidden > 0 && <button type="button" onClick={() => setAll(true)} className="self-start py-1 type-footnote text-muted-foreground hover:text-foreground" data-show-steps>{t("core:transcript.moreSteps", { count: hidden })}</button>}
-          {g.evs.map((x, j) => j < hidden ? null : <Step key={j} e={x} live={live} last={j === g.evs.length - 1} />)}
+        <div className="mt-1 flex flex-col">
+          <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled ? { s: "cancel", label: t("core:transcript.interrupted") } : { s: "end", label: t("core:trail.finished") }} />
         </div>
       </CollapsibleContent>
     </Collapsible>
@@ -773,7 +757,7 @@ export function Brief({ text, label, className }: { text: string; label?: string
   )
 }
 /** range = [from, to) into the session's tuples: only that part of the conversation (one reply in the work log) */
-type Seg = { t: string; evs: any[]; idx: number; t0?: number; t1?: number; end?: string; files?: [string, number, number][] }
+type Seg = { t: string; evs: any[]; idx: number; /** when each of `evs` came */ at?: number[]; t0?: number; t1?: number; end?: string; files?: [string, number, number][] }
 /* one segment of a transcript: while a reply streams, only the segment that grew renders again */
 const sameEvs = (a: any[], b: any[]) => a.length === b.length && a.every((x, i) => x === b[i] || (x.length === b[i].length && x.every((v: any, j: number) => v === b[i][j])))
 function TranscriptPermission({ e }: { e: any[] }) {
@@ -839,7 +823,7 @@ function segsOf(s: Sess, range?: [number, number], skip?: [number, number][]): S
     const ans = buf[buf.length - 1][0][0] === "a" ? buf.pop()! : null
     if (buf.length) {
       const lastIdx = buf[buf.length - 1][1]
-      segs.push(work = { t: "work", evs: buf.map((x) => x[0]), idx: buf[0][1], t0: t0 || ts[buf[0][1]], t1: end?.[1] ?? ts[lastIdx + 1] ?? ts[lastIdx], end: end?.[0] })
+      segs.push(work = { t: "work", evs: buf.map((x) => x[0]), at: buf.map((x) => ts[x[1]] ?? 0), idx: buf[0][1], t0: t0 || ts[buf[0][1]], t1: end?.[1] ?? ts[lastIdx + 1] ?? ts[lastIdx], end: end?.[0] })
       for (const [e] of buf) if (e[0] === "tool" && e[1] === "edit" && e[6] != null && e[8] !== 1 && e[3]) { const f = files.get(e[3]) ?? [e[3], 0, 0]; f[1] += e[6]; f[2] += e[7] ?? 0; files.set(e[3], f) }
     }
     if (ans) segs.push({ t: "a", evs: [ans[0]], idx: ans[1] })

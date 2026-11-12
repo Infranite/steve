@@ -6,10 +6,10 @@ import { cn } from "cn"
 import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, SquareIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon, TerminalIcon, PencilIcon, GlobeIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
-import { TraceLine, TraceIcon, TraceTitle, TraceDescription } from "@/components/ui/trace"
+import { Trail, useTick, type StepState, type ToolStep, type TrailItem } from "@/components/work-trail"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
-import { st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
+import { STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
 import { ItemRef, DecisionCard, ItemNo, StatusDot, AlertClose, go } from "@/ui"
 import { jumpToMsg, threadMsg } from "@/thread/history"
 import { Trans } from "react-i18next"
@@ -39,25 +39,35 @@ export function researchIcon(name: string, kind?: string) { return ICON[toolClas
 /** "读" / "执行" / "保存画像": the verb of one tool row; a tool Steve has no word for goes by its own name */
 export function researchToolLabel(name: string, kind?: string): string {
   const c = toolClass(name, kind), step = meetStep(name)
-  return c === "meet" ? (step ? tr(`thread:research.tool.meet.${step}`) : toolShort(name)) : c === "other" ? toolShort(name) : tr(`thread:research.tool.${c}`)
+  return c === "meet" ? (step ? tr(`thread:research.tool.meet.${step}`) : toolShort(name)) : c === "other" ? STEVE_TOOL[toolShort(name)] ?? toolShort(name) : tr(`thread:research.tool.${c}`)
 }
 /** "正在读" / "正在搜索": the live line's verb for a tool */
 const liveLabel = (name: string, kind?: string) => { const c = toolClass(name, kind); return c === "other" ? tr("thread:research.live.other", { name: toolShort(name) }) : tr(`thread:research.live.${c}`) }
+const GROUP: Partial<Record<ToolClass, "read" | "search" | "run" | "fetch" | "edit">> = { read: "read", search: "search", exec: "run", fetch: "fetch", edit: "edit" }
+/** one research call on the trail: calls of one kind in a row merge, their briefs as chips */
+export function researchStep(key: string, name: string, kind: string | undefined, brief: string, state: StepState, more: Partial<ToolStep> = {}): ToolStep {
+  const c = toolClass(name, kind), g = GROUP[c], label = researchToolLabel(name, kind)
+  const merged = (calls: number, distinct: number, running: boolean) => g ? tr(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : tr("core:trail.group.tool", { name: label, count: calls })
+  return { t: "tool", key, state, verb: [liveLabel(name, kind), label], subj: brief, mono: true, group: g ?? (c === "meet" ? undefined : "tool:" + name), merged,
+    chip: brief ? { label: brief, mono: true, icon: researchIcon(name, kind) } : undefined, attrs: { kind: c }, ...more }
+}
 
-/** the research being read right now: one line that keeps changing, with a stop button */
+/** the work under way: a clock, and the calls so far on the trail, the one running now last; with a stop button */
 export function ResearchLive() {
-  const l = st.live, [, tick] = useState(0), t = useT()
-  useEffect(() => { if (!l) return; const t = setInterval(() => tick((x) => x + 1), 1000); return () => clearInterval(t) }, [l?.run])
+  const l = st.live, now = useTick(!!l), t = useT()
   if (!l) return null
-  /* the call that runs now comes first: one that takes minutes is seen while it runs */
-  const now = l.now, last = now ?? l.tools[l.tools.length - 1], I = last ? researchIcon(last.name, last.kind) : FileTextIcon
+  const items: TrailItem[] = l.tools.map((x, n) => researchStep(String(n), x.name, x.kind, x.brief, x.ok ? "done" : "fail"))
+  if (l.now) items.push(researchStep("now", l.now.name, l.now.kind, l.now.brief, "run"))
   return (
-    <div className="-mb-1 flex max-w-[88%] items-center gap-2 self-start px-1" data-research-live={l.run}>
-      <TraceLine className="min-w-0 flex-1"><TraceIcon>{last && !now ? <I strokeWidth={1.5} /> : <Spinner className="size-3.5" />}</TraceIcon>
-        <TraceTitle className="shrink-0">{last ? liveLabel(last.name, last.kind) : t("thread:research.live.read")}</TraceTitle>
-        <TraceDescription className="min-w-0 shrink truncate font-mono text-[12px]">{last?.brief ?? "…"}</TraceDescription>
-        <TraceDescription className="shrink-0 tabular-nums">{t(Date.now() - l.t0 > 90_000 ? "thread:research.liveMetaSlow" : "thread:research.liveMeta", { n: l.tools.length + (now ? 1 : 0), time: secs(Date.now() - l.t0) })}</TraceDescription></TraceLine>
-      <Button size="xs" variant="outline" className="shrink-0" onClick={() => stopRun(l.run)} data-research-stop><SquareIcon className="fill-current" />{t("thread:research.stop")}</Button>
+    <div className="-mb-1 flex max-w-[88%] flex-col gap-1 self-start px-1" data-research-live={l.run}>
+      <div className="flex min-w-0 items-center gap-1.5 type-callout">
+        <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground" />
+        <span className="shimmer shrink-0 text-foreground">{t("core:transcript.working")}</span>
+        <span className="shrink-0 tabular-nums text-muted-foreground">{secs(now - l.t0)}</span>
+        {now - l.t0 > 90_000 && <span className="min-w-0 truncate text-muted-foreground">· {t("thread:research.slow")}</span>}
+        <Button size="xs" variant="ghost" className="ml-1 shrink-0 text-muted-foreground" onClick={() => stopRun(l.run)} data-research-stop><SquareIcon className="fill-current" />{t("thread:research.stop")}</Button>
+      </div>
+      {items.length > 0 ? <Trail items={items} live /> : <Trail items={[{ t: "line", key: "start", state: "run", label: <span className="shimmer">{t("thread:research.live.read")}</span> }]} live />}
     </div>
   )
 }

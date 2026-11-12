@@ -59,8 +59,7 @@ export default {
       fetch: "Fetching",
       meet: "Saving",
     },
-    liveMeta: "· tool {{n}} · {{time}}",
-    liveMetaSlow: "· tool {{n}} · {{time}} · still reading…",
+    slow: "still reading…",
     stop: "Stop",
   },
   offer: {

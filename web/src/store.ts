@@ -49,7 +49,7 @@ export type Item = {
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
 export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
   reasoningEffort?: string | null; mem: [string, string, string][]; memCount: number; memLoaded: boolean; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
-export type Draft = { mid: string; thought: string; text: string }
+export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string }; cites?: Cite[]
   /** Steve's welcome that opened the first meeting */
   meet?: boolean
@@ -215,7 +215,8 @@ export function briefHead(text: string): string {
   const line = text.split("\n").find((l) => l.trim())?.trim() ?? ""
   return !line ? t("core:brief.plain") : line.length > 120 ? line.slice(0, 120) + "…" : line
 }
-const STEVE_TOOL: Record<string, string> = live(["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish", "steve_lane_status"] as const, (k) => t(`core:steveTool.${k}`))
+/** what Steve's own tools are called; one Steve has no word for goes by its name */
+export const STEVE_TOOL: Record<string, string> = live(["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish", "steve_lane_status", "steve_workflow", "steve_item_read", "steve_items_search", "steve_item_dependencies", "steve_knowledge_search", "steve_knowledge_read", "steve_knowledge_get", "steve_debug", "steve_devices", "steve_reply_source", "steve_event_get", "steve_sessions_list", "steve_remember", "steve_note", "steve_whois", "steve_contacts_find", "steve_contacts_search", "steve_contact_get", "steve_contacts_remember", "steve_im_read", "steve_mail_thread", "steve_mail_attachment", "steve_mail_draft", "steve_mail_send", "steve_github_status", "steve_github_ci_log", "steve_github_comment", "steve_github_open_pr", "steve_secret_list", "steve_secret_use", "steve_steward_propose", "steve_upgrade"] as const, (k) => t(`core:steveTool.${k}`))
 const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
 const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
 const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
@@ -679,7 +680,8 @@ function onHub(e: HubEvent | ModuleEvent) {
   if (e.type === "steve.draft") {
     if (nextDraft || st.draft?.mid !== e.mid) priorDraftReplies = new Set([...st.thread, ...knownMsgs.values()].filter((m) => m.k === "steve" && m.origin === e.mid && m.id).map((m) => m.id!))
     nextDraft = false
-    st.draft = { mid: e.mid, thought: e.thought, text: e.text }
+    const was = st.draft?.mid === e.mid ? st.draft : undefined, now = Date.now()
+    st.draft = { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) }
     if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
     drawDraft(); return
   }

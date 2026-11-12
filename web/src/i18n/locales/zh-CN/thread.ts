@@ -54,8 +54,7 @@ export default {
       fetch: "正在获取",
       meet: "正在保存",
     },
-    liveMeta: "· 第 {{n}} 个工具 · {{time}}",
-    liveMetaSlow: "· 第 {{n}} 个工具 · {{time}} · 还在读…",
+    slow: "还在读…",
     stop: "停",
   },
   offer: {

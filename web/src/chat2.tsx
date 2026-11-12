@@ -1,11 +1,12 @@
 /* Chat page, second pass (ST-6): what Steve did for each message, folded like an agent transcript; notifications and a
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
-import { Markdown } from "@/components/markdown"
 import { useEffect, useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { ArchiveIcon, BrainIcon, CheckIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, RouteIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
-import { Trace, TraceLine, TraceIcon, TraceTitle, TraceDescription, TraceCollapsible, TraceCollapsibleTrigger, TraceCollapsibleContent } from "@/components/ui/trace"
+import { ArchiveIcon, BrainIcon, ChevronDownIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { Trail, type TrailItem } from "@/components/work-trail"
+import { toolClass } from "@/thread/tools"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
@@ -13,7 +14,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { st, tm, botName, projectName, tagName, pendingCards, sessionCards, unreadNotices, readNotices, dismissNotice, closeRel, WT, type Msg, type Steps } from "@/store"
 import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote } from "@/ui"
 import type { RNotice } from "@/api"
-import { ResearchLive, researchSummary, researchIcon, researchToolLabel } from "@/thread/parts"
+import { ResearchLive, researchSummary, researchStep } from "@/thread/parts"
 import { t, useT } from "@/i18n"
 
 /* ───────── what Steve did ───────── */
@@ -51,56 +52,47 @@ export function StepsBlock({ m }: { m: Msg }) {
     window.addEventListener(OPEN_EV, h); return () => window.removeEventListener(OPEN_EV, h)
   }, [m.id])
   if (!s || (!s.route && !s.tools.length)) return null
-  const r = s.route, failed = s.tools.some((x) => x.status === "failed")
+  const r = s.route
   const routeDesc = r && [kindLabel(r.kind), r.kind === "item" && botName(r.picked ?? r.bot), r.project && projectName(r.project), ...r.tags.map(tagName), ...r.newTags.map((tag) => t("shell:chat.newTag", { tag }))].filter(Boolean).join(" · ")
+  const items: TrailItem[] = []
+  if (r) items.push({ t: "line", key: "route", state: "done", label: <span className="shrink-0">{t("shell:chat.triage")}</span>, detail: <span className="min-w-0 truncate text-foreground/85">{routeDesc}</span>, attrs: { "step-route": "" },
+    body: <div className="pb-1 type-footnote text-muted-foreground">{r.picked ? t("shell:chat.picked", { bot: botName(r.picked) }) : ""}{r.why}{r.guard && r.modelKind && r.modelKind !== r.kind ? t("shell:chat.guarded", { model: kindLabel(r.modelKind), kind: kindLabel(r.kind) }) : ""}<span className="ml-1.5 text-tertiary">{[r.model, secs(r.ms)].filter(Boolean).join(" · ")}</span></div> })
+  if (s.answer?.thought) items.push({ t: "think", key: "thought", text: s.answer.thought, live: false, ms: s.answer.ms, attrs: { "step-thought": "" } })
+  s.tools.forEach((tool, n) => {
+    const brief = typeof tool.args?.brief === "string" ? tool.args.brief : undefined
+    const known = TOOL[tool.name], item = tool.result?.item as string | undefined, state = tool.status === "failed" ? "fail" : "done"
+    const err = (tool.error || (s.research && tool.status === "failed")) ? <div className="pb-1 type-footnote text-destructive">{s.research ? researchError(tool.error) : tool.error}</div> : undefined
+    const extra = tool.ms > 0 ? <span className="shrink-0 tabular-nums text-tertiary">{secs(tool.ms)}</span> : undefined
+    if (!known && brief !== undefined) { items.push(researchStep(String(n), tool.name, tool.kind, brief, state, { body: err, attrs: { kind: toolClass(tool.name, tool.kind), "step-tool": tool.name } })); return }
+    const desc = tool.name === "create_item" ? [item, botName((tool.result?.bot ?? tool.args.bot) as string), tool.result?.project ? projectName(tool.result.project as string) : t("shell:chat.noProject")].filter(Boolean).join(" · ")
+      : tool.name === "draft_config" ? `${tool.result?.target ?? ""}${tool.result ? " · " + t("shell:chat.changes", { count: Number(tool.result.changes) }) : ""}` : tool.name === "supplement" ? String(tool.args.item ?? "") : ""
+    const label = known ? known[0]() : tool.name
+    items.push({ t: "line", key: String(n), state, attrs: { "step-tool": tool.name }, body: err,
+      label: <span className={cn("shrink-0", state === "fail" && "text-destructive")}>{label}</span>,
+      detail: <>{desc && (item ? <button type="button" className="min-w-0 truncate text-foreground/85 hover:text-foreground hover:underline" onClick={(e) => { e.stopPropagation(); go("#/items/" + item) }}>{desc}</button> : <span className="min-w-0 truncate text-foreground/85">{desc}</span>)}{extra}</> })
+  })
+  const took = s.research?.ms ?? s.ms
   return (
-    <TraceCollapsible open={open} onOpenChange={setOpen} id={"steps-" + m.id} className="max-w-full self-start" data-steps={m.id}>
-      <TraceCollapsibleTrigger className="px-2 py-1 hover:bg-muted [&_[data-slot=trace-line]]:text-[12px] [&_[data-slot=trace-description]]:text-muted-foreground" data-steps-toggle>
-        <TraceLine status={failed ? "error" : undefined}><TraceIcon><BrainIcon strokeWidth={1.5} /></TraceIcon><TraceTitle>{s.research ? t("shell:chat.researched") : t("shell:chat.thinking")}</TraceTitle>
-          <TraceDescription className="min-w-0 shrink truncate">{stepsSummary(s)}{s.ms != null && !s.research && <span className="ml-1.5">· {secs(s.ms)}</span>}</TraceDescription></TraceLine>
-      </TraceCollapsibleTrigger>
-      <TraceCollapsibleContent>
-        <Trace className="gap-1.5 pt-1">
-          {r && <div className="flex flex-col gap-0.5" data-step-route>
-            <TraceLine><TraceIcon><RouteIcon strokeWidth={1.5} /></TraceIcon><TraceTitle className="text-foreground/80">{t("shell:chat.triage")}</TraceTitle><TraceDescription className="min-w-0 shrink truncate">{routeDesc}</TraceDescription></TraceLine>
-            <div className="pl-6 type-footnote text-muted-foreground">{r.picked ? t("shell:chat.picked", { bot: botName(r.picked) }) : ""}{r.why}{r.guard && r.modelKind && r.modelKind !== r.kind ? t("shell:chat.guarded", { model: kindLabel(r.modelKind), kind: kindLabel(r.kind) }) : ""}<span className="ml-1.5 text-tertiary">{[r.model, secs(r.ms)].filter(Boolean).join(" · ")}</span></div>
-          </div>}
-          {s.answer?.thought && <div className="flex flex-col gap-0.5" data-step-thought>
-            <TraceLine><TraceIcon><BrainIcon strokeWidth={1.5} /></TraceIcon><TraceTitle className="text-foreground/80">{t("shell:chat.howToAnswer")}</TraceTitle><TraceDescription>{secs(s.answer.ms)}</TraceDescription></TraceLine>
-            <div className="min-w-0 break-words pl-6 text-muted-foreground"><Markdown text={s.answer.thought} className="type-callout" /></div>
-          </div>}
-          {s.tools.map((tool, n) => {
-            const brief = typeof tool.args?.brief === "string" ? tool.args.brief : undefined
-            const known = TOOL[tool.name]
-            const [label, I] = known ? [known[0](), known[1]] : brief !== undefined ? [researchToolLabel(tool.name, tool.kind), researchIcon(tool.name, tool.kind)] : [tool.name, InfoIcon], item = tool.result?.item as string | undefined
-            const desc = tool.name === "create_item" ? [item, botName((tool.result?.bot ?? tool.args.bot) as string), tool.result?.project ? projectName(tool.result.project as string) : t("shell:chat.noProject")].filter(Boolean).join(" · ")
-              : tool.name === "draft_config" ? `${tool.result?.target ?? ""}${tool.result ? " · " + t("shell:chat.changes", { count: Number(tool.result.changes) }) : ""}` : tool.name === "supplement" ? String(tool.args.item ?? "") : brief ?? ""
-            return (
-              <div key={n} className="flex flex-col gap-0.5" data-step-tool={tool.name}>
-                <TraceLine status={tool.status === "failed" ? "error" : undefined}>
-                  <TraceIcon>{tool.status === "failed" ? <XIcon strokeWidth={1.75} /> : <I strokeWidth={1.5} />}</TraceIcon><TraceTitle className={tool.status === "failed" ? "" : "text-foreground/80"}>{label}</TraceTitle>
-                  <TraceDescription className="min-w-0 shrink truncate font-mono text-[12px]">{item ? <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + item)}>{desc}</button> : desc}</TraceDescription>
-                  <TraceDescription className="inline-flex items-center gap-1">{tool.status === "ok" && <CheckIcon className="size-3.5" strokeWidth={1.75} />}{tool.ms > 0 && secs(tool.ms)}</TraceDescription>
-                </TraceLine>
-                {(tool.error || (s.research && tool.status === "failed")) && <div className="pl-6 type-footnote text-destructive">{s.research ? researchError(tool.error) : tool.error}</div>}
-              </div>
-            )
-          })}
-        </Trace>
-      </TraceCollapsibleContent>
-    </TraceCollapsible>
+    <Collapsible open={open} onOpenChange={setOpen} id={"steps-" + m.id} className="max-w-full self-start px-1" data-steps={m.id}>
+      <CollapsibleTrigger className="group/work flex max-w-full min-w-0 items-center gap-1.5 rounded-lg py-0.5 text-left type-callout text-muted-foreground hover:text-foreground" data-steps-toggle>
+        <ChevronDownIcon className="size-4 shrink-0 -rotate-90 transition group-aria-expanded/work:rotate-0" />
+        <span className="shrink-0 text-foreground/85">{s.research ? t("shell:chat.researched") : t("shell:chat.thinking")}</span>
+        {took != null && !s.research && <span className="shrink-0 tabular-nums">{secs(took)}</span>}
+        <span className="min-w-0 truncate">· {stepsSummary(s)}</span>
+      </CollapsibleTrigger>
+      <CollapsibleContent><Trail className="pt-1" items={items} live={false} end={s.tools.length ? { s: s.research?.stopped && s.research.stopped !== "budget" ? "cancel" : "end", label: s.research?.stopped ? t(`thread:research.stopped.${s.research.stopped}`) : t("core:trail.finished") } : undefined} /></CollapsibleContent>
+    </Collapsible>
   )
 }
 
 const PHASE: Record<string, () => string> = { route: () => t("shell:chat.phase.route"), answer: () => t("shell:chat.phase.answer"), research: () => t("shell:chat.phase.research"), item: () => t("shell:chat.phase.item"), config: () => t("shell:chat.phase.config"), supplement: () => t("shell:chat.phase.supplement") }
-/** while Steve works on a message: what it is doing right now; while an answer is written, its reasoning so far */
+/** while Steve works on a message: the research under way, or his reasoning streaming in (one line once the answer starts) */
 export function LiveSteps() {
   const d = st.draft, t = useT()
   if (st.live) return <ResearchLive />
   if (d?.thought) return (
     <div className="-mb-1 max-w-[88%] self-start px-1" data-live-steps="thought">
-      <TraceLine><TraceIcon>{d.text ? <BrainIcon strokeWidth={1.5} /> : <Spinner className="size-3.5" />}</TraceIcon><TraceTitle>{t("shell:chat.thinking")}</TraceTitle>
-        <TraceDescription className="min-w-0 shrink truncate">{firstSentence(d.thought)}</TraceDescription></TraceLine>
+      <Trail items={[{ t: "think", key: "thought", text: d.thought, live: !d.text, t0: d.t0, ms: d.t1 != null ? d.t1 - d.t0 : undefined }]} live={!d.text} />
     </div>
   )
   if (d?.text) return null
