@@ -437,8 +437,10 @@ impl Db {
     /// the call may have made moot) is never read as what it waits for now. Only a call's update that
     /// comes late (the call began before the reply) does not count as a call after the reply.
     pub fn final_reply(&self, session: &str) -> Result<String> {
-        /// How far back a turn is read: a call whose beginning lies further back counts as new.
+        /// How many of the turn's last events are read: a call whose beginning lies further back
+        /// counts as begun at its oldest update read.
         const SCAN: usize = 5000;
+        let mut read = 0;
         enum Seen {
             Text(String),
             Tool(Option<String>),
@@ -453,6 +455,7 @@ impl Db {
             };
             before = oldest.seq;
             for e in &page {
+                read += 1;
                 if let Some(t) = steve_transcript::assistant_text(&e.kind, &e.data) {
                     turn.push(Seen::Text(t.to_string()));
                     continue;
@@ -461,7 +464,7 @@ impl Db {
                     || e.kind == "user_message_chunk"
                     || e.kind == steve_transcript::TEXT
                         && e.data.get("role").and_then(Value::as_str) == Some("user");
-                if user || turn.len() >= SCAN {
+                if user || read >= SCAN {
                     break 'back;
                 }
                 if matches!(

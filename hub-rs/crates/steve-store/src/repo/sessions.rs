@@ -265,7 +265,7 @@ impl Sessions<'_> {
     pub fn stop_asked(&self, id: &str, attempt: Option<&str>) -> Result<()> {
         self.0.write(|w| {
             w.c.run(
-                "INSERT INTO session_stops (session_id, stop_asked, asked_seq, updated) VALUES (?1, ?2, (SELECT MAX(seq) FROM events WHERE session_id = ?1), ?3) ON CONFLICT(session_id) DO UPDATE SET stop_asked = ?2, asked_seq = excluded.asked_seq, updated = ?3",
+                "INSERT INTO session_stops (session_id, stop_asked, asked_seq, updated) VALUES (?1, ?2, (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?1), ?3) ON CONFLICT(session_id) DO UPDATE SET stop_asked = ?2, asked_seq = excluded.asked_seq, updated = ?3",
                 params![id, attempt, now()],
             )?;
             Ok(())

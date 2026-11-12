@@ -1379,20 +1379,40 @@ fn old_end_must_not_consume_new_stop_request() {
 
 /// ST-37 #3 contrast: a Stop asked for one turn, then your message starts another before any end
 /// came. That newer turn's end is not yours: it uses the old request up and is judged as usual.
+/// A Stop kept by an older build has no moment recorded: an end of another turn is not taken
+/// for an older one's, it uses the Stop up as before rather than holding the session for good.
 #[test]
 fn a_newer_turns_end_after_your_message_is_not_your_stop() {
-    let k = kit(2);
-    let i = k.item("run", "执行", None);
-    let s = k.session(&i, "idle");
-    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
-    assert!(k.core.cancel_turn(&s).unwrap());
-    over_untold(&k, &s);
-    k.core.session_message(&s, "接着做", false, &[]).unwrap();
-    k.rt.say(&s, "改了一半");
-    k.rt.end_turn(&k.core, &s, "end_turn", None);
-    let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();
-    assert!(!crate::work::held(&kept), "{kept:?}");
-    assert_eq!(k.rt.prompts_of(&s).len(), 3, "continued by Steve");
+    for legacy in [false, true] {
+        let k = kit(2);
+        let i = k.item("run", "执行", None);
+        let s = k.session(&i, "idle");
+        k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+        assert!(k.core.cancel_turn(&s).unwrap());
+        over_untold(&k, &s);
+        if legacy {
+            k.db()
+                .store()
+                .with_conn(|c| {
+                    c.execute(
+                        "UPDATE session_stops SET asked_seq = NULL WHERE session_id = ?",
+                        [&s],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        k.core.session_message(&s, "接着做", false, &[]).unwrap();
+        k.rt.say(&s, "改了一半");
+        k.rt.end_turn(&k.core, &s, "end_turn", None);
+        let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();
+        assert!(!crate::work::held(&kept), "legacy {legacy}: {kept:?}");
+        assert_eq!(
+            k.rt.prompts_of(&s).len(),
+            3,
+            "legacy {legacy}: continued by Steve"
+        );
+    }
 }
 
 /// ST-37 #4: a pause stops unit a's turn A and the graph is resumed at once; the Hub restarts

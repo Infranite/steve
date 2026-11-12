@@ -2048,9 +2048,9 @@ impl Tx<'_> {
                 );
             if same {
                 asked_yours = true;
-            } else if !self
-                .db()
-                .sent_after(&session.id, k.asked_seq.unwrap_or(i64::MAX))?
+            } else if let Some(asked_at) = k.asked_seq
+                /* a Stop kept before its moment was (an older build's): not known to be newer */
+                && !self.db().sent_after(&session.id, asked_at)?
             {
                 self.graph_stop_drop(e)?;
                 self.diagnostic_session(
