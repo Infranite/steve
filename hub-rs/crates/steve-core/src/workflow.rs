@@ -1083,6 +1083,10 @@ impl Tx<'_> {
             )?;
             self.lc_invalidate(&parent, "工作单元未通过")?;
             self.db().item_patch(child, patch![now: summary])?;
+            // its questions and stop cards are moot now: the coordinator decides what comes next
+            if let Some((_, failed)) = self.db().store().workflows().by_child(child)? {
+                self.unit_cards_expire(child, &failed)?;
+            }
         }
         self.mark(&s.id, Mark::Delivered);
         Ok(())

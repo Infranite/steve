@@ -4,13 +4,12 @@
 //! that paused its graph without asking you). They get one card,
 //! “它停下了：…”, with 让它继续 / 我来看看 / 放弃; it expires as soon as a turn starts again.
 
-use std::collections::HashSet;
 use std::time::Duration;
 
 use serde_json::json;
 
 use crate::error::Result;
-use crate::lifecycle::{settle, stop_card, supersede_where};
+use crate::lifecycle::settle;
 use crate::repo::NewDecision;
 use crate::util::{js_head, now};
 use crate::work::{LastStop, NODE_WAIT, Work};
@@ -57,6 +56,8 @@ impl Core {
 
 impl Tx<'_> {
     pub(crate) fn check_stalls(&mut self, at: i64) -> Result<Vec<String>> {
+        // cards the work has moved past go first, holds or not (crate::work)
+        self.work_tidy()?;
         // a release in flight explains an idle item (and no turn may start anyway)
         if self.holding() || self.st.releasing.is_some() {
             return Ok(vec![]);
@@ -65,45 +66,6 @@ impl Tx<'_> {
         /* quotas that are back: their agents go on */
         self.quota_wake(at)?;
         for ws in self.db().workspace_ids()? {
-            // An old stop card can predate this Hub or the unit's current turn. No new child-start
-            // event will arrive to expire it, so reconcile it from the durable graph each pass.
-            let mut seen = HashSet::new();
-            for d in self.db().decisions_open(&ws)? {
-                if !stop_card(&d) {
-                    continue;
-                }
-                let Some(item_id) = d.item_id.as_deref() else {
-                    continue;
-                };
-                if !seen.insert(item_id.to_owned()) {
-                    continue;
-                }
-                let Some(i) = self.db().item(item_id)? else {
-                    continue;
-                };
-                if i.archived || i.phase != crate::cycle::ACTIVE {
-                    continue;
-                }
-                let Some(g) = self.db().store().workflows().get(item_id)? else {
-                    continue;
-                };
-                if g.single_session() {
-                    continue;
-                }
-                if let Some(work) = self.graph_work(&g)?
-                    && work.waiting()
-                {
-                    supersede_where(
-                        self.db(),
-                        item_id,
-                        stop_card,
-                        "协作工作仍在进行或有明确等待状态",
-                    )?;
-                    if let Some(why) = work.text() {
-                        self.db().item_patch(item_id, crate::patch![now: why])?;
-                    }
-                }
-            }
             /* only work in progress stalls; a closing waits on its own gate */
             for id in self.db().items_running(&ws)? {
                 let Some(i) = self.db().item(&id)? else {

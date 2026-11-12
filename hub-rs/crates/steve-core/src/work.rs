@@ -8,6 +8,7 @@
 use steve_store::{WorkUnit, Workflow};
 
 use crate::cycle::CLOSED;
+use crate::lifecycle::{stop_card, supersede_where};
 use crate::repo::Item;
 use crate::util::js_head;
 use crate::{Result, Tx};
@@ -157,27 +158,90 @@ impl Tx<'_> {
                 }));
             }
         }
-        if let Some(d) = self
+        let open: Vec<_> = self
             .db()
             .decisions_of_item(&item.id)?
             .into_iter()
-            .find(|d| d.status == "open")
-        {
-            return Ok(Work::User(steve_i18n::t!(
+            .filter(|d| d.status == "open")
+            .collect();
+        let user = |d: &steve_store::Decision| {
+            Work::User(steve_i18n::t!(
                 "core.now.waiting_user",
                 question = js_head(&d.question, 80)
-            )));
+            ))
+        };
+        if let Some(d) = open.iter().find(|d| !stop_card(d)) {
+            return Ok(user(d));
         }
-        if let Some(t) = self.quota_text(&item.id) {
+        if open.is_empty()
+            && let Some(t) = self.quota_text(&item.id)
+        {
             return Ok(Work::Until(t));
         }
+        /* a card saying it stopped is outdated by units at work (one left from before a restart,
+         * or from before these rules): the graph's state stands, and [`Tx::work_tidy`] expires it */
         if let Some(g) = self.db().store().workflows().get(&item.id)?
             && !g.single_session()
             && let Some(w) = self.graph_work(&g)?
+            && (open.is_empty() || w.waiting())
         {
             return Ok(w);
         }
+        if let Some(d) = open.first() {
+            return Ok(user(d));
+        }
         Ok(Work::Idle)
+    }
+
+    /// Cards the work has moved past, on every pass of the stall watch (so also right after a
+    /// restart, when no unit start is going to tell): a parent's stop cards while its units run,
+    /// queue, wait for you or are paused; the leftover questions and stop cards of a unit that failed
+    /// or was cancelled. Cards about an effect nobody knows, a release, an approval or an acceptance
+    /// stay.
+    pub(crate) fn work_tidy(&mut self) -> Result<usize> {
+        let mut n = 0;
+        for g in self.db().store().workflows().all_open()? {
+            if g.single_session() {
+                continue;
+            }
+            if self
+                .db()
+                .item(&g.item_id)?
+                .is_some_and(|i| !i.archived && i.phase == crate::cycle::ACTIVE)
+                && let Some(w) = self.graph_work(&g)?
+                && w.waiting()
+                && let Some(text) = w.text()
+            {
+                let gone = supersede_where(self.db(), &g.item_id, stop_card, text)?;
+                if gone > 0 {
+                    self.db().item_patch(&g.item_id, crate::patch![now: text])?;
+                }
+                n += gone;
+            }
+            for u in &g.units {
+                if let Some(child) = u.item_id.as_deref()
+                    && matches!(u.status.as_str(), "failed" | "cancelled")
+                {
+                    n += self.unit_cards_expire(child, u)?;
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// A unit that failed or was cancelled waits on nobody: its own questions and stop cards go;
+    /// the coordinator retries or replans it.
+    pub(crate) fn unit_cards_expire(&mut self, child: &str, u: &WorkUnit) -> Result<usize> {
+        let why = format!(
+            "工作单元 {} {}，由主事项负责人重试或重规划",
+            u.spec.title,
+            if u.status == "cancelled" {
+                "已取消"
+            } else {
+                "未通过"
+            }
+        );
+        supersede_where(self.db(), child, |d| stop_card(d) || d.kind == "ask", &why)
     }
 
     /// The graph's part: `None` when every unit is through and only the coordinator is left to act.

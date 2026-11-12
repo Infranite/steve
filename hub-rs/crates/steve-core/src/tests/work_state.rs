@@ -593,3 +593,204 @@ fn a_quota_that_is_back_later_is_waited_for_not_continued() {
     );
     assert_eq!(steve_lines(&k, &i).len(), 1);
 }
+
+fn old_card(k: &Kit, item: &str, subject_type: &str, options: &[&str], question: &str) -> String {
+    k.db()
+        .decision_create(crate::repo::NewDecision {
+            workspace_id: crate::repo::WS.into(),
+            kind: "fail".into(),
+            subject_type: subject_type.into(),
+            subject_id: item.into(),
+            item_id: Some(item.into()),
+            question: question.into(),
+            options: Some(options.iter().map(|s| s.to_string()).collect()),
+            requested_by: "steve".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .id
+}
+
+fn open_ids(k: &Kit, item: &str) -> Vec<String> {
+    k.db()
+        .decisions_of_item(item)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.status == "open")
+        .map(|d| d.id)
+        .collect()
+}
+
+fn restarted(k: &Kit) -> crate::Core {
+    crate::Core::new(
+        k.db().clone(),
+        k.rt.clone(),
+        k.gw.clone(),
+        k.core.config().clone(),
+    )
+}
+
+/// After an upgrade or a restart, a parent can hold stop cards from before while its units already
+/// run: no unit start is going to expire them. The graph's state stands, the next stall pass expires
+/// the ordinary stop cards, and nothing continues the coordinator.
+#[test]
+fn old_stop_cards_of_a_parent_whose_units_run_expire_after_a_restart() {
+    let k = kit(2);
+    let parent = planned(&k, &["a", "b"]);
+    let coord = k.session(&parent, "idle");
+    old_card(
+        &k,
+        &parent,
+        STALL,
+        &["continue", "look", "drop"],
+        "它停下了：已发布 v0.2.98",
+    );
+    old_card(
+        &k,
+        &parent,
+        "item",
+        &["continue", "delivered", "look"],
+        "Agent 停下来了，没有交付也没有提问",
+    );
+    crate::lifecycle::settle(k.db(), &parent).unwrap();
+    assert_eq!(k.status(&parent).0, "wait");
+    assert_eq!(
+        work(&k, &parent),
+        ("running", Some("协作执行中：a、b".into()))
+    );
+
+    let core = restarted(&k);
+    assert!(core.tx().check_stalls(later()).unwrap().is_empty());
+    assert!(open_ids(&k, &parent).is_empty(), "both stop cards expired");
+    assert_eq!(k.status(&parent).0, "run");
+    assert!(k.rt.prompts_of(&coord).is_empty(), "not continued");
+    assert!(
+        k.timeline_texts(&parent)
+            .iter()
+            .any(|t| t == "2 件待处理已失效：协作执行中：a、b")
+    );
+}
+
+/// Only ordinary stop cards go: a question, an effect nobody knows and a release card stay yours, and
+/// the parent waits on them.
+#[test]
+fn real_user_cards_of_a_parent_survive_the_tidy() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let coord = k.session(&parent, "idle");
+    let stop = old_card(
+        &k,
+        &parent,
+        STALL,
+        &["continue", "look", "drop"],
+        "它停下了：旧卡",
+    );
+    let ask = k.decision(&parent, Some(&coord), "ask", "item", &["A", "B"]);
+    let unknown = old_card(
+        &k,
+        &parent,
+        "item",
+        &["release_retry", "look"],
+        "发布结果未知",
+    );
+    let release = old_card(
+        &k,
+        &parent,
+        "item",
+        &["release_live", "release_waive", "look"],
+        "是否已上线",
+    );
+    assert_eq!(work(&k, &parent).0, "waiting_user");
+    k.core.tx().check_stalls(later()).unwrap();
+    let open = open_ids(&k, &parent);
+    assert!(!open.contains(&stop));
+    for id in [&ask, &unknown, &release] {
+        assert!(open.contains(id), "{id} stays");
+    }
+    assert_eq!(work(&k, &parent).0, "waiting_user");
+    assert!(k.rt.prompts_of(&coord).is_empty());
+}
+
+/// Queued units outdate an old stop card too, even while the Hub holds new turns.
+#[test]
+fn old_stop_cards_of_a_parent_with_queued_units_expire_during_a_hold() {
+    let k = kit(2);
+    k.core.tx().set_hold(crate::occupancy::Hold::Release, true);
+    let parent = planned(&k, &["a"]);
+    assert_eq!(unit(&k, &parent, "a").status, "pending");
+    old_card(
+        &k,
+        &parent,
+        STALL,
+        &["continue", "look", "drop"],
+        "它停下了：旧卡",
+    );
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert!(open_ids(&k, &parent).is_empty());
+    assert_eq!(work(&k, &parent).0, "queued");
+}
+
+fn deliver(k: &Kit, parent: &str, id: &str) {
+    let sid = unit(k, parent, id).session_id.unwrap();
+    let s = k.db().session(&sid).unwrap().unwrap();
+    k.core
+        .tool_deliver(
+            &s,
+            &format!("{id} 已验证"),
+            &[crate::Output {
+                kind: "文件".into(),
+                title: format!("{id} 的成果"),
+                location: Some(format!("{id}.txt")),
+                role: None,
+            }],
+            &[crate::Check {
+                name: "检查和实际操作".into(),
+                passed: true,
+                operated: true,
+            }],
+            &[],
+        )
+        .unwrap();
+    k.rt.end_turn(&k.core, &sid, "end_turn", None);
+}
+
+/// ST-11: a review unit reported its failure while its own item still had a question open. The
+/// question is moot (the coordinator retries or replans), so the unit's item does not stay waiting
+/// for you; a card left on an already failed unit's item from before goes on the next pass.
+#[test]
+fn a_failed_units_leftover_cards_do_not_keep_its_item_waiting() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    deliver(&k, &parent, "a");
+    let review = unit(&k, &parent, "review");
+    assert_eq!(review.status, "running");
+    let child = review.item_id.clone().unwrap();
+    let rs = k
+        .db()
+        .session(review.session_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    k.decision(&child, Some(&rs.id), "ask", "item", &["A", "B"]);
+    crate::lifecycle::settle(k.db(), &child).unwrap();
+    assert_eq!(k.status(&child).0, "wait");
+    k.core
+        .tool_workflow(&rs, json!({"action":"fail","reason":"缺少关键回归"}))
+        .unwrap();
+    assert_eq!(unit(&k, &parent, "review").status, "failed");
+    assert!(open_ids(&k, &child).is_empty(), "the question is moot");
+    assert_ne!(k.status(&child).0, "wait");
+    k.rt.end_turn(&k.core, &rs.id, "end_turn", None);
+
+    // a stall card the old watch left on the failed unit's item
+    old_card(
+        &k,
+        &child,
+        STALL,
+        &["continue", "look", "drop"],
+        "它停下了：旧卡",
+    );
+    crate::lifecycle::settle(k.db(), &child).unwrap();
+    k.core.tx().check_stalls(later()).unwrap();
+    assert!(open_ids(&k, &child).is_empty());
+    assert_ne!(k.status(&child).0, "wait");
+}
