@@ -29,6 +29,7 @@ pub mod node_secrets;
 pub mod node_tools;
 pub mod onboard_mcp;
 pub mod outbox;
+pub mod output_files;
 pub mod ports;
 pub mod principal;
 pub mod research;
@@ -574,6 +575,11 @@ pub fn wire_assembly(
     asm.check().map_err(|e| BackendError::msg(e.to_string()))?;
     let db = steve_store::Store::open(cfg.db_path(), store::BusPublisher(bus.clone()))
         .map_err(|e| BackendError::msg(format!("open {}: {e}", cfg.db_path().display())))?;
+    if !cfg.no_resume {
+        if let Err(error) = output_files::recover_legacy(&db, &cfg.home, &cfg.db_path()) {
+            tracing::warn!(%error, "legacy delivery output recovery failed; will retry on next start");
+        }
+    }
     let lookup = db.clone();
     bus.set_session_workspace(move |sid| {
         lookup
@@ -855,6 +861,8 @@ pub fn wire_assembly(
         mcp: Arc::new(core::CoreMcp {
             store: db.clone(),
             core: core.clone(),
+            home: cfg.home.clone(),
+            workspaces: workspaces.clone(),
         }),
         extra: extra.clone(),
     });
@@ -898,6 +906,8 @@ pub fn wire_assembly(
     let mcp = steve_mcp::router(Arc::new(core::CoreMcp {
         store: db.clone(),
         core: core.clone(),
+        home: cfg.home.clone(),
+        workspaces: workspaces.clone(),
     }))
     .layer(axum::middleware::from_fn_with_state(
         extra,

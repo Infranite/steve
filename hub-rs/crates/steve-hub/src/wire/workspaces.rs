@@ -142,7 +142,11 @@ impl From<StoreError> for PlacementError {
 
 /// The directories the Hub configures for the local Node besides projects and sessions.
 pub fn configured(cfg: &crate::config::Config) -> Vec<PathBuf> {
-    vec![cfg.scratch.clone(), cfg.worktrees.clone()]
+    vec![
+        cfg.scratch.clone(),
+        cfg.worktrees.clone(),
+        cfg.home.join("workspaces"),
+    ]
 }
 
 pub struct Workspaces {

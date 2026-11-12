@@ -338,6 +338,33 @@ async fn answers(e: &Env) -> Vec<Value> {
     all
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_report_opens_from_hub_with_node_enabled() {
+    let e = start_with(true).await;
+    let dir = e.home.join("steve/workspaces/i1/outputs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let report = dir.join("report.md");
+    std::fs::write(&report, "# 交付报告\n").unwrap();
+    let c = rusqlite::Connection::open(&e.db).unwrap();
+    c.execute(
+        "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
+        VALUES('i1','default',1,'报告','done','done',1,1)",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO artifacts(id,item_id,kind,title,location,created)
+        VALUES('report','i1','报告','交付正文',?,1)",
+        [report.to_str().unwrap()],
+    )
+    .unwrap();
+    let (status, preview) = e
+        .call("GET", "/api/items/i1/artifacts/report/preview", None)
+        .await;
+    assert_eq!(status, 200, "{preview}");
+    assert_eq!(preview["text"], "# 交付报告\n");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_local_node_shows_outputs_as_the_hub_did() {
     let f = fixture();

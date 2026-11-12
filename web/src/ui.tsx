@@ -137,7 +137,7 @@ export function KindTag({ id, className }: { id: string; className?: string }) {
   return <span title={tr("core:tag.kindTitle", { desc: t.desc })} className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-border bg-background px-1.5 font-mono text-[11px] leading-none text-foreground", className)} data-kind={t.name}>
     <span aria-hidden className="size-1.5 rounded-full" style={{ background: kindColor(t.name) }} />{t.name}</span>
 }
-/** tags: the category first (see KindTag), then quiet grey pills; the tag category shows on hover */
+/** tags: type first, then delivery and domain; delivery nature stays visible without a hover */
 export function Tags({ ids, className, onRemove, max }: { ids?: string[]; className?: string; onRemove?: (id: string) => void; max?: number }) {
   const tr = useT()
   const xs = sortTags(ids).map(tag).filter(Boolean) as NonNullable<ReturnType<typeof tag>>[]
@@ -148,8 +148,8 @@ export function Tags({ ids, className, onRemove, max }: { ids?: string[]; classN
     <span className={cn("inline-flex flex-wrap items-center gap-1", className)} data-tags>
       {kinds.map((t) => <KindTag key={t.id} id={t.id} />)}
       {shown.map((t) => (
-        <span key={t.id} title={tr("core:tag.title", { cat: tagCatLabel(t.cat), desc: t.desc })} className="inline-flex h-5 items-center gap-0.5 rounded-full bg-muted px-2 text-[11.5px] leading-none text-muted-foreground" data-tag={t.name}>
-          {t.name}{onRemove && <button type="button" aria-label={tr("core:tag.remove", { name: t.name })} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-background hover:text-foreground"><XIcon className="size-3" /></button>}
+        <span key={t.id} title={tr("core:tag.title", { cat: tagCatLabel(t.cat), desc: t.desc })} className={cn("inline-flex h-5 items-center gap-0.5 rounded-full px-2 text-[11.5px] leading-none", t.cat === "交付" ? "border border-border bg-background text-foreground" : "bg-muted text-muted-foreground")} data-tag={t.name} data-delivery={t.cat === "交付" || undefined}>
+          {t.cat === "交付" && <span className="mr-0.5 text-muted-foreground">{tagCatLabel(t.cat)} ·</span>}{t.name}{onRemove && <button type="button" aria-label={tr("core:tag.remove", { name: t.name })} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-muted hover:text-foreground"><XIcon className="size-3" /></button>}
         </span>))}
       {max && rest.length > max && <span className="text-[11.5px] text-muted-foreground">+{rest.length - max}</span>}
     </span>

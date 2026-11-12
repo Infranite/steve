@@ -18,6 +18,7 @@ use crate::util::{js_head, js_len, js_tail, now, or, token};
 use crate::{Core, Mark, Tx};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use steve_modules::outbound::YOLO_ACTOR;
@@ -1014,6 +1015,19 @@ impl Tx<'_> {
                 ))
                 .unwrap_or_default()
         ));
+        let outputs = if s.device_id == "hub" || s.device_id == "local" {
+            self.cfg()
+                .home
+                .join("workspaces")
+                .join(&item.id)
+                .join("outputs")
+        } else {
+            Path::new(&s.cwd).join("outputs")
+        };
+        lines.push(format!(
+            "Final outputs that do not belong in Git (reports, designs, images, documents, data) go in {}. Create it if needed and give steve_deliver the actual file paths. Package a folder as a ZIP file before delivery. Git-managed code and documentation stay in the repository and are delivered by commit/branch. A prose label is not a file path; do not put final outputs in temporary folders or a disposable git worktree.",
+            outputs.display()
+        ));
         /* agents share the machine: on 2026-11-01 one ran `pkill -f include-partial-messages` and killed two others */
         lines.push("Other agents run on this machine at the same time. Stop only processes you started yourself, by PID; never use pkill, killall or kill by name or pattern.".into());
         lines.push(self.bot_prompt(bot, &item.workspace_id)?);
@@ -1653,6 +1667,29 @@ impl Tx<'_> {
             notes.push_str(&format!("\n\n注意：{why}"));
         }
         let summary = &format!("{summary}{notes}");
+        let design_report = if design_confirmation_required(&self.db().goal(item_id)?) {
+            let report = outputs
+                .iter()
+                .find_map(|o| {
+                    (o.role.as_deref() == Some("result")
+                        && ["方案", "设计", "报告"]
+                            .iter()
+                            .any(|word| o.kind.contains(word)))
+                    .then(|| o.location.as_deref())
+                    .flatten()
+                })
+                .ok_or_else(|| crate::cycle::conflict("设计确认前需交付可打开的方案文件"))?;
+            verify_design_file(&self.cfg().home, item_id, report)?;
+            let goal_version = self
+                .db()
+                .goals(item_id)?
+                .last()
+                .map(|g| g.version)
+                .unwrap_or(1);
+            Some((report.to_string(), goal_version))
+        } else {
+            None
+        };
         /* a new delivery also replaces an older one still waiting for acceptance */
         supersede(
             self.db(),
@@ -1695,6 +1732,36 @@ impl Tx<'_> {
         };
         self.db()
             .timeline_add(item_id, &Self::by(s), "sys", "交付，等你验收", Some(&s.id))?;
+        if let Some((report, goal_version)) = design_report {
+            let d = self.db().decision_create(NewDecision {
+                workspace_id: item.workspace_id.clone(),
+                kind: "ask".into(),
+                subject_type: "design_implementation".into(),
+                subject_id: json!({"goal_version": goal_version, "location": report}).to_string(),
+                item_id: Some(item_id.into()),
+                session_id: Some(s.id.clone()),
+                question: "设计报告已交付，请先查看「产出」。下一步是否按方案实现？".into(),
+                draft: Some("选择「按方案实现」会继续当前事项；选择「只保留设计」会完成本次设计；也可以要求修改设计。".into()),
+                options: Some(vec!["按方案实现".into(), "只保留设计".into(), "修改设计".into()]),
+                requested_by: Self::by(s),
+            })?;
+            self.db().item_patch(
+                item_id,
+                patch![stage: "设计确认", now: "设计已交付，等你决定是否实现"],
+            )?;
+            flow_quiet(
+                self.db(),
+                item_id,
+                Update {
+                    kind: "ask",
+                    text: "设计已交付，等你决定是否实现".into(),
+                    decision: Some(d.id),
+                    ..Default::default()
+                },
+            );
+            self.mark(&s.id, Mark::Asked);
+            return settle(self.db(), item_id);
+        }
         /* the acceptance policy: automatic takes the agent's delivery as it is — its checks, failed ones
          * and steps it left open are on the card, and you can send it back (decided by the user on
          * 2026-11-09: trust the agent's judgment). Waived records that nobody confirmed. */
@@ -1705,7 +1772,13 @@ impl Tx<'_> {
             _ => crate::cycle::Policy::Human,
         };
         self.mark(&s.id, Mark::Delivered);
-        let (back, full) = crate::thread::flowback::delivery(self.db(), item_id, summary)?;
+        let saved_summary = outputs
+            .iter()
+            .find(|o| o.title == "交付正文")
+            .and_then(|o| o.location.as_deref())
+            .map(|path| format!("完整交付正文：{path}。请从「产出」打开。"));
+        let shown_summary = saved_summary.as_deref().unwrap_or(summary);
+        let (back, full) = crate::thread::flowback::delivery(self.db(), item_id, shown_summary)?;
         if policy != crate::cycle::Policy::Human {
             flow_quiet(
                 self.db(),
@@ -1742,7 +1815,7 @@ impl Tx<'_> {
             item_id: Some(item_id.into()),
             session_id: Some(s.id.clone()),
             question: "做完了，请验收".into(),
-            draft: Some(format!("{summary}{check_text}{left}")),
+            draft: Some(format!("{shown_summary}{check_text}{left}")),
             options: Some(vec!["pass".into(), "rework".into()]),
             requested_by: Self::by(s),
         })?;
@@ -2606,6 +2679,80 @@ impl Tx<'_> {
         let reget = |t: &Tx| t.db().decision(id).map(|d| d.expect("decision exists"));
         let tl = |t: &Tx, item: &str, text: &str| t.answer_line(item, actor, text, sid.as_deref());
         match (d.kind.as_str(), d.subject_type.as_str()) {
+            ("ask", "design_implementation") => {
+                if actor == YOLO_ACTOR {
+                    return Err(crate::cycle::conflict("设计是否实现必须由用户决定"));
+                }
+                if !d.options.iter().any(|option| option == choice) {
+                    return Err(crate::cycle::conflict("请选择设计确认卡上的选项"));
+                }
+                let i = iid()?;
+                let binding: Value = serde_json::from_str(&d.subject_id)
+                    .map_err(|_| crate::cycle::conflict("设计确认卡缺少交付绑定"))?;
+                let latest = self.db().goals(&i)?.last().map(|g| g.version).unwrap_or(1);
+                let location = binding
+                    .get("location")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| crate::cycle::conflict("设计确认卡缺少方案文件"))?;
+                if binding.get("goal_version").and_then(Value::as_i64) != Some(latest)
+                    || !self
+                        .db()
+                        .store()
+                        .artifacts()
+                        .list(&i)?
+                        .iter()
+                        .any(|a| a.location.as_deref() == Some(location))
+                {
+                    return Err(crate::cycle::conflict(
+                        "设计或目标已经变化，请重新交付并确认",
+                    ));
+                }
+                verify_design_file(&self.cfg().home, &i, location)?;
+                self.db().decision_resolve(
+                    id,
+                    json!({"answer": choice, "text": text}),
+                    "resolved",
+                    None,
+                )?;
+                let detail = if text.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("；补充：{text}")
+                };
+                tl(self, &i, &format!("设计决定：{choice}{detail}"))?;
+                match choice {
+                    "按方案实现" => {
+                        self.db().add_goal(&i, &format!("按用户确认的设计报告实现并验证。已确认方案文件：{location}。实现范围以此方案为准，发布仍按正常流程。"))?;
+                        self.db()
+                            .item_patch(&i, patch![stage: "执行", now: "设计已确认，开始实现"])?;
+                        self.send(&to, &format!("用户已确认设计，并要求按方案实现。先阅读本事项的交付正文及设计产出，然后实现、验证并再次交付。{detail}"))?;
+                    }
+                    "只保留设计" => {
+                        self.lc_request_complete(
+                            &i,
+                            actor,
+                            crate::cycle::Policy::Human,
+                            true,
+                            "你确认只交付设计，暂不实现",
+                            None,
+                            vec!["用户已查看设计并决定暂不实现".into()],
+                        )?;
+                    }
+                    "修改设计" => {
+                        self.db()
+                            .item_patch(&i, patch![stage: "设计", now: "按你的意见修改设计"])?;
+                        self.send(
+                            &to,
+                            &format!(
+                                "用户要求修改设计：{}。改好后重新用 steve_deliver 交付完整方案。",
+                                or(text, "请复核设计方案")
+                            ),
+                        )?;
+                    }
+                    _ => unreachable!(),
+                }
+                return reget(self);
+            }
             ("accept", _) if choice == "pass" => {
                 let i = iid()?;
                 let before = self.item(&i)?;
@@ -4388,6 +4535,76 @@ impl Tx<'_> {
         }
         Ok(())
     }
+}
+
+/// A design-only goal or an explicit review gate leaves implementation to the user. A model's
+/// quality review cannot answer this product decision, even with automatic acceptance enabled.
+fn design_confirmation_required(goal: &str) -> bool {
+    let deferred = [
+        "设计通过后",
+        "设计通过之后",
+        "经用户确认后",
+        "用户确认后",
+        "不直接实现",
+        "先出设计",
+        "先设计",
+    ]
+    .iter()
+    .any(|phrase| goal.contains(phrase));
+    let design = ["设计", "方案", "原型", "线框"]
+        .iter()
+        .any(|word| goal.contains(word));
+    let implementation = [
+        "并实现",
+        "并开发",
+        "并落地",
+        "设计与实现",
+        "设计和实现",
+        "实现并",
+        "开发并",
+        "按方案实施",
+        "部署",
+        "上线",
+        "修复",
+    ]
+    .iter()
+    .any(|phrase| goal.contains(phrase));
+    deferred || (design && !implementation)
+}
+
+/// A decision authorizes the exact content-addressed report that was shown for this goal.
+fn verify_design_file(home: &Path, item: &str, location: &str) -> Result<()> {
+    let root = home.join("workspaces").join(item).join("outputs");
+    let path = Path::new(location);
+    let expected = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("output-"))
+        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| crate::cycle::conflict("设计文件缺少内容校验"))?;
+    if !path.starts_with(&root)
+        || [
+            root.parent().unwrap().parent().unwrap(),
+            root.parent().unwrap(),
+            root.as_path(),
+            path,
+        ]
+        .iter()
+        .any(|part| !std::fs::symlink_metadata(part).is_ok_and(|m| !m.file_type().is_symlink()))
+    {
+        return Err(crate::cycle::conflict("设计文件不在事项持久目录中"));
+    }
+    let bytes = std::fs::read(path).map_err(|_| crate::cycle::conflict("设计文件无法读取"))?;
+    let actual = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    if bytes.len() > 64 * 1024 * 1024 || actual != expected {
+        return Err(crate::cycle::conflict(
+            "设计文件内容已变化，请重新交付并确认",
+        ));
+    }
+    Ok(())
 }
 
 /// How a new plan relates to the one before: `None` when it keeps every earlier step (the same round,

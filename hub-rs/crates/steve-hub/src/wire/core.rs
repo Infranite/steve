@@ -2056,6 +2056,8 @@ impl Domain for CoreDomain {
 pub struct CoreMcp {
     pub store: Store,
     pub core: Core,
+    pub home: PathBuf,
+    pub workspaces: Arc<super::workspaces::Workspaces>,
 }
 
 type ToolResult = Result<(), steve_mcp::ToolError>;
@@ -2140,8 +2142,14 @@ impl steve_mcp::Backend for CoreMcp {
         unfinished: Option<Vec<String>>,
     ) -> ToolResult {
         let observation = super::diagnostics::ToolObservation::new(&self.store, s, "steve_deliver");
-        let (c, s) = (self.core.clone(), s.clone());
-        let outputs: Vec<steve_core::Output> = outputs
+        let (c, s, store, home, workspaces) = (
+            self.core.clone(),
+            s.clone(),
+            self.store.clone(),
+            self.home.clone(),
+            self.workspaces.clone(),
+        );
+        let mut outputs: Vec<steve_core::Output> = outputs
             .into_iter()
             .map(|o| steve_core::Output {
                 kind: o.kind,
@@ -2160,9 +2168,76 @@ impl steve_mcp::Backend for CoreMcp {
             .collect();
         let unfinished = unfinished.unwrap_or_default();
         observation
-            .run(tool(move || {
-                c.tool_deliver(&s, &summary, &outputs, &checks, &unfinished)
-            }))
+            .run(async move {
+                if let Some(item) = s.item_id.as_deref() {
+                    for output in &mut outputs {
+                        if let Some(location) = output.location.as_deref()
+                            && !super::output_files::summary_reference(Some(location))
+                        {
+                            output.location = Some(
+                                super::output_files::retain_location(
+                                    &home,
+                                    item,
+                                    &s,
+                                    location,
+                                    &workspaces,
+                                )
+                                .await
+                                .map_err(steve_mcp::ToolError::from)?,
+                            );
+                        }
+                    }
+                }
+                tool(move || {
+                    if let Some(item) = s.item_id.as_deref() {
+                        let goal = store.items().goal(item)?;
+                        let referenced = outputs
+                            .iter()
+                            .any(|o| super::output_files::summary_reference(o.location.as_deref()));
+                        let text_result = outputs.iter().any(|o| {
+                            o.role.as_deref() != Some("record")
+                                && ["设计", "方案", "报告", "报表", "分析", "评审", "规范"]
+                                    .iter()
+                                    .any(|word| o.kind.contains(word))
+                        });
+                        let report_goal = goal.contains("设计方案")
+                            || goal.contains("设计通过")
+                            || goal.contains("报告")
+                            || goal.contains("报表")
+                            || goal.contains("分析")
+                            || goal.contains("调研");
+                        if referenced || text_result || report_goal || summary.len() > 2000 {
+                            let safe = steve_vault::redact::scrub_text(&s.id, &summary);
+                            let report =
+                                super::output_files::save_report(&home, item, safe.as_ref())?;
+                            let location = report.to_string_lossy().into_owned();
+                            for o in &mut outputs {
+                                if super::output_files::summary_reference(o.location.as_deref())
+                                    || (o.location.as_deref().is_none_or(|p| p.trim().is_empty())
+                                        && o.role.as_deref() == Some("result")
+                                        && ["设计", "方案", "报告", "报表", "分析", "评审", "规范"]
+                                            .iter()
+                                            .any(|word| o.kind.contains(word)))
+                                {
+                                    o.location = Some(location.clone());
+                                }
+                            }
+                            // A work unit still needs an output of its own; the coordinator cannot
+                            // satisfy that gate by generating an output for an empty delivery.
+                            if !outputs.is_empty() || store.workflows().by_child(item)?.is_none() {
+                                outputs.push(steve_core::Output {
+                                    kind: "报告".into(),
+                                    title: "交付正文".into(),
+                                    location: Some(location),
+                                    role: Some("result".into()),
+                                });
+                            }
+                        }
+                    }
+                    c.tool_deliver(&s, &summary, &outputs, &checks, &unfinished)
+                })
+                .await
+            })
             .await
     }
     async fn publish(
@@ -2444,7 +2519,10 @@ mod routed_tests {
             let rt = with_node(dir.path());
             exec(&rt.store, sql);
             let r = rt.refusal("s1");
-            assert!(r.as_deref().is_some_and(|r| r.contains(why)), "{sql}: {r:?}");
+            assert!(
+                r.as_deref().is_some_and(|r| r.contains(why)),
+                "{sql}: {r:?}"
+            );
             if let Err(e) = rt.prompt("s1", "还在吗", "me", &[]) {
                 assert!(e.to_string().contains(why), "{sql}: {e}");
             } else {

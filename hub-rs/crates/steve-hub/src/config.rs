@@ -336,10 +336,15 @@ fn strip_slash(s: &str) -> String {
 }
 
 impl Config {
-    /// Reads the process environment and creates `data/ worktrees/ scratch/` like config.ts does at import.
+    /// Reads the process environment and creates the Hub's data and working directories.
     pub fn from_env() -> Result<Self, ConfigError> {
         let cfg = Self::from_vars(|k| std::env::var(k).ok())?;
-        for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
+        for d in [
+            &cfg.data_dir,
+            &cfg.worktrees,
+            &cfg.scratch,
+            &cfg.home.join("workspaces"),
+        ] {
             std::fs::create_dir_all(d).map_err(|source| ConfigError::Dir {
                 path: d.display().to_string(),
                 source,
