@@ -69,8 +69,9 @@ impl Tx<'_> {
                 let Some(s) = self.active_session(&i.id)? else {
                     continue;
                 };
-                /* a unit's session belongs to its graph: the graph resumes it or reports it */
-                if self.workflow_child(&i)? || self.st.probing.contains_key(&i.id) {
+                /* a unit's session belongs to its graph: the graph resumes it or reports it; a
+                 * look at the remote under way answers this stop (a lost one is looked at again) */
+                if self.workflow_child(&i)? || self.probing(&i.id, now()) {
                     continue;
                 }
                 /* the item's work, not the session alone: a coordinator idle while its graph runs,
