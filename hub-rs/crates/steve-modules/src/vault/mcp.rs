@@ -29,7 +29,7 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         }),
         json!({
             "name": USE,
-            "description": "Run a command that needs a credential from the user's vault. Steve injects the values and runs the command for you; you get the exit code and the output with secrets removed. Usually the user must approve first.",
+            "description": "Run a command that needs a credential from the user's vault. Steve injects the values and runs the command for you; you get the exit code and the output as the command printed it. Usually the user must approve first.",
             "inputSchema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
