@@ -126,10 +126,16 @@ impl Tx<'_> {
     /// it: they delay turns, they do not explain an item. Its words are written into the item's `now`,
     /// so they are zh-CN whoever asks ([`crate::now_line`] shows them in the reader's language).
     pub(crate) fn work(&self, item: &Item) -> Result<Work> {
-        steve_i18n::stored(|| self.work_in(item))
+        steve_i18n::stored(|| self.work_of(item, true))
     }
 
-    fn work_in(&self, item: &Item) -> Result<Work> {
+    /// [`Tx::work`] for a continue about to be spent: the item's own cards saying it stopped are what
+    /// the continue answers (a turn starting expires them), not something it waits for.
+    pub(crate) fn work_to_continue(&self, item: &Item) -> Result<Work> {
+        steve_i18n::stored(|| self.work_of(item, false))
+    }
+
+    fn work_of(&self, item: &Item, stops: bool) -> Result<Work> {
         if item.status == "pause" {
             return Ok(Work::Paused(steve_i18n::t!("core.now.item_paused")));
         }
@@ -162,7 +168,7 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(&item.id)?
             .into_iter()
-            .filter(|d| d.status == "open")
+            .filter(|d| d.status == "open" && (stops || !stop_card(d)))
             .collect();
         let user = |d: &steve_store::Decision| {
             Work::User(steve_i18n::t!(

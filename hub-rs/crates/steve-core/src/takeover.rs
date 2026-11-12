@@ -314,7 +314,7 @@ impl Tx<'_> {
         }
         /* looked at again right before a continue is spent: the stop may be old news (a probe
          * that came back late, a unit that started meanwhile), and a waiting item is not continued */
-        let work = self.work(&self.item(&i.id)?)?;
+        let work = self.work_to_continue(&self.item(&i.id)?)?;
         if work.waiting() {
             self.diagnostic_session(
                 &s.id,

@@ -444,20 +444,6 @@ impl Db {
             .optional()?)
         })?)
     }
-    /// The text of the session's newest `system` event.
-    pub fn last_system_text(&self, session: &str) -> Result<Option<String>> {
-        let data: Option<String> = self.s.reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT data FROM events WHERE session_id = ? AND kind = 'system' ORDER BY seq DESC LIMIT 1",
-                [session],
-                |r| r.get(0),
-            )
-            .optional()?)
-        })?;
-        Ok(data
-            .and_then(|d| serde_json::from_str::<Value>(&d).ok())
-            .and_then(|v| v.get("text").and_then(Value::as_str).map(String::from)))
-    }
     /// Any event of the session at or after `ts`.
     pub fn has_events_since(&self, session: &str, ts: i64) -> Result<bool> {
         Ok(self.s.reader::<_, steve_store::StoreError>(|c| {

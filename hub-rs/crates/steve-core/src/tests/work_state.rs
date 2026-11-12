@@ -594,6 +594,28 @@ fn a_quota_that_is_back_later_is_waited_for_not_continued() {
     assert_eq!(steve_lines(&k, &i).len(), 1);
 }
 
+/// The look before a continue is spent does not take the item's own stop card for a wait: a voided
+/// delivery still reaches an agent whose earlier stop left a card open.
+#[test]
+fn an_open_stop_card_does_not_hold_back_a_continue() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    old_card(
+        &k,
+        &i,
+        STALL,
+        &["continue", "look", "drop"],
+        "它停下了：会话空闲",
+    );
+    assert_eq!(work(&k, &i).0, "waiting_user");
+    k.core.tx().takeover_invalidated(&i, "计划已更新").unwrap();
+    let p = k.rt.prompts_of(&s);
+    assert_eq!(p.len(), 1, "continued");
+    assert!(p[0].contains("交付已经作废"), "{p:?}");
+    assert_eq!(steve_lines(&k, &i).len(), 1);
+}
+
 fn old_card(k: &Kit, item: &str, subject_type: &str, options: &[&str], question: &str) -> String {
     k.db()
         .decision_create(crate::repo::NewDecision {
