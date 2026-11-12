@@ -2145,8 +2145,15 @@ impl Tx<'_> {
                 }
                 return Ok(());
             }
-            if let crate::work::Work::Failed(why) = work {
-                graph_failed = Some(why);
+            match work {
+                crate::work::Work::Failed(why) => graph_failed = Some(why),
+                /* it paused its own graph and asked nothing: yours to decide, not continued */
+                crate::work::Work::Halted(why)
+                    if t.stop_reason != "cancelled" && error.is_none() =>
+                {
+                    return self.fail(item_id, &why);
+                }
+                _ => {}
             }
         }
         if t.stop_reason == "cancelled" {

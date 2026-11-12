@@ -1,7 +1,8 @@
 //! What an item's work is doing now (ST-10): one judgement, from durable state, for the turn end, the
 //! stall watch, Steve's continues and the diagnostics. A coordinator that ends its turn while its
-//! work graph runs, queues, waits for you or is paused is waiting on purpose; a required unit that
-//! failed is a real failure it has to act on. Never judged from the session's last words or its last
+//! work graph runs, queues, waits for you or is paused by you is waiting on purpose; a graph it
+//! paused itself without asking waits for you, and you are asked; a required unit that failed is a
+//! real failure it has to act on. Never judged from the session's last words or its last
 //! system line (an old release notice says nothing about why it is idle now).
 
 use steve_store::{WorkUnit, Workflow};
@@ -23,8 +24,12 @@ pub(crate) enum Work {
     Queued(String),
     /// An open card of the item or of one of its units waits for you.
     User(String),
-    /// Stopped on purpose: the item or its work graph is paused.
+    /// Stopped on purpose: you paused the item or its work graph.
     Paused(String),
+    /// The coordinator paused its own work graph and asked you nothing: it waits for you to decide,
+    /// so it is a stop that reaches you (a card), not a quiet wait. Steve does not continue it: the
+    /// pause was the agent's own call (ST-5, ST-10, ST-27).
+    Halted(String),
     /// Waits on registered prerequisites.
     Blocked(String),
     /// The work graph needs its coordinator: a required unit failed or was cancelled, it is out of
@@ -42,6 +47,7 @@ impl Work {
             Work::Queued(_) => "queued",
             Work::User(_) => "waiting_user",
             Work::Paused(_) => "paused",
+            Work::Halted(_) => "paused_by_agent",
             Work::Blocked(_) => "dependency_wait",
             Work::Failed(_) => "failed",
             Work::Idle => "idle",
@@ -55,6 +61,7 @@ impl Work {
             | Work::Queued(t)
             | Work::User(t)
             | Work::Paused(t)
+            | Work::Halted(t)
             | Work::Blocked(t)
             | Work::Failed(t) => Some(t),
             Work::Idle => None,
@@ -63,7 +70,7 @@ impl Work {
 
     /// Someone is at it or it waits on purpose: nothing stopped, nobody is continued.
     pub(crate) fn waiting(&self) -> bool {
-        !matches!(self, Work::Failed(_) | Work::Idle)
+        !matches!(self, Work::Failed(_) | Work::Halted(_) | Work::Idle)
     }
 }
 
@@ -154,8 +161,12 @@ impl Tx<'_> {
 
     /// The graph's part: `None` when every unit is through and only the coordinator is left to act.
     pub(crate) fn graph_work(&self, g: &Workflow) -> Result<Option<Work>> {
-        if g.paused {
-            return Ok(Some(Work::Paused("协作已暂停".into())));
+        if let Some((by, why)) = g.paused_by() {
+            return Ok(Some(if by == steve_store::PAUSED_BY_AGENT {
+                Work::Halted(format!("协作已暂停，等你决定：{}", js_head(why, 160)))
+            } else {
+                Work::Paused("协作已暂停".into())
+            }));
         }
         if !self.workflow_current(g)? {
             return Ok(Some(Work::Failed(

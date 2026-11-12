@@ -252,37 +252,64 @@ impl Tx<'_> {
         let ready = self.rt().check_workflow_execution(item);
         if let Some(units) = out["units"].as_array_mut() {
             for (row, unit) in units.iter_mut().zip(&g.units) {
-                row["waiting_on"] = json!(unit.spec.depends_on.iter().filter(|id| {
-                    g.units.iter().find(|other| &other.spec.id == *id).is_none_or(|other| other.status != "succeeded")
-                }).collect::<Vec<_>>());
-                row["stop_pending"] = json!(matches!(unit.status.as_str(), "succeeded" | "failed" | "cancelled") && self.workflow_busy(unit)?);
+                row["waiting_on"] = json!(
+                    unit.spec
+                        .depends_on
+                        .iter()
+                        .filter(|id| {
+                            g.units
+                                .iter()
+                                .find(|other| &other.spec.id == *id)
+                                .is_none_or(|other| other.status != "succeeded")
+                        })
+                        .collect::<Vec<_>>()
+                );
+                row["stop_pending"] = json!(
+                    matches!(unit.status.as_str(), "succeeded" | "failed" | "cancelled")
+                        && self.workflow_busy(unit)?
+                );
                 if matches!(unit.status.as_str(), "running" | "dispatching") {
                     // A workflow row and a busy Node are not proof of fresh execution. The runtime
                     // evidence contract may only upgrade this state for the exact active attempt.
                     row["activity"] = json!({"state":"unconfirmed"});
-                    if unit.status == "running" && current_cycle && ready.is_ok()
+                    if unit.status == "running"
+                        && current_cycle
+                        && ready.is_ok()
                         && let (Some(child), Some(session)) = (&unit.item_id, &unit.session_id)
                         && !self.rt().uncertain(session)
-                        && let Some(activity) = self.db().store().workflows().confirmed_activity(child, session, steve_store::now())?
+                        && let Some(activity) = self.db().store().workflows().confirmed_activity(
+                            child,
+                            session,
+                            steve_store::now(),
+                        )?
                     {
                         row["activity"] = json!(activity);
                     }
                 }
             }
         }
-        let (archived, archived_total) = self.db().store().workflows().archived_attempts_recent(item, 50)?;
-        out["history_attempts"] = json!(archived.into_iter().map(|old| json!({
-            "item_id": old.item_id,
-            "unit_id": old.unit_id,
-            "created": old.created,
-            "snapshot": {
-                "title": excerpt(&old.snapshot.spec.title, VIEW_TEXT),
-                "status": old.snapshot.status,
-                "attempt": old.snapshot.attempt,
-                "session_id": old.snapshot.session_id,
-                "reason": old.snapshot.reason.map(|r| excerpt(&r, VIEW_TEXT)),
-            },
-        })).collect::<Vec<_>>());
+        let (archived, archived_total) = self
+            .db()
+            .store()
+            .workflows()
+            .archived_attempts_recent(item, 50)?;
+        out["history_attempts"] = json!(
+            archived
+                .into_iter()
+                .map(|old| json!({
+                    "item_id": old.item_id,
+                    "unit_id": old.unit_id,
+                    "created": old.created,
+                    "snapshot": {
+                        "title": excerpt(&old.snapshot.spec.title, VIEW_TEXT),
+                        "status": old.snapshot.status,
+                        "attempt": old.snapshot.attempt,
+                        "session_id": old.snapshot.session_id,
+                        "reason": old.snapshot.reason.map(|r| excerpt(&r, VIEW_TEXT)),
+                    },
+                }))
+                .collect::<Vec<_>>()
+        );
         out["history_attempts_total"] = json!(archived_total);
         out["history_total"] = json!(history_total);
         out["current_cycle"] = json!(current_cycle);
@@ -426,12 +453,16 @@ impl Tx<'_> {
                     if !self.workflow_current(current)? {
                         for unit in &current.units {
                             if self.workflow_busy(unit)? {
-                                return Err(conflict("旧周期仍有执行或子事项未收尾，暂不能开始新周期"));
+                                return Err(conflict(
+                                    "旧周期仍有执行或子事项未收尾，暂不能开始新周期",
+                                ));
                             }
                             if let Some(id) = unit.item_id.as_deref()
                                 && self.item(id)?.phase != "closed"
                             {
-                                return Err(conflict("旧周期仍有执行或子事项未收尾，暂不能开始新周期"));
+                                return Err(conflict(
+                                    "旧周期仍有执行或子事项未收尾，暂不能开始新周期",
+                                ));
                             }
                         }
                     }
@@ -475,10 +506,16 @@ impl Tx<'_> {
                     .replace(item, rev, reason, &specs, parallel, attempts)?;
             }
             "pause" | "resume" => {
+                /* a Bot's pause waits for you; yours is your own (crate::work) */
+                let by = if actor == "agent" || self.db().bot(actor)?.is_some() {
+                    steve_store::PAUSED_BY_AGENT
+                } else {
+                    steve_store::PAUSED_BY_USER
+                };
                 self.db()
                     .store()
                     .workflows()
-                    .pause(item, action == "pause", reason)?;
+                    .pause_by(item, action == "pause", reason, by)?;
                 if action == "pause" {
                     self.workflow_stop_units(item)?;
                 }
@@ -583,10 +620,12 @@ impl Tx<'_> {
         };
         match action {
             ItemAction::Pause | ItemAction::Drop => {
-                self.db()
-                    .store()
-                    .workflows()
-                    .pause(item, true, "主事项暂停或取消")?;
+                self.db().store().workflows().pause_by(
+                    item,
+                    true,
+                    "主事项暂停或取消",
+                    steve_store::PAUSED_BY_ITEM,
+                )?;
                 self.workflow_stop_units(item)?;
                 if action == ItemAction::Drop {
                     for u in g
@@ -605,10 +644,12 @@ impl Tx<'_> {
                 }
             }
             ItemAction::Resume if !g.single_session() => {
-                self.db()
-                    .store()
-                    .workflows()
-                    .pause(item, false, "主事项恢复")?;
+                self.db().store().workflows().pause_by(
+                    item,
+                    false,
+                    "主事项恢复",
+                    steve_store::PAUSED_BY_ITEM,
+                )?;
             }
             _ => {}
         }

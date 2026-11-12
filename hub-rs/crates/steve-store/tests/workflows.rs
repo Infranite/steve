@@ -118,6 +118,7 @@ fn explicit_single_session_mode_is_durable_audited_and_replan_revokes_it() {
         .workflows()
         .pause(&parent, true, "用户暂停")
         .unwrap();
+    assert_eq!(paused.paused_by(), Some(("user", "用户暂停")));
     is_conflict(
         t.store
             .workflows()

@@ -1,6 +1,7 @@
 //! Items that stopped without saying so: `run`, but their session has been idle for a while and their
-//! work ([`crate::work`]) neither runs, queues, waits for you, is paused nor waits on prerequisites (a
-//! cancelled turn, an agent that died, a coordinator left with a failed unit). They get one card,
+//! work ([`crate::work`]) neither runs, queues, waits for you, is paused by you nor waits on
+//! prerequisites (a cancelled turn, an agent that died, a coordinator left with a failed unit or
+//! that paused its graph without asking you). They get one card,
 //! “它停下了：…”, with 让它继续 / 我来看看 / 放弃; it expires as soon as a turn starts again.
 
 use std::collections::HashSet;
@@ -127,6 +128,8 @@ impl Tx<'_> {
                 /* the cause from state, never the session's last system line */
                 let (why, yours) = match &work {
                     Work::Failed(why) => (why.clone(), false),
+                    /* the agent's own pause: it is not continued over it, you are asked */
+                    Work::Halted(why) => (why.clone(), true),
                     _ => LastStop::cause(self.st.stops.get(&s.id)),
                 };
                 let mut question = format!("它停下了：{}", js_head(&why, 200));

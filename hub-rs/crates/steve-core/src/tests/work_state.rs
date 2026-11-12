@@ -216,6 +216,80 @@ fn a_paused_graph_is_not_a_stop() {
     assert_eq!(k.status(&parent).2, "协作已暂停");
 }
 
+/// ST-5, ST-10, ST-27: the coordinator paused its own graph and asked nothing. That waits for you:
+/// it gets a card (at its turn end, or from the watch for a graph paused earlier), never Steve's
+/// continue over its own call; resuming the graph takes the card back.
+#[test]
+fn a_graph_its_coordinator_paused_without_asking_waits_for_you() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let coord = k.session(&parent, "idle");
+    let revision = k
+        .db()
+        .store()
+        .workflows()
+        .get(&parent)
+        .unwrap()
+        .unwrap()
+        .revision;
+    k.core
+        .workflow_change(
+            &parent,
+            json!({"action":"pause","reason":"评审单元被上游拒绝","expected_revision":revision}),
+            "dev",
+        )
+        .unwrap();
+    assert_eq!(
+        work(&k, &parent),
+        (
+            "paused_by_agent",
+            Some("协作已暂停，等你决定：评审单元被上游拒绝".into())
+        )
+    );
+    // a graph paused before its turn ended (or before this Hub): the watch asks you
+    assert_eq!(
+        k.core.tx().check_stalls(later()).unwrap(),
+        vec![parent.clone()]
+    );
+    assert!(k.rt.prompts_of(&coord).is_empty(), "not continued");
+    assert!(steve_lines(&k, &parent).is_empty(), "no budget spent");
+    assert_eq!(stall_cards(&k, &parent), 1);
+    assert_eq!(k.status(&parent).0, "wait");
+    assert_eq!(work(&k, &parent).0, "waiting_user");
+    // you resume it: the card no longer applies
+    change(&k, &parent, "resume", None);
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert_eq!(stall_cards(&k, &parent), 0);
+    assert_eq!(k.status(&parent).0, "run");
+
+    // paused in a turn that then ends: the card comes with the turn end
+    k.rt.prompt(&coord, "看看进度", "me", &[]).unwrap();
+    let revision = k
+        .db()
+        .store()
+        .workflows()
+        .get(&parent)
+        .unwrap()
+        .unwrap()
+        .revision;
+    k.core
+        .workflow_change(
+            &parent,
+            json!({"action":"pause","reason":"需要你确认范围","expected_revision":revision}),
+            "dev",
+        )
+        .unwrap();
+    coordinator_turn(&k, &coord, "已暂停。");
+    assert_eq!(k.rt.prompts_of(&coord).len(), 1, "not continued");
+    assert!(steve_lines(&k, &parent).is_empty());
+    let cards = k.open_fails(&parent);
+    assert_eq!(
+        cards,
+        vec!["协作已暂停，等你决定：需要你确认范围".to_string()]
+    );
+    assert_eq!(k.status(&parent).0, "wait");
+}
+
 /// Units that wait for their turn (here: the Hub holds new turns) are queued work, not a stop.
 #[test]
 fn queued_units_are_waited_for() {
@@ -316,7 +390,10 @@ fn a_stop_card_never_quotes_an_old_system_line() {
             json!({"text": "已发布 v0.2.99：Release 构建通过"}),
         )
         .unwrap();
-    assert_eq!(k.core.tx().check_stalls(later()).unwrap(), std::slice::from_ref(&i));
+    assert_eq!(
+        k.core.tx().check_stalls(later()).unwrap(),
+        std::slice::from_ref(&i)
+    );
     let q = k.open_fails(&i).pop().unwrap();
     assert_eq!(
         q,
@@ -335,7 +412,10 @@ fn a_stop_card_never_quotes_an_old_system_line() {
     k.db()
         .event_add(&coord, "system", json!({"text": "已发布 v0.2.98"}))
         .unwrap();
-    assert_eq!(k.core.tx().check_stalls(later()).unwrap(), std::slice::from_ref(&parent));
+    assert_eq!(
+        k.core.tx().check_stalls(later()).unwrap(),
+        std::slice::from_ref(&parent)
+    );
     let q = k.open_fails(&parent).pop().unwrap();
     assert_eq!(
         q,
