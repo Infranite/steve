@@ -417,6 +417,19 @@ fn archive_attempt(tx: &Tx<'_>, parent: &str, unit: &WorkUnit, reason: &str) -> 
     Ok(())
 }
 
+// A new item cycle supersedes the graph, not the evidence. Retried attempts are invalidated by
+// archive_attempt; completed units from an older cycle keep their actual verdict for inspection.
+fn archive_cycle_unit(tx: &Tx<'_>, parent: &str, unit: &WorkUnit) -> Result<()> {
+    if let Some(child) = &unit.item_id {
+        tx.execute(
+            "INSERT OR IGNORE INTO workflow_attempts(item_id,workflow_id,unit_id,snapshot,created)
+             VALUES (?,?,?,?,?)",
+            params![child, parent, unit.spec.id, to_json(unit)?, now()],
+        )?;
+    }
+    Ok(())
+}
+
 /// Records a unit's evidence inside the caller's write transaction. The core uses this with the
 /// child's closing intent so a committed success can never be left without its lifecycle checkpoint.
 pub fn deliver_in(
@@ -666,26 +679,20 @@ impl Workflows<'_> {
                 "SELECT coalesce(max(version),0) FROM item_goals WHERE item_id=?",
                 [parent], |r| r.get(0),
             )?;
-            let mut context = (item.cycle, goal_version);
+            let context = (item.cycle, goal_version);
+            let mut new_cycle = false;
             if let Some(old) = &old {
-                if (old.cycle,old.goal_version) != context
-                    && old.units.iter().any(|u|u.active() || u.status=="succeeded")
-                {
-                    let only_raise_budget = max_attempts > old.max_attempts
-                        && max_parallel == old.max_parallel
-                        && old.units.len() == specs.len()
-                        && old.units.iter().zip(specs).all(|(u,s)|u.spec==*s);
-                    if !only_raise_budget {
-                        return Err(conflict("主事项目标或执行周期已变化，请先取消运行并重置旧成果，再重新规划"));
+                if (old.cycle,old.goal_version) != context {
+                    if !old.paused || old.units.iter().any(WorkUnit::active) {
+                        return Err(conflict("旧周期仍在编排或执行；先暂停并确认工作已停止，再重新规划"));
                     }
-                    // A budget-only increase can unblock resets of exhausted old attempts. It must
-                    // not silently make those old results count for the new goal or item cycle.
-                    context = (old.cycle,old.goal_version);
+                    new_cycle = true;
                 }
-                if old.units.iter().filter(|u| u.active()).count() > max_parallel {
+                if !new_cycle && old.units.iter().filter(|u| u.active()).count() > max_parallel {
                     return Err(conflict("新的并发上限小于正在运行的工作数"));
                 }
                 for unit in &old.units {
+                    if new_cycle { continue; }
                     let next = specs.iter().find(|s| s.id == unit.spec.id);
                     if (unit.active() || unit.status == "succeeded") && next != Some(&unit.spec) {
                         return Err(conflict(format!(
@@ -698,7 +705,14 @@ impl Workflows<'_> {
                     "UPDATE workflows SET max_parallel=?,max_attempts=?,cycle=?,goal_version=? WHERE item_id=?",
                     params![max_parallel as i64, max_attempts, context.0,context.1,parent],
                 )?;
+                if new_cycle {
+                    for unit in &old.units {
+                        archive_cycle_unit(tx, parent, unit)?;
+                    }
+                    tx.execute("DELETE FROM workflow_units WHERE workflow_id=?", [parent])?;
+                }
                 for unit in &old.units {
+                    if new_cycle { continue; }
                     if !specs.iter().any(|s| s.id == unit.spec.id) {
                         archive_attempt(tx,parent,unit,reason)?;
                         tx.execute(

@@ -446,6 +446,40 @@ fn single_session_confirmation_cannot_waive_a_new_goal_or_cycle() {
 }
 
 #[test]
+fn a_new_cycle_replans_without_reusing_old_successes() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    for id in ["a", "b", "review", "integrate"] {
+        finish(&k, &parent, id);
+    }
+    let old_review = unit(&k, &parent, "review");
+    let old_session = k.db().session(old_review.session_id.as_deref().unwrap()).unwrap().unwrap();
+    change(&k, &parent, "pause", None).unwrap();
+    k.db().exec("UPDATE items SET cycle=cycle+1 WHERE id=?", &[&parent]).unwrap();
+
+    let result = k.core.workflow_change(&parent, json!({
+        "action":"plan", "reason":"新周期重新验收，旧成果只留作历史",
+        "expected_revision":graph(&k,&parent).revision, "units":specs,
+        "max_parallel":2, "max_attempts":3
+    }), "me").unwrap();
+    assert_eq!(result["current_cycle"], true);
+    assert_eq!(result["cycle"], 2);
+    assert_eq!(result["paused"], true);
+    for u in &graph(&k, &parent).units {
+        assert_eq!(u.status, "pending");
+        assert_eq!(u.attempt, 0);
+        assert!(u.item_id.is_none());
+    }
+    assert_eq!(result["history_attempts_total"], 4);
+    assert!(result["history_attempts"].as_array().unwrap().iter().any(|u|
+        u["unit_id"] == "review" && u["snapshot"]["status"] == "succeeded"));
+    assert!(k.core.tool_deliver(&old_session, "过期结果", &[], &[], &[]).is_err());
+    assert!(parent_deliver(&k, &parent).is_err(), "old successes must not accept the new cycle");
+    change(&k, &parent, "resume", None).unwrap();
+    assert_eq!(unit(&k, &parent, "a").status, "running");
+}
+
+#[test]
 fn no_confined_node_plans_but_never_creates_or_runs_children() {
     let (k, parent, specs) = setup(false);
     let v = plan(&k, &parent, &specs);
