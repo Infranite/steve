@@ -65,7 +65,7 @@ export default {
     blockers: "主事项暂不能完成",
     attempt: "第 {{n}}/{{max}} 次",
     depends: "依赖：{{names}}", resources: "协同范围：{{names}}",
-    details: "目标与交付", outputs: "共享交付物",
+    details: "目标与交付", outputs: "报告的产出", outputResult: "正式成果", outputRecord: "过程记录", outputUnspecified: "性质未标注",
     checkPassed: "通过", checkFailed: "未通过", operated: "实际操作",
     history_other: "计划调整记录（{{count}}；此处最多显示最近 20 条）", revision: "第 {{n}} 版",
     single: "改为单会话验收",
