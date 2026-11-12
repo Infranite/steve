@@ -163,6 +163,43 @@ fn an_idle_coordinator_while_units_run_for_minutes_is_waiting() {
     assert_eq!(snap["work"]["why"], "协作执行中：a、b");
 }
 
+#[test]
+fn a_stop_card_from_before_recovery_expires_while_the_graph_is_running() {
+    let k = kit(2);
+    let parent = planned(&k, &["a"]);
+    let coord = k.session(&parent, "idle");
+    let old = k.decision(&parent, Some(&coord), "fail", STALL, &["continue", "look"]);
+    crate::lifecycle::settle(k.db(), &parent).unwrap();
+    assert_eq!(k.status(&parent).0, "wait");
+
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert_eq!(k.db().decision(&old).unwrap().unwrap().status, "expired");
+    assert_eq!(k.status(&parent).0, "run");
+    assert_eq!(k.status(&parent).2, "协作执行中：a");
+
+    let old = k.decision(&parent, Some(&coord), "fail", STALL, &["continue", "look"]);
+    let real_question = k.decision(&parent, Some(&coord), "ask", "item", &["answer"]);
+    crate::lifecycle::settle(k.db(), &parent).unwrap();
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert_eq!(k.db().decision(&old).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&real_question).unwrap().unwrap().status,
+        "open"
+    );
+    assert_eq!(k.status(&parent).0, "wait", "the real question still waits");
+
+    let old = k.decision(&parent, Some(&coord), "fail", STALL, &["continue", "look"]);
+    let unknown_effect = k.decision(&parent, Some(&coord), "fail", "item", &["release_retry"]);
+    let release = k.decision(&parent, Some(&coord), "fail", "item", &["release_live"]);
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert_eq!(k.db().decision(&old).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&unknown_effect).unwrap().unwrap().status,
+        "open"
+    );
+    assert_eq!(k.db().decision(&release).unwrap().unwrap().status, "open");
+}
+
 /// A paused graph is your stop: nothing continues the coordinator or opens a card for it.
 #[test]
 fn a_paused_graph_is_not_a_stop() {
