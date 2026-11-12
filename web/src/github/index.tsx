@@ -12,6 +12,8 @@ import { st, toast } from "@/store"
 import { Unauthenticated } from "@/api"
 import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot } from "@/ui"
 import { Select } from "@/view-shared"
+import { connStatusOf } from "@/api/accounts"
+import { cn } from "cn"
 import { Unwired } from "@/unwired"
 import { gh, submitManifest, type GhOverview, type GhRepo, type GhAvailable } from "@/api/github"
 import { NotWired } from "@/api"
@@ -99,11 +101,11 @@ function IndexView() {
           {v.apps.length > 0 && <section><SectionLabel>GitHub App</SectionLabel>
             <Group>{v.apps.map((a) => (
               <Row key={a.slug} icon={<GhIcon />} title={<span className="font-medium">{a.slug}</span>} sub={<Meta><span>{a.owner || t("github:index.personalAccount")}</span><span>{t("github:index.botIdentity", { slug: a.slug })}</span></Meta>} data-gh-app={a.slug}>
-                <Button size="sm" variant={appConn ? "ghost" : "default"} nativeButton={false} render={<a href={a.html_url.replace(/\/$/, "") + "/installations/new"} />} data-gh-install>{appConn ? t("github:index.installMore") : t("github:index.install")}</Button>
+                <Button size="sm" variant={appConn ? "ghost" : "default"} className="max-sm:px-2" nativeButton={false} render={<a href={a.html_url.replace(/\/$/, "") + "/installations/new"} />} aria-label={appConn ? t("github:index.installMore") : t("github:index.install")} data-gh-install><PlusIcon className="sm:hidden" /><span className={cn(appConn && "max-sm:hidden")}>{appConn ? t("github:index.installMore") : t("github:index.install")}</span></Button>
               </Row>))}</Group></section>}
           {connected && <section><SectionLabel right={!v.connections.some((c) => c.kind === "pat") ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setPat(true)} data-gh-pat-open><KeyRoundIcon />{t("github:shared.usePat")}</Button> : undefined}>{t("github:index.connections")}</SectionLabel>
             <Group>{v.connections.map((c) => (
-              <Row key={c.id} icon={<GhIcon />} title={c.account || c.id} sub={<Meta><span>{c.kind === "app" ? t("github:index.connApp") : t("github:index.connPat")}</span><span className="inline-flex items-center gap-1.5"><StatusDot s={c.status === "ok" ? "done" : "fail"} />{c.status === "ok" ? t("github:shared.ok") : c.status}</span></Meta>} data-gh-conn={c.kind} />))}</Group></section>}
+              <Row key={c.id} icon={<GhIcon />} title={c.account || c.id} sub={<Meta><span>{c.kind === "app" ? t("github:index.connApp") : t("github:index.connPat")}</span><span className="inline-flex items-center gap-1.5"><StatusDot s={c.status === "ok" ? "done" : "fail"} />{c.status === "ok" ? t("github:shared.ok") : connStatusOf(c)[0]}</span></Meta>} data-gh-conn={c.kind} />))}</Group></section>}
           {v.suggestions.length > 0 && <section><SectionLabel>{t("github:index.suggestions")}</SectionLabel>
             <Group>{v.suggestions.map((s) => (
               <Row key={s.project_id} icon={<span className={ICO}><SparklesIcon className="size-[18px]" strokeWidth={1.5} /></span>} title={<span><Trans t={t} i18nKey="github:index.suggestTitle" values={{ repo: s.full_name, project: projectName(s.project_id) }} components={{ mono: <span className="font-mono text-[13px]" /> }} /></span>} sub={t("github:shared.linkHint")} data-gh-suggest={s.full_name}>
