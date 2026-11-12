@@ -110,7 +110,7 @@ export function StatsSettingsPane() {
           <p className="mb-3 type-callout text-muted-foreground">{t("stats:prices.modelsIntro")}</p>
           <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
             <table className="w-full min-w-[620px] type-callout" aria-label={t("stats:prices.modelsAria")}>
-              <thead className="border-b text-left type-footnote text-muted-foreground"><tr><th className="py-2 font-medium">{t("stats:col.model")}</th><th className="py-2 pl-2 font-medium">{t("stats:col.source")}</th>{cols.map(([, l]) => <th key={l} className="py-2 pl-2 text-right font-medium">{l}</th>)}<th className="py-2 pl-2 text-right font-medium">tokens</th><th className="w-16" /></tr></thead>
+              <thead className="border-b text-left type-footnote text-muted-foreground"><tr><th className="py-2 font-medium">{t("stats:col.model")}</th><th className="py-2 pl-2 font-medium">{t("stats:col.source")}</th>{cols.map(([, l]) => <th key={l} className="whitespace-nowrap py-2 pl-2 text-right font-medium">{l}</th>)}<th className="py-2 pl-2 text-right font-medium">tokens</th><th className="w-16" /></tr></thead>
               <tbody>{v.models.map((m) => {
                 const q = m.price
                 return (

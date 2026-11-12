@@ -19,7 +19,7 @@ import { BookOpenIcon, ChartNoAxesColumnIcon,
 import { Button } from "@/components/ui/button"
 import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-trail"
 import { Item as UIItem, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSeparator, ItemTitle } from "@/components/ui/item"
-import { Empty as UIEmpty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
+import { Empty as UIEmpty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
@@ -158,7 +158,7 @@ export function Tags({ ids, className, onRemove, max }: { ids?: string[]; classN
 }
 export const ItemNo = ({ id, className }: { id: string; className?: string }) => <span className={cn("shrink-0 font-mono text-[12px] tabular-nums text-muted-foreground", className)} data-no>{id}</span>
 export const Meta = ({ children, className }: { children: ReactNode; className?: string }) => (
-  <div className={cn("flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 type-footnote text-muted-foreground [&>*+*]:before:mr-1.5 [&>*+*]:before:text-tertiary [&>*+*]:before:content-['·']", className)}>{children}</div>
+  <div className={cn("flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 type-footnote text-muted-foreground [&>*:not(:last-child)]:after:ml-1.5 [&>*:not(:last-child)]:after:text-tertiary [&>*:not(:last-child)]:after:content-['·']", className)}>{children}</div>
 )
 export function SectionLabel({ children, right, className }: { children: ReactNode; right?: ReactNode; className?: string }) {
   return <div className={cn("mb-2 flex min-h-6 items-center justify-between gap-2 type-label text-muted-foreground", className)}><span>{children}</span>{right}</div>
@@ -167,7 +167,7 @@ export function SectionLabel({ children, right, className }: { children: ReactNo
 export function Group({ children, className }: { children: ReactNode; className?: string }) {
   const xs = Children.toArray(children).filter(Boolean)
   return (
-    <ItemGroup className={cn("-mx-2 gap-0!", className)}>
+    <ItemGroup className={cn("-mx-2 w-auto gap-0!", className)}>
       {xs.map((c, n) => <Fragment key={n}>{n > 0 && <ItemSeparator className="mx-2 my-0 w-auto!" />}{c}</Fragment>)}
     </ItemGroup>
   )
@@ -206,7 +206,8 @@ export function Chips<T extends string>({ value, onChange, options, className }:
     </ToggleGroup>
   )
 }
-export function Empty({ title, sub, icon }: { title: string; sub?: string; icon?: ReactNode }) {
+/** `action`: what to do about it, inside the empty state rather than a page-height below it */
+export function Empty({ title, sub, icon, action }: { title: string; sub?: string; icon?: ReactNode; action?: ReactNode }) {
   return (
     <UIEmpty className="py-16">
       <EmptyHeader>
@@ -214,6 +215,7 @@ export function Empty({ title, sub, icon }: { title: string; sub?: string; icon?
         <EmptyTitle className="type-headline">{title}</EmptyTitle>
         {sub && <EmptyDescription className="type-callout">{sub}</EmptyDescription>}
       </EmptyHeader>
+      {action && <EmptyContent>{action}</EmptyContent>}
     </UIEmpty>
   )
 }
@@ -245,9 +247,10 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
       </header>
       <div ref={scrollRef ?? own} onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 36)} className="min-h-0 flex-1 overflow-y-auto">
         <div className={cn("mx-auto w-full px-4 sm:px-8", footer ? "pb-6" : "pb-24 md:pb-12")} style={{ maxWidth: max + 64 }}>
+          {/* the title block keeps 20rem before the toolbar beside it wraps below, so a phone never squeezes the description */}
           {!noTitle && (
             <div className="flex flex-wrap items-end gap-x-4 gap-y-3 pb-6 pt-1">
-              <div className="min-w-0 flex-1"><h1 className={cn(small ? "type-title" : "type-large-title", "text-foreground")}>{title}</h1>{sub && <div className="mt-1 type-callout text-muted-foreground">{sub}</div>}</div>
+              <div className="min-w-[min(100%,20rem)] flex-1"><h1 className={cn(small ? "type-title" : "type-large-title", "text-foreground")}>{title}</h1>{sub && <div className="mt-1 type-callout text-muted-foreground">{sub}</div>}</div>
               {toolbar && <div className={cn("flex flex-wrap items-center gap-2", toolbarTop && "self-start")}>{toolbar}</div>}
             </div>
           )}

@@ -39,8 +39,8 @@ export function AboutVersions() {
       {newer && <Row title={t("pages:version.availableFrontend")} sub={t("pages:version.availableSub")} data-web-update>
         <span className="flex items-center gap-2"><VersionValue v={st.webVersion} label={t("pages:version.availableFrontendVersion")} /><Button size="sm" variant="outline" onClick={() => location.reload()}><RefreshCwIcon />{t("pages:version.reload")}</Button></span></Row>}
     </Group>
+    {differ && !newer && <p className="mt-2 px-1 type-footnote text-muted-foreground" data-version-differ>{t("pages:version.differ")}</p>}
     <UpgradeSettings />
-    {differ && !newer && <p className="mt-2 type-footnote text-muted-foreground" data-version-differ>{t("pages:version.differ")}</p>}
   </section>
 }
 
@@ -138,7 +138,7 @@ export function UpgradeSettings() {
     no_release: t("pages:upgrade.status.no_release"), error: t("pages:upgrade.status.error"), unsupported_platform: t("pages:upgrade.status.unsupported_platform"),
   }
   const releaseURL = (() => { try { const u = new URL(check?.release_url ?? ""); return u.protocol === "https:" ? u.href : undefined } catch { return undefined } })()
-  return <div className="mt-5" data-upgrade-settings>
+  return <div className="mt-8" data-upgrade-settings>
     <SectionLabel>{t("pages:upgrade.section")}</SectionLabel>
     <Group>
       <Row title="GitHub Release" sub={state?.repository ?? t("pages:upgrade.reading")}>

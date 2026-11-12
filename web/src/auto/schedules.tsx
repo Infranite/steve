@@ -39,7 +39,7 @@ export function Schedules({ L, onNew }: { L: Load<Schedule[]>; onNew: () => void
       <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { const d = del!; setDel(null); setOpen(null); void act("del", () => flowApi.deleteSchedule(d.id), t("auto:schedule.deleted")) }} data-del-schedule-confirm>{t("common:action.delete")}</AlertDialogAction></AlertDialogFooter>
     </AlertDialogContent></AlertDialog>
     {edit && <NewScheduleDialog edit={edit} onClose={() => setEdit(null)} onSaved={() => void L.reload()} />}
-    {!L.data.length ? <><Empty title={t("auto:schedule.emptyTitle")} sub={t("auto:schedule.emptySub")} /><div className="flex justify-center"><Button variant="outline" onClick={onNew}><PlusIcon />{t("auto:newSchedule")}</Button></div></>
+    {!L.data.length ? <Empty title={t("auto:schedule.emptyTitle")} sub={t("auto:schedule.emptySub")} action={<Button variant="outline" onClick={onNew}><PlusIcon />{t("auto:newSchedule")}</Button>} />
     : <Group>{L.data.map((s) => (
       <Collapsible key={s.id} open={open === s.id} onOpenChange={(o) => setOpen(o ? s.id : null)}>
         <div className="flex items-center gap-3 px-2 py-3">

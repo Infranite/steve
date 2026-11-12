@@ -51,6 +51,7 @@ export default {
     noMatch: "没有符合的条目",
     noItems: "还没有条目",
     noItemsSub: "用右上角的“新建条目”保存第一个密码或令牌。",
+    noItemsLockedSub: "保险箱打开后才能新建条目。",
     recentUses: "最近使用",
     noUses: "还没有使用记录",
     rules: "规则",

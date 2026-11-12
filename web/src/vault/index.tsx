@@ -24,6 +24,8 @@ import { date } from "@/i18n/format"
 const TPL_I: Record<string, any> = { login: KeyRoundIcon, bank_card: CreditCardIcon, api_credential: TerminalIcon, id_document: IdCardIcon, secure_note: FileTextIcon, ssh_key: LockIcon, recovery_codes: ShieldIcon }
 const Ico = ({ I, className }: { I: any; className?: string }) => <span className={"flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground " + (className ?? "")} aria-hidden><I className="size-4" strokeWidth={1.5} /></span>
 const Section = ({ label, right, children }: { label: string; right?: ReactNode; children: ReactNode }) => <section><SectionLabel right={right}>{label}</SectionLabel>{children}</section>
+/** a section with nothing in it yet: one quiet line, not a page-sized empty state */
+const Quiet = ({ children }: { children: ReactNode }) => <div className="px-1 type-callout text-muted-foreground">{children}</div>
 const Note = ({ children }: { children: ReactNode }) => <div className="mt-2 px-1 type-footnote text-muted-foreground">{children}</div>
 const back = (): [string, string] => ["#/accounts", tr("vault:backAccounts")]
 const backVault = (): [string, string] => ["#/vault", tr("vault:title")]
@@ -119,8 +121,8 @@ function VaultView() {
       <KeychainBanner s={status} />
       <div className="flex flex-col gap-8">
         <div>{tpls.length > 1 && <Chips className="mb-4" value={curTpl} onChange={(v) => { vtpl = v === allTpl ? "" : v; r() }} options={tplOpts} />}
-          {xs.length ? <Group>{xs.map((v) => <VaultRow key={v.id} v={v} />)}</Group> : <Empty title={items.length ? t("vault:home.noMatch") : t("vault:home.noItems")} sub={items.length ? undefined : t("vault:home.noItemsSub")} />}</div>
-        {uses && <Section label={t("vault:home.recentUses")}>{uses.length ? <Group>{uses.map((u) => <UseRow key={u.id} u={u} showItem />)}</Group> : <Empty title={t("vault:home.noUses")} />}</Section>}
+          {xs.length ? <Group>{xs.map((v) => <VaultRow key={v.id} v={v} />)}</Group> : <Empty title={items.length ? t("vault:home.noMatch") : t("vault:home.noItems")} sub={items.length ? undefined : status.keychain === "ok" ? t("vault:home.noItemsSub") : t("vault:home.noItemsLockedSub")} />}</div>
+        {uses && <Section label={t("vault:home.recentUses")}>{uses.length ? <Group>{uses.map((u) => <UseRow key={u.id} u={u} showItem />)}</Group> : <Quiet>{t("vault:home.noUses")}</Quiet>}</Section>}
         <Section label={t("vault:home.rules")}><Group>
           <Row title={t("vault:home.ruleBotTitle")} sub={t("vault:home.ruleBotSub")} />
           <Row title={t("vault:home.ruleHighTitle")} sub={t("vault:home.ruleHighSub")} />
@@ -176,11 +178,11 @@ function VaultItemView({ id }: { id: string }) {
               <Button variant="ghost" size="icon-xs" aria-label={t("vault:item.copyField", { label: fl.label })} className="text-muted-foreground" disabled={R.busy === fl.id} onClick={() => { if (fl.secret) void R.reveal(fl.id, true); else navigator.clipboard?.writeText(fl.value ?? "").then(() => toast(t("common:action.copied")), () => toast(t("vault:clipboardDenied"))) }} data-copy><CopyIcon /></Button>
               <Button variant="ghost" size="icon-xs" aria-label={t("vault:item.editField", { label: fl.label })} className="text-muted-foreground" onClick={() => setEdit(fl)} data-edit-field><PencilIcon /></Button>
             </Row>)
-        })}</Group> : <Empty title={t("vault:item.noFields")} />}
+        })}</Group> : <Quiet>{t("vault:item.noFields")}</Quiet>}
           <Note>{t("vault:item.fieldsNote")}</Note></Section>
         <LinkedAccount v={v} onChange={() => void reload()} />
         <Grants v={v} onChange={() => void reload()} />
-        {uses && <Section label={t("vault:item.useLog")}>{uses.length ? <Group>{uses.map((u) => <UseRow key={u.id} u={u} />)}</Group> : <Empty title={t("vault:item.neverUsed")} />}
+        {uses && <Section label={t("vault:item.useLog")}>{uses.length ? <Group>{uses.map((u) => <UseRow key={u.id} u={u} />)}</Group> : <Quiet>{t("vault:item.neverUsed")}</Quiet>}
           <Note>{t("vault:item.useLogNote")}</Note></Section>}
       </div>
     </Page>
@@ -236,7 +238,7 @@ function Grants({ v, onChange }: { v: RItem; onChange: () => void }) {
     <Section label={t("vault:grants.section")}>
       {live.length ? <Group>{live.map((g) => <Row key={g.id} icon={<BotAvatar k={g.bot_id} size={24} />} title={botName(g.bot_id)} sub={t("vault:grants.rowSub", { scope: g.scope_label, time: tm(g.until) })} data-grant={g.bot_id}>
         <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(() => vaultApi.revokeGrant(g.id), t("vault:grants.revoked")).then((r) => r && onChange())} data-revoke-grant>{t("vault:grants.revoke")}</Button></Row>)}</Group>
-        : v.sensitivity === "high" || v.template === "bank_card" ? null : <div className="px-1 type-callout text-muted-foreground">{t("vault:grants.none")}</div>}
+        : v.sensitivity === "high" || v.template === "bank_card" ? null : <Quiet>{t("vault:grants.none")}</Quiet>}
       {v.sensitivity === "high" || v.template === "bank_card" ? <Note>{t("vault:grants.highNote")}</Note> :
         bots.length === 0 ? <Note>{t("vault:grants.noBots")}</Note> :
         <form className="mt-3 flex flex-wrap items-center gap-2" data-new-grant onSubmit={(e) => { e.preventDefault(); void add() }}>

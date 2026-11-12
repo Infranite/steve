@@ -43,7 +43,7 @@ import { RunState } from "@/yolo/status"
 import { cn } from "cn"
 import { lang, t as tr, useT } from "@/i18n"
 import { nearTime, num } from "@/i18n/format"
-import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleCheckIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, LinkIcon, ListIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UploadIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
+import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleCheckIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, ServerIcon, LinkIcon, ListIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UploadIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
 import { useEffect, useRef, useState, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 let selecting = false
@@ -695,7 +695,7 @@ export function MoreView() {
     { name: t("views:more.groupWork"), rows: [["projects", t("views:more.projects"), t("views:more.projectsSub", { name: st.workspace?.name }), FolderIcon], ["sessions", t("views:more.sessions"), t("views:more.sessionsSub"), SquareTerminalIcon], ["stats", t("views:more.stats"), t("views:more.statsSub"), ChartNoAxesColumnIcon]] },
     { name: t("views:more.groupLinks"), rows: [["integrations", t("views:more.integrations"), t("views:more.integrationsSub"), PlugIcon], ["channels", t("views:more.channels"), t("views:more.channelsSub"), MessagesSquareIcon], ["mail", t("views:more.mail"), t("views:more.mailSub"), MailIcon], ["contacts", t("views:more.contacts"), t("views:more.contactsSub"), ContactRoundIcon], ["knowledge", t("views:more.knowledge"), t("views:more.knowledgeSub"), BookOpenIcon]] },
     { name: t("views:more.groupAuto"), rows: [["bots", t("views:more.bots"), t("views:more.botsSub"), BotIcon], ["auto", t("views:more.auto"), t("views:more.autoSub"), WorkflowIcon], ["signals", t("views:more.signals"), t("views:more.signalsSub"), RadioIcon]] },
-    { name: t("views:more.groupSystem"), rows: [["devices", t("views:more.devices"), t("views:more.devicesSub"), SquareTerminalIcon], ["accounts", t("views:more.accounts"), t("views:more.accountsSub"), LockIcon], ["vault", t("views:more.vault"), t("views:more.vaultSub"), KeyRoundIcon], ["settings", t("views:more.settings"), t("views:more.settingsSub"), SettingsIcon]] },
+    { name: t("views:more.groupSystem"), rows: [["devices", t("views:more.devices"), t("views:more.devicesSub"), ServerIcon], ["accounts", t("views:more.accounts"), t("views:more.accountsSub"), KeyRoundIcon], ["vault", t("views:more.vault"), t("views:more.vaultSub"), LockIcon], ["settings", t("views:more.settings"), t("views:more.settingsSub"), SettingsIcon]] },
   ] as const
   return (
     <Page title={t("views:more.title")} max={640}>

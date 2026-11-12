@@ -52,6 +52,7 @@ export default {
     noMatch: "No matching items",
     noItems: "No items yet",
     noItemsSub: "Use “New item” at the top right to save your first password or token.",
+    noItemsLockedSub: "Items can be added once the vault opens again.",
     recentUses: "Recent use",
     noUses: "No use yet",
     rules: "Rules",

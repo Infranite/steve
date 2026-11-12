@@ -7,7 +7,7 @@ import { HubData } from "@/backup-settings"
 import { OutboxDead } from "@/outbox-settings"
 import { useEffect, useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, PlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon } from "lucide-react"
+import { ChevronRightIcon, PlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -38,6 +38,8 @@ import { MODELS_CAT, ModelsSettingsPane, SteveJudges } from "@/models-settings"
 import { ModelPicker } from "@/model-picker"
 import { RecentStats } from "@/stats/drill"
 import { AboutVersions } from "@/version"
+import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
+import { Ico as AutoIco, when } from "@/auto/common"
 
 /* ═════════ Bot 列表 ═════════ */
 let botFilter: "全部" | "启用" | "停用" = "全部"
@@ -218,7 +220,7 @@ export function BotView({ k }: { k: string }) {
       <div className="-mx-4 mb-6 overflow-x-auto px-4"><Segmented value={botTab} onChange={(v) => { botTab = v; r() }} options={tabs} /></div>
       {botTab === "概览" && (mine.length ? <Group>{mine.map((i) => <ItemRow key={i.id} i={i} bot={false} />)}</Group> : <Empty title={t("manage:detail.noRunning")} />)}
       {botTab === "对外身份" && <PersonasSection bot={k} />}
-      {botTab === "定时与流程" && <Empty title={t("manage:detail.scheduleEmpty")} sub={t("manage:detail.scheduleEmptySub")} />}
+      {botTab === "定时与流程" && <BotSchedules k={k} />}
       {botTab === "能力" && (
         <div className="flex flex-col gap-7" data-caps>
           <section><SectionLabel>{t("manage:caps.steveTools")}</SectionLabel>
@@ -343,6 +345,22 @@ function LanguageRow() {
   const t = useT()
   return <Row title={t("common:settings.language")} sub={t("common:settings.languageSub")} data-language-row><LanguageSwitch /></Row>
 }
+/** a Bot's schedules, read from 自动化 where they are made and changed */
+function BotSchedules({ k }: { k: string }) {
+  const t = useT()
+  const L = useFlowLoad(() => flowApi.schedules(), [], ["flow", "run"])
+  if (L.unwired) return <Empty title={t("manage:detail.scheduleEmpty")} sub={t("manage:detail.scheduleEmptySub")} />
+  if (L.error && !L.data) return <Empty title={errText(L.error)} />
+  if (!L.data) return <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
+  const mine = L.data.filter((s) => s.bot === k)
+  return <section data-bot-schedules>
+    <SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/auto/schedules")} data-bot-schedules-open>{t("manage:detail.scheduleOpen")}</Button>}>{t("manage:detail.scheduleCount", { n: mine.length })}</SectionLabel>
+    {mine.length ? <Group>{mine.map((s) => <Row key={s.id} icon={<AutoIco I={ClockIcon} />} title={s.name} onClick={() => go("#/auto/schedules")} data-bot-schedule={s.id}
+      sub={<Meta><span>{s.describe}</span><span>{s.enabled ? (s.next_at ? t("auto:schedule.next", { time: when(s.next_at) }) : t("auto:schedule.onPlan")) : t("auto:disabled")}</span></Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
+      : <div className="px-1 type-callout text-muted-foreground">{t("manage:detail.scheduleNone")}</div>}
+    <p className="mt-6 px-1 type-footnote text-muted-foreground">{t("manage:detail.scheduleNote")}</p>
+  </section>
+}
 function Pane({ id }: { id: string }) {
   const t = useT()
   const c = st.settings
@@ -428,8 +446,8 @@ function WorkspacePane() {
     </FieldGroup>
     <section><SectionLabel>{t("manage:ws.here")}</SectionLabel><Group>
       <Row icon={<FolderIcon className="size-4 text-muted-foreground" strokeWidth={1.5} />} title={t("manage:ws.projects", { count: st.projects.length })} onClick={() => go("#/projects")}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
-      <Row title={t("manage:ws.bots", { count: Object.keys(st.bots).length })} onClick={() => go("#/bots")}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
-      <Row title={t("manage:ws.items", { count: st.items.length })} onClick={() => go("#/items")}><ChevronRightIcon className="size-4 text-tertiary" /></Row></Group></section>
+      <Row icon={<BotIcon className="size-4 text-muted-foreground" strokeWidth={1.5} />} title={t("manage:ws.bots", { count: Object.keys(st.bots).length })} onClick={() => go("#/bots")}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
+      <Row icon={<ListTodoIcon className="size-4 text-muted-foreground" strokeWidth={1.5} />} title={t("manage:ws.items", { count: st.items.length })} onClick={() => go("#/items")}><ChevronRightIcon className="size-4 text-tertiary" /></Row></Group></section>
     <section><SectionLabel>{t("manage:ws.all", { n: st.workspaces.length })}</SectionLabel>
       <Group>{st.workspaces.map((x) => <Row key={x.id} title={x.name} sub={x.description || undefined}>{x.id === w.id ? <span className="type-footnote text-muted-foreground">{t("manage:ws.current")}</span> : <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void import("@/store").then((m) => m.switchWorkspace(x.id))}>{t("manage:ws.switch")}</Button>}</Row>)}</Group>
       <Button size="sm" variant="outline" className="mt-3" onClick={() => openSheet("newWorkspace")}><PlusIcon />{t("manage:ws.new")}</Button></section>

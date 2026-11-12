@@ -70,7 +70,7 @@ function FlowList({ L, onNew }: { L: Load<FlowSummary[]>; onNew: () => void }) {
   const t = useT()
   if (L.error && !L.data) return <Failed title="" msg={errText(L.error)} retry={() => void L.reload()} />
   if (!L.data) return null
-  if (!L.data.length) return <><Empty title={t("auto:flows.emptyTitle")} sub={t("auto:flows.emptySub")} /><div className="flex justify-center"><Button variant="outline" onClick={onNew}><PlusIcon />{t("auto:newFlow")}</Button></div></>
+  if (!L.data.length) return <Empty title={t("auto:flows.emptyTitle")} sub={t("auto:flows.emptySub")} action={<Button variant="outline" onClick={onNew}><PlusIcon />{t("auto:newFlow")}</Button>} />
   const toggle = async (f: FlowSummary, v: boolean) => {
     setBusy(f.id)
     try { await flowApi.patchFlow(f.id, { enabled: v }); toast(v ? t("auto:flows.enabledToast") : t("auto:flows.disabledToast")); await L.reload() } catch (e) { toast(errText(e)) } finally { setBusy(null) }

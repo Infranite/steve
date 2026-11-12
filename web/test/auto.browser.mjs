@@ -65,7 +65,10 @@ const run = async ({ width, height, scheme }) => {
     await page.waitForFunction(() => document.querySelector("[data-allow-private] input")?.value === "192.168.1.10, nas.local, router.lan")
     await fits(); await shot("allow-private")
     // a new schedule: $20 for an item, $1 for a report, and what you type stays
-    await page.goto(base + "/test/fixtures/auto.html#/auto/schedules"); await page.locator("[data-new-schedule]").click()
+    await page.goto(base + "/test/fixtures/auto.html#/auto/schedules")
+    // no schedules yet: the way to make one sits inside the empty state, not a page-height below it
+    await page.locator('[data-slot="empty"] button').waitFor()
+    await page.locator("[data-new-schedule]").click()
     const budget = page.locator("#sch-budget"), mode = page.locator('[data-pick="sch-mode"]')
     await budget.waitFor()
     assert.equal(await budget.inputValue(), "20")

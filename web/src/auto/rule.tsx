@@ -152,7 +152,7 @@ export function RuleView({ id }: { id: string }) {
                 sub={[r.dry_run ? t("auto:rule.dryRun") : "", "v" + r.flow_version, r.error ?? "", t("auto:rule.clickSteps")].filter(Boolean).join(" · ")}>
                 {(r.status === "running" || r.status === "waiting") && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={(e) => { e.stopPropagation(); void act("cancel", () => flowApi.cancelRun(r.id), t("auto:rule.runCancelled")).then(() => runs.reload()) }}>{t("common:action.cancel")}</Button>}
                 <span className="type-footnote tabular-nums text-muted-foreground">{tm(r.started)}</span></Row>))}</Group>
-              : <Empty title={runs.data ? t("auto:noRuns") : t("auto:loading")} />}
+              : <div className="px-1 type-callout text-muted-foreground">{runs.data ? t("auto:noRuns") : t("auto:loading")}</div>}
           </section>
           <section data-versions>
             <SectionLabel>{t("auto:rule.versions")}</SectionLabel>

@@ -125,7 +125,7 @@ export function Inspector({ g, n, onChange, onSelect, flows, sources, step, flow
   const prev = upstream(g, n.id)
   return (
     <div className="flex flex-col gap-4" data-inspector data-kind={n.kind}>
-      <SectionLabel className="mb-0" right={<span className="font-normal">{group}</span>}>{label}{n.kind === "action" && c.action ? " · " + (actionLabel(c.action) ?? c.action) : ""}</SectionLabel>
+      <SectionLabel className="mb-0" right={group !== label ? <span className="font-normal">{group}</span> : undefined}>{label}{n.kind === "action" && c.action ? " · " + (actionLabel(c.action) ?? c.action) : ""}</SectionLabel>
       <div className="flex flex-col gap-3 px-1">
         <F label={t("auto:node.name")}><Input className="rounded-lg" value={n.title} onChange={(e) => onChange(patchNode(g, n.id, (x) => { x.title = e.target.value }))} data-node-title /></F>
         <F label={t("auto:node.note")}><Input className="rounded-lg" value={n.note ?? ""} onChange={(e) => onChange(patchNode(g, n.id, (x) => { x.note = e.target.value }))} /></F>

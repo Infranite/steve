@@ -27,7 +27,7 @@ export function SourceView({ adapter }: { adapter: string }) {
   if (L.error && !L.data) return <Failed title={t("auto:source.page")} back={BACK} msg={errText(L.error)} retry={() => void L.reload()} />
   if (!L.data) return <Loading title={t("auto:source.page")} back={BACK} />
   if (adapter === "im" || s?.source === "im") return (
-    <Page title="IM" back={BACK}><Empty title={t("auto:source.imMoved")} sub={t("auto:source.imMovedSub")} /><div className="flex justify-center"><Button onClick={() => go("#/channels")}>{t("auto:source.toChannels")}</Button></div></Page>
+    <Page title="IM" back={BACK}><Empty title={t("auto:source.imMoved")} sub={t("auto:source.imMovedSub")} action={<Button onClick={() => go("#/channels")}>{t("auto:source.toChannels")}</Button>} /></Page>
   )
   if (!s) return <Page title={t("auto:source.page")} back={BACK}><Empty title={t("auto:source.notFound")} sub={t("auto:source.notFoundSub")} /></Page>
   const patch = async (p: SourcePatch, ok?: string) => {

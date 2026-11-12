@@ -311,14 +311,10 @@ export function AccessSettingsPane() {
           <PairContent onClaimed={() => void load()} />
         </div>
       ) : (
-        <Group>
-          <Row title={t("pages:access.pairTitle")}>
-            <Button size="sm" onClick={() => setShowPair(true)} data-open-pair-qr>
-              <QrCodeIcon className="size-4" />
-              {t("pages:access.pairButton")}
-            </Button>
-          </Row>
-        </Group>
+        <Button size="sm" variant="outline" onClick={() => setShowPair(true)} data-open-pair-qr>
+          <QrCodeIcon className="size-4" />
+          {t("pages:access.pairButton")}
+        </Button>
       )}
     </section>
 
