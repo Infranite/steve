@@ -1,1 +1,0 @@
-When a collaboration work unit reports a failed review or blocker, its child item now finishes as failed after its turn ends. The result and reason remain in the work graph for the coordinator to retry or replan, without leaving an idle child item that later raises a separate stall alert.

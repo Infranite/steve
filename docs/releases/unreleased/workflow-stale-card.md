@@ -1,1 +1,0 @@
-After a restart, Steve now clears an old parent stop alert when its collaboration graph is already running or waiting for a known reason. The item returns to its current work status, while real questions and uncertain external effects continue to wait for the user.
