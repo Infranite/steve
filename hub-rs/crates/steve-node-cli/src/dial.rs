@@ -352,8 +352,8 @@ pub async fn serve_at(
 }
 
 /// The file in a Node's home that says why its last link to the Hub failed,
-/// `{"at": <ms>, "error": "…"}`; gone once it links. Its Hub shows its own Node's (a remote
-/// Node's reason stays in that Node's log: it never reached the Hub).
+/// `{"at": <ms>, "error": "…"}`; gone once it links. Its Hub reads its own Node's; a remote Node
+/// tells its Hub a fault in a handshake report instead (`tell_hub`).
 pub const LINK_STATUS: &str = "link-status.json";
 
 /// Why the Node in `home` could not link last, and when (ms): `None` once it linked.
@@ -416,6 +416,8 @@ async fn serve_with(
     let node_id = NodeId::new(p.node_id.clone()).map_err(|_| anyhow!("bad node id"))?;
     let server = NodeServer::new(Arc::new(node.clone()));
     let mut backoff = Duration::from_millis(200);
+    // the fault last told to the Hub, and when
+    let mut told: Option<(String, std::time::Instant)> = None;
     loop {
         // over tailcat, a new tunnel for every link: one whose far end went away (a Hub restart)
         // can stay up and lead nowhere
@@ -428,7 +430,7 @@ async fn serve_with(
             },
             (None, None) => unreachable!(),
         };
-        let linked = match url {
+        let linked = match &url {
             Ok(url) => {
                 let key = *known.lock().unwrap();
                 let learnt = |k: [u8; 32]| {
@@ -463,12 +465,26 @@ async fn serve_with(
                 let trust = trust_now.lock().unwrap().clone();
                 let linked = || status.linked();
                 link_once(
-                    &node, &server, &link, &url, &node_id, hub, id, &trust, &linked,
+                    &node, &server, &link, url, &node_id, hub, id, &trust, &linked,
                 )
                 .await
             }
             Err(e) => Err(Stop::Retry(format!("{e:#}"))),
         };
+        // a fault the Hub could not see from its side: told in place of a hello, so its owner
+        // sees it on the devices page; again when it changes or every few minutes (a Hub restart
+        // forgets it)
+        if let (Err(Stop::Fault(e)), Ok(url)) = (&linked, &url)
+            && told
+                .as_ref()
+                .is_none_or(|(t, at)| t != e || at.elapsed() >= RETELL)
+        {
+            let trust = trust_now.lock().unwrap().clone();
+            match tell_hub(url, &trust, &node_id, &p.hub_id, id, e).await {
+                Ok(()) => told = Some((e.clone(), std::time::Instant::now())),
+                Err(why) => tracing::info!("telling the hub why the link failed: {why}"),
+            }
+        }
         drop(tunnel);
         match linked {
             Ok(()) => backoff = Duration::from_millis(200),
@@ -496,6 +512,27 @@ async fn serve_with(
 
 /// Connecting and upgrading one link.
 const CONNECT: Duration = Duration::from_secs(30);
+/// How often the same link fault is told to the Hub again.
+const RETELL: Duration = Duration::from_secs(300);
+
+/// Tells the Hub at `url` why this Node could not link (a handshake `report` instead of a hello),
+/// on a connection of its own that links nothing.
+async fn tell_hub(
+    url: &str,
+    trust: &Trust,
+    node_id: &NodeId,
+    hub_id: &str,
+    id: &Identity,
+    why: &str,
+) -> Result<(), String> {
+    let (mut sink, mut stream) = tokio::time::timeout(CONNECT, tls::connect(url, trust))
+        .await
+        .map_err(|_| format!("no answer from the hub within {}s", CONNECT.as_secs()))?
+        .map_err(|e| e.to_string())?;
+    handshake::report(&mut sink, &mut stream, node_id, id, Some(hub_id), why)
+        .await
+        .map_err(|e| e.to_string())
+}
 
 #[derive(Debug, PartialEq)]
 enum Stop {

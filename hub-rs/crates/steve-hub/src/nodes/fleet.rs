@@ -26,6 +26,9 @@ struct Entry {
     tools: Option<Arc<dyn HubTools>>,
     /// The protocol of the Node's latest link since the Hub started (`None`: not linked yet).
     proto: Option<(u16, u16)>,
+    /// What a remote Node last reported it could not link with, and when (ms), since it last
+    /// linked (handshake `report`).
+    link_failure: Option<(i64, String)>,
 }
 
 pub struct NodeFleet {
@@ -167,6 +170,7 @@ impl NodeFleet {
             runtime: None,
             tools: None,
             proto: None,
+            link_failure: None,
         });
         f(e)
     }
@@ -178,7 +182,16 @@ impl NodeFleet {
 
     /// Records the protocol the Node's hello said, for each link it opens.
     pub fn linked(&self, node: &NodeId, proto: (u16, u16)) {
-        self.entry(node, |e| e.proto = Some(proto));
+        self.entry(node, |e| {
+            e.proto = Some(proto);
+            e.link_failure = None;
+        });
+    }
+
+    /// A remote Node said why it could not link (a handshake `report`): shown until it links.
+    pub fn link_failed(&self, node: &NodeId, at: i64, why: &str) {
+        let why = steve_node_wire::handshake::clip_report(why).to_string();
+        self.entry(node, |e| e.link_failure = Some((at, why)));
     }
 
     /// Whether the Node is known to speak `since` or later: its latest link said so. A Node not
@@ -245,13 +258,15 @@ impl NodeFleet {
             .and_then(|e| e.runtime.clone())
     }
 
-    /// Why `node` could not link last, and when (ms), while it is not linked. Only the Hub's own
-    /// Node says (it notes it in its home); a remote Node's reason stays in its own log.
+    /// Why `node` could not link last, and when (ms), while it is not linked: the Hub's own Node
+    /// notes it in its home, a remote Node reports it in place of a hello ([`Self::link_failed`];
+    /// kept in memory, so a Hub restart forgets it until the Node reports again).
     pub fn link_failure(&self, node: &str) -> Option<(i64, String)> {
-        if node != crate::wire::local_service::NODE_ID {
-            return None;
+        if node == crate::wire::local_service::NODE_ID {
+            return steve_node_cli::dial::link_status(&self.data_dir.join("node"));
         }
-        steve_node_cli::dial::link_status(&self.data_dir.join("node"))
+        let nodes = self.nodes.lock().unwrap();
+        nodes.get(node).and_then(|e| e.link_failure.clone())
     }
 
     /// `node` has no live link: why, as far as the Hub knows. `None`: it is linked.

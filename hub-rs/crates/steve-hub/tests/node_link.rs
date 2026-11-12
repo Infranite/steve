@@ -176,19 +176,30 @@ async fn a_node_with_many_historical_streams_links_and_reconciles_every_head() {
         tx.execute(
             "INSERT INTO streams(stream,epoch,produced,acknowledged) VALUES (?1,'epoch01',1,1)",
             [format!("stream_{i:04}_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")],
-        ).unwrap();
+        )
+        .unwrap();
     }
     tx.commit().unwrap();
     let pairing = Pairing {
-        hub_url: h.url(), node_id: node.to_string(), hub_id: h.svc.hub_id.clone(),
-        pin: None, loopback: true, hub_key: None, name: "local".into(),
+        hub_url: h.url(),
+        node_id: node.to_string(),
+        hub_id: h.svc.hub_id.clone(),
+        pin: None,
+        loopback: true,
+        hub_key: None,
+        name: "local".into(),
     };
     let task = tokio::spawn(async move {
         steve_node_cli::dial::serve(local, &pairing, &id, &Trust::LoopbackPlaintext).await
     });
     let remote = h.fleet.remote(&node);
-    until("attached with 800 heads", 10, || remote.generation() == Some(1)).await;
-    let snapshot = steve_hub::wire::node_runtime::read_snapshot(remote.as_ref(), 100).await.unwrap();
+    until("attached with 800 heads", 10, || {
+        remote.generation() == Some(1)
+    })
+    .await;
+    let snapshot = steve_hub::wire::node_runtime::read_snapshot(remote.as_ref(), 100)
+        .await
+        .unwrap();
     assert_eq!(snapshot.heads.len(), 800);
     task.abort();
 }
@@ -528,4 +539,112 @@ async fn a_remote_node_takes_only_its_owners_work() {
     rt.bind(&binding).unwrap();
     n.task.abort();
     n.node.shutdown().await;
+}
+
+/// A remote Node that cannot link tells its Hub why in place of a hello: the devices page
+/// (`GET /api/nodes`) shows it as the Node's `link_error` until the Node links.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_nodes_link_failure_reaches_the_devices_page() {
+    use steve_node_wire::handshake;
+    use steve_node_wire::tls;
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    let nodes = || async {
+        reqwest::Client::new()
+            .get(format!("{}/api/nodes", h.url()))
+            .header("x-test-user", "u1")
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+    let error_of = |v: &serde_json::Value| {
+        let rows = v.get("nodes").unwrap_or(v).as_array().unwrap().clone();
+        rows.into_iter()
+            .find(|n| n["node_id"] == node.as_str())
+            .unwrap()["link_error"]
+            .clone()
+    };
+    assert!(error_of(&nodes().await).is_null());
+
+    let (mut sink, mut stream) = tls::connect(&h.ws_url(), &Trust::LoopbackPlaintext)
+        .await
+        .unwrap();
+    let why = "invalid: a welcome whose signature does not hold";
+    handshake::report(&mut sink, &mut stream, &node, &id, Some(&h.svc.hub_id), why)
+        .await
+        .unwrap();
+    let e = error_of(&nodes().await);
+    assert_eq!(e["error"], why);
+    assert!(e["at"].as_i64().unwrap() > 0);
+    assert_eq!(
+        h.fleet.remote(&node).generation(),
+        None,
+        "a report links nothing"
+    );
+
+    // another identity cannot speak for it
+    let other = Identity::generate().unwrap();
+    let (mut sink, mut stream) = tls::connect(&h.ws_url(), &Trust::LoopbackPlaintext)
+        .await
+        .unwrap();
+    let r = handshake::report(
+        &mut sink,
+        &mut stream,
+        &node,
+        &other,
+        Some(&h.svc.hub_id),
+        "forged",
+    )
+    .await;
+    assert_eq!(r.unwrap_err().code, "denied");
+    assert_eq!(error_of(&nodes().await)["error"], why);
+
+    // once it links, the reason is gone
+    let fake = FakeNode::new(node.as_str());
+    let _l = dial(&h, &id, &node, fake, 1).await.unwrap();
+    until("linked", 10, || {
+        h.fleet.remote(&node).generation().is_some()
+    })
+    .await;
+    assert!(error_of(&nodes().await).is_null());
+}
+
+/// The steve-node dial loop itself: a hello the Hub cannot take (its store fails here) is a
+/// fault the Node tells the Hub in a report, and the reason is gone once the Node links.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_dial_loop_reports_a_fault_and_links_once_it_clears() {
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    h.store
+        .transaction::<_, steve_store::StoreError>(|tx| {
+            tx.execute_batch(
+                "CREATE TRIGGER no_links BEFORE UPDATE OF generation ON nodes
+                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let n = local_node(&h, id, &node).await;
+    until("the fault reported", 15, || {
+        h.fleet.link_failure(node.as_str()).is_some()
+    })
+    .await;
+    let (_, why) = h.fleet.link_failure(node.as_str()).unwrap();
+    assert!(why.starts_with("internal:"), "{why}");
+    assert_eq!(h.fleet.remote(&node).generation(), None);
+    h.store
+        .transaction::<_, steve_store::StoreError>(|tx| {
+            tx.execute_batch("DROP TRIGGER no_links;")?;
+            Ok(())
+        })
+        .unwrap();
+    until("linked", 40, || {
+        h.fleet.remote(&node).generation().is_some()
+    })
+    .await;
+    assert_eq!(h.fleet.link_failure(node.as_str()), None);
+    n.task.abort();
 }

@@ -2462,11 +2462,20 @@ mod routed_tests {
             Some("internal: control message hello is 69214 bytes, over the 65536 limit")
         );
         assert_eq!(fleet.link_failure("local").map(|f| f.0), Some(5));
+        assert_eq!(fleet.link_failure("n2"), None, "nothing reported yet");
+        // a remote Node's reason arrives in its handshake report, and goes once it links
+        let n2 = steve_node_api::NodeId::new("n2").unwrap();
+        fleet.link_failed(&n2, 7, "invalid: a welcome whose signature does not hold");
         assert_eq!(
             fleet.link_failure("n2"),
-            None,
-            "a remote Node's stays with it"
+            Some((7, "invalid: a welcome whose signature does not hold".into()))
         );
+        assert_eq!(
+            fleet.offline(&n2).as_deref(),
+            Some("invalid: a welcome whose signature does not hold")
+        );
+        fleet.linked(&n2, steve_node_api::PROTOCOL);
+        assert_eq!(fleet.link_failure("n2"), None);
     }
 
     /// A RoutedRuntime with the local Node on (a fake one), item `i1` with an idle session `s1`
