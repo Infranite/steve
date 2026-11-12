@@ -4,7 +4,8 @@
  * 单日范围（今天）按小时（ST-43）：点一个小时，下钻用 `hour` 取那个小时里完成或新建的事项，和柱子同一个区间。 */
 import { useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { ChartColumnIcon, TableIcon, XIcon } from "lucide-react"
+import { ArrowDownUpIcon, ChartColumnIcon, ListTodoIcon, TableIcon, XIcon } from "lucide-react"
+import { Panel, PanelFoot, StatStrip } from "@/panel"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 import { ago } from "@/i18n/format"
@@ -14,7 +15,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { st, pendingCards, WT, type Item, type Orphan } from "@/store"
 import { go, ItemNo, Segmented, StatusDot } from "@/ui"
 import { stats, type Filter, type Series, type Summary } from "@/api/stats"
-import { Chart, ChartHead, ChartTable, HBars, STATE, type BarRow } from "@/stats/chart"
+import { Chart, ChartBody, ChartHead, ChartTable, HBars, STATE, type BarRow } from "@/stats/chart"
 import { ItemsTable } from "@/stats/items"
 import { bucketName, delta, fmtRange, isHour, oneDay, zoneName, useStats } from "@/stats/format"
 
@@ -45,10 +46,11 @@ function Tile({ k, label, scope, value, foot, def, tone, on, onClick }: { k: str
   return (
     <Tooltip>
       <TooltipTrigger render={<button type="button" onClick={onClick} aria-pressed={on} aria-label={t("stats:overview.tileAria", { label, scope })}
-        className={cn("min-w-0 rounded-lg px-3 py-2.5 text-left outline-none transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring", on && "bg-muted")} data-kpi={k} />}>
-        <span className="flex items-center gap-1.5 type-label text-muted-foreground"><span aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: tone }} />{label}<span className="font-normal text-tertiary">· {scope}</span></span>
-        <span className="mt-1 block truncate text-[26px] font-semibold leading-8 tracking-[-0.02em] text-foreground">{value}</span>
-        <span className="mt-0.5 block min-h-4 truncate type-footnote text-muted-foreground">{foot}</span>
+        className={cn("relative min-w-0 border-border px-5 py-4 text-left outline-none transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 [&:not(:first-child)]:border-l max-lg:[&:nth-child(3)]:border-l-0 max-lg:[&:nth-child(n+3)]:border-t", on && "bg-muted/60 hover:bg-muted/60")} data-kpi={k} />}>
+        {on && <span aria-hidden className="absolute inset-x-0 top-0 h-0.5" style={{ background: tone }} />}
+        <span className="flex items-center gap-1.5 type-footnote text-muted-foreground"><span aria-hidden className="size-2 shrink-0 rounded-[3px]" style={{ background: tone }} />{label}<span className="text-tertiary">· {scope}</span></span>
+        <span className="mt-2 block truncate font-mono text-[28px] leading-8 tabular-nums tracking-[-0.03em] text-foreground">{value}</span>
+        <span className="mt-1 block min-h-4 truncate type-footnote text-muted-foreground">{foot}</span>
       </TooltipTrigger>
       <TooltipContent className="max-w-64">{def}</TooltipContent>
     </Tooltip>
@@ -62,7 +64,7 @@ export function CoreKpis({ s, f, prevName, rangeName, drill, setDrill }: { s: Su
   const toggle = (d: Drill) => setDrill(drill === d ? null : d)
   const d = delta(s.throughput.done, s.prev?.throughput.done)
   return (
-    <div className="-mx-3 grid grid-cols-2 gap-1 lg:grid-cols-4" data-core-kpis>
+    <div className="grid grid-cols-2 lg:grid-cols-4" data-core-kpis>
       <Tile k="run" label={t("stats:overview.run")} scope={t("stats:overview.now")} value={now.run.length} tone={STATE.run} foot={t("stats:overview.runFoot", { count: now.by("run").length + now.by("wait").length + now.by("block").length + now.by("pause").length })}
         def={t("stats:overview.runDef")} on={drill === "run"} onClick={() => toggle("run")} />
       <Tile k="wait" label={t("stats:overview.wait")} scope={t("stats:overview.now")} value={now.cards.length} tone={STATE.wait} foot={now.cards.length ? t("stats:overview.waitFoot", { count: new Set(now.cards.map((c) => c.i.id || c.w.decision)).size }) : t("stats:overview.noneWaiting")}
@@ -99,14 +101,21 @@ export function FlowChart({ s, f, fkey, live, drill, setDrill }: { s: Summary; f
   const pick = (day: string | null) => setDrill(day ? `day:${day}` : null)
   const err = cr.s === "error" ? cr.msg : dn.s === "error" ? dn.msg : null
   return (
-    <section data-flow-chart>
-      <ChartHead k="flow" title={t("stats:overview.flow")} meta={rangeMeta(t("stats:overview.unitItems"), s, hourly)}
+    <Panel k="flow" data-flow-chart>
+      <ChartHead k="flow" icon={<ArrowDownUpIcon />} title={t("stats:overview.flow")} sub={t("stats:panel.flowSub")} meta={rangeMeta(t("stats:overview.unitItems"), s, hourly)}
         legend={[{ label: t("stats:overview.flowCreated", { count: s.throughput.created }), c: STATE.created }, { label: t("stats:overview.flowDone", { count: s.throughput.done }), c: STATE.done }, ...(hourly && data?.current != null ? [{ label: t("stats:overview.flowCurrent"), c: "var(--muted)" }] : [])]}
         right={<ModeSwitch table={table} set={setTable} />} />
-      {!data ? <Loading err={err} /> : table ? <ChartTable data={data} fmt={(v) => String(Math.round(v))} picked={picked} onPick={pick} />
-        : <Chart data={data} kind="group" int fmt={(v) => String(Math.round(v))} colors={[STATE.created, STATE.done]} picked={picked} onPick={pick} label={hourly ? t("stats:overview.flowAriaHourly") : t("stats:overview.flowAriaDaily")} height={200} />}
-      {data && data.series.every((l) => l.values.every((v) => !v)) && <div className="mt-2 type-footnote text-muted-foreground">{t("stats:overview.flowEmpty")}</div>}
-    </section>
+      <ChartBody>
+        {!data ? <Loading err={err} /> : table ? <ChartTable data={data} fmt={(v) => String(Math.round(v))} picked={picked} onPick={pick} />
+          : <Chart data={data} kind="group" int fmt={(v) => String(Math.round(v))} colors={[STATE.created, STATE.done]} picked={picked} onPick={pick} label={hourly ? t("stats:overview.flowAriaHourly") : t("stats:overview.flowAriaDaily")} height={200} />}
+        {data && data.series.every((l) => l.values.every((v) => !v)) && <div className="mt-2 type-footnote text-muted-foreground">{t("stats:overview.flowEmpty")}</div>}
+      </ChartBody>
+      <StatStrip items={[
+        { k: "created", label: t("stats:overview.created"), value: s.throughput.created },
+        { k: "done", label: t("stats:overview.completed"), value: s.throughput.done, tone: s.throughput.done ? "ok" : undefined },
+        { k: "net", label: t("stats:panel.net"), value: s.throughput.created - s.throughput.done > 0 ? "+" + (s.throughput.created - s.throughput.done) : s.throughput.created - s.throughput.done },
+      ]} />
+    </Panel>
   )
 }
 
@@ -118,12 +127,14 @@ export function StatusBars({ f, drill, setDrill }: { f: Filter; drill: Drill | n
   const total = rows.reduce((a, r) => a + r.value, 0)
   const fails = now.fail.filter((i) => i.waits.some((w) => w.type === "fail")).length
   return (
-    <section data-status-bars>
-      <ChartHead k="status" title={t("stats:overview.statusTitle")} meta={t("stats:overview.statusMeta", { count: total })} />
-      {total === 0 ? <div className="py-8 text-center type-callout text-muted-foreground">{t("stats:overview.statusNone")}</div>
-        : <HBars k="status" label={t("stats:overview.statusAria")} rows={rows} total={Math.max(...rows.map((r) => r.value))} picked={drill?.startsWith("status:") ? drill.slice(7) : null} onPick={(k) => setDrill(drill === `status:${k}` ? null : `status:${k}` as Drill)} />}
-      {fails > 0 && <div className="mt-2 type-footnote text-muted-foreground"><Trans t={t} i18nKey="stats:overview.failsNote" count={fails} components={{ link: <button type="button" className={link} onClick={() => setDrill("fail")} /> }} /></div>}
-    </section>
+    <Panel k="status" data-status-bars>
+      <ChartHead k="status" icon={<ListTodoIcon />} title={t("stats:overview.statusTitle")} sub={t("stats:panel.statusSub")} meta={t("stats:overview.statusMeta", { count: total })} />
+      <ChartBody className="flex-1">
+        {total === 0 ? <div className="py-8 text-center type-callout text-muted-foreground">{t("stats:overview.statusNone")}</div>
+          : <div className="-mx-1.5"><HBars k="status" label={t("stats:overview.statusAria")} rows={rows} total={Math.max(...rows.map((r) => r.value))} picked={drill?.startsWith("status:") ? drill.slice(7) : null} onPick={(k) => setDrill(drill === `status:${k}` ? null : `status:${k}` as Drill)} /></div>}
+      </ChartBody>
+      {fails > 0 && <PanelFoot meta={<Trans t={t} i18nKey="stats:overview.failsNote" count={fails} components={{ link: <button type="button" className={link} onClick={() => setDrill("fail")} /> }} />} />}
+    </Panel>
   )
 }
 
@@ -179,13 +190,13 @@ export function DrillPanel({ d, f, fkey, live, rangeName, close }: { d: Drill; f
     body = <ItemsTable key={dayTab} f={g} fkey={fkey + d + dayTab} live={live} only={dayTab} sort0={dayTab === "done" ? "done_at" : "est"} />
   }
   return (
-    <section className="rounded-xl border px-4 pt-3 pb-2" aria-label={t("stats:overview.drillAria")} data-drill={d}>
+    <section className="bg-muted/20 px-5 pt-3.5 pb-2" aria-label={t("stats:overview.drillAria")} data-drill={d}>
       <div className="mb-2 flex items-center gap-2">
-        <h3 className="min-w-0 flex-1 type-headline">{title}</h3>
+        <h3 className="min-w-0 flex-1 text-[14px] font-medium">{title}</h3>
         {more && <span className="type-footnote">{more}</span>}
         <Button size="icon-xs" variant="ghost" className="text-muted-foreground" aria-label={t("stats:overview.drillClose")} onClick={close} data-drill-close><XIcon /></Button>
       </div>
-      {body}
+      <div className={cn(d === "done" || d.startsWith("day:") ? "-mx-5" : undefined)}>{body}</div>
     </section>
   )
 }

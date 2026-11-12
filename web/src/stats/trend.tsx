@@ -2,12 +2,14 @@
  * tokens、费用是按天堆叠柱，命中率是折线；分组的颜色按顺序取 SERIES，超过 5 组并入“其他”。点一天，下面的用量明细切到那一天。
  * 单日范围（今天）按小时（ST-43）：点一个小时，用量明细切到那个小时。
  * 完成数和耗时不在这里：它们在概览和“耗时”里，用状态色画。 */
-import { useState } from "react"
+import { useState, type ReactNode } from "react"
+import { CoinsIcon } from "lucide-react"
+import { Panel } from "@/panel"
 import { Button } from "@/components/ui/button"
 import { stats, type Filter, type Group, type Metric } from "@/api/stats"
 import { Segmented } from "@/ui"
 import { Select } from "@/view-shared"
-import { Chart, ChartHead, ChartTable, fold, seriesColor, type Kind } from "@/stats/chart"
+import { Chart, ChartBody, ChartHead, ChartTable, fold, seriesColor, type Kind } from "@/stats/chart"
 import { Loading, ModeSwitch } from "@/stats/overview"
 import { t, useT } from "@/i18n"
 import { bucketName, fmtN, fmtPct, fmtRange, fmtUsd, oneDay, zoneName, useStats } from "@/stats/format"
@@ -28,7 +30,8 @@ const GROUP_KEYS: Record<Tab, Group[]> = {
 const groupLabel = (g: Group) => (g === "token_type" ? t("stats:trend.group.tokenType") : g === "model" ? t("stats:trend.group.model") : g === "bot" ? t("stats:trend.group.bot") : g === "project" ? t("stats:trend.group.project") : g === "source" ? t("stats:trend.group.source") : t("stats:trend.group.none"))
 const TYPE_LABEL = (): Record<string, string> => ({ input: t("stats:col.input"), output: t("stats:col.output"), cache_read: t("stats:col.cacheRead"), cache_write: t("stats:col.cacheWrite") })
 
-export function Trend({ f, fkey, live, range, tz, picked, onPick }: { f: Filter; fkey: string; live: boolean; range: [string, string]; tz?: string; picked: string | null; onPick: (d: string | null) => void }) {
+/** the usage trend as a panel; `children` (its figures and notes) follow the chart */
+export function Trend({ f, fkey, live, range, tz, picked, onPick, children }: { f: Filter; fkey: string; live: boolean; range: [string, string]; tz?: string; picked: string | null; onPick: (d: string | null) => void; children?: ReactNode }) {
   const t = useT()
   const hourly = oneDay(f)
   const [tab, setTab] = useState<Tab>("tokens")
@@ -46,15 +49,16 @@ export function Trend({ f, fkey, live, range, tz, picked, onPick }: { f: Filter;
   const unit = UNIT()[tab][hourly ? 1 : 0], span = fmtRange(range[0], range[1])
   const meta = hourly ? t("stats:trend.metaHourly", { unit, range: span, zone: zoneName(tz) }) : t("stats:trend.meta", { unit, range: span })
   return (
-    <section data-trend>
-      <ChartHead k="usage" title={TITLE(tab)} meta={picked ? t("stats:trend.metaPicked", { meta, bucket: bucketName(picked) }) : meta}
+    <Panel k="usage" data-trend>
+      <ChartHead k="usage" icon={<CoinsIcon />} title={TITLE(tab)} sub={t("stats:panel.usageSub")} meta={picked ? t("stats:trend.metaPicked", { meta, bucket: bucketName(picked) }) : meta}
         legend={d && !one ? d.series.map((l, i) => ({ label: l.label, c: seriesColor(i, l.key), line: kind === "line" })) : undefined}
         right={<>
           <Segmented size="sm" value={tab} onChange={(v) => { setTab(v); setGroup(GROUP_KEYS[v][0]) }} options={TABS()} />
           {GROUP_KEYS[tab].length > 1 && <Select value={g} onChange={(v) => setGroup(v as Group)} options={GROUP_KEYS[tab].map((v) => ({ v, l: groupLabel(v) }))} testId="trend-group" />}
           <ModeSwitch table={table} set={setTable} />
         </>} />
-      {picked && <Button variant="ghost" size="xs" className="-mt-1 mb-2 text-blue" onClick={() => onPick(null)} data-picked>{hourly ? t("stats:trend.pickedDay", { bucket: bucketName(picked) }) : t("stats:trend.pickedAll", { bucket: bucketName(picked) })}</Button>}
+      <ChartBody>
+      {picked && <Button variant="ghost" size="xs" className="mb-2 text-blue" onClick={() => onPick(null)} data-picked>{hourly ? t("stats:trend.pickedDay", { bucket: bucketName(picked) }) : t("stats:trend.pickedAll", { bucket: bucketName(picked) })}</Button>}
       {data.s === "loading" ? <Loading h={220} />
         : data.s !== "ok" || !d ? <Loading h={220} err={data.s === "error" ? data.msg : t("stats:trend.loadFailed")} />
         : <>
@@ -62,6 +66,8 @@ export function Trend({ f, fkey, live, range, tz, picked, onPick }: { f: Filter;
           {cut > 0 && <div className="mt-2 type-footnote text-muted-foreground">{t("stats:trend.cut", { count: cut })}</div>}
           {empty && <div className="mt-2 type-footnote text-muted-foreground">{tab === "hit_rate" ? t("stats:trend.emptyHit") : t("stats:trend.emptyUsage")}</div>}
         </>}
-    </section>
+      </ChartBody>
+      {children}
+    </Panel>
   )
 }

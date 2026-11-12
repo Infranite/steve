@@ -22,13 +22,13 @@ export function ItemsTable({ f, fkey, live, only, sort0 = "est" }: { f: Filter; 
   const [d] = useStats(() => stats.items(f, sort, at, 50, only), [fkey, sort, at, only], live)
   return (
     <div data-items-table>
-      <div className="mb-2 flex items-center gap-2">
+      <div className="mb-2 flex items-center gap-2 px-5">
         <Select value={sort} onChange={(v) => { setSort(v as ItemSort); setCursor([]) }} options={SORTS().map(([v, l]) => ({ v, l }))} testId="items-sort" />
         {d.s === "ok" && <span className="type-footnote text-muted-foreground" data-items-total={d.v.total}>{only === "done" ? t("stats:items.totalDone", { count: d.v.total }) : only === "created" ? t("stats:items.totalCreated", { count: d.v.total }) : t("stats:items.totalActive", { count: d.v.total })}</span>}
       </div>
       {d.s === "loading" ? <div className="flex h-24 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
-        : d.s !== "ok" ? <div className="py-6 type-callout text-muted-foreground" role="alert">{d.s === "error" ? d.msg : t("stats:items.loadFailed")}</div>
-        : !d.v.rows.length ? <div className="py-6 type-callout text-muted-foreground">{only === "done" ? t("stats:items.emptyDone") : only === "created" ? t("stats:items.emptyCreated") : t("stats:items.emptyActive")}</div>
+        : d.s !== "ok" ? <div className="px-5 py-6 type-callout text-muted-foreground" role="alert">{d.s === "error" ? d.msg : t("stats:items.loadFailed")}</div>
+        : !d.v.rows.length ? <div className="px-5 py-6 type-callout text-muted-foreground">{only === "done" ? t("stats:items.emptyDone") : only === "created" ? t("stats:items.emptyCreated") : t("stats:items.emptyActive")}</div>
         : <>
           <Table label={t("stats:col.item")} min={760} head={<tr><th className={cn(th, "w-20")}>{t("stats:col.item")}</th><th className={th}>{t("stats:col.title")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.lead")}</th><th className={cn(th, "pl-4 text-right")}>Agent</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.wait")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.reworks")}</th><th className={cn(th, "pl-4 text-right")}>tokens</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:word.estCost")}<Est /></span></th></tr>}>
             {d.v.rows.map((r) => (
@@ -41,7 +41,7 @@ export function ItemsTable({ f, fkey, live, only, sort0 = "est" }: { f: Filter; 
             ))}
           </Table>
           {(cursor.length > 0 || d.v.next) && (
-            <div className="mt-2 flex items-center justify-end gap-2">
+            <div className="mt-2 flex items-center justify-end gap-2 px-5">
               <Button size="xs" variant="ghost" disabled={!cursor.length} onClick={() => setCursor(cursor.slice(0, -1))}>{t("stats:items.prevPage")}</Button>
               <Button size="xs" variant="ghost" disabled={!d.v.next} onClick={() => d.v.next && setCursor([...cursor, d.v.next])} data-items-next>{t("stats:items.nextPage")}</Button>
             </div>

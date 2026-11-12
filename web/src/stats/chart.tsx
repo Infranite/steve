@@ -9,6 +9,7 @@ import { cn } from "cn"
 import type { Series } from "@/api/stats"
 import { t, useT } from "@/i18n"
 import { bucketName, bucketTick, hhmm, hourSpan } from "@/stats/format"
+import { PanelIcon } from "@/panel"
 
 /** identity colours, in order (index.css `--series-*`, validated light and dark) */
 export const SERIES = [1, 2, 3, 4, 5].map((n) => `var(--series-${n})`)
@@ -32,21 +33,32 @@ export function Legend({ items, className }: { items: LegendEntry[]; className?:
   )
 }
 
-/** a chart's head: title, then “单位 · 时间范围” in grey, the legend under it; `right` holds the chart's own switches */
-export function ChartHead({ title, meta, legend, right, k }: { title: ReactNode; meta?: ReactNode; legend?: LegendEntry[]; right?: ReactNode; k?: string }) {
+/** a chart panel's head (stats.md §6.3, panel.tsx): icon, title and the chart's own switches; under a hairline the legend on the
+ *  left and “单位 · 时间范围” in monospace on the right. The chart that follows goes in a `ChartBody`. */
+export function ChartHead({ title, meta, legend, right, k, icon, sub }: { title: ReactNode; meta?: ReactNode; legend?: LegendEntry[]; right?: ReactNode; k?: string; icon?: ReactNode; sub?: ReactNode }) {
   return (
-    <div className="mb-3" data-chart-head={k}>
-      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
-        <div className="min-w-0">
-          <h3 className="type-headline text-foreground">{title}</h3>
-          {meta && <div className="mt-0.5 type-footnote text-muted-foreground" data-chart-meta>{meta}</div>}
+    <div data-chart-head={k}>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-5 py-4">
+        <div className="flex min-w-0 items-center gap-3">
+          {icon && <PanelIcon>{icon}</PanelIcon>}
+          <div className="min-w-0">
+            <h3 className="truncate text-[15px] font-medium leading-5 text-foreground">{title}</h3>
+            {sub && <div className="mt-0.5 line-clamp-2 type-footnote text-muted-foreground">{sub}</div>}
+          </div>
         </div>
         {right && <div className="flex flex-wrap items-center gap-2">{right}</div>}
       </div>
-      {legend && legend.length > 0 && <Legend items={legend} className="mt-2" />}
+      {(meta || (legend && legend.length > 0)) && (
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 border-t px-5 pt-3.5">
+          {legend && legend.length > 0 ? <Legend items={legend} /> : <span />}
+          {meta && <div className="font-mono text-[12px] tabular-nums text-muted-foreground" data-chart-meta>{meta}</div>}
+        </div>
+      )}
     </div>
   )
 }
+/** the chart under a `ChartHead`, in the same section (no hairline between them) */
+export const ChartBody = ({ children, className }: { children: ReactNode; className?: string }) => <div className={cn("flex-1 border-t-0! px-5 pt-3 pb-4", className)}>{children}</div>
 
 /** at most 5 identity series; the rest summed into “其他” (stacks only: a rate can't be summed) */
 export function fold(d: Series, max = 5): Series {
@@ -131,9 +143,9 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
       <div className="type-label text-muted-foreground">{bucketName(data.buckets[at])}</div>
       {at === cur && <div className="mt-0.5 type-footnote text-tertiary" data-tip-current>{t("stats:chart.openUntil", { time: hhmm(Date.now()) })}</div>}
       {future(at) ? <div className="mt-1 type-footnote text-muted-foreground" data-tip-future>{t("stats:chart.notYet")}</div> : lines.map((l, i) => (kind !== "band" || i === 0 || lines.length < 2) ? (
-        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={color(i)} line /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
+        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={color(i)} line /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-mono font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
       ) : (
-        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={STATE.band} /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
+        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={STATE.band} /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-mono font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
       ))}
       {kind === "stack" && lines.length > 1 && !future(at) && <div className="mt-1 flex justify-between border-t pt-1 type-footnote"><span className="text-muted-foreground">{t("stats:chart.total")}</span><span className="font-medium tabular-nums">{tf(stackTop[at])}</span></div>}
       {onPick && !future(at) && <div className="mt-1 type-footnote text-tertiary">{data.buckets[at] === picked ? t("stats:chart.clickCancel") : hourly ? t("stats:chart.clickHour") : t("stats:chart.clickDay")}</div>}
@@ -152,11 +164,11 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
         </g>}
         {ticks.map((v) => (
           <g key={v}>
-            <line x1={PAD.l} x2={w - PAD.r} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth={1} />
-            <text x={PAD.l - 8} y={y(v)} dy="0.32em" textAnchor="end" className="fill-muted-foreground text-[11px] tabular-nums">{fmt(v)}</text>
+            <line x1={PAD.l} x2={w - PAD.r} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth={1} strokeDasharray={v ? "2 3" : undefined} />
+            <text x={PAD.l - 8} y={y(v)} dy="0.32em" textAnchor="end" className="fill-muted-foreground font-mono text-[10.5px] tabular-nums">{fmt(v)}</text>
           </g>
         ))}
-        {data.buckets.map((d, i) => i % every === 0 && <text key={d} x={x(i)} y={height - 8} textAnchor="middle" className={cn("text-[11px] tabular-nums", d === picked || i === cur ? "fill-foreground font-medium" : future(i) ? "fill-tertiary" : "fill-muted-foreground")}>{xFmt(d)}</text>)}
+        {data.buckets.map((d, i) => i % every === 0 && <text key={d} x={x(i)} y={height - 8} textAnchor="middle" className={cn("font-mono text-[10.5px] tabular-nums", d === picked || i === cur ? "fill-foreground font-medium" : future(i) ? "fill-tertiary" : "fill-muted-foreground")}>{xFmt(d)}</text>)}
         {at >= 0 && at < n && kind !== "stack" && kind !== "group" && <line x1={x(at)} x2={x(at)} y1={PAD.t} y2={PAD.t + ih} stroke="var(--border)" strokeWidth={1} />}
         {kind === "stack" && data.buckets.map((d, i) => {
           let base = 0
@@ -211,7 +223,7 @@ export function ChartTable({ data, fmt, picked, onPick }: { data: Series; fmt: (
   return (
     <div className="max-h-80 overflow-auto" data-chart-table>
       <table className="w-full type-footnote tabular-nums">
-        <thead className="sticky top-0 bg-background"><tr className="text-muted-foreground"><th className="py-1.5 pr-3 text-left font-medium">{hourly ? t("stats:col.hourSpan") : t("stats:col.date")}</th>{data.series.map((l) => <th key={l.key} className="py-1.5 pl-3 text-right font-medium">{l.label}</th>)}</tr></thead>
+        <thead className="sticky top-0 bg-card"><tr className="text-muted-foreground"><th className="py-1.5 pr-3 text-left font-medium">{hourly ? t("stats:col.hourSpan") : t("stats:col.date")}</th>{data.series.map((l) => <th key={l.key} className="py-1.5 pl-3 text-right font-medium">{l.label}</th>)}</tr></thead>
         <tbody>{data.buckets.map((d, i) => {
           const later = cur >= 0 && i > cur, can = onPick && !later
           return (
@@ -239,12 +251,12 @@ export function HBars({ rows, fmt = String, onPick, picked, label, total, k, vw 
       {rows.map((r) => {
         const body = <>
           <span className="w-[5.5rem] shrink-0 truncate text-left type-callout sm:w-28" title={r.title}>{r.label}</span>
-          <span className="relative h-2.5 min-w-0 flex-1 overflow-hidden rounded-r-[4px] bg-muted/60" aria-hidden>
-            {r.value > 0 && <span className="absolute inset-y-0 left-0 rounded-r-[4px]" style={{ width: `${Math.max(1.5, (r.value / max) * 100)}%`, background: r.c }} />}
+          <span className="relative h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-muted/70" aria-hidden>
+            {r.value > 0 && <span className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${Math.max(1.5, (r.value / max) * 100)}%`, background: r.c }} />}
           </span>
           <span className={cn(vw, "shrink-0 text-right")}>
-            <span className="block type-headline tabular-nums">{fmt(r.value)}</span>
-            {r.sub != null && <span className="block truncate type-footnote tabular-nums text-muted-foreground">{r.sub}</span>}
+            <span className="block font-mono text-[13px] font-medium leading-5 tabular-nums">{fmt(r.value)}</span>
+            {r.sub != null && <span className="block truncate font-mono text-[11px] tabular-nums text-muted-foreground">{r.sub}</span>}
           </span>
         </>
         const cls = "flex w-full items-center gap-3 rounded-md px-1.5 py-1.5"

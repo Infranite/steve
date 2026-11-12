@@ -1,4 +1,4 @@
-/* 指标数字（stats.md §6.3 第 2 条）：12px 标签、数字、一行灰色脚注“比上个 7 天 ↑ 18%”；悬停给定义。不加卡片框。
+/* 指标数字（stats.md §6.3 第 2 条）：12px 标签、等宽数字、一行灰色脚注“比上个 7 天 ↑ 18%”；悬停给定义。放在面板的数字条里（panel.tsx）。
  * ST-40 起页面顶部只放核心指标（overview.tsx）；这里是“用量与费用”一节的三个：估算费用 · 总 tokens · 缓存命中率。 */
 import type { ReactNode } from "react"
 import { cn } from "cn"
@@ -13,18 +13,25 @@ export function Est() {
   return <span className="inline-flex h-4 shrink-0 items-center rounded border border-border px-1 text-[10.5px] font-medium leading-none text-muted-foreground" title={t("stats:word.estTitle")} aria-label={t("stats:word.estAria")}>{t("stats:word.est")}</span>
 }
 
-export function Kpi({ label, value, foot, def, badge, k, small }: { label: string; value: ReactNode; foot?: ReactNode; def: string; badge?: ReactNode; k: string; small?: boolean }) {
+/** a figure in a panel's strip (panel.tsx `StatStrip`, with its definition on hover): grey label, monospace number, grey foot */
+export function Kpi({ label, value, foot, def, badge, k, tone }: { label: string; value: ReactNode; foot?: ReactNode; def: string; badge?: ReactNode; k: string; tone?: "bad" | "wait" | "ok" }) {
   return (
     <Tooltip>
-      <TooltipTrigger render={<div tabIndex={0} className="min-w-0 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring" data-kpi={k} />}>
-        <div className="flex items-center gap-1.5 type-label text-muted-foreground">{label}{badge}</div>
-        <div className={cn("mt-1 truncate font-semibold tracking-[-0.02em] text-foreground", small ? "text-[20px] leading-7" : "text-[26px] leading-8")}>{value}</div>
+      <TooltipTrigger render={<div tabIndex={0} className={cn(KPI_CELL, "outline-none focus-visible:bg-muted/40")} data-kpi={k} />}>
+        <div className="flex items-center gap-1.5 truncate type-footnote text-muted-foreground">{label}{badge}</div>
+        <div className={cn("mt-1 truncate font-mono text-[17px] leading-6 tabular-nums tracking-[-0.01em]", tone === "bad" ? "text-destructive" : tone === "wait" ? "text-attention" : tone === "ok" ? "text-success" : "text-foreground")}>{value}</div>
         <div className="mt-0.5 min-h-4 truncate type-footnote text-muted-foreground">{foot}</div>
       </TooltipTrigger>
       <TooltipContent className="max-w-64">{def}</TooltipContent>
     </Tooltip>
   )
 }
+/** a strip's cell and its row: hairlines between cells, wrapping to two per row on a phone */
+export const KPI_CELL = "min-w-0 border-border px-5 py-3.5 [&:not(:first-child)]:border-l"
+export const kpiRow = (n: number) => cn("grid", n === 3 ? "grid-cols-3" : n === 6 ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-6" : "grid-cols-2 sm:grid-cols-4",
+  n !== 3 && "max-sm:[&>*:nth-child(2n+1)]:border-l-0 max-sm:[&>*:nth-child(n+3)]:border-t",
+  n === 6 && "sm:max-lg:[&>*:nth-child(3n+1)]:border-l-0 sm:max-lg:[&>*:nth-child(n+4)]:border-t",
+  n === 8 && "sm:[&>*:nth-child(4n+1)]:border-l-0 sm:[&>*:nth-child(n+5)]:border-t")
 
 /** “Agent 62% · 网关 18%”: the total hides that a few large gateway calls can sink it */
 function HitSplit({ rows }: { rows: UsageRow[] }) {
@@ -42,12 +49,12 @@ export function UsageKpis({ s, prevName, bySource }: { s: Summary; prevName: str
   const t = useT()
   const p = s.prev, vs = versus(s, prevName)
   return (
-    <div className="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3" data-kpis>
-      <Kpi small k="est" label={t("stats:word.estCost")} badge={<Est />} value={s.usage.total === 0 && s.spend.reported > 0 ? "—" : fmtUsd(s.spend.est)}
+    <div className={kpiRow(3)} data-kpis>
+      <Kpi k="est" label={t("stats:word.estCost")} badge={<Est />} value={s.usage.total === 0 && s.spend.reported > 0 ? "—" : fmtUsd(s.spend.est)}
         foot={s.usage.total === 0 && s.spend.reported > 0 ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(s.spend.reported) }) : vs(s.spend.est, p?.spend.est)}
         def={t("stats:kpi.estDef")} />
-      <Kpi small k="tokens" label={t("stats:kpi.totalTokens")} value={fmtN(s.usage.total)} foot={vs(s.usage.total, p?.usage.total)} def={t("stats:kpi.tokensDef")} />
-      <Kpi small k="hit" label={t("stats:kpi.hitRate")} value={fmtPct(s.usage.hit_rate)}
+      <Kpi k="tokens" label={t("stats:kpi.totalTokens")} value={fmtN(s.usage.total)} foot={vs(s.usage.total, p?.usage.total)} def={t("stats:kpi.tokensDef")} />
+      <Kpi k="hit" label={t("stats:kpi.hitRate")} value={fmtPct(s.usage.hit_rate)}
         foot={s.usage.hit_rate == null ? t("stats:kpi.noCacheSplit") : (bySource && bySource.some((r) => r.hit_rate != null) ? <HitSplit rows={bySource} /> : vs(s.usage.hit_rate, p?.usage.hit_rate))}
         def={s.usage.hit_rate != null && vs(s.usage.hit_rate, p?.usage.hit_rate) ? t("stats:kpi.hitDefTotal", { vs: vs(s.usage.hit_rate, p?.usage.hit_rate) }) : t("stats:kpi.hitDef")} />
     </div>

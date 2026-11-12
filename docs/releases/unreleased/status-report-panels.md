@@ -1,0 +1,6 @@
+Statistics, device status, the YOLO record and the per-item report now use one card layout. Each card has a header with an icon, a title and a one-line description, followed by its chart, a row of figures in monospace, and notes and actions at the bottom.
+
+- Statistics: the overview card puts the four core figures first, then the YOLO run state. Each chart is its own card, with its legend and its unit and range on one line. Lead time, usage, quality and agent figures appear in rows under their charts. Tool kinds are shown in two columns.
+- Devices: the Hub's card shows load, memory, the fullest disk and running sessions, and turns orange at 75% and red at 90%. The device page opens with a device status card that gives each metric a 24-hour sparkline and a usage bar. Conversations show running against the limit, then the running ones first, and the list collapses after eight.
+- YOLO record: each time YOLO was on is a card with its decided, left-to-you, release and cost figures. Each item lists its first five decisions and shows the rest on request.
+- Item report: the timeline is now three labeled lanes (turns, decisions, milestones) on a time axis. While the item is open, a dashed line marks the current time.

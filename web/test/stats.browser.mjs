@@ -114,7 +114,7 @@ try {
     /* charts: unit + range on each, legends agree with the summary */
     const range = "10月30日 – 11月5日"
     for (const k of ["flow", "lead", "usage"]) assert.match(await page.locator(`[data-chart-head="${k}"] [data-chart-meta]`).innerText(), new RegExp(range), k)
-    assert.match(await page.locator('[data-chart-head="flow"]').innerText(), new RegExp(`件 / 天[\\s\\S]*新建 ${sum(created)} 件[\\s\\S]*完成 ${sum(done)} 件`))
+    assert.match(await page.locator('[data-chart-head="flow"]').innerText(), new RegExp(`新建 ${sum(created)} 件[\\s\\S]*完成 ${sum(done)} 件[\\s\\S]*件 / 天`))
     assert.equal(await page.locator('[data-chart="group"] [data-bar]').count(), days.length)
     // status distribution matches the overview, and opens the same list
     const bars = Object.fromEntries(await page.locator('[data-hbars="status"] [data-hbar]').evaluateAll((xs) => xs.map((x) => [x.getAttribute("data-hbar"), x.textContent])))

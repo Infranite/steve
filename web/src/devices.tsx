@@ -1,25 +1,25 @@
-/* 设备与远程 Node 配对；身份与确认由所有者 API 校验。 */
+/* 设备与远程 Node 配对；身份与确认由所有者 API 校验。列表和详情都是面板（panel.tsx）：Hub 一张带设备状态数字条，其他设备一张；
+ * 详情页从设备状态起，依次是会话、运行环境、标签、项目目录、中心节点和连接。 */
 import { useEffect, useState } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, PlusIcon, ServerIcon, CpuIcon, FolderIcon, PauseIcon, PlayIcon, RefreshCwIcon } from "lucide-react"
+import { ActivityIcon, ChevronRightIcon, CpuIcon, FolderIcon, LinkIcon, MonitorSmartphoneIcon, PauseIcon, PlayIcon, PlusIcon, RefreshCwIcon, ServerIcon, SquareTerminalIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Meter, Panel, PanelFoot, PanelRow, StatStrip, Tag, type Tone } from "@/panel"
 import { Spinner } from "@/components/ui/spinner"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { st, toast, refresh, tm } from "@/store"
 import { api, type RDevice, type RNode, type RPairing, type RRuntime } from "@/api"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import { go, Page, Group, Row, SectionLabel, StatusDot, Meta, Empty, Status, closeSheet, openSheet } from "@/ui"
+import { go, Page, Meta, Empty, Status, closeSheet, openSheet } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
-import { VitalsSection } from "@/devices-vitals"
+import { VitalsSection, VitalsStrip } from "@/devices-vitals"
 import { NodeTags } from "@/devices-tags"
 import { TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
 import { useHubAddress } from "@/hub-ui"
 
-const Ico = ({ d, size = 36 }: { d: RDevice; size?: number }) => <span className="relative flex shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground" style={{ width: size, height: size }}><ServerIcon className="size-[45%]" strokeWidth={1.5} />
-  <span className={cn("absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-background", d.status === "暂停接活" ? "bg-attention" : "bg-success")} /></span>
 const onDevice = (id: string) => Object.keys(st.S).filter((k) => st.S[k].device === id && !st.S[k].ro)
 const stateText = (d: RDevice) => (d.status === "暂停接活" ? t("shell:devices.onlinePaused") : t("shell:devices.online"))
 
@@ -50,8 +50,8 @@ function useRemoteNodes() {
   return { nodes, error, loading, reload: () => setRevision(x => x + 1) }
 }
 
-const NodeIco = ({ node, stale }: { node: RNode; stale: boolean }) => <span className="relative flex size-9 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground"><ServerIcon className="size-[45%]" strokeWidth={1.5} />
-  <span className={cn("absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-background", stale || node.state === "revoked" ? "bg-muted-foreground" : node.state === "pending" || node.state === "paused" ? "bg-attention" : node.linked ? "bg-success" : "bg-muted-foreground")} /></span>
+/** a Node's link at a glance: green linked, orange waiting or paused, grey otherwise */
+const NodeDot = ({ node, stale }: { node: RNode; stale: boolean }) => <span aria-hidden className={cn("size-2 shrink-0 rounded-full", stale || node.state === "revoked" ? "bg-muted-foreground" : node.state === "pending" || node.state === "paused" ? "bg-attention" : node.linked ? "bg-success" : "bg-muted-foreground")} />
 
 export function DevicesView() {
   const t = useT()
@@ -62,37 +62,45 @@ export function DevicesView() {
   const node = nodes?.find(n => n.node_id === selected)
   const connection = (n: RNode) => error ? t("shell:devices.connectionUnknown") : n.linked ? t("shell:devices.linked") : t("shell:devices.disconnected")
   const registration = (n: RNode) => error ? t("shell:devices.registrationPrevious", { state: t(`shell:devices.nodeState.${n.state}`) }) : t(`shell:devices.nodeState.${n.state}`)
+  const regTone = (n: RNode): Tone => error || n.state === "revoked" ? "muted" : n.state === "pending" || n.state === "paused" ? "wait" : "ok"
+  const hubSessions = hub ? onDevice(hub.id).filter((k) => st.S[k].st === "run").length : 0
   return (
     <>
     <Page title={t("shell:devices.title")} sub={t("shell:devices.sub")} max={760}
       actions={<Button size="sm" variant="outline" onClick={() => openSheet("pair")} data-pair><PlusIcon />{t("shell:devices.add")}</Button>}>
-      <div className="flex flex-col gap-8">
-        {hub && <section><SectionLabel>Hub</SectionLabel>
-          <Group><Row icon={<Ico d={hub} />} onClick={() => go("#/devices/" + hub.id)} data-device-row={hub.name} title={<span className="inline-flex items-center gap-1.5">{hub.name}{hub.roles.map((r) => <Badge key={r} variant="outline" className="font-normal text-muted-foreground">{r}</Badge>)}</span>}
-            sub={<Meta><span>{stateText(hub)}</span>{hub.version && <span data-hub-version>{hub.version}</span>}<span>{st.runtimes.filter((r) => r.ok).map((r) => r.name).join(t("shell:list.sep")) || t("shell:devices.noHarness")}</span></Meta>}><OwnerChip objectType="device" objectId={hub.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></Row></Group></section>}
-        <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={loading} onClick={reload} data-refresh-nodes>{loading ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.refreshNodes")}</Button>}>{nodes !== null && !error ? t("shell:devices.others", { count: rest.length + nodes.length }) : t("shell:devices.othersTitle")}</SectionLabel>
-          {(rest.length > 0 || !!nodes?.length) && <Group>{rest.map((d) => <Row key={d.id} icon={<Ico d={d} />} title={d.name} sub={d.roles.join(" · ")} onClick={() => go("#/devices/" + d.id)}><OwnerChip objectType="device" objectId={d.id} bare /></Row>)}
-            {nodes?.map(n => <Row key={n.node_id} icon={<NodeIco node={n} stale={!!error} />} data-node-row={n.node_id} onClick={() => setSelected(n.node_id)}
-              title={<span className="inline-flex flex-wrap items-center gap-1.5">{n.name}<Badge variant="outline" className="font-normal text-muted-foreground">Node</Badge><Badge variant="outline" className="font-normal text-muted-foreground">{registration(n)}</Badge></span>}
-              sub={<Meta><span>{connection(n)}</span><span className="font-mono break-all">{n.node_id}</span></Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
-          </Group>}
-          {error && <p role="alert" className="px-1 py-3 type-callout text-destructive" data-node-error>{t("shell:devices.nodesUnavailable")} · {error}</p>}
-          {nodes === null && !error && <p className="px-1 py-4 type-callout text-muted-foreground" role="status" data-nodes-loading>{t("shell:devices.loadingNodes")}</p>}
-          {nodes !== null && !error && !rest.length && !nodes.length && <Empty title={t("shell:devices.noOthers")} sub={t("shell:devices.noOthersSub")} />}
-        </section>
-        <section><SectionLabel>{t("shell:devices.scheduling")}</SectionLabel>
-          <Group><Row title={t("shell:devices.where")} sub={t("shell:devices.whereSub")} /></Group></section>
+      <div className="flex flex-col gap-4">
+        {hub && <Panel k="hub" icon={<ServerIcon />} data-device-row={hub.name}
+          title={<span className="inline-flex items-center gap-2">{hub.name}<span className="font-mono text-[11px] font-normal text-muted-foreground">Hub</span></span>}
+          sub={<Meta><span>{hub.roles.filter((r) => r !== "Hub").join(" · ") || "Hub"}</span>{hub.version && <span className="font-mono" data-hub-version>{hub.version}</span>}<span>{st.runtimes.filter((r) => r.ok).map((r) => r.name).join(t("shell:list.sep")) || t("shell:devices.noHarness")}</span></Meta>}
+          right={<><Tag tone={hub.status === "暂停接活" ? "wait" : "ok"} data-hub-state><span className="size-1.5 rounded-full bg-current" />{stateText(hub)}</Tag><OwnerChip objectType="device" objectId={hub.id} bare /></>}>
+          <VitalsStrip node="local" />
+          <PanelFoot meta={<>{t("shell:devices.whereSub")}{hubSessions > 0 && <> · {t("shell:devices.running", { count: hubSessions })}</>}</>}>
+            <Button size="sm" variant="outline" onClick={() => go("#/devices/" + hub.id)} data-device-open>{t("shell:devices.details")}<ChevronRightIcon /></Button>
+          </PanelFoot>
+        </Panel>}
+        <Panel k="others" icon={<MonitorSmartphoneIcon />} title={nodes !== null && !error ? t("shell:devices.others", { count: rest.length + nodes.length }) : t("shell:devices.othersTitle")} sub={t("shell:devices.othersSub")}
+          right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={loading} onClick={reload} data-refresh-nodes>{loading ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.refreshNodes")}</Button>}>
+          {(rest.length > 0 || !!nodes?.length) && <div className="py-1.5">{rest.map((d) => <PanelRow key={d.id} title={d.name} sub={d.roles.join(" · ")} onClick={() => go("#/devices/" + d.id)}><OwnerChip objectType="device" objectId={d.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
+            {nodes?.map(n => <PanelRow key={n.node_id} data-node-row={n.node_id} onClick={() => setSelected(n.node_id)}
+              title={<span className="inline-flex items-center gap-2"><NodeDot node={n} stale={!!error} />{n.name}</span>}
+              sub={<Meta><span>{connection(n)}</span><span className="font-mono">{n.node_id}</span></Meta>}><Tag tone={regTone(n)}>{registration(n)}</Tag><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
+          </div>}
+          {error && <p role="alert" className="px-5 py-3 type-callout text-destructive" data-node-error>{t("shell:devices.nodesUnavailable")} · {error}</p>}
+          {nodes === null && !error && <p className="px-5 py-4 type-callout text-muted-foreground" role="status" data-nodes-loading>{t("shell:devices.loadingNodes")}</p>}
+          {nodes !== null && !error && !rest.length && !nodes.length && <div className="px-5 py-6"><div className="type-callout text-foreground">{t("shell:devices.noOthers")}</div><div className="mt-0.5 type-footnote text-muted-foreground">{t("shell:devices.noOthersSub")}</div></div>}
+          <PanelFoot meta={t("shell:devices.pairDesc")}><Button size="sm" variant="outline" onClick={() => openSheet("pair")}><PlusIcon />{t("shell:devices.add")}</Button></PanelFoot>
+        </Panel>
       </div>
     </Page>
-    {selected && <Dialog open onOpenChange={open => !open && setSelected(null)}><DialogContent className="rounded-2xl sm:max-w-[560px]" data-node-detail>
+    {selected && <Dialog open onOpenChange={open => !open && setSelected(null)}><DialogContent className="max-h-[85vh] overflow-y-auto rounded-2xl sm:max-w-[560px]" data-node-detail>
       <DialogHeader><DialogTitle>{node?.name ?? t("shell:devices.remoteNode")}</DialogTitle><DialogDescription>{t("shell:devices.nodeDetailSub")}</DialogDescription></DialogHeader>
-      {node ? <Group>
-        <Row title={t("shell:devices.registrationState")} sub={registration(node)} />
-        <Row title={t("shell:devices.connection")} sub={connection(node)} />
-        <Row title={t("shell:devices.nodeId")} sub={<span className="font-mono break-all select-all">{node.node_id}</span>} />
-        <Row title={t("shell:devices.fingerprint")} sub={<span className="font-mono break-all select-all">{node.fingerprint}</span>} />
-        {node.last_seen != null && <Row title={t("shell:devices.lastConnected")} sub={tm(node.last_seen)} />}
-      </Group> : <p role="status">{t("shell:devices.nodeNotVisible")}</p>}
+      {node ? <Panel k="node">
+        <PanelRow title={t("shell:devices.registrationState")}><Tag tone={regTone(node)}>{registration(node)}</Tag></PanelRow>
+        <PanelRow title={t("shell:devices.connection")}><span className="type-callout text-muted-foreground">{connection(node)}</span></PanelRow>
+        <PanelRow title={t("shell:devices.nodeId")} sub={<span className="font-mono break-all select-all whitespace-normal">{node.node_id}</span>} />
+        <PanelRow title={t("shell:devices.fingerprint")} sub={<span className="font-mono break-all select-all whitespace-normal">{node.fingerprint}</span>} />
+        {node.last_seen != null && <PanelRow title={t("shell:devices.lastConnected")}><span className="font-mono text-[12.5px] tabular-nums text-muted-foreground">{tm(node.last_seen)}</span></PanelRow>}
+      </Panel> : <p role="status">{t("shell:devices.nodeNotVisible")}</p>}
       {node && <NodeTags node={node.node_id} />}
       {node && <VitalsSection node={node.node_id} />}
       <DialogFooter><Button variant="outline" onClick={() => setSelected(null)}>{t("shell:devices.gotIt")}</Button></DialogFooter>
@@ -102,34 +110,60 @@ export function DevicesView() {
 }
 
 export function DeviceView({ id }: { id: string }) {
-  const [busy, setBusy] = useState(false), t = useT()
+  const [busy, setBusy] = useState(false), [all, setAll] = useState(false), t = useT()
   const d = st.devices.find((x) => x.id === id)
   if (!d) return <Page title={t("shell:devices.title")} back={["#/devices", t("shell:devices.title")]}><Empty title={t("shell:devices.notFound")} /></Page>
   const isHub = d.roles.includes("Hub"), ss = onDevice(d.id).filter((k) => st.S[k].st !== "ended"), dirs = st.projects.filter((p) => p.device_id === d.id)
+  const paused = d.status === "暂停接活"
+  /* running first, then the rest by their last activity */
+  const rank = (k: string) => (st.S[k].st === "run" ? 0 : st.S[k].st === "wait" ? 1 : 2)
+  ss.sort((a, b) => rank(a) - rank(b))
+  const running = ss.filter((k) => st.S[k].st === "run").length
+  const shown = all ? ss : ss.slice(0, 8)
   const recheck = async () => { setBusy(true); try { await api.devices(true); await refresh(); toast(t("shell:devices.rechecked")) } catch (e) { toast((e as Error).message) } finally { setBusy(false) } }
+  const pause = () => void api.patchDevice(d.id, { status: paused ? "正常" : "暂停接活" }).then(() => { toast(paused ? t("shell:devices.resumed") : t("shell:devices.paused")); return refresh() })
+  const pauseButton = <Button size="sm" variant="outline" onClick={pause} data-pause-device>{paused ? <><PlayIcon />{t("shell:devices.resume")}</> : <><PauseIcon />{t("shell:devices.pause")}</>}</Button>
+  const stateTag = <Tag tone={paused ? "wait" : "ok"}><span className="size-1.5 rounded-full bg-current" />{stateText(d)}</Tag>
   return (
-    <Page title={d.name} back={["#/devices", t("shell:devices.title")]} max={720} sub={<Meta><span>{d.roles.join(" · ")}</span><span>{stateText(d)}</span><span>{d.os}</span><span>{d.version}</span></Meta>}
-      actions={<Button size="sm" variant="outline" onClick={() => void api.patchDevice(d.id, { status: d.status === "暂停接活" ? "正常" : "暂停接活" }).then(() => { toast(d.status === "暂停接活" ? t("shell:devices.resumed") : t("shell:devices.paused")) ; return refresh() })} data-pause-device>{d.status === "暂停接活" ? <><PlayIcon />{t("shell:devices.resume")}</> : <><PauseIcon />{t("shell:devices.pause")}</>}</Button>}>
-      <div className="flex flex-col gap-8">
-        {isHub && <section><SectionLabel>{t("shell:devices.hubNode")}</SectionLabel><Group>
-          <Row title={t("shell:devices.storage")} sub={t("shell:devices.storageSub")} />
-          <Row title={t("shell:devices.access")} sub={t("shell:devices.accessSub")} />
-          <Row title={t("shell:devices.models")} sub={t("shell:devices.modelsSub")} />
-        </Group></section>}
+    <Page title={d.name} back={["#/devices", t("shell:devices.title")]} max={760} sub={<Meta><span>{d.roles.join(" · ")}</span><span>{d.os}</span><span className="font-mono">{d.version}</span></Meta>}
+      actions={pauseButton}>
+      <div className="flex flex-col gap-4">
+        {isHub ? <VitalsSection node="local" right={stateTag}>
+          <PanelFoot meta={t("shell:devices.lastSeenAt", { time: tm(d.seen) })}>{pauseButton}</PanelFoot>
+        </VitalsSection> : <Panel k="state" icon={<ActivityIcon />} title={t("shell:devices.vitals.title")} sub={t("shell:devices.lastSeenAt", { time: tm(d.seen) })} right={stateTag} />}
+        <Panel k="sessions" icon={<SquareTerminalIcon />} title={t("shell:devices.sessionsHere", { count: ss.length })} sub={t("shell:devices.maxSessions", { count: d.max_sessions })}
+          right={<span className="flex flex-col items-end gap-1.5" data-running><span className="font-mono text-[12px] leading-4 tabular-nums text-muted-foreground">{t("shell:devices.runningOf", { n: running, max: d.max_sessions })}</span><Meter value={d.max_sessions ? running / d.max_sessions : 0} tone={d.max_sessions && running >= d.max_sessions ? "wait" : "run"} className="w-20" /></span>}>
+          {ss.length ? <div className="py-1.5">{shown.map((k) => { const s = st.S[k]; return <PanelRow key={k} title={s.title} sub={s.item ? t("shell:devices.sessionSub", { item: s.item, n: s.n, up: s.up }) : t("shell:devices.noItem")} onClick={() => go("#/sessions/" + k)}><Status s={s.st} sess /></PanelRow> })}</div>
+            : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noSessions")}</div>}
+          {ss.length > shown.length && <PanelFoot><Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setAll(true)} data-sessions-more>{t("shell:devices.moreSessions", { count: ss.length - shown.length })}</Button></PanelFoot>}
+        </Panel>
+        <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={t("shell:devices.runtimesSub", { ok: st.runtimes.filter((r) => r.ok).length, count: st.runtimes.length })}
+          right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>
+          {st.runtimes.length ? <div className="py-1.5">{st.runtimes.map((r) => <div key={r.id} className="flex items-start gap-4 px-5 py-3 [&+&]:border-t [&+&]:border-border/60" data-runtime={r.id}>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2 type-callout text-foreground">{r.name}<span className="font-mono text-[11.5px] text-muted-foreground">{r.version || r.adapter_version}</span><span className="type-footnote text-tertiary">{r.custom ? t("shell:devices.harness.custom") : t("shell:devices.harness.builtin")}</span></div>
+              <div className="mt-0.5 flex flex-col gap-0.5 type-footnote text-muted-foreground"><span className="truncate">{r.note} · <span className="font-mono">{r.path.replace(/^\/Users\/[^/]+/, "~")}</span></span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></div>
+            </div>
+            <Tag tone={r.ok ? "ok" : "wait"}>{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</Tag>
+          </div>)}</div> : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noRuntimes")}</div>}
+          {isHub && <div className="px-5 py-3"><AddHarness /></div>}
+        </Panel>
         {isHub && <NodeTags node="local" />}
-        {isHub && <VitalsSection node="local" />}
-        <section><SectionLabel right={<span className="type-footnote font-normal">{t("shell:devices.maxSessions", { count: d.max_sessions })}</span>}>{t("shell:devices.sessionsHere", { count: ss.length })}</SectionLabel>
-          {ss.length ? <Group>{ss.map((k) => { const s = st.S[k]; return <Row key={k} title={s.title} sub={s.item ? t("shell:devices.sessionSub", { item: s.item, n: s.n, up: s.up }) : t("shell:devices.noItem")} onClick={() => go("#/sessions/" + k)}><Status s={s.st} sess /></Row> })}</Group> : <Empty title={t("shell:devices.noSessions")} />}</section>
-        <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>{t("shell:devices.runtimes")}</SectionLabel>
-          {st.runtimes.length ? <Group>{st.runtimes.map((r) => <Row key={r.id} icon={<span className="flex size-8 items-center justify-center rounded-lg bg-muted text-muted-foreground"><CpuIcon className="size-4" strokeWidth={1.5} /></span>}
-            title={<span className="inline-flex items-center gap-1.5">{r.name}<Badge variant="outline" className="type-footnote">{r.custom ? t("shell:devices.harness.custom") : t("shell:devices.harness.builtin")}</Badge><span className="type-footnote text-muted-foreground">{r.version || r.adapter_version}</span></span>}
-            sub={<span className="flex flex-col gap-0.5"><span>{r.note} · <span className="font-mono">{r.path.replace(/^\/Users\/[^/]+/, "~")}</span></span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></span>}>
-            <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={r.ok ? "done" : "wait"} />{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</span></Row>)}</Group> : <Empty title={t("shell:devices.noRuntimes")} />}
-          {isHub && <AddHarness />}</section>
-        <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/projects")}>{t("shell:devices.manageProjects")}</Button>}>{t("shell:devices.projectsHere", { count: dirs.length })}</SectionLabel>
-          {dirs.length ? <Group>{dirs.map((p) => <Row key={p.id} icon={<FolderIcon className="size-4 text-muted-foreground" strokeWidth={1.5} />} title={p.name} sub={<span className="font-mono">{p.path.replace(/^\/Users\/[^/]+/, "~")}</span>} onClick={() => go("#/projects/" + p.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
-            : <Empty title={t("shell:devices.noProjects")} />}</section>
-        <section><SectionLabel>{t("shell:devices.connection")}</SectionLabel><Group><Row title={t("shell:devices.lastSeen")} sub={tm(d.seen)} /><Row title={t("shell:devices.owner")} sub={t("shell:devices.ownerSub")}><OwnerChip objectType="device" objectId={d.id} bare /></Row></Group></section>
+        <Panel k="projects" icon={<FolderIcon />} title={t("shell:devices.projectsTitle")} sub={t("shell:devices.projectsSub", { count: dirs.length })}
+          right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/projects")}>{t("shell:devices.manageProjects")}</Button>}>
+          {dirs.length ? <div className="py-1.5">{dirs.map((p) => <PanelRow key={p.id} title={p.name} sub={<span className="font-mono">{p.path.replace(/^\/Users\/[^/]+/, "~")}</span>} onClick={() => go("#/projects/" + p.id)}><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}</div>
+            : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noProjects")}</div>}
+        </Panel>
+        {isHub && <Panel k="hub" icon={<ServerIcon />} title={t("shell:devices.hubNode")} sub={t("shell:devices.hubNodeSub")}>
+          <div className="py-1.5">
+            <PanelRow title={t("shell:devices.storage")} sub={t("shell:devices.storageSub")} />
+            <PanelRow title={t("shell:devices.access")} sub={t("shell:devices.accessSub")} />
+            <PanelRow title={t("shell:devices.models")} sub={t("shell:devices.modelsSub")} />
+          </div>
+        </Panel>}
+        <Panel k="connection" icon={<LinkIcon />} title={t("shell:devices.connection")} sub={t("shell:devices.ownerSub")} right={<OwnerChip objectType="device" objectId={d.id} bare />}>
+          <StatStrip items={[{ k: "seen", label: t("shell:devices.lastSeen"), value: tm(d.seen) }, { k: "max", label: t("shell:devices.maxShort"), value: d.max_sessions }]} />
+        </Panel>
       </div>
     </Page>
   )

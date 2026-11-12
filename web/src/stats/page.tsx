@@ -1,9 +1,11 @@
 /* 统计页（stats.md §6）：#/stats 与下钻 #/stats/items/:id。只有 Rust Hub 有这些接口；
  * 拿不到（TS Hub）时显示“还没有接入”，不显示示例数据。费用处处标“估”。
- * ST-40 起的层级：运行状态（原顶部横栏）→ 核心指标与下钻 → 事项（新建与完成、状态分布）→ 耗时 → 用量与费用 → 质量与介入 → Agent → 事项明细。
+ * ST-40 起的层级：概览（核心指标与下钻，运行状态在它的脚注）→ 事项（新建与完成、状态分布）→ 耗时 → 用量与费用 → 质量与介入 → Agent → 事项明细。
+ * 每一块是一张面板（panel.tsx）：头部、图、数字条、脚注。
  * 每张图都写明单位和时间范围；时间范围、项目、Bot 只在页头选一次，下面所有数字跟着变。 */
 import { useEffect, useState } from "react"
-import { CalendarIcon } from "lucide-react"
+import { CalendarIcon, GaugeIcon, ListOrderedIcon } from "lucide-react"
+import { Panel, Tag } from "@/panel"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
@@ -107,14 +109,15 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
   const range = fmtRange(s.range.from, s.range.to), rangeName = NAME(f.range), prevName = PREV(f.range)
   const [src] = useStats(() => stats.usage(f, "source"), [fkey], live)
   return (
-    <div className="flex flex-col gap-14" data-stats>
-      <div className="flex flex-col gap-5" data-overview>
-        <RunState className="-mt-4 border-b pb-3" />
+    <div className="flex flex-col gap-10" data-stats>
+      <Panel k="overview" data-overview icon={<GaugeIcon />} title={t("stats:panel.overview")} sub={t("stats:panel.overviewSub", { name: rangeName, range })}
+        right={live ? <Tag tone="ok" data-live><span className="size-1.5 animate-pulse rounded-full bg-current" />{t("stats:panel.live")}</Tag> : <Tag>{t("stats:panel.past")}</Tag>}>
         <CoreKpis s={s} f={f} prevName={prevName} rangeName={rangeName} drill={drill} setDrill={setDrill} />
         {drill && <DrillPanel key={drill} d={drill} f={f} fkey={fkey} live={live} rangeName={rangeName} close={() => setDrill(null)} />}
-      </div>
+        <RunState className="px-5 py-3" />
+      </Panel>
       <Section k="items" title={t("stats:page.items")} meta={oneDay(f) ? t("stats:page.itemsMetaHourly", { range }) : t("stats:page.itemsMetaDaily", { range })}>
-        <div className="grid grid-cols-1 gap-10 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           <FlowChart s={s} f={f} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />
           <StatusBars f={f} drill={drill} setDrill={setDrill} />
         </div>
@@ -122,18 +125,21 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
       {nothing ? <Empty title={t("stats:page.nothing")} sub={t("stats:page.nothingSub")} /> : <>
         <TimeSection s={s} f={f} fkey={fkey} live={live} range={range} />
         <Section k="usage" title={t("stats:page.usage")} meta={range}>
-          <UsageKpis s={s} prevName={prevName} bySource={src.s === "ok" ? src.v.rows : undefined} />
-          <PriceNote spend={s.spend} />
-          <Trend f={f} fkey={fkey} live={live} range={[s.range.from, s.range.to]} tz={s.range.tz} picked={picked} onPick={setPicked} />
+          <Trend f={f} fkey={fkey} live={live} range={[s.range.from, s.range.to]} tz={s.range.tz} picked={picked} onPick={setPicked}>
+            <UsageKpis s={s} prevName={prevName} bySource={src.s === "ok" ? src.v.rows : undefined} />
+            <PriceNote spend={s.spend} />
+          </Trend>
           <UsageSection f={f} fkey={fkey} live={live} picked={picked} />
         </Section>
         <QualityHuman s={s} f={f} fkey={fkey} live={live} range={range} prevName={prevName} />
         <AgentSection s={s} f={f} fkey={fkey} live={live} range={range} />
-        <Section k="item-table" title={t("stats:page.itemTable")} meta={t("stats:page.itemTableMeta", { range })}>
-          <ItemsTable f={f} fkey={fkey} live={live} />
+        <Section k="item-table" title={t("stats:page.itemTable")} meta={range}>
+          <Panel k="item-table" icon={<ListOrderedIcon />} title={t("stats:page.itemTable")} sub={t("stats:panel.itemTableSub")}>
+            <div className="py-3"><ItemsTable f={f} fkey={fkey} live={live} /></div>
+          </Panel>
         </Section>
       </>}
-      <footer className="border-t pt-4 type-footnote text-muted-foreground" data-stats-foot>
+      <footer className="px-1 type-footnote text-muted-foreground" data-stats-foot>
         {t("stats:page.foot.all", {
           cost: t("stats:page.foot.cost"),
           tokens: s.usage.reported
@@ -157,7 +163,7 @@ function PriceNote({ spend }: { spend: Summary["spend"] }) {
   const from = by.table && md ? t(failed ? "stats:page.priceNote.fromBothFailed" : "stats:page.priceNote.fromBoth", { md }) : by.table ? t("stats:page.priceNote.fromTable") : md ? t(failed ? "stats:page.priceNote.fromMdFailed" : "stats:page.priceNote.fromMd", { md }) : ""
   if (!spend.unpriced_tokens && !from) return null
   return (
-    <div className="-mt-3 flex flex-col gap-0.5 type-footnote text-muted-foreground" data-price-note>
+    <div className="flex flex-col gap-0.5 px-5 py-3 type-footnote text-muted-foreground" data-price-note>
       {spend.unpriced_tokens > 0 && (
         <div data-unpriced-note>
           <Trans t={t} i18nKey="stats:page.priceNote.unpriced" count={unpriced.length} values={{ models: unpriced.join(t("stats:word.listSep")) || t("stats:word.unknownModel"), tokens: fmtN(spend.unpriced_tokens) }} components={{ warn: <span className="text-attention" /> }} />
