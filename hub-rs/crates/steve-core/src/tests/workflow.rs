@@ -483,7 +483,32 @@ fn review_failure_blocks_integration_and_child_token_cannot_replan_or_read_sibli
     assert_eq!(out["reported"], true);
     assert!(out.get("units").is_none());
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
+    let child = review.item_id.as_deref().unwrap();
+    assert_eq!(k.phase(child), "closed");
+    assert_eq!(k.status(child).0, "fail");
+    assert_eq!(
+        k.db().item(child).unwrap().unwrap().outcome.as_deref(),
+        Some("failed")
+    );
     assert_eq!(unit(&k, &parent, "integrate").status, "pending");
+    assert!(k.finish(&parent).is_err());
+}
+
+#[test]
+fn a_work_unit_that_stops_without_delivery_closes_its_failed_child() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let work = unit(&k, &parent, "a");
+    let child = work.item_id.as_deref().unwrap();
+    let session = work.session_id.as_deref().unwrap();
+    k.rt.end_turn(&k.core, session, "error", Some("执行失败"));
+    assert_eq!(unit(&k, &parent, "a").status, "failed");
+    assert_eq!(k.phase(child), "closed");
+    assert_eq!(k.status(child).0, "fail");
+    assert_eq!(
+        k.db().item(child).unwrap().unwrap().outcome.as_deref(),
+        Some("failed")
+    );
     assert!(k.finish(&parent).is_err());
 }
 
