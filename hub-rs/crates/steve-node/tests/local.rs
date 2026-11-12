@@ -22,6 +22,41 @@ struct T {
     sink: Arc<RecordingSink>,
 }
 
+#[tokio::test]
+async fn snapshot_pages_thousands_of_stream_heads_without_oversized_frames() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let mut db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    let tx = db.transaction().unwrap();
+    for i in 0..4_000 {
+        tx.execute(
+            "INSERT INTO streams(stream,epoch,produced,acknowledged) VALUES (?1,'epoch01',1,1)",
+            [format!("stream_{i:04}_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")],
+        ).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let mut cursor = None;
+    let mut seen = std::collections::HashSet::new();
+    let mut pages = 0;
+    loop {
+        let page = n.snapshot(PageRequest {
+            cursor: cursor.clone(),
+            limit: if cursor.is_none() { 0 } else { 100 },
+        }).await.unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() < 64 * 1024);
+        assert!(page.heads.len() <= 100);
+        for head in page.heads {
+            assert!(seen.insert(head.stream.as_str().to_string()));
+        }
+        pages += 1;
+        cursor = page.next;
+        if cursor.is_none() { break; }
+    }
+    assert_eq!(seen.len(), 4_000);
+    assert_eq!(pages, 40);
+}
+
 impl T {
     /// `env`: extra variables for the fake adapter (`FAKE_ACP_SHAPE=claude099`…).
     fn new(env: &[(&str, &str)]) -> T {
