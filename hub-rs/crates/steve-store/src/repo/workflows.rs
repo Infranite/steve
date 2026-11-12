@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -62,6 +62,25 @@ pub struct WorkflowHistory {
     pub unit_id: Option<String>,
     pub detail: Value,
     pub created: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArchivedWorkflowAttempt {
+    pub item_id: String,
+    pub unit_id: String,
+    pub snapshot: WorkUnit,
+    pub created: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkflowActivity {
+    pub state: &'static str,
+    pub observed_at: i64,
+    pub node_id: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub attempt_id: String,
+    pub epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -463,6 +482,82 @@ pub fn deliver_in(
 }
 
 impl Workflows<'_> {
+    /// A current turn is confirmed only by applied activity from the exact active Node attempt.
+    /// The Hub's receive time, not the Node's clock, sets freshness. This is a read-only display
+    /// fact; uncertain or stale work remains active but unconfirmed in the UI.
+    pub fn confirmed_activity(&self, child: &str, session: &str, at: i64) -> Result<Option<WorkflowActivity>> {
+        self.0.read(|c| crate::read_snapshot(c, |c| {
+            let active: Option<(String, String, String)> = c.query_row(
+                "SELECT a.attempt_id,t.turn_id,s.node_id FROM runtime_sessions s
+                 JOIN sessions biz ON biz.id=s.session_id AND biz.item_id=?1
+                 JOIN runtime_turns t ON t.session_id=s.session_id AND t.active_attempt=s.active_attempt AND t.state='running'
+                 JOIN runtime_attempts a ON a.attempt_id=s.active_attempt AND a.turn_id=t.turn_id AND a.node_id=s.node_id
+                 JOIN nodes n ON n.node_id=s.node_id AND n.state='active' AND n.last_seen BETWEEN ?3 AND ?4
+                 WHERE s.session_id=?2 AND s.phase='active' AND s.release_pending=0
+                   AND a.state='running' AND a.cancel_requested=0",
+                params![child, session, at.saturating_sub(600_000), at],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ).optional()?;
+            let Some((attempt, turn, node)) = active else { return Ok(None) };
+            let recent: Option<(i64, String, String, i64)> = c.query_row(
+                "SELECT e.received,e.epoch,e.stream,e.seq FROM node_event_inbox e
+                 JOIN node_streams ns ON ns.node_id=e.node_id AND ns.stream=e.stream AND ns.epoch=e.epoch
+                 WHERE e.node_id=?1 AND e.applied=1 AND ns.fault IS NULL AND ns.applied>=e.seq AND e.received BETWEEN ?5 AND ?6
+                   AND json_extract(e.payload,'$.subject.of')='execution'
+                   AND json_extract(e.payload,'$.subject.type')='turn'
+                   AND json_extract(e.payload,'$.subject.session')=?2
+                   AND json_extract(e.payload,'$.subject.turn')=?3
+                   AND json_extract(e.payload,'$.subject.attempt')=?4
+                   AND (json_extract(e.payload,'$.body.type') IN ('tool_changed','permission_requested','permission_resolved','plan')
+                     OR (json_extract(e.payload,'$.body.type')='message_started'
+                       AND json_extract(e.payload,'$.body.role') IN ('assistant','thought'))
+                     OR (json_extract(e.payload,'$.body.type')='text_delta' AND EXISTS (
+                       SELECT 1 FROM node_event_inbox m WHERE m.node_id=e.node_id AND m.stream=e.stream
+                         AND m.epoch=e.epoch AND m.seq<=e.seq AND m.applied=1
+                         AND json_extract(m.payload,'$.subject.attempt')=?4
+                         AND json_extract(m.payload,'$.body.type')='message_started'
+                         AND json_extract(m.payload,'$.body.role') IN ('assistant','thought')
+                         AND json_extract(m.payload,'$.body.message')=json_extract(e.payload,'$.body.message'))))
+                 ORDER BY e.received DESC,e.seq DESC LIMIT 1",
+                params![node, session, turn, attempt, at.saturating_sub(600_000), at],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            ).optional()?;
+            let Some((observed_at, epoch, stream, seq)) = recent else { return Ok(None) };
+            let started: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM node_event_inbox e WHERE e.node_id=?1 AND e.epoch=?5 AND e.stream=?6 AND e.seq<=?7 AND e.applied=1
+                   AND json_extract(e.payload,'$.subject.of')='execution'
+                   AND json_extract(e.payload,'$.subject.type')='turn'
+                   AND json_extract(e.payload,'$.subject.session')=?2
+                   AND json_extract(e.payload,'$.subject.turn')=?3
+                   AND json_extract(e.payload,'$.subject.attempt')=?4
+                   AND json_extract(e.payload,'$.body.type')='attempt_started')",
+                params![node, session, turn, attempt, epoch, stream, seq], |r| r.get(0),
+            )?;
+            if !started { return Ok(None) }
+            Ok((at.saturating_sub(observed_at).max(0) < 600_000).then(|| WorkflowActivity {
+                    state: "confirmed", observed_at, node_id: node, session_id: session.into(),
+                    turn_id: turn, attempt_id: attempt, epoch,
+                }))
+        }))
+    }
+
+    pub fn archived_attempts_recent(&self, parent: &str, limit: i64) -> Result<(Vec<ArchivedWorkflowAttempt>, i64)> {
+        self.0.read(|c| crate::read_snapshot(c, |c| {
+            let total: i64 = c.query_row("SELECT COUNT(*) FROM workflow_attempts WHERE workflow_id=?", [parent], |r| r.get(0))?;
+            let rows = all(c,
+                "SELECT item_id,unit_id,snapshot,created FROM workflow_attempts WHERE workflow_id=? ORDER BY created DESC,item_id DESC LIMIT ?",
+                params![parent, limit],
+                |r| Ok(ArchivedWorkflowAttempt {
+                    item_id: r.get("item_id")?,
+                    unit_id: r.get("unit_id")?,
+                    snapshot: decode(r, "snapshot")?,
+                    created: r.get("created")?,
+                }),
+            )?;
+            Ok((rows, total))
+        }))
+    }
+
     pub fn get(&self, parent: &str) -> Result<Option<Workflow>> {
         self.0.read(|c| {
             // Header, units and history are one read snapshot even if another Hub process commits a

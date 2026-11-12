@@ -34,7 +34,7 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -130,7 +130,6 @@ export function ItemsView() {
   if (sortBy === "pri") xs = [...xs].sort((a, b) => PRI_ORDER[a.pri ?? "中"] - PRI_ORDER[b.pri ?? "中"])
   if (sortBy === "no") xs = [...xs].sort((a, b) => +b.id.split("-")[1] - +a.id.split("-")[1])
   const groups: [Item["st"], string][] = [["wait", t("views:items.groupWait")], ["prop", t("views:items.groupProp")], ["run", t("views:items.groupRun")], ["block", t("views:items.groupBlock")], ["pause", t("views:items.groupPause")], ["done", t("views:items.groupDone")], ["drop", t("views:items.groupDrop")]]
-  const simple = (() => { const { N, E } = gBuild(); return gComps(N, E).filter((c) => c.some((k) => N[k].k === "item") && c.length <= 2).length })()
   const seg = <Segmented value={itemsView} onChange={(v) => { itemsView = v; selecting = false; selected.clear(); r() }} options={[["list", t("views:items.viewList")], ["board", t("views:items.viewBoard")], ["graph", t("views:items.viewGraph")]] as const} />
   const pick = selecting ? (id: string) => () => { selected.has(id) ? selected.delete(id) : selected.add(id); r() } : () => undefined
   const ids = [...selected]
@@ -203,7 +202,7 @@ export function ItemsView() {
         <div className="flex flex-col gap-3">
           <GraphLegend />
           <RelationGraph scope="all" hideSimple={!showAll} height={560} onOpen={openNode} />
-          <div className="flex flex-wrap items-center gap-2 type-footnote text-muted-foreground">{showAll ? t("views:items.graphAll") : t("views:items.graphHidden", { count: simple })}<Button size="xs" variant="outline" onClick={() => { showAll = !showAll; r() }}>{showAll ? t("views:items.graphLinkedOnly") : t("views:items.graphShowAll")}</Button></div>
+          <div className="flex flex-wrap items-center gap-2 type-footnote text-muted-foreground">{showAll ? t("views:items.graphAll") : t("views:items.graphFiltered")}<Button size="xs" variant="outline" onClick={() => { showAll = !showAll; r() }}>{showAll ? t("views:items.graphLinkedOnly") : t("views:items.graphShowAll")}</Button></div>
         </div>
       )}
     </Page>
