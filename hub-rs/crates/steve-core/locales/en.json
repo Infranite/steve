@@ -242,6 +242,7 @@
   "core.yolo.reason.continue_off": "The settings do not let YOLO tell it to continue",
   "core.yolo.reason.stuck_continue": "3 automatic continues in a row made no progress",
   "core.yolo.reason.continue_again": "Steve already told it to continue and it still has not delivered, so it is left to you",
+  "core.yolo.reason.continue_yours": "You stopped this turn yourself; whether it goes on is yours to decide",
   "core.yolo.reason.continue_stall": "It stopped without delivering or asking",
   "core.yolo.reason.continue_error": "Continues automatically after a conversation error",
   "core.yolo.reason.continue_release": "The second release of this item failed",

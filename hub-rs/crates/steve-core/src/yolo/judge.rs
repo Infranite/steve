@@ -734,6 +734,9 @@ pub fn reason_shown(reason: &str) -> String {
         "它停下了，没有交付也没有提问" => {
             steve_i18n::t!("core.yolo.reason.continue_stall")
         }
+        "你自己中断了这一回合，继续与否由你决定" => {
+            steve_i18n::t!("core.yolo.reason.continue_yours")
+        }
         "会话出错后自动继续" => steve_i18n::t!("core.yolo.reason.continue_error"),
         "这件事项第二次发布失败" => steve_i18n::t!("core.yolo.reason.continue_release"),
         "发布失败已回滚，交回 Bot 修" => {

@@ -242,6 +242,7 @@
   "core.yolo.reason.continue_off": "设置里没有让 YOLO 让它继续",
   "core.yolo.reason.stuck_continue": "连续 3 次自动继续没有进展",
   "core.yolo.reason.continue_again": "Steve 已经让它继续过，仍然没有交付，留给你看",
+  "core.yolo.reason.continue_yours": "你自己中断了这一回合，继续与否由你决定",
   "core.yolo.reason.continue_stall": "它停下了，没有交付也没有提问",
   "core.yolo.reason.continue_error": "会话出错后自动继续",
   "core.yolo.reason.continue_release": "这件事项第二次发布失败",
