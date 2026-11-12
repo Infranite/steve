@@ -539,11 +539,14 @@ fn candidates_of(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Value>> {
         let (why, scope) = reasons(c, mem.decision_id.as_deref())?;
         out.push(json!({
             "mem": mem_json(c, &mem),
-            "record": record_name(&mem.kind),
+            "record": match record_name(&mem.kind) {
+                "长期记忆" => steve_i18n::t!("knowledge.record.memory"),
+                _ => steve_i18n::t!("knowledge.record.entry"),
+            },
             "why": why,
             "scope": scope,
             "origin": origin,
-            "origin_label": label,
+            "origin_label": crate::sources::label_shown(&label),
             "evidence": evidence,
             "supersedes": supersedes,
             "decision_id": mem.decision_id,
@@ -641,7 +644,7 @@ pub fn expired(m: &Modules, who: &Caller) -> ApiResult<Value> {
             let (Some(mem), Some((_, label, evidence, _))) = (mems::get(c, &id)?, candidate_row(c, &id)?) else {
                 continue;
             };
-            out.push(json!({ "mem": mem_json(c, &mem), "origin_label": label, "evidence": evidence, "expired": at }));
+            out.push(json!({ "mem": mem_json(c, &mem), "origin_label": crate::sources::label_shown(&label), "evidence": evidence, "expired": at }));
         }
         Ok(Value::Array(out))
     })

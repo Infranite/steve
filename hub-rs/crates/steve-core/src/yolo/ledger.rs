@@ -181,7 +181,9 @@ impl Yolo {
             Ok::<_, steve_modules::ApiError>(changed)
         })?;
         if changed {
-            let text = format!("YOLO 不再替你处理「{title}」：{reason}");
+            let text = steve_i18n::stored(|| {
+                steve_i18n::t!("core.notice.yolo_item_off", title = title, reason = reason)
+            });
             if let Err(e) =
                 crate::notify::notify(&self.0.db, ws, "system", "info", &text, Some(item))
             {

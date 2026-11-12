@@ -703,6 +703,10 @@ impl ConnectionProvider for ExtWs {
         "外部渠道"
     }
 
+    fn localize(&self, text: &str) -> Option<String> {
+        crate::adapters::localize(text)
+    }
+
     fn caps(&self) -> &[&'static str] {
         &["msg.receive", "msg.send_as_user"]
     }

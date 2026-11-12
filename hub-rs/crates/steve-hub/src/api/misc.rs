@@ -160,11 +160,16 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
         let t_items = t0.elapsed();
         out.insert(
             "decisions".into(),
-            objs(agent_busy(r, r.decisions_open(w)?)?),
+            objs(crate::decision_text::all(agent_busy(
+                r,
+                r.decisions_open(w)?,
+            )?)),
         );
         out.insert(
             "recent".into(),
-            objs(r.decisions_recent(w, now_ms() - 7 * 24 * 3_600_000)?),
+            objs(crate::decision_text::all(
+                r.decisions_recent(w, now_ms() - 7 * 24 * 3_600_000)?,
+            )),
         );
         let (bots, all) = super::bots_out(r, w)?;
         out.insert("bots".into(), objs(bots));

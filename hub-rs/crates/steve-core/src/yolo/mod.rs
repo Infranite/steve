@@ -355,16 +355,22 @@ impl Yolo {
                 Ok::<_, steve_store::StoreError>((n.decided, n.declined))
             })
             .map_err(store_err)?;
-        let what = if from == Mode::Full {
-            "完全放开"
-        } else {
-            "YOLO"
-        };
-        self.notice(
-            ws,
-            "info",
-            &format!("{what} 已结束：替你做了 {decided} 件，留给你 {declined} 件"),
-        );
+        let text = steve_i18n::stored(|| {
+            if from == Mode::Full {
+                steve_i18n::t!(
+                    "core.notice.full_ended",
+                    decided = decided,
+                    declined = declined
+                )
+            } else {
+                steve_i18n::t!(
+                    "core.notice.yolo_ended",
+                    decided = decided,
+                    declined = declined
+                )
+            }
+        });
+        self.notice(ws, "info", &text);
         self.status(ws)
     }
 
@@ -526,7 +532,7 @@ impl Yolo {
                 ws,
                 "system",
                 "fail",
-                &format!("YOLO 已暂停：{reason}"),
+                &steve_i18n::stored(|| steve_i18n::t!("core.notice.yolo_paused", reason = reason)),
                 None,
             )
         {

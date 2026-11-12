@@ -18,3 +18,16 @@ async fn by_language_with_names() {
     })
     .await;
 }
+
+/// Fixed zh-CN text written earlier comes back in the reader's language; zh-CN and other text stay.
+#[test]
+fn fixed_text_is_reworded() {
+    const KEYS: &[&str] = &["i18n.test.hello", "i18n.test.count"];
+    let en = |s: &str| steve_i18n::with(EN, || steve_i18n::reword!(s, KEYS));
+    assert_eq!(en("你好，小王").as_deref(), Some("Hello, 小王"));
+    assert_eq!(en("共 12 个").as_deref(), Some("12 in all"));
+    assert_eq!(en("你好，"), None, "a value is never empty");
+    assert_eq!(en("随便说的话"), None);
+    let zh = steve_i18n::with(ZH_CN, || steve_i18n::reword!("你好，小王", KEYS));
+    assert_eq!(zh, None);
+}

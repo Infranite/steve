@@ -184,7 +184,11 @@ impl Engine {
         // what the web acts on, as flags: `reason` is display text in the request's language
         v["user_took_over"] =
             json!(a.outcome == "cancelled" && a.reason == super::undo::USER_CANCEL);
-        v["limit_what"] = json!(a.reason.strip_prefix(super::limits::REASON_PREFIX));
+        v["limit_what"] = json!(
+            a.reason
+                .strip_prefix(super::limits::REASON_PREFIX)
+                .map(super::limits::what_shown)
+        );
         Ok(v)
     }
 

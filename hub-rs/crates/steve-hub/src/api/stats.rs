@@ -577,7 +577,8 @@ fn quote_json(q: &steve_stats::Quote) -> Value {
     json!({
         "source": q.source, "match": q.price.pattern, "via": q.via, "since": q.since,
         "input": q.price.input, "output": q.price.output,
-        "cache_read": q.price.cache_read, "cache_write": q.price.cache_write, "note": q.price.note,
+        "cache_read": q.price.cache_read, "cache_write": q.price.cache_write,
+        "note": steve_stats::prices::note_shown(&q.price.note),
     })
 }
 
@@ -585,7 +586,10 @@ async fn prices_get(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -
     let enabled = api.0.price_url.is_some();
     api.read(move |db| {
         let custom = stored_prices(db, &c.ws)?;
-        let prices = custom.clone().unwrap_or_else(default_prices);
+        // the default rows' notes are the Hub's and read in your language; rows you saved are yours
+        let prices = custom
+            .clone()
+            .unwrap_or_else(|| steve_stats::prices::rows_shown(&default_prices()));
         let book = metrics::book_of(db, &c.ws).map_err(serr)?;
         // tokens of models no row prices, over everything recorded
         let mut unpriced: BTreeMap<String, i64> = BTreeMap::new();
@@ -615,7 +619,7 @@ async fn prices_get(State(api): State<StatsApi>, Extension(c): Extension<Ctx>) -
         ok(json!({
             "prices": prices,
             "custom": custom.is_some(),
-            "defaults": default_prices(),
+            "defaults": steve_stats::prices::rows_shown(&default_prices()),
             "unpriced": unpriced.into_iter().map(|(model, tokens)| json!({"model": model, "tokens": tokens})).collect::<Vec<_>>(),
             "models": models,
             "catalog": {

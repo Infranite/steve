@@ -78,5 +78,14 @@
   "knowledge.doc.delete_other": "这篇不能单独删除",
   "knowledge.uses.deleted": "已删除",
   "knowledge.mem.already_handled": "这条记忆已经处理过了",
-  "knowledge.mem.deleted_no_undo": "这条记忆已经删除，不能撤销"
+  "knowledge.mem.deleted_no_undo": "这条记忆已经删除，不能撤销",
+  "knowledge.builtin.notes": "我的笔记",
+  "knowledge.builtin.files": "上传的文件",
+  "knowledge.builtin.items": "事项交付",
+  "knowledge.builtin.chat": "主线对话",
+  "knowledge.builtin.mems": "记忆",
+  "knowledge.builtin.bot_mems": "Bot 记忆",
+  "knowledge.chat.day": "%{day} 的对话",
+  "knowledge.record.memory": "长期记忆",
+  "knowledge.record.entry": "知识条目"
 }

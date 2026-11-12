@@ -624,7 +624,10 @@ pub fn park(
                 tx,
                 session,
                 "system",
-                json!({ "text": "该会话绑定在 Node 上，但 Node 未启用（STEVE_NODE_MODE），消息已排队，不会交给旧运行器。", "parked": true }),
+                json!({
+                    "text": steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked")),
+                    "parked": true
+                }),
                 V1,
                 None,
                 now(),

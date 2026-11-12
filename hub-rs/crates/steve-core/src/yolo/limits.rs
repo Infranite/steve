@@ -52,6 +52,62 @@ impl Limit {
 /// The stored prefix of a hard limit's reason ([`Limit::reason`]).
 pub const REASON_PREFIX: &str = "硬限制：";
 
+/// What the limits say (`Limit::what`, written in zh-CN), the fixed ones before the ones that start
+/// with a value.
+const WHAT_KEYS: &[&str] = &[
+    "core.yolo.limit.bank_card",
+    "core.yolo.limit.vault_high",
+    "core.yolo.limit.flow_budget",
+    "core.yolo.limit.github",
+    "core.yolo.limit.foreign_release",
+    "core.yolo.limit.disclosure_block",
+    "core.yolo.limit.as_you_no_mark",
+    "core.yolo.limit.as_you_no_check",
+    "core.yolo.limit.port",
+    "core.yolo.limit.release_script",
+    "core.yolo.limit.steve_home",
+    "core.yolo.limit.nested",
+    "core.yolo.limit.heredoc",
+    "core.yolo.limit.eval",
+    "core.yolo.limit.sh_c",
+    "core.yolo.limit.curl_send",
+    "core.yolo.limit.remote_url",
+    "core.yolo.limit.other_branch",
+    "core.yolo.limit.remote_host",
+    "core.yolo.limit.deploy_tools",
+    "core.yolo.limit.wget",
+    "core.yolo.limit.http",
+    "core.yolo.limit.rsync",
+    "core.yolo.limit.publish",
+    "core.yolo.limit.release_run",
+    "core.yolo.limit.crates",
+    "core.yolo.limit.image",
+    "core.yolo.limit.release_target",
+    "core.yolo.limit.payment",
+    "core.yolo.limit.outward",
+    "core.yolo.limit.waits_for_you",
+    "core.yolo.limit.needs_you",
+    "core.yolo.limit.outward_ask",
+    "core.yolo.limit.steve_home_at",
+    "core.yolo.limit.outside",
+    "core.yolo.limit.unknown_target",
+    "core.yolo.limit.launchd",
+    "core.yolo.limit.curl_method",
+    "core.yolo.limit.gh_write",
+    "core.yolo.limit.git_c",
+    "core.yolo.limit.git_unknown",
+    "core.yolo.limit.git_config",
+    "core.yolo.limit.git_elsewhere",
+    "core.yolo.limit.sends_as_you",
+    "core.yolo.limit.target_unknown",
+    "core.yolo.limit.method_send",
+];
+
+/// A limit's stored `what` in the request's language; one that is none of ours as written.
+pub fn what_shown(what: &str) -> String {
+    steve_i18n::reword!(what, WHAT_KEYS).unwrap_or_else(|| what.to_owned())
+}
+
 static MONEY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)支付|付款|转账|下单|购买|充值|续费|\bpay\b|\bcheckout\b|\bcharge\b|\bpurchase\b",
@@ -1502,6 +1558,51 @@ fn find(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every key is a text a limit here writes (its values where the source has `{…}`), so a stored
+    /// `what` reads back against it.
+    #[test]
+    fn what_keys_are_the_limits_texts() {
+        let src = include_str!("limits.rs");
+        let var = Regex::new(r"%\{[a-z]+\}").unwrap();
+        for k in WHAT_KEYS {
+            let zh = String::from(rust_i18n::t!(*k, locale = steve_i18n::ZH_CN));
+            let pattern = var
+                .split(&zh)
+                .map(regex::escape)
+                .collect::<Vec<_>>()
+                .join(r"\{[a-z_.()]*\}");
+            let re = Regex::new(&format!("\"{pattern}\"")).unwrap();
+            assert!(re.is_match(src), "{k}: {zh}");
+        }
+    }
+
+    #[test]
+    fn what_reads_in_english() {
+        let en = |w: &str| steve_i18n::with(steve_i18n::EN, || what_shown(w));
+        assert_eq!(
+            en("碰到 STEVE_HOME：../Cargo.toml"),
+            "Touches STEVE_HOME: ../Cargo.toml"
+        );
+        assert_eq!(en("碰到 STEVE_HOME"), "Touches STEVE_HOME");
+        assert_eq!(
+            en("cp 的目标来自变量或标准输入，看不出在哪"),
+            "The target of cp comes from a variable or standard input; can't tell where it is"
+        );
+        assert_eq!(
+            en("对外或不可撤回的动作（推送）"),
+            "An outward-facing or irreversible action (推送)"
+        );
+        assert_eq!(en("git push"), "git push");
+        let zh = steve_i18n::with(steve_i18n::ZH_CN, || what_shown("碰到 STEVE_HOME：x"));
+        assert_eq!(zh, "碰到 STEVE_HOME：x");
+        assert_eq!(
+            steve_i18n::with(steve_i18n::EN, || crate::yolo::judge::reason_shown(
+                "硬限制：碰到 STEVE_HOME"
+            )),
+            "Hard limit: Touches STEVE_HOME"
+        );
+    }
 
     #[test]
     fn ai_prefix_is_added_once_and_cannot_be_brought_along() {

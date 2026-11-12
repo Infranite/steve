@@ -12,7 +12,9 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::provider::{AuthKind, ConnectionProvider, FieldDef, Pairing};
+use super::provider::{
+    AuthKind, ConnectionProvider, FieldOut, Pairing, fields_shown, integration_shown, shown,
+};
 use super::repo::ConnRow;
 use super::service::{Connections, HealthOut};
 use crate::Caller;
@@ -217,7 +219,7 @@ pub struct AdapterInfo {
     /// The device flow is offered.
     pub device: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fields: Option<Vec<FieldDef>>,
+    pub fields: Option<Vec<FieldOut>>,
     pub capabilities: Vec<CapSpec>,
     /// The connections it pairs with ([`ConnectionProvider::pairing`]); `null` when it does not.
     pub pairing: Option<Pairing>,
@@ -489,15 +491,15 @@ impl Connections {
             providers.len() - 1
         };
         for p in self.providers() {
-            let i = p.integration();
+            let i = integration_shown(p.as_ref());
             let k = slot(&mut providers, &i.provider, &i.provider_name);
             providers[k].adapters.push(AdapterInfo {
                 id: p.id().into(),
-                name: p.name().into(),
+                name: shown(p.as_ref(), p.name()),
                 identity: i.identity.clone(),
                 auth: p.auth(),
                 device: p.oauth().is_some_and(|s| s.device_url.is_some()),
-                fields: matches!(p.auth(), AuthKind::Credential).then(|| p.fields().to_vec()),
+                fields: fields_shown(p.as_ref()),
                 capabilities: i.capabilities,
                 pairing: p.pairing(),
                 channel: self.channel_summary(p.id()).cloned(),
@@ -519,7 +521,7 @@ impl Connections {
                 providers[k].connections.push(info);
                 continue;
             };
-            let i = p.integration();
+            let i = integration_shown(p.as_ref());
             let k = slot(&mut providers, &i.provider, &i.provider_name);
             let info = self.info(p.as_ref(), &i, r, a);
             let key = installation_key(&r.id, &r.config);
@@ -598,7 +600,7 @@ impl Connections {
             id: r.id.clone(),
             account_id: r.account_id.clone(),
             adapter: r.adapter.clone(),
-            adapter_name: p.name().into(),
+            adapter_name: shown(p, p.name()),
             identity: i.identity.clone(),
             name: if a.display_name.is_empty() {
                 a.handle_display.clone()

@@ -153,8 +153,8 @@ pub fn own_doc(
 pub fn doc_brief(d: &DocRow, s: &SourceRow) -> Value {
     json!({
         "id": d.id,
-        "source": {"id": s.id, "kind": s.kind, "name": s.name},
-        "title": d.title,
+        "source": {"id": s.id, "kind": s.kind, "name": crate::sources::name_shown(&s.kind, &s.name)},
+        "title": if s.kind == "chat" { crate::sources::chat_day_shown(&d.title) } else { d.title.clone() },
         "ref": d.r#ref,
         "visibility": d.eff_visibility(s),
         "level": d.eff_level(s),
@@ -470,7 +470,7 @@ pub fn mem_json(c: &Connection, m: &Mem) -> Value {
         .collect();
     json!({
         "id": m.id, "kind": m.kind, "text": m.text, "source_type": m.source_type,
-        "source_label": steve_modules::shown::source_label(&m.source_label), "level": m.level, "status": m.status,
+        "source_label": crate::sources::label_shown(&m.source_label), "level": m.level, "status": m.status,
         "visibility": m.visibility, "about": about, "created": m.created,
     })
 }

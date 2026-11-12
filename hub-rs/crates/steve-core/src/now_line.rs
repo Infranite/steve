@@ -7,6 +7,7 @@
 use std::borrow::Cow;
 
 use steve_i18n::ZH_CN;
+use steve_i18n::template::{fill, read};
 
 /// Whole lines, the more specific first where one template also matches another's text.
 const LINES: &[&str] = &[
@@ -44,71 +45,6 @@ const SEP: &str = "core.now.list_sep";
 
 fn template(locale: &str, key: &str) -> String {
     rust_i18n::t!(key, locale = locale).into_owned()
-}
-
-enum Seg {
-    Lit(String),
-    Var(String),
-}
-
-fn parse(t: &str) -> Vec<Seg> {
-    let mut out = vec![];
-    let mut rest = t;
-    while let Some(at) = rest.find("%{") {
-        let Some(end) = rest[at..].find('}') else {
-            break;
-        };
-        if at > 0 {
-            out.push(Seg::Lit(rest[..at].into()));
-        }
-        out.push(Seg::Var(rest[at + 2..at + end].into()));
-        rest = &rest[at + end + 1..];
-    }
-    if !rest.is_empty() {
-        out.push(Seg::Lit(rest.into()));
-    }
-    out
-}
-
-/// The values of `t`'s placeholders when `s` is `t` filled in (each value non-empty), else `None`.
-fn read(t: &str, s: &str) -> Option<Vec<(String, String)>> {
-    fn go(segs: &[Seg], s: &str, out: &mut Vec<(String, String)>) -> bool {
-        match segs.split_first() {
-            None => s.is_empty(),
-            Some((Seg::Lit(l), rest)) => {
-                s.strip_prefix(l.as_str()).is_some_and(|s| go(rest, s, out))
-            }
-            Some((Seg::Var(name), rest)) => {
-                /* the shortest value that lets the rest match: a title may hold the next literal, the
-                 * fixed text after it seldom does */
-                for (at, _) in s.char_indices().skip(1).chain([(s.len(), ' ')]) {
-                    let n = out.len();
-                    if go(rest, &s[at..], out) {
-                        out.insert(n, (name.clone(), s[..at].into()));
-                        return true;
-                    }
-                    out.truncate(n);
-                }
-                false
-            }
-        }
-    }
-    let mut out = vec![];
-    go(&parse(t), s, &mut out).then_some(out)
-}
-
-fn fill(t: &str, vals: &[(String, String)]) -> String {
-    parse(t)
-        .into_iter()
-        .map(|s| match s {
-            Seg::Lit(l) => l,
-            Seg::Var(name) => vals
-                .iter()
-                .find(|(n, _)| *n == name)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_default(),
-        })
-        .collect()
 }
 
 /// `stored` read against the zh-CN templates of `keys` and filled in `locale`'s.

@@ -157,6 +157,61 @@ impl FieldDef {
     }
 }
 
+/// A [`FieldDef`] as the form shows it: label and hint in the request's language
+/// ([`ConnectionProvider::localize`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct FieldOut {
+    pub key: &'static str,
+    pub label: String,
+    pub secret: bool,
+    pub required: bool,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// `p`'s fixed `text` in the request's language ([`ConnectionProvider::localize`]), else as written.
+pub fn shown<P: ConnectionProvider + ?Sized>(p: &P, text: &str) -> String {
+    p.localize(text).unwrap_or_else(|| text.to_owned())
+}
+
+/// `p`'s credential form as shown, for [`AuthKind::Credential`].
+pub fn fields_shown<P: ConnectionProvider + ?Sized>(p: &P) -> Option<Vec<FieldOut>> {
+    matches!(p.auth(), AuthKind::Credential).then(|| {
+        p.fields()
+            .iter()
+            .map(|f| FieldOut {
+                key: f.key,
+                label: shown(p, f.label),
+                secret: f.secret,
+                required: f.required,
+                kind: f.kind,
+                default: f.default,
+                hint: f.hint.map(|h| shown(p, h)),
+            })
+            .collect()
+    })
+}
+
+/// `p`'s [`ConnectionProvider::integration`] with its fixed text (provider name, notes, what each
+/// scope is for) in the request's language.
+pub fn integration_shown<P: ConnectionProvider + ?Sized>(p: &P) -> Integration {
+    let mut i = p.integration();
+    i.provider_name = shown(p, &i.provider_name);
+    for c in &mut i.capabilities {
+        if let Some(n) = &c.note {
+            c.note = Some(shown(p, n));
+        }
+        for s in &mut c.scopes {
+            s.purpose = shown(p, &s.purpose);
+        }
+    }
+    i
+}
+
 /// Whose account a new connection is (only these may have one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Owner {
@@ -316,6 +371,14 @@ pub trait ConnectionProvider: Send + Sync + 'static {
     fn system(&self) -> &str;
     /// Shown in the new-connection dialog.
     fn name(&self) -> &str;
+    /// Its own fixed text (its name, field labels and hints, and the provider name, notes and scope
+    /// purposes of [`Self::integration`]), written in zh-CN, in the request's language:
+    /// `steve_i18n::reword!(text, KEYS)` over the adapter's keys. `None`: shown as written (and
+    /// always in zh-CN). See [`shown`].
+    fn localize(&self, text: &str) -> Option<String> {
+        let _ = text;
+        None
+    }
     /// The capabilities it can offer at most.
     fn caps(&self) -> &[&'static str];
     fn auth(&self) -> AuthKind;

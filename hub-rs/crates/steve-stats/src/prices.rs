@@ -92,6 +92,48 @@ pub fn default_prices() -> Vec<Price> {
     ]
 }
 
+/// The notes the Hub writes itself (the default rows', a catalog quote's), each a whole note or one
+/// part of a "；"-joined note.
+const NOTE_KEYS: &[&str] = &[
+    "stats.price_note.official",
+    "stats.price_note.haiku",
+    "stats.price_note.no_cache",
+    "stats.price_note.no_cache_read",
+    "stats.price_note.no_cache_write",
+    "stats.price_note.tiered",
+];
+
+/// A price `note` in the request's language: the Hub's own notes translated, one you wrote as written.
+pub fn note_shown(note: &str) -> String {
+    if let Some(s) = steve_i18n::reword!(note, NOTE_KEYS) {
+        return s;
+    }
+    let zh_sep = rust_i18n::t!("stats.price_note.sep", locale = steve_i18n::ZH_CN);
+    let parts: Vec<&str> = note.split(&*zh_sep).collect();
+    let shown: Vec<Option<String>> = parts
+        .iter()
+        .map(|p| steve_i18n::reword!(p, NOTE_KEYS))
+        .collect();
+    if parts.len() < 2 || shown.iter().any(Option::is_none) {
+        return note.to_owned();
+    }
+    shown
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(&steve_i18n::t!("stats.price_note.sep"))
+}
+
+/// The rows with their notes in the request's language ([`note_shown`]).
+pub fn rows_shown(rows: &[Price]) -> Vec<Price> {
+    rows.iter()
+        .map(|p| Price {
+            note: note_shown(&p.note),
+            ..p.clone()
+        })
+        .collect()
+}
+
 /// The row a model is priced with.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Priced<'a> {
@@ -324,6 +366,27 @@ pub fn validate(prices: &[Price]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Hub's notes read in the reader's language; zh-CN and your own notes as written.
+    #[test]
+    fn notes_by_language() {
+        let en = |n: &str| steve_i18n::with(steve_i18n::EN, || note_shown(n));
+        let rows = steve_i18n::with(steve_i18n::EN, || rows_shown(&default_prices()));
+        assert_eq!(rows[0].note, "List price");
+        assert!(
+            rows[2].note.starts_with("List price for prompts ≤100K; "),
+            "{}",
+            rows[2].note
+        );
+        assert_eq!(
+            en("Models.dev 没列缓存价，缓存按输入价估；另有长上下文或分档价，这里按基础价"),
+            "Models.dev lists no cache prices; cache is priced as input; Long-context or tiered prices also exist; the base price is used here"
+        );
+        assert_eq!(en("我自己的价；官方标价"), "我自己的价；官方标价");
+        assert_eq!(en(""), "");
+        let zh = steve_i18n::with(steve_i18n::ZH_CN, || rows_shown(&default_prices()));
+        assert_eq!(zh, default_prices());
+    }
 
     fn pat(p: Option<Priced<'_>>) -> Option<(&str, Option<&str>)> {
         p.map(|p| (p.price.pattern.as_str(), p.via))

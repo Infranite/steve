@@ -31,6 +31,7 @@ pub mod models;
 mod modules;
 pub mod mq;
 pub mod node_git;
+pub mod notice_line;
 pub mod notify;
 pub mod now_line;
 mod occupancy;

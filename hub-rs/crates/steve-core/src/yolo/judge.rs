@@ -600,7 +600,10 @@ pub fn error_backoff_s(attempts: u32, restart: bool) -> u64 {
 pub fn reason_shown(reason: &str) -> String {
     let tail = |p: &str| reason.strip_prefix(p);
     if let Some(w) = tail(super::limits::REASON_PREFIX) {
-        return steve_i18n::t!("core.yolo.reason.limit", what = w);
+        return steve_i18n::t!(
+            "core.yolo.reason.limit",
+            what = super::limits::what_shown(w)
+        );
     }
     if let Some(w) = tail("看起来涉及工作区以外：") {
         return steve_i18n::t!("core.yolo.reason.outside", what = w);

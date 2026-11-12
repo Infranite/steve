@@ -41,5 +41,12 @@
   "stats.total.lead": "Lead time",
   "stats.total.hit_rate": "Cache hit rate",
   "stats.total.turns": "Turns",
-  "stats.total.decisions": "Decisions"
+  "stats.total.decisions": "Decisions",
+  "stats.price_note.official": "List price",
+  "stats.price_note.haiku": "List price for prompts ≤100K; longer prompts list at 0.50/2.50, not told apart here",
+  "stats.price_note.no_cache": "Models.dev lists no cache prices; cache is priced as input",
+  "stats.price_note.no_cache_read": "Models.dev lists no cache read price; priced as input",
+  "stats.price_note.no_cache_write": "Models.dev lists no cache write price; priced as input",
+  "stats.price_note.tiered": "Long-context or tiered prices also exist; the base price is used here",
+  "stats.price_note.sep": "; "
 }

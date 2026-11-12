@@ -78,5 +78,14 @@
   "knowledge.doc.delete_other": "This document can't be deleted on its own",
   "knowledge.uses.deleted": "Deleted",
   "knowledge.mem.already_handled": "This memory has already been handled",
-  "knowledge.mem.deleted_no_undo": "This memory was deleted and can't be restored"
+  "knowledge.mem.deleted_no_undo": "This memory was deleted and can't be restored",
+  "knowledge.builtin.notes": "My notes",
+  "knowledge.builtin.files": "Uploaded files",
+  "knowledge.builtin.items": "Item deliveries",
+  "knowledge.builtin.chat": "Main conversation",
+  "knowledge.builtin.mems": "Memories",
+  "knowledge.builtin.bot_mems": "Bot memories",
+  "knowledge.chat.day": "Conversation on %{day}",
+  "knowledge.record.memory": "Long-term memory",
+  "knowledge.record.entry": "Knowledge entry"
 }

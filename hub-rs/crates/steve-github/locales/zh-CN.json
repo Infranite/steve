@@ -47,5 +47,8 @@
   "github.manifest.check_failed": "没能核对这个安装：%{error}",
   "github.manifest.foreign_installation": "这个安装不属于本工作空间的 GitHub App",
   "github.manifest.another_account": "另一个账号",
-  "github.manifest.already_installed": "这个 GitHub App 已经装在 %{login} 上了，一个 App 目前只能接一个安装"
+  "github.manifest.already_installed": "这个 GitHub App 已经装在 %{login} 上了，一个 App 目前只能接一个安装",
+  "github.text.pat_name": "GitHub 个人令牌",
+  "github.text.pat_token": "令牌",
+  "github.text.pat_token_hint": "GitHub 设置 → Developer settings → Fine-grained tokens：选好仓库，给 Contents、Pull requests、Issues 读写，Checks、Actions 读；要接收事件再给 Webhooks 读写"
 }

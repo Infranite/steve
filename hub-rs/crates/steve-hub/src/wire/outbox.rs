@@ -43,10 +43,14 @@ pub fn dead_notice(g: &outbox::DeadGroup) -> String {
         .as_deref()
         .map(|e| e.chars().take(200).collect::<String>())
         .unwrap_or_default();
-    format!(
-        "后台投递 {}（{}）有事件一直没能送达，Steve 已停止自动重试（{why}）。原因排除后，到“设置 · 数据 · 后台投递”重新投递。",
-        g.consumer, g.topic
-    )
+    steve_i18n::stored(|| {
+        steve_i18n::t!(
+            "hub.notice.outbox_dead",
+            consumer = g.consumer,
+            topic = g.topic,
+            why = why
+        )
+    })
 }
 
 /// One notice per consumer and workspace that has its first dead delivery (until it is revived).

@@ -204,6 +204,100 @@ macro_rules! t {
     };
 }
 
+/// Fixed zh-CN text, written before the reader's language was known (stored with a notification, a
+/// decision, a constant an adapter declares), in the current language: `text` read against the zh-CN text
+/// of each of `keys` in turn (`%{name}` matches any non-empty value), and the first that matches filled
+/// in the current language with the same values. `None` when the current language is zh-CN (the text
+/// stays as it is, byte for byte) or no key matches (text of a person or a model). `t(key, locale)` looks a
+/// key up in the calling crate's files: use [`reword!`].
+pub fn reword(text: &str, keys: &[&str], t: impl Fn(&str, &str) -> String) -> Option<String> {
+    let locale = current();
+    if locale == ZH_CN || text.is_empty() {
+        return None;
+    }
+    keys.iter().find_map(|k| {
+        let vals = template::read(&t(k, ZH_CN), text)?;
+        Some(template::fill(&t(k, locale), &vals))
+    })
+}
+
+/// [`reword()`] over the calling crate's files: `steve_i18n::reword!(text, KEYS)`, an `Option<String>`.
+#[macro_export]
+macro_rules! reword {
+    ($text:expr, $keys:expr) => {
+        $crate::reword($text, $keys, |k, l| {
+            ::std::string::String::from(rust_i18n::t!(k, locale = l))
+        })
+    };
+}
+
+/// `%{name}` templates read backwards: the values that make a template a given text.
+pub mod template {
+    enum Seg<'a> {
+        Lit(&'a str),
+        Var(&'a str),
+    }
+
+    fn parse(t: &str) -> Vec<Seg<'_>> {
+        let mut out = vec![];
+        let mut rest = t;
+        while let Some(at) = rest.find("%{") {
+            let Some(end) = rest[at..].find('}') else {
+                break;
+            };
+            if at > 0 {
+                out.push(Seg::Lit(&rest[..at]));
+            }
+            out.push(Seg::Var(&rest[at + 2..at + end]));
+            rest = &rest[at + end + 1..];
+        }
+        if !rest.is_empty() {
+            out.push(Seg::Lit(rest));
+        }
+        out
+    }
+
+    /// The values of `t`'s placeholders when `s` is `t` filled in (each value non-empty, the shortest
+    /// that lets the rest match), else `None`.
+    pub fn read(t: &str, s: &str) -> Option<Vec<(String, String)>> {
+        fn go(segs: &[Seg<'_>], s: &str, out: &mut Vec<(String, String)>) -> bool {
+            match segs.split_first() {
+                None => s.is_empty(),
+                Some((Seg::Lit(l), rest)) => s.strip_prefix(l).is_some_and(|s| go(rest, s, out)),
+                Some((Seg::Var(name), rest)) => {
+                    let ends = s.char_indices().skip(1).map(|(at, _)| at);
+                    for at in ends.chain([s.len()]).filter(|at| *at > 0) {
+                        let n = out.len();
+                        if go(rest, &s[at..], out) {
+                            out.insert(n, ((*name).into(), s[..at].into()));
+                            return true;
+                        }
+                        out.truncate(n);
+                    }
+                    false
+                }
+            }
+        }
+        let mut out = vec![];
+        go(&parse(t), s, &mut out).then_some(out)
+    }
+
+    /// `t` with its placeholders filled from `vals` (a missing one empty).
+    pub fn fill(t: &str, vals: &[(String, String)]) -> String {
+        parse(t)
+            .into_iter()
+            .map(|s| match s {
+                Seg::Lit(l) => l.to_owned(),
+                Seg::Var(name) => vals
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default(),
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

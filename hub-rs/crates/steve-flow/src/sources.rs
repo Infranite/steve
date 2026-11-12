@@ -8,7 +8,7 @@ use std::sync::Arc;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steve_modules::accounts::connections::{ConnCx, Connections};
+use steve_modules::accounts::connections::{ConnCx, Connections, shown};
 use steve_modules::{ApiError, ApiResult, Caller};
 use steve_store::{ChangeEvent, Tx};
 
@@ -355,8 +355,8 @@ pub fn view(
             let n24 = stored.get(t.key).copied().unwrap_or(0) + cx.drops.count(&ids, t.key, since);
             Ok(json!({
                 "key": t.key,
-                "label": t.label,
-                "desc": t.desc,
+                "label": shown(a, t.label),
+                "desc": shown(a, t.desc),
                 "on": first.map_or(t.default_on, |s| s.type_on(t.key, t.default_on)),
                 "param": set.and_then(|s| s.param.clone()).or(t.param.map(String::from)),
                 "n24": n24,
@@ -375,7 +375,7 @@ pub fn view(
     Ok(SourceView {
         adapter: a.id().into(),
         source: a.source().into(),
-        name: a.name().into(),
+        name: shown(a, a.name()),
         paused: !sets.is_empty() && sets.iter().all(|s| s.paused),
         triage_bot: first.and_then(|s| s.triage_bot.clone()),
         connections: conns

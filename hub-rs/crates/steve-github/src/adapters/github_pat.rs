@@ -55,6 +55,14 @@ impl ConnectionProvider for GitHubPat {
     fn name(&self) -> &str {
         "GitHub 个人令牌"
     }
+    fn localize(&self, text: &str) -> Option<String> {
+        const KEYS: &[&str] = &[
+            "github.text.pat_name",
+            "github.text.pat_token",
+            "github.text.pat_token_hint",
+        ];
+        steve_i18n::reword!(text, KEYS)
+    }
     fn caps(&self) -> &[&'static str] {
         &super::CAPS
     }
@@ -104,6 +112,29 @@ impl ConnectionProvider for GitHubPat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The form and the name in the reader's language; zh-CN as declared.
+    #[test]
+    fn form_text_by_language() {
+        use steve_modules::accounts::connections::{fields_shown, shown};
+        let a = GitHubPat::default();
+        let texts = || {
+            let f = &fields_shown(&a).unwrap()[0];
+            (
+                shown(&a, a.name()),
+                f.label.clone(),
+                f.hint.clone().unwrap(),
+            )
+        };
+        let (name, label, hint) = steve_i18n::with(steve_i18n::EN, texts);
+        assert_eq!(
+            (name.as_str(), label.as_str()),
+            ("GitHub personal token", "Token")
+        );
+        assert!(hint.starts_with("GitHub Settings → "), "{hint}");
+        let (name, label, _) = steve_i18n::with(steve_i18n::ZH_CN, texts);
+        assert_eq!((name.as_str(), label.as_str()), ("GitHub 个人令牌", "令牌"));
+    }
 
     #[test]
     fn api_base_from_the_env() {

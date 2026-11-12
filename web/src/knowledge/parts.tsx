@@ -64,9 +64,11 @@ export function SessionKnowledge({ id }: { id: string }) {
 }
 
 /** a candidate's question names what it would become (ST-41): “存为长期记忆吗？…” or “存为知识条目吗？…”;
- *  decisions opened earlier ask “记住这条吗？…” */
-const ASK = /^(存为长期记忆吗？|存为知识条目吗？|记住这条吗？)/
-export const memAsk = (q: string) => q.match(ASK)?.[1] ?? t("knowledge:ask.saveMem")
+ *  decisions opened earlier ask “记住这条吗？…”. The Hub words them in the request's language. */
+const ASK = /^(存为长期记忆吗？|存为知识条目吗？|记住这条吗？|Save as a long-term memory\? |Save as a knowledge entry\? |Remember this\? )/
+export const memAsk = (q: string) => q.match(ASK)?.[1]?.trim() ?? t("knowledge:ask.saveMem")
+/** the draft line that says why it is worth keeping, in either language */
+const WHY = /^(为什么值得保留：|Why keep it: )/
 /** the body of a confirm/mem decision: what it would become and why it is worth keeping, where it came from,
  *  the words it was based on, what it replaces, and the wording you can fix before confirming (sent as the
  *  decision's text) */
@@ -80,7 +82,7 @@ export function MemConfirm({ q, draft, busy, act }: { q: string; draft?: string;
     <CardContent className="flex flex-col gap-2 pb-4" data-mem-confirm>
       {edit ? <Textarea autoFocus aria-label={t("knowledge:parts.wordingAria")} className="min-h-16 rounded-lg" value={txt} onChange={(e) => setTxt(e.target.value)} data-mem-text />
         : <div className="type-body">{tx || orig}</div>}
-      {lines.length > 0 && <div className="flex flex-col gap-0.5 type-footnote text-muted-foreground">{lines.map((l, n) => <div key={n} className={cn("break-words", l.startsWith("为什么值得保留：") && "text-foreground/80")}>{l}</div>)}</div>}
+      {lines.length > 0 && <div className="flex flex-col gap-0.5 type-footnote text-muted-foreground">{lines.map((l, n) => <div key={n} className={cn("break-words", WHY.test(l) && "text-foreground/80")}>{l}</div>)}</div>}
     </CardContent>
     <CardFooter className="flex-wrap justify-end gap-2 border-t px-3 py-2.5!">
       {!edit && <Button variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setEdit(true)} data-mem-edit>{t("knowledge:parts.reword")}</Button>}
