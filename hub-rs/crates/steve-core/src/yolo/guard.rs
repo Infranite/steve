@@ -23,6 +23,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::{Value, json};
 
+use super::exec::{Body, Feed};
 use super::judge::{Env, Tool};
 use super::limits::{Places, tool_base, tool_command, tool_kind, tool_paths, tool_targets};
 use super::shell::{self, Argv};
@@ -329,6 +330,9 @@ fn fetch_carries(url: &str) -> Option<String> {
 /// else ([`super::exec::code_runs`]); `None` when it has none or is no interpreter.
 fn code_outward(p: &str, args: &[String]) -> Option<String> {
     let it = super::exec::interpreter(p, args)?;
+    if let Some(why) = it.unseen {
+        return Some(why);
+    }
     if !it.lines.is_empty() {
         return Some(format!("{p} 会把命令交给 shell 执行，留给你"));
     }
@@ -490,6 +494,17 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
         if let Some(why) = &a.unclear {
             return Err(format!("{why}，看不出它运行的命令从哪开始"));
         }
+        // a variable that makes the program run a command (`GIT_EDITOR=true`: judged as that
+        // command) or load code (`LD_PRELOAD`: left to the user)
+        for b in super::exec::var_bodies(&c.words) {
+            match b {
+                Body::Line(l, _) => {
+                    command(&l, &pl, cx)?;
+                }
+                Body::Unseen(why) => return Err(why),
+                _ => {}
+            }
+        }
         // a here-document is text for a reader (`cat <<EOF > file`), not a script for anything else
         if c.stdin.is_some() && !(READERS.contains(&a.program.as_str()) || a.program == "tee") {
             return Err(format!(
@@ -548,6 +563,33 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
     }
     if let Some(why) = code_outward(p, args) {
         return Err(why);
+    }
+    // an option whose value is a command (`fd -x`, `tar --to-command`)
+    if !super::exec::option_bodies(p, args, &Feed::default()).is_empty() {
+        return Err(format!("{p} 的选项会运行别的命令，留给你"));
+    }
+    // a runner's command (`bundle exec X`, `uv run X`) meets the guard as X would
+    if !matches!(p, "npm" | "pnpm" | "yarn")
+        && let Some(bodies) = super::exec::sub_runner(p, args, &Feed::default())
+    {
+        for b in bodies {
+            match b {
+                Body::Argv(words, _) => match shell::argv(&words) {
+                    Some(inner) if !inner.sudo && inner.unclear.is_none() => {
+                        if NEVER.contains(&inner.program.as_str())
+                            || SHELLS.contains(&inner.program.as_str())
+                        {
+                            return Err(format!("{p} 要运行的 {} 留给你", inner.program));
+                        }
+                        simple(&inner, pl, cx)?;
+                    }
+                    Some(_) => return Err(format!("{p} 要运行的命令留给你")),
+                    None => {}
+                },
+                Body::Unseen(why) => return Err(why),
+                _ => return Err(format!("{p} 会把命令交给 shell 执行，留给你")),
+            }
+        }
     }
     let sub = operands(args).first().map(|s| s.as_str()).unwrap_or("");
     let inside_all = |list: Vec<&String>| -> Result<(), String> {

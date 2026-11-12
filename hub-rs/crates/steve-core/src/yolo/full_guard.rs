@@ -142,10 +142,14 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// One simple command: the hard limits as written, then what it is and what it runs.
+    /// One simple command: the hard limits as written, then what its variables, it and what it
+    /// runs in turn do.
     fn simple(&self, c: &Simple, feed: &Feed, pl: &Places, depth: u8) -> Result<(), Stop> {
         if let Some(l) = limits::simple(c, pl, self.branch, 0) {
             return Err(Stop::Limit(l));
+        }
+        for b in exec::var_bodies(&c.words) {
+            self.body(b, pl, depth)?;
         }
         match shell::argv(&c.words) {
             Some(a) => self.argv(&a, feed, pl, depth),
@@ -180,29 +184,33 @@ impl Walk<'_> {
             ));
         }
         for b in exec::bodies(a, feed) {
-            match b {
-                Body::Line(s, f) => self.line(&s, &f, pl, depth + 1, true)?,
-                Body::Maybe(s) => self.line(&s, &Feed::default(), pl, depth + 1, false)?,
-                Body::Argv(words, f) => {
-                    let c = Simple {
-                        expands: words.iter().any(|w| w.contains('$')),
-                        words,
-                        ..Default::default()
-                    };
-                    if depth >= MAX_DEPTH {
-                        return Err(Stop::Ask("命令嵌套太深，看不清".into()));
-                    }
-                    self.simple(&c, &f, pl, depth + 1)?;
-                }
-                Body::Code(lang, code) => {
-                    if let Some(why) = exec::code_runs(lang, &code) {
-                        return Err(Stop::Ask(why));
-                    }
-                }
-                Body::Unseen(why) => return Err(Stop::Ask(why)),
-            }
+            self.body(b, pl, depth)?;
         }
         Ok(())
+    }
+
+    /// One thing a command runs, one level below it.
+    fn body(&self, b: Body, pl: &Places, depth: u8) -> Result<(), Stop> {
+        match b {
+            Body::Line(s, f) => self.line(&s, &f, pl, depth + 1, true),
+            Body::Maybe(s) => self.line(&s, &Feed::default(), pl, depth + 1, false),
+            Body::Argv(words, f) => {
+                if depth >= MAX_DEPTH {
+                    return Err(Stop::Ask("命令嵌套太深，看不清".into()));
+                }
+                let c = Simple {
+                    expands: words.iter().any(|w| w.contains('$')),
+                    words,
+                    ..Default::default()
+                };
+                self.simple(&c, &f, pl, depth + 1)
+            }
+            Body::Code(lang, code) => match exec::code_runs(lang, &code) {
+                Some(why) => Err(Stop::Ask(why)),
+                None => Ok(()),
+            },
+            Body::Unseen(why) => Err(Stop::Ask(why)),
+        }
     }
 }
 

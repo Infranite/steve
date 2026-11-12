@@ -202,6 +202,9 @@ pub(crate) struct Sessions {
     /// The mode switch failed (a store error, say): the next sync tries it again, whatever the
     /// note did meanwhile. Apart from `told`, so a retry never makes a note again.
     mode_pending: Mutex<HashSet<String>>,
+    /// The mode the backend said it cannot express for a session: not asked again for a harness
+    /// left wider than wanted (it would be every sync), only when Steve wants another one.
+    unsupported: Mutex<HashMap<String, String>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -239,6 +242,16 @@ impl Sessions {
     /// Whether the last mode switch for `sid` is still to be made.
     fn mode_pending(&self, sid: &str) -> bool {
         lock(&self.mode_pending).contains(sid)
+    }
+    fn unsupported(&self, sid: &str, mode: &str) -> bool {
+        lock(&self.unsupported).get(sid).is_some_and(|m| m == mode)
+    }
+    fn set_unsupported(&self, sid: &str, mode: Option<&str>) {
+        let mut u = lock(&self.unsupported);
+        match mode {
+            Some(m) => u.insert(sid.into(), m.into()),
+            None => u.remove(sid),
+        };
     }
     fn set_mode_pending(&self, sid: &str, pending: bool) {
         let mut p = lock(&self.mode_pending);
@@ -449,9 +462,11 @@ impl Core {
             // when the harness is still left wider than Steve wants (a restart forgot the change)
             let changed = sessions.changed(&s.id, level).is_some();
             let left_wide = || {
-                rt.mode_name(&mode)
-                    .zip(rt.mode_state(&s.id))
-                    .is_some_and(|(w, st)| wider_than(&w, &st))
+                !sessions.unsupported(&s.id, &mode)
+                    && rt
+                        .mode_name(&mode)
+                        .zip(rt.mode_state(&s.id))
+                        .is_some_and(|(w, st)| wider_than(&w, &st))
             };
             if !changed && !sessions.mode_pending(&s.id) && !left_wide() {
                 continue;
@@ -465,8 +480,9 @@ impl Core {
                 }
                 Ok(crate::runtime::Configured::Unsupported) => {
                     tracing::warn!(session = %s.id, mode, "yolo sync: a mode its backend cannot express: unchanged");
+                    sessions.set_unsupported(&s.id, Some(&mode));
                 }
-                Ok(_) => {}
+                Ok(_) => sessions.set_unsupported(&s.id, None),
             }
             sessions.set_mode_pending(&s.id, false);
             out.push(s.id);

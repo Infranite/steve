@@ -974,3 +974,118 @@ fn st26_a_wrappers_command_starts_where_its_options_end() {
         assert_eq!(rule, "tool.full", "{c}");
     }
 }
+
+/// The second look at ST-26 (independent re-review): commands carried in variables and git
+/// options, `-l` clustered with `-e`, scripts piped in as `/dev/stdin` or `bash -s`, `env -S`'s own
+/// escapes, abbreviated sed options, package runners, inline modules and `fd -x`. Each was let
+/// through by the first version of this change; plain YOLO is checked alongside.
+#[test]
+fn st26_commands_hidden_in_variables_options_and_runners_are_read() {
+    let pl = place();
+    for (c, rule) in [
+        (
+            "GIT_EDITOR='git push origin HEAD;:' git commit --allow-empty",
+            "limit.5",
+        ),
+        (
+            "GIT_SEQUENCE_EDITOR='git push origin HEAD' git rebase -i main",
+            "limit.5",
+        ),
+        ("git grep -O'git push origin HEAD;:' -l main", "limit.5"),
+        (
+            "git grep --open-files-in-pager='git push origin HEAD' -l x",
+            "limit.5",
+        ),
+        ("git config core.editor 'git push origin HEAD'", "limit.5"),
+        ("git -c core.pager='git push origin HEAD' log", "limit.5"),
+        ("git config diff.x.textconv 'sh -c id'", "limit.5"),
+        ("git difftool -x 'git push origin HEAD' main", "limit.5"),
+        ("export PAGER='pkill -f node'; git log", "tool.full"),
+        ("LD_PRELOAD=/tmp/st26.so ls", "tool.full"),
+        ("DYLD_INSERT_LIBRARIES=/tmp/st26.dylib ls", "tool.full"),
+        (
+            "NODE_OPTIONS='--require /tmp/st26.js' node app.js",
+            "tool.full",
+        ),
+        (
+            "PYTHONBREAKPOINT=os.system python3 -c 'breakpoint(\"id\")'",
+            "tool.full",
+        ),
+        ("BASH_ENV=/tmp/st26.sh bash -c true", "tool.full"),
+        (
+            "ruby -le 'system \"git\", \"push\", \"origin\", \"HEAD\"'",
+            "tool.full",
+        ),
+        ("perl -lne 'system(\"id\")' notes.md", "tool.full"),
+        ("perl -0777 -ne 'system(\"id\")' notes.md", "tool.full"),
+        ("ruby -W0 -e 'system \"id\"'", "tool.full"),
+        (
+            "printf 'import os\\nos.system(\"pkill -f node\")\\n' | python3 /dev/stdin",
+            "tool.full",
+        ),
+        (
+            "printf '%s %s origin HEAD\\n' git push | bash /dev/stdin",
+            "tool.full",
+        ),
+        ("printf 'pkill -f node\\n' | bash -s x", "tool.full"),
+        ("printf 'pkill -f node\\n' | bash -o pipefail", "tool.full"),
+        ("env -S 'git\\_push\\_origin\\_HEAD'", "tool.full"),
+        (
+            "sed --expr='1e git push origin HEAD' README.md",
+            "tool.full",
+        ),
+        ("sed --exp='1e id' README.md", "tool.full"),
+        ("sed --fi=x.sed README.md", "tool.full"),
+        ("bundle exec git push origin HEAD", "limit.5"),
+        ("npm exec -- sudo id", "tool.full"),
+        ("uv run pkill -f node", "tool.full"),
+        ("poetry run sudo id", "tool.full"),
+        ("direnv exec . git push origin HEAD", "limit.5"),
+        ("mise exec node@20 -- pkill -f node", "tool.full"),
+        ("nix-shell -p hello --run 'pkill -f node'", "tool.full"),
+        ("bun x sudo id", "tool.full"),
+        (
+            "node --import 'data:text/javascript,import{execSync}from\"node:child_process\";execSync(\"id\")' -e 0",
+            "tool.full",
+        ),
+        (
+            "node -e 'import(\"data:text/javascript;base64,AAAA\")'",
+            "tool.full",
+        ),
+        (
+            "python3 -c 'import timeit; timeit.timeit(\"import os; os.sys\"+\"tem(1)\", number=1)'",
+            "tool.full",
+        ),
+        (
+            "python3 -c 'import cProfile; cProfile.run(\"1\")'",
+            "tool.full",
+        ),
+        ("fd -1 -x sh -c 'pkill -f node' _", "tool.full"),
+        ("fd . -x git push origin HEAD", "limit.5"),
+        ("tar -xf a.tar --to-command='pkill -f node'", "tool.full"),
+        ("echo '* * * * * pkill node' | crontab -", "tool.full"),
+    ] {
+        let (auto, got) = full_verdict(&pl, c, &[]);
+        assert!(!auto, "{c}: allowed under full access");
+        assert_eq!(got, rule, "{c}");
+        let (auto, got) = plain_verdict(&pl, c);
+        assert!(!auto, "{c}: allowed by plain YOLO ({got})");
+    }
+    // what the first version took for code that could run something, and only reads
+    for c in [
+        "python3 -c 'import sys; print(sys.executable)'",
+        "python3 -c 'import platform; print(platform.system())'",
+        "python3 -c 'import sqlite3; c = sqlite3.connect(\":memory:\"); c.execute(\"select 1\")'",
+        "python3 -c 'print(\"skill\")'",
+        "sed -l 5 's/a/b/' input.txt",
+        "uv run pytest -q",
+        "bundle exec rspec",
+        "npm exec -- vitest run",
+        "git grep -O -l main",
+        "EDITOR=true git commit --allow-empty -m x",
+        "fd -e rs",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(auto, "{c}: {rule}");
+    }
+}

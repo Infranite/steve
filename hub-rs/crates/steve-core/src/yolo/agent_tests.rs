@@ -667,6 +667,17 @@ fn a_harness_left_wider_than_wanted_is_asked_back_after_a_restart() {
         assert!(k.core.yolo_sync(WS).is_empty(), "{st:?}");
     }
     assert_eq!(k.rt.st().modes.len(), 1, "asked once");
+    // a backend that cannot express the wanted mode is not asked again at every sync
+    k.rt.st().mode_unsupported = true;
+    at(ModeState {
+        applied: Some("full_access".into()),
+        ..Default::default()
+    });
+    assert_eq!(k.core.yolo_sync(WS), vec![sid.clone()]);
+    assert!(k.core.yolo_sync(WS).is_empty());
+    assert!(k.core.yolo_sync(WS).is_empty());
+    assert_eq!(k.rt.st().modes.len(), 2, "unsupported: asked once");
+    k.rt.st().mode_unsupported = false;
     // the same for a session without a bot: back to asking
     k.db()
         .exec("UPDATE sessions SET bot_id=NULL WHERE id=?", &[&sid])

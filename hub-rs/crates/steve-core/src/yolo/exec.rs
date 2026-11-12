@@ -80,6 +80,206 @@ pub(crate) enum Body {
     Unseen(String),
 }
 
+/// Names of a program's standard input as a file: a script read from there is fed, not written.
+const STDIN_PATHS: &[&str] = &["-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"];
+
+/// A shell reads its script from standard input: `-s`, or no script operand (or one that names
+/// standard input). `-o`/`-O` take a value.
+fn shell_reads_stdin(args: &[String]) -> bool {
+    let mut i = 0;
+    while let Some(x) = args.get(i) {
+        i += 1;
+        match x.as_str() {
+            "--" => break,
+            "-o" | "+o" | "-O" | "+O" => i += 1,
+            s if s.starts_with("--") => {}
+            s if s.starts_with('-') && s.len() > 1 => {
+                if s[1..].contains('s') {
+                    return true;
+                }
+            }
+            s if s.starts_with('+') => {}
+            s => return STDIN_PATHS.contains(&s),
+        }
+    }
+    args.get(i)
+        .is_none_or(|s| STDIN_PATHS.contains(&s.as_str()))
+}
+
+/// Variables whose value a program runs as a command line (an editor, a pager, an ssh command,
+/// an askpass helper): `GIT_EDITOR='…' git commit`, `export PAGER=…`.
+const COMMAND_VARS: &[&str] = &[
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "MANPAGER",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_PAGER",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "SUDO_ASKPASS",
+    "GIT_EXTERNAL_DIFF",
+    "PROMPT_COMMAND",
+    "LESSOPEN",
+    "LESSCLOSE",
+    "BROWSER",
+];
+/// Variables that load code into the programs that follow (a preloaded library, interpreter or
+/// git options, a shell's startup file): what they run cannot be read off the line.
+const CODE_VARS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "NODE_OPTIONS",
+    "PERL5OPT",
+    "RUBYOPT",
+    "PYTHONBREAKPOINT",
+    "PYTHONSTARTUP",
+    "BASH_ENV",
+    "ENV",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+];
+
+/// What the variable assignments among `words` make the programs after them run: a command
+/// variable's value is a line; a code variable cannot be read. All words are looked at
+/// (`A=… cmd`, `env A=… cmd`, `export A=…`): an assignment that is only text costs nothing.
+pub(crate) fn var_bodies(words: &[String]) -> Vec<Body> {
+    let mut out = vec![];
+    for w in words {
+        let Some((k, v)) = w.split_once('=') else {
+            continue;
+        };
+        if !shell::is_assignment(w) {
+            continue;
+        }
+        if COMMAND_VARS.contains(&k) {
+            if !v.trim().is_empty() {
+                out.push(Body::Line(v.to_string(), Feed::default()));
+            }
+        } else if CODE_VARS.contains(&k)
+            || k.starts_with("DYLD_")
+            || k.starts_with("GIT_CONFIG_KEY_")
+            || k.starts_with("GIT_CONFIG_VALUE_")
+        {
+            out.push(Body::Unseen(format!(
+                "环境变量 {k} 会让后面的程序加载代码，看不出会运行什么"
+            )));
+        }
+    }
+    out
+}
+
+/// What an option of an ordinary program runs: its value is a command line (`split --filter`),
+/// a program (`rg --pre`), the rest of the words up to `;` (`fd -x`), or something that cannot
+/// be read (a vim command, a crontab).
+enum Runs {
+    Line,
+    Program,
+    Rest,
+    Unseen,
+}
+
+/// Programs (by their names) and the options of theirs that run a command.
+type OptionCommands = (&'static [&'static str], &'static [(&'static str, Runs)]);
+
+/// Programs that run a command given in one of their options, and those options. Their other words
+/// are data.
+const OPTION_COMMANDS: &[OptionCommands] = &[
+    (
+        &["fd", "fdfind"],
+        &[
+            ("-x", Runs::Rest),
+            ("--exec", Runs::Rest),
+            ("-X", Runs::Rest),
+            ("--exec-batch", Runs::Rest),
+        ],
+    ),
+    (&["rg"], &[("--pre", Runs::Program)]),
+    (
+        &["tar", "gtar", "bsdtar"],
+        &[
+            ("--to-command", Runs::Line),
+            ("-I", Runs::Line),
+            ("--use-compress-program", Runs::Line),
+            ("--checkpoint-action", Runs::Unseen),
+            ("-F", Runs::Line),
+            ("--info-script", Runs::Line),
+            ("--new-volume-script", Runs::Line),
+        ],
+    ),
+    (&["sort", "gsort"], &[("--compress-program", Runs::Program)]),
+    (&["split", "gsplit"], &[("--filter", Runs::Line)]),
+    (&["man"], &[("-P", Runs::Line), ("--pager", Runs::Line)]),
+    (
+        &["zip"],
+        &[("-TT", Runs::Line), ("--unzip-command", Runs::Line)],
+    ),
+    (
+        &["vim", "vi", "nvim", "view", "ex"],
+        &[
+            ("-c", Runs::Unseen),
+            ("--cmd", Runs::Unseen),
+            ("+", Runs::Unseen),
+        ],
+    ),
+    (&["less"], &[("+", Runs::Unseen)]),
+];
+
+/// What `p`'s command options run (`fd -x`, `tar --to-command`…).
+pub(crate) fn option_bodies(p: &str, args: &[String], feed: &Feed) -> Vec<Body> {
+    let mut out = vec![];
+    let Some((_, opts)) = OPTION_COMMANDS.iter().find(|(n, _)| n.contains(&p)) else {
+        return out;
+    };
+    let mut i = 0;
+    while let Some(x) = args.get(i) {
+        i += 1;
+        for (o, runs) in opts.iter() {
+            // `--opt=v`, `--opt v`, `-Ov`, `-O v`, `+cmd`
+            let value = if *o == "+" {
+                x.strip_prefix('+').map(String::from)
+            } else if x == o {
+                let v = args.get(i).cloned();
+                if !matches!(runs, Runs::Rest) {
+                    i += 1;
+                }
+                v
+            } else if o.starts_with("--") {
+                x.strip_prefix(&format!("{o}=")).map(String::from)
+            } else {
+                x.strip_prefix(o)
+                    .filter(|v| !v.is_empty())
+                    .map(String::from)
+            };
+            let Some(v) = value else {
+                continue;
+            };
+            match runs {
+                Runs::Line => out.push(Body::Line(v, feed.clone())),
+                Runs::Program => out.push(Body::Argv(vec![v], feed.clone())),
+                Runs::Rest => {
+                    let end = args[i..]
+                        .iter()
+                        .position(|x| x == ";" || x == "\\;")
+                        .map_or(args.len(), |e| i + e);
+                    out.push(Body::Argv(args[i..end].to_vec(), feed.clone()));
+                    i = end;
+                }
+                Runs::Unseen => out.push(Body::Unseen(format!(
+                    "{p} 的 {o} 会运行这里读不出来的命令，留给你"
+                ))),
+            }
+            break;
+        }
+    }
+    out
+}
+
 /// Programs that only read their arguments (text, patterns, files) or write files: a quoted
 /// argument is data to them, never a command. (`sed`'s scripts are read by [`sed_runs`].)
 const DATA: &[&str] = &[
@@ -108,6 +308,24 @@ pub(crate) const OPAQUE: &[&str] = &[
     "watchexec",
     "expect",
     "sshpass",
+    "firejail",
+    "proxychains",
+    "proxychains4",
+    "torsocks",
+    "chpst",
+    "setpriv",
+    "capsh",
+    "sandbox-exec",
+    "perf",
+    "flatpak-spawn",
+    "systemd-inhibit",
+    "sg",
+    "newgrp",
+    "numactl",
+    "cgexec",
+    // a job that runs later
+    "at",
+    "batch",
 ];
 
 /// Runners whose command starts after their options: `watch`'s words are a line for `sh -c` (with
@@ -246,6 +464,53 @@ const RUNNERS: &[Wrapper] = &[
         lead: 0,
     },
     Wrapper {
+        names: &["xvfb-run"],
+        flags: "a",
+        valued: "efnpsw",
+        attached: "",
+        long_flags: &["--auto-servernum", "--help"],
+        long_valued: &[
+            "--error-file",
+            "--auth-file",
+            "--server-num",
+            "--xauth-protocol",
+            "--server-args",
+            "--wait",
+        ],
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["dbus-run-session"],
+        flags: "",
+        valued: "",
+        attached: "",
+        long_flags: &["--config-file", "--dbus-daemon", "--help", "--version"],
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["ssh-agent"],
+        flags: "csDdk",
+        valued: "aEPt",
+        attached: "",
+        long_flags: NO_LONG,
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["catchsegv"],
+        flags: "",
+        valued: "",
+        attached: "",
+        long_flags: HELP,
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
         names: &["valgrind"],
         flags: "vqh",
         valued: "",
@@ -292,8 +557,9 @@ pub(crate) fn bodies(a: &Argv, feed: &Feed) -> Vec<Body> {
                     }
                 ))),
             },
-            // `bash script.sh` runs a file, as any program would; with no script it reads stdin
-            None if operands(args).iter().all(|x| x.as_str() == "-") => from_stdin(&mut out, None),
+            // `bash script.sh` runs a file, as any program would; `-s`, no script or
+            // `/dev/stdin` read the script from standard input
+            None if shell_reads_stdin(args) => from_stdin(&mut out, None),
             None => {}
         }
         return out;
@@ -316,7 +582,7 @@ pub(crate) fn bodies(a: &Argv, feed: &Feed) -> Vec<Body> {
         "source" | "." => {
             if operands(args)
                 .first()
-                .is_none_or(|f| matches!(f.as_str(), "/dev/stdin" | "-" | "/dev/fd/0"))
+                .is_none_or(|f| STDIN_PATHS.contains(&f.as_str()))
             {
                 from_stdin(&mut out, None);
             }
@@ -410,7 +676,15 @@ pub(crate) fn bodies(a: &Argv, feed: &Feed) -> Vec<Body> {
         runner(p, spec, args, feed, &mut out);
         return out;
     }
+    if let Some(b) = sub_runner(p, args, feed) {
+        out.extend(b);
+        return out;
+    }
     if let Some(it) = interpreter(p, args) {
+        if let Some(why) = it.unseen {
+            out.push(Body::Unseen(why));
+            return out;
+        }
         match it.lang {
             Lang::Shell if !it.codes.is_empty() || it.stdin => out.push(Body::Unseen(format!(
                 "{p} 是另一种 shell，它的命令这里读不出来"
@@ -423,6 +697,16 @@ pub(crate) fn bodies(a: &Argv, feed: &Feed) -> Vec<Body> {
                 }
             }
         }
+        return out;
+    }
+    if p == "crontab" && !args.iter().all(|x| x == "-l") {
+        // a job installed now runs later, whatever it is
+        out.push(Body::Unseen("crontab 装的任务以后才运行，留给你".into()));
+        return out;
+    }
+    let ob = option_bodies(p, args, feed);
+    if !ob.is_empty() {
+        out.extend(ob);
         return out;
     }
     if !DATA.contains(&p) && !READERS.contains(&p) {
@@ -498,6 +782,502 @@ fn runner(p: &str, spec: &Wrapper, args: &[String], feed: &Feed, out: &mut Vec<B
     }
 }
 
+/// A package or environment manager that runs a command of its own (`npm exec`, `bundle exec`,
+/// `uv run`, `mise exec … --`…), read by the option words it takes: `valued` take the next word
+/// (unless written `--x=v`), `line` take a command line, `shell` make the command words a line,
+/// `none` make it run no program read here (a Python module, a lookup), `flags` take nothing. An
+/// option not listed leaves where its command starts unknown. Its command follows the options
+/// (and `lead` more words), or follows `--`; with `dashdash`, only `--` or a `line` option give one.
+struct SubRunner {
+    names: &'static [&'static str],
+    /// The subcommand that runs a command (`exec`, `run`); empty: the program itself does.
+    subs: &'static [&'static str],
+    flags: &'static [&'static str],
+    valued: &'static [&'static str],
+    line: &'static [&'static str],
+    shell: &'static [&'static str],
+    none: &'static [&'static str],
+    lead: usize,
+    dashdash: bool,
+}
+
+const SUB_RUNNERS: &[SubRunner] = &[
+    SubRunner {
+        names: &["npm"],
+        subs: &["exec", "x"],
+        flags: &[
+            "--yes",
+            "-y",
+            "--no",
+            "--workspaces",
+            "--ws",
+            "--include-workspace-root",
+            "--silent",
+            "-s",
+            "--quiet",
+            "-q",
+            "--offline",
+            "--prefer-offline",
+            "--prefer-online",
+            "--legacy-peer-deps",
+        ],
+        valued: &[
+            "--package",
+            "-p",
+            "--workspace",
+            "-w",
+            "--prefix",
+            "--registry",
+            "--cache",
+            "--userconfig",
+            "--loglevel",
+        ],
+        line: &["--call", "-c"],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["pnpm"],
+        subs: &["exec", "dlx"],
+        flags: &[
+            "--recursive",
+            "-r",
+            "--parallel",
+            "--no-bail",
+            "--silent",
+            "-s",
+            "--workspace-root",
+            "-w",
+            "--report-summary",
+            "--reverse",
+        ],
+        valued: &[
+            "--package",
+            "--filter",
+            "-F",
+            "--dir",
+            "-C",
+            "--workspace-dir",
+            "--resume-from",
+        ],
+        line: &[],
+        shell: &["-c", "--shell-mode"],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["yarn"],
+        subs: &["exec", "dlx"],
+        flags: &["--quiet", "-q"],
+        valued: &["--package", "-p"],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["bun"],
+        subs: &["x"],
+        flags: &["--bun"],
+        valued: &[],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["bundle", "bundler"],
+        subs: &["exec"],
+        flags: &["--keep-file-descriptors"],
+        valued: &["--gemfile"],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["direnv"],
+        subs: &["exec"],
+        flags: &[],
+        valued: &[],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 1,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["uv"],
+        subs: &["run"],
+        flags: &[
+            "--frozen",
+            "--locked",
+            "--no-sync",
+            "--isolated",
+            "--no-project",
+            "--no-dev",
+            "--dev",
+            "--only-dev",
+            "--all-extras",
+            "--all-packages",
+            "--active",
+            "--no-env-file",
+            "--no-editable",
+            "--exact",
+            "--offline",
+            "--no-cache",
+            "--quiet",
+            "-q",
+            "--verbose",
+            "-v",
+        ],
+        valued: &[
+            "--with",
+            "--with-requirements",
+            "--with-editable",
+            "--python",
+            "-p",
+            "--package",
+            "--extra",
+            "--group",
+            "--only-group",
+            "--no-group",
+            "--index",
+            "--index-url",
+            "--default-index",
+            "--extra-index-url",
+            "--env-file",
+            "--directory",
+            "--project",
+            "--config-setting",
+            "-C",
+            "--cache-dir",
+        ],
+        line: &[],
+        shell: &[],
+        none: &["-m", "--module", "--script", "--gui-script"],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["poetry"],
+        subs: &["run"],
+        flags: &[
+            "--quiet",
+            "-q",
+            "--verbose",
+            "-v",
+            "-vv",
+            "-vvv",
+            "--no-interaction",
+            "-n",
+            "--no-ansi",
+            "--ansi",
+            "--no-plugins",
+            "--no-cache",
+        ],
+        valued: &["--directory", "-C", "--project", "-P"],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["pipenv"],
+        subs: &["run"],
+        flags: &["--quiet", "-q", "--verbose", "-v"],
+        valued: &["--python"],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["pdm"],
+        subs: &["run"],
+        flags: &[
+            "--verbose",
+            "-v",
+            "--quiet",
+            "-q",
+            "--global",
+            "-g",
+            "--recreate",
+        ],
+        valued: &["--project", "-p", "--venv"],
+        line: &[],
+        shell: &[],
+        none: &["--list", "-l"],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["conda", "mamba", "micromamba"],
+        subs: &["run"],
+        flags: &[
+            "--live-stream",
+            "--no-capture-output",
+            "--debug-wrapper-scripts",
+            "-v",
+            "--verbose",
+        ],
+        valued: &["-n", "--name", "-p", "--prefix", "--cwd"],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["mise", "rtx"],
+        subs: &["exec", "x"],
+        flags: &[],
+        valued: &[],
+        line: &["-c", "--command"],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: true,
+    },
+    SubRunner {
+        names: &["asdf", "rbenv", "pyenv", "nodenv", "goenv", "jenv"],
+        subs: &["exec"],
+        flags: &[],
+        valued: &[],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["doppler"],
+        subs: &["run"],
+        flags: &[],
+        valued: &[],
+        line: &["--command"],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: true,
+    },
+    SubRunner {
+        names: &["op"],
+        subs: &["run"],
+        flags: &[],
+        valued: &[],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: true,
+    },
+    SubRunner {
+        names: &["aws-vault"],
+        subs: &["exec"],
+        flags: &[
+            "--no-session",
+            "-n",
+            "--json",
+            "-j",
+            "--server",
+            "-s",
+            "--lazy",
+            "--stdout",
+        ],
+        valued: &[
+            "--duration",
+            "-d",
+            "--mfa-token",
+            "-t",
+            "--region",
+            "--prompt",
+        ],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 1,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["dotenv"],
+        subs: &[],
+        flags: &["--debug", "-o", "--override", "--quiet", "-q"],
+        valued: &["-e", "-v"],
+        line: &[],
+        shell: &[],
+        none: &["-p"],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["dotenvx"],
+        subs: &["run"],
+        flags: &[],
+        valued: &[],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: true,
+    },
+    SubRunner {
+        names: &["nix-shell"],
+        subs: &[],
+        flags: &[],
+        valued: &[],
+        line: &["--run", "--command"],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: true,
+    },
+    SubRunner {
+        names: &["devbox"],
+        subs: &["run"],
+        flags: &["--quiet", "-q"],
+        valued: &["--config", "-c", "--environment", "-e"],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+    SubRunner {
+        names: &["cross-env", "ccache", "sccache", "distcc"],
+        subs: &[],
+        flags: &[],
+        valued: &[],
+        line: &[],
+        shell: &[],
+        none: &[],
+        lead: 0,
+        dashdash: false,
+    },
+];
+
+/// What a [`SubRunner`] runs; `None`: `p` is none, or not in the form that runs a command (`npm
+/// install`, `bun run x`).
+pub(crate) fn sub_runner(p: &str, args: &[String], feed: &Feed) -> Option<Vec<Body>> {
+    let r = SUB_RUNNERS.iter().find(|r| r.names.contains(&p))?;
+    // what `--` ends: the runner's own words
+    let dash = args.iter().position(|x| x == "--");
+    let own = &args[..dash.unwrap_or(args.len())];
+    let name = |w: &str| {
+        w.split_once('=')
+            .map_or(w.to_string(), |(n, _)| n.to_string())
+    };
+    let mut i = 0;
+    if !r.subs.is_empty() {
+        // the subcommand, after global options only (`npm --prefix x exec`, not `npm install exec`)
+        let mut k = 0;
+        let at = loop {
+            let x = own.get(k)?;
+            if !x.starts_with('-') {
+                if !r.subs.contains(&x.as_str()) {
+                    return None;
+                }
+                break k;
+            }
+            k += if r.valued.contains(&name(x).as_str()) && !x.contains('=') {
+                2
+            } else {
+                1
+            };
+        };
+        i = at + 1;
+    } else if matches!(p, "ccache" | "sccache" | "distcc")
+        && args.first().is_some_and(|x| x.starts_with('-'))
+    {
+        // `ccache -s`: its own statistics, no compiler run
+        return Some(vec![]);
+    }
+    let mut out = vec![];
+    if r.dashdash {
+        // a line may be given anywhere among its own words (`nix-shell -p x --run '…'`)
+        let mut j = i;
+        while let Some(x) = own.get(j) {
+            j += 1;
+            if r.line.contains(&name(x).as_str()) {
+                match x.split_once('=') {
+                    Some((_, v)) => out.push(Body::Line(v.to_string(), feed.clone())),
+                    None => {
+                        out.extend(own.get(j).map(|l| Body::Line(l.clone(), feed.clone())));
+                        j += 1;
+                    }
+                }
+            }
+        }
+        if let Some(d) = dash {
+            let words = args[d + 1..].to_vec();
+            if !words.is_empty() {
+                out.push(Body::Argv(words, feed.clone()));
+            }
+        }
+        return Some(out);
+    }
+    let mut shell_mode = false;
+    // the options before the command
+    while let Some(x) = args.get(i) {
+        if x == "--" || !x.starts_with('-') || x == "-" {
+            break;
+        }
+        let n = name(x);
+        let step = if x.contains('=') { 1 } else { 2 };
+        if r.none.contains(&n.as_str()) {
+            return Some(out);
+        } else if r.line.contains(&n.as_str()) {
+            let l = x
+                .split_once('=')
+                .map(|(_, v)| v.to_string())
+                .or_else(|| args.get(i + 1).cloned());
+            out.extend(l.map(|l| Body::Line(l, feed.clone())));
+            i += step;
+        } else if r.valued.contains(&n.as_str()) {
+            i += step;
+        } else if r.shell.contains(&n.as_str()) {
+            shell_mode = true;
+            i += 1;
+        } else if r.flags.contains(&n.as_str()) {
+            i += 1;
+        } else {
+            out.push(Body::Unseen(format!(
+                "{p} 的选项 {x} 不认识，看不出它运行的命令从哪开始"
+            )));
+            return Some(out);
+        }
+    }
+    let mut start = if dash == Some(i) { i + 1 } else { i + r.lead };
+    if args.get(start).is_some_and(|x| x == "--") {
+        start += 1;
+    }
+    let mut words: Vec<String> = args
+        .get(start..)
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
+    if p == "cross-env" {
+        // `cross-env A=1 B=2 cmd`
+        let n = words.iter().take_while(|w| w.contains('=')).count();
+        words.drain(..n);
+    }
+    if !words.is_empty() {
+        out.push(if shell_mode {
+            Body::Line(words.join(" "), feed.clone())
+        } else {
+            Body::Argv(words, feed.clone())
+        });
+    }
+    Some(out)
+}
+
 /// What git runs besides itself: `-c` values that are commands (an alias `!…`, a pager, an
 /// editor), `rebase -x`, `bisect run`, `submodule foreach`. Its other words (a commit message, a
 /// path, a pattern) are data.
@@ -519,6 +1299,51 @@ fn git(args: &[String], feed: &Feed) -> Vec<Body> {
     }
     let sub = args.get(i).map(String::as_str).unwrap_or("");
     let rest = &args[(i + 1).min(args.len())..];
+    if args[..i].iter().any(|x| x.starts_with("--exec-path")) {
+        out.push(Body::Unseen(
+            "git --exec-path 让 git 从别处找子命令，看不出会运行什么".into(),
+        ));
+    }
+    // options whose value is a command git runs: a pager, a diff tool, an upload-pack program
+    let valued = |names: &[&str], short: Option<&str>| -> Vec<String> {
+        let mut v = vec![];
+        let mut it = rest.iter();
+        while let Some(x) = it.next() {
+            if names.contains(&x.as_str()) || short == Some(x.as_str()) {
+                v.extend(it.next().cloned());
+            } else if let Some(c) = names.iter().find_map(|n| x.strip_prefix(&format!("{n}="))) {
+                v.push(c.into());
+            } else if let Some(c) = short
+                .and_then(|s| x.strip_prefix(s))
+                .filter(|c| !c.is_empty())
+            {
+                v.push(c.into());
+            }
+        }
+        v
+    };
+    let lines = match sub {
+        "grep" => {
+            // `-O` alone opens the default pager; `-Ocmd` / `--open-files-in-pager=cmd` name one
+            let mut v: Vec<String> = rest
+                .iter()
+                .filter_map(|x| {
+                    x.strip_prefix("-O")
+                        .or_else(|| x.strip_prefix("--open-files-in-pager="))
+                        .filter(|c| !c.is_empty())
+                        .map(String::from)
+                })
+                .collect();
+            v.retain(|c| !c.starts_with('-'));
+            v
+        }
+        "difftool" => valued(&["--extcmd"], Some("-x")),
+        "fetch" | "pull" => valued(&["--upload-pack"], None),
+        "clone" | "ls-remote" => valued(&["--upload-pack"], Some("-u")),
+        "archive" => valued(&["--exec"], None),
+        _ => vec![],
+    };
+    out.extend(lines.into_iter().map(|l| Body::Line(l, feed.clone())));
     match sub {
         "rebase" => {
             let mut it = rest.iter();
@@ -562,8 +1387,14 @@ struct Interp {
     /// Short options with a value (attached or the next word) that is not code.
     valued: &'static str,
     long_valued: &'static [&'static str],
-    /// Short options whose value can only be attached (perl's `-i.bak`, `-l0`).
+    /// Short options whose value can only be attached, the rest of the word (`-i.bak`, `-x/dir`).
     attached: &'static str,
+    /// Short options followed by digits only, if any (perl's `-l`, `-0777`); a letter after them
+    /// is the next option of the cluster (`-lne`).
+    digits: &'static str,
+    /// Options whose value is a module loaded before the code (`--import`, `-r`): one given inline
+    /// (`data:` URL) is code that cannot be read.
+    loaders: &'static [&'static str],
 }
 
 const INTERPRETERS: &[Interp] = &[
@@ -576,6 +1407,8 @@ const INTERPRETERS: &[Interp] = &[
         valued: "WXmQ",
         long_valued: &["--check-hash-based-pycs"],
         attached: "",
+        digits: "",
+        loaders: &[],
     },
     Interp {
         names: &["node", "nodejs", "tsx", "ts-node"],
@@ -595,6 +1428,14 @@ const INTERPRETERS: &[Interp] = &[
             "--title",
         ],
         attached: "",
+        digits: "",
+        loaders: &[
+            "-r",
+            "--require",
+            "--import",
+            "--loader",
+            "--experimental-loader",
+        ],
     },
     Interp {
         names: &["bun"],
@@ -605,6 +1446,8 @@ const INTERPRETERS: &[Interp] = &[
         valued: "r",
         long_valued: &["--preload", "--cwd", "--env-file", "--config"],
         attached: "",
+        digits: "",
+        loaders: &["-r", "--preload"],
     },
     Interp {
         names: &["deno"],
@@ -615,6 +1458,8 @@ const INTERPRETERS: &[Interp] = &[
         valued: "",
         long_valued: &["--config", "--import-map", "--location", "--env-file"],
         attached: "",
+        digits: "",
+        loaders: &[],
     },
     Interp {
         names: &["ruby", "irb"],
@@ -624,7 +1469,9 @@ const INTERPRETERS: &[Interp] = &[
         long_code: NO_LONG,
         valued: "IrCEF",
         long_valued: &["--encoding", "--external-encoding", "--internal-encoding"],
-        attached: "ix0lWT",
+        attached: "ix",
+        digits: "0WT",
+        loaders: &["-r"],
     },
     Interp {
         names: &["perl"],
@@ -634,7 +1481,9 @@ const INTERPRETERS: &[Interp] = &[
         long_code: NO_LONG,
         valued: "IMmF",
         long_valued: NO_LONG,
-        attached: "il0xCdD",
+        attached: "ixCdD",
+        digits: "l0",
+        loaders: &["-M", "-m"],
     },
     Interp {
         names: &["php"],
@@ -645,6 +1494,8 @@ const INTERPRETERS: &[Interp] = &[
         valued: "cdfzt",
         long_valued: NO_LONG,
         attached: "",
+        digits: "",
+        loaders: &[],
     },
     Interp {
         names: &["lua", "luajit"],
@@ -655,6 +1506,8 @@ const INTERPRETERS: &[Interp] = &[
         valued: "l",
         long_valued: NO_LONG,
         attached: "",
+        digits: "",
+        loaders: &[],
     },
     Interp {
         names: &["Rscript", "R"],
@@ -665,6 +1518,8 @@ const INTERPRETERS: &[Interp] = &[
         valued: "",
         long_valued: NO_LONG,
         attached: "",
+        digits: "",
+        loaders: &[],
     },
     Interp {
         names: &["pwsh", "powershell"],
@@ -681,6 +1536,8 @@ const INTERPRETERS: &[Interp] = &[
         valued: "",
         long_valued: NO_LONG,
         attached: "",
+        digits: "",
+        loaders: &[],
     },
     Interp {
         names: &["osascript"],
@@ -691,6 +1548,8 @@ const INTERPRETERS: &[Interp] = &[
         valued: "ls",
         long_valued: NO_LONG,
         attached: "",
+        digits: "",
+        loaders: &[],
     },
 ];
 
@@ -701,8 +1560,11 @@ pub(crate) struct Inline {
     pub codes: Vec<String>,
     /// Command lines it hands to a shell (`bun exec`).
     pub lines: Vec<String>,
-    /// It reads its program from standard input: no code, no module, no script (or `-`).
+    /// It reads its program from standard input: no code, no module, and no script or one that is
+    /// standard input (`-`, `/dev/stdin`).
     pub stdin: bool,
+    /// Code it is given that cannot be read at all (a module as a `data:` URL).
+    pub unseen: Option<String>,
 }
 
 /// `p`'s command line when `p` is an interpreter: all its code, attached (`-c'…'`), clustered
@@ -715,11 +1577,21 @@ pub(crate) fn interpreter(p: &str, args: &[String]) -> Option<Inline> {
         codes: vec![],
         lines: vec![],
         stdin: false,
+        unseen: None,
     };
     let mut first: Option<&str> = None;
     let mut module = false;
     let mut i = 0;
     let mut opts = true;
+    // a module given inline is code nothing here can read
+    let mut load = |opt: &str, v: Option<&String>| {
+        if it.loaders.contains(&opt) && v.is_some_and(|v| v.trim_start().starts_with("data:")) {
+            out.unseen = Some(format!(
+                "{p} {opt} 加载的是写在命令里的模块，看不出会做什么"
+            ));
+        }
+    };
+    let mut codes = vec![];
     while let Some(x) = args.get(i) {
         i += 1;
         if opts && x == "--" {
@@ -732,60 +1604,81 @@ pub(crate) fn interpreter(p: &str, args: &[String]) -> Option<Inline> {
             .find(|l| x == *l || x.strip_prefix(*l).is_some_and(|r| r.starts_with('=')));
         if let Some(l) = long {
             match x.strip_prefix(*l).and_then(|r| r.strip_prefix('=')) {
-                Some(v) => out.codes.push(v.into()),
+                Some(v) => codes.push(v.to_string()),
                 None => {
-                    out.codes.extend(args.get(i).cloned());
+                    codes.extend(args.get(i).cloned());
                     i += 1;
                 }
             }
             continue;
         }
-        if x.starts_with("--") {
-            if it.long_valued.contains(&x.as_str()) {
-                i += 1;
+        if opts && x.starts_with("--") {
+            match x.split_once('=') {
+                Some((n, v)) => load(n, Some(&v.to_string())),
+                None if it.long_valued.contains(&x.as_str()) => {
+                    load(x, args.get(i));
+                    i += 1;
+                }
+                None => {}
             }
             continue;
         }
         if opts && x.len() > 1 && x.starts_with('-') {
             let cs: Vec<char> = x[1..].chars().collect();
-            for (j, &c) in cs.iter().enumerate() {
+            let mut j = 0;
+            while let Some(&c) = cs.get(j) {
                 let rest: String = cs[j + 1..].iter().collect();
                 if it.code.contains(c) {
                     if it.code_attached && !rest.is_empty() {
-                        out.codes.push(rest);
+                        codes.push(rest);
                     } else {
-                        out.codes.extend(args.get(i).cloned());
+                        codes.extend(args.get(i).cloned());
                         i += 1;
                     }
                     break;
                 }
                 if it.valued.contains(c) {
                     module |= it.lang == Lang::Python && c == 'm';
+                    let opt = format!("-{c}");
                     if rest.is_empty() {
+                        load(&opt, args.get(i));
                         i += 1;
+                    } else {
+                        load(&opt, Some(&rest));
                     }
                     break;
                 }
                 if it.attached.contains(c) {
                     break;
                 }
+                j += 1;
+                if it.digits.contains(c) {
+                    while cs.get(j).is_some_and(|d| d.is_ascii_digit() || *d == ':') {
+                        j += 1;
+                    }
+                }
             }
             continue;
         }
         first.get_or_insert(x.as_str());
     }
+    out.codes = codes;
     match (p, first) {
         ("deno", Some("eval")) => out
             .codes
             .extend(operands(args).get(1).map(|s| s.to_string())),
-        ("deno", Some("run")) => out.stdin = operands(args).get(1).is_none_or(|s| *s == "-"),
+        ("deno", Some("run")) => {
+            out.stdin = operands(args)
+                .get(1)
+                .is_none_or(|s| STDIN_PATHS.contains(&s.as_str()));
+        }
         ("bun", Some("exec")) => out
             .lines
             .extend(operands(args).get(1).map(|s| s.to_string())),
         _ => {}
     }
     if p != "deno" && out.codes.is_empty() && !module {
-        out.stdin = first.is_none_or(|f| f == "-");
+        out.stdin = first.is_none_or(|f| STDIN_PATHS.contains(&f));
     } else if p == "deno" && first.is_none() {
         out.stdin = true;
     }
@@ -796,12 +1689,17 @@ pub(crate) fn interpreter(p: &str, args: &[String]) -> Option<Inline> {
 /// process or evaluate text as code.
 static RUNS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"(?i)\b(system\w*|popen\w*|spawn\w*|exec\w*|eval|fork\w*|subprocess|child_process",
-        r"|posix_spawn\w*|startfile|webbrowser|pty|ctypes|cffi|ffi|fiddle|dlopen|syscall|setuid",
-        r"|seteuid|setreuid|setresuid|setgid|setegid|setgroups|initgroups|open3|shell_exec",
-        r"|passthru|proc_open|pcntl_\w+|posix_\w+)\b|\w*kill\w*|create_subprocess",
+        r"(?i)\b(system\w*|popen\w*|spawn\w*|exec|execv\w*|execl\w*|execSync|execFile\w*|execa",
+        r"|exec_command|eval|fork\w*|subprocess|child_process|posix_spawn\w*|startfile|webbrowser",
+        r"|pty|ctypes|cffi|ffi|fiddle|dlopen|syscall|setuid|seteuid|setreuid|setresuid|setgid",
+        r"|setegid|setgroups|initgroups|open3|shell_exec|passthru|proc_open|pcntl_\w+|posix_\w+",
+        r"|kill\w*|\w+_kill|pkill|killall)\b|create_subprocess",
     ))
     .expect("valid regex")
+});
+/// What reads like [`RUNS`] but only names this process or its platform.
+static PLAIN_CALLS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bplatform\.system\(\)|\bsys\.executable\b").expect("valid regex")
 });
 /// Per language: loading code by a computed name, reaching a function by one (reflection),
 /// unpickling.
@@ -809,7 +1707,8 @@ static PY_DYNAMIC: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"\b(__import__|importlib|runpy|getattr|setattr|delattr|globals|locals|vars|inspect",
         r"|attrgetter|methodcaller|pickle|cPickle|marshal|dill|shelve|jsonpickle|unsafe_load",
-        r"|builtins|code\.interact)\b|\byaml\.load\b",
+        r"|builtins|timeit|cProfile|pdb|bdb|doctest|pydoc|pipepager|breakpoint|runcall|runctx)\b",
+        r"|\byaml\.load\b|\bcode\.\w+|\bprofile\.run|\btrace\.Trace",
     ))
     .expect("valid regex")
 });
@@ -817,6 +1716,7 @@ static JS_DYNAMIC: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"\b(Function|constructor|__proto__|Reflect|globalThis|global|vm|worker_threads|Worker",
         r"|WebAssembly|mainModule|binding|_linkedBinding|getBuiltinModule|Deno|Bun)\b",
+        r"|['\x22`]\s*data:",
     ))
     .expect("valid regex")
 });
@@ -835,7 +1735,8 @@ static PHP_DYNAMIC: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid regex")
 });
 static LUA_DYNAMIC: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(load|loadstring|loadfile|dofile|require|debug|package)\b").expect("valid regex")
+    Regex::new(r"\b(load|loadstring|loadfile|dofile|require|debug|package|os\.execute|io\.popen)\b")
+        .expect("valid regex")
 });
 static R_DYNAMIC: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
@@ -919,6 +1820,7 @@ pub(crate) fn code_runs(lang: Lang, code: &str) -> Option<String> {
         }
         _ => {}
     }
+    let code = &PLAIN_CALLS.replace_all(code, "");
     if let Some(m) = RUNS.find(code) {
         return why(m.as_str());
     }
@@ -1000,6 +1902,18 @@ pub(crate) fn sed_runs(args: &[String]) -> Option<String> {
             let (n, v) = long
                 .split_once('=')
                 .map_or((long, None), |(n, v)| (n, Some(v)));
+            // GNU takes any unambiguous start of a long option (`--expr`, `--fi`)
+            let Some(n) = SED_LONG
+                .iter()
+                .find(|o| **o == n)
+                .or_else(|| {
+                    let all: Vec<&&str> = SED_LONG.iter().filter(|o| o.starts_with(n)).collect();
+                    (all.len() == 1).then(|| all[0])
+                })
+                .copied()
+            else {
+                return Some(format!("sed 的选项 {x} 不认识，看不出它的脚本是哪个"));
+            };
             match (n, v) {
                 ("expression", Some(v)) => scripts.push(v.into()),
                 ("expression", None) => {
@@ -1026,6 +1940,15 @@ pub(crate) fn sed_runs(args: &[String]) -> Option<String> {
                     break;
                 }
                 'f' => return Some(IN_FILE.into()),
+                // GNU's `-l N` (line length); BSD's `-l` takes nothing
+                'l' if rest.is_empty()
+                    && args
+                        .get(i)
+                        .is_some_and(|n| n.chars().all(|d| d.is_ascii_digit())) =>
+                {
+                    i += 1;
+                    break;
+                }
                 // a suffix (`-i.bak`): BSD's `-i SUFFIX` has GNU read the suffix as the script,
                 // which BSD's sed, without `e`, could not run
                 'i' | 'I' => break,
@@ -1046,6 +1969,28 @@ pub(crate) fn sed_runs(args: &[String]) -> Option<String> {
     }
     None
 }
+
+/// GNU sed's long options.
+const SED_LONG: &[&str] = &[
+    "binary",
+    "debug",
+    "expression",
+    "file",
+    "follow-symlinks",
+    "help",
+    "in-place",
+    "line-length",
+    "null-data",
+    "zero-terminated",
+    "posix",
+    "quiet",
+    "silent",
+    "regexp-extended",
+    "sandbox",
+    "separate",
+    "unbuffered",
+    "version",
+];
 
 /// What in sed script `s` executes (`e …`, an `s` command's `e` flag); `Err`: not a script this
 /// reader knows.
@@ -1313,6 +2258,132 @@ mod tests {
             Some((w(&["A", "B"]), false))
         );
         assert_eq!(codes("ls", &["-e"]), None);
+    }
+
+    #[test]
+    fn runners_commands_start_after_their_options() {
+        let argv = |p: &str, a: &[&str]| -> Option<Vec<Vec<String>>> {
+            sub_runner(p, &w(a), &Feed::default()).map(|bs| {
+                bs.into_iter()
+                    .map(|b| match b {
+                        Body::Argv(v, _) => v,
+                        Body::Line(l, _) => vec![format!("line:{l}")],
+                        Body::Unseen(_) => vec!["unseen".into()],
+                        other => vec![format!("{other:?}")],
+                    })
+                    .collect()
+            })
+        };
+        assert_eq!(
+            argv("npm", &["--prefix", "x", "exec", "--", "sudo", "id"]),
+            Some(vec![w(&["sudo", "id"])])
+        );
+        assert_eq!(
+            argv("npm", &["exec", "-c", "pkill x"]),
+            Some(vec![w(&["line:pkill x"])])
+        );
+        assert_eq!(
+            argv("npm", &["install", "exec"]),
+            None,
+            "another subcommand"
+        );
+        assert_eq!(argv("npm", &["test"]), None);
+        assert_eq!(
+            argv("uv", &["run", "--with", "x", "pytest"]),
+            Some(vec![w(&["pytest"])])
+        );
+        assert_eq!(
+            argv("uv", &["run", "-m", "pytest"]),
+            Some(vec![]),
+            "a module"
+        );
+        assert_eq!(
+            argv("uv", &["run", "--frob", "x", "pkill"]),
+            Some(vec![w(&["unseen"])])
+        );
+        assert_eq!(
+            argv("conda", &["run", "-n", "env", "pkill", "x"]),
+            Some(vec![w(&["pkill", "x"])])
+        );
+        assert_eq!(
+            argv("aws-vault", &["exec", "prof", "--", "aws", "s3"]),
+            Some(vec![w(&["aws", "s3"])])
+        );
+        assert_eq!(
+            argv("direnv", &["exec", ".", "git", "push"]),
+            Some(vec![w(&["git", "push"])])
+        );
+        assert_eq!(
+            argv("mise", &["exec", "node@20", "--", "id"]),
+            Some(vec![w(&["id"])])
+        );
+        assert_eq!(
+            argv("mise", &["exec", "node@20"]),
+            Some(vec![]),
+            "no command: a shell"
+        );
+        assert_eq!(
+            argv("cross-env", &["A=1", "B=2", "pkill", "x"]),
+            Some(vec![w(&["pkill", "x"])])
+        );
+        assert_eq!(
+            argv("pnpm", &["exec", "-c", "pkill", "x"]),
+            Some(vec![w(&["line:pkill x"])])
+        );
+        assert_eq!(argv("ccache", &["-s"]), Some(vec![]));
+    }
+
+    #[test]
+    fn a_shell_reads_its_script_from_standard_input() {
+        for a in [
+            &[][..],
+            &["-s"],
+            &["-s", "x"],
+            &["-xs"],
+            &["-"],
+            &["/dev/stdin"],
+            &["-o", "pipefail"],
+            &["-e", "/dev/fd/0"],
+        ] {
+            assert!(shell_reads_stdin(&w(a)), "{a:?}");
+        }
+        for a in [
+            &["x.sh"][..],
+            &["-o", "pipefail", "x.sh"],
+            &["-e", "x.sh", "-s"],
+        ] {
+            assert!(!shell_reads_stdin(&w(a)), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn variables_and_options_that_carry_commands() {
+        let v = var_bodies(&w(&[
+            "GIT_EDITOR=git push",
+            "A=1",
+            "git",
+            "commit",
+            "LD_PRELOAD=/x.so",
+        ]));
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert!(matches!(&v[0], Body::Line(l, _) if l == "git push"));
+        assert!(matches!(&v[1], Body::Unseen(_)));
+        assert!(var_bodies(&w(&["echo", "PATH=/x", "CC=gcc"])).is_empty());
+        let o = option_bodies(
+            "fd",
+            &w(&["-e", "rs", "-x", "rm", "{}", ";", "-H"]),
+            &Feed::default(),
+        );
+        assert_eq!(o, vec![Body::Argv(w(&["rm", "{}"]), Feed::default())]);
+        assert!(option_bodies("fd", &w(&["-e", "rs"]), &Feed::default()).is_empty());
+        assert_eq!(
+            option_bodies(
+                "tar",
+                &w(&["-xf", "a", "--to-command=cat"]),
+                &Feed::default()
+            ),
+            vec![Body::Line("cat".into(), Feed::default())]
+        );
     }
 
     #[test]

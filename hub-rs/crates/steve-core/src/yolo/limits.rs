@@ -23,6 +23,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Value;
 
+use super::exec::{self, Body, Feed};
 use super::judge::{Disclosure, Env, Facts, Identity, Outbound, OutboundStage, Subject, Tool};
 use super::shell::{self, Argv, Parsed, Simple};
 
@@ -751,6 +752,34 @@ pub(crate) fn simple(c: &Simple, pl: &Places, branch: Option<&str>, depth: u8) -
             return Some(l);
         }
     }
+    // every command it runs in turn (wrappers, runners, variables), as the execution model reads it
+    let feed = Feed::of(c, &Feed::default());
+    for b in exec::var_bodies(&c.words)
+        .into_iter()
+        .chain(exec::bodies(&a, &feed))
+    {
+        let hit = match b {
+            Body::Line(s, _) | Body::Maybe(s) => shell::parse(&s)
+                .ok()
+                .and_then(|n| parsed(&n, pl, branch, depth + 1)),
+            Body::Argv(words, _) => {
+                if depth >= MAX_DEPTH {
+                    return Some(Limit::new(4, "命令嵌套太深，看不清"));
+                }
+                let c = Simple {
+                    expands: words.iter().any(|w| w.contains('$')),
+                    words,
+                    ..Default::default()
+                };
+                simple(&c, pl, branch, depth + 1)
+            }
+            // not a hard limit's to say: the guard and full access leave it to the user
+            Body::Code(..) | Body::Unseen(_) => None,
+        };
+        if hit.is_some() {
+            return hit;
+        }
+    }
     None
 }
 
@@ -1452,7 +1481,10 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
             "-c" => {
                 let kv = args.get(i + 1).map(String::as_str).unwrap_or("");
                 if risky_git_config(kv) {
-                    return Some(Limit::new(5, format!("git -c {kv} 可能把命令变成推送")));
+                    return Some(Limit::new(
+                        5,
+                        format!("git -c {kv} 可能让 git 运行别的命令或推送"),
+                    ));
                 }
                 i += 2;
             }
@@ -1492,7 +1524,7 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
         "config" => rest
             .iter()
             .find(|k| risky_git_config(k))
-            .map(|k| Limit::new(5, format!("git config {k} 可能把命令变成推送"))),
+            .map(|k| Limit::new(5, format!("git config {k} 可能让 git 运行别的命令或推送"))),
         "submodule" if rest.first().is_some_and(|r| r == "foreach") => sub_argv(
             rest[1..]
                 .iter()
@@ -1532,20 +1564,42 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
     }
 }
 
+/// A git setting that redirects pushes, or names a command git runs later (an editor, a pager,
+/// a diff, filter or merge driver, a hook directory, an included file).
 fn risky_git_config(k: &str) -> bool {
     let k = k.to_lowercase();
+    let key = k.split_once('=').map_or(k.as_str(), |(k, _)| k);
     [
         "alias.",
         "remote.",
         "url.",
         "core.sshcommand",
         "core.hookspath",
+        "core.editor",
+        "core.pager",
+        "core.fsmonitor",
+        "core.askpass",
+        "core.gitproxy",
         "credential.",
         "branch.",
         "push.",
+        "diff.external",
+        "filter.",
+        "sequence.editor",
+        "pager.",
+        "gpg.",
+        "interactive.difffilter",
+        "include.",
+        "includeif.",
+        "uploadpack.packobjectshook",
+        "sendemail.",
     ]
     .iter()
-    .any(|p| k.starts_with(p))
+    .any(|p| key.starts_with(p))
+        || key.starts_with("diff.") && (key.ends_with(".textconv") || key.ends_with(".command"))
+        || key.starts_with("merge.") && key.ends_with(".driver")
+        || key.starts_with("difftool.") && key.ends_with(".cmd")
+        || key.starts_with("mergetool.") && key.ends_with(".cmd")
 }
 
 fn find(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {

@@ -702,6 +702,10 @@ pub(crate) fn options(
 /// The words of `env -S`'s string; `None` when it is more than words (an operator, a redirection,
 /// command substitution): env would not read those the way a shell does.
 fn split_string(s: &str) -> Option<Vec<String>> {
+    // env's own escapes (`\_` is a space, `\c` ends it) and `${VAR}` are not a shell's
+    if s.contains(['\\', '$']) {
+        return None;
+    }
     let p = parse(s).ok()?;
     if !p.opaque.is_empty() || p.cmds.len() > 1 {
         return None;
@@ -713,7 +717,7 @@ fn split_string(s: &str) -> Option<Vec<String>> {
     }
 }
 
-fn is_assignment(w: &str) -> bool {
+pub(crate) fn is_assignment(w: &str) -> bool {
     match w.split_once('=') {
         Some((k, _)) => {
             !k.is_empty()
