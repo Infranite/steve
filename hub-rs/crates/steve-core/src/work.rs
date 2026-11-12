@@ -270,7 +270,7 @@ impl Tx<'_> {
     }
 
     /// A turn of the unit's session runs or is not confirmed over.
-    fn unit_turn(&self, u: &WorkUnit) -> Result<bool> {
+    pub(crate) fn unit_turn(&self, u: &WorkUnit) -> Result<bool> {
         let Some(child) = u.item_id.as_deref() else {
             return Ok(false);
         };

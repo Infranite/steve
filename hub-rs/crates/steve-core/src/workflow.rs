@@ -470,6 +470,25 @@ impl Tx<'_> {
         for g in self.db().store().workflows().all_open()? {
             let parent = self.item(&g.item_id)?;
             for u in &g.units {
+                // A crash can land after the graph recorded a failure but before the turn-end
+                // callback closed its child. The failed attempt is durable; finish that item once
+                // its session is no longer running, including failures from older installations.
+                if u.status == "failed"
+                    && let Some(child) = u.item_id.as_deref()
+                    && self
+                        .db()
+                        .item(child)?
+                        .is_some_and(|i| i.phase == crate::cycle::ACTIVE)
+                    && !self.unit_turn(u)?
+                {
+                    let reason = u
+                        .reason
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| (!u.summary.trim().is_empty()).then_some(u.summary.as_str()))
+                        .unwrap_or("工作单元未通过");
+                    self.lc_stop(child, FAIL, "workflow", reason, None)?;
+                }
                 if (g.paused
                     || parent.status == "pause"
                     || parent.archived
