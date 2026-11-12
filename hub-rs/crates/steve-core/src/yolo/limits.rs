@@ -144,19 +144,42 @@ fn outward_ask(text: &str, full: bool) -> Option<regex::Match<'_>> {
         OUTWARD_ASK.find(text)
     }
 }
-/// Hard limit 7: something the user has to do themselves, or to say they did.
+/// Hard limit 7: something the user has to do themselves, or to say they did. A request (or a claim),
+/// never a bare word: a question about how long a verification code lives, how many digits an OTP
+/// has or which library draws a QR code is an ordinary design question.
 static OWN_ACTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"(?i)本人|亲自|手动(操作|完成|确认|登录|点击|执行|授权|批准|输入|扫码)",
-        r"|扫码|扫一扫|二维码|验证码|动态码|短信码|一次性密码|两步验证|双重验证|二次验证|\b(2fa|mfa|otp)\b",
-        r"|指纹|面容|touch ?id|face ?id|硬件密钥|yubikey|u盾",
+        r"(?i)(你|您|需要|请|麻烦|得|由)[^。？?！!\n]{0,4}(本人|亲自)",
+        r"|(请|你|您|麻烦)[^。？?！!\n]{0,4}手动(操作|完成|确认|登录|点击|执行|授权|批准|输入|扫码)",
+        // scanning a code, asked for
+        r"|(请|你|您|麻烦|帮我|用手机|用微信|用支付宝|打开)[^。？?！!\n]{0,8}(扫码|扫一扫|扫一下)",
+        r"|扫(一下|描)?(这个|下面的?|上面的?|图中的?|页面上的?)(二维码|码)",
+        // a one-time code asked for, to be typed or passed on
+        r"|((请|麻烦|帮我)[^。？?！!\n]{0,6}|你(来|去|再)?)(输入|提供|发|告诉|填|报)[^。？?！!\n]{0,8}(验证码|动态码|短信码|校验码|一次性密码|otp|2fa|mfa)",
+        r"|(把|将)[^。？?！!\n]{0,6}(验证码|动态码|短信码|校验码|一次性密码|otp)[^。？?！!\n]{0,4}(发|告诉|给|报)",
+        r"|(验证码|动态码|短信码|校验码|一次性密码)[^。？?！!\n]{0,6}(发我|发给我|发过来|告诉我|给我|是多少)",
+        r"|(完成|通过|进行)[^。？?！!\n]{0,4}(两步验证|双重验证|二次验证|2fa|mfa)",
+        r"|(用|按|插上|插入|刷|录入)[^。？?！!\n]{0,4}(指纹|面容|touch ?id|face ?id|硬件密钥|yubikey|u盾)",
         r"|插(上|入|好)(手机|设备|硬件|数据线|u盘|网线|电源)|重新插拔",
         r"|你[^。？?！!\n]{0,8}(在|用|到)(你的)?(手机|电脑|浏览器|设备|app|应用|系统设置|钥匙串|终端)",
         r"|(登录|授权|操作|扫码|确认|安装|批准|验证)(完|好)?(了|后|之后|以后)[^。？?\n]{0,4}(告诉|通知|回复|跟|叫)我",
         r"|(在|用)(手机|设备|手表|平板)(上|里)?[^。？?\n]{0,4}(确认|登录|授权|批准|扫|点|验证|输入)",
+        r"|请(你|您)?(先|再|重新)?(登录|登入)",
+        // a claim that it was done
         r"|(你|用户|本人)[^。？?\n]{0,4}已(经)?[^。？?\n]{0,6}(登录|扫码|确认|授权|批准|操作|验证)",
-        r"|\b(qr ?code|verification code|one-time (code|password)|passkey|in person|yourself)\b",
-        r"|\bon your (phone|device|computer|laptop|browser)\b|\b(sign|log) ?in (manually|yourself)\b",
+        r"|\b(the )?user (has )?(already )?(confirmed|approved|logged in|signed in|scanned|authorized)\b",
+        r"|\balready (logged|signed) ?in\b",
+        // English: signing in asked for, or to be reported done
+        r"|\b(please|you('ll| will)? need to|you have to|you must|can you|could you|would you|kindly|go ahead and)\s+(re-?)?(log ?in|sign ?in|log ?on|sign ?on|authenticate|authori[sz]e)\b",
+        r"|(^|[.!?\n]\s*)(re-?)?(log|sign) (in|on) (to|into|with)\b",
+        r"|\b(log|sign) ?(in|on) (to|into|with)\b[^.?!\n]{0,60}\b(then|and|once|when)\b[^.?!\n]{0,30}\b(reply|tell me|let me know|ping me)\b",
+        r"|\b(once|when|after) you('ve| have|'re| are)?\s+(logged|signed|log|sign) ?(in|on)\b",
+        r"|\b(log|sign) ?in (manually|yourself)\b|\b(in person|yourself)\b",
+        r"|\b(enter|type|send( me)?|give me|provide|share|paste|tell me|read me)\b[^.?!\n]{0,20}\b(verification|one-time|otp|2fa|mfa|sms|security|login|auth|authentication) ?(code|password|pin)\b",
+        r"|\b(enter|type|send( me)?|give me|provide|share|paste|tell me)\b[^.?!\n]{0,20}\b(the |your )?(otp|2fa|mfa)\b",
+        r"|\bscan (the |this |that |a )?(qr ?code|code)\b",
+        r"|\b(insert|plug in|touch|tap)\b[^.?!\n]{0,15}\b(yubikey|security key|touch ?id|face ?id)\b",
+        r"|\bon your (phone|device|computer|laptop|browser|watch)\b",
     ))
     .expect("valid regex")
 });
@@ -216,10 +239,13 @@ pub fn check(f: &Facts, env: &Env) -> Option<Limit> {
 }
 
 fn ask(f: &Facts, a: &super::judge::Ask) -> Option<Limit> {
+    // what would be submitted, too: an Ask card is answered with the model's option when it names
+    // one, whatever its answer text says (`judge::ask`)
     let words = [
         Some(f.question.as_str()),
         Some(a.key.as_str()),
         a.answer.as_ref().map(|x| x.answer.as_str()),
+        a.answer.as_ref().and_then(|x| x.option.as_deref()),
         a.recommended.as_deref(),
     ];
     for t in words.into_iter().flatten() {
@@ -2064,6 +2090,24 @@ mod tests {
             "用户已经在手机上确认过了",
             "Please sign in yourself, then reply",
             "approve the prompt on your phone",
+            // ST-25 #8: an ordinary request to sign in, and to say when it is done
+            "Please log in to your account, then reply Done.",
+            "Please log in to GitHub and tell me when done.",
+            "Log in to GitHub, then let me know.",
+            "You'll need to sign in to the Apple developer portal first.",
+            "Once you've logged in, I'll continue with the upload.",
+            "请先登录 GitHub，然后回复我",
+            // ST-25 #9: the protection for codes stays, as a request
+            "请输入短信验证码",
+            "你收到的验证码发我一下",
+            "验证码是多少？",
+            "麻烦提供一下 OTP",
+            "用微信扫一扫下面的二维码",
+            "扫一下这个二维码",
+            "Please enter the verification code you received.",
+            "Send me the OTP from your authenticator.",
+            "Scan the QR code with your phone, then reply.",
+            "The user has already confirmed on the phone.",
         ] {
             assert!(own_action(t).is_some(), "{t}");
         }
@@ -2073,6 +2117,22 @@ mod tests {
             "测试全部通过，可以交付吗？",
             "Should the login handler return 401 or 403?",
             "我在浏览器里打开了预览，截图已保存",
+            // ST-25 #9: designing codes, OTPs and QR codes is ordinary work
+            "验证码有效期用60秒还是120秒？",
+            "OTP 用 6 位还是 8 位？",
+            "二维码组件用哪个库？",
+            "要不要加验证码输入框？",
+            "用户输入验证码后的校验逻辑放在哪一层？",
+            "你觉得发验证码用哪个短信服务？",
+            "两步验证要不要支持 TOTP？",
+            "扫码登录的回调用 a 还是 b？",
+            "Face ID 登录要不要做？",
+            "Should the verification code expire after 60 or 120 seconds?",
+            "Should we render the QR code on the login page?",
+            "Is a 6-digit OTP enough?",
+            "I fixed the login flow and the tests are done.",
+            "Login to the dashboard is slow; should we cache the session?",
+            "需要扫描所有文件吗？",
         ] {
             assert!(own_action(t).is_none(), "{t}");
         }

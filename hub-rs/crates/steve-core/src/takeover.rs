@@ -149,12 +149,14 @@ impl Tx<'_> {
         if let Stop::Stopped {
             last, answered_you, ..
         } = &stop
-            && (crate::yolo::answer::looks_like_question(last).is_some()
-                || *answered_you
-                || crate::yolo::limits::own_action(last).is_some())
+            && (crate::yolo::answer::looks_like_question(last).is_some() || *answered_you)
         {
-            /* and it waits for something only you can do (sign in, scan a code, confirm on a
-             * device): continuing it would only have it take the step as done */
+            return Ok(Some(stop.why().into()));
+        }
+        /* and it waits for something only you can do (sign in, scan a code, confirm on a device),
+         * said anywhere in its final reply however long: continuing it would only have it take the
+         * step as done. Whatever way it stopped. */
+        if crate::yolo::limits::own_action(&self.db().final_reply(sid)?).is_some() {
             return Ok(Some(stop.why().into()));
         }
         if self.waiting_on_lane(item_id)? {

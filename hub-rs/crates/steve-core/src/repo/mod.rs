@@ -430,6 +430,39 @@ impl Db {
     pub fn events_after(&self, session: &str, after: i64) -> Result<Vec<Event>> {
         Ok(self.s.events().after(session, after, 5000)?)
     }
+    /// The agent's final reply: what it said after its last tool call in the turn that ended (since
+    /// the last message it was sent), whole however long it is or however many events it streamed in.
+    /// What it waits for now is said there, not somewhere on the way.
+    pub fn final_reply(&self, session: &str) -> Result<String> {
+        let mut parts: Vec<String> = vec![];
+        let mut before = 0;
+        'back: loop {
+            let page = self.s.events().before(session, before, 500)?;
+            let Some(oldest) = page.last() else {
+                break;
+            };
+            before = oldest.seq;
+            for e in &page {
+                if let Some(t) = steve_transcript::assistant_text(&e.kind, &e.data) {
+                    parts.push(t.to_string());
+                    continue;
+                }
+                let user = e.kind == "user"
+                    || e.kind == "user_message_chunk"
+                    || e.kind == steve_transcript::TEXT
+                        && e.data.get("role").and_then(Value::as_str) == Some("user");
+                let tool = matches!(
+                    e.kind.as_str(),
+                    steve_transcript::TOOL | "tool_call" | "tool_call_update"
+                );
+                if user || tool && !parts.is_empty() {
+                    break 'back;
+                }
+            }
+        }
+        parts.reverse();
+        Ok(parts.concat().trim().to_string())
+    }
     pub fn events_up_to(&self, session: &str, seq: i64) -> Result<Vec<Event>> {
         Ok(self.s.events().up_to(session, seq)?)
     }

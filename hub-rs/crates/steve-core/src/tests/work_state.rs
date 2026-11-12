@@ -838,3 +838,71 @@ fn a_failed_units_leftover_cards_do_not_keep_its_item_waiting() {
     assert!(open_ids(&k, &child).is_empty());
     assert_ne!(k.status(&child).0, "wait");
 }
+
+/// ST-25 #2 at the turn end: a request to scan at the start of a long final reply, streamed in many
+/// pieces and not ending in a question, is still a wait on you. Steve does not continue it.
+#[test]
+fn a_long_final_reply_asking_you_to_scan_is_not_continued() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.rt.say(&s, "请扫码授权，完成后告诉我。");
+    for _ in 0..120 {
+        k.rt.say(&s, "阅读说明。");
+    }
+    k.rt.say(&s, "我在这里等着");
+    k.rt.end_turn(&k.core, &s, "end_turn", None);
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
+    assert!(steve_lines(&k, &i).is_empty());
+    assert_eq!(k.open_fails(&i).len(), 1, "the card is yours");
+    // and the stall watch later on does not continue it either
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert_eq!(k.rt.prompts_of(&s).len(), 1);
+
+    // what it said before its last tool call is not what it waits for now
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.rt.say(&s, "看到文档里写着请扫码授权。");
+    k.db()
+        .event_add(&s, steve_transcript::TOOL, json!({"tool": {"id": "t1"}}))
+        .unwrap();
+    k.rt.say(&s, "改好了一半，接着做。");
+    k.rt.end_turn(&k.core, &s, "end_turn", None);
+    assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
+}
+
+/// ST-25 #8 at the turn end: an English request to sign in and say when done, with no question mark.
+#[test]
+fn an_english_request_to_log_in_is_not_continued() {
+    let k = kit(2);
+    for said in [
+        "Please log in to your account, then reply Done.",
+        "Please log in to GitHub and tell me when done.",
+    ] {
+        let i = k.item("run", "执行", None);
+        let s = k.session(&i, "idle");
+        k.rt.prompt(&s, "do it", "me", &[]).unwrap();
+        k.rt.say(&s, said);
+        k.rt.end_turn(&k.core, &s, "end_turn", None);
+        assert_eq!(k.rt.prompts_of(&s).len(), 1, "{said}: not continued");
+        assert_eq!(k.open_fails(&i).len(), 1, "{said}: the card is yours");
+    }
+}
+
+/// ST-25 #9 at the turn end: words about codes in a report are no wait on you; Steve continues it.
+#[test]
+fn a_report_about_codes_is_continued() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+    k.rt.say(
+        &s,
+        "验证码有效期改成 120 秒了，OTP 位数和二维码组件也换好了，测试通过。",
+    );
+    k.rt.end_turn(&k.core, &s, "end_turn", None);
+    assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
+    assert!(k.open_fails(&i).is_empty());
+}

@@ -292,8 +292,14 @@ impl Engine {
                     (StallCause::Stopped, Some(sid)) => self.session_tail(sid)?,
                     _ => String::new(),
                 };
-                // only its last words: what it waits for now, not what it did on the way
-                let own_action = super::limits::own_action(crate::util::js_tail(&tail, 400));
+                // its final reply, whole: what it waits for now, not what it did on the way (a
+                // request to scan a code at its start is not lost behind a long explanation)
+                let own_action = match sid.as_deref() {
+                    Some(sid) => super::limits::own_action(
+                        &self.core().store().final_reply(sid).map_err(ce)?,
+                    ),
+                    _ => None,
+                };
                 let asked = match (&cause, sid.as_deref()) {
                     (StallCause::Stopped, Some(_)) if !present => {
                         match answer::looks_like_question(&tail) {

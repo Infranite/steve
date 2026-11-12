@@ -529,6 +529,24 @@ impl Events<'_> {
         })
     }
 
+    /// Up to `limit` events with `seq < before`, newest first (`before <= 0`: from the last one):
+    /// a reader of the latest words pages back with it however long the session is.
+    pub fn before(&self, session_id: &str, before: i64, limit: i64) -> Result<Vec<Event>> {
+        let before = if before <= 0 { i64::MAX } else { before };
+        self.0.read(|c| {
+            crate::read_snapshot(c, |tx| {
+                let mut events: Vec<Event> = all(
+                    tx,
+                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?",
+                    params![session_id, before, limit],
+                    event_row,
+                )?;
+                for e in &mut events { hydrate_event(tx, session_id, e)?; }
+                Ok(events)
+            })
+        })
+    }
+
     /// Events with `seq <= seq` (the history a fork starts from).
     pub fn up_to(&self, session_id: &str, seq: i64) -> Result<Vec<Event>> {
         self.0.read(|c| {

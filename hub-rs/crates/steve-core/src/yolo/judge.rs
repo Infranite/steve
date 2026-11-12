@@ -814,6 +814,13 @@ pub fn judge(f: &Facts, p: &Policy, env: &Env) -> Verdict {
         if NEVER.contains(&choice.as_str()) || choice.starts_with("grant_") || !offered {
             return decline("never", format!("YOLO 不会选「{choice}」"));
         }
+        // the value an answered question is submitted with, whichever rule picked it: no answer
+        // says the user did something in person or takes their step (hard limit 7)
+        if matches!(f.subject, Subject::Ask(_))
+            && let Some(w) = limits::own_action(choice)
+        {
+            return decline("limit.7", format!("{}需要你本人操作或确认（{w}）", limits::REASON_PREFIX));
+        }
     }
     v
 }

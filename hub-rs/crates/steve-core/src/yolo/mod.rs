@@ -38,6 +38,8 @@ mod full_tests;
 #[cfg(test)]
 mod guard_tests;
 #[cfg(test)]
+mod own_action_tests;
+#[cfg(test)]
 mod release_tests;
 #[cfg(test)]
 mod tests;

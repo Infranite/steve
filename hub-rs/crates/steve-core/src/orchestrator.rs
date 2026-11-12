@@ -2223,7 +2223,8 @@ impl Tx<'_> {
                 let last = self.last_agent_text(&session.id)?;
                 if crate::yolo::answer::looks_like_question(&last).is_some()
                     || answered_you
-                    || crate::yolo::limits::own_action(&last).is_some()
+                    || crate::yolo::limits::own_action(&self.db().final_reply(&session.id)?)
+                        .is_some()
                 {
                     format!("{why}；Agent 停下来等你：{}", js_head(&last, 160))
                 } else {
