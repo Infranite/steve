@@ -1,0 +1,1 @@
+Steve now closes child items left active by older workflow attempts after a retry or replan. It preserves a recorded failed delivery as a failed child, cancels a retired attempt without such a delivery, and waits for any live turn to end before closing either one.

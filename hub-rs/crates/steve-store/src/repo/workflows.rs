@@ -491,6 +491,25 @@ impl Workflows<'_> {
         })
     }
 
+    /// Retired attempts whose child item was left active. A failed delivery remains identifiable
+    /// in the append-only history even though archiving changes the snapshot status to cancelled.
+    pub fn retired_open(&self) -> Result<Vec<(WorkUnit, bool)>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT a.snapshot,
+                        EXISTS(SELECT 1 FROM workflow_history h
+                               WHERE h.workflow_id=a.workflow_id AND h.action='deliver'
+                                 AND json_extract(h.detail,'$.child')=a.item_id
+                                 AND json_extract(h.detail,'$.status')='failed') AS failed
+                 FROM workflow_attempts a JOIN items i ON i.id=a.item_id
+                 WHERE i.phase='active' ORDER BY a.created,a.item_id",
+                [],
+                |r| Ok((decode(r, "snapshot")?, r.get::<_, i64>("failed")? != 0)),
+            )
+        })
+    }
+
     pub fn active(&self) -> Result<Vec<Workflow>> {
         self.list_open(true)
     }
