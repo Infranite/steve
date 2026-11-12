@@ -34,7 +34,7 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, gBuild, gComps, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -299,7 +299,7 @@ function TagPicker({ i }: { i: Item }) {
       <DropdownMenuTrigger render={<button type="button" className="self-start type-footnote text-muted-foreground hover:text-foreground" data-add-tag />}>{domain.length ? t("views:item.addMore") : t("views:item.addNone")}</DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-h-80 w-72">
         <div className="p-1"><Input autoFocus className="h-8 rounded-md text-[13px]" placeholder={t("views:item.tagSearch")} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} data-tag-search /></div>
-        {DOMAIN_CATS.map((c) => { const g = xs.filter((x) => x.cat === c); return g.length ? <div key={c}><div className="px-2 pb-0.5 pt-2 type-footnote text-muted-foreground">{c}</div>
+        {DOMAIN_CATS.map((c) => { const g = xs.filter((x) => x.cat === c); return g.length ? <div key={c}><div className="px-2 pb-0.5 pt-2 type-footnote text-muted-foreground">{tagCatLabel(c)}</div>
           {g.map((x) => <DropdownMenuItem key={x.id} onClick={() => setTags(i.id, [...(i.tags ?? []), x.id])} data-tag-opt={x.name} className="flex-col items-start gap-0"><span className="type-callout">{x.name}</span><span className="line-clamp-1 type-footnote text-muted-foreground">{x.desc}</span></DropdownMenuItem>)}</div> : null })}
         {!xs.length && <div className="px-2 py-2 type-footnote text-muted-foreground">{t("views:item.tagNoMatch")}</div>}
         <DropdownMenuSeparator />

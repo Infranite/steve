@@ -51,7 +51,7 @@ const accLabel = (t: T, k: string) => ((ACC_KEYS as readonly string[]).includes(
 const PERM_KEYS = ["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const
 const permLabel = (t: T, k: string) => ((PERM_KEYS as readonly string[]).includes(k) ? t(`manage:perm.${k as (typeof PERM_KEYS)[number]}`) : PERM[k] ?? k)
 /* tag categories are stored as Chinese words (store TAG_CATS); only the label is translated */
-const TAG_CAT_KEYS: Record<string, "all" | "project" | "kind" | "domain" | "client" | "topic"> = { 全部: "all", 项目: "project", 类型: "kind", 领域: "domain", 客户: "client", 主题: "topic" }
+const TAG_CAT_KEYS: Record<string, "all" | "project" | "kind" | "delivery" | "domain" | "client" | "topic"> = { 全部: "all", 项目: "project", 类型: "kind", 交付: "delivery", 领域: "domain", 客户: "client", 主题: "topic" }
 const catLabel = (t: T, c: string) => (TAG_CAT_KEYS[c] ? t(`manage:tagCat.${TAG_CAT_KEYS[c]}`) : c)
 
 export function BotsView() {

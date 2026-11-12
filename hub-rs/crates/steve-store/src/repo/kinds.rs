@@ -1,5 +1,6 @@
 //! Item categories (ST-34): every task item carries exactly one of six fixed tags of category
-//! [`KIND_CAT`] — bug, feat, doc, refactor, ops, chore — and any number of other (domain) tags.
+//! [`KIND_CAT`] — bug, feat, doc, refactor, ops, chore — and any number of other tags,
+//! including optional multi-select [`DELIVERY_CAT`] tags for the handover's nature.
 //! They are ordinary `tags` rows, so everything that shows an item's tags shows its category and a
 //! TS Hub still reads them. [`ensure`] seeds them per workspace; renaming, recategorising, deleting
 //! or merging them is refused, and every write of an item's tags goes through [`checked`].
@@ -11,6 +12,108 @@ use crate::{ChangeEvent, Result, StoreError, Tag, W, now, uid};
 
 /// The tag category the six item categories live in, and only they.
 pub const KIND_CAT: &str = "类型";
+
+/// Optional, multi-select tags describing what an item hands over. They do not decide
+/// whether a particular output belongs in Git or in the item's output directory.
+pub const DELIVERY_CAT: &str = "交付";
+pub const DELIVERIES: [(&str, &str); 6] = [
+    ("方案", "设计稿、原型或实施方案"),
+    ("代码", "Git 管理的代码、配置或脚本"),
+    ("报告", "调研、审计、测试或分析结论"),
+    ("内容", "手册、图片、演示稿等成品内容"),
+    ("数据", "表格、数据集或导出结果"),
+    ("操作", "部署、升级或配置变更等实际操作"),
+];
+
+/// Conservative hints for a new item's expected deliverables. More than one may apply.
+pub(crate) fn expected_deliveries(title: &str, goal: &str) -> Vec<&'static str> {
+    let text = format!("{title}\n{goal}");
+    let mut labels = Vec::new();
+    let rules: [(&str, &[&str]); 6] = [
+        ("方案", &["设计", "方案", "原型", "线框"]),
+        ("代码", &["实现", "开发", "修复", "改代码", "重构", "编程"]),
+        (
+            "报告",
+            &["报告", "调研", "审计", "分析", "评估", "排查", "核查"],
+        ),
+        ("内容", &["文档", "手册", "图片", "海报", "幻灯片", "视频"]),
+        ("数据", &["报表", "表格", "数据集", "数据导出"]),
+        ("操作", &["部署", "升级", "发布", "安装", "迁移", "清理"]),
+    ];
+    for (name, words) in rules {
+        if words.iter().any(|word| text.contains(word)) {
+            labels.push(name);
+        }
+    }
+    labels
+}
+
+/// Actual outputs can add deliverable tags without changing the item's purpose category.
+pub(crate) fn output_deliveries(
+    kind: &str,
+    title: &str,
+    location: Option<&str>,
+    role: Option<&str>,
+) -> Vec<&'static str> {
+    if role == Some("record") || title == "交付正文" {
+        return vec![];
+    }
+    let text = format!("{kind} {title}");
+    let mut labels = Vec::new();
+    if ["设计", "方案", "原型", "线框", "规范"]
+        .iter()
+        .any(|w| text.contains(w))
+    {
+        labels.push("方案");
+    }
+    if ["提交", "分支", "PR"].iter().any(|w| kind.contains(w))
+        || location.is_some_and(|loc| {
+            [".rs", ".ts", ".tsx", ".py", ".go", ".swift"]
+                .iter()
+                .any(|ext| loc.ends_with(ext))
+        })
+    {
+        labels.push("代码");
+    }
+    if ["报告", "评审", "审计", "核验", "验收"]
+        .iter()
+        .any(|w| text.contains(w))
+    {
+        labels.push("报告");
+    }
+    if ["文档", "图片", "截图", "视频", "海报", "演示"]
+        .iter()
+        .any(|w| text.contains(w))
+    {
+        labels.push("内容");
+    }
+    if ["数据", "报表", "表格", "CSV"]
+        .iter()
+        .any(|w| text.contains(w))
+    {
+        labels.push("数据");
+    }
+    if ["部署", "升级", "运行版本", "安装", "发布"]
+        .iter()
+        .any(|w| text.contains(w))
+    {
+        labels.push("操作");
+    }
+    labels
+}
+
+pub(crate) fn add_delivery_labels(
+    c: &Connection,
+    ws: &str,
+    item: &str,
+    labels: &[&str],
+) -> Result<()> {
+    for label in labels {
+        c.prepare_cached("INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT ?, id FROM tags WHERE workspace_id = ? AND cat = ? AND name = ?")?
+            .execute(params![item, ws, DELIVERY_CAT, label])?;
+    }
+    Ok(())
+}
 
 /// The item categories with what each is for (also the router's and the backfill's guidance).
 pub const KINDS: [(&str, &str); 6] = [
@@ -99,6 +202,68 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
     for id in strays {
         w.c.run("UPDATE tags SET cat = ? WHERE id = ?", [MOVED_CAT, &id])?;
         w.publish(ChangeEvent::Tag { id });
+    }
+    // Seed and infer only once. Delivery tags remain ordinary editable tags, so a person's later
+    // choice to rename or remove one is not silently reversed by `ensure` on the next boot.
+    let marker = "__delivery_tags_backfilled_v1";
+    if !w
+        .c
+        .prepare_cached("SELECT 1 FROM settings WHERE workspace_id = ? AND key = ?")?
+        .exists(params![ws, marker])?
+    {
+        for (name, desc) in DELIVERIES {
+            match one(
+                w.c,
+                "SELECT * FROM tags WHERE workspace_id = ? AND name = ?",
+                [ws, name],
+                Tag::from_row,
+            )? {
+                Some(t) if t.cat == DELIVERY_CAT => {}
+                Some(t) => {
+                    w.c.run(
+                        "UPDATE tags SET cat = ? WHERE id = ?",
+                        [DELIVERY_CAT, &t.id],
+                    )?;
+                    w.publish(ChangeEvent::Tag { id: t.id });
+                }
+                None => {
+                    let id = uid("tag");
+                    w.c.run(
+                    "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES (?, ?, ?, ?, ?, 'Steve', ?)",
+                    params![id, ws, name, DELIVERY_CAT, desc, now()],
+                )?;
+                    w.publish(ChangeEvent::Tag { id });
+                }
+            }
+        }
+        // One pass for pre-existing cards. A removed inferred tag stays removed afterwards.
+        let items: Vec<(String, String, String)> = all(
+            w.c,
+            "SELECT i.id,i.title,COALESCE((SELECT text FROM item_goals WHERE item_id=i.id ORDER BY version DESC LIMIT 1),'') FROM items i WHERE i.workspace_id=? AND i.kind='task'",
+            [ws],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        for (item, title, goal) in items {
+            add_delivery_labels(w.c, ws, &item, &expected_deliveries(&title, &goal))?;
+            let outputs: Vec<(String, String, Option<String>, Option<String>)> = all(
+                w.c,
+                "SELECT a.kind,a.title,a.location,r.role FROM artifacts a LEFT JOIN artifact_roles r ON r.artifact_id=a.id WHERE a.item_id=?",
+                [&item],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            for (kind, title, location, role) in outputs {
+                add_delivery_labels(
+                    w.c,
+                    ws,
+                    &item,
+                    &output_deliveries(&kind, &title, location.as_deref(), role.as_deref()),
+                )?;
+            }
+        }
+        w.c.run(
+            "INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,?, 'true',?)",
+            params![ws, marker, now()],
+        )?;
     }
     Ok(out)
 }

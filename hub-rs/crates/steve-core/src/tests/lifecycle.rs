@@ -5,10 +5,28 @@
 use crate::git::tests::{branch_with, g, repo};
 use crate::patch;
 use crate::repo::{PlanStep, WS};
-use crate::runtime::Check;
+use crate::runtime::{Check, Output};
 use crate::testkit::Kit;
 use crate::{ItemAction, SupplementMode};
 use serde_json::json;
+use sha2::Digest;
+
+fn design_report(k: &Kit, item: &str, body: &str) -> Output {
+    let dir = k.home().join("workspaces").join(item).join("outputs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let hash = sha2::Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let path = dir.join(format!("output-{hash}.md"));
+    std::fs::write(&path, body).unwrap();
+    Output {
+        kind: "方案".into(),
+        title: "设计方案".into(),
+        location: Some(path.to_string_lossy().into_owned()),
+        role: Some("result".into()),
+    }
+}
 
 fn last_json(k: &Kit, v: serde_json::Value) {
     std::fs::create_dir_all(k.home().join("releases")).unwrap();
@@ -498,6 +516,132 @@ fn auto_accept_takes_the_delivery_as_it_is() {
         k.timeline_texts(&x.id)
             .contains(&"自动验收：有没通过的检查或没做完的步骤，见交付".to_string())
     );
+}
+
+#[test]
+fn design_delivery_waits_for_the_users_implementation_decision() {
+    let k = Kit::new();
+    let item = k.item("run", "执行", None);
+    k.db()
+        .add_goal(&item, "交付一份可评审的页面设计方案")
+        .unwrap();
+    let sid = k.session(&item, "idle");
+    let session = k.db().session(&sid).unwrap().unwrap();
+    let report = design_report(&k, &item, "# 完整设计\n\n正文");
+    k.core
+        .tool_deliver(&session, "# 完整设计\n\n正文", &[report], &[], &[])
+        .unwrap();
+    let decision = k
+        .db()
+        .decisions_of_item(&item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+        .unwrap();
+    assert_eq!(k.status(&item).0, "wait");
+    assert!(
+        k.core
+            .resolve(
+                &decision.id,
+                "只保留设计",
+                "",
+                steve_modules::outbound::YOLO_ACTOR
+            )
+            .is_err()
+    );
+    k.core
+        .resolve(&decision.id, "只保留设计", "", "me")
+        .unwrap();
+    assert_eq!(k.status(&item).0, "done");
+}
+
+#[test]
+fn design_and_implementation_goal_does_not_ask_to_start_work_already_requested() {
+    let k = Kit::new();
+    let item = k.item("run", "执行", None);
+    k.db().add_goal(&item, "设计并实现页面，完成验证").unwrap();
+    let sid = k.session(&item, "idle");
+    let session = k.db().session(&sid).unwrap().unwrap();
+    let report = design_report(&k, &item, "页面设计与实现记录");
+    k.core
+        .tool_deliver(&session, "页面设计与实现记录", &[report], &[], &[])
+        .unwrap();
+    assert!(
+        k.db()
+            .decisions_of_item(&item)
+            .unwrap()
+            .iter()
+            .all(|d| d.subject_type != "design_implementation")
+    );
+}
+
+#[test]
+fn confirming_design_starts_implementation_without_reasking_the_design_question() {
+    let k = Kit::new();
+    let item = k.item("run", "执行", None);
+    k.db()
+        .add_goal(&item, "先出设计，设计通过后再实现")
+        .unwrap();
+    let sid = k.session(&item, "idle");
+    let session = k.db().session(&sid).unwrap().unwrap();
+    let report = design_report(&k, &item, "完整方案");
+    k.core
+        .tool_deliver(&session, "完整方案", &[report], &[], &[])
+        .unwrap();
+    let decision = k
+        .db()
+        .decisions_of_item(&item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+        .unwrap();
+    k.core
+        .resolve(&decision.id, "按方案实现", "优先做手机布局", "me")
+        .unwrap();
+    assert!(
+        k.db()
+            .goal(&item)
+            .unwrap()
+            .starts_with("按用户确认的设计报告实现")
+    );
+    assert_eq!(k.status(&item).1, "执行");
+    assert!(
+        k.db()
+            .decisions_of_item(&item)
+            .unwrap()
+            .iter()
+            .all(|d| d.status != "open" || d.subject_type != "design_implementation")
+    );
+}
+
+#[test]
+fn changed_design_file_cannot_reuse_the_old_approval() {
+    let k = Kit::new();
+    let item = k.item("run", "执行", None);
+    k.db()
+        .add_goal(&item, "先出设计方案，用户确认后再实现")
+        .unwrap();
+    let sid = k.session(&item, "idle");
+    let session = k.db().session(&sid).unwrap().unwrap();
+    let report = design_report(&k, &item, "原设计");
+    let path = report.location.clone().unwrap();
+    k.core
+        .tool_deliver(&session, "原设计", &[report], &[], &[])
+        .unwrap();
+    let decision = k
+        .db()
+        .decisions_of_item(&item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+        .unwrap();
+    std::fs::write(path, "已改动的设计").unwrap();
+    assert!(
+        k.core
+            .resolve(&decision.id, "按方案实现", "", "me")
+            .is_err()
+    );
+    assert_eq!(k.status(&item).0, "wait");
 }
 
 fn step(s: &str, done: bool) -> PlanStep {

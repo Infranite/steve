@@ -22,7 +22,7 @@ export default {
   avatarColor: { mist: "雾蓝", lavender: "薰衣草", teal: "青绿", amber: "琥珀", coral: "珊瑚", slate: "石板灰", navy: "深蓝灰", walnut: "胡桃" },
   kind: { bug: "修复", feat: "功能", doc: "文档", refactor: "重构", ops: "运维", chore: "杂项" },
   /* the tag categories the Hub knows (the stored value stays Chinese; this is how it reads) */
-  tagCat: { project: "项目", kind: "类型", domain: "领域", client: "客户", topic: "主题" },
+  tagCat: { project: "项目", kind: "类型", delivery: "交付", domain: "领域", client: "客户", topic: "主题" },
   error: { generic: "出错了", loadRetry: "载入失败，正在重试：{{msg}}", network: "网络出错" },
   defaultModel: "默认模型",
   unknownHarness: "未知 harness",

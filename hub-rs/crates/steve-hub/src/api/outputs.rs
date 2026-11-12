@@ -98,6 +98,7 @@ async fn load(
                 .collect();
             roots.push(cfg.worktrees.join(&id));
             roots.push(cfg.scratch.join(&id));
+            roots.push(cfg.home.join("workspaces").join(&id).join("outputs"));
             roots.extend(temp_dirs());
             let o = Out {
                 kind: str_of(&a, "kind"),
@@ -111,9 +112,20 @@ async fn load(
             Ok((o, project_id))
         })
         .await?;
-    let v = match st.workspaces.clone() {
-        Some(ws) => node::view(ws, item, project, &o, temp_dirs()).await?,
-        None => None,
+    // Durable deliverables belong to the Hub, even when the item ran on a remote Node that is
+    // now offline. `locate` still canonicalizes and checks the item's allowed roots.
+    let durable = st.cfg.home.join("workspaces").join(&item).join("outputs");
+    let v = if o
+        .loc
+        .as_ref()
+        .is_some_and(|loc| FsPath::new(loc).starts_with(&durable))
+    {
+        None
+    } else {
+        match st.workspaces.clone() {
+            Some(ws) => node::view(ws, item, project, &o, temp_dirs()).await?,
+            None => None,
+        }
     };
     Ok((o, v))
 }

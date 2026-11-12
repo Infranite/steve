@@ -184,6 +184,9 @@ impl Items<'_> {
             super::put_item_tags(&tx, &id, &tags)?;
             tx.run("INSERT INTO item_goals (item_id, version, text, created) VALUES (?, 1, ?, ?)", params![id, p.goal, t])?;
             if task {
+                super::kinds::add_delivery_labels(
+                    &tx, ws, &id, &super::kinds::expected_deliveries(&p.title, &p.goal),
+                )?;
                 // stats: the item's first status
                 status_mark(&tx, ws, &id, t, None, p.status.as_deref().unwrap_or("run"))?;
             }
@@ -530,6 +533,17 @@ pub fn artifact_add_in(
             [&id, role],
         )?;
     }
+    let workspace: String = tx.query_row(
+        "SELECT workspace_id FROM items WHERE id = ?",
+        [item_id],
+        |row| row.get(0),
+    )?;
+    super::kinds::add_delivery_labels(
+        tx,
+        &workspace,
+        item_id,
+        &super::kinds::output_deliveries(kind, title, location, role),
+    )?;
     tx.publish(ChangeEvent::Item { id: item_id.into() });
     Ok(())
 }
