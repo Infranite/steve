@@ -1,6 +1,6 @@
 /* Shared building blocks for the Steve prototype — see DESIGN.md.
  * Quiet chrome: grey scale everywhere, blue = selected/running, orange = needs you. */
-import { Children, Fragment, memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
+import { Children, Fragment, memo, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { Robot } from "@/robot"
 import { cue } from "@/bus"
 import { clockDur } from "@/i18n/format"
@@ -172,16 +172,20 @@ export function Group({ children, className }: { children: ReactNode; className?
     </ItemGroup>
   )
 }
-export function Row({ title, sub, children, onClick, icon, className, ...rest }: { title: ReactNode; sub?: ReactNode; children?: ReactNode; onClick?: () => void; icon?: ReactNode; className?: string; [k: string]: any }) {
+/** `controls`: the children hold their own buttons. A button cannot contain a button, so the row's click target is
+ *  then a cover button under the content, and the children sit above it. */
+export function Row({ title, sub, children, onClick, icon, className, controls = false, ...rest }: { title: ReactNode; sub?: ReactNode; children?: ReactNode; onClick?: () => void; icon?: ReactNode; className?: string; controls?: boolean; [k: string]: any }) {
+  const id = useId(), cover = !!onClick && controls
   return (
-    <UIItem size="sm" role="listitem" className={cn("min-h-12 rounded-lg border-0 px-2 py-2.5", onClick && "cursor-pointer text-left hover:bg-accent", className)}
-      render={onClick ? <button type="button" onClick={onClick} /> : undefined} {...rest}>
+    <UIItem size="sm" role="listitem" className={cn("min-h-12 rounded-lg border-0 px-2 py-2.5", onClick && "cursor-pointer text-left hover:bg-accent", cover && "relative has-[[data-row-cover]:focus-visible]:ring-[3px] has-[[data-row-cover]:focus-visible]:ring-ring/50", className)}
+      render={onClick && !cover ? <button type="button" onClick={onClick} /> : undefined} {...rest}>
+      {cover && <button type="button" onClick={onClick} aria-labelledby={id} className="absolute inset-0 cursor-pointer rounded-[inherit] outline-none" data-row-cover />}
       {icon && <ItemMedia>{icon}</ItemMedia>}
       <ItemContent className="min-w-0 gap-0.5">
-        <ItemTitle className="w-full type-body font-normal">{title}</ItemTitle>
+        <ItemTitle id={id} className="w-full type-body font-normal">{title}</ItemTitle>
         {sub && <ItemDescription className="type-footnote">{sub}</ItemDescription>}
       </ItemContent>
-      {children && <ItemActions className="shrink-0">{children}</ItemActions>}
+      {children && <ItemActions className={cn("shrink-0", cover && "relative")}>{children}</ItemActions>}
     </UIItem>
   )
 }

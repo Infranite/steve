@@ -79,7 +79,7 @@ export default {
   /* #/mail: the thread list */
   list: {
     onboardingSub: "收件、分诊、起草回复；每封信都在你批准后才发出",
-    onboardingTitle: "要接入邮件和日历吗？",
+    onboardingTitle: "要接入邮箱吗？",
     onboardingBody: "接入后 Steve 帮你分诊来信：需要你回的列出来，邮件 Bot 起草回复，你改过、点发送才会发出。通知类邮件进汇报，不打扰你。",
     connect: "接入邮箱",
     all: "全部",

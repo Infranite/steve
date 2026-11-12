@@ -7,7 +7,7 @@ export default {
     title: "Integrations",
     notFound: "No such service",
     notFoundSub: "Steve doesn't know this one. Go back to Integrations to see what you can connect.",
-    overviewSub: "Outside services Steve can connect to. Channels are just one kind: there are also docs, calendars, tasks, mail, code repositories and directories. Each one lists who Steve works as and what it can do",
+    overviewSub: "Outside services Steve can connect to. Channels are just one kind: there are also docs, calendars, tasks, mail, code repositories and directories. Each one lists who Steve works as and what it can do.",
     noneTitle: "Nothing connected yet",
     noneSub: "Steve supports the services below, but none are connected, so no capabilities are on yet. Pick a service and follow the steps.",
     available: "Available · {{n}}",

@@ -75,7 +75,7 @@ export default {
   },
   list: {
     onboardingSub: "Receive, triage and draft replies. Nothing is sent until you approve it",
-    onboardingTitle: "Connect your mail and calendar?",
+    onboardingTitle: "Connect a mailbox?",
     onboardingBody: "Once connected, Steve triages incoming mail: what needs your reply is listed, the mail bot drafts a reply, and nothing goes out until you review it and press Send. Notifications go into reports and stay out of your way.",
     connect: "Connect mailbox",
     all: "All",

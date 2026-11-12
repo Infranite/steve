@@ -53,7 +53,7 @@ function HoldingRow({ x, person }: { x: Holding; person: string }) {
   const remove = async () => changedToast(await act(ownership.remove(o.object_type, o.object_id, { person_id: person, role: x.role })), t("people:holdings.released", { name: o.name }))
   const others = x.others.filter((s) => s.role === "owner" && s.status === "confirmed").map((s) => s.person_name)
   return (
-    <Row icon={<ObjIcon t={o.object_type} />} onClick={href ? () => go(href) : undefined} data-holding={o.name}
+    <Row icon={<ObjIcon t={o.object_type} />} onClick={href ? () => go(href) : undefined} controls data-holding={o.name}
       title={<span className="inline-flex items-center gap-1.5">{o.name}{x.status !== "confirmed" && <Badge variant="outline" className="font-normal text-attention">{t("people:shared.pending")}</Badge>}</span>}
       sub={<SubMeta><span>{o.type_label}</span><span>{x.role_label}</span>{o.detail && <span>{clip(o.detail)}</span>}<span>{label("source", x.source)}</span>{others.length > 0 && <span>{t("people:holdings.alsoOwners", { names: joinList(others) })}</span>}</SubMeta>}>
       {x.status !== "confirmed" && x.decision_id && <span className="flex gap-1" onClick={(e) => e.stopPropagation()}>
@@ -93,7 +93,7 @@ export function UnownedSection() {
   return (
     <section className="mt-8" data-unowned><Section label={t("people:holdings.unowned", { n: L.data.length })}>
       <Group>{L.data.map((o) => { const href = objectHref(o); return (
-        <Row key={o.object_type + o.object_id} icon={<ObjIcon t={o.object_type} />} title={o.name} sub={<SubMeta><span>{o.type_label}</span>{o.detail && <span>{clip(o.detail)}</span>}</SubMeta>} onClick={href ? () => go(href) : undefined} data-unowned-row={o.name}>
+        <Row key={o.object_type + o.object_id} icon={<ObjIcon t={o.object_type} />} title={o.name} sub={<SubMeta><span>{o.type_label}</span>{o.detail && <span>{clip(o.detail)}</span>}</SubMeta>} onClick={href ? () => go(href) : undefined} controls data-unowned-row={o.name}>
           <OwnerChip objectType={o.object_type} objectId={o.object_id} bare /></Row>) })}</Group>
       <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("people:holdings.unownedNote")}</div>
     </Section></section>

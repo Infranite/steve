@@ -41,8 +41,8 @@ function Contacts() {
       {newOpen && <NewContactDialog onClose={() => setNewOpen(false)} />}
       <AskSteve className="mb-6" ctx={{ kind: "global" }} placeholder={t("people:contacts.ask")} />
       {tab === "contacts" && <>
-        <div className="mb-5 flex flex-wrap items-center gap-2"><Chips value={filterLabel(rel)} onChange={(v) => { const f = FILTER_KEYS.find((k) => filterLabel(k) === v) ?? "all"; crel = f; setRel(f) }} options={FILTER_KEYS.map(filterLabel)} /><span className="flex-1" />
-          <Input className="h-7 w-48 rounded-lg text-[13px]" aria-label={t("people:shared.searchContacts")} placeholder={t("people:shared.searchContactsPh")} value={q} onChange={(e) => { cq = e.target.value; setQ(e.target.value) }} data-contact-search /></div>
+        <div className="mb-5 flex flex-wrap items-center gap-2"><Chips value={filterLabel(rel)} onChange={(v) => { const f = FILTER_KEYS.find((k) => filterLabel(k) === v) ?? "all"; crel = f; setRel(f) }} options={FILTER_KEYS.map(filterLabel)} className="flex-wrap" /><span className="flex-1" />
+          <Input className="h-7 w-full rounded-lg text-[13px] sm:w-60" aria-label={t("people:shared.searchContacts")} placeholder={t("people:shared.searchContactsPh")} value={q} onChange={(e) => { cq = e.target.value; setQ(e.target.value) }} data-contact-search /></div>
         <ContactList q={dq} f={FILTERS[rel] ?? {}} />
         {!dq && rel === "all" && <UnownedSection />}
       </>}

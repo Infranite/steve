@@ -43,7 +43,7 @@ function Onboarding() {
         <div className="min-w-0 flex-1">
           <div className="type-headline">{t("mail:list.onboardingTitle")}</div>
           <div className="mt-0.5 type-callout text-muted-foreground">{t("mail:list.onboardingBody")}</div>
-          <Button size="sm" className="mt-3" onClick={() => go("#/accounts")} data-mail-connect><PlusIcon />{t("mail:list.connect")}</Button>
+          <Button size="sm" className="mt-3" onClick={() => go("#/integrations/mail")} data-mail-connect><PlusIcon />{t("mail:list.connect")}</Button>
         </div>
       </div>
     </Page>

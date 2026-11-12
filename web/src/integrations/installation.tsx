@@ -226,7 +226,7 @@ function Capabilities({ c, kind, feishu, planned }: { c: IConnection; kind: "ste
       <ul className="flex flex-col gap-1.5">{live.map((a) => { const [l, d] = label(a); return (
         <li key={a.area} className="flex items-start gap-2 px-1" data-cap-area={a.area} data-cap-state={a.state}>
           <StatusDot s={d} className="mt-1.5" />
-          <div className="min-w-0 flex-1 type-callout"><span>{areaLabel(a.area)}</span><span className="text-muted-foreground"> · {NOTE[a.area] ?? a.note ?? ""}</span>
+          <div className="min-w-0 flex-1 type-callout"><span>{areaLabel(a.area)}</span>{(NOTE[a.area] ?? a.note) && <span className="text-muted-foreground"> · {NOTE[a.area] ?? a.note}</span>}
             {a.state === "missing" && <div className="type-footnote text-attention">{t(a.caps.length ? "integrations:inst.cap.missingSome" : "integrations:inst.cap.missingAll", { list: join(a.missing_scopes.map(purpose)) })}</div>}
           </div>
           <span className="shrink-0 type-footnote text-muted-foreground">{l}</span>
