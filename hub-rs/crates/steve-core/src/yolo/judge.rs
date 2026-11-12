@@ -822,7 +822,10 @@ pub fn judge(f: &Facts, p: &Policy, env: &Env) -> Verdict {
         if matches!(f.subject, Subject::Ask(_))
             && let Some(w) = limits::own_action(choice)
         {
-            return decline("limit.7", format!("{}需要你本人操作或确认（{w}）", limits::REASON_PREFIX));
+            return decline(
+                "limit.7",
+                format!("{}需要你本人操作或确认（{w}）", limits::REASON_PREFIX),
+            );
         }
     }
     v

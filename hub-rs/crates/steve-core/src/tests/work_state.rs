@@ -923,7 +923,10 @@ fn your_stop_after_a_failure_notice_is_yours() {
         Some("检查失败"),
     );
     assert_eq!(unit(&k, &parent, "a").status, "failed");
-    assert!(k.rt.st().turning.contains(&coord), "the coordinator was told");
+    assert!(
+        k.rt.st().turning.contains(&coord),
+        "the coordinator was told"
+    );
     let before = k.rt.prompts_of(&coord).len();
     assert!(k.core.cancel_turn(&coord).unwrap());
     k.rt.end_turn(&k.core, &coord, "cancelled", None);
@@ -944,7 +947,10 @@ fn your_stop_after_a_failure_notice_is_yours() {
     let snap = k.core.diagnostic_snapshot(&parent).unwrap();
     assert_eq!(snap["work"]["last_stop"]["yours"], true, "{snap}");
     // a voided delivery does not continue it either: the card stays yours
-    k.core.tx().takeover_invalidated(&parent, "计划已更新").unwrap();
+    k.core
+        .tx()
+        .takeover_invalidated(&parent, "计划已更新")
+        .unwrap();
     assert_eq!(k.rt.prompts_of(&coord).len(), before);
 }
 
@@ -1113,10 +1119,7 @@ fn a_unit_out_of_attempts_holds_its_successors_as_failed() {
             let coord = k.session(&parent, "idle");
             coordinator_turn(&k, &coord, "看一下");
             let p = k.rt.prompts_of(&coord);
-            assert!(
-                p.last().unwrap().contains("a 尝试次数已用完"),
-                "{p:?}"
-            );
+            assert!(p.last().unwrap().contains("a 尝试次数已用完"), "{p:?}");
         }
     }
 }

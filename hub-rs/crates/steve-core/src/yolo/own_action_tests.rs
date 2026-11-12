@@ -120,7 +120,11 @@ fn a_long_reply_after_a_request_to_scan_is_still_yours() {
         ("declined", "limit.7"),
         "{a:?}"
     );
-    assert_eq!(t.kit.rt.prompts_of(&sid).len(), 1, "YOLO did not continue it");
+    assert_eq!(
+        t.kit.rt.prompts_of(&sid).len(),
+        1,
+        "YOLO did not continue it"
+    );
     assert_eq!(t.decision(&d).status, "open");
 
     // the same length of text with nothing asked of you is continued as usual
@@ -221,9 +225,10 @@ fn a_design_question_about_codes_is_answered_as_usual() {
     // left in plain text at a turn end: a question, so yours from Steve, and YOLO answers it
     let (item, sid, _) = t.item();
     t.kit.rt.prompt(&sid, "做事", "me", &[]).unwrap();
-    t.kit
-        .rt
-        .say(&sid, "OTP 和二维码登录都接好了。验证码有效期用60秒还是120秒？");
+    t.kit.rt.say(
+        &sid,
+        "OTP 和二维码登录都接好了。验证码有效期用60秒还是120秒？",
+    );
     t.kit.rt.end_turn(&t.kit.core, &sid, "end_turn", None);
     let d = t
         .kit
@@ -246,9 +251,10 @@ fn a_design_question_about_codes_is_answered_as_usual() {
     // a statement about codes is no wait on you: YOLO continues it as any other stop
     let (item, sid, _) = t.item();
     t.kit.rt.prompt(&sid, "做事", "me", &[]).unwrap();
-    t.kit
-        .rt
-        .say(&sid, "验证码有效期改成 120 秒了，二维码组件也换好了，测试通过。");
+    t.kit.rt.say(
+        &sid,
+        "验证码有效期改成 120 秒了，二维码组件也换好了，测试通过。",
+    );
     t.kit.rt.end_turn(&t.kit.core, &sid, "end_turn", None);
     let d = t
         .kit
