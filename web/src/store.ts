@@ -35,7 +35,7 @@ export type Rel = { tone: "run" | "fail" | "ok"; text: string; /** the Hub's out
 export type Out = [string, string, string | null, string, number?, ("record" | "result")?]
 export type PlanRound = { n: number; steps: [string, number][]; end: "done" | "replaced"; at: string }
 export type Item = {
-  id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
+  id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"; phase?: "ready" | "active" | "closing" | "closed"; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
   goals: string[]; now: string; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item: string; s?: string; at?: number } | null
   due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
@@ -435,7 +435,7 @@ function itemOf(i: RItem): Item {
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
   })
   return {
-    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit,
+    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, phase: i.phase, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit,
     goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.status === "block" && i.now === "等前置事项完成后自动开始" ? t("views:dependencyWait.waiting") : i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
