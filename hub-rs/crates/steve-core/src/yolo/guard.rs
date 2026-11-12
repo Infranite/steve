@@ -498,7 +498,9 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
         // command) or load code (`LD_PRELOAD`: left to the user)
         for b in super::exec::var_bodies(&c.words) {
             match b {
-                Body::Line(l, _) => var_command(&l)?,
+                Body::Line(l, _) => {
+                    command(&l, &pl, cx)?;
+                }
                 Body::Unseen(why) => return Err(why),
                 _ => {}
             }
@@ -525,31 +527,6 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
         matched.push(a.program.clone());
     }
     Ok(matched)
-}
-
-/// A command a variable names (`GIT_EDITOR=true`, `CC=clang`): a build tool or editor goes as the
-/// variable's program would; root, a program never run unattended, a shell's `-c` or a `kill`
-/// stays with the user.
-fn var_command(line: &str) -> Result<(), String> {
-    let p = shell::parse(line).map_err(|e| format!("环境变量里的命令看不懂：{}", e.0))?;
-    if let Some(what) = p.opaque.first() {
-        return Err(format!("环境变量里的命令有 {what}，看不出会执行什么"));
-    }
-    for c in &p.cmds {
-        let Some(a) = shell::argv(&c.words) else {
-            continue;
-        };
-        let p = a.program.as_str();
-        if a.sudo
-            || a.unclear.is_some()
-            || NEVER.contains(&p)
-            || p == "kill"
-            || SHELLS.contains(&p) && a.args.iter().any(|x| shell::is_dash_c(x))
-        {
-            return Err(format!("环境变量让程序运行 {p}，留给你"));
-        }
-    }
-    Ok(())
 }
 
 pub(super) fn operands(args: &[String]) -> Vec<&String> {

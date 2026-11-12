@@ -351,6 +351,9 @@ pub(crate) struct Places {
     /// without a prompt. `STEVE_HOME`, port 8440, launchd, other items' branches and worktrees, and
     /// the other limits still hold.
     pub full: bool,
+    /// Where `cd -` goes back to, and the directories `pushd` left (`popd` returns to them).
+    pub prev: Option<Option<PathBuf>>,
+    pub stack: Vec<Option<PathBuf>>,
 }
 
 impl Places {
@@ -382,6 +385,8 @@ impl Places {
             protected,
             tmp,
             full: false,
+            prev: None,
+            stack: Vec::new(),
         }
     }
 
@@ -427,12 +432,24 @@ impl Places {
         if !matches!(a.program.as_str(), "cd" | "pushd" | "popd") {
             return false;
         }
-        self.base = match (a.program.as_str(), operands(&a.args).first()) {
-            ("popd", _) => None,
+        let to = match (a.program.as_str(), operands(&a.args).first()) {
+            // an empty stack: popd fails and the shell stays where it is
+            ("popd", _) => match self.stack.pop() {
+                Some(d) => d,
+                None => return true,
+            },
+            ("cd", Some(d)) if d.as_str() == "-" => match self.prev.clone() {
+                Some(d) => d,
+                None => return true,
+            },
+            ("pushd", None) => None,
             (_, None) => Some(self.home.clone()),
-            (_, Some(d)) if d.as_str() == "-" => None,
             (_, Some(d)) => self.resolve(d),
         };
+        if a.program == "pushd" {
+            self.stack.push(self.base.clone());
+        }
+        self.prev = Some(std::mem::replace(&mut self.base, to));
         true
     }
 
@@ -512,24 +529,60 @@ impl Places {
 }
 
 /// Whether one path part `pat` (`*`, `?`, `[…]`; a brace list may be anything) can match `name`.
+/// As the shell globs: a leading dot is matched only by a dot.
 fn glob_part(pat: &str, name: &str) -> bool {
     if pat.contains('{') {
         return true;
     }
-    fn go(p: &[char], n: &[char]) -> bool {
-        match p.first() {
-            None => n.is_empty(),
-            Some('*') => (0..=n.len()).any(|k| go(&p[1..], &n[k..])),
-            Some('?') => !n.is_empty() && go(&p[1..], &n[1..]),
-            Some('[') => match p.iter().position(|c| *c == ']') {
-                Some(e) if !n.is_empty() => go(&p[e + 1..], &n[1..]),
-                _ => false,
-            },
-            Some(c) => n.first() == Some(c) && go(&p[1..], &n[1..]),
-        }
+    if name.starts_with('.') && !pat.starts_with('.') {
+        return false;
     }
-    let (p, n): (Vec<char>, Vec<char>) = (pat.chars().collect(), name.chars().collect());
-    go(&p, &n)
+    // the pattern as single-character tokens: a literal, `?`, a bracket class (any one), `*`
+    let mut toks: Vec<Option<char>> = vec![];
+    let mut star = vec![];
+    let cs: Vec<char> = pat.chars().collect();
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            // `**` is one `*`
+            '*' => {
+                if star.last() != Some(&true) {
+                    toks.push(None);
+                    star.push(true);
+                }
+            }
+            '?' => {
+                toks.push(None);
+                star.push(false);
+            }
+            '[' => {
+                i += cs[i..].iter().position(|c| *c == ']').unwrap_or(0);
+                toks.push(None);
+                star.push(false);
+            }
+            c => {
+                toks.push(Some(c));
+                star.push(false);
+            }
+        }
+        i += 1;
+    }
+    let n: Vec<char> = name.chars().collect();
+    // dp[j]: the tokens so far can match the first j characters
+    let mut dp = vec![false; n.len() + 1];
+    dp[0] = true;
+    for (t, is_star) in toks.iter().zip(&star) {
+        let mut next = vec![false; n.len() + 1];
+        for j in 0..=n.len() {
+            next[j] = if *is_star {
+                dp[j] || j > 0 && next[j - 1]
+            } else {
+                j > 0 && dp[j - 1] && t.is_none_or(|c| c == n[j - 1])
+            };
+        }
+        dp = next;
+    }
+    dp[n.len()]
 }
 
 // ── tool calls ──
@@ -765,12 +818,11 @@ fn parsed(p: &Parsed, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Li
     }
     let mut pl = pl.clone();
     for c in &p.cmds {
-        if pl.cd(&c.words) {
-            continue;
-        }
+        // a `cd` into Steve's data, or by a glob that may reach it, is judged like any word
         if let Some(l) = simple(c, &pl, branch, depth) {
             return Some(l);
         }
+        pl.cd(&c.words);
     }
     None
 }
@@ -1337,9 +1389,7 @@ pub(crate) fn curl_loopback(args: &[String]) -> Option<CurlLine> {
         out.urls.push(x.clone());
     }
     // without -g, curl expands `[0-9]` and `{a,b}` in a URL: `:844[0-0]` is port 8440
-    let globoff = args
-        .iter()
-        .any(|x| x == "--globoff" || x.starts_with('-') && !x.starts_with("--") && x.contains('g'));
+    let globoff = curl_targets(args).1;
     let local = |u: &str| {
         let rest = u
             .strip_prefix("http://")
@@ -1355,7 +1405,7 @@ pub(crate) fn curl_loopback(args: &[String]) -> Option<CurlLine> {
                 (&rest[..end], &rest[end..])
             }
         };
-        if !globoff && after.contains(['[', '{']) {
+        if !globoff && host_port_glob(u) {
             return false;
         }
         // a port is digits, nothing else
@@ -1370,30 +1420,138 @@ pub(crate) fn curl_loopback(args: &[String]) -> Option<CurlLine> {
     (!out.urls.is_empty() && out.urls.iter().all(|u| local(u))).then_some(out)
 }
 
+/// curl's URLs (its operands and `--url` values; any word not known to be an option's value)
+/// and whether it globs them (`-g`/`--globoff` turn that off).
+fn curl_targets(args: &[String]) -> (Vec<String>, bool) {
+    // options that take a value, besides the ones `curl_loopback` reads
+    const LONG: &[&str] = &[
+        "request",
+        "header",
+        "data",
+        "data-raw",
+        "data-binary",
+        "data-urlencode",
+        "data-ascii",
+        "json",
+        "user",
+        "user-agent",
+        "referer",
+        "max-time",
+        "connect-timeout",
+        "write-out",
+        "cookie",
+        "cookie-jar",
+        "form",
+        "form-string",
+        "retry",
+        "range",
+        "output",
+        "output-dir",
+        "retry-delay",
+        "retry-max-time",
+        "proxy",
+        "proxy-user",
+        "resolve",
+        "connect-to",
+        "config",
+        "cacert",
+        "capath",
+        "cert",
+        "key",
+        "interface",
+        "dump-header",
+        "upload-file",
+        "url-query",
+        "oauth2-bearer",
+        "limit-rate",
+        "max-filesize",
+        "continue-at",
+        "quote",
+        "unix-socket",
+        "abstract-unix-socket",
+        "netrc-file",
+        "trace",
+        "trace-ascii",
+        "variable",
+        "expand-url",
+        "time-cond",
+        "local-port",
+        "dns-servers",
+        "aws-sigv4",
+        "header-file",
+    ];
+    const SHORT: &str = "XHdFuAemwbroTxKEcDUQYytzCP";
+    let mut urls = vec![];
+    let mut globoff = false;
+    let mut i = 0;
+    while let Some(x) = args.get(i) {
+        i += 1;
+        if let Some(long) = x.strip_prefix("--") {
+            let (name, val) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v.to_string())),
+                None => (long, None),
+            };
+            if name == "globoff" {
+                globoff = true;
+            } else if name == "url" || LONG.contains(&name) {
+                let v = val.or_else(|| {
+                    i += 1;
+                    args.get(i - 1).cloned()
+                });
+                if name == "url" {
+                    urls.extend(v);
+                }
+            }
+            continue;
+        }
+        if let Some(cluster) = x.strip_prefix('-').filter(|c| !c.is_empty()) {
+            for (k, ch) in cluster.char_indices() {
+                if ch == 'g' {
+                    globoff = true;
+                }
+                if SHORT.contains(ch) {
+                    if cluster[k + ch.len_utf8()..].is_empty() {
+                        i += 1;
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        urls.push(x.clone());
+    }
+    (urls, globoff)
+}
+
+/// A glob or brace list in a URL's host or port (`0:844[0-0]`, `{a,b}.x`); an IPv6 address in
+/// brackets is not one.
+fn host_port_glob(u: &str) -> bool {
+    let rest = u.split_once("://").map_or(u, |(_, r)| r);
+    let hp = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hp = hp.rsplit_once('@').map_or(hp, |(_, h)| h);
+    let hp = match hp.strip_prefix('[') {
+        Some(r) => match r.split_once(']') {
+            Some((inside, after)) if inside.contains(':') => after,
+            _ => return true,
+        },
+        None => hp,
+    };
+    hp.contains(['[', '{'])
+}
+
 fn curl(args: &[String]) -> Option<Limit> {
     // talking to a server on this machine (a test Hub, a dev server) sends nothing out; 8440 is
     // caught before by the text check
     if curl_loopback(args).is_some() {
         return None;
     }
-    // a URL curl expands (`:844[0-0]`, `{a,b}`) hides where it goes, port 8440 included
-    let globoff = args
-        .iter()
-        .any(|x| x == "--globoff" || x.starts_with('-') && !x.starts_with("--") && x.contains('g'));
-    if !globoff
-        && args.iter().any(|x| {
-            !x.starts_with('-')
-                && (x.contains("://")
-                    || ["localhost", "127.", "[::1]"]
-                        .iter()
-                        .any(|h| x.starts_with(h)))
-                && x.split_once("://")
-                    .map_or(x.as_str(), |(_, r)| r)
-                    .trim_start_matches('[')
-                    .contains(['[', '{'])
-        })
-    {
-        return Some(Limit::new(4, "curl 的网址带通配，看不出会连到哪个端口"));
+    // a host or port curl expands (`:844[0-0]`, `{a,b}`) hides where it goes, 8440 included
+    let (urls, globoff) = curl_targets(args);
+    if !globoff && urls.iter().any(|u| host_port_glob(u)) {
+        return Some(Limit::new(
+            4,
+            "curl 的网址带通配，看不出会连到哪个主机和端口",
+        ));
     }
     let send = || Some(Limit::new(5, "curl 把数据发出去"));
     let method = |m: &str| {
@@ -1668,7 +1826,7 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
                     x.strip_prefix('-')
                         .filter(|c| !c.starts_with('-'))
                         .is_some_and(|c| c.contains(short))
-                        || x.len() > 3 && x.starts_with("--") && long.starts_with(x.as_str())
+                        || x.len() > 2 && x.starts_with("--") && long.starts_with(x.as_str())
                 })
             };
             let force_delete = has('D', "") || has('d', "--delete") && has('f', "--force");
@@ -1687,6 +1845,9 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
             _ => None,
         },
         // writing or deleting another branch's ref directly
+        "update-ref" if rest.iter().any(|x| x == "--stdin") => {
+            Some(Limit::new(4, "git update-ref --stdin 看不出改的是哪个分支"))
+        }
         "update-ref" => {
             let own = branch.map(|b| format!("refs/heads/{b}"));
             operands(rest)

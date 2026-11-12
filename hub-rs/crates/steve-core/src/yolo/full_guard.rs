@@ -134,15 +134,15 @@ impl Walk<'_> {
         }
         let mut pl = pl.clone();
         for c in &p.cmds {
-            if pl.cd(&c.words) {
-                continue;
-            }
             // in text that may be a command line, words that cannot name a program (a pattern
             // such as `^TestA$`, a query such as `.a[]`) are text
             if !strict && shell::argv(&c.words).is_some_and(|a| dynamic(&a.program) && !a.sudo) {
                 continue;
             }
+            // a `cd` is judged too (into Steve's data, or by a glob that may reach it), then moves
+            // what later relative paths mean
             self.simple(c, &Feed::of(c, feed), &pl, depth)?;
+            pl.cd(&c.words);
         }
         Ok(())
     }

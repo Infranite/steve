@@ -149,36 +149,90 @@ const CODE_VARS: &[&str] = &[
     "PYTHONBREAKPOINT",
     "PYTHONSTARTUP",
     "BASH_ENV",
-    "ENV",
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG_COUNT",
     "GIT_EXEC_PATH",
     "GIT_TEMPLATE_DIR",
 ];
 
-/// What the variable assignments among `words` make the programs after them run: a command
-/// variable's value is a line; a code variable cannot be read. All words are looked at
-/// (`A=… cmd`, `env A=… cmd`, `export A=…`): an assignment that is only text costs nothing.
+/// The variable assignments of a simple command: the ones in front of its program (and of the
+/// wrappers before it: `env A=… cmd`, `sudo A=… cmd`), the arguments of `export`/`declare`…, and
+/// make's variable arguments (`make CC=…`). A `NAME=value` word given to any other program is
+/// its data (`echo ENV=prod`, `docker run -e A=b`).
+fn assignments(words: &[String]) -> Vec<&String> {
+    const SETS: &[&str] = &["export", "declare", "typeset", "local", "readonly"];
+    const PASS: &[&str] = &[
+        "env",
+        "sudo",
+        "doas",
+        "nohup",
+        "nice",
+        "time",
+        "command",
+        "exec",
+        "stdbuf",
+        "caffeinate",
+    ];
+    let mut out = vec![];
+    for (i, w) in words.iter().enumerate() {
+        if shell::is_assignment(w) {
+            out.push(w);
+            continue;
+        }
+        let p = shell::basename(w);
+        if SETS.contains(&p) || matches!(p, "make" | "gmake") {
+            out.extend(words[i + 1..].iter().filter(|x| shell::is_assignment(x)));
+            break;
+        }
+        // a wrapper and its options: assignments may follow (`env -i A=b cmd`)
+        if PASS.contains(&p) || w.starts_with('-') {
+            continue;
+        }
+        break;
+    }
+    out
+}
+
+/// What the variable assignments of a simple command ([`assignments`]) make the programs after
+/// them run: a command variable's value is a line; a variable that loads code cannot be read.
 pub(crate) fn var_bodies(words: &[String]) -> Vec<Body> {
     let mut out = vec![];
-    for w in words {
+    for w in assignments(words) {
         let Some((k, v)) = w.split_once('=') else {
             continue;
         };
-        if !shell::is_assignment(w) {
+        if v.trim().is_empty() {
             continue;
         }
+        let loads = match k {
+            // only these options load code; `--max-old-space-size` does not
+            "NODE_OPTIONS" => [
+                "--require",
+                "-r",
+                "--import",
+                "--loader",
+                "--experimental-loader",
+                "--eval",
+                "-e",
+            ]
+            .iter()
+            .any(|o| {
+                v.split_whitespace()
+                    .any(|x| x == *o || x.starts_with(&format!("{o}=")))
+            }),
+            "PYTHONBREAKPOINT" => v != "0",
+            _ => {
+                CODE_VARS.contains(&k)
+                    || k.starts_with("DYLD_")
+                    || k.starts_with("GIT_CONFIG_KEY_")
+                    || k.starts_with("GIT_CONFIG_VALUE_")
+            }
+        };
         if COMMAND_VARS.contains(&k)
             || k.starts_with("CARGO_TARGET_") && (k.ends_with("_RUNNER") || k.ends_with("_LINKER"))
         {
-            if !v.trim().is_empty() {
-                out.push(Body::Line(v.to_string(), Feed::default()));
-            }
-        } else if CODE_VARS.contains(&k)
-            || k.starts_with("DYLD_")
-            || k.starts_with("GIT_CONFIG_KEY_")
-            || k.starts_with("GIT_CONFIG_VALUE_")
-        {
+            out.push(Body::Line(v.to_string(), Feed::default()));
+        } else if loads {
             out.push(Body::Unseen(format!(
                 "环境变量 {k} 会让后面的程序加载代码，看不出会运行什么"
             )));
@@ -1845,6 +1899,21 @@ static AWK_RUNS: LazyLock<Regex> = LazyLock::new(|| {
 /// reader, not a sandbox: it only lets through code that plainly computes, reads and writes files;
 /// anything that could run something else stays with the user, whatever its strings say.
 pub(crate) fn code_runs(lang: Lang, code: &str) -> Option<String> {
+    // a comment between a name and its call (`require/**/(…)`) hides nothing; a `//` inside a
+    // string is not a comment: both readings are looked at
+    if matches!(lang, Lang::Js | Lang::Php) {
+        let bare = JS_COMMENTS.replace_all(code, " ");
+        if bare != code
+            && let Some(why) = code_runs_as(lang, &bare)
+        {
+            return Some(why);
+        }
+    }
+    code_runs_as(lang, code)
+}
+
+/// [`code_runs`] on one reading of the code.
+fn code_runs_as(lang: Lang, code: &str) -> Option<String> {
     let why = |what: &str| {
         Some(format!(
             "内联代码里有能运行别的程序或动态执行的写法（{what}），静态看不出会运行什么，留给你"
@@ -1859,12 +1928,6 @@ pub(crate) fn code_runs(lang: Lang, code: &str) -> Option<String> {
         _ => {}
     }
     let code = &PLAIN_CALLS.replace_all(code, "");
-    // a comment between a name and its call (`require/**/(…)`) hides nothing
-    let code = &if matches!(lang, Lang::Js | Lang::Php) {
-        JS_COMMENTS.replace_all(code, " ").into_owned()
-    } else {
-        code.to_string()
-    };
     if let Some(m) = RUNS.find(code) {
         return why(m.as_str());
     }
@@ -2405,9 +2468,10 @@ mod tests {
         let v = var_bodies(&w(&[
             "GIT_EDITOR=git push",
             "A=1",
+            "LD_PRELOAD=/x.so",
             "git",
             "commit",
-            "LD_PRELOAD=/x.so",
+            "PAGER=data",
         ]));
         assert_eq!(v.len(), 2, "{v:?}");
         assert!(matches!(&v[0], Body::Line(l, _) if l == "git push"));
