@@ -1,5 +1,6 @@
 import { api } from "@/api"
 import { WorkflowPanel } from "@/workflow-panel"
+import { workflowRelation } from "@/item-workflow-relation"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
 import { usePeopleOn } from "@/api/people"
@@ -187,12 +188,14 @@ export function ItemsView() {
           {groups.filter((g) => g[0] !== "drop").map(([s, l]) => { const g = xs.filter((i) => i.st === s); return (
             <div key={s} className="flex min-h-72 flex-col gap-2 rounded-xl bg-muted/60 p-2">
               <div className="flex items-center gap-2 px-2 py-1.5 type-label"><StatusDot s={s} />{l}<span className="tabular-nums text-muted-foreground">{g.length}</span></div>
-              {g.map((i) => (
+              {g.map((i) => { const relation = workflowRelation(i, st.items); return (
                 <button key={i.id} type="button" onClick={() => go("#/items/" + i.id)} className="rounded-lg border bg-card p-3 text-left transition-shadow duration-150 hover:shadow-md" data-kanban-card={i.id}>
-                  <ItemNo id={i.id} /><div className="mt-0.5 type-callout font-medium">{i.t}</div><div className="mt-1 line-clamp-2 type-footnote text-muted-foreground">{i.now}</div>
+                  <ItemNo id={i.id} /><div className="mt-0.5 type-callout font-medium">{i.t}</div>
+                  {relation && <div className="mt-1 type-footnote font-medium text-foreground/80" data-workflow-relation={relation.kind}>{relation.kind === "parent" ? t("shell:item.waitingFor", { ids: relation.children.join(t("shell:item.relationSep")) }) : t("shell:item.childOf", { id: relation.parent })}</div>}
+                  <div className="mt-1 line-clamp-2 type-footnote text-muted-foreground">{i.now}</div>
                   <Tags ids={i.tags} max={2} className="mt-2" /><Meta className="mt-2"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}{i.plan && <PlanBar i={i} />}</Meta>
                 </button>
-              ))}
+              ) })}
             </div>) })}
         </div>
       )}

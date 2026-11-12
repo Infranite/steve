@@ -5,6 +5,7 @@ import { Progress } from "@/components/ui/progress"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { SelectContent, SelectItem, SelectTrigger, SelectValue, Select as UISelect } from "@/components/ui/select"
 import { botName, closeRel, depsOpen, kindOf, st, WACT, waitLine, type Item } from "@/store"
+import { workflowRelation } from "@/item-workflow-relation"
 import { BotAvatar, go, ItemNo, KindTag, Meta, RelNote, StatusDot, Tags } from "@/ui"
 import { cn } from "cn"
 import { FolderIcon, GitBranchIcon, StarIcon } from "lucide-react"
@@ -50,6 +51,7 @@ export function PlanBar({ i, warn }: { i: Item; warn?: boolean }) {
 export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: () => void; proj?: boolean; bot?: boolean }) {
   const t = useT()
   const on = selected.has(i.id), closed = i.st === "done" || i.st === "drop", w = i.wait
+  const relation = workflowRelation(i, st.items)
   const planOpen = !!i.plan?.length && i.plan.some((x) => x[1] !== 1)
   const extra = [
     i.ss.length > 1 && <span key="ss">{t("shell:item.sessions", { count: i.ss.length })}</span>,
@@ -89,8 +91,12 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
             {!pick && <Button size="xs" variant="outline" className="shrink-0" onClick={(e) => { e.stopPropagation(); go("#/items/" + i.id) }} data-item-wait-go={i.id}>{t("shell:item.goAct", { act: WACT[w.type] ?? t("shell:item.handle") })}</Button>}
           </div>
         )}
-        {!closed && !w && (i.now || extra.length > 0) && (
-          <Meta className="mt-0.5 flex-nowrap pl-14 [&>*:first-child]:min-w-0 [&>*:first-child]:truncate"><span className="type-callout" data-item-now>{i.now || "—"}</span>{extra}</Meta>
+        {!closed && !w && (i.now || relation || extra.length > 0) && (
+          <Meta className="mt-0.5 flex-nowrap pl-14">
+            {relation && <span className="shrink-0 type-callout font-medium text-foreground/80" data-workflow-relation={relation.kind}>{relation.kind === "parent" ? t("shell:item.waitingFor", { ids: relation.children.join(t("shell:item.relationSep")) }) : t("shell:item.childOf", { id: relation.parent })}</span>}
+            {i.now && <span className="min-w-0 truncate type-callout" data-item-now>{i.now}</span>}
+            {extra}
+          </Meta>
         )}
         {i.rel && i.rel.tone !== "ok" && <RelNote rel={i.rel} className="mt-1 pl-14" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
       </div>
