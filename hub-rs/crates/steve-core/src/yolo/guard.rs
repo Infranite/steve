@@ -498,9 +498,7 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
         // command) or load code (`LD_PRELOAD`: left to the user)
         for b in super::exec::var_bodies(&c.words) {
             match b {
-                Body::Line(l, _) => {
-                    command(&l, &pl, cx)?;
-                }
+                Body::Line(l, _) => var_command(&l)?,
                 Body::Unseen(why) => return Err(why),
                 _ => {}
             }
@@ -527,6 +525,31 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
         matched.push(a.program.clone());
     }
     Ok(matched)
+}
+
+/// A command a variable names (`GIT_EDITOR=true`, `CC=clang`): a build tool or editor goes as the
+/// variable's program would; root, a program never run unattended, a shell's `-c` or a `kill`
+/// stays with the user.
+fn var_command(line: &str) -> Result<(), String> {
+    let p = shell::parse(line).map_err(|e| format!("环境变量里的命令看不懂：{}", e.0))?;
+    if let Some(what) = p.opaque.first() {
+        return Err(format!("环境变量里的命令有 {what}，看不出会执行什么"));
+    }
+    for c in &p.cmds {
+        let Some(a) = shell::argv(&c.words) else {
+            continue;
+        };
+        let p = a.program.as_str();
+        if a.sudo
+            || a.unclear.is_some()
+            || NEVER.contains(&p)
+            || p == "kill"
+            || SHELLS.contains(&p) && a.args.iter().any(|x| shell::is_dash_c(x))
+        {
+            return Err(format!("环境变量让程序运行 {p}，留给你"));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn operands(args: &[String]) -> Vec<&String> {
@@ -562,6 +585,13 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
         return Err("xargs 的参数来自标准输入，看不出".into());
     }
     if let Some(why) = code_outward(p, args) {
+        return Err(why);
+    }
+    // something it runs that cannot be read (`cargo --config …runner`, `less +!…`)
+    if let Some(Body::Unseen(why)) = super::exec::bodies(a, &Feed::default())
+        .into_iter()
+        .find(|b| matches!(b, Body::Unseen(_)))
+    {
         return Err(why);
     }
     // an option whose value is a command (`fd -x`, `tar --to-command`)
@@ -673,7 +703,12 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
                 Ok(())
             }
         }
-        "git" => git(args, pl, extra),
+        "git" => {
+            if !super::exec::bodies(a, &Feed::default()).is_empty() {
+                return Err("git 会运行命令行里给的别的命令，留给你".into());
+            }
+            git(args, pl, extra)
+        }
         "find" => {
             if args.iter().any(|x| {
                 matches!(
@@ -874,6 +909,9 @@ fn git(args: &[String], pl: &Places, extra: &[String]) -> Result<(), String> {
                 i += 2;
             }
             "-c" => return Err("git -c 留给你".into()),
+            s if s.starts_with("--config-env") || s.starts_with("--exec-path") => {
+                return Err(format!("git {s} 留给你"));
+            }
             s if s.starts_with("--git-dir") || s.starts_with("--work-tree") => {
                 return Err("git --git-dir / --work-tree 留给你".into());
             }
@@ -919,9 +957,17 @@ fn git(args: &[String], pl: &Places, extra: &[String]) -> Result<(), String> {
         "reset" => !rest
             .iter()
             .any(|x| matches!(x.as_str(), "--hard" | "--merge" | "--keep")),
-        "branch" => !rest
-            .iter()
-            .any(|x| x == "-D" || x == "-d" || x == "--delete" || x == "-m" || x == "-M"),
+        "branch" => !rest.iter().any(|x| {
+            // `-D`, `-d`, `-m`, `-M`, also clustered (`-qD`) or abbreviated (`--del`)
+            x.strip_prefix('-')
+                .filter(|c| !c.starts_with('-'))
+                .is_some_and(|c| c.contains(['D', 'd', 'm', 'M']))
+                || x.len() > 3
+                    && x.starts_with("--")
+                    && ["--delete", "--move", "--copy"]
+                        .iter()
+                        .any(|l| l.starts_with(x.as_str()))
+        }),
         "rebase" | "merge" => {
             let ops = operands(rest);
             rest.iter()

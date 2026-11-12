@@ -126,6 +126,17 @@ const COMMAND_VARS: &[&str] = &[
     "LESSOPEN",
     "LESSCLOSE",
     "BROWSER",
+    // build tools run these programs (a compiler, its wrapper, a test runner)
+    "RUSTC",
+    "RUSTDOC",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CC",
+    "CXX",
+    "LD",
+    "MAKE",
+    "SHELL",
 ];
 /// Variables that load code into the programs that follow (a preloaded library, interpreter or
 /// git options, a shell's startup file): what they run cannot be read off the line.
@@ -157,7 +168,9 @@ pub(crate) fn var_bodies(words: &[String]) -> Vec<Body> {
         if !shell::is_assignment(w) {
             continue;
         }
-        if COMMAND_VARS.contains(&k) {
+        if COMMAND_VARS.contains(&k)
+            || k.starts_with("CARGO_TARGET_") && (k.ends_with("_RUNNER") || k.ends_with("_LINKER"))
+        {
             if !v.trim().is_empty() {
                 out.push(Body::Line(v.to_string(), Feed::default()));
             }
@@ -263,11 +276,15 @@ pub(crate) fn option_bodies(p: &str, args: &[String], feed: &Feed) -> Vec<Body> 
                 Runs::Line => out.push(Body::Line(v, feed.clone())),
                 Runs::Program => out.push(Body::Argv(vec![v], feed.clone())),
                 Runs::Rest => {
+                    // `-xcmd` / `--exec=cmd`: the attached word is the program
+                    let attached = (x != o).then(|| v.clone());
                     let end = args[i..]
                         .iter()
                         .position(|x| x == ";" || x == "\\;")
                         .map_or(args.len(), |e| i + e);
-                    out.push(Body::Argv(args[i..end].to_vec(), feed.clone()));
+                    let mut words: Vec<String> = attached.into_iter().collect();
+                    words.extend(args[i..end].iter().cloned());
+                    out.push(Body::Argv(words, feed.clone()));
                     i = end;
                 }
                 Runs::Unseen => out.push(Body::Unseen(format!(
@@ -697,6 +714,23 @@ pub(crate) fn bodies(a: &Argv, feed: &Feed) -> Vec<Body> {
                 }
             }
         }
+        return out;
+    }
+    if p == "cargo"
+        && args.iter().enumerate().any(|(i, x)| {
+            let v = match x.strip_prefix("--config") {
+                Some("") => args.get(i + 1).map(String::as_str).unwrap_or(""),
+                Some(r) => r.strip_prefix('=').unwrap_or(""),
+                None => "",
+            };
+            ["runner", "wrapper", "linker", "rustc", "rustdoc"]
+                .iter()
+                .any(|k| v.contains(k))
+        })
+    {
+        out.push(Body::Unseen(
+            "cargo --config 指定了要运行的程序，看不出会运行什么".into(),
+        ));
         return out;
     }
     if p == "crontab" && !args.iter().all(|x| x == "-l") {
@@ -1693,10 +1727,13 @@ static RUNS: LazyLock<Regex> = LazyLock::new(|| {
         r"|exec_command|eval|fork\w*|subprocess|child_process|posix_spawn\w*|startfile|webbrowser",
         r"|pty|ctypes|cffi|ffi|fiddle|dlopen|syscall|setuid|seteuid|setreuid|setresuid|setgid",
         r"|setegid|setgroups|initgroups|open3|shell_exec|passthru|proc_open|pcntl_\w+|posix_\w+",
-        r"|kill\w*|\w+_kill|pkill|killall)\b|create_subprocess",
+        r"|kill\w*|\w+_kill|pkill|killall|sendmail|nodemailer)\b|create_subprocess",
     ))
     .expect("valid regex")
 });
+/// JavaScript (and PHP) comments.
+static JS_COMMENTS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/\*[\s\S]*?\*/|//[^\n]*").expect("valid regex"));
 /// What reads like [`RUNS`] but only names this process or its platform.
 static PLAIN_CALLS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bplatform\.system\(\)|\bsys\.executable\b").expect("valid regex")
@@ -1707,7 +1744,8 @@ static PY_DYNAMIC: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"\b(__import__|importlib|runpy|getattr|setattr|delattr|globals|locals|vars|inspect",
         r"|attrgetter|methodcaller|pickle|cPickle|marshal|dill|shelve|jsonpickle|unsafe_load",
-        r"|builtins|timeit|cProfile|pdb|bdb|doctest|pydoc|pipepager|breakpoint|runcall|runctx)\b",
+        r"|builtins|timeit|cProfile|pdb|bdb|doctest|pydoc|pipepager|breakpoint|runcall|runctx",
+        r"|pkgutil|resolve_name|import_module|get_field|Formatter|smtplib)\b",
         r"|\byaml\.load\b|\bcode\.\w+|\bprofile\.run|\btrace\.Trace",
     ))
     .expect("valid regex")
@@ -1792,8 +1830,8 @@ static COMPUTED: LazyLock<Regex> = LazyLock::new(|| {
 /// call.
 static SHELLOUT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"`|%x|\bqx\b|\bopen\b[^;]*['\x22]\s*-?\|",
-        r"|&\s*[\{\$]|\*\s*\{|->\s*[\$\(]",
+        r"`|%x|\bqx\b|['\x22]\s*-?\||\|\s*['\x22]|\breadpipe\b|\bopen2\b|IPC::|\bExpect\b",
+        r"|&\s*[\{\$]|\*\s*\{|->\s*[\$\(]|\b(mail|mb_send_mail)\s*\(|Net::SMTP|net/smtp",
     ))
     .expect("valid regex")
 });
@@ -1821,6 +1859,12 @@ pub(crate) fn code_runs(lang: Lang, code: &str) -> Option<String> {
         _ => {}
     }
     let code = &PLAIN_CALLS.replace_all(code, "");
+    // a comment between a name and its call (`require/**/(…)`) hides nothing
+    let code = &if matches!(lang, Lang::Js | Lang::Php) {
+        JS_COMMENTS.replace_all(code, " ").into_owned()
+    } else {
+        code.to_string()
+    };
     if let Some(m) = RUNS.find(code) {
         return why(m.as_str());
     }
@@ -2368,7 +2412,7 @@ mod tests {
         assert_eq!(v.len(), 2, "{v:?}");
         assert!(matches!(&v[0], Body::Line(l, _) if l == "git push"));
         assert!(matches!(&v[1], Body::Unseen(_)));
-        assert!(var_bodies(&w(&["echo", "PATH=/x", "CC=gcc"])).is_empty());
+        assert!(var_bodies(&w(&["echo", "PATH=/x", "FOO=gcc"])).is_empty());
         let o = option_bodies(
             "fd",
             &w(&["-e", "rs", "-x", "rm", "{}", ";", "-H"]),

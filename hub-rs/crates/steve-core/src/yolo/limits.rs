@@ -388,6 +388,19 @@ impl Places {
     /// The canonical path a word names; `None` when it cannot be known here (`$VAR`, `~user`, relative
     /// without a working directory).
     pub fn resolve(&self, w: &str) -> Option<PathBuf> {
+        // `$HOME` and `$STEVE_HOME` are known here; any other variable is not
+        for (var, to) in [
+            ("$HOME", &self.home),
+            ("${HOME}", &self.home),
+            ("$STEVE_HOME", &self.protected[0]),
+            ("${STEVE_HOME}", &self.protected[0]),
+        ] {
+            if let Some(rest) = w.strip_prefix(var)
+                && (rest.is_empty() || rest.starts_with('/'))
+            {
+                return self.resolve(&format!("{}{rest}", to.to_string_lossy()));
+            }
+        }
         if w.contains('$') || w.contains('`') {
             return None;
         }
@@ -421,6 +434,35 @@ impl Places {
             (_, Some(d)) => self.resolve(d),
         };
         true
+    }
+
+    /// A word with a glob or a brace list (`~/.stev?/web`, `~/{x,.steve}`) that may expand to
+    /// Steve's data outside the item's own directory: the directory it starts from is in it, or
+    /// its next part may name the step towards it.
+    pub fn may_glob_steve(&self, w: &str) -> bool {
+        let Some(cut) = w.find(['*', '?', '[', '{']) else {
+            return false;
+        };
+        let slash = w[..cut].rfind('/');
+        let dir = match slash {
+            Some(0) => Some(PathBuf::from("/")),
+            Some(i) => self.resolve(&w[..i]),
+            None => self.base.clone(),
+        };
+        let Some(dir) = dir else {
+            return false;
+        };
+        let start = slash.map_or(0, |i| i + 1);
+        let part = w[start..].split('/').next().unwrap_or("");
+        if self.in_steve(&dir) {
+            return true;
+        }
+        self.protected.iter().any(|s| {
+            s.strip_prefix(&dir)
+                .ok()
+                .and_then(|r| r.components().next())
+                .is_some_and(|c| glob_part(part, &c.as_os_str().to_string_lossy()))
+        })
     }
 
     pub fn inside(&self, p: &Path) -> bool {
@@ -467,6 +509,27 @@ impl Places {
             None => Some(Limit::new(4, format!("看不出 {w} 指向哪里"))),
         }
     }
+}
+
+/// Whether one path part `pat` (`*`, `?`, `[…]`; a brace list may be anything) can match `name`.
+fn glob_part(pat: &str, name: &str) -> bool {
+    if pat.contains('{') {
+        return true;
+    }
+    fn go(p: &[char], n: &[char]) -> bool {
+        match p.first() {
+            None => n.is_empty(),
+            Some('*') => (0..=n.len()).any(|k| go(&p[1..], &n[k..])),
+            Some('?') => !n.is_empty() && go(&p[1..], &n[1..]),
+            Some('[') => match p.iter().position(|c| *c == ']') {
+                Some(e) if !n.is_empty() => go(&p[e + 1..], &n[1..]),
+                _ => false,
+            },
+            Some(c) => n.first() == Some(c) && go(&p[1..], &n[1..]),
+        }
+    }
+    let (p, n): (Vec<char>, Vec<char>) = (pat.chars().collect(), name.chars().collect());
+    go(&p, &n)
 }
 
 // ── tool calls ──
@@ -717,16 +780,24 @@ fn parsed(p: &Parsed, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Li
 /// every command a line runs with this ([`super::full_guard`]), not only the line's own.
 pub(crate) fn simple(c: &Simple, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
     for w in &c.writes {
+        if pl.may_glob_steve(w) {
+            return Some(Limit::new(4, format!("可能碰到 STEVE_HOME：{w}")));
+        }
         if let Some(l) = pl.write_target(w) {
             return Some(l);
         }
     }
     for w in &c.words {
+        if !(w.contains('/') || w.starts_with('.') || w.starts_with('~')) {
+            continue;
+        }
         if let Some(rp) = pl.resolve(w)
-            && (w.contains('/') || w.starts_with('.') || w.starts_with('~'))
             && pl.in_steve(&rp)
         {
             return Some(Limit::new(4, format!("碰到 STEVE_HOME：{w}")));
+        }
+        if pl.may_glob_steve(w) {
+            return Some(Limit::new(4, format!("可能碰到 STEVE_HOME：{w}")));
         }
     }
     let a = shell::argv(&c.words)?;
@@ -1265,6 +1336,10 @@ pub(crate) fn curl_loopback(args: &[String]) -> Option<CurlLine> {
         }
         out.urls.push(x.clone());
     }
+    // without -g, curl expands `[0-9]` and `{a,b}` in a URL: `:844[0-0]` is port 8440
+    let globoff = args
+        .iter()
+        .any(|x| x == "--globoff" || x.starts_with('-') && !x.starts_with("--") && x.contains('g'));
     let local = |u: &str| {
         let rest = u
             .strip_prefix("http://")
@@ -1273,10 +1348,23 @@ pub(crate) fn curl_loopback(args: &[String]) -> Option<CurlLine> {
         if rest.contains('@') || rest.contains('\\') {
             return false;
         }
-        let host = match rest.strip_prefix('[') {
-            Some(r) => r.split(']').next().unwrap_or(""),
-            None => rest.split(['/', ':', '?', '#']).next().unwrap_or(""),
+        let (host, after) = match rest.strip_prefix('[') {
+            Some(r) => r.split_once(']').unwrap_or((r, "")),
+            None => {
+                let end = rest.find(['/', ':', '?', '#']).unwrap_or(rest.len());
+                (&rest[..end], &rest[end..])
+            }
         };
+        if !globoff && after.contains(['[', '{']) {
+            return false;
+        }
+        // a port is digits, nothing else
+        if let Some(port) = after.strip_prefix(':') {
+            let p = port.split(['/', '?', '#']).next().unwrap_or("");
+            if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+        }
         matches!(host, "127.0.0.1" | "localhost" | "::1")
     };
     (!out.urls.is_empty() && out.urls.iter().all(|u| local(u))).then_some(out)
@@ -1287,6 +1375,25 @@ fn curl(args: &[String]) -> Option<Limit> {
     // caught before by the text check
     if curl_loopback(args).is_some() {
         return None;
+    }
+    // a URL curl expands (`:844[0-0]`, `{a,b}`) hides where it goes, port 8440 included
+    let globoff = args
+        .iter()
+        .any(|x| x == "--globoff" || x.starts_with('-') && !x.starts_with("--") && x.contains('g'));
+    if !globoff
+        && args.iter().any(|x| {
+            !x.starts_with('-')
+                && (x.contains("://")
+                    || ["localhost", "127.", "[::1]"]
+                        .iter()
+                        .any(|h| x.starts_with(h)))
+                && x.split_once("://")
+                    .map_or(x.as_str(), |(_, r)| r)
+                    .trim_start_matches('[')
+                    .contains(['[', '{'])
+        })
+    {
+        return Some(Limit::new(4, "curl 的网址带通配，看不出会连到哪个端口"));
     }
     let send = || Some(Limit::new(5, "curl 把数据发出去"));
     let method = |m: &str| {
@@ -1478,6 +1585,25 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
                 dir = args.get(i + 1).map(String::as_str);
                 i += 2;
             }
+            // `--config-env=key=VAR` sets `key` from a variable: its value cannot be read
+            s if s == "--config-env" || s.starts_with("--config-env=") => {
+                let kv = match s.strip_prefix("--config-env=") {
+                    Some(kv) => {
+                        i += 1;
+                        kv
+                    }
+                    None => {
+                        i += 2;
+                        args.get(i - 1).map(String::as_str).unwrap_or("")
+                    }
+                };
+                if risky_git_config(kv) {
+                    return Some(Limit::new(
+                        5,
+                        format!("git --config-env {kv} 可能让 git 运行别的命令或推送"),
+                    ));
+                }
+            }
             "-c" => {
                 let kv = args.get(i + 1).map(String::as_str).unwrap_or("");
                 if risky_git_config(kv) {
@@ -1536,9 +1662,16 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
             depth,
         ),
         "branch" => {
-            let force_delete = rest.iter().any(|x| x == "-D")
-                || rest.iter().any(|x| x == "-d" || x == "--delete")
-                    && rest.iter().any(|x| x == "-f" || x == "--force");
+            // `-D` or `-d -f`, also clustered (`-qD`, `-df`) or abbreviated (`--del --for`)
+            let has = |short: char, long: &str| {
+                rest.iter().any(|x| {
+                    x.strip_prefix('-')
+                        .filter(|c| !c.starts_with('-'))
+                        .is_some_and(|c| c.contains(short))
+                        || x.len() > 3 && x.starts_with("--") && long.starts_with(x.as_str())
+                })
+            };
+            let force_delete = has('D', "") || has('d', "--delete") && has('f', "--force");
             if force_delete {
                 let targets = operands(rest);
                 let own =
@@ -1553,6 +1686,14 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
             Some("remove" | "move") => Some(Limit::new(4, "git worktree remove/move")),
             _ => None,
         },
+        // writing or deleting another branch's ref directly
+        "update-ref" => {
+            let own = branch.map(|b| format!("refs/heads/{b}"));
+            operands(rest)
+                .into_iter()
+                .find(|r| r.starts_with("refs/heads/") && own.as_deref() != Some(r.as_str()))
+                .map(|_| Limit::new(4, "改写或删除别的事项的分支"))
+        }
         "clean" | "rm" | "mv" | "restore" | "checkout" | "reset" | "stash" | "switch" | "clone"
         | "init"
             if elsewhere =>

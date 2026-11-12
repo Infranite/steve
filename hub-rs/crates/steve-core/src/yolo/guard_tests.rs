@@ -1089,3 +1089,105 @@ fn st26_commands_hidden_in_variables_options_and_runners_are_read() {
         assert!(auto, "{c}: {rule}");
     }
 }
+
+/// The third look (second independent re-review): a URL curl expands to port 8440, git's
+/// `--config-env`, branch deletion clustered or abbreviated and `update-ref`, Steve's data behind
+/// a glob or `$HOME`, `fd`'s attached `-x`, `git grep -O` with any command under plain YOLO, more
+/// inline-code forms, and settings naming the program a build tool runs. Text that only looks
+/// like a command (`go test -run '^A$|^B$'`) stays text.
+#[test]
+fn st26_globs_config_env_branch_forms_and_build_settings_are_read() {
+    let pl = place();
+    for (c, rule) in [
+        (
+            "curl -X POST -d '{}' 'http://127.0.0.1:844[0-0]/api/x'",
+            "limit.4",
+        ),
+        ("curl 'http://127.0.0.1:844{0,1}/api/x'", "limit.4"),
+        (
+            "FOO='git push origin HEAD' git --config-env=core.fsmonitor=FOO status",
+            "limit.5",
+        ),
+        ("git --config-env diff.external=FOO diff", "limit.5"),
+        ("git branch -qD steve/other", "limit.4"),
+        ("git branch --del --force steve/other", "limit.4"),
+        ("git branch -df steve/other", "limit.4"),
+        ("git update-ref -d refs/heads/steve/other", "limit.4"),
+        ("rm -rf ~/.stev?/web", "limit.4"),
+        ("rm -rf \"$HOME\"/.ste\"ve\"", "limit.4"),
+        ("rm -rf ${HOME}/.steve/data", "limit.4"),
+        ("rm -rf ../*", "limit.4"),
+        ("ls ~/.st*", "limit.4"),
+        ("fd -g node -d1 -xpkill", "tool.full"),
+        ("fd -g x.sh --exec=sudo", "tool.full"),
+        ("git grep -O'pkill -f node' -l main", "tool.full"),
+        ("git grep -Osudo -l main", "tool.full"),
+        (
+            "python3 -c 'import pkgutil; pkgutil.resolve_name(\"os:sy\"+\"stem\")(\"id\")'",
+            "tool.full",
+        ),
+        (
+            "python3 -c 'import string; string.Formatter().get_field(\"0.x\", [1], {})'",
+            "tool.full",
+        ),
+        (
+            "node -e 'const m=require/**/(\"child_pro\"+\"cess\")'",
+            "tool.full",
+        ),
+        (
+            "ruby -e 'IO.read(\"|git pu\"+\"sh origin HEAD\")'",
+            "tool.full",
+        ),
+        ("perl -e 'readpipe(\"id\")'", "tool.full"),
+        ("perl -e 'open(F, \"id |\")'", "tool.full"),
+        (
+            "perl -MIPC::Open2 -e 'open2(my $o, my $i, \"id\")'",
+            "tool.full",
+        ),
+        // sending mail as the user is a hard limit wherever it is spelled
+        (
+            "php -r 'mail(\"a@example.invalid\", \"s\", \"b\");'",
+            "limit.3",
+        ),
+        (
+            "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER=sudo cargo run",
+            "tool.full",
+        ),
+        ("RUSTC_WRAPPER='pkill -f node' cargo build", "tool.full"),
+        (
+            "cargo run --config 'target.aarch64-apple-darwin.runner=\"sudo\"'",
+            "tool.full",
+        ),
+        ("make SHELL=sudo .SHELLFLAGS='-n sh -c' all", "tool.full"),
+    ] {
+        let c = pl.fill(c);
+        let (auto, got) = full_verdict(&pl, &c, &[]);
+        assert!(!auto, "{c}: allowed under full access");
+        assert_eq!(got, rule, "{c}");
+        let (auto, got) = plain_verdict(&pl, &c);
+        assert!(!auto, "{c}: allowed by plain YOLO ({got})");
+    }
+    for c in [
+        "go test -run '^TestA$|^TestB$' ./...",
+        "yq '.a[] | .b' f.yaml",
+        "curl -sS http://127.0.0.1:3000/health",
+        "curl -g 'http://[::1]:3000/x?a[]=1'",
+        "git branch -vv",
+        "git branch -d steve/st-21",
+        "git update-ref refs/heads/steve/st-21 HEAD",
+        "rm -rf ./target/*",
+        "ls ~/*.log",
+        "fd -e rs -x wc -l",
+        "CC=clang make",
+        "SHELL=/bin/bash make test",
+        "cargo build --config profile.release.lto=true",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(auto, "{c}: {rule}");
+    }
+    // plain YOLO keeps the build idioms it took before
+    for c in ["CC=clang make", "GIT_EDITOR=true git rebase --continue"] {
+        let (auto, rule) = plain_verdict(&pl, c);
+        assert!(auto, "{c}: plain {rule}");
+    }
+}
