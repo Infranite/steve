@@ -199,6 +199,42 @@ try {
     await shot(page, `yolo-${type}-modes-${scale}x`)
     await page.close()
   }
+  // Answers that come back out of order: a slow earlier load of the same item, or of the item shown before, never
+  // replaces the newest one (the Hub's answers are delayed for real, nothing is mocked inside the page).
+  {
+    const { page } = await makePage(390, 844)
+    const line = (status, residual = false) => ({ item_id: "", level: "full", source: "item", layers: { workspace: "off", project: null, item: "full", forced: null, paused: false },
+      sessions: [{ session_id: "s1", readonly: false, status, wanted: "full_access", applied: status === "applied" ? "full_access" : "accept_edits", desired: null, busy: residual, refused: status === "refused" ? "this node's owner allows at most permission mode auto" : null, residual }] })
+    const seen = { "ST-100": 0, "ST-101": 0 }
+    await page.route(`${base}/api/yolo/items/*`, async route => {
+      const id = new URL(route.request().url()).pathname.split("/").pop()
+      const n = seen[id]++
+      // ST-100's first answer is slow and stale; its next one is fresh; ST-101 answers at once
+      if (id === "ST-100" && n === 0) { await new Promise(r => setTimeout(r, 1200)); return route.fulfill({ json: { ...line("after_turn", true), item_id: id } }) }
+      return route.fulfill({ json: { ...line(id === "ST-100" ? "applied" : "refused"), item_id: id } })
+    })
+    await page.goto(base + "/test/fixtures/yolo-layout.html?theme=dark&swap=1")
+    await page.waitForFunction(() => window.__hubEvent)
+    await page.evaluate(() => window.__hubEvent({ type: "yolo" }))
+    await page.locator('[data-yolo-mode="applied"]').waitFor()
+    await page.waitForTimeout(1500)
+    assert.equal(seen["ST-100"], 2)
+    assert.equal(await page.locator('[data-yolo-mode="after_turn"]').count(), 0, "the late, older answer did not replace the newer one")
+    assert.equal(await page.locator('[data-yolo-mode="applied"]').count(), 1)
+    // switch items while ST-100's load is on its way: its late answer never shows under ST-101
+    seen["ST-100"] = 0
+    await page.locator("[data-yolo-swap]").click()
+    await page.locator("[data-yolo-swap]").click()
+    await page.locator("[data-yolo-swap]").click()
+    await page.locator('[data-yolo-mode="refused"]').waitFor()
+    await page.waitForTimeout(1500)
+    assert.equal(await page.locator("[data-yolo-swap]").textContent(), "ST-101")
+    assert.equal(seen["ST-100"], 1, "ST-100 was asked again, slowly, before the switch")
+    assert.equal(await page.locator('[data-yolo-mode="after_turn"]').count(), 0, "the item shown before does not overwrite this one")
+    assert.equal(await page.locator('[data-yolo-mode="applied"]').count(), 0)
+    assert.equal(await page.locator('[data-yolo-mode="refused"]').count(), 1)
+    await page.close()
+  }
   assert.deepEqual(errors, [], "no browser runtime errors")
   console.log("PASS: YOLO screenshot/phone/landscape/200% text/English layouts, long commands, fixed reachable actions, cancellation and item/project confirmations")
 } finally { await browser.close() }

@@ -3,7 +3,7 @@
 //!
 //! Order: out of scope → [`Verdict::Off`]; a hard limit ([`super::limits::check`]) → `Decline`; the user
 //! is present → `Wait`; then the table, where a tool request under full access is judged by what full
-//! access promises ([`super::guard::full`]) instead of the guard. There are no budgets. Nothing in
+//! access promises ([`super::full_guard::full`]) instead of the guard. There are no budgets. Nothing in
 //! [`Policy`] reaches the hard limits; widening it only ever turns `Decline` into `Auto` for decisions
 //! that passed them.
 //!
@@ -265,7 +265,7 @@ pub struct Tool {
     pub own_pids: Vec<u32>,
     /// The item runs with full access (完全放开) while its harness still asked: a request left over
     /// from the mode it ran in before (the switch lands at the turn's end) or one its executor asks
-    /// in any mode. Judged by what full access promises ([`super::guard::full`]), not the guard.
+    /// in any mode. Judged by what full access promises ([`super::full_guard::full`]), not the guard.
     pub full: bool,
 }
 
@@ -826,7 +826,7 @@ fn has(f: &Facts, choice: &str) -> bool {
 
 fn table(f: &Facts, p: &Policy, env: &Env) -> Verdict {
     match &f.subject {
-        Subject::Tool(t) if t.full => match guard::full(t) {
+        Subject::Tool(t) if t.full => match super::full_guard::full(t) {
             guard::Guard::Allow { option, checks } => {
                 auto(&option, FULL_RULE, FULL_REASON).checks(checks)
             }

@@ -16,6 +16,7 @@ pub mod digest;
 pub mod draft;
 pub mod engine;
 pub mod facts;
+pub mod full_guard;
 pub mod guard;
 pub mod judge;
 pub mod ledger;

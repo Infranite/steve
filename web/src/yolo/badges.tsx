@@ -2,14 +2,14 @@
  * “YOLO 替你选了「…」” once answered, a countdown with 现在 / 我来定 in the cool-down, “YOLO 没接：<原因>” when it left
  * the card to you — plus the item's and the project's own setting (跟随全局 / 关 / YOLO / 完全放开) and the mark on
  * YOLO's timeline lines. */
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { ChevronDownIcon, ZapIcon } from "lucide-react"
 import { cn } from "cn"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { yoloApi, type PermMode, type RYoloItem, type YoloMode } from "@/api/yolo"
 import { st, useHubEvents, yoloCancel, yoloNow, yoloScope, type Item } from "@/store"
-import { modeLines } from "@/yolo/modes"
+import { modeLines, newest } from "@/yolo/modes"
 import { Dot, fullGives, fullKeeps, levelOf, type YoloState } from "@/yolo/switch"
 import { t, useT } from "@/i18n"
 
@@ -163,9 +163,16 @@ const modeName = (m: PermMode | null) => (m ? t(`yolo:mode.name.${m}`) : t("yolo
  *  harness runs in; a change on its way, waiting for the turn's end or refused says so, never “in effect” */
 export function YoloItemModes({ i }: { i: Item }) {
   const t = useT()
-  const [s, setS] = useState<RYoloItem | null>(null)
-  const load = useCallback(() => { yoloApi.item(i.id).then(setS, () => setS(null)) }, [i.id])
-  useEffect(() => { load() }, [load])
+  /* the answer is kept with the item it is for: another item's never shows, even for a render before it is cleared */
+  const [got, setGot] = useState<{ id: string; s: RYoloItem | null } | null>(null)
+  const req = useRef(newest()).current
+  const load = useCallback(() => {
+    const id = i.id, live = req.begin()
+    yoloApi.item(id).then((s) => { if (live()) setGot({ id, s }) }, () => { if (live()) setGot({ id, s: null }) })
+  }, [i.id, req])
+  /* another item (or leaving the page) voids what is still on its way */
+  useEffect(() => { load(); return req.drop }, [load, req])
+  const s = got?.id === i.id ? got.s : null
   const ids = new Set(s?.sessions.map((x) => x.session_id) ?? [])
   useHubEvents(["yolo", "yolo_action", "session", "decision", "event"], load, 400, {
     filter: (e) => e.type === "yolo" || e.type === "yolo_action" || (e.type === "event" ? ids.has(e.session_id) : "item_id" in e && e.item_id === i.id),

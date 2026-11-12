@@ -552,4 +552,87 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         "the tool was not asked again: {t}"
     );
     assert!(t.contains("after"), "{t}");
+
+    // 关 → 完全放开: while YOLO is off a request waits and nothing is recorded; switching to full
+    // access with the default “new cards only” window answers that very request once (it belongs to
+    // the running turn), while one that would stop processes by name inside `find -exec` stays yours
+    let (s, v) = e
+        .call("PUT", "/api/yolo", Some(json!({"mode": "off"})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let off_ok = item(
+        &e,
+        "复制 @permexec cp notes.txt /opt/steve-e2e/off.txt @say after-off",
+    )
+    .await;
+    let off_kill = item(
+        &e,
+        "停掉 @permexec find . -name x.pid -exec killall node ; @say after-kill",
+    )
+    .await;
+    let open_cards = |sid: String| {
+        let db = e.db.clone();
+        move || {
+            rows(
+                &db,
+                "SELECT id FROM decisions WHERE subject_type = 'tool_call' AND status = 'open' AND session_id = ?",
+                &[&sid],
+            )
+        }
+    };
+    let (ok_open, kill_open) = (open_cards(off_ok.clone()), open_cards(off_kill.clone()));
+    assert!(
+        until(20, || async {
+            ok_open().len() == 1 && kill_open().len() == 1
+        })
+        .await,
+        "both requests wait for you"
+    );
+    let (ok_acts, kill_acts) = (acts(off_ok.clone()), acts(off_kill.clone()));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        ok_acts().is_empty() && kill_acts().is_empty(),
+        "off: YOLO records nothing"
+    );
+    let (s, v) = e
+        .call(
+            "PUT",
+            "/api/yolo",
+            Some(json!({"mode": "full", "confirm": true})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(
+        until(20, || async {
+            texts(&e, &off_ok).await.contains("perm:selected:")
+        })
+        .await,
+        "the waiting request was answered and the turn went on: {}",
+        texts(&e, &off_ok).await
+    );
+    let r = ok_acts();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(
+        (r[0][0].clone(), r[0][1].clone(), r[0][2].clone()),
+        (json!("resolved"), json!("decided"), json!("tool.full"))
+    );
+    assert_eq!(
+        texts(&e, &off_ok).await.matches("perm:selected:").count(),
+        1
+    );
+    assert!(
+        until(20, || async { e.session(&off_ok).await["busy"] == false }).await,
+        "the turn went on to its end"
+    );
+    assert!(
+        until(20, || async { !kill_acts().is_empty() }).await,
+        "YOLO looked at the other one"
+    );
+    let r = kill_acts();
+    assert_eq!(
+        (r[0][0].clone(), r[0][1].clone(), r[0][2].clone()),
+        (json!("open"), json!("declined"), json!("tool.full")),
+        "{r:?}"
+    );
+    assert!(!texts(&e, &off_kill).await.contains("perm:selected"));
 }

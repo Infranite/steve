@@ -72,7 +72,7 @@ export default {
     unknown: "Outcome of the switch unknown; the session waits until it is known",
     not_sent: "Not switched to “{{wanted}}” yet; Steve will try again",
     not_running: "No session running",
-    residual: "It still asks for permission this turn; YOLO approves as full access. Steve's data, pushing, payments and messages as you still wait for you",
+    residual: "It still asks for permission this turn; YOLO approves as full access. Root, stopping processes it did not start, Steve's data, pushing, payments and messages as you still wait for you",
     detail: "Steve wants: {{wanted}} · Node applied: {{applied}}",
   },
   digest: {
@@ -194,8 +194,8 @@ export default {
   /* the YOLO control */
   switch: {
     never: "YOLO never spends money, sends messages or email as you (unless marked [AI] and cleared by the disclosure check), pushes to GitHub or other remotes, deletes data outside the workspace, or handles content that could leak.",
-    fullGives: "Agents will run any command and change any file as you, without asking first.",
-    fullKeeps: "Still waiting for you: payments and bank cards, high-sensitivity vault entries, messages and email Steve sends as you (only those marked [AI] that pass the disclosure check go out), and releases of other projects. Under full access the agent's own commands and edits no longer ask for permission, so Steve has nothing to answer and does not intercept them. What still protects you: Steve keeps its secrets out of the agent's environment and files where it can, and agent processes get no GH_TOKEN and no SSH agent. An agent's own sandbox, if it has one, may be off under full access; an OS-level sandbox is on the way. This is the same whichever agent you use.",
+    fullGives: "Once the harness runs with full access, agents run any command and change any file as you, without asking first.",
+    fullKeeps: "Still waiting for you: payments and bank cards, high-sensitivity vault entries, messages and email Steve sends as you (only those marked [AI] that pass the disclosure check go out), and releases of other projects. Once the harness runs with full access, the agent's own commands and edits no longer ask for permission, so Steve has nothing to answer and does not intercept them. A turn already running keeps its previous permissions until it ends, and some harnesses still ask under full access: those requests reach Steve as before and YOLO answers them within full access's limits, while running as root, stopping processes by name or ones the agent did not start, touching Steve's data, pushing and publishing, and commands that cannot be read still wait for you. The item page's “Executor” line says whether the switch has taken effect. What still protects you: Steve keeps its secrets out of the agent's environment and files where it can, and agent processes get no GH_TOKEN and no SSH agent. An agent's own sandbox, if it has one, may be off under full access; an OS-level sandbox is on the way. This is the same whichever agent you use.",
     storedLocked: "Saved mode: {{level}}. It does not apply right now.",
     storedOff: "Change to off",
     pillLabel: "YOLO settings: {{label}}",

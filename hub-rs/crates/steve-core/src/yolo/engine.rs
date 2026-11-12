@@ -18,7 +18,9 @@
 //!   ([`Engine::arm`]); after a restart the Hub arms again the ones a Node still waits for.
 //! - A tool request left to the user is looked at again once full access applies to it (the user
 //!   switched while the runner waited): a decline holds at the level it was made, an answer is
-//!   given once ([`Engine::kick_waiting_tools`] when the switch or a scope changes).
+//!   given once ([`Engine::kick_waiting_tools`] when the switch or a scope changes). That holds for
+//!   one that came while YOLO was off too: a window for new cards only keeps YOLO off the other
+//!   cards from before it, not off a request a runner still waits for.
 //! - It never runs inside the core's critical section: every call takes the lock itself.
 
 use std::collections::{HashMap, HashSet};
@@ -362,9 +364,12 @@ impl Engine {
             .yolo()
             .store()
             .reader(|c| repo::window_current(c, &d.workspace_id))?;
+        // a tool request a runner still waits for (armed above) belongs to the turn full access now
+        // applies to, however old: the window's start only keeps YOLO off other cards left from before
         if let Some(w) = &window
             && !w.include_open
             && d.created < w.started
+            && !full_now
         {
             return Ok(None);
         }

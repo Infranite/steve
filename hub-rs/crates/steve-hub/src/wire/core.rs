@@ -2754,7 +2754,7 @@ mod yolo_input_tests {
     /// What the guard makes of these: unknown is asked, never judged against a guessed base.
     #[test]
     fn the_guard_asks_when_the_directory_is_unknown() {
-        use steve_core::yolo::{guard, judge};
+        use steve_core::yolo::{full_guard, guard, judge};
         let w = ws("w1");
         let t = yolo_input(Some(&w), None, &req(write(&w, "a"), vec![]));
         let tool = judge::Tool {
@@ -2781,7 +2781,7 @@ mod yolo_input_tests {
         );
         // under full access too: what the Node cannot place is not judged
         assert!(
-            !matches!(guard::full(&tool), guard::Guard::Allow { .. }),
+            !matches!(full_guard::full(&tool), guard::Guard::Allow { .. }),
             "asked under full access"
         );
     }

@@ -74,7 +74,7 @@ export default {
     unknown: "切换结果未知，会话先停着等核实",
     not_sent: "还没切换到「{{wanted}}」，Steve 会再试",
     not_running: "没有运行中的会话",
-    residual: "这一回合它仍会请求权限，YOLO 按完全放开放行；碰到 Steve 的数据、推送、付款、以你名义发消息仍等你",
+    residual: "这一回合它仍会请求权限，YOLO 按完全放开放行；以 root 运行、结束不是它启动的进程、碰到 Steve 的数据、推送、付款、以你名义发消息仍等你",
     detail: "Steve 期望：{{wanted}} · Node 已应用：{{applied}}",
   },
   /* the YOLO record, #/yolo */
@@ -193,8 +193,8 @@ export default {
   /* the YOLO control */
   switch: {
     never: "花钱、以你的名义发消息或邮件（除非带 [AI] 标识并通过披露检查）、推到 GitHub 等远端、删工作区外的数据、可能泄露的内容，YOLO 永远不替你做。",
-    fullGives: "Agent 会以你的身份运行任何命令、修改任何文件，不再先问你。",
-    fullKeeps: "仍然要你确认：付款和银行卡、高敏感保险箱条目、经 Steve 以你的名义发出的消息和邮件（只发带 [AI] 标识并通过披露检查的）、其他项目的发布。完全放开下，Agent 自己的命令和改动不再请求权限，Steve 收不到要回答的请求，也就不会拦截它们。仍然起保护作用的是：Steve 的机密尽量不放在 Agent 看得到的环境变量和文件里，Agent 的进程拿不到 GH_TOKEN 和 SSH agent。Agent 自带的沙箱（如果有）在完全放开下可能不再生效；系统级的沙箱还在开发中。不论用哪种 Agent 都是这样。",
+    fullGives: "执行器切到完全放开后，Agent 会以你的身份运行任何命令、修改任何文件，不再先问你。",
+    fullKeeps: "仍然要你确认：付款和银行卡、高敏感保险箱条目、经 Steve 以你的名义发出的消息和邮件（只发带 [AI] 标识并通过披露检查的）、其他项目的发布。执行器切到完全放开后，Agent 自己的命令和改动不再请求权限，Steve 收不到要回答的请求，也就不会拦截它们。但切换时正在进行的回合仍按原来的权限运行到这一回合结束，有的执行器在完全放开下也仍会请求权限：这些请求照常送到 Steve，由 YOLO 按完全放开的边界代答，以 root 运行、按名字结束进程或结束不是它启动的进程、碰到 Steve 的数据、推送和发布、看不清的命令仍会留给你。执行器是否已经切换，看事项页的“执行器”一行。仍然起保护作用的是：Steve 的机密尽量不放在 Agent 看得到的环境变量和文件里，Agent 的进程拿不到 GH_TOKEN 和 SSH agent。Agent 自带的沙箱（如果有）在完全放开下可能不再生效；系统级的沙箱还在开发中。不论用哪种 Agent 都是这样。",
     storedLocked: "保存的模式是「{{level}}」，现在不生效",
     storedOff: "改成关",
     pillLabel: "YOLO 设置：{{label}}",

@@ -30,3 +30,24 @@ test("every line has its text in both languages, with the modes named", () => {
   const zh = i18n.t("yolo:mode.after_turn", { lng: "zh-CN", wanted: "完全放开", applied: "由执行器判断" })
   assert.ok(zh.includes("本回合结束后") && zh.includes("完全放开") && zh.includes("由执行器判断"), zh)
 })
+
+test("only the newest request's answer shows: a late earlier one, or one for the item shown before, is dropped", async () => {
+  const { newest } = await import("../src/yolo/modes.ts")
+  const later = () => { let done; const p = new Promise((r) => { done = r }); return { p, done } }
+  const req = newest(), shown = []
+  const send = (what) => { const live = req.begin(), d = later(); d.p.then((v) => { if (live()) shown.push(v) }); return () => d.done(`${what}:answer`) }
+  // two loads of the same item; the first answer comes back last
+  const first = send("old"), second = send("new")
+  second(); await new Promise((r) => setTimeout(r, 5))
+  first(); await new Promise((r) => setTimeout(r, 5))
+  assert.deepEqual(shown, ["new:answer"])
+  // the item changed while a load of the previous one was on its way
+  const before = send("ST-1")
+  req.drop()
+  const after = send("ST-2")
+  after(); before(); await new Promise((r) => setTimeout(r, 5))
+  assert.deepEqual(shown, ["new:answer", "ST-2:answer"])
+  // leaving the page voids what is still coming
+  const gone = send("gone"); req.drop(); gone(); await new Promise((r) => setTimeout(r, 5))
+  assert.deepEqual(shown, ["new:answer", "ST-2:answer"])
+})

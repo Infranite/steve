@@ -296,3 +296,102 @@ fn stepping_down_or_a_read_only_session_is_judged_by_the_guard() {
     let d = t.permission(&item, &ro, edit(&outside));
     assert_eq!(look(&t, &d), ("declined".into(), "limit.4".into()));
 }
+
+/// YOLO off while a tool request waits, then 完全放开 with the default “only new cards” window: the
+/// request the runner still waits for is the running turn's, so it is answered once. Cards from
+/// before the window that are not such a request — a business card, a tool card no runner waits
+/// for, one the user rejected, one the Node expired — stay as they were, and stepping up only to
+/// plain YOLO takes none of them.
+#[test]
+fn switching_from_off_to_full_answers_the_waiting_tool_request_only() {
+    let t = t();
+    set(&t, false, false);
+    let (item, sid, cwd) = t.item();
+    let outside = OUTSIDE.replace('*', "off");
+    let waiting = t.permission(&item, &sid, exec(&format!("cp a.txt {outside}"), &cwd));
+    let business = t.card(
+        &item,
+        &sid,
+        "approve",
+        "action",
+        "要不要清理构建缓存？",
+        "",
+        &["yes", "no"],
+    );
+    // a card nothing waits for (no runner registered it)
+    let unbound = t.card(
+        &item,
+        &sid,
+        "approve",
+        "tool_call",
+        "允许执行：Edit",
+        "{}",
+        &super::engine_tests::PERM_OPTIONS,
+    );
+    // on an item of its own: the user's answer counts as their being around, and YOLO waits then
+    let (item2, sid2, _) = t.item();
+    let rejected = t.permission(&item2, &sid2, edit(&outside));
+    t.kit.core.resolve(&rejected, "reject", "", "me").unwrap();
+    let expired = t.permission(&item, &sid, edit(&outside));
+    t.kit
+        .db()
+        .decision_resolve(
+            &expired,
+            json!({"superseded": "这一轮已经结束"}),
+            "expired",
+            None,
+        )
+        .unwrap();
+    for d in [&waiting, &business, &unbound, &rejected, &expired] {
+        assert_eq!(look(&t, d).0, "none", "off: nothing recorded");
+    }
+    // the window opens after every card above
+    t.clock.advance(60_000);
+    set(&t, true, false);
+    assert!(
+        t.engine.kick_waiting_tools(WS).is_empty(),
+        "plain YOLO keeps to new cards"
+    );
+    set(&t, false, false);
+    t.clock.advance(60_000);
+    set(&t, true, true);
+    let acts = t.engine.kick_waiting_tools(WS);
+    assert_eq!(acts.len(), 1, "{acts:?}");
+    assert_eq!(acts[0].decision_id.as_deref(), Some(waiting.as_str()));
+    assert_eq!(
+        (acts[0].outcome.as_str(), acts[0].rule.as_str()),
+        ("decided", "tool.full")
+    );
+    assert_eq!(answered(&t, &waiting), 1);
+    assert_eq!(t.decision(&waiting).result["optionId"], "once");
+    for d in [&business, &unbound] {
+        assert_eq!(look(&t, d).0, "none", "{d}: older than the window");
+        assert_eq!(t.decision(d).status, "open");
+        assert!(t.actions(d).is_empty());
+    }
+    // the user's own reject is the only answer the runner got; the expired card got none
+    assert_eq!(answered(&t, &rejected), 1);
+    assert_eq!(answered(&t, &expired), 0);
+    for d in [&rejected, &expired] {
+        assert!(t.actions(d).is_empty(), "{d}");
+        assert_ne!(t.decision(d).result["decided_by"], "yolo");
+    }
+    // once: the tick, the event heard again
+    for _ in 0..3 {
+        assert!(t.engine.kick_waiting_tools(WS).is_empty());
+        assert!(t.engine.tick().is_empty());
+    }
+    assert_eq!(answered(&t, &waiting), 1);
+    // stepping down while another old request waits: the window holds again
+    set(&t, false, false);
+    let later = t.permission(&item, &sid, edit(&outside));
+    t.clock.advance(60_000);
+    set(&t, true, true);
+    set(&t, true, false);
+    assert_eq!(
+        look(&t, &later).0,
+        "none",
+        "plain YOLO: older than the window"
+    );
+    assert_eq!(answered(&t, &later), 0);
+}

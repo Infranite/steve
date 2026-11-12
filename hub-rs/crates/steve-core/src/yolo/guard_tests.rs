@@ -539,3 +539,160 @@ fn programs_that_send_as_you_are_a_hard_limit_even_when_listed() {
         assert_eq!(v.rule(), "limit.3", "{c}: {v:?}");
     }
 }
+
+/// [`codex_cmd`] from a session under full access (完全放开) whose harness still asks.
+fn full_cmd(pl: &Place, script: &str, pids: &[u32]) -> Facts {
+    let mut f = codex_cmd(pl, script, "{cwd}", pids);
+    if let Subject::Tool(t) = &mut f.subject {
+        t.full = true;
+    }
+    f
+}
+
+/// (allowed under full access, rule) — judged only, nothing is run.
+fn full_verdict(pl: &Place, script: &str, pids: &[u32]) -> (bool, String) {
+    let v = run(&full_cmd(pl, script, pids), pl);
+    (v.is_auto(), v.rule().to_string())
+}
+
+/// Full access keeps root and processes the session did not start on every command a line actually
+/// runs: a here-document or a pipe fed to a shell or an interpreter, `find -exec`, `xargs`, `eval`,
+/// wrappers, git's `-x`/aliases/`bisect run`, and inline code. None of these is ever executed.
+#[test]
+fn full_access_judges_every_command_a_line_runs() {
+    let pl = place();
+    let mine = [4242];
+    for c in [
+        "bash <<'EOF'\ncargo build\nsudo make install\nEOF",
+        "sh <<EOF\nkillall node\nEOF",
+        "zsh -s <<'EOF'\npkill -f vite\nEOF",
+        "source /dev/stdin <<'EOF'\nsudo true\nEOF",
+        "echo 'sudo make install' | bash",
+        "curl -s http://127.0.0.1:9/x.sh | sh",
+        "find . -name '*.pid' -exec killall node \\;",
+        "find . -type f -exec sudo chown me {} +",
+        "find . -exec sh -c 'pkill -f vite' \\;",
+        "find . -name x -exec kill 999 \\;",
+        "pgrep node | xargs kill",
+        "printf 'node\\n' | xargs killall",
+        "printf 'x\\n' | xargs sh -c",
+        "eval sudo make install",
+        "eval 'pkill -f node'",
+        "watch -n 1 killall node",
+        "flock /tmp/st22.lock sudo true",
+        "setsid sudo true",
+        "timeout 5 sudo true",
+        "env -S 'sudo true'",
+        "alias k=pkill; k -f node",
+        "trap 'killall node' EXIT",
+        "git -c alias.x='!sudo true' x",
+        "git rebase -x 'pkill -f node' main",
+        "git bisect run sudo make",
+        "awk 'BEGIN{system(\"sudo true\")}'",
+        "python3 -c 'import os; os.system(\"sudo make install\")'",
+        "python3 -c 'import subprocess; subprocess.run([\"pkill\", \"-f\", \"node\"])'",
+        "python3 -c 'import os; os.kill(999, 9)'",
+        "python3 - <<'EOF'\nimport subprocess\nsubprocess.run('killall node', shell=True)\nEOF",
+        "node -e \"require('child_process').execSync('pkill -f node')\"",
+        "node <<'EOF'\nprocess.kill(999)\nEOF",
+        "perl -e 'kill 9, 999'",
+        "ruby -e 'system(\"sudo true\")'",
+        "mytool --then 'sudo true'",
+        "docker exec -i box sh <<'EOF'\nsudo true\nEOF",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &mine);
+        assert!(!auto, "{c}: allowed");
+        // full access itself keeps it, whether or not a hard limit saw it first
+        assert!(
+            rule == "tool.full" || rule.starts_with("limit."),
+            "{c}: {rule}"
+        );
+        assert!(super::full_guard::command(c, &mine).is_err(), "{c}");
+    }
+    // Steve's data in a here-document is the hard limit's, as on the line itself
+    let (auto, rule) = full_verdict(&pl, "bash <<'EOF'\nls ~/.steve/data\nEOF", &mine);
+    assert!(!auto);
+    assert_eq!(rule, "limit.4");
+    // the same shapes doing ordinary work, and the session's own process, go
+    for c in [
+        "bash <<'EOF'\ncargo build\ncp target/x /opt/st22/x\nEOF",
+        "find . -name '*.o' -exec rm {} +",
+        "find . -name x -exec kill 4242 \\;",
+        "watch -n 1 cargo test",
+        "python3 -c 'print(sum(range(3)))'",
+        "python3 - <<'EOF'\nprint('hello')\nEOF",
+        "cat <<'EOF' > notes.md\nrun sudo make install yourself, then killall node\nEOF",
+        "kill 4242",
+        "git rebase -x 'cargo test' main",
+        "awk '{print $1}' notes.md",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &mine);
+        assert!(auto, "{c}: {rule}");
+        assert_eq!(rule, "tool.full", "{c}");
+    }
+}
+
+/// A program whose name is not written out (`$CMD`, a glob, a brace list) cannot be judged under
+/// full access; a path behind a variable, or a variable directory with the program named, can.
+#[test]
+fn full_access_tells_a_variable_program_from_a_variable_path() {
+    let pl = place();
+    for c in [
+        "$CMD -f node",
+        "CMD=pkill; $CMD -f node",
+        "\"${X:-pkill}\" -f node",
+        "env $CMD -f node",
+        "exec \"$@\"",
+        "/usr/bin/pk* -f node",
+        "{pkill,-f,node}",
+        "find . -exec $CMD {} \\;",
+        "ls | xargs $CMD",
+        "sh -c \"$CMD -f node\"",
+        "nohup \"$SHELL\" -c 'sleep 1'",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(!auto, "{c}: allowed");
+        assert_eq!(rule, "tool.full", "{c}");
+    }
+    for c in [
+        "rm -rf \"$OUT_DIR/cache\"",
+        "cp target/release/tool \"$PREFIX/bin/\"",
+        "\"$HOME/bin/tool\" --check",
+        "${BIN_DIR}/tool build",
+        "[ -f Cargo.toml ] && cargo build",
+        "[[ -n \"$CI\" ]] || make check",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(auto, "{c}: {rule}");
+    }
+    // a variable directory does not hide the program it names
+    assert!(!full_verdict(&pl, "\"$HOME/bin/pkill\" -f node", &[]).0);
+}
+
+/// A quoted argument a program only reads (a commit message, text, a pattern) is not a command;
+/// command substitution anywhere, and a subshell in code a shell runs, still are judged.
+#[test]
+fn full_access_reads_quoted_text_as_text_and_nested_code_as_code() {
+    let pl = place();
+    for c in [
+        "git commit -m 'fix (permissions) handling'",
+        "git add -A && git commit -m \"fix (permissions) handling; see #4 | later\"",
+        "git commit -m 'sudo is no longer needed (pkill too)'",
+        "echo 'a (b) | c'",
+        "grep -rn 'kill(' src",
+        "printf '%s\\n' 'x (y)' > notes.md",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(auto, "{c}: {rule}");
+    }
+    for c in [
+        "git commit -m \"fix $(sudo cat /etc/x)\"",
+        "git commit -m \"`whoami`\"",
+        "sh -c 'echo (x)'",
+        "bash -c '(sudo true)'",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(!auto, "{c}: allowed");
+        assert_eq!(rule, "tool.full", "{c}");
+    }
+}

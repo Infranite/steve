@@ -35,3 +35,14 @@ export function modeLines(sessions: RYoloItemSession[]): ModeLine[] {
   }
   return out
 }
+
+/** Only the newest request's answer counts: `begin` before sending one returns whether it is still the newest when
+ *  its answer comes; `drop` voids every request sent so far (the item changed, the view went away). An answer that
+ *  arrives late, after a newer request or for the item shown before, is never shown. */
+export function newest() {
+  let n = 0
+  return {
+    begin() { const k = ++n; return () => k === n },
+    drop() { n++ },
+  }
+}
