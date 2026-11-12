@@ -1869,7 +1869,11 @@ impl Tx<'_> {
                 "system",
                 json!({"text": "这个项目没有配置发布动作，不能发布。"}),
             )?;
-            return Ok(());
+            // an error, not "release requested": told that, the agent ends its turn and waits for a release
+            // that never comes
+            return Err(crate::cycle::conflict(
+                "这个项目没有配置发布动作，不能发布；用 steve_deliver 交付结果，需要发布时在交付说明里写明",
+            ));
         };
         if self.nothing_to_release(&item)? {
             return self.publish_nothing(&item, s);
