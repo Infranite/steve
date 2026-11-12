@@ -75,7 +75,14 @@ export default {
     not_sent: "还没切换到「{{wanted}}」，Steve 会再试",
     not_running: "没有运行中的会话",
     residual: "这一回合它仍会请求权限，YOLO 按完全放开放行；以 root 运行、结束不是它启动的进程、碰到 Steve 的数据、推送、付款、以你名义发消息仍等你",
-    detail: "Steve 期望：{{wanted}} · Node 已应用：{{applied}}",
+    detail: "Steve 期望：{{wanted}}（{{from}}）· Node 已应用：{{applied}}",
+    from: {
+      full_access: "来自完全放开",
+      bot_bypass: "来自 Bot 设置：不询问",
+      bot: "来自 Bot 设置",
+      node_default: "没有 Bot：按会话默认的「每步询问」",
+      readonly: "只读会话",
+    },
   },
   /* the YOLO record, #/yolo */
   digest: {

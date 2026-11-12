@@ -183,9 +183,11 @@ export function YoloItemModes({ i }: { i: Item }) {
   return (
     <div className="-mt-3 mb-5 flex flex-col gap-0.5 pl-0.5 type-footnote text-muted-foreground" data-yolo-modes>
       {lines.map((l, n) => (
-        <div key={n} className="flex min-w-0 flex-col" data-yolo-mode={l.key} title={t("yolo:mode.detail", { wanted: modeName(l.wanted), applied: modeName(l.applied) })}>
+        <div key={n} className="flex min-w-0 flex-col" data-yolo-mode={l.key} data-yolo-mode-from={l.from} title={t("yolo:mode.detail", { wanted: modeName(l.wanted), from: t(`yolo:mode.from.${l.from}`), applied: modeName(l.applied) })}>
           <span className="min-w-0 break-words"><span className="font-medium text-foreground/80">{t("yolo:mode.label")}</span>{" "}
-            <span className={tone[l.tone]}>{t(`yolo:mode.${l.key}`, { wanted: modeName(l.wanted), applied: modeName(l.applied), reason: l.reason })}</span></span>
+            <span className={tone[l.tone]}>{t(`yolo:mode.${l.key}`, { wanted: modeName(l.wanted), applied: modeName(l.applied), reason: l.reason })}</span>
+            {/* a mode not set by the bot or full access says where it comes from */}
+            {(l.from === "node_default" || l.from === "bot_bypass") && <span className="text-muted-foreground"> · {t(`yolo:mode.from.${l.from}`)}</span>}</span>
           {l.residual && <span className="min-w-0 break-words" data-yolo-residual>{t("yolo:mode.residual")}</span>}
         </div>
       ))}

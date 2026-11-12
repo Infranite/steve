@@ -73,7 +73,14 @@ export default {
     not_sent: "Not switched to “{{wanted}}” yet; Steve will try again",
     not_running: "No session running",
     residual: "It still asks for permission this turn; YOLO approves as full access. Root, stopping processes it did not start, Steve's data, pushing, payments and messages as you still wait for you",
-    detail: "Steve wants: {{wanted}} · Node applied: {{applied}}",
+    detail: "Steve wants: {{wanted}} ({{from}}) · Node applied: {{applied}}",
+    from: {
+      full_access: "from full access",
+      bot_bypass: "from the bot's setting: no prompts",
+      bot: "from the bot's setting",
+      node_default: "no bot: the session's default, “Asks every step”",
+      readonly: "read-only session",
+    },
   },
   digest: {
     title: "YOLO record",

@@ -2781,7 +2781,10 @@ mod yolo_input_tests {
         );
         // under full access too: what the Node cannot place is not judged
         assert!(
-            !matches!(full_guard::full(&tool), guard::Guard::Allow { .. }),
+            !matches!(
+                full_guard::full(&tool, &env),
+                Ok(guard::Guard::Allow { .. })
+            ),
             "asked under full access"
         );
     }

@@ -15,6 +15,7 @@ pub mod breaker;
 pub mod digest;
 pub mod draft;
 pub mod engine;
+pub mod exec;
 pub mod facts;
 pub mod full_guard;
 pub mod guard;

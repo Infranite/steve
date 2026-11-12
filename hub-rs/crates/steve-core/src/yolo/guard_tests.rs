@@ -607,7 +607,6 @@ fn full_access_judges_every_command_a_line_runs() {
             rule == "tool.full" || rule.starts_with("limit."),
             "{c}: {rule}"
         );
-        assert!(super::full_guard::command(c, &mine).is_err(), "{c}");
     }
     // Steve's data in a here-document is the hard limit's, as on the line itself
     let (auto, rule) = full_verdict(&pl, "bash <<'EOF'\nls ~/.steve/data\nEOF", &mine);
@@ -693,6 +692,285 @@ fn full_access_reads_quoted_text_as_text_and_nested_code_as_code() {
     ] {
         let (auto, rule) = full_verdict(&pl, c, &[]);
         assert!(!auto, "{c}: allowed");
+        assert_eq!(rule, "tool.full", "{c}");
+    }
+}
+
+// ── ST-26: the independent review of ST-24, item by item (judged only, nothing is run) ──
+
+/// Plain YOLO's verdict on `script`: (allowed, rule).
+fn plain_verdict(pl: &Place, script: &str) -> (bool, String) {
+    let v = run(&codex_cmd(pl, script, "{cwd}", &[]), pl);
+    (v.is_auto(), v.rule().to_string())
+}
+
+/// Review item 1: A command a wrapper runs meets every hard limit, not only root and processes. Before,
+/// `env -S`, `watch`, `setsid`, `flock`… let pushing, mail as the user and deleting another item's
+/// branch through under full access (and `env -S` under plain YOLO too).
+#[test]
+fn st26_every_command_a_wrapper_runs_meets_the_hard_limits() {
+    let pl = place();
+    for (c, limit) in [
+        ("env -S 'git push origin HEAD'", "limit.5"),
+        ("watch -n 1 git push origin HEAD", "limit.5"),
+        ("watch -n 1 sendmail nobody@example.invalid", "limit.3"),
+        ("watch -n 1 git branch -D steve/other", "limit.4"),
+        ("env -S 'git branch -D steve/other'", "limit.4"),
+        ("env --split-string='git push origin HEAD'", "limit.5"),
+        ("env -S'git push origin HEAD'", "limit.5"),
+        ("setsid git push origin HEAD", "limit.5"),
+        ("flock /tmp/st26.lock git push origin HEAD", "limit.5"),
+        ("watch -x git push origin HEAD", "limit.5"),
+        ("nohup watch -n 1 git push origin HEAD", "limit.5"),
+        ("watch -n 1 lark-cli im send", "limit.3"),
+        ("watch -n 1 gh pr merge 1", "limit.5"),
+        ("setsid env -S 'git push origin HEAD'", "limit.5"),
+        ("arch -arm64 git push origin HEAD", "limit.5"),
+        ("caffeinate -i git push origin HEAD", "limit.5"),
+        ("time -p git push origin HEAD", "limit.5"),
+        ("script -q /dev/null git push origin HEAD", "limit.5"),
+        ("alias p='git push origin HEAD'; p", "limit.5"),
+        ("trap 'git push origin HEAD' EXIT", "limit.5"),
+        ("watch -n 1 'rm -rf {steve}/data'", "limit.4"),
+        ("setsid launchctl list", "limit.4"),
+    ] {
+        let c = pl.fill(c);
+        let (auto, rule) = full_verdict(&pl, &c, &[]);
+        assert!(!auto, "{c}: allowed under full access");
+        assert_eq!(rule, limit, "{c}");
+        assert!(!plain_verdict(&pl, &c).0, "{c}: allowed by plain YOLO");
+    }
+    // the same wrappers doing ordinary work, and the item's own branch, go
+    for c in [
+        "watch -n 1 cargo test",
+        "watch -d -n 2 git status",
+        "setsid cargo build",
+        "flock /tmp/st26.lock cargo test",
+        "flock /tmp/st26.lock -c 'cargo build && cargo test'",
+        "env -S 'cargo build --release'",
+        "git branch -D steve/st-21",
+        "caffeinate -i cargo test",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(auto, "{c}: {rule}");
+    }
+}
+
+/// Review item 2: Inline code that can start a program, evaluate text or reach a name it computes cannot be
+/// judged by reading its strings: before, `os.system("pk" + "ill …")` went through under full
+/// access. Code that only computes, reads and writes files still goes.
+#[test]
+fn st26_inline_code_that_could_run_anything_stays_with_you() {
+    let pl = place();
+    for c in [
+        r#"python3 -c 'import os; os.system("pk" + "ill -f node")'"#,
+        r#"python3 -c 'getattr(__import__("o"+"s"), "sys"+"tem")("pk"+"ill node")'"#,
+        r#"python3 -c 'import subprocess as s; s.run(["pk"+"ill", "node"])'"#,
+        r#"python3 -c 'exec("pr"+"int(1)")'"#,
+        r#"python3 -c 'import pickle; pickle.loads(b"x")'"#,
+        r#"python3 -c 'print(().__class__.__base__)'"#,
+        r#"python3 -c 'print("\x70kill")'"#,
+        r#"node -e 'require("child_"+"process").execSync("pk"+"ill node")'"#,
+        r#"node -e 'const k = "ki" + "ll"; process[k](1)'"#,
+        r#"node -e '[]["fil"+"ter"]["constr"+"uctor"]("return 1")()'"#,
+        r#"node -e 'eval("1")'"#,
+        r#"node -e 'const m = "fs"; require(m)'"#,
+        r#"ruby -e 'system("pk"+"ill node")'"#,
+        r#"ruby -e 'Kernel.send(:sys)'"#,
+        r#"ruby -e 'puts `id`'"#,
+        r#"perl -e 'system("pk"."ill node")'"#,
+        r#"perl -e '&{"sys"."tem"}("id")'"#,
+        r#"php -r '$f = "sys"."tem"; $f("id");'"#,
+        r#"lua -e 'os.execute("id")'"#,
+        r#"Rscript -e 'system2("id")'"#,
+        r#"awk 'BEGIN { print "id" | "sh" }'"#,
+        r#"pwsh -c 'Get-Process'"#,
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(!auto, "{c}: allowed under full access");
+        assert_eq!(rule, "tool.full", "{c}");
+        assert!(!plain_verdict(&pl, c).0, "{c}: allowed by plain YOLO");
+    }
+    for c in [
+        "python3 -c 'print(1)'",
+        r#"python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'"#,
+        "python3 -c 'import os; print(os.getcwd())'",
+        r#"node -e 'console.log(require("./package.json").version)'"#,
+        r#"node -e 'console.log(JSON.parse("[1,2]").length, process.argv[1])'"#,
+        "node -p '1+1'",
+        "ruby -e 'puts 1+1'",
+        "perl -ne 'print if /x/' notes.md",
+        "awk '{print $1}' notes.md",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(auto, "{c}: {rule}");
+    }
+}
+
+/// Review item 3: Every piece of inline code is read: attached (`-c'…'`), clustered (`-ne`, `-pe`, `-Ic`),
+/// repeated (`-e a -e b`) and long (`--eval=`). Before, these went through under full access, and
+/// some under plain YOLO.
+#[test]
+fn st26_attached_clustered_and_repeated_code_is_read() {
+    let pl = place();
+    for c in [
+        r#"python3 -c'import os; os.system("sudo true")'"#,
+        r#"python3 -Ic 'import os; os.system("sudo true")'"#,
+        r#"python3 -W ignore -c 'import os; os.system("sudo true")'"#,
+        r#"ruby -e 'puts 1' -e 'system("sudo true")'"#,
+        r#"ruby -e'system("sudo true")'"#,
+        r#"perl -e 'print 1' -e 'system("sudo true")'"#,
+        r#"perl -ne 'system("sudo true")'"#,
+        r#"node --eval='require("child_process").execSync("sudo true")'"#,
+        r#"node -pe 'require("child_process").execSync("sudo true")'"#,
+        r#"Rscript -e 1 -e 'system("sudo true")'"#,
+        r#"deno eval 'Deno.exit(0)'"#,
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(!auto, "{c}: allowed under full access");
+        assert_eq!(rule, "tool.full", "{c}");
+        assert!(!plain_verdict(&pl, c).0, "{c}: allowed by plain YOLO");
+    }
+}
+
+/// Review item 4: A root shell with no command (`sudo -i`, `sudo -s`, `sudo`) is root: before, the wrapper was
+/// stripped, nothing was left to judge and it went through in both modes.
+#[test]
+fn st26_a_root_shell_without_a_command_is_root() {
+    let pl = place();
+    for c in [
+        "sudo -i",
+        "sudo -s",
+        "sudo --login",
+        "sudo -u other -i",
+        "sudo -E -s",
+        "sudo",
+        "doas -s",
+        "env sudo -s",
+        "nohup sudo -i",
+        "su",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(!auto, "{c}: allowed under full access");
+        assert_eq!(rule, "tool.full", "{c}");
+        let (auto, rule) = plain_verdict(&pl, c);
+        assert!(!auto, "{c}: allowed by plain YOLO ({rule})");
+    }
+}
+
+/// Review item 5: What a command is fed passes on to the command it runs: `env -S bash`, `sh -c bash` and
+/// other wrappers hand their here-document or pipe to the shell inside. Before, the shell inside
+/// was judged as fed nothing, and `pkill` in its script went through.
+#[test]
+fn st26_standard_input_passes_through_wrappers() {
+    let pl = place();
+    for c in [
+        "printf 'pkill -f node\\n' | env -S bash",
+        "env -S bash <<'EOF'\npkill -f node\nEOF",
+        "env -S 'bash -s' <<'EOF'\npkill -f node\nEOF",
+        "sh -c 'bash' <<'EOF'\npkill -f node\nEOF",
+        "nohup bash <<'EOF'\nkillall node\nEOF",
+        "timeout 5 env bash <<'EOF'\nsudo true\nEOF",
+        "printf 'x\\n' | setsid bash",
+        "printf 'x\\n' | flock /tmp/st26.lock python3",
+        "env -S python3 <<'EOF'\nimport os; os.system('id')\nEOF",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(!auto, "{c}: allowed under full access");
+        assert_eq!(rule, "tool.full", "{c}");
+        assert!(!plain_verdict(&pl, c).0, "{c}: allowed by plain YOLO");
+    }
+    for c in [
+        "env -S bash <<'EOF'\ncargo build\nEOF",
+        "sh -c 'bash' <<'EOF'\ncargo test\nEOF",
+        "env -S 'bash -c \"cargo build\"'",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(auto, "{c}: {rule}");
+    }
+}
+
+/// Review item 6: sed's execution forms (GNU's `e` command and `s///e` flag) run commands whatever platform
+/// the line came from; a script in a file cannot be read. Before, both modes took them as text.
+#[test]
+fn st26_sed_that_executes_is_not_data() {
+    let pl = place();
+    for c in [
+        "sed -n '1e pkill -f node' input.txt",
+        "sed 's/.*/pkill -f node/e' input.txt",
+        "sed -e '1e pkill -f node' input.txt",
+        "sed --expression='1e pkill -f node' input.txt",
+        "sed -n -e p -e '1e sudo true' input.txt",
+        "sed -ne '1e pkill -f node' input.txt",
+        "sed -i -e '1e true' input.txt",
+        "sed '/x/{e true\n}' input.txt",
+        "sed 's/a/b/;s/.*/id/e' input.txt",
+        "sed -f script.sed input.txt",
+        "gsed -n '1e pkill -f node' input.txt",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(!auto, "{c}: allowed under full access");
+        assert_eq!(rule, "tool.full", "{c}");
+        assert!(!plain_verdict(&pl, c).0, "{c}: allowed by plain YOLO");
+    }
+    for c in [
+        "sed -n '1p' input.txt",
+        "sed 's/a/e/g' input.txt",
+        "sed -i 's/foo/bar/' input.txt",
+        "sed -i '' 's/foo/bar/' input.txt",
+        "sed -E 's/(e)/\\1x/' input.txt",
+        "sed '/exit/d' input.txt",
+        "sed -n '/e/p' input.txt",
+        "sed '1i header' input.txt",
+        "sed 'y/abc/xyz/' input.txt",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(auto, "{c}: {rule}");
+        let (auto, rule) = plain_verdict(&pl, c);
+        assert!(auto, "{c}: plain {rule}");
+    }
+}
+
+/// Review item 7: A wrapper's command starts where its documented options end, never at every operand: a
+/// data argument (`grep pkill README.md`) is not a program. Before, `watch -n 1 grep pkill
+/// README.md` waited for the user. An option a wrapper is not known to take leaves its command
+/// unknown, so it stays with the user rather than guessed.
+#[test]
+fn st26_a_wrappers_command_starts_where_its_options_end() {
+    let pl = place();
+    for c in [
+        "watch -n 1 grep pkill README.md",
+        "watch -n 1 grep sudo README.md",
+        "watch -n 1 'grep -c killall src/main.rs'",
+        "watch -n 1 'echo \"pkill later\"'",
+        "flock /tmp/st26.lock echo sudo",
+        "setsid echo pkill",
+        "timeout 5 grep sudo README.md",
+        "nice -n 5 grep killall README.md",
+        "command -v pkill",
+        "xargs -n 1 echo sudo < /dev/null",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(auto, "{c}: {rule}");
+    }
+    for c in [
+        "watch -n 1 pkill node",
+        "watch -q 3 pkill node",
+        "watch 'sudo true'",
+        "watch --frobnicate pkill node",
+        "caffeinate -i pkill -f node",
+        "caffeinate -t 5 pkill -f node",
+        "time -p pkill -f node",
+        "taskset 0x1 pkill node",
+        "xargs -i{} pkill {} < /dev/null",
+        "env --frobnicate pkill -f node",
+        "env - pkill -f node",
+        "command pkill -f node",
+        "tmux new-session -d 'pkill -f node'",
+        "parallel pkill ::: node",
+    ] {
+        let (auto, rule) = full_verdict(&pl, c, &[]);
+        assert!(!auto, "{c}: allowed under full access");
         assert_eq!(rule, "tool.full", "{c}");
     }
 }

@@ -72,7 +72,7 @@ async function makePage(width, height, locale = "zh-CN", preview = "long") {
     if (path === "/api/yolo/actions") return route.fulfill({ json: { windows: [], waiting: 0 } })
     // full access chosen while a turn runs: the harness still asks until the turn ends
     if (path === "/api/yolo/items/ST-100") return route.fulfill({ json: { item_id: "ST-100", level: "full", source: "item", layers: { workspace: "off", project: null, item: "full", forced: null, paused: false },
-      sessions: [{ session_id: "s1", readonly: false, status: "after_turn", wanted: "full_access", applied: "accept_edits", desired: "full_access", busy: true, refused: null, residual: true }] } })
+      sessions: [{ session_id: "s1", readonly: false, status: "after_turn", wanted: "full_access", wanted_from: "full_access", applied: "accept_edits", desired: "full_access", busy: true, refused: null, residual: true }] } })
     if (path === "/api/yolo" || path.startsWith("/api/yolo/scopes/")) return route.fulfill({ json: status })
     throw new Error("Unexpected API request: " + req.url())
   })
@@ -204,7 +204,7 @@ try {
   {
     const { page } = await makePage(390, 844)
     const line = (status, residual = false) => ({ item_id: "", level: "full", source: "item", layers: { workspace: "off", project: null, item: "full", forced: null, paused: false },
-      sessions: [{ session_id: "s1", readonly: false, status, wanted: "full_access", applied: status === "applied" ? "full_access" : "accept_edits", desired: null, busy: residual, refused: status === "refused" ? "this node's owner allows at most permission mode auto" : null, residual }] })
+      sessions: [{ session_id: "s1", readonly: false, status, wanted: "full_access", wanted_from: "full_access", applied: status === "applied" ? "full_access" : "accept_edits", desired: null, busy: residual, refused: status === "refused" ? "this node's owner allows at most permission mode auto" : null, residual }] })
     const seen = { "ST-100": 0, "ST-101": 0 }
     await page.route(`${base}/api/yolo/items/*`, async route => {
       const id = new URL(route.request().url()).pathname.split("/").pop()
@@ -233,6 +233,21 @@ try {
     assert.equal(await page.locator('[data-yolo-mode="after_turn"]').count(), 0, "the item shown before does not overwrite this one")
     assert.equal(await page.locator('[data-yolo-mode="applied"]').count(), 0)
     assert.equal(await page.locator('[data-yolo-mode="refused"]').count(), 1)
+    await page.close()
+  }
+  // ST-26: a session without a bot taken back from full access: pending, with where its mode comes from; an empty
+  // wanted from an older Hub never reads as in effect
+  for (const [wanted, status, key] of [["ask", "after_turn", "after_turn"], [null, "applied", "unknown"]]) {
+    const { page } = await makePage(390, 844)
+    await page.route(`${base}/api/yolo/items/*`, route => route.fulfill({ json: { item_id: "ST-100", level: "off", source: "workspace", layers: { workspace: "off", project: null, item: null, forced: null, paused: false },
+      sessions: [{ session_id: "s1", readonly: false, status, wanted, wanted_from: "node_default", applied: "full_access", desired: wanted, busy: true, refused: null, residual: false }] } }))
+    await page.goto(base + "/test/fixtures/yolo-layout.html?theme=dark")
+    await page.locator(`[data-yolo-mode="${key}"]`).waitFor()
+    assert.equal(await page.locator('[data-yolo-mode="applied"]').count(), 0, `${status}: not in effect`)
+    const text = await page.locator(`[data-yolo-mode="${key}"]`).textContent()
+    assert.ok(text.includes("没有 Bot"), text)
+    await layout(page, "[data-yolo-modes]")
+    await shot(page, `yolo-modes-nobot-${key}`)
     await page.close()
   }
   assert.deepEqual(errors, [], "no browser runtime errors")

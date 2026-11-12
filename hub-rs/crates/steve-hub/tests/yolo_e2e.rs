@@ -635,4 +635,57 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         "{r:?}"
     );
     assert!(!texts(&e, &off_kill).await.contains("perm:selected"));
+
+    // ST-26: a session without a bot runs under full access; turning full access off asks its
+    // harness back to asking (before, no mode was sent and the page read `applied` with an empty
+    // `wanted` while the harness still ran in full access). Nothing reads as applied until the
+    // Node confirmed `ask`.
+    let nobot = item(&e, "笔记 @say nobot @sleep 1500 @say done").await;
+    let c = rusqlite::Connection::open(&e.db).expect("db");
+    c.busy_timeout(Duration::from_secs(5)).expect("timeout");
+    c.execute("UPDATE sessions SET bot_id = NULL WHERE id = ?", [&nobot])
+        .expect("no bot");
+    let iid = e.session(&nobot).await["item_id"]
+        .as_str()
+        .expect("item")
+        .to_string();
+    let row = || async {
+        let (s, v) = e.call("GET", &format!("/api/yolo/items/{iid}"), None).await;
+        assert_eq!(s, 200, "{v}");
+        v["sessions"][0].clone()
+    };
+    assert!(
+        until(30, || async {
+            let r = row().await;
+            r["status"] == "applied" && r["applied"] == "full_access"
+        })
+        .await,
+        "opened under full access: {}",
+        row().await
+    );
+    assert_eq!(row().await["wanted_from"], "full_access");
+    assert!(
+        until(20, || async { e.session(&nobot).await["busy"] == false }).await,
+        "its turn ended"
+    );
+    let (s, v) = e
+        .call("PUT", "/api/yolo", Some(json!({"mode": "off"})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let r = row().await;
+    assert_eq!(r["wanted"], "ask", "never an empty wanted: {r}");
+    assert_eq!(r["wanted_from"], "node_default", "{r}");
+    assert!(
+        !(r["status"] == "applied" && r["applied"] == "full_access"),
+        "not applied while the harness still runs full access: {r}"
+    );
+    assert!(
+        until(30, || async {
+            let r = row().await;
+            r["status"] == "applied" && r["applied"] == "ask"
+        })
+        .await,
+        "the Node confirmed ask: {}",
+        row().await
+    );
 }

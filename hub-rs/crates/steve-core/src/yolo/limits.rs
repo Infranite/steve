@@ -24,7 +24,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::judge::{Disclosure, Env, Facts, Identity, Outbound, OutboundStage, Subject, Tool};
-use super::shell::{self, Argv, Parsed};
+use super::shell::{self, Argv, Parsed, Simple};
 
 pub use steve_modules::outbound::{AI_PREFIX, strip_ai_prefix, with_ai_prefix};
 
@@ -404,6 +404,24 @@ impl Places {
         Some(canonical(&p))
     }
 
+    /// `cd`, `pushd` or `popd` (`words` being a simple command): moves what later relative paths
+    /// mean, to nothing known when it cannot be read. True when it was one.
+    pub fn cd(&mut self, words: &[String]) -> bool {
+        let Some(a) = shell::argv(words) else {
+            return false;
+        };
+        if !matches!(a.program.as_str(), "cd" | "pushd" | "popd") {
+            return false;
+        }
+        self.base = match (a.program.as_str(), operands(&a.args).first()) {
+            ("popd", _) => None,
+            (_, None) => Some(self.home.clone()),
+            (_, Some(d)) if d.as_str() == "-" => None,
+            (_, Some(d)) => self.resolve(d),
+        };
+        true
+    }
+
     pub fn inside(&self, p: &Path) -> bool {
         self.cwd.as_ref().is_some_and(|c| p.starts_with(c))
     }
@@ -683,56 +701,54 @@ fn parsed(p: &Parsed, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Li
     }
     let mut pl = pl.clone();
     for c in &p.cmds {
-        // `cd` moves what later relative paths mean
-        if let Some(a) = shell::argv(&c.words)
-            && matches!(a.program.as_str(), "cd" | "pushd" | "popd")
-        {
-            pl.base = match (a.program.as_str(), operands(&a.args).first()) {
-                ("popd", _) => None,
-                (_, None) => Some(pl.home.clone()),
-                (_, Some(d)) if d.as_str() == "-" => None,
-                (_, Some(d)) => pl.resolve(d),
-            };
+        if pl.cd(&c.words) {
             continue;
         }
-        let pl = &pl;
-        for w in &c.writes {
-            if let Some(l) = pl.write_target(w) {
-                return Some(l);
-            }
-        }
-        for w in &c.words {
-            if let Some(rp) = pl.resolve(w)
-                && (w.contains('/') || w.starts_with('.') || w.starts_with('~'))
-                && pl.in_steve(&rp)
-            {
-                return Some(Limit::new(4, format!("碰到 STEVE_HOME：{w}")));
-            }
-        }
-        let Some(a) = shell::argv(&c.words) else {
-            continue;
-        };
-        // a here-document fed to a shell is a script of its own
-        if let Some(body) = &c.stdin
-            && SHELLS.contains(&a.program.as_str())
-        {
-            match shell::parse(body) {
-                Ok(n) => {
-                    if let Some(l) = parsed(&n, pl, branch, depth + 1) {
-                        return Some(l);
-                    }
-                }
-                Err(_) => return Some(Limit::new(4, "喂给 shell 的 here-document 看不清")),
-            }
-        }
-        if let Some(l) = program(&a, c.expands, pl, branch, depth) {
+        if let Some(l) = simple(c, &pl, branch, depth) {
             return Some(l);
         }
-        // quoted arguments that are command lines of their own (`sh -c`, `ssh host '…'`, `-x '…'`)
-        for n in shell::nested(&a.args) {
-            if let Some(l) = parsed(&n, pl, branch, depth + 1) {
-                return Some(l);
+    }
+    None
+}
+
+/// The limits one simple command hits where `pl` says it runs: its redirections, the paths it
+/// names, and its program with what that runs as far as this module follows it. Full access judges
+/// every command a line runs with this ([`super::full_guard`]), not only the line's own.
+pub(crate) fn simple(c: &Simple, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
+    for w in &c.writes {
+        if let Some(l) = pl.write_target(w) {
+            return Some(l);
+        }
+    }
+    for w in &c.words {
+        if let Some(rp) = pl.resolve(w)
+            && (w.contains('/') || w.starts_with('.') || w.starts_with('~'))
+            && pl.in_steve(&rp)
+        {
+            return Some(Limit::new(4, format!("碰到 STEVE_HOME：{w}")));
+        }
+    }
+    let a = shell::argv(&c.words)?;
+    // a here-document fed to a shell is a script of its own
+    if let Some(body) = &c.stdin
+        && SHELLS.contains(&a.program.as_str())
+    {
+        match shell::parse(body) {
+            Ok(n) => {
+                if let Some(l) = parsed(&n, pl, branch, depth + 1) {
+                    return Some(l);
+                }
             }
+            Err(_) => return Some(Limit::new(4, "喂给 shell 的 here-document 看不清")),
+        }
+    }
+    if let Some(l) = program(&a, c.expands, pl, branch, depth) {
+        return Some(l);
+    }
+    // quoted arguments that are command lines of their own (`sh -c`, `ssh host '…'`, `-x '…'`)
+    for n in shell::nested(&a.args) {
+        if let Some(l) = parsed(&n, pl, branch, depth + 1) {
+            return Some(l);
         }
     }
     None
@@ -1040,11 +1056,11 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
             }
             return all_inside(operands(args).into_iter().skip(1).collect());
         }
-        "sed" | "perl" | "ruby" => {
+        "sed" | "gsed" | "perl" | "ruby" => {
             let in_place = args.iter().any(|x| {
                 x.starts_with("-i")
                     || x.starts_with("--in-place")
-                    || (p != "sed" && x.starts_with("-p") && x.contains('i'))
+                    || (!p.ends_with("sed") && x.starts_with("-p") && x.contains('i'))
             });
             if in_place {
                 if let Some(l) = unknown_targets() {
@@ -1052,7 +1068,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
                 }
                 let has_script_opt = args
                     .iter()
-                    .any(|x| x == "-e" || x == "-f" || x == "-E" && p != "sed");
+                    .any(|x| x == "-e" || x == "-f" || x == "-E" && !p.ends_with("sed"));
                 let ops = operands(args);
                 let files: Vec<&String> = if has_script_opt {
                     ops

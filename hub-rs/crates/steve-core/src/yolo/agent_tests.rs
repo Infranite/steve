@@ -514,3 +514,170 @@ fn an_items_state_says_what_is_wanted_and_what_the_backend_confirmed() {
     // another workspace's item is not found
     assert!(k.core.yolo_item_state("other", &item).is_err());
 }
+
+/// ST-26 (review of ST-24, 8): a session without a bot that ran under full access is taken back to
+/// asking when full access ends or steps down. Before, nothing was asked for (no mode was sent, the
+/// state said `wanted: null`) and the item page read `applied` while the harness still bypassed
+/// every prompt. Now the page names where the mode comes from and says pending, on its way,
+/// refused or unknown until the backend confirms it.
+#[test]
+fn a_session_without_a_bot_is_taken_back_from_full_access() {
+    use crate::runtime::ModeState;
+    let k = Kit::new();
+    let y = yolo(&k);
+    full(&y);
+    let (item, sid) = started(&k, &k.home().join("ops/release.sh"));
+    k.db()
+        .exec("UPDATE sessions SET bot_id=NULL WHERE id=?", &[&sid])
+        .unwrap();
+    let state = || k.core.yolo_item_state(WS, &item).unwrap()["sessions"][0].clone();
+    let at = |st: ModeState| {
+        k.rt.st().mode_states.insert(sid.clone(), st);
+    };
+    at(ModeState {
+        applied: Some("full_access".into()),
+        ..Default::default()
+    });
+    let row = state();
+    assert_eq!(
+        (row["wanted"].as_str(), row["wanted_from"].as_str()),
+        (Some("full_access"), Some("full_access"))
+    );
+    assert_eq!(row["status"], "applied");
+    for (step, wanted_from) in [("off", "node_default"), ("on", "node_default")] {
+        // full access again first, then down to `step`
+        full(&y);
+        k.core.yolo_sync(WS);
+        at(ModeState {
+            applied: Some("full_access".into()),
+            ..Default::default()
+        });
+        k.rt.st().modes.clear();
+        switch(&y, step == "on");
+        assert_eq!(k.core.yolo_sync(WS), vec![sid.clone()], "{step}");
+        assert_eq!(
+            k.rt.st().modes,
+            vec![(sid.clone(), agent::ASKING.to_string())],
+            "{step}: asked back to asking"
+        );
+        // a turn runs: the change waits for its end, and nothing reads as in force
+        at(ModeState {
+            applied: Some("full_access".into()),
+            desired: Some("ask".into()),
+            busy: true,
+            ..Default::default()
+        });
+        let row = state();
+        assert_eq!(row["wanted"], "ask", "{step}: never an empty wanted");
+        assert_eq!(row["wanted_from"], wanted_from);
+        assert_eq!(row["applied"], "full_access");
+        assert_eq!(row["status"], "after_turn", "{step}");
+        assert_eq!(row["residual"], false);
+        // idle: on its way to the harness
+        at(ModeState {
+            applied: Some("full_access".into()),
+            desired: Some("ask".into()),
+            sending: true,
+            ..Default::default()
+        });
+        assert_eq!(state()["status"], "sending", "{step}");
+        // the Node or the harness refused it, or the outcome is not known
+        at(ModeState {
+            applied: Some("full_access".into()),
+            refused: Some("adapter has no mode default".into()),
+            ..Default::default()
+        });
+        assert_eq!(state()["status"], "refused", "{step}");
+        at(ModeState {
+            applied: Some("full_access".into()),
+            unknown: true,
+            ..Default::default()
+        });
+        assert_eq!(state()["status"], "unknown", "{step}");
+        // confirmed
+        at(ModeState {
+            applied: Some("ask".into()),
+            ..Default::default()
+        });
+        assert_eq!(state()["status"], "applied", "{step}");
+    }
+    // a bot's session names its bot as the source
+    let (item2, sid2) = started(&k, &k.home().join("ops/release.sh"));
+    let s = k.core.yolo_item_state(WS, &item2).unwrap();
+    assert_eq!(s["sessions"][0]["session_id"], sid2.as_str());
+    assert_eq!(s["sessions"][0]["wanted_from"], "bot");
+}
+
+/// After a restart the Hub no longer remembers what it told a session; a harness the Node still
+/// runs wider than Steve wants (full access left on) is asked back on the next sync, once, and
+/// not again while that change waits, is on its way, was refused or has an unknown outcome.
+#[test]
+fn a_harness_left_wider_than_wanted_is_asked_back_after_a_restart() {
+    use crate::runtime::ModeState;
+    let k = Kit::new();
+    let y = yolo(&k);
+    switch(&y, true);
+    let (_, sid) = started(&k, &k.home().join("ops/release.sh"));
+    k.core.yolo_sync(WS);
+    k.rt.st().modes.clear();
+    let at = |st: ModeState| {
+        k.rt.st().mode_states.insert(sid.clone(), st);
+    };
+    // as a restarted Hub finds it: no level change here, but the Node still runs full access
+    at(ModeState {
+        applied: Some("full_access".into()),
+        ..Default::default()
+    });
+    assert_eq!(k.core.yolo_sync(WS), vec![sid.clone()]);
+    assert_eq!(k.rt.st().modes, vec![(sid.clone(), "auto".to_string())]);
+    for st in [
+        ModeState {
+            applied: Some("full_access".into()),
+            desired: Some("auto".into()),
+            busy: true,
+            ..Default::default()
+        },
+        ModeState {
+            applied: Some("full_access".into()),
+            desired: Some("auto".into()),
+            sending: true,
+            ..Default::default()
+        },
+        ModeState {
+            applied: Some("full_access".into()),
+            refused: Some("no".into()),
+            ..Default::default()
+        },
+        ModeState {
+            applied: Some("full_access".into()),
+            unknown: true,
+            ..Default::default()
+        },
+        // narrower than wanted, or as wanted: nothing to take back
+        ModeState {
+            applied: Some("ask".into()),
+            ..Default::default()
+        },
+        ModeState {
+            applied: Some("auto".into()),
+            ..Default::default()
+        },
+    ] {
+        at(st.clone());
+        assert!(k.core.yolo_sync(WS).is_empty(), "{st:?}");
+    }
+    assert_eq!(k.rt.st().modes.len(), 1, "asked once");
+    // the same for a session without a bot: back to asking
+    k.db()
+        .exec("UPDATE sessions SET bot_id=NULL WHERE id=?", &[&sid])
+        .unwrap();
+    at(ModeState {
+        applied: Some("full_access".into()),
+        ..Default::default()
+    });
+    assert_eq!(k.core.yolo_sync(WS), vec![sid.clone()]);
+    assert_eq!(
+        k.rt.st().modes.last(),
+        Some(&(sid.clone(), agent::ASKING.to_string()))
+    );
+}

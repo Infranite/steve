@@ -132,6 +132,8 @@ pub(super) const READERS: &[&str] = &[
     "env",
     "printenv",
     "fd",
+    // `command -v`/`-V` only looks a command up (`command CMD` runs CMD, read through)
+    "command",
 ];
 /// Programs that write; every path argument must be inside the item's directory.
 const WRITERS: &[&str] = &[
@@ -323,23 +325,22 @@ fn fetch_carries(url: &str) -> Option<String> {
     None
 }
 
-/// The inline code of an interpreter's command line (`python3 -c CODE`, `node -e CODE`, `deno eval
-/// CODE`…), when there is one.
-pub(super) fn inline_code<'a>(p: &str, args: &'a [String]) -> Option<&'a str> {
-    let flags: &[&str] = match p {
-        "python" | "python3" => &["-c"],
-        "node" | "bun" | "tsx" | "ts-node" => &["-e", "--eval", "-p", "--print"],
-        "ruby" => &["-e"],
-        "perl" => &["-e", "-E"],
-        "deno" => {
-            return (args.first().map(String::as_str) == Some("eval"))
-                .then(|| operands(&args[1..]).first().map(|s| s.as_str()))
-                .flatten();
-        }
-        _ => return None,
-    };
-    let i = args.iter().position(|a| flags.contains(&a.as_str()))?;
-    args.get(i + 1).map(String::as_str)
+/// Why an interpreter's inline code stays with the user: outward words, or a way to run something
+/// else ([`super::exec::code_runs`]); `None` when it has none or is no interpreter.
+fn code_outward(p: &str, args: &[String]) -> Option<String> {
+    let it = super::exec::interpreter(p, args)?;
+    if !it.lines.is_empty() {
+        return Some(format!("{p} 会把命令交给 shell 执行，留给你"));
+    }
+    it.codes
+        .iter()
+        .find_map(|code| match OUTWARD_CODE.find(code) {
+            Some(m) => Some(format!(
+                "内联代码里有对外或执行别的程序的字眼（{}），留给你",
+                m.as_str()
+            )),
+            None => super::exec::code_runs(it.lang, code),
+        })
 }
 
 /// An awk command line read the way awk reads it: the program texts (`-e`/`--source`, or the first
@@ -381,46 +382,7 @@ pub(super) fn awk_parts(args: &[String]) -> Option<(Vec<&str>, Vec<&String>)> {
 /// An interpreter that reads its program from standard input (`… | python3`, `… | node -`): no inline
 /// code, no module and no script operand.
 pub(super) fn program_from_stdin(p: &str, args: &[String]) -> bool {
-    let valued: &[&str] = match p {
-        "python" | "python3" => &["-W", "-X", "-Q"],
-        "node" | "bun" | "tsx" | "ts-node" => &[
-            "-r",
-            "--require",
-            "--import",
-            "-C",
-            "--conditions",
-            "--loader",
-            "--experimental-loader",
-            "--input-type",
-        ],
-        "ruby" => &["-I", "-r", "-C", "-E", "-F"],
-        "perl" => &["-I", "-M", "-m"],
-        "deno" => {
-            let ops = operands(args);
-            return match ops.first().map(|s| s.as_str()) {
-                None | Some("-") => true,
-                Some("run") => ops.get(1).is_none_or(|s| *s == "-"),
-                _ => false,
-            };
-        }
-        _ => return false,
-    };
-    if inline_code(p, args).is_some()
-        || matches!(p, "python" | "python3") && args.iter().any(|a| a == "-m")
-    {
-        return false;
-    }
-    let mut i = 0;
-    while let Some(a) = args.get(i) {
-        match a.as_str() {
-            "-" => return true,
-            "--" => return args.get(i + 1).is_none_or(|s| s == "-"),
-            s if valued.contains(&s) => i += 2,
-            s if s.starts_with('-') => i += 1,
-            _ => return false,
-        }
-    }
-    true
+    super::exec::interpreter(p, args).is_some_and(|i| i.stdin)
 }
 
 /// Why an awk program is more than a reader: it runs commands (`system()`, a pipe) or writes files.
@@ -525,6 +487,9 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
         if a.sudo {
             return Err("sudo 留给你".into());
         }
+        if let Some(why) = &a.unclear {
+            return Err(format!("{why}，看不出它运行的命令从哪开始"));
+        }
         // a here-document is text for a reader (`cat <<EOF > file`), not a script for anything else
         if c.stdin.is_some() && !(READERS.contains(&a.program.as_str()) || a.program == "tee") {
             return Err(format!(
@@ -581,13 +546,8 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
     if a.xargs {
         return Err("xargs 的参数来自标准输入，看不出".into());
     }
-    if let Some(code) = inline_code(p, args)
-        && let Some(m) = OUTWARD_CODE.find(code)
-    {
-        return Err(format!(
-            "内联代码里有对外或执行别的程序的字眼（{}），留给你",
-            m.as_str()
-        ));
+    if let Some(why) = code_outward(p, args) {
+        return Err(why);
     }
     let sub = operands(args).first().map(|s| s.as_str()).unwrap_or("");
     let inside_all = |list: Vec<&String>| -> Result<(), String> {
@@ -688,6 +648,9 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
             readable_all(roots)
         }
         "sed" => {
+            if let Some(why) = super::exec::sed_runs(args) {
+                return Err(why);
+            }
             if args
                 .iter()
                 .any(|x| x.starts_with("-i") || x.starts_with("--in-place"))
@@ -783,18 +746,14 @@ fn npx(args: &[String], pl: &Places, cx: &Cx) -> Result<(), String> {
     let a = Argv {
         program: name.to_string(),
         args: ops[1..].to_vec(),
-        sudo: false,
-        xargs: false,
+        ..Default::default()
     };
     if TOOLCHAIN.contains(&name) || READERS.contains(&name) {
         simple(&a, pl, cx)
     } else {
         // a JavaScript build tool: what it is handed inline is still read
-        match inline_code("node", &a.args).and_then(|c| OUTWARD_CODE.find(c)) {
-            Some(m) => Err(format!(
-                "内联代码里有对外或执行别的程序的字眼（{}），留给你",
-                m.as_str()
-            )),
+        match code_outward("node", &a.args) {
+            Some(why) => Err(why),
             None => Ok(()),
         }
     }

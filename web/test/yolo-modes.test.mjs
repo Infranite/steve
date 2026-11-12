@@ -3,7 +3,7 @@ import { test } from "node:test"
 import { modeLine, modeLines } from "../src/yolo/modes.ts"
 
 const i18n = (await import("../src/i18n/index.ts")).default
-const row = (o) => ({ session_id: "s1", readonly: false, status: "applied", wanted: "full_access", applied: "full_access", desired: null, busy: false, refused: null, residual: false, ...o })
+const row = (o) => ({ session_id: "s1", readonly: false, status: "applied", wanted: "full_access", wanted_from: "full_access", applied: "full_access", desired: null, busy: false, refused: null, residual: false, ...o })
 
 test("only what the Node confirmed reads as in effect", () => {
   assert.equal(modeLine(row({})).tone, "ok")
@@ -13,6 +13,14 @@ test("only what the Node confirmed reads as in effect", () => {
   const refused = modeLine(row({ status: "refused", applied: "auto", refused: "this node's owner allows at most permission mode auto" }))
   assert.deepEqual([refused.tone, refused.reason], ["bad", "this node's owner allows at most permission mode auto"])
   assert.equal(modeLine(row({ status: "unknown" })).tone, "bad")
+})
+
+test("ST-26: a session without a bot taken back from full access says where its mode comes from, and an empty wanted is never in effect", () => {
+  const back = modeLine(row({ status: "after_turn", wanted: "ask", wanted_from: "node_default", applied: "full_access", desired: "ask", busy: true }))
+  assert.deepEqual([back.key, back.tone, back.wanted, back.from, back.applied], ["after_turn", "wait", "ask", "node_default", "full_access"])
+  const empty = modeLine(row({ status: "applied", wanted: null, wanted_from: "node_default", applied: "full_access" }))
+  assert.deepEqual([empty.key, empty.tone], ["unknown", "bad"])
+  assert.equal(modeLine(row({ status: "applied", wanted: "ask", wanted_from: "node_default", applied: "ask" })).tone, "ok")
 })
 
 test("read-only sessions and sessions nothing runs are left out, and equal lines read once", () => {
@@ -26,6 +34,7 @@ test("every line has its text in both languages, with the modes named", () => {
     for (const key of ["applied", "after_turn", "sending", "next_open", "refused", "unknown", "not_sent", "not_running", "residual", "detail", "label", "none"])
       assert.ok(i18n.exists(`yolo:mode.${key}`, { lng: lang }), `${lang} ${key}`)
     for (const m of ["plan", "ask", "accept_edits", "auto", "full_access"]) assert.ok(i18n.exists(`yolo:mode.name.${m}`, { lng: lang }), `${lang} ${m}`)
+    for (const f of ["full_access", "bot_bypass", "bot", "node_default", "readonly"]) assert.ok(i18n.exists(`yolo:mode.from.${f}`, { lng: lang }), `${lang} from ${f}`)
   }
   const zh = i18n.t("yolo:mode.after_turn", { lng: "zh-CN", wanted: "完全放开", applied: "由执行器判断" })
   assert.ok(zh.includes("本回合结束后") && zh.includes("完全放开") && zh.includes("由执行器判断"), zh)

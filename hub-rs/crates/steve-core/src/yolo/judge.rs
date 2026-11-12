@@ -826,11 +826,13 @@ fn has(f: &Facts, choice: &str) -> bool {
 
 fn table(f: &Facts, p: &Policy, env: &Env) -> Verdict {
     match &f.subject {
-        Subject::Tool(t) if t.full => match super::full_guard::full(t) {
-            guard::Guard::Allow { option, checks } => {
+        Subject::Tool(t) if t.full => match super::full_guard::full(t, env) {
+            Ok(guard::Guard::Allow { option, checks }) => {
                 auto(&option, FULL_RULE, FULL_REASON).checks(checks)
             }
-            guard::Guard::Ask(why) => decline(FULL_RULE, why),
+            Ok(guard::Guard::Ask(why)) => decline(FULL_RULE, why),
+            // a command the line runs inside another one hits a hard limit
+            Err(l) => decline(&l.rule(), l.reason()),
         },
         Subject::Tool(t) => {
             if t.cwd.is_none() {

@@ -34,10 +34,14 @@ export type RYoloPreview = {
 export type PermMode = "plan" | "ask" | "accept_edits" | "auto" | "full_access"
 /** where one session's harness stands: `applied` only once its backend (the Node) confirmed it */
 export type ModeStatus = "applied" | "after_turn" | "sending" | "next_open" | "refused" | "unknown" | "not_sent" | "not_running"
+/** where the mode Steve wants comes from: full access, a bot set to bypass prompts, the bot's own mode, no bot (the
+ *  asking mode a Node opens a session in without one), a read-only session */
+export type ModeSource = "full_access" | "bot_bypass" | "bot" | "node_default" | "readonly"
 export type RYoloItemSession = {
   session_id: string; readonly: boolean; status: ModeStatus
-  /** what Steve asks for now (null: the harness default) */
+  /** what Steve asks for now (null: this runtime cannot name it; never in effect then) */
   wanted: PermMode | null
+  wanted_from: ModeSource
   /** what the Node confirmed the harness runs in (null: nothing confirmed yet) */
   applied: PermMode | null
   /** waiting for the turn's end or the next open, or on its way */
