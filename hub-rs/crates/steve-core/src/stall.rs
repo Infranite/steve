@@ -62,6 +62,8 @@ impl Tx<'_> {
             return Ok(vec![]);
         }
         let mut out = vec![];
+        /* quotas that are back: their agents go on */
+        self.quota_wake(at)?;
         for ws in self.db().workspace_ids()? {
             // An old stop card can predate this Hub or the unit's current turn. No new child-start
             // event will arrive to expire it, so reconcile it from the durable graph each pass.
@@ -178,6 +180,7 @@ impl Tx<'_> {
     }
 
     pub(crate) fn expire_stall(&mut self, session_id: &str) -> Result<()> {
+        self.quota_turn_started(session_id);
         let Some(item) = self.db().session(session_id)?.and_then(|s| s.item_id) else {
             return Ok(());
         };

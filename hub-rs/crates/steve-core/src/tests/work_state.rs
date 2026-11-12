@@ -550,3 +550,46 @@ fn input_waiting_on_an_unlinked_node_says_why() {
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert_eq!(k.status(&i).2, "有排队输入等待发送");
 }
+
+/// ST-1/2/3: a 429 that says the quota is back in hours. Continuing at once fails within a second
+/// and spends the continues; the item waits until then instead, and the agent goes on after.
+#[test]
+fn a_quota_that_is_back_later_is_waited_for_not_continued() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做吧", "me", &[]).unwrap();
+    k.rt.end_turn(
+        &k.core,
+        &s,
+        "error",
+        Some("API Error: 429 · upstream account quota exhausted; try again in 2h"),
+    );
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued at once");
+    assert!(steve_lines(&k, &i).is_empty(), "no continue spent");
+    assert!(k.open_fails(&i).is_empty(), "no card");
+    let (code, why) = work(&k, &i);
+    assert_eq!(code, "quota_wait");
+    assert!(why.unwrap().starts_with("模型配额用完，"));
+    assert!(k.status(&i).2.starts_with("模型配额用完，"));
+    // the watch leaves it while the quota is out
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert_eq!(k.rt.prompts_of(&s).len(), 1);
+    // the time has come: continued once, still nothing spent
+    let back = now() + 2 * 3_600_000 + 60_000;
+    assert!(k.core.tx().check_stalls(back).unwrap().is_empty());
+    let prompts = k.rt.prompts_of(&s);
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("配额已恢复"), "{}", prompts[1]);
+    assert!(steve_lines(&k, &i).is_empty());
+    assert_eq!(work(&k, &i).0, "running");
+
+    // a quota with no time stays an ordinary error: continued within the budget
+    k.rt.end_turn(
+        &k.core,
+        &s,
+        "error",
+        Some("API Error: 429 Too Many Requests"),
+    );
+    assert_eq!(steve_lines(&k, &i).len(), 1);
+}

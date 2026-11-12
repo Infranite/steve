@@ -2191,6 +2191,12 @@ impl Tx<'_> {
                         ..Default::default()
                     });
                 let why = format!("会话出错：{e}");
+                /* a quota that says when it is back: wait for then, nothing spent */
+                if t.stop_reason == "error"
+                    && let Some(until) = crate::quota::reset_at(e, crate::util::now())
+                {
+                    return self.quota_wait(item_id, &session.id, until, e);
+                }
                 /* the harness failed and the turn is known to have ended: the agent gets another go
                  * first, told to check before redoing anything (2026-11-09). So does a turn its Node's
                  * restart cut, once the Node confirmed its harness is gone (B6). Any other outcome

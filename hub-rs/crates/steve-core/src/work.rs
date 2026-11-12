@@ -35,6 +35,8 @@ pub(crate) enum Work {
     Halted(String),
     /// Waits on registered prerequisites.
     Blocked(String),
+    /// Waits for a time: the model's quota is back then ([`crate::quota`]).
+    Until(String),
     /// The work graph needs its coordinator: a required unit failed or was cancelled, it is out of
     /// attempts, the goal moved under it, or the graph cannot run here.
     Failed(String),
@@ -52,6 +54,7 @@ impl Work {
             Work::Paused(_) => "paused",
             Work::Halted(_) => "paused_by_agent",
             Work::Blocked(_) => "dependency_wait",
+            Work::Until(_) => "quota_wait",
             Work::Failed(_) => "failed",
             Work::Idle => "idle",
         }
@@ -66,6 +69,7 @@ impl Work {
             | Work::Paused(t)
             | Work::Halted(t)
             | Work::Blocked(t)
+            | Work::Until(t)
             | Work::Failed(t) => Some(t),
             Work::Idle => None,
         }
@@ -155,6 +159,9 @@ impl Tx<'_> {
                 "等你处理：{}",
                 js_head(&d.question, 80)
             )));
+        }
+        if let Some(t) = self.quota_text(&item.id) {
+            return Ok(Work::Until(t));
         }
         if let Some(g) = self.db().store().workflows().get(&item.id)?
             && !g.single_session()

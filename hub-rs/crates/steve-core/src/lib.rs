@@ -25,17 +25,18 @@ pub mod harnesses;
 pub mod housekeeping;
 pub mod kinds;
 pub mod lane;
-pub mod mq;
 pub mod lifecycle;
 mod marks;
 pub mod models;
 mod modules;
+pub mod mq;
 pub mod node_git;
 pub mod notify;
 mod occupancy;
 mod orchestrator;
 pub mod outbox_work;
 pub mod proof;
+mod quota;
 pub mod release;
 pub mod repo;
 pub mod runtime;
@@ -129,6 +130,8 @@ pub(crate) struct State {
     ended: HashMap<String, String>,
     /// How each session's last turn ended, for a stall later on (`work::LastStop`).
     stops: HashMap<String, work::LastStop>,
+    /// Items whose turn failed on a model quota that is back later (`quota`).
+    quota_waits: HashMap<String, quota::QuotaWait>,
     releasing: Option<Releasing>,
     release_generation: u64,
     /// An acceptance answered with 验收并发布 `(item, who)`: its release requirement starts the
