@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
 use steve_node::LocalNode;
-use steve_node_api::{ExecutionControl, NodeId};
+use steve_node_api::NodeId;
 use steve_node_wire::handshake::{self, NodeIntro};
 use steve_node_wire::identity::{self, Identity};
 use steve_node_wire::tls::{self, Trust};
@@ -476,7 +476,6 @@ async fn link_once(
             ))
         })?
         .map_err(|e| Stop::Retry(e.to_string()))?;
-    let heads = node.streams().await.unwrap_or_default();
     let (_, welcome) = handshake::dial(
         &mut sink,
         &mut stream,
@@ -484,7 +483,10 @@ async fn link_once(
             node: node_id,
             identity: id,
             incarnation: node.incarnation(),
-            heads,
+            // The Hub obtains all stream heads from the paged post-link snapshot. Including
+            // them here grows the fixed-size control hello with every historical stream and
+            // eventually prevents the Node from linking at all.
+            heads: Vec::new(),
             caps: None,
             hub_id: Some(hub.id),
             hub_key: hub.key,
