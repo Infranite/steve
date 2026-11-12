@@ -76,6 +76,8 @@ fn confirmed_workflow_activity_needs_the_current_applied_attempt_and_fresh_agent
     assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_003).unwrap().is_none());
     event(5, at + 1_004, "a_current", json!({"type":"tool_changed","tool":{}}));
     assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_005).unwrap().is_some());
+    store.with_conn(|c| { c.execute("UPDATE nodes SET last_seen=0 WHERE node_id='n'", [])?; Ok(()) }).unwrap();
+    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_005).unwrap().is_some(), "a connection timestamp is not a heartbeat");
     store.with_conn(|c| { c.execute("UPDATE node_streams SET fault='gap' WHERE node_id='n'", [])?; Ok(()) }).unwrap();
     assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_005).unwrap().is_none(), "a faulted event stream cannot confirm activity");
     store.with_conn(|c| { c.execute("UPDATE node_streams SET fault=NULL WHERE node_id='n'", [])?; Ok(()) }).unwrap();

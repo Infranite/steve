@@ -505,10 +505,10 @@ impl Workflows<'_> {
                  JOIN sessions biz ON biz.id=s.session_id AND biz.item_id=?1
                  JOIN runtime_turns t ON t.session_id=s.session_id AND t.active_attempt=s.active_attempt AND t.state='running'
                  JOIN runtime_attempts a ON a.attempt_id=s.active_attempt AND a.turn_id=t.turn_id AND a.node_id=s.node_id
-                 JOIN nodes n ON n.node_id=s.node_id AND n.state='active' AND n.last_seen BETWEEN ?3 AND ?4
+                 JOIN nodes n ON n.node_id=s.node_id AND n.state='active'
                  WHERE s.session_id=?2 AND s.phase='active' AND s.release_pending=0
                    AND a.state='running' AND a.cancel_requested=0",
-                params![child, session, at.saturating_sub(600_000), at],
+                params![child, session],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             ).optional()?;
             let Some((attempt, turn, node)) = active else { return Ok(None) };

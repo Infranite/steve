@@ -163,6 +163,36 @@ async fn local_node(h: &Hub, id: Identity, node: &NodeId) -> Running {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_with_many_historical_streams_links_and_reconciles_every_head() {
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    let dir = tempfile::tempdir().unwrap();
+    let (cfg, _) = local_config(dir.path(), &node);
+    let local = LocalNode::open(cfg).unwrap();
+    let mut db = rusqlite::Connection::open(dir.path().join("node/node.sqlite3")).unwrap();
+    let tx = db.transaction().unwrap();
+    for i in 0..800 {
+        tx.execute(
+            "INSERT INTO streams(stream,epoch,produced,acknowledged) VALUES (?1,'epoch01',1,1)",
+            [format!("stream_{i:04}_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")],
+        ).unwrap();
+    }
+    tx.commit().unwrap();
+    let pairing = Pairing {
+        hub_url: h.url(), node_id: node.to_string(), hub_id: h.svc.hub_id.clone(),
+        pin: None, loopback: true, hub_key: None, name: "local".into(),
+    };
+    let task = tokio::spawn(async move {
+        steve_node_cli::dial::serve(local, &pairing, &id, &Trust::LoopbackPlaintext).await
+    });
+    let remote = h.fleet.remote(&node);
+    until("attached with 800 heads", 10, || remote.generation() == Some(1)).await;
+    let snapshot = steve_hub::wire::node_runtime::read_snapshot(remote.as_ref(), 100).await.unwrap();
+    assert_eq!(snapshot.heads.len(), 800);
+    task.abort();
+}
+
 fn phase(h: &Hub, s: &str) -> String {
     h.q(&format!(
         "SELECT phase FROM runtime_sessions WHERE session_id='{s}'"
