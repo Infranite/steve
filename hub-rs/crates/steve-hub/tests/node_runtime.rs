@@ -495,9 +495,13 @@ async fn the_same_events_again_are_stored_once() {
     let exec = h.attempts()[0].clone();
     let (s, b) = text(&exec, "x");
     h.node.emit(s, b).await.unwrap();
-    let before: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
     // the Node did not hear the ack and sends what it kept again
     let replay = h.seen.seen.lock().unwrap().clone();
+    until("first inbox write", || {
+        h.q::<i64>("SELECT COUNT(*) FROM node_event_inbox") == replay.len() as i64
+    })
+    .await;
+    let before: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
     let sink = Sink(Arc::downgrade(&h.rt));
     sink.commit(EventBatch {
         events: replay.clone(),
