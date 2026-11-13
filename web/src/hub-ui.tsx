@@ -2,7 +2,7 @@
  * field (on the no-Hub, signed-out and cannot-connect screens, in a dialog, and in 设置 · 访问与客户端), the answer
  * to a pairing link, and the offer of the Hubs another page sent along. The list itself is `hubDirectory()`. */
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { CheckIcon, ChevronRightIcon, ChevronsUpDownIcon, KeyRoundIcon, PlusIcon, QrCodeIcon, ServerIcon, ServerOffIcon } from "lucide-react"
+import { CheckIcon, CircleAlertIcon, ChevronRightIcon, ChevronsUpDownIcon, KeyRoundIcon, PlusIcon, QrCodeIcon, ServerIcon, ServerOffIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -82,11 +82,11 @@ export function HubSwitcher() {
         <DropdownMenuContent align="start" className="min-w-60">
           {/* a label must sit inside a group: outside one, Base UI throws and blanks the page */}
           <DropdownMenuGroup>
-            <DropdownMenuLabel className="type-footnote text-muted-foreground">Hub</DropdownMenuLabel>
+            <DropdownMenuLabel className="type-label text-tertiary">Hub</DropdownMenuLabel>
             {(hubs ?? []).map((h) => (
               <DropdownMenuItem key={h.id} onClick={() => to(h)} data-hub-opt={h.address}>
                 <ServerIcon className="size-4 text-muted-foreground" strokeWidth={1.5} />
-                <span className="min-w-0 flex-1"><span className="block truncate">{h.name}</span>{hubSub(h) && <span className="block truncate type-footnote text-muted-foreground">{hubSub(h)}</span>}</span>
+                <span className="min-w-0 flex-1"><span className="block truncate">{h.name}</span>{hubSub(h) && <span className="block truncate type-footnote text-tertiary">{hubSub(h)}</span>}</span>
                 {h.current && <CheckIcon className="size-4 text-blue" />}
               </DropdownMenuItem>))}
           </DropdownMenuGroup>
@@ -138,17 +138,17 @@ export function HubChooser({ manage = false, down = false, focus = false, classN
   return (
     <div className={cn("flex w-full flex-col gap-3 text-left", className)} data-hub-chooser>
       {hubs === null ? <Spinner className="size-4 self-center text-muted-foreground" /> : shown.length > 0 && (
-        <div className="flex flex-col overflow-hidden rounded-xl border border-border" role="list" data-hub-list>
+        <div className="flex flex-col overflow-hidden rounded-xl bg-card p-1 shadow-[var(--lift)]" role="list" data-hub-list>
           {shown.map((h) => {
             const here = h.current && !down
             return (
-              <div key={h.id} role="listitem" className="flex items-center gap-1 border-b border-border px-1 last:border-b-0" data-hub-row={h.address}>
+              <div key={h.id} role="listitem" className="flex items-center gap-1 anim-in [&+&]:border-t [&+&]:border-border/70" data-hub-row={h.address}>
                 <button type="button" disabled={here || !!busy} onClick={() => void act(h.id, () => dir.switchTo(h))}
-                  className={cn("flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-2 text-left", !here && "cursor-pointer hover:bg-accent")} data-hub-go={h.address}>
+                  className={cn("flex min-w-0 flex-1 items-center gap-3 rounded-lg px-2.5 py-2 text-left", !here && "cursor-pointer hover:bg-accent")} data-hub-go={h.address}>
                   <ServerIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate type-body">{h.name}</span>
-                    {(hubSub(h) || (h.current && down)) && <span className="block truncate type-footnote text-muted-foreground">{[h.current && down ? t("shell:hub.noAnswer") : "", hubSub(h)].filter(Boolean).join(" · ")}</span>}
+                    <span className="block truncate type-body font-medium">{h.name}</span>
+                    {(hubSub(h) || (h.current && down)) && <span className="block truncate type-footnote text-tertiary">{[h.current && down ? t("shell:hub.noAnswer") : "", hubSub(h)].filter(Boolean).join(" · ")}</span>}
                   </span>
                   {busy === h.id ? <Spinner className="size-4 text-muted-foreground" /> : here ? <CheckIcon className="size-4 text-blue" aria-label={t("shell:hub.current")} /> : null}
                 </button>
@@ -158,17 +158,17 @@ export function HubChooser({ manage = false, down = false, focus = false, classN
           })}
         </div>
       )}
-      {error && <div className="type-footnote text-destructive" role="alert">{error}</div>}
-      {err && errAt === "list" && <div className="-mt-1 type-footnote text-destructive" role="alert" data-hub-error>{err}</div>}
+      {error && <div className="type-callout text-destructive" role="alert">{error}</div>}
+      {err && errAt === "list" && <div className="-mt-1 type-callout text-destructive" role="alert" data-hub-error>{err}</div>}
       <form onSubmit={(e) => { e.preventDefault(); if (input.trim()) void act("add", () => dir.add(input, name)) }} className="flex w-full flex-col gap-2" data-add-hub>
         <Input value={input} onChange={(e) => setInput(e.target.value)} placeholder={t("shell:hub.addPlaceholder")} autoFocus={focus} inputMode="url" autoCapitalize="off" autoCorrect="off" spellCheck={false} data-add-hub-url />
         {manage && <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("shell:hub.namePlaceholder")} data-add-hub-name />}
-        {err && errAt === "add" && <div className="type-footnote text-destructive" role="alert" data-hub-error>{err}</div>}
+        {err && errAt === "add" && <div className="type-callout text-destructive" role="alert" data-hub-error>{err}</div>}
         <div className="flex gap-2">
           <Button type="submit" className="flex-1" disabled={!!busy || !input.trim()} data-add-hub-submit>{busy === "add" ? <Spinner className="size-4" /> : t("shell:hub.connect")}</Button>
           {dir.scan && <Button type="button" variant="outline" disabled={!!busy} onClick={() => void act("scan", dir.scan!)} data-hub-scan><QrCodeIcon className="size-4" />{t("shell:hub.scan")}</Button>}
         </div>
-        <div className="type-footnote text-muted-foreground">{t("shell:hub.addHint")}</div>
+        <div className="type-footnote text-tertiary">{t("shell:hub.addHint")}</div>
       </form>
     </div>
   )
@@ -186,7 +186,7 @@ export function HubLine({ className }: { className?: string }) {
   const { hubs } = useHubs()
   const cur = hubs?.find((h) => h.current)
   const text = cur ? (cur.name === hostOf(cur.address) ? cur.name : `${cur.name} · ${hostOf(cur.address)}`) : nativeBridge() ? "" : hostOf(currentHub())
-  return text ? <div className={cn("font-mono text-[12px] text-muted-foreground", className)} data-hub-line>{text}</div> : null
+  return text ? <div className={cn("type-code text-muted-foreground", className)} data-hub-line>{text}</div> : null
 }
 
 /** the list in a dialog: `openSheet("hubs")`, `#/hub/add` */
@@ -215,15 +215,15 @@ export function HubsOffer({ className }: { className?: string }) {
   const offer = hubsOffer()
   if (!offer.length) return null
   return (
-    <div className={cn("flex w-full flex-col gap-2 rounded-xl border border-border p-3 text-left", className)} data-hubs-offer>
-      <div className="type-callout">{t("shell:hub.offerTitle")}</div>
-      <div className="type-footnote text-muted-foreground">{t("shell:hub.offerSub")}</div>
+    <div className={cn("flex w-full flex-col gap-2 rounded-xl bg-card p-4 text-left shadow-[var(--lift)] anim-in", className)} data-hubs-offer>
+      <div className="type-headline">{t("shell:hub.offerTitle")}</div>
+      <div className="-mt-1 type-callout text-muted-foreground">{t("shell:hub.offerSub")}</div>
       {/* the address is never the part that is cut: a long name must not push it out of sight */}
-      <ul className="flex flex-col gap-1 text-[12px]">{offer.map((h) => <li key={h.url} className="flex min-w-0 flex-col">
-        {h.name && <span className="truncate">{h.name}</span>}
-        <span className="font-mono break-all text-muted-foreground" data-hubs-offer-address>{h.url}</span>
+      <ul className="flex flex-col gap-1.5 rounded-lg bg-muted/60 px-3 py-2">{offer.map((h) => <li key={h.url} className="flex min-w-0 flex-col">
+        {h.name && <span className="truncate type-callout font-medium">{h.name}</span>}
+        <span className="type-code break-all text-muted-foreground" data-hubs-offer-address>{h.url}</span>
       </li>)}</ul>
-      <div className="flex gap-2">
+      <div className="mt-1 flex gap-2">
         <Button size="sm" onClick={() => answerOffer(true)} data-hubs-offer-add>{t("shell:hub.offerAdd")}</Button>
         <Button size="sm" variant="ghost" onClick={() => answerOffer(false)} data-hubs-offer-skip>{t("shell:hub.offerSkip")}</Button>
       </div>
@@ -239,7 +239,7 @@ export function HubsOfferDialog() {
     <Dialog open onOpenChange={(o) => !o && answerOffer(false)}>
       <DialogContent className="sm:max-w-md" showCloseButton={false}>
         <DialogHeader className="sr-only"><DialogTitle>Hub</DialogTitle></DialogHeader>
-        <HubsOffer className="border-0 p-0" />
+        <HubsOffer className="bg-transparent p-0 shadow-none" />
       </DialogContent>
     </Dialog>
   )
@@ -279,17 +279,17 @@ export function PairClaim() {
     catch (e) { setErr(hubErrorText(e)); setBusy(false) }
   }
   return (
-    <div className="flex w-full max-w-sm flex-col items-center gap-4" data-pair-claim>
-      <QrCodeIcon className="size-10 text-muted-foreground" strokeWidth={1.25} />
+    <div className="flex w-full max-w-sm flex-col items-center gap-5 anim-in" data-pair-claim>
+      <span className="flex size-16 items-center justify-center rounded-2xl bg-card text-muted-foreground shadow-[var(--lift)]"><QrCodeIcon className="size-8" strokeWidth={1.25} /></span>
       <div>
         <div className="type-title">{link ? t("shell:hub.pairTitle", { name: link.name || hostOf(addresses[0] ?? "") || "Steve Hub" }) : t("shell:hub.pairBadTitle")}</div>
-        {addresses.length > 0 && <div className="mt-1.5 flex flex-col gap-0.5 font-mono text-[12px] text-muted-foreground" data-pair-addresses>{addresses.map((u) => <span key={u}>{u}</span>)}</div>}
+        {addresses.length > 0 && <div className="mt-2 flex flex-col gap-0.5 type-code text-muted-foreground" data-pair-addresses>{addresses.map((u) => <span key={u}>{u}</span>)}</div>}
       </div>
       {!link || !addresses.length ? <p className="type-callout text-muted-foreground" data-pair-bad>{t("shell:hub.pairBad")}</p> : native ? (busy && <Spinner className="size-5 text-muted-foreground" />) : <>
         <p className="type-callout text-muted-foreground">{t("shell:hub.pairSub")}</p>
-        {plan?.open && <p className="rounded-lg bg-attention/10 px-3 py-2 type-footnote text-attention" data-pair-other>{t("shell:hub.pairOther")}</p>}
+        {plan?.open && <p className="flex gap-2 rounded-lg bg-attention/10 px-3 py-2 type-callout text-foreground/80" data-pair-other><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" />{t("shell:hub.pairOther")}</p>}
       </>}
-      {err && <div className="type-footnote text-destructive" role="alert" data-pair-error>{err}</div>}
+      {err && <div className="type-callout text-destructive" role="alert" data-pair-error>{err}</div>}
       <div className="flex w-full max-w-xs flex-col gap-2">
         {plan && addresses.length > 0 && (plan.call.length > 0
           ? <Button disabled={busy} onClick={() => void claim()} data-pair-accept>{busy ? <Spinner className="size-4" /> : t("shell:hub.pairHere")}</Button>

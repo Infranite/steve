@@ -30,7 +30,7 @@ export function NativeIdLine({ k, label, className }: { k: string; label?: strin
   return (
     <span className={cn("flex min-w-0 items-center gap-1 type-footnote text-muted-foreground", className)} data-native-id={s.nativeId}>
       <span className="shrink-0">{name}</span>
-      <button type="button" title={s.nativeId} className="min-w-0 truncate font-mono text-[11.5px] hover:text-foreground" onClick={() => copy(s.nativeId!, t("shell:resume.what.id"))}>{s.nativeId.slice(0, 8)}</button>
+      <button type="button" title={s.nativeId} className="min-w-0 truncate font-mono text-foreground/80 hover:text-foreground" onClick={() => copy(s.nativeId!, t("shell:resume.what.id"))}>{s.nativeId.slice(0, 8)}</button>
       <CopyButton text={s.nativeId} what={t("shell:resume.what.id")} testId="native-id" />
       <Popover>
         <PopoverTrigger render={<Button variant="ghost" size="xs" className="-ml-1 h-5 px-1.5 text-muted-foreground" data-resume-open={k} />}><SquareTerminalIcon />{t("shell:resume.resume")}</PopoverTrigger>
@@ -43,19 +43,21 @@ export function NativeIdLine({ k, label, className }: { k: string; label?: strin
 function Field({ label, value, mono = true, what, testId, children }: { label: string; value: string; mono?: boolean; what: string; testId: string; children?: ReactNode }) {
   return (
     <div className="flex flex-col gap-1" data-resume-field={testId}>
-      <div className="flex items-center justify-between gap-2 type-footnote text-muted-foreground"><span>{label}</span><CopyButton text={value} what={what} testId={testId} /></div>
-      <div className={cn("break-all rounded-lg bg-muted px-2.5 py-1.5 text-foreground", mono ? "font-mono text-[12px] leading-5" : "type-callout")}>{value}</div>
+      <div className="flex items-center justify-between gap-2 type-label text-tertiary"><span>{label}</span><CopyButton text={value} what={what} testId={testId} /></div>
+      <div className={cn("break-all rounded-lg bg-muted/60 px-3 py-2 text-foreground", mono ? "type-code" : "type-callout")}>{value}</div>
       {children}
     </div>
   )
 }
 
+/* a warning: the icon carries the status colour, the sentence stays readable body text on a faint wash */
+const WARN = "flex gap-2 rounded-lg bg-attention/10 px-3 py-2 type-callout text-foreground/80"
 /** what the transcript check found, in one sentence */
 function Check({ r, h }: { r: RResume; h: string }) {
   const tr = r.transcript, t = useT()
-  if (!tr) return <p className="flex gap-1.5 type-footnote text-attention" data-resume-check="missing"><CircleAlertIcon className="mt-0.5 size-3.5 shrink-0" />{t("shell:resume.checkMissing", { h })}</p>
-  if (!tr.matches) return <p className="flex gap-1.5 type-footnote text-attention" data-resume-check="mismatch"><CircleAlertIcon className="mt-0.5 size-3.5 shrink-0" />{tr.id && tr.id !== r.id ? t("shell:resume.checkIdMismatch", { h, id: tr.id }) : t("shell:resume.checkCwdMismatch", { h, cwd: homeTilde(tr.cwd ?? "") })}</p>
-  return <p className="flex gap-1.5 type-footnote text-muted-foreground" data-resume-check="ok"><CircleCheckIcon className="mt-0.5 size-3.5 shrink-0 text-success" />{tr.updated ? t("shell:resume.checkOkUpdated", { h, time: tm(tr.updated) }) : t("shell:resume.checkOk", { h })}</p>
+  if (!tr) return <p className={WARN} data-resume-check="missing"><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" />{t("shell:resume.checkMissing", { h })}</p>
+  if (!tr.matches) return <p className={WARN} data-resume-check="mismatch"><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" />{tr.id && tr.id !== r.id ? t("shell:resume.checkIdMismatch", { h, id: tr.id }) : t("shell:resume.checkCwdMismatch", { h, cwd: homeTilde(tr.cwd ?? "") })}</p>
+  return <p className="flex gap-1.5 type-callout text-muted-foreground" data-resume-check="ok"><CircleCheckIcon className="mt-0.5 size-4 shrink-0 text-success" />{tr.updated ? t("shell:resume.checkOkUpdated", { h, time: tm(tr.updated) }) : t("shell:resume.checkOk", { h })}</p>
 }
 
 /** the full resume details; fetched when shown, again when the session's id or state changes */
@@ -75,14 +77,14 @@ export function ResumeCard({ k }: { k: string }) {
   if (!r) return <p className="type-footnote text-muted-foreground" data-resume="loading">{t("shell:resume.loading")}</p>
   return (
     <div className="flex flex-col gap-3" data-resume={r.id ? "ready" : "none"}>
-      <div className="flex items-center gap-2 type-callout"><SquareTerminalIcon className="size-4 text-muted-foreground" /><span className="font-medium">{h}</span><span className="type-footnote text-muted-foreground">{t("shell:resume.original")}</span></div>
-      {r.id ? <Field label={t("shell:resume.originalId")} value={r.id} what={t("shell:resume.what.id")} testId="id" /> : <p className="rounded-lg bg-muted px-2.5 py-1.5 type-footnote text-muted-foreground" data-resume-pending>{t("shell:resume.idPending", { note: noIdNote(s) })}</p>}
+      <div className="flex items-center gap-2"><SquareTerminalIcon className="size-4 text-muted-foreground" /><span className="type-headline">{h}</span><span className="type-callout text-muted-foreground">{t("shell:resume.original")}</span></div>
+      {r.id ? <Field label={t("shell:resume.originalId")} value={r.id} what={t("shell:resume.what.id")} testId="id" /> : <p className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground" data-resume-pending>{t("shell:resume.idPending", { note: noIdNote(s) })}</p>}
       {r.id && (r.command
-        ? <Field label={t("shell:resume.what.command")} value={r.command} what={t("shell:resume.what.command")} testId="command" />
-        : <p className="type-footnote text-muted-foreground" data-resume-no-command>{t("shell:resume.noCommand", { h })}</p>)}
-      {r.cwd && <Field label={t("shell:resume.what.cwd")} value={r.cwd} what={t("shell:resume.what.cwd")} testId="cwd">{!r.cwd_exists && <span className="type-footnote text-attention" data-resume-cwd-missing>{t("shell:resume.cwdMissing")}</span>}</Field>}
+        ? <Field label={t("shell:resume.commandLabel")} value={r.command} what={t("shell:resume.what.command")} testId="command" />
+        : <p className="type-callout text-muted-foreground" data-resume-no-command>{t("shell:resume.noCommand", { h })}</p>)}
+      {r.cwd && <Field label={t("shell:resume.cwdLabel")} value={r.cwd} what={t("shell:resume.what.cwd")} testId="cwd">{!r.cwd_exists && <span className="flex gap-1.5 type-callout text-foreground/80" data-resume-cwd-missing><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" />{t("shell:resume.cwdMissing")}</span>}</Field>}
       {r.id && <Check r={r} h={h} />}
-      {r.id && <ul className="flex list-disc flex-col gap-1 pl-4 type-footnote text-muted-foreground">
+      {r.id && <ul className="flex list-disc flex-col gap-1 pl-4 type-footnote text-tertiary marker:text-tertiary">
         {s.st === "run" && <li data-resume-running>{r.harness === "claude-code" ? t("shell:resume.runningFork") : t("shell:resume.running")}</li>}
         <li>{t("shell:resume.terminalNote")}</li>
       </ul>}

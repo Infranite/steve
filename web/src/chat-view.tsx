@@ -60,8 +60,8 @@ function Hero() {
     <div className="flex min-w-0 shrink items-center gap-2.5" data-hero="compact">
       <div className="shrink-0" onDoubleClick={() => cue("love")}><Robot k="steve" size={28} live /></div>
       <span className="shrink-0 type-headline">{S?.n ?? "Steve"}</span>
-      <span className={cn("flex min-w-0 items-center gap-1.5 truncate type-footnote transition-colors", doing || label ? "text-foreground/85" : "text-muted-foreground")} data-hero-label>
-        {doing && <span className="size-1.5 shrink-0 rounded-full bg-blue dot-running" aria-hidden />}<span className="truncate">{text}</span></span>
+      <span className={cn("flex min-w-0 items-center gap-1.5 truncate type-callout transition-colors duration-200", doing || label ? "text-foreground/80" : "text-tertiary")} data-hero-label>
+        {doing && <span className="size-1.5 shrink-0 rounded-full bg-blue dot-running" aria-hidden />}<span key={text} className="truncate anim-in">{text}</span></span>
     </div>
   )
 }
@@ -70,7 +70,7 @@ function Hero() {
 function SteveSays({ children, sub, still }: { children: ReactNode; sub?: string; still?: boolean }) {
   return (
     <div className={cn("min-w-0 self-stretch px-1", !still && "anim-in")} data-steve-msg>
-      {sub && <div className="mb-1 type-footnote text-muted-foreground">{sub}</div>}
+      {sub && <div className="mb-1.5 type-label text-tertiary">{sub}</div>}
       <div className="type-chat text-foreground">{children}</div>
     </div>
   )
@@ -78,7 +78,7 @@ function SteveSays({ children, sub, still }: { children: ReactNode; sub?: string
 
 const Me = ({ t, files }: { t: string; files?: RFile[] }) => <div className="flex max-w-[80%] flex-col items-end gap-1.5 self-end anim-in" data-me-msg>
   <Files files={files} align="end" />
-  {(t !== "（附件）" || !files?.length) && <div className="min-w-0 max-w-full rounded-[20px] bg-muted px-4 py-2.5 type-chat"><Markdown text={t} /></div>}</div>
+  {(t !== "（附件）" || !files?.length) && <div className="min-w-0 max-w-full rounded-2xl rounded-br-md bg-muted px-4 py-2.5 type-chat text-foreground"><Markdown text={t} /></div>}</div>
 
 /* hover actions under Steve's replies: copy, quote, and the corrections of thread routing (§3.5) */
 function MsgActions({ m }: { m: Msg }) {
@@ -107,7 +107,7 @@ function MeActions({ m }: { m: Msg }) {
       <DropdownMenu>
         <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("pages:chat.reroute")} className="text-muted-foreground" data-reroute-menu />}><RouteIcon /></DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-44">
-          <div className="px-2 py-1 type-footnote text-muted-foreground">{t("pages:chat.rerouteMenu")}</div>
+          <div className="px-2 pb-1 pt-1.5 type-label text-tertiary">{t("pages:chat.rerouteMenu")}</div>
           <DropdownMenuItem onClick={() => void reroute(m, "inline")} data-reroute="inline">{t("pages:chat.inline")}</DropdownMenuItem>
           <DropdownMenuItem onClick={() => void reroute(m, "item")} data-reroute="item">{t("pages:chat.asItem")}</DropdownMenuItem>
           <DropdownMenuItem onClick={() => setToItem(true)} data-reroute="supplement">{t("pages:chat.toItem")}</DropdownMenuItem>
@@ -115,9 +115,9 @@ function MeActions({ m }: { m: Msg }) {
       </DropdownMenu>
       <Popover open={toItem} onOpenChange={setToItem}>
         <PopoverTrigger nativeButton={false} render={<span className="size-0" aria-hidden />} />
-        <PopoverContent align="end" className="w-60 gap-2 rounded-2xl p-3" data-reroute-popover>
-          <div className="type-callout font-medium">{t("pages:chat.whichItem")}</div>
-          <Input autoFocus placeholder="ST-12" value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} className="h-8" data-reroute-item />
+        <PopoverContent align="end" className="w-64 gap-3 p-3" data-reroute-popover>
+          <div className="type-body font-medium">{t("pages:chat.whichItem")}</div>
+          <Input autoFocus placeholder="ST-12" value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} className="font-mono" data-reroute-item />
           <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setToItem(false)}>{t("common:action.cancel")}</Button><Button size="sm" onClick={send}>{t("pages:chat.send")}</Button></div>
         </PopoverContent>
       </Popover>
@@ -159,10 +159,10 @@ function DigestSection({ title, items, row, id }: { title: string; items: Item[]
   if (!items.length) return null
   const xs = all ? items : items.slice(0, 3)
   return (
-    <div className="border-t px-1.5 py-2" data-digest-section={id}>
-      <div className="flex items-center justify-between px-2.5 py-1 type-label text-muted-foreground"><span>{title} · {items.length}</span>
-        {items.length > 3 && <button type="button" className="font-normal hover:text-foreground" onClick={() => setAll(!all)}>{all ? t("pages:chat.digest.collapse") : t("pages:chat.digest.more", { count: items.length - 3 })}</button>}</div>
-      {xs.map((i) => <div key={i.id} role="button" tabIndex={0} onClick={() => go("#/items/" + i.id)} className="flex min-h-10 cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-1.5 transition-colors hover:bg-accent">{row(i)}</div>)}
+    <div className="border-t border-border/70 px-2 py-2" data-digest-section={id}>
+      <div className="flex items-center justify-between px-2 pb-1 pt-1.5 type-label text-tertiary"><span>{title} <span className="tabular-nums">· {items.length}</span></span>
+        {items.length > 3 && <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => setAll(!all)}>{all ? t("pages:chat.digest.collapse") : t("pages:chat.digest.more", { count: items.length - 3 })}</button>}</div>
+      {xs.map((i) => <div key={i.id} role="button" tabIndex={0} onClick={() => go("#/items/" + i.id)} className="flex min-h-10 cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-accent anim-in">{row(i)}</div>)}
     </div>
   )
 }
@@ -174,16 +174,16 @@ function Digest({ from }: { from: number }) {
   const h = Math.round((Date.now() - from) / 3600_000)
   const t = useT()
   return (
-    <Card size="sm" className="-mt-2 w-full max-w-[560px] self-start gap-0 py-0 anim-in" data-digest>
-      <div className="px-4 pb-3 pt-3.5">
-        <div className="type-footnote text-muted-foreground">{t("pages:chat.digest.away", { from: tm(from), count: h })}</div>
+    <Card size="sm" className="-mt-2 w-full max-w-[560px] self-start gap-0 py-0 shadow-[var(--lift)] anim-in" data-digest>
+      <div className="px-4 pb-3 pt-4">
+        <div className="type-footnote text-tertiary">{t("pages:chat.digest.away", { from: tm(from), count: h })}</div>
         <div className="mt-1 type-headline">{t("pages:chat.digest.headline", { wait: p.length, done: done.length, run: run.length })}</div>
       </div>
       <DigestSection id="need" title={t("pages:chat.digest.need")} items={p} row={(i) => <>
         <StatusDot s="wait" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>
         <Button size="xs" variant="outline" onClick={(e) => { e.stopPropagation(); go("#/inbox") }}>{WACT[i.wait!.type]}</Button></>} />
       <DigestSection id="done" title={t("pages:chat.digest.done")} items={done} row={(i) => <>
-        <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="type-footnote text-muted-foreground">{i.now}</span></>} />
+        <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="max-w-40 truncate type-footnote text-muted-foreground">{i.now}</span></>} />
       <DigestSection id="run" title={t("pages:chat.digest.run")} items={run} row={(i) => <>
         <StatusDot s={i.st} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="hidden type-footnote text-muted-foreground sm:inline">{i.plan ? <PlanBar i={i} /> : i.st === "block" ? t("pages:chat.digest.blocked") : ""}</span></>} />
     </Card>
@@ -319,7 +319,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   const { more, ended, loading } = historyState()
   return (
     <div className="flex h-full min-h-0 overflow-hidden text-foreground" data-chat-page><div className="relative flex min-w-0 flex-1 flex-col">
-      <header className="flex h-[52px] shrink-0 items-center gap-2 border-b border-border/60 px-3 sm:px-5" data-chat-header>
+      <header className="flex h-13 shrink-0 items-center gap-2 border-b border-border/70 px-3 sm:px-5" data-chat-header>
         <SidebarTrigger className="hidden shrink-0 text-muted-foreground md:inline-flex" />
         <Hero />
         <div className="flex-1" />
@@ -332,40 +332,41 @@ export function ChatView({ conv }: { conv?: string } = {}) {
        * put a horizontal scrollbar line under the messages on every swipe */}
       <div className="relative flex min-h-0 flex-1 flex-col"><div ref={scroller} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-none outline-none" data-chat-scroll>
         <div className="mx-auto flex w-full max-w-[800px] flex-col gap-8 px-4 pb-10 pt-5 sm:px-8" data-chat-messages>
-          {!conv && list.length > 0 && <div ref={top} className="-mb-4 flex min-h-5 justify-center type-footnote text-muted-foreground" data-chat-older={loading ? "loading" : more ? "more" : ended ? "start" : "none"}>
+          {!conv && list.length > 0 && <div ref={top} className="-mb-4 flex min-h-5 justify-center type-footnote text-tertiary" data-chat-older={loading ? "loading" : more ? "more" : ended ? "start" : "none"}>
             {loading ? <span className="flex items-center gap-2"><Spinner className="size-3.5" />{t("pages:chat.loadingOlder")}</span> : more ? <button type="button" className="hover:text-foreground" onClick={() => { keep.current = anchorNow(); void loadOlder() }}>{t("pages:chat.older")}</button> : ended && <span>{t("pages:chat.start")}</span>}
           </div>}
-          {conv && im === null && <div className="py-10 text-center type-callout text-muted-foreground" data-conv-missing>{t("pages:chat.missing")}</div>}
+          {conv && im === null && <div className="py-16 text-center type-body text-muted-foreground" data-conv-missing>{t("pages:chat.missing")}</div>}
           {list.map((m, n) => {
             const key = m.clientId ?? m.id ?? m.k
             const prev = list[n - 1], day = m.created && (!prev?.created || new Date(prev.created).toDateString() !== new Date(m.created).toDateString())
-            const dayLabel = day ? <div className="flex items-center gap-4 type-footnote text-muted-foreground" key={"d" + key} data-chat-day><span className="h-px flex-1 bg-border/60" /><span>{chatDay(m.created!)}</span><span className="h-px flex-1 bg-border/60" /></div> : null
-            const lit = m.id && m.id === flash ? "rounded-2xl bg-blue/10 ring-8 ring-blue/10" : ""
+            const dayLabel = day ? <div className="flex items-center gap-4 type-label text-tertiary" key={"d" + key} data-chat-day><span className="h-px flex-1 bg-border/70" /><span>{chatDay(m.created!)}</span><span className="h-px flex-1 bg-border/70" /></div> : null
+            /* the jumped-to message: a wash with a soft halo, both fading in and out together; the radius stays when it fades */
+            const lit = m.id && m.id === flash ? "bg-blue/8 shadow-[0_0_0_8px_color-mix(in_srgb,var(--blue)_8%,transparent)]" : ""
             if (m.k === "me" && conv) return <Fragment key={key}>{dayLabel}<div className="flex flex-col gap-1.5" data-msg={m.id} data-im-turn><SenderLine m={rawOf(m)} />{rawOf(m)?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={rawOf(m)!.channel_message!} /></div> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /></div></Fragment>
-            if (m.k === "me") return <Fragment key={key}>{dayLabel}<div className={cn("group/me relative flex flex-col gap-1.5 transition-colors duration-500", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}><QuoteHead id={m.replyTo} className="self-end" />{m.a2uiAction ? <A2uiActionNote a={m.a2uiAction} /> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /><MeActions m={m} /></div></Fragment>
+            if (m.k === "me") return <Fragment key={key}>{dayLabel}<div className={cn("group/me relative flex flex-col gap-1.5 rounded-xl transition-[background-color,box-shadow] duration-[260ms] ease-[var(--ease-out)]", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}><QuoteHead id={m.replyTo} className="self-end" />{m.a2uiAction ? <A2uiActionNote a={m.a2uiAction} /> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /><MeActions m={m} /></div></Fragment>
             if (m.k === "thinking") return <div key={key} className="flex flex-col gap-2" data-chat-draft={st.draft?.mid} aria-busy="true"><LiveSteps />{st.draft?.text && <SteveSays><Markdown text={st.draft.text} streaming /></SteveSays>}</div>
             if (m.notice) return <Fragment key={key}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>
-            return <Fragment key={key}>{dayLabel}<div className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 transition-colors duration-500", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}>
-              <div className="flex min-w-0 items-center gap-2 px-1 type-footnote text-muted-foreground" data-chat-author><span className="truncate font-medium text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>
-              <QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}{m.stopped && <div className="mt-2 flex items-center gap-1.5 type-footnote text-muted-foreground" data-stopped><CircleStopIcon className="size-3.5" aria-hidden />{t("pages:chat.stopped")}</div>}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.meet && meeting() && m.id === st.settings.onboardFrom && <Button size="sm" variant="ghost" className="-mt-1 self-start text-muted-foreground" onClick={() => void endMeeting()} data-meet-skip>{t("pages:chat.onboard.meetSkip")}</Button>}{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
+            return <Fragment key={key}>{dayLabel}<div className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 rounded-xl transition-[background-color,box-shadow] duration-[260ms] ease-[var(--ease-out)]", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}>
+              <div className="flex min-w-0 items-baseline gap-2 px-1 type-footnote text-tertiary" data-chat-author><span className="truncate type-callout font-semibold text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>
+              <QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}{m.stopped && <div className="mt-2 flex items-center gap-1.5 type-callout text-muted-foreground" data-stopped><CircleStopIcon className="size-3.5" aria-hidden />{t("pages:chat.stopped")}</div>}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.meet && meeting() && m.id === st.settings.onboardFrom && <Button size="sm" variant="ghost" className="-mt-1 self-start text-muted-foreground" onClick={() => void endMeeting()} data-meet-skip>{t("pages:chat.onboard.meetSkip")}</Button>}{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
           })}
           {!conv && away > 0 && <><SteveSays sub={t("pages:chat.digest.sub")}>{t("pages:chat.digest.lead")}</SteveSays><Digest from={away} /></>}
           {!conv && <Onboarding />}
         </div>
       </div>
       {/* pinned to the list, not the page: the composer's height differs between phone and desktop and grows with the queue */}
-      {back ? <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-0.5 rounded-full border bg-popover p-0.5 shadow-md anim-in" data-jump-bar>
+      {back ? <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-0.5 rounded-full bg-popover p-1 shadow-lg anim-in" data-jump-bar>
           {back !== "latest" && <Button size="sm" variant="ghost" className="rounded-full" onClick={() => { const a = back; setBack(null); if (!toAnchor(a)) bottom() }} data-jump-back><Undo2Icon />{t("pages:chat.jumpBack")}</Button>}
           <Button size="sm" variant="ghost" className="rounded-full text-muted-foreground" onClick={bottom} data-jump-latest>{fresh ? t("pages:chat.newCount", { count: fresh }) : t("pages:chat.latest")}<ArrowDownIcon /></Button>
         </div>
-        : unread && <Button className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full" size="sm" onClick={bottom} data-new-messages>{fresh ? t("pages:chat.newCount", { count: fresh }) : t("pages:chat.newMessages")}<ArrowDownIcon /></Button>}</div>
+        : unread && <Button className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full shadow-lg anim-in" size="sm" onClick={bottom} data-new-messages>{fresh ? t("pages:chat.newCount", { count: fresh }) : t("pages:chat.newMessages")}<ArrowDownIcon /></Button>}</div>
       <div className="mx-auto w-full max-w-[800px] shrink-0 px-4 pb-[76px] pt-3 sm:px-8 md:pb-5" data-chat-input>
         {conv ? im && <ImReadOnly b={im.badge} /> : <>
         {p.length > 0 && (
-          <button type="button" onClick={() => go("#/inbox")} data-pending-strip className="mb-2 flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left type-callout transition-colors hover:bg-accent">
+          <button type="button" onClick={() => go("#/inbox")} data-pending-strip className="mb-2 flex w-full items-center gap-2.5 rounded-xl bg-muted/60 px-3 py-2 text-left type-callout transition-colors hover:bg-accent anim-in">
             <StatusDot s="wait" /><span className="font-medium">{t("pages:chat.pending", { count: p.length })}</span>
             <span className="min-w-0 flex-1 truncate text-muted-foreground">{p.map((c) => t("pages:chat.pendingRow", { kind: c.w.subject === "tool_call" ? t("pages:chat.pendingPermission") : WT[c.w.type], title: c.i.id ? c.i.t : t("pages:chat.pendingConv", { title: c.i.t }) })).join(" · ")}</span>
-            <ChevronRightIcon className="size-4 text-muted-foreground" />
+            <ChevronRightIcon className="size-4 shrink-0 text-tertiary" />
           </button>
         )}
         <ChatQueue composer={composer} />

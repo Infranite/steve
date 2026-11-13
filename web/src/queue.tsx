@@ -166,8 +166,8 @@ export function QueuedComment({ sid, q, prefix = "", composer, note, starting, a
   return <div className="min-w-0 flex-1" data-queued={q.id} data-queued-comment>
     {e.edit !== null ? <div className="mb-1"><EditBox e={e} /></div> : (shown !== "（附件）" || !q.files?.length) && body(shown)}
     <Files files={q.files} className="my-1" />
-    <div className="flex flex-wrap items-center gap-x-2 type-footnote text-muted-foreground">
-      <span className="inline-flex items-center gap-1" data-sq-note>{at} · <ClockIcon className="size-3 shrink-0" aria-hidden />{t("shell:queue.queuedNote", { note })}</span>
+    <div className="flex flex-wrap items-center gap-x-2 type-footnote text-tertiary">
+      <span className="inline-flex items-center gap-1 tabular-nums" data-sq-note>{at} · <ClockIcon className="size-3 shrink-0" aria-hidden />{t("shell:queue.queuedNote", { note })}</span>
       <Actions e={e} shown={shown} ops={ops} via={q.via} className="-ml-2 sm:ml-0" />
     </div>
   </div>

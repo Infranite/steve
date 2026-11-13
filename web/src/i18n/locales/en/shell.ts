@@ -423,6 +423,8 @@ export default {
     loading: "Loading…",
     original: "Original conversation",
     originalId: "Original session ID",
+    commandLabel: "Resume command",
+    cwdLabel: "Working directory",
     idPending: "Session ID: {{note}}.",
     noCommand: "{{h}} has no known resume command. Use the ID above to find it in its own interface.",
     cwdMissing: "This directory no longer exists. Restore it before resuming.",

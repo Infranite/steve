@@ -8,7 +8,8 @@ import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
 import { usePeopleOn } from "@/api/people"
 import { Files } from "@/attach"
-import { SessionCards } from "@/chat2"
+import { PANEL_W, SessionCards } from "@/chat2"
+import { SearchField } from "@/search-field"
 import { Markdown } from "@/components/markdown"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
@@ -46,7 +47,7 @@ import { RunState } from "@/yolo/status"
 import { cn } from "cn"
 import { lang, t as tr, useT } from "@/i18n"
 import { nearTime, num } from "@/i18n/format"
-import { CircleAlertIcon, CircleDashedIcon, CircleHelpIcon, HourglassIcon, LoaderCircleIcon, ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleCheckIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, ServerIcon, LinkIcon, ListIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UploadIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
+import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PanelRightIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, ServerIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UploadIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 let selecting = false
@@ -306,8 +307,8 @@ export function LinkDialog({ k }: { k: string }) {
 let dtab: "动态" | "产出" = "动态"; let lastItem = ""
 /* the item page's state: its mark and pill take the state's tone; the "now" card's border too */
 const STATE_TONE: Record<ItemState["tone"], [string, string]> = {
-  run: ["text-blue", "bg-blue/10 text-blue"], wait: ["text-attention", "bg-attention/12 text-attention"], pause: ["text-muted-foreground", "bg-muted text-muted-foreground"],
-  done: ["text-success", "bg-success/10 text-success"], fail: ["text-destructive", "bg-destructive/10 text-destructive"], neutral: ["text-muted-foreground", "bg-muted text-muted-foreground"],
+  run: ["text-blue", "bg-blue/12 text-blue"], wait: ["text-attention", "bg-attention/12 text-attention"], pause: ["text-muted-foreground", "bg-muted text-muted-foreground"],
+  done: ["text-success", "bg-success/12 text-success"], fail: ["text-destructive", "bg-destructive/12 text-destructive"], neutral: ["text-muted-foreground", "bg-muted text-muted-foreground"],
 }
 const ROOT_STATUS: Record<ItemState["kind"], AgentStatus> = {
   done: "done", dropped: "stopped", failed: "failed", proposed: "proposed", asking: "asking", unavailable: "blocked",
@@ -712,21 +713,22 @@ export function SessionsView() {
   const oneDevice = xs.length > 1 && new Set(xs.map(([, s]) => deviceName(s.device))).size === 1, oneSrc = xs.length > 1 && new Set(xs.map(([, s]) => s.src)).size === 1
   const shared = [oneDevice && deviceName(xs[0][1].device), oneSrc && xs[0][1].src].filter(Boolean).join(" · ")
   return (
-    <Page title={t("views:sessions.title")} sub={t("views:sessions.sub", { total: all.length, run: all.filter((x) => x[1].st === "run").length }) + (shared ? " · " + t("views:sessions.allOn", { what: shared }) : "")} actions={<Button size="sm" variant="outline" onClick={() => openSheet("import")} data-import><UploadIcon />{t("views:sessions.import")}</Button>}>
-      <label className="relative mb-3 block"><SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" />
-        <Input className="h-10 rounded-xl bg-muted/70 pl-9 text-[14px]" placeholder={t("views:sessions.search")} defaultValue={sq} onChange={(e) => { sq = e.target.value.trim(); r() }} data-session-search /></label>
-      <div className="mb-5 flex flex-wrap items-center gap-2"><Chips value={sfLabel(sf)} onChange={(v) => { sf = SFILTS.find((k) => sfLabel(k) === v) ?? "all"; r() }} options={SFILTS.map(sfLabel)} /><span className="flex-1" />
+    <Page title={t("views:sessions.title")} sub={t("views:sessions.sub", { total: all.length, run: all.filter((x) => x[1].st === "run").length }) + (shared ? " · " + t("views:sessions.allOn", { what: shared }) : "")}
+      /* importing belongs to the list, on the title line, not at the window's far edge */
+      toolbar={<Button size="sm" variant="outline" onClick={() => openSheet("import")} data-import><UploadIcon />{t("views:sessions.import")}</Button>} toolbarTop>
+      <SearchField className="mb-4" aria-label={t("views:sessions.search")} placeholder={t("views:sessions.search")} defaultValue={sq} onChange={(e) => { sq = e.target.value.trim(); r() }} data-session-search />
+      <div className="mb-6 flex flex-wrap items-center gap-2"><Chips value={sfLabel(sf)} onChange={(v) => { sf = SFILTS.find((k) => sfLabel(k) === v) ?? "all"; r() }} options={SFILTS.map(sfLabel)} /><span className="flex-1" />
         <Select testId="harness-filter" value={hf} onChange={(v) => { hf = v; r() }} options={[{ v: "all", l: t("views:sessions.allHarness") }, ...st.runtimes.map((x) => ({ v: x.name, l: x.name }))]} /></div>
       {xs.length ? (
         <Group>{xs.map(([k, s]) => (
           <div key={k} role="button" tabIndex={0} onClick={() => go("#/sessions/" + k)} data-session-row={k} className="flex cursor-pointer items-start gap-3 rounded-lg px-2 py-3 transition-colors hover:bg-accent">
-            <StatusDot s={s.st} className="mt-[7px]" />
+            <StatusDot s={s.st} className="mt-2" />
             <div className="min-w-0 flex-1">
               <div className="truncate type-body font-medium">{s.title}</div>
-              <Meta className="mt-0.5">{s.item ? <span className="max-w-[300px] truncate"><span className="font-mono">{s.item}</span> · #{s.n}</span> : <span>{t("views:sessions.unlinked")}</span>}{s.ro && <Badge variant="outline" className="h-4.5 font-normal text-muted-foreground"><LockIcon />{t("views:sessions.readOnly")}</Badge>}<span>{hm(s)}</span>{!oneDevice && <span>{st.devices.find((d) => d.id === s.device)?.name ?? "Hub"}</span>}{!oneSrc && <span>{s.src}</span>}{s.ctx > 0 && <span>{t("views:sessions.ctx", { pct: s.ctx })}</span>}</Meta>
-              {sq && hits?.has(k) && <div className="mt-1 type-footnote text-muted-foreground">{t("views:sessions.contentHit", { q: sq })}</div>}
+              <Meta className="mt-0.5">{s.item ? <span className="max-w-[300px] truncate"><span className="font-mono">{s.item}</span> <span className="tabular-nums">#{s.n}</span></span> : <span>{t("views:sessions.unlinked")}</span>}{s.ro && <Badge variant="outline" className="h-4.5 font-normal text-muted-foreground"><LockIcon />{t("views:sessions.readOnly")}</Badge>}{/* harness and model as two fields: one separator style on the line */}<span>{s.h ?? t("core:unknownHarness")}</span><span>{s.m ?? t("core:defaultModel")}</span>{!oneDevice && <span>{st.devices.find((d) => d.id === s.device)?.name ?? "Hub"}</span>}{!oneSrc && <span>{s.src}</span>}{s.ctx > 0 && <span>{t("views:sessions.ctx", { pct: s.ctx })}</span>}</Meta>
+              {sq && hits?.has(k) && <div className="mt-1 type-footnote text-blue">{t("views:sessions.contentHit", { q: sq })}</div>}
             </div>
-            <span className="shrink-0 type-footnote text-muted-foreground">{s.up}</span>
+            <span className="shrink-0 pt-0.5 type-footnote tabular-nums text-tertiary">{s.up}</span>
           </div>
         ))}</Group>
       ) : <Empty title={all.length ? t("views:sessions.emptyFiltered") : t("views:sessions.emptyNone")} sub={all.length ? undefined : t("views:sessions.emptyNoneSub")} />}
@@ -734,6 +736,11 @@ export function SessionsView() {
   )
 }
 
+/* a finished turn is one quiet line under the conversation; only a running or waiting turn keeps its box. On a phone the
+ * run bar keeps the state and the time, not the step summary */
+const RUNBAR_QUIET = "[&_:is([data-runbar=done],[data-runbar=stop],[data-runbar=ended])]:min-h-8 [&_:is([data-runbar=done],[data-runbar=stop],[data-runbar=ended])]:border-0 [&_:is([data-runbar=done],[data-runbar=stop],[data-runbar=ended])]:bg-transparent [&_:is([data-runbar=done],[data-runbar=stop],[data-runbar=ended])]:px-0 [&_:is([data-runbar=done],[data-runbar=stop],[data-runbar=ended])]:py-1 max-sm:[&_[data-runbar]_[data-doing]]:hidden"
+/* the relation graph in a side panel: a muted field, not a frame holding framed cards */
+const GRAPH_FLAT = "[&_[data-graph]]:border-0 [&_[data-graph]]:bg-muted/60 [&_[data-graph-detail]]:border-0 [&_[data-graph-detail]]:bg-muted/60 [&_[data-graph-empty]]:border-0 [&_[data-graph-empty]]:bg-muted/60"
 export function SessionView({ k }: { k: string }) {
   const t = useT()
   const [mode, setMode] = useState<"插话" | "排队">("插话"), [renaming, setRenaming] = useState(false)
@@ -766,14 +773,14 @@ export function SessionView({ k }: { k: string }) {
   const ctx = (
     <HoverCard>
       <HoverCardTrigger render={<button type="button" className="rounded-full px-2 py-1 type-footnote tabular-nums text-muted-foreground hover:bg-accent" />}>{s.contextKnown ? t("views:session.ctxPct", { pct: s.ctx }) : t("views:session.ctxUnknown")}</HoverCardTrigger>
-      <HoverCardContent className="w-60"><div className="type-label">{t("views:session.ctx")}</div>{s.contextKnown && <Progress value={Math.min(100, s.ctx)} className="my-2" />}<div className="type-footnote text-muted-foreground">{s.contextKnown ? t("views:session.ctxUsed", { pct: s.ctx }) : t("views:session.ctxNone")}</div></HoverCardContent>
+      <HoverCardContent className="w-60"><div className="type-label text-tertiary">{t("views:session.ctx")}</div>{s.contextKnown && <Progress value={Math.min(100, s.ctx)} className="my-2.5" />}<div className="type-callout text-muted-foreground">{s.contextKnown ? t("views:session.ctxUsed", { pct: s.ctx }) : t("views:session.ctxNone")}</div></HoverCardContent>
     </HoverCard>
   )
   const panel = (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-8">
       {i ? (
         <div><SectionLabel>{t("views:session.item")}</SectionLabel>
-          <button type="button" onClick={() => go("#/items/" + i.id)} className="-mx-2 w-[calc(100%+16px)] rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-accent"><div className="type-callout font-medium"><span className="mr-1.5 font-mono text-[12px] font-normal text-muted-foreground">{i.id}</span>{i.t}</div><Status s={itemDisplayStatus(i)} className="mt-1" /></button>
+          <button type="button" onClick={() => go("#/items/" + i.id)} className="-mx-2 w-[calc(100%+16px)] rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-accent"><div className="type-callout font-medium"><span className="mr-1.5 font-mono type-footnote font-normal text-muted-foreground">{i.id}</span>{i.t}</div><Status s={itemDisplayStatus(i)} className="mt-1" /></button>
           <div className="mt-1 px-1 type-callout text-muted-foreground"><ProjectChip id={i.project} /></div></div>
       ) : (
         <div><SectionLabel>{t("views:session.unlinked")}</SectionLabel><div className="flex flex-wrap gap-2">{!s.ro && <Button size="sm" variant="outline" onClick={() => openSheet("link", { k })} data-link>{t("views:session.link")}</Button>}<Button size="sm" variant="outline" onClick={() => openSheet("fork", { k, at: Math.max(0, s.ev.length - 1) })}>{t("views:session.toItem")}</Button></div></div>
@@ -782,7 +789,7 @@ export function SessionView({ k }: { k: string }) {
         <RelationGraph key={k} focus={k} scope="near" height={260} minimal onOpen={openNode} /></div>
       <SessionKnowledge id={k} />
       <div data-session-resume><SectionLabel>{t("views:session.resume")}</SectionLabel><ResumeCard k={k} /></div>
-      <div><SectionLabel>{t("views:session.info")}</SectionLabel><div className="flex flex-col gap-1 px-1 type-callout text-muted-foreground"><BotName k={s.b} className="text-foreground" /><span>{hm(s)}</span><span>{t("views:session.effort", { v: s.reasoningEffort ?? t("views:session.effortInherit") })}</span><a href={"#/devices/" + s.device} className="hover:text-foreground">{t("views:session.runsOn", { device: st.devices.find((d) => d.id === s.device)?.name ?? "Hub" })}</a><span>{t("views:session.source", { src: s.src })}</span><span>{t("views:session.durCtx", { dur: s.dur, ctx: s.contextKnown ? `${s.ctx}%` : t("views:session.unreported") })}</span></div></div>
+      <div><SectionLabel>{t("views:session.info")}</SectionLabel><div className="flex flex-col gap-1.5 px-1 type-callout text-muted-foreground"><BotName k={s.b} className="font-medium text-foreground" /><span>{hm(s)}</span><span>{t("views:session.effort", { v: s.reasoningEffort ?? t("views:session.effortInherit") })}</span><a href={"#/devices/" + s.device} className="hover:text-foreground">{t("views:session.runsOn", { device: st.devices.find((d) => d.id === s.device)?.name ?? "Hub" })}</a><span>{t("views:session.source", { src: s.src })}</span><span>{t("views:session.durCtx", { dur: s.dur, ctx: s.contextKnown ? `${s.ctx}%` : t("views:session.unreported") })}</span></div></div>
     </div>
   )
   return (
@@ -790,33 +797,39 @@ export function SessionView({ k }: { k: string }) {
       <div className="min-w-0 flex-1">
         <Page noTitle title={t("views:session.numbered", { n: s.n })} back={i ? ["#/items/" + i.id, t("views:items.title")] : ["#/sessions", t("views:sessions.title")]} max={720} scrollRef={scroller}
           bar={<div className="flex min-w-0 items-center gap-2"><span className="truncate type-headline">{s.n ? t("views:session.numberedBar", { n: s.n }) : ""}{renaming ? <Input autoFocus defaultValue={s.title} className="inline-flex h-7 w-56 rounded-md" data-rename-input onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.title) sessPatch(k, { title: v }, t("views:session.renamed")); setRenaming(false) }} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} /> : s.title}</span><Status s={s.st} sess pill className="hidden sm:inline-flex" />{i && <ProjectChip id={i.project} className="hidden shrink-0 type-footnote text-muted-foreground sm:inline-flex" />}</div>}
-          actions={<>{!s.ro && <SessionStats id={k} />}{/* the runtime line under the conversation says it too: below xl the title needs the room */}<span className="hidden xl:inline-flex">{ctx}</span><Button size="sm" variant="ghost" className="text-muted-foreground xl:hidden" onClick={() => setInfoOpen(true)}>{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
+          actions={<>{!s.ro && <SessionStats id={k} />}{/* the runtime line under the conversation says it too: below xl the title needs the room */}<span className="hidden xl:inline-flex">{ctx}</span><Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)}>{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
           footer={
-            <div className="mx-auto w-full max-w-[784px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5">
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-muted-foreground" data-session-runtime>
-                <span>Harness <span className="text-foreground">{s.h ?? t("views:session.unknown")}</span></span>
+            /* on the page's own frame and reading width: the composer and the transcript share one left edge */
+            <div className="mx-auto w-full max-w-[1104px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div className={cn("max-w-[760px]", RUNBAR_QUIET)}>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-tertiary" data-session-runtime>
+                <span>Harness <span className="text-muted-foreground">{s.h ?? t("views:session.unknown")}</span></span>
                 <NativeIdLine k={k} label={t("views:session.nativeId")} className="w-auto" />
-                <span className="break-all">{t("views:session.model")} <span className="text-foreground">{s.m ?? t("views:session.defaultModel")}</span></span>
-                <span>{t("views:session.effortLabel")} <span className="text-foreground">{s.reasoningEffort ?? t("views:session.effortInherit")}</span></span>
-                <span className={s.ctx >= 80 ? "text-attention" : ""}>{s.contextKnown ? t("views:session.ctxPct", { pct: s.ctx }) : t("views:session.ctxUnknown")}</span>
+                <span className="break-all">{t("views:session.model")} <span className="text-muted-foreground">{s.m ?? t("views:session.defaultModel")}</span></span>
+                <span>{t("views:session.effortLabel")} <span className="text-muted-foreground">{s.reasoningEffort ?? t("views:session.effortInherit")}</span></span>
+                {/* the header says it from xl up */}
+                <span className={cn("tabular-nums xl:hidden", s.ctx >= 80 ? "text-attention" : "text-muted-foreground")}>{s.contextKnown ? t("views:session.ctxPct", { pct: s.ctx }) : t("views:session.ctxUnknown")}</span>
               </div>
               <RunBar k={k} onStop={s.ro ? undefined : () => interrupt(k)} />
               {!s.ro && <QueueStrip sid={k} rows={s.queue} note={queueNote(s)} starting={s.starting} composer={composer} />}
               {s.ro ? (
-                <div className="flex flex-wrap items-center gap-3 rounded-2xl border bg-card px-4 py-3" data-readonly>
+                <div className="flex flex-wrap items-center gap-3 rounded-xl bg-muted/60 px-4 py-3" data-readonly>
                   <LockIcon className="size-4 text-muted-foreground" /><span className="min-w-0 flex-1 type-callout text-muted-foreground">{t("views:session.readOnlyNote", { src: s.src.startsWith("本机 ") ? t("views:session.srcLocal", { h: s.src.slice(3) }) : s.src })}</span>
                   <Button size="sm" variant="outline" onClick={() => openSheet("fork", { k, at: Math.max(0, s.ev.length - 1) })}>{t("views:session.toItem")}</Button>
                 </div>
               ) : <Composer key={k} draftKey={draftKey(st.workspace?.id, "session", k)} handle={composer} testId="session" model={hm(s)} placeholder={s.st === "ended" ? t("views:session.endedPlaceholder") : t("views:session.placeholder")} onSend={(text, files) => sessSend(k, text, mode, files)}
                 left={run ? <Segmented size="sm" value={mode} onChange={setMode} options={[["插话", t("views:session.modeSteer")], ["排队", t("views:session.modeQueue")]] as const} /> : undefined} />}
-            </div>
+            </div></div>
           }>
           <div className="pt-6"><Transcript k={k} /><SessionCards k={k} /></div>
         </Page>
       </div>
-      <aside className="hidden w-[300px] shrink-0 overflow-y-auto border-l border-sidebar-border bg-sidebar px-5 py-5 xl:block" data-session-panel>{panel}</aside>
+      {/* the same panel as the chat rail: one width, a head on the top bar's line, the content scrolling under it */}
+      <aside className={cn("hidden shrink-0 flex-col border-l border-sidebar-border bg-sidebar xl:flex", PANEL_W)} data-session-panel>
+        <div className="flex h-12 shrink-0 items-center border-b border-sidebar-border px-5 type-headline" data-session-panel-head>{t("views:session.info")}</div>
+        <div className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-6 pt-5", GRAPH_FLAT)}>{panel}</div>
+      </aside>
       {debugOpen && s.item && <ItemDebugDialog item={s.item} session={k} onClose={() => setDebugOpen(false)} />}
-      <Dialog open={infoOpen} onOpenChange={setInfoOpen}><DialogContent className="max-h-[85dvh] overflow-y-auto"><DialogHeader><DialogTitle>{t("views:session.info")}</DialogTitle><DialogDescription>{t("views:session.infoDesc")}</DialogDescription></DialogHeader>{panel}</DialogContent></Dialog>
+      <Dialog open={infoOpen} onOpenChange={setInfoOpen}><DialogContent className="max-h-[85dvh] overflow-y-auto"><DialogHeader><DialogTitle>{t("views:session.info")}</DialogTitle><DialogDescription>{t("views:session.infoDesc")}</DialogDescription></DialogHeader><div className={GRAPH_FLAT}>{panel}</div></DialogContent></Dialog>
     </div>
   )
 }

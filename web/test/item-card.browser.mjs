@@ -16,7 +16,7 @@ try {
       // nothing on the card reaches past its edge, and the title keeps its room beside the status
       const over = await card.evaluate(el => { const r = el.getBoundingClientRect(); return [...el.querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > r.right + 1).map(e => e.outerHTML.slice(0, 80)) })
       assert.deepEqual(over, [], `${id} overflows its card at ${width}px`)
-      const title = await card.locator("[data-item-ref] .type-body").boundingBox()
+      const title = await card.locator("[data-item-ref] .type-headline").boundingBox()
       assert.ok(title.width > box.width / 3, `${id} title squeezed to ${title.width}px`)
     }
     // the misfiled build sentence is a build line, not “已发布 …”

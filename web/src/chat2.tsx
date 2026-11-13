@@ -61,12 +61,12 @@ export function StepsBlock({ m }: { m: Msg }) {
   const routeDesc = r && [kindLabel(r.kind), r.kind === "item" && botName(r.picked ?? r.bot), r.project && projectName(r.project), ...r.tags.map(tagName), ...r.newTags.map((tag) => t("shell:chat.newTag", { tag }))].filter(Boolean).join(" · ")
   const items: TrailItem[] = []
   if (r) items.push({ t: "line", key: "route", state: "done", label: <span className="shrink-0">{t("shell:chat.triage")}</span>, detail: <span className="min-w-0 truncate text-foreground/85">{routeDesc}</span>, attrs: { "step-route": "" },
-    body: <div className="pb-1 type-footnote text-muted-foreground">{r.picked ? t("shell:chat.picked", { bot: botName(r.picked) }) : ""}{r.why}{r.guard && r.modelKind && r.modelKind !== r.kind ? t("shell:chat.guarded", { model: kindLabel(r.modelKind), kind: kindLabel(r.kind) }) : ""}<span className="ml-1.5 text-tertiary">{[r.model, secs(r.ms)].filter(Boolean).join(" · ")}</span></div> })
+    body: <div className="pb-1 type-callout text-muted-foreground">{r.picked ? t("shell:chat.picked", { bot: botName(r.picked) }) : ""}{r.why}{r.guard && r.modelKind && r.modelKind !== r.kind ? t("shell:chat.guarded", { model: kindLabel(r.modelKind), kind: kindLabel(r.kind) }) : ""}<span className="ml-1.5 type-footnote tabular-nums text-tertiary">{[r.model, secs(r.ms)].filter(Boolean).join(" · ")}</span></div> })
   if (s.answer?.thought) items.push({ t: "think", key: "thought", text: s.answer.thought, live: false, ms: s.answer.ms, attrs: { "step-thought": "" } })
   s.tools.forEach((tool, n) => {
     const brief = typeof tool.args?.brief === "string" ? tool.args.brief : undefined
     const known = TOOL[tool.name], item = tool.result?.item as string | undefined, state = tool.status === "failed" ? "fail" : "done"
-    const err = (tool.error || (s.research && tool.status === "failed")) ? <div className="pb-1 type-footnote text-destructive">{s.research ? researchError(tool.error) : tool.error}</div> : undefined
+    const err = (tool.error || (s.research && tool.status === "failed")) ? <div className="pb-1 type-callout text-destructive">{s.research ? researchError(tool.error) : tool.error}</div> : undefined
     const extra = tool.ms > 0 ? <span className="shrink-0 tabular-nums text-tertiary">{secs(tool.ms)}</span> : undefined
     if (!known && brief !== undefined) { items.push(researchStep(String(n), tool.name, tool.kind, brief, state, { body: err, attrs: { kind: toolClass(tool.name, tool.kind), "step-tool": tool.name } })); return }
     const desc = tool.name === "create_item" ? [item, botName((tool.result?.bot ?? tool.args.bot) as string), tool.result?.project ? projectName(tool.result.project as string) : t("shell:chat.noProject")].filter(Boolean).join(" · ")
@@ -80,9 +80,9 @@ export function StepsBlock({ m }: { m: Msg }) {
   return (
     <Collapsible open={open} onOpenChange={setOpen} id={"steps-" + m.id} className="max-w-full self-start px-1" data-steps={m.id}>
       <CollapsibleTrigger className="group/work flex max-w-full min-w-0 items-center gap-1.5 rounded-lg py-0.5 text-left type-callout text-muted-foreground hover:text-foreground" data-steps-toggle>
-        <ChevronDownIcon className="size-4 shrink-0 -rotate-90 transition group-aria-expanded/work:rotate-0" />
+        <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-tertiary transition-transform duration-200 ease-(--ease-out) group-hover/work:text-muted-foreground group-aria-expanded/work:rotate-0" />
         <span className="shrink-0 text-foreground/85">{s.research ? t("shell:chat.researched") : t("shell:chat.thinking")}</span>
-        {took != null && !s.research && <span className="shrink-0 tabular-nums">{secs(took)}</span>}
+        {took != null && !s.research && <span className="shrink-0 tabular-nums text-tertiary">{secs(took)}</span>}
         <span className="min-w-0 truncate">· {stepsSummary(s)}</span>
       </CollapsibleTrigger>
       <CollapsibleContent><Trail className="pt-1" items={items} live={false} end={s.tools.length ? { s: s.research?.stopped && s.research.stopped !== "budget" ? "cancel" : "end", label: s.research?.stopped ? t(`thread:research.stopped.${s.research.stopped}`) : t("core:trail.finished") } : undefined} /></CollapsibleContent>
@@ -111,7 +111,7 @@ export function NoticeLine({ m, onOpen }: { m: Msg; onOpen: () => void }) {
     <div className="flex max-w-[88%] items-start gap-2.5 self-start px-1 type-callout anim-in" data-notice-line={m.notice?.ref ?? m.id}>
       <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" strokeWidth={1.75} />
       <div className="min-w-0 flex-1 wrap-anywhere"><span className="text-foreground">{m.t}</span>
-        <span className="ml-2 inline-flex gap-2 type-footnote text-muted-foreground">{m.item && <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + m.item)}>{t("shell:chat.goItem", { item: m.item })}</button>}<button type="button" className="hover:text-foreground hover:underline" onClick={onOpen}>{t("shell:chat.notices")}</button></span></div>
+        <span className="ml-2 inline-flex gap-3 type-footnote text-muted-foreground">{m.item && <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + m.item)}>{t("shell:chat.goItem", { item: m.item })}</button>}<button type="button" className="hover:text-foreground hover:underline" onClick={onOpen}>{t("shell:chat.notices")}</button></span></div>
       <Tooltip>
         <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("shell:chat.dismissNotice")} className="-my-0.5 shrink-0 text-muted-foreground" onClick={() => dismissNotice(m.notice?.ref ?? m.id!)} data-notice-dismiss />}><XIcon /></TooltipTrigger>
         <TooltipContent>{t("shell:chat.dismissNoticeHint")}</TooltipContent>
@@ -121,6 +121,32 @@ export function NoticeLine({ m, onOpen }: { m: Msg; onOpen: () => void }) {
 }
 
 /* ───────── right rail ───────── */
+/** one width for every panel beside the conversation (rail, history, a session's info): switching them never moves the column */
+export const PANEL_W = "w-[320px]"
+/** a Collapsible's content that eases its height open and shut (the base component does not yet) */
+export const FOLD = "h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-[var(--ease-out)] data-ending-style:h-0 data-starting-style:h-0"
+/** a panel beside the conversation that slides open and shut: its width eases between 0 and PANEL_W, the content keeps its
+ * width and stays mounted until the close has finished. `test` names the open panel only (closed, it is gone for tests). */
+export function SidePanel({ open, children, className, test }: { open: boolean; children: ReactNode; className?: string; test: Record<string, string> }) {
+  const [mounted, setMounted] = useState(open), [shown, setShown] = useState(open)
+  useEffect(() => {
+    if (open) {
+      setMounted(true)
+      let r = requestAnimationFrame(() => { r = requestAnimationFrame(() => setShown(true)) })
+      return () => cancelAnimationFrame(r)
+    }
+    setShown(false)
+    const h = setTimeout(() => setMounted(false), 280)
+    return () => clearTimeout(h)
+  }, [open])
+  if (!mounted) return null
+  return (
+    <div className={cn("flex shrink-0 justify-end overflow-hidden transition-[width] duration-[260ms] ease-[var(--ease-out)]", shown && open ? PANEL_W : "w-0")} inert={!open || undefined} data-side-panel>
+      <aside className={cn("flex shrink-0 flex-col overflow-hidden border-l border-sidebar-border bg-sidebar transition-opacity duration-[260ms] ease-[var(--ease-out)]", PANEL_W, shown && open ? "opacity-100" : "opacity-60", className)} {...(open ? test : {})}>{children}</aside>
+    </div>
+  )
+}
+
 const RAIL = "steve-chat-rail"
 const railPref = () => { const v = localStorage.getItem(RAIL); return v ? v === "1" : window.innerWidth >= 1280 }
 /* one panel beside the conversation at a time on wide screens: the rail (事项 and notices) or the history (ST-50); opening
@@ -152,10 +178,10 @@ function similar(xs: RNotice[]): [RNotice, RNotice[]][] {
 }
 function Similar({ n, more, notice }: { n: RNotice; more: RNotice[]; notice: (n: RNotice) => ReactNode }) {
   const t = useT(), [open, setOpen] = useState(false)
-  return <>{notice(n)}{more.length > 0 && <>
-    {open && more.map(notice)}
-    <button type="button" className="mb-1 ml-7 self-start type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)} aria-expanded={open} data-notice-similar={more.length}>{open ? t("shell:chat.similarHide") : t("shell:chat.similarMore", { count: more.length })}</button>
-  </>}</>
+  return <>{notice(n)}{more.length > 0 && <Collapsible open={open} onOpenChange={setOpen}>
+    <CollapsibleContent className={FOLD}>{more.map(notice)}</CollapsibleContent>
+    <button type="button" className="mb-1 ml-6 flex items-center gap-1 self-start type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)} aria-expanded={open} data-notice-similar={more.length}>{open ? t("shell:chat.similarHide") : t("shell:chat.similarMore", { count: more.length })}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-[260ms] ease-[var(--ease-out)]", open && "rotate-180")} /></button>
+  </Collapsible>}</>
 }
 
 /** 事项: what Steve is following for you (running, waiting on you) and the notices, in the rail */
@@ -178,16 +204,21 @@ export function RailToggle({ className }: { className?: string }) {
 export function ChatRail() {
   const { railOpen } = useRail(), t = useT()
   const isWide = useWide()
-  if (isWide) return railOpen ? <aside className="flex w-[300px] shrink-0 flex-col overflow-y-auto overflow-x-hidden border-l border-sidebar-border bg-sidebar px-4 pb-6 pt-3" data-rail="aside"><RailBody /></aside> : null
+  /* the same head as 历史 beside it: one height with the conversation's bar, the name the toggle has, a close */
+  const head = <div className="flex h-13 shrink-0 items-center gap-2 border-b border-sidebar-border px-4" data-rail-head>
+    <span className="type-headline">{t("shell:chat.items")}</span>
+    <Button variant="ghost" size="icon-sm" className="ml-auto text-muted-foreground" aria-label={t("shell:chat.hideRail")} onClick={toggleRail} data-rail-close><XIcon /></Button>
+  </div>
+  if (isWide) return <SidePanel open={railOpen} test={{ "data-rail": "aside" }}>{head}<div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-6 pt-4" data-rail-scroll><RailBody /></div></SidePanel>
   return (
     <Sheet open={sheetOpen} onOpenChange={(o) => { sheetOpen = o; bump() }}>
-      <SheetContent side="right" className="w-[88vw] max-w-[360px]! overflow-y-auto overflow-x-hidden px-4 pb-8 pt-3" data-rail="sheet"><SheetTitle className="sr-only">{t("shell:chat.railTitle")}</SheetTitle><RailBody /></SheetContent>
+      <SheetContent side="right" showCloseButton={false} className="w-[88vw] max-w-[360px]! gap-0 overflow-hidden p-0" data-rail="sheet"><SheetTitle className="sr-only">{t("shell:chat.railTitle")}</SheetTitle>{head}<div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-8 pt-4"><RailBody /></div></SheetContent>
     </Sheet>
   )
 }
 
 function Line({ children, onClick, test }: { children: ReactNode; onClick: () => void; test?: string }) {
-  return <button type="button" onClick={onClick} className="-mx-2 flex min-h-9 w-[calc(100%+16px)] items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-accent" data-rail-row={test}>{children}</button>
+  return <button type="button" onClick={onClick} className="-mx-2 flex min-h-9 w-[calc(100%+16px)] items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-sidebar-accent anim-in" data-rail-row={test}>{children}</button>
 }
 const NI: Record<string, any> = { release: MegaphoneIcon, archive: ArchiveIcon, system: InfoIcon }
 const DAY = 86400_000
@@ -205,36 +236,40 @@ function RailBody() {
   const pinned = st.notices.filter((n) => n.level === "fail" && !n.closed && (n.created > st.noticeSeen || waiting(n)))
   const rest = st.notices.filter((n) => !pinned.includes(n)), fresh = rest.filter((n) => n.created > st.noticeSeen), seen = rest.filter((n) => n.created <= st.noticeSeen)
   /* read ones fold away once there is something new; with nothing new the latest few stay visible */
-  const shownSeen = older ? 50 : pinned.length || fresh.length ? 0 : 5
+  const base = pinned.length || fresh.length ? 0 : 5
   const notice = (n: RNotice) => {
     const I = n.level === "fail" ? CircleAlertIcon : n.level === "success" ? CircleCheckIcon : NI[n.kind] ?? InfoIcon, isNew = n.created > st.noticeSeen
     return (
       <Line key={n.id} onClick={() => n.item_id ? go("#/items/" + n.item_id) : n.text.startsWith("YOLO") ? go("#/yolo") : undefined} test={"notice-" + n.id}>
         <I className={cn("mt-0.5 size-4 shrink-0 self-start", n.level === "fail" && !n.closed ? "text-destructive" : n.level === "fail" ? "text-muted-foreground" : n.level === "success" ? "text-success" : "text-muted-foreground")} strokeWidth={1.75} />
         <span className="min-w-0 flex-1"><span title={n.text} className={cn("line-clamp-2 wrap-anywhere type-callout", isNew ? "font-medium text-foreground" : "text-foreground/80")}>{n.text}</span>
-          <span className="mt-0.5 block type-footnote text-muted-foreground">{n.item_id && <span className="mr-1.5 font-mono">{n.item_id}</span>}{tm(n.created)}</span></span>
-        {isNew && <span className="mt-1.5 size-2 shrink-0 self-start rounded-full bg-blue" aria-label={t("shell:chat.unread")} data-unread-dot />}
+          <span className="mt-0.5 block type-footnote tabular-nums text-tertiary">{n.item_id && <span className="mr-1.5 font-mono">{n.item_id}</span>}{tm(n.created)}</span></span>
+        {/* a new failure already stands out by its icon: the unread dot would only compete with it */}
+        {isNew && <span className={cn("mt-1.5 size-2 shrink-0 self-start rounded-full bg-blue", n.level === "fail" && !n.closed && "sr-only")} aria-label={t("shell:chat.unread")} data-unread-dot />}
       </Line>
     )
   }
   return (
-    <div className="flex flex-col gap-6" data-rail-body>
+    <div className="flex flex-col gap-7" data-rail-body>
       {/* the bar above the conversation already says what Steve is doing: the rail starts with what waits on you */}
       {cards.length > 0 && <section data-rail-wait><SectionLabel>{t("shell:chat.waitingHead", { count: cards.length })}</SectionLabel>
-        {cards.slice(0, 5).map(({ i, w }) => <Line key={w.decision} onClick={() => go(i.id ? "#/inbox" : "#/sessions/" + w.session)} test={"wait-" + w.decision}><StatusDot s="wait" />{i.id && <ItemNo id={i.id} />}<span className="min-w-0 flex-1 truncate type-callout">{i.id ? i.t : t("shell:chat.sessionTitle", { title: i.t })}</span><span className="shrink-0 type-footnote text-muted-foreground">{w.subject === "tool_call" ? t("shell:chat.permission") : WT[w.type]}</span></Line>)}
+        {cards.slice(0, 5).map(({ i, w }) => <Line key={w.decision} onClick={() => go(i.id ? "#/inbox" : "#/sessions/" + w.session)} test={"wait-" + w.decision}><StatusDot s="wait" />{i.id && <ItemNo id={i.id} />}<span className="min-w-0 flex-1 truncate type-callout">{i.id ? i.t : t("shell:chat.sessionTitle", { title: i.t })}</span><span className="shrink-0 type-footnote text-tertiary">{w.subject === "tool_call" ? t("shell:chat.permission") : WT[w.type]}</span></Line>)}
         {cards.length > 5 && <Line onClick={() => go("#/inbox")}><span className="type-footnote text-muted-foreground">{t("shell:chat.moreWaiting", { count: cards.length - 5 })}</span></Line>}</section>}
       {thoughts.length > 0 && <section data-rail-thoughts><SectionLabel>{t("shell:chat.thoughtsHead")}</SectionLabel>
-        {thoughts.map((m) => <Line key={m.id} onClick={() => openSteps(m.id!)} test={"thought-" + m.id}><BrainIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /><span className="min-w-0 flex-1 truncate type-callout" title={stepsSummary(m.steps!)}>{railThought(m)}</span><span className="shrink-0 type-footnote text-muted-foreground">{tm(m.created)}</span></Line>)}</section>}
+        {thoughts.map((m) => <Line key={m.id} onClick={() => openSteps(m.id!)} test={"thought-" + m.id}><BrainIcon className="size-4 shrink-0 text-tertiary" strokeWidth={1.5} /><span className="min-w-0 flex-1 truncate type-callout text-foreground/85" title={stepsSummary(m.steps!)}>{railThought(m)}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{tm(m.created)}</span></Line>)}</section>}
       <section data-rail-notices><SectionLabel>{unread.length ? t("shell:chat.noticesUnread", { count: unread.length }) : t("shell:chat.notices")}</SectionLabel>
-        {!st.notices.length && <div className="type-footnote text-muted-foreground">{t("shell:chat.noticesEmpty")}</div>}
-        {pinned.map(notice)}{similar(fresh).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}{similar(seen.slice(0, shownSeen)).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}
-        {seen.length > shownSeen && <button type="button" className="mt-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(true)} data-older>{t("shell:chat.olderRead", { count: seen.length - shownSeen })}</button>}
-        {older && <button type="button" className="mt-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(false)}>{t("shell:chat.hideRead")}</button>}
+        {!st.notices.length && <div className="type-callout text-tertiary">{t("shell:chat.noticesEmpty")}</div>}
+        {pinned.map(notice)}{similar(fresh).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}{similar(seen.slice(0, base)).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}
+        {/* the read ones fold like the similar ones: the same chevron under the text, the height easing open */}
+        {seen.length > base && <Collapsible open={older} onOpenChange={setOlder}>
+          <CollapsibleContent className={FOLD}>{similar(seen.slice(base, 50)).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}</CollapsibleContent>
+          <button type="button" className="mt-1 ml-6 flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(!older)} aria-expanded={older} data-older>{older ? t("shell:chat.hideRead") : t("shell:chat.olderRead", { count: seen.length - base })}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-[260ms] ease-[var(--ease-out)]", older && "rotate-180")} /></button>
+        </Collapsible>}
       </section>
       {run.length > 0 && <section data-rail-run><SectionLabel>{t("shell:chat.runningHead", { count: run.length })}</SectionLabel>
         {run.slice(0, 5).map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"run-" + i.id}><StatusDot s="run" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>{i.rel?.tone === "fail" && <span className="shrink-0 type-footnote text-destructive" data-rel="fail">{i.rel.outcome === "not_released" ? t("shell:chat.notReleased") : t("shell:chat.releaseFailed")}</span>}</Line>)}</section>}
       {delivered.length > 0 && <section data-rail-done><SectionLabel>{t("shell:chat.recentDone")}</SectionLabel>
-        {delivered.map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"done-" + i.id}><CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="shrink-0 type-footnote text-muted-foreground">{i.up}</span></Line>)}</section>}
+        {delivered.map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"done-" + i.id}><CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{i.up}</span></Line>)}</section>}
     </div>
   )
 }

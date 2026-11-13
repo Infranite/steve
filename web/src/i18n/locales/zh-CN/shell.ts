@@ -406,6 +406,8 @@ export default {
     loading: "正在读取…",
     original: "原始会话",
     originalId: "原始 Session ID",
+    commandLabel: "恢复命令",
+    cwdLabel: "工作目录",
     idPending: "Session ID {{note}}。",
     noCommand: "{{h}} 没有已知的恢复命令，可以用上面的 ID 在它自己的界面里找。",
     cwdMissing: "这个目录已经不在了，恢复前需要先恢复目录。",

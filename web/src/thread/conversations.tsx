@@ -4,13 +4,13 @@
  * chat message (§2.11). Read-only here: a note links to the space, where a message goes out through the checks. */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "cn"
-import { ArrowLeftIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon } from "lucide-react"
+import { ArrowLeftIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon, MessagesSquareIcon } from "lucide-react"
 import { conversationsApi, type ConvBadge, type ConvMessage, type ConvRow, type Reaction } from "@/api/conversations"
 import { st, msgOf, discardOut, useHubEvents, type Msg } from "@/store"
 import { matchesSpace } from "@/live-utils"
-import { go } from "@/ui"
+import { Empty, go } from "@/ui"
+import { SearchField } from "@/search-field"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { t as tr, useT } from "@/i18n"
 
@@ -41,11 +41,11 @@ export function ConvBadgeChip({ b, className }: { b: ConvBadge; className?: stri
   const t = useT()
   return (
     <span className={cn("inline-flex min-w-0 items-center gap-1.5 type-footnote text-muted-foreground", className)} data-conv-badge>
-      <span className="shrink-0 rounded-md bg-accent px-1.5 py-px font-medium text-foreground">{b.provider}</span>
+      <span className="shrink-0 rounded-md bg-muted px-1.5 py-px type-label text-foreground/80">{b.provider}</span>
       <I className="size-3.5 shrink-0" strokeWidth={1.75} />
-      <span className="truncate text-foreground">{b.name}</span>
+      <span className="truncate text-foreground/85">{b.name}</span>
       <span className="shrink-0">{kindLabel(b)}</span>
-      {b.has_external && <span className="shrink-0 rounded-md border px-1 py-px">{t("thread:conv.external")}</span>}
+      {b.has_external && <span className="shrink-0 rounded-md bg-attention/12 px-1.5 py-px type-label text-attention">{t("thread:conv.external")}</span>}
     </span>
   )
 }
@@ -109,23 +109,28 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
     {current && <nav aria-label={t("thread:conv.nav")} className="mx-auto flex w-full max-w-[800px] shrink-0 items-center gap-2 px-4 pb-1 pt-2 sm:px-8" data-conv-switcher>
       <Button variant="ghost" size="sm" className="-ml-2 text-muted-foreground" onClick={() => go("#/")} data-conv="steve"><ArrowLeftIcon />{t("thread:conv.main")}</Button>
       <div className="flex min-w-0 flex-1 items-center gap-1" data-current-conversation>
-        <span className="truncate type-footnote" title={badge?.name}>{badge?.name || t("thread:conv.current")}</span>
+        <span className="truncate type-callout font-medium" title={badge?.name}>{badge?.name || t("thread:conv.current")}</span>
         <Button variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground" aria-label={t("thread:conv.closeCurrent")} disabled={busy !== null} onClick={() => void change(current, true)}><XIcon /></Button>
       </div>
       <Button variant="ghost" size="sm" className="ml-auto shrink-0 text-muted-foreground" onClick={() => setOpen(true)}><ListIcon />{t("thread:conv.list")}</Button>
     </nav>}
-    {!open && error && <p role="alert" className="mx-auto px-4 text-destructive type-footnote">{error}</p>}
+    {!open && error && <p role="alert" className="mx-auto px-4 type-callout text-destructive">{error}</p>}
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="max-h-[85dvh] gap-3 sm:max-w-xl" data-conversation-manager>
-        <DialogTitle>{t("thread:conv.list")}</DialogTitle>
-        <DialogDescription>{t("thread:conv.listHelp")}</DialogDescription>
-        <Input aria-label={t("thread:conv.search")} placeholder={t("thread:conv.searchPlaceholder")} value={query} onChange={e => setQuery(e.target.value)} />
-        <div className="flex gap-2" aria-label={t("thread:conv.stateLabel")}>{(["open", "closed", "all"] as const).map((key) => <Button key={key} size="sm" variant={state === key ? "secondary" : "ghost"} aria-pressed={state === key} onClick={() => setState(key)}>{t(`thread:conv.state.${key}`)}</Button>)}</div>
-        {updates && <Button size="sm" variant="outline" onClick={() => load()}>{t("thread:conv.updated")}</Button>}
-        {error && <div role="alert" className="flex items-center gap-2 text-destructive">{error}<Button size="sm" variant="outline" onClick={() => load()}>{t("common:action.retry")}</Button></div>}
-        <div className="min-h-24 overflow-y-auto overscroll-contain" style={{ maxHeight: "48dvh" }} aria-busy={loading}>
-          {rows.map(r => <div key={r.space} className="flex min-w-0 items-center gap-2 border-b py-2" data-conversation-row={r.space}>
-            <button type="button" className="min-w-0 flex-1 rounded-md p-2 text-left hover:bg-accent disabled:opacity-50" disabled={busy !== null} onClick={async () => {
+      <DialogContent className="max-h-[85dvh] gap-4 sm:max-w-xl" data-conversation-manager>
+        <div className="flex flex-col gap-1"><DialogTitle>{t("thread:conv.list")}</DialogTitle>
+        <DialogDescription>{t("thread:conv.listHelp")}</DialogDescription></div>
+        <SearchField aria-label={t("thread:conv.search")} placeholder={t("thread:conv.searchPlaceholder")} value={query} onChange={e => setQuery(e.target.value)} />
+        {/* the system's segmented control in look (the same well, thumb and slide), built from buttons with aria-pressed:
+          * the filter is not a tab panel. As wide as the search on a phone */}
+        <div role="group" className="relative isolate grid h-8 w-full grid-cols-3 rounded-lg bg-muted p-[3px] sm:w-fit" aria-label={t("thread:conv.stateLabel")} data-conv-state={state}>
+          <span aria-hidden className="absolute inset-y-[3px] left-[3px] -z-10 w-[calc((100%-6px)/3)] rounded-md bg-card shadow-[var(--lift)] transition-transform duration-[180ms] ease-[var(--ease-out)] dark:bg-accent" style={{ transform: `translateX(${["open", "closed", "all"].indexOf(state) * 100}%)` }} />
+          {(["open", "closed", "all"] as const).map((key) => <button type="button" key={key} aria-pressed={state === key} onClick={() => setState(key)} className={cn("h-full min-w-20 rounded-md px-3 type-callout font-medium", state === key ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>{t(`thread:conv.state.${key}`)}</button>)}
+        </div>
+        {updates && <Button size="sm" variant="secondary" className="w-fit justify-self-start anim-in" onClick={() => load()}>{t("thread:conv.updated")}</Button>}
+        {error && <div role="alert" className="flex items-center gap-2 type-callout text-destructive">{error}<Button size="sm" variant="outline" onClick={() => load()}>{t("common:action.retry")}</Button></div>}
+        <div className="-mx-2 min-h-24 overflow-y-auto overscroll-contain px-2" style={{ maxHeight: "48dvh" }} aria-busy={loading}>
+          {rows.map(r => <div key={r.space} className="flex min-w-0 items-center gap-2 border-b border-border/70 py-1 last:border-b-0 anim-in" data-conversation-row={r.space}>
+            <button type="button" className="-mx-1 flex min-w-0 flex-1 flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left hover:bg-accent disabled:opacity-50" disabled={busy !== null} onClick={async () => {
               const hash = location.hash
               if (r.closed) {
                 setBusy(r.space); setError("")
@@ -134,14 +139,13 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
               if (!active() || !latest.current.open || location.hash !== hash) return
               go("#/c/" + r.space); setOpen(false)
             }} aria-label={r.closed ? t("thread:conv.restoreOpen", { name: r.name }) : t("thread:conv.openNamed", { name: r.name })}>
-              <div className="truncate font-medium">{r.name}</div>
-              <div className="truncate type-footnote text-muted-foreground">{t(r.closed ? "thread:conv.rowMetaClosed" : "thread:conv.rowMeta", { provider: r.provider, kind: kindLabel(r) })}</div>
-              <div className="truncate type-footnote text-muted-foreground">{r.last_text || t("thread:conv.noPreview")}</div>
+              <div className="flex min-w-0 items-baseline gap-2"><span className="truncate type-body font-medium">{r.name}</span><span className="shrink-0 truncate type-footnote text-tertiary">{t(r.closed ? "thread:conv.rowMetaClosed" : "thread:conv.rowMeta", { provider: r.provider, kind: kindLabel(r) })}</span></div>
+              <div className="truncate type-callout text-muted-foreground">{r.last_text || t("thread:conv.noPreview")}</div>
             </button>
-            <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void change(r.space, !r.closed)} aria-label={r.closed ? t("thread:conv.restoreNamed", { name: r.name }) : t("thread:conv.closeNamed", { name: r.name })}>{busy === r.space ? t("thread:conv.saving") : r.closed ? t("thread:conv.restore") : t("common:action.close")}</Button>
+            <Button size="sm" variant="ghost" className="shrink-0 text-muted-foreground" disabled={busy !== null} onClick={() => void change(r.space, !r.closed)} aria-label={r.closed ? t("thread:conv.restoreNamed", { name: r.name }) : t("thread:conv.closeNamed", { name: r.name })}>{busy === r.space ? t("thread:conv.saving") : r.closed ? t("thread:conv.restore") : t("common:action.close")}</Button>
           </div>)}
-          {!rows.length && !loading && !error && <p className="py-8 text-center text-muted-foreground">{query ? t("thread:conv.noMatch") : state === "closed" ? t("thread:conv.noClosed") : t("thread:conv.none")}</p>}
-          {loading && <p role="status" className="py-3 text-center text-muted-foreground">{t("thread:conv.loading")}</p>}
+          {!rows.length && !loading && !error && <Empty icon={<MessagesSquareIcon />} title={query ? t("thread:conv.noMatch") : state === "closed" ? t("thread:conv.noClosed") : t("thread:conv.none")} />}
+          {loading && <p role="status" className="py-3 text-center type-callout text-tertiary">{t("thread:conv.loading")}</p>}
           {next !== null && <Button className="mt-3 w-full" variant="outline" disabled={loading} onClick={() => load(next)}>{t("thread:conv.more")}</Button>}
         </div>
       </DialogContent>
@@ -185,7 +189,7 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   if (!s || s === "skipped") return null
   /* only a draft can be assumed closed: whatever the Hub says past it wins over a late click */
   const shown = closed && s === "draft" ? "discarded" : s
-  const note = <div className={cn("type-footnote", shown === "failed" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{shown in CHAN_OUT ? t(CHAN_OUT[shown as keyof typeof CHAN_OUT]) : shown}</div>
+  const note = <div className={cn("type-callout", shown === "failed" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{shown in CHAN_OUT ? t(CHAN_OUT[shown as keyof typeof CHAN_OUT]) : shown}</div>
   if (shown !== "draft" || !decision) return note
   const busy = st.pendingActions.has("decision:" + decision)
   const discard = async () => { if (await discardOut(decision)) setClosed(true) }
@@ -203,14 +207,14 @@ export function SenderLine({ m }: { m?: ConvMessage }) {
   const t = useT()
   const c = m?.meta?.chan
   if (!c) return null
-  return <div className="flex items-center justify-end gap-2 self-end type-footnote text-muted-foreground"><span>{c.sender || t("thread:who.someone")}{c.command ? " · /bot" : ""}</span><ReactionChip r={m?.reaction} /></div>
+  return <div className="flex items-center justify-end gap-2 self-end type-footnote text-tertiary"><span className="font-medium text-muted-foreground">{c.sender || t("thread:who.someone")}{c.command ? " · /bot" : ""}</span><ReactionChip r={m?.reaction} /></div>
 }
 
 /** in place of the composer: this conversation is read here, said there */
 export function ImReadOnly({ b }: { b: ConvBadge }) {
   const t = useT()
   return (
-    <div className="flex flex-col gap-2 rounded-2xl border px-4 py-3 sm:flex-row sm:items-center" data-im-readonly>
+    <div className="flex flex-col gap-2 rounded-xl bg-muted/60 px-4 py-3 sm:flex-row sm:items-center" data-im-readonly>
       <div className="min-w-0 flex-1 type-callout text-muted-foreground">
         {t(b.dm ? "thread:conv.readOnlyDm" : "thread:conv.readOnlyGroup", { provider: b.provider, name: b.name })}
       </div>

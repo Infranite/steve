@@ -17,10 +17,10 @@ export function WorkspaceSwitcher() {
         <DropdownMenuContent align="start" className="min-w-56">
           {/* a label must sit inside a group: outside one, Base UI throws and blanks the page */}
           <DropdownMenuGroup>
-            <DropdownMenuLabel className="type-footnote text-muted-foreground">{t("shell:space.label")}</DropdownMenuLabel>
+            <DropdownMenuLabel className="type-label text-tertiary">{t("shell:space.label")}</DropdownMenuLabel>
             {st.workspaces.map((x) => (
               <DropdownMenuItem key={x.id} onClick={() => x.id !== w.id && void switchWorkspace(x.id)} data-ws-opt={x.name}>
-                <LayersIcon className="size-4 text-muted-foreground" strokeWidth={1.5} /><span className="flex-1">{x.name}</span>{x.id === w.id && <CheckIcon className="size-4 text-blue" />}
+                <LayersIcon className="size-4 text-muted-foreground" strokeWidth={1.5} /><span className="min-w-0 flex-1 truncate">{x.name}</span>{x.id === w.id && <CheckIcon className="size-4 text-blue" />}
               </DropdownMenuItem>))}
           </DropdownMenuGroup>
           <DropdownMenuSeparator />
