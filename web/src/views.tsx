@@ -1,4 +1,3 @@
-import { api } from "@/api"
 import { AgentDetail, AgentDetailPanel, AgentTree, hasAgentTree, History, Notices, TeamPanel, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
 import { itemState, type ItemState } from "@/item-state"
 import type { AgentStatus } from "@/agent-tree"
@@ -9,10 +8,8 @@ import { ItemDebugDialog } from "@/debug-panel"
 import { usePeopleOn } from "@/api/people"
 import { Files } from "@/attach"
 import { PANEL_W, SessionCards } from "@/chat2"
-import { SearchField } from "@/search-field"
 import { Markdown } from "@/components/markdown"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -47,7 +44,7 @@ import { RunState } from "@/yolo/status"
 import { cn } from "cn"
 import { lang, t as tr, useT } from "@/i18n"
 import { nearTime, num } from "@/i18n/format"
-import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PanelRightIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, ServerIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UploadIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
+import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PanelRightIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, ServerIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 let selecting = false
@@ -691,47 +688,6 @@ export function ItemView({ id }: { id: string }) {
           </section>
         </aside>
       </div>
-    </Page>
-  )
-}
-
-/* ═════════ 会话 ═════════ */
-type SessFilt = "all" | "run" | "unlinked" | "imported"
-let sf: SessFilt = "all", sq = "", hf = "all"
-const SFILTS: SessFilt[] = ["all", "run", "unlinked", "imported"]
-const sfLabel = (k: SessFilt) => tr(({ all: "views:sessions.filterAll", run: "views:sessions.filterRun", unlinked: "views:sessions.filterUnlinked", imported: "views:sessions.filterImported" } as const)[k])
-export function SessionsView() {
-  const t = useT()
-  const [, f] = useState(0); const r = () => f((x) => x + 1)
-  const [hits, setHits] = useState<Set<string> | null>(null)
-  useEffect(() => { if (!sq) { setHits(null); return } const tm = setTimeout(() => api.searchSessions(sq).then((xs) => setHits(new Set(xs))).catch(() => setHits(new Set())), 250); return () => clearTimeout(tm) }, [sq])
-  const all = Object.keys(st.S).map((k) => [k, st.S[k]] as const)
-  const xs = all.filter(([k, s]) => (hf === "all" || s.h === hf) && (sf === "all" || (sf === "run" && s.st === "run") || (sf === "unlinked" && !s.item) || (sf === "imported" && !!s.ro))
-    && (!sq || s.title.includes(sq) || (s.item ?? "").toLowerCase().includes(sq.toLowerCase()) || !!hits?.has(k)))
-  /* what every listed session shares (one device, one source) is said once above the list, not on every row */
-  const deviceName = (k: string | undefined) => st.devices.find((d) => d.id === k)?.name ?? "Hub"
-  const oneDevice = xs.length > 1 && new Set(xs.map(([, s]) => deviceName(s.device))).size === 1, oneSrc = xs.length > 1 && new Set(xs.map(([, s]) => s.src)).size === 1
-  const shared = [oneDevice && deviceName(xs[0][1].device), oneSrc && xs[0][1].src].filter(Boolean).join(" · ")
-  return (
-    <Page title={t("views:sessions.title")} sub={t("views:sessions.sub", { total: all.length, run: all.filter((x) => x[1].st === "run").length }) + (shared ? " · " + t("views:sessions.allOn", { what: shared }) : "")}
-      /* importing belongs to the list, on the title line, not at the window's far edge */
-      toolbar={<Button size="sm" variant="outline" onClick={() => openSheet("import")} data-import><UploadIcon />{t("views:sessions.import")}</Button>} toolbarTop>
-      <SearchField className="mb-4" aria-label={t("views:sessions.search")} placeholder={t("views:sessions.search")} defaultValue={sq} onChange={(e) => { sq = e.target.value.trim(); r() }} data-session-search />
-      <div className="mb-6 flex flex-wrap items-center gap-2"><Chips value={sfLabel(sf)} onChange={(v) => { sf = SFILTS.find((k) => sfLabel(k) === v) ?? "all"; r() }} options={SFILTS.map(sfLabel)} /><span className="flex-1" />
-        <Select testId="harness-filter" value={hf} onChange={(v) => { hf = v; r() }} options={[{ v: "all", l: t("views:sessions.allHarness") }, ...st.runtimes.map((x) => ({ v: x.name, l: x.name }))]} /></div>
-      {xs.length ? (
-        <Group>{xs.map(([k, s]) => (
-          <div key={k} role="button" tabIndex={0} onClick={() => go("#/sessions/" + k)} data-session-row={k} className="flex cursor-pointer items-start gap-3 rounded-lg px-2 py-3 transition-colors hover:bg-accent">
-            <StatusDot s={s.st} className="mt-2" />
-            <div className="min-w-0 flex-1">
-              <div className="truncate type-body font-medium">{s.title}</div>
-              <Meta className="mt-0.5">{s.item ? <span className="max-w-[300px] truncate"><span className="font-mono">{s.item}</span> <span className="tabular-nums">#{s.n}</span></span> : <span>{t("views:sessions.unlinked")}</span>}{s.ro && <Badge variant="outline" className="h-4.5 font-normal text-muted-foreground"><LockIcon />{t("views:sessions.readOnly")}</Badge>}{/* harness and model as two fields: one separator style on the line */}<span>{s.h ?? t("core:unknownHarness")}</span><span>{s.m ?? t("core:defaultModel")}</span>{!oneDevice && <span>{st.devices.find((d) => d.id === s.device)?.name ?? "Hub"}</span>}{!oneSrc && <span>{s.src}</span>}{s.ctx > 0 && <span>{t("views:sessions.ctx", { pct: s.ctx })}</span>}</Meta>
-              {sq && hits?.has(k) && <div className="mt-1 type-footnote text-blue">{t("views:sessions.contentHit", { q: sq })}</div>}
-            </div>
-            <span className="shrink-0 pt-0.5 type-footnote tabular-nums text-tertiary">{s.up}</span>
-          </div>
-        ))}</Group>
-      ) : <Empty title={all.length ? t("views:sessions.emptyFiltered") : t("views:sessions.emptyNone")} sub={all.length ? undefined : t("views:sessions.emptyNoneSub")} />}
     </Page>
   )
 }

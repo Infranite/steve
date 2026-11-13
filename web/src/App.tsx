@@ -19,7 +19,7 @@ import { useRoute, Sidebar, MobileTabs, getSheet, resolvedTheme, openSheet, clos
 const InboxView = lazyView(() => import("@/views").then((m) => ({ default: m.InboxView })))
 const ItemsView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemsView })))
 const ItemView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemView })))
-const SessionsView = lazyView(() => import("@/views").then((m) => ({ default: m.SessionsView })))
+const SessionsView = lazyView(() => import("@/sessions-list").then((m) => ({ default: m.SessionsView })))
 const SessionView = lazyView(() => import("@/views").then((m) => ({ default: m.SessionView })))
 const MoreView = lazyView(() => import("@/views").then((m) => ({ default: m.MoreView })))
 const DesignView = lazyView(() => import("@/views").then((m) => ({ default: m.DesignView })))
