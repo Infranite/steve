@@ -101,13 +101,18 @@ try {
     await page.locator("[data-yolo-include-open]").click()
     await page.locator("[data-yolo-full-ok]").click()
     assert.ok(await apply.isEnabled())
-    await scroll.evaluate(el => { el.scrollTop = el.scrollHeight })
+    // the opened section animates its height: scroll once the content has stopped growing
+    await scroll.evaluate(async (el) => { let h = -1; while (el.scrollHeight !== h) { h = el.scrollHeight; await new Promise((r) => setTimeout(r, 120)) } el.scrollTop = el.scrollHeight })
     await layout(page, "[data-yolo-dialog]", '[data-slot="dialog-footer"]')
     assert.deepEqual(await page.locator('[data-slot="dialog-footer"]').boundingBox(), footerBefore, "scrolling content does not move the action area")
-    assert.ok(await page.locator("[data-yolo-full-ok]").evaluate(el => {
+    // reachable: scrolling brings it into the scroll area (with doubled text on a small phone its label is taller
+    // than the area, so the very bottom shows the label's end, not the box at its start)
+    const reach = await page.locator("[data-yolo-full-ok]").evaluate(el => {
+      el.scrollIntoView({ block: "nearest" })
       const r = el.getBoundingClientRect(), s = el.closest("[data-yolo-scroll]").getBoundingClientRect()
-      return r.top >= s.top && r.bottom <= s.bottom
-    }), "last acknowledgement is reachable by vertical scrolling")
+      return { ok: r.top >= s.top && r.bottom <= s.bottom, r: [r.top, r.bottom], s: [s.top, s.bottom] }
+    })
+    assert.ok(reach.ok, `last acknowledgement is reachable by vertical scrolling (${width}x${height} @${scale}: ${JSON.stringify(reach)})`)
     await shot(page, `yolo-${width}-${height}-${scale}x-${locale}-bottom`)
     await apply.click()
     await page.locator("[data-yolo-dialog]").waitFor({ state: "detached" })

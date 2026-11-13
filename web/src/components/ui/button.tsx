@@ -8,7 +8,7 @@ const buttonVariants = cva(
     variants: {
       variant: {
         /* the one accent: the action a page is for */
-        default: "bg-primary text-primary-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.14),0_1px_2px_rgb(16_24_40/0.12)] hover:bg-[color-mix(in_oklch,var(--primary),black_9%)] dark:hover:bg-[color-mix(in_oklch,var(--primary),white_8%)]",
+        default: "bg-primary text-primary-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.14),0_1px_2px_rgb(16_24_40/0.12)] hover:bg-[color-mix(in_oklch,var(--primary),black_9%)] dark:hover:bg-[color-mix(in_oklch,var(--primary),white_8%)] disabled:bg-muted disabled:text-tertiary disabled:shadow-none disabled:opacity-100",
         /* a quiet surface lifted off the page */
         outline:
           "bg-card text-foreground shadow-[var(--lift)] hover:bg-accent hover:shadow-[var(--lift-hover)] aria-expanded:bg-accent",

@@ -6,7 +6,7 @@ import { defineConfig } from "vite"
 const hub = process.env.STEVE_HUB ?? "http://127.0.0.1:8441"
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  resolve: { alias: [{ find: "@", replacement: resolve(import.meta.dirname, "./src") }] },
+  resolve: { alias: [{ find: "@", replacement: resolve(import.meta.dirname, "./src") }, { find: /^cn$/, replacement: resolve(import.meta.dirname, "./src/lib/cn.ts") }] },
   server: { port: 5174, proxy: { "/api": { target: hub, changeOrigin: false }, "/auth": { target: hub }, "/healthz": { target: hub } } },
   build: { chunkSizeWarningLimit: 4000 },
 })
