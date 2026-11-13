@@ -127,7 +127,7 @@ const css = /* css */ `
   gap: 4px;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-chkc-ink);
   -webkit-font-smoothing: antialiased;
@@ -167,8 +167,8 @@ const css = /* css */ `
 
 .ui-chkc__text { display: grid; min-width: 0; }
 .ui-chkc__label { color: var(--ui-chkc-ink); overflow-wrap: anywhere; }
-.ui-chkc__desc { font-size: 12px; line-height: 16px; color: var(--ui-chkc-subtle); overflow-wrap: anywhere; }
-.ui-chkc__error { margin: 0 0 0 26px; font-size: 12px; line-height: 16px; color: var(--ui-chkc-danger); overflow-wrap: anywhere; animation: ui-chkc-message 260ms var(--ui-chkc-ease); }
+.ui-chkc__desc { font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-chkc-subtle); overflow-wrap: anywhere; }
+.ui-chkc__error { margin: 0 0 0 26px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-chkc-danger); overflow-wrap: anywhere; animation: ui-chkc-message 260ms var(--ui-chkc-ease); }
 
 /* Card: a bordered row, clickable as a whole – a soft shadow on hover; checked, it takes a faint gray fill (no dark edge) */
 .ui-chkc[data-variant="card"] .ui-chkc__row {
@@ -186,7 +186,7 @@ const css = /* css */ `
 
 /* Touch screens: 16px text and a bigger box */
 @media (pointer: coarse) {
-  .ui-chkc { font-size: 15px; line-height: 22px; }
+  .ui-chkc { font-size: calc(15px * var(--type-scale, 1)); line-height: 22px; }
   .ui-chkc__control { width: 20px; height: 22px; }
   .ui-chkc__box { width: 20px; height: 20px; border-radius: 5.5px; }
   .ui-chkc__mark { width: 18px; height: 18px; }

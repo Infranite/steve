@@ -159,7 +159,7 @@ const css = /* css */ `
   background: var(--ui-kbdc-bg);
   box-shadow: inset 0 0 0 0.5px var(--ui-kbdc-edge);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--type-scale, 1));
   font-weight: 500;
   font-style: normal;
   line-height: 1;
@@ -174,7 +174,7 @@ const css = /* css */ `
   --h: 20px;
   --pad: 5px;
   border-radius: var(--aui-radius-sm, 5px);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
 }
 
 /* A combo sits in one chip: ⌘K close together, "Ctrl K" with a small space – left to right even in RTL text, like

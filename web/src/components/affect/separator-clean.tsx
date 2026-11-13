@@ -105,7 +105,7 @@ const css = /* css */ `
   width: 100%;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   color: var(--ui-sepc-text);
   -webkit-font-smoothing: antialiased;

@@ -165,7 +165,7 @@ const css = /* css */ `
   gap: 6px;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-fldc-ink);
   -webkit-font-smoothing: antialiased;
@@ -176,7 +176,7 @@ const css = /* css */ `
 .ui-fldc__label { min-width: 0; font-weight: 500; color: var(--ui-fldc-title); overflow-wrap: anywhere; cursor: default; }
 /* The required mark: quiet, right after the last word, never alone on a line */
 .ui-fldc__required { margin-inline-start: 2px; color: var(--ui-fldc-subtle); font-weight: 400; white-space: nowrap; }
-.ui-fldc__optional { flex: none; font-size: 12px; line-height: 16px; color: var(--ui-fldc-subtle); }
+.ui-fldc__optional { flex: none; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-fldc-subtle); }
 
 /* Under the control: the hint, or the error in its place, and the count */
 .ui-fldc__foot { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
@@ -184,14 +184,14 @@ const css = /* css */ `
   flex: 1;
   min-width: 0;
   margin: 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   color: var(--ui-fldc-subtle);
   overflow-wrap: anywhere;
   animation: ui-fldc-message 260ms var(--ui-fldc-ease);
 }
 .ui-fldc[data-invalid] .ui-fldc__message { color: var(--ui-fldc-danger); }
-.ui-fldc__count { flex: none; margin-inline-start: auto; font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--ui-fldc-faint); white-space: nowrap; }
+.ui-fldc__count { flex: none; margin-inline-start: auto; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; font-variant-numeric: tabular-nums; color: var(--ui-fldc-faint); white-space: nowrap; }
 
 @keyframes ui-fldc-message {
   from { opacity: 0; transform: translateY(-3px); filter: blur(2px); }

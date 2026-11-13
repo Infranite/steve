@@ -535,7 +535,7 @@ const css = /* css */ `
   box-sizing: border-box;
   max-width: 100%;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   color: var(--ui-rnc-ink);
@@ -560,7 +560,7 @@ const css = /* css */ `
   border-radius: calc(var(--aui-radius, 7px) - 1px);
   background: var(--aui-surface, var(--ui-rnc-card));
   box-shadow: var(--ui-rnc-shadow);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   color: var(--ui-rnc-text);
   white-space: nowrap;
@@ -596,11 +596,11 @@ const css = /* css */ `
 .ui-rnc__panel[hidden] { display: none; }
 .ui-rnc__panel:focus { outline: none; }
 .ui-rnc__head { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; }
-.ui-rnc__label { font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-rnc-muted); }
-.ui-rnc__count { font-size: 10px; font-weight: 500; line-height: 16px; color: var(--aui-placeholder, var(--ui-rnc-faint)); font-variant-numeric: tabular-nums; }
+.ui-rnc__label { font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-rnc-muted); }
+.ui-rnc__count { font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--aui-placeholder, var(--ui-rnc-faint)); font-variant-numeric: tabular-nums; }
 .ui-rnc__body { display: grid; grid-template-columns: minmax(0, 1fr); }
 .ui-rnc__list { display: grid; grid-template-columns: minmax(0, 1fr); max-height: min(calc(var(--ui-rnc-row) * 5.5), max(calc(var(--ui-rnc-row) * 2.5), calc(100dvh - 200px))); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
-.ui-rnc__empty { padding: 14px 8px 16px; font-size: 12px; line-height: 16px; color: var(--ui-rnc-muted); }
+.ui-rnc__empty { padding: 14px 8px 16px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-rnc-muted); }
 
 /* One row – always 52px, whatever state it's in */
 .ui-rnc__row { position: relative; display: flex; align-items: center; flex: none; height: var(--ui-rnc-row); border-radius: calc(var(--aui-radius-sm, 5px) + 1px); transition: background-color 120ms ease; }
@@ -611,16 +611,16 @@ const css = /* css */ `
 .ui-rnc__pie { transition: stroke-dasharray 700ms var(--ui-rnc-ease); }
 .ui-rnc__text { display: grid; flex: 1; min-width: 0; }
 .ui-rnc__title { overflow: hidden; font-weight: 500; color: var(--ui-rnc-ink); white-space: nowrap; text-overflow: ellipsis; }
-.ui-rnc__step { font-size: 12px; line-height: 16px; color: var(--ui-rnc-muted); }
+.ui-rnc__step { font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-rnc-muted); }
 .ui-rnc__row[data-state="done"] .ui-rnc__title { color: var(--ui-rnc-text); }
-.ui-rnc__steps { flex: none; font-size: 12px; line-height: 16px; color: var(--ui-rnc-muted); font-variant-numeric: tabular-nums; }
-.ui-rnc__badge { flex: none; height: 18px; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-rnc-badge-wash); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-rnc-badge); white-space: nowrap; animation: ui-rnc-in 260ms var(--ui-rnc-ease) both; }
+.ui-rnc__steps { flex: none; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-rnc-muted); font-variant-numeric: tabular-nums; }
+.ui-rnc__badge { flex: none; height: 18px; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-rnc-badge-wash); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 18px; color: var(--ui-rnc-badge); white-space: nowrap; animation: ui-rnc-in 260ms var(--ui-rnc-ease) both; }
 .ui-rnc__act { display: flex; flex: none; justify-content: flex-end; min-width: 40px; padding-right: 6px; }
 .ui-rnc__btn { display: grid; place-items: center; width: 28px; height: 28px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-rnc-icon); transition: background-color 120ms ease, color 120ms ease; }
 .ui-rnc__btn svg { width: 14px; height: 14px; }
 button.ui-rnc__btn:hover { background: var(--ui-rnc-press); color: var(--ui-rnc-ink); }
 span.ui-rnc__btn { color: var(--ui-rnc-blue); }
-.ui-rnc__btn--text { width: auto; padding: 0 8px; background: var(--aui-surface, var(--ui-rnc-card)); box-shadow: var(--ui-rnc-shadow); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-rnc-ink); animation: ui-rnc-in 260ms var(--ui-rnc-ease) both; }
+.ui-rnc__btn--text { width: auto; padding: 0 8px; background: var(--aui-surface, var(--ui-rnc-card)); box-shadow: var(--ui-rnc-shadow); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-rnc-ink); animation: ui-rnc-in 260ms var(--ui-rnc-ease) both; }
 button.ui-rnc__btn--text:hover { background: color-mix(in srgb, var(--ui-rnc-card), #000 3%); }
 
 /* Text that swaps: stacked in one cell, the old line leaves upwards while the new one rises in */

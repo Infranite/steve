@@ -436,7 +436,7 @@ const css = /* css */ `
   width: 100%;
   container-type: inline-size;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-adc-ink);
   -webkit-font-smoothing: antialiased;
@@ -453,18 +453,18 @@ const css = /* css */ `
 .ui-adc__intro-text { min-width: 0; }
 .ui-adc__title {
   margin: 0;
-  font-size: 15px;
+  font-size: calc(15px * var(--type-scale, 1));
   font-weight: 600;
   line-height: 22px;
   letter-spacing: -0.006em;
   color: var(--ui-adc-strong);
   overflow-wrap: anywhere;
 }
-.ui-adc__subtitle { margin: 4px 0 0; font-size: 13px; line-height: 20px; color: var(--ui-adc-text); overflow-wrap: anywhere; }
+.ui-adc__subtitle { margin: 4px 0 0; font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; color: var(--ui-adc-text); overflow-wrap: anywhere; }
 .ui-adc__meta {
   flex: none;
   margin-top: 6px;
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-adc-muted);
   font-variant-numeric: tabular-nums;
@@ -499,7 +499,7 @@ const css = /* css */ `
   outline: none;
   background: transparent;
   font: inherit;
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-adc-ink);
 }
@@ -516,7 +516,7 @@ const css = /* css */ `
   border-radius: calc(var(--aui-radius, 7px) + 1px);
   background: var(--ui-adc-card);
   box-shadow: var(--ui-adc-shadow);
-  font-size: 13px !important;
+  font-size: calc(13px * var(--type-scale, 1)) !important;
   font-weight: 500;
   line-height: 20px;
   color: var(--ui-adc-ink) !important;
@@ -550,7 +550,7 @@ const css = /* css */ `
   padding: 0 8px;
   border-radius: calc(var(--aui-radius-sm, 5px) + 1px);
   background: transparent;
-  font-size: 13px !important;
+  font-size: calc(13px * var(--type-scale, 1)) !important;
   line-height: 20px;
   text-align: left;
   color: var(--ui-adc-ink) !important;
@@ -576,7 +576,7 @@ const css = /* css */ `
   padding: 0 8px;
   border-radius: calc(var(--aui-radius-sm, 5px) + 1px);
   background: transparent;
-  font-size: 13px !important;
+  font-size: calc(13px * var(--type-scale, 1)) !important;
   line-height: 20px;
   text-align: left;
   color: var(--ui-adc-text) !important;
@@ -587,20 +587,20 @@ const css = /* css */ `
 .ui-adc__nav-icon { display: grid; flex: none; color: var(--ui-adc-muted); }
 .ui-adc__nav-item[aria-current] .ui-adc__nav-icon { color: var(--ui-adc-ink); }
 .ui-adc__nav-label { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.ui-adc__nav-count { flex: none; font-size: 12px; line-height: 16px; font-weight: 400; font-variant-numeric: tabular-nums; color: var(--ui-adc-faint); }
+.ui-adc__nav-count { flex: none; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; font-weight: 400; font-variant-numeric: tabular-nums; color: var(--ui-adc-faint); }
 
 .ui-adc .ui-adc__heading {
   display: flex;
   align-items: baseline;
   gap: 6px;
   margin: 4px 0 12px;
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 20px;
   color: var(--ui-adc-strong);
 }
 .ui-adc__heading-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.ui-adc__heading span:not(.ui-adc__heading-text) { flex: none; font-variant-numeric: tabular-nums; font-size: 12px; line-height: 16px; font-weight: 400; color: var(--ui-adc-muted); }
+.ui-adc__heading span:not(.ui-adc__heading-text) { flex: none; font-variant-numeric: tabular-nums; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; font-weight: 400; color: var(--ui-adc-muted); }
 
 .ui-adc__grid {
   display: grid;
@@ -636,7 +636,7 @@ const css = /* css */ `
 }
 .ui-adc__tile[data-filled] { box-shadow: inset 0 0 0 0.5px var(--ui-adc-tile-filled-line); }
 .ui-adc__tile svg { width: 17px; height: 17px; }
-.ui-adc__tile-initial { font-size: 13px; font-weight: 500; line-height: 1; color: var(--ui-adc-text); }
+.ui-adc__tile-initial { font-size: calc(13px * var(--type-scale, 1)); font-weight: 500; line-height: 1; color: var(--ui-adc-text); }
 .ui-adc__tile[data-filled] .ui-adc__tile-initial { color: #fff; }
 .ui-adc__app-name { display: grid; flex: 1; min-width: 0; }
 .ui-adc__name {
@@ -644,13 +644,13 @@ const css = /* css */ `
   min-width: 0;
   align-items: center;
   gap: 4px;
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 20px;
   color: var(--ui-adc-strong);
 }
 .ui-adc__name-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.ui-adc__vendor { overflow: hidden; font-size: 12px; line-height: 16px; white-space: nowrap; text-overflow: ellipsis; color: var(--ui-adc-muted); }
+.ui-adc__vendor { overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; white-space: nowrap; text-overflow: ellipsis; color: var(--ui-adc-muted); }
 /* Two lines at most – keeps every card the same height */
 .ui-adc .ui-adc__desc {
   display: -webkit-box;
@@ -660,7 +660,7 @@ const css = /* css */ `
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   min-height: 40px;
   overflow-wrap: anywhere;
@@ -678,7 +678,7 @@ const css = /* css */ `
   border-radius: calc(var(--aui-radius, 7px) - 1px);
   background: var(--ui-adc-card);
   box-shadow: var(--ui-adc-shadow);
-  font-size: 13px !important;
+  font-size: calc(13px * var(--type-scale, 1)) !important;
   font-weight: 500;
   line-height: 20px;
   color: var(--ui-adc-ink) !important;
@@ -703,7 +703,7 @@ const css = /* css */ `
   padding: 48px 16px;
   border-radius: calc(var(--aui-radius-lg, 10px) + 2px);
   background: var(--ui-adc-empty);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   text-align: center;
   color: var(--ui-adc-muted);
@@ -739,7 +739,7 @@ const css = /* css */ `
   .ui-adc .ui-adc__nav-item { height: 36px; }
   .ui-adc .ui-adc__menu-item { height: 40px; }
   .ui-adc .ui-adc__connect { height: 36px; }
-  .ui-adc__search input { font-size: 16px; }
+  .ui-adc__search input { font-size: calc(16px * var(--type-scale, 1)); }
 }
 
 @media (prefers-reduced-motion: reduce) {

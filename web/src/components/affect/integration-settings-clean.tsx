@@ -201,7 +201,7 @@ const css = /* css */ `
   background: var(--aui-surface, var(--ui-isc-card));
   box-shadow: var(--aui-shadow-card, var(--ui-isc-shadow));
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   color: var(--ui-isc-ink);
@@ -229,22 +229,22 @@ const css = /* css */ `
 .ui-isc__logo svg { width: 22px; height: 22px; }
 /* Image logos of any size fit the tile; without one, the first letter of the name */
 .ui-isc__logo img { display: block; width: 22px; height: 22px; object-fit: contain; }
-.ui-isc__initial { font-size: 15px; font-weight: 600; color: var(--ui-isc-text); }
+.ui-isc__initial { font-size: calc(15px * var(--type-scale, 1)); font-weight: 600; color: var(--ui-isc-text); }
 .ui-isc__who { display: grid; flex: 1; min-width: 0; }
-.ui-isc__name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 15px; line-height: 24px; font-weight: 500; color: var(--ui-isc-strong); }
+.ui-isc__name { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: calc(15px * var(--type-scale, 1)); line-height: 24px; font-weight: 500; color: var(--ui-isc-strong); }
 .ui-isc__name-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .ui-isc__count {
   flex: none;
   padding: 0 5px;
   border-radius: var(--aui-radius-sm, 5px);
   background: var(--aui-subtle);
-  font-size: 11px;
+  font-size: calc(11px * var(--type-scale, 1));
   line-height: 16px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   color: var(--ui-isc-text);
 }
-.ui-isc__meta { overflow: hidden; font-size: 12px; line-height: 16px; white-space: nowrap; text-overflow: ellipsis; color: var(--ui-isc-muted); }
+.ui-isc__meta { overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; white-space: nowrap; text-overflow: ellipsis; color: var(--ui-isc-muted); }
 
 /* The switch, at the size of Steve's own switches (32×20, a 16px knob) */
 .ui-isc__switch {
@@ -281,7 +281,7 @@ const css = /* css */ `
 
 /* Sections sit right in the card, split by hairlines */
 .ui-isc__section { padding: 14px 16px 16px; border-top: 0.5px solid var(--ui-isc-line); }
-.ui-isc__label { display: block; margin: 0 0 6px; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--ui-isc-ink); }
+.ui-isc__label { display: block; margin: 0 0 6px; font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; font-weight: 500; color: var(--ui-isc-ink); }
 
 /* Fields: white with the hairline shadow */
 .ui-isc__field {
@@ -299,7 +299,7 @@ const css = /* css */ `
 .ui-isc__field:hover { box-shadow: var(--ui-isc-shadow-hover); }
 /* Steve: typing in a field shows the same focus ring as Steve's own text areas */
 .ui-isc__field:focus-within { outline: none; box-shadow: 0 0 0 0.5px var(--aui-border-strong, rgba(0, 0, 0, 0.12)), 0 0 0 3px color-mix(in srgb, var(--ui-isc-focus) 35%, transparent); }
-.ui-isc__hint { overflow-wrap: anywhere; margin: 6px 0 0; font-size: 12px; line-height: 16px; color: var(--ui-isc-muted); }
+.ui-isc__hint { overflow-wrap: anywhere; margin: 6px 0 0; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-isc-muted); }
 
 /* Save bar: the card's last row under a hairline, slides open when something changed */
 .ui-isc__save { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 0fr; transition: grid-template-rows 360ms var(--ui-isc-ease); }
@@ -324,7 +324,7 @@ const css = /* css */ `
   border-radius: calc(var(--aui-radius, 7px) - 1px);
   background: var(--aui-surface, var(--ui-isc-card)) !important;
   box-shadow: var(--ui-isc-shadow);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 500;
   color: var(--ui-isc-strong) !important;
   transition: box-shadow 140ms ease, background-color 140ms ease;
@@ -358,8 +358,8 @@ const css = /* css */ `
 .ui-isc__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding: 6px 0; }
 .ui-isc__row + .ui-isc__row { border-top: 0.5px solid var(--ui-isc-line); }
 .ui-isc__row-text { display: grid; min-width: 0; }
-.ui-isc__row-title { font-size: 13px; line-height: 20px; color: var(--ui-isc-ink); overflow-wrap: anywhere; }
-.ui-isc__row-hint { font-size: 12px; line-height: 18px; color: var(--ui-isc-muted); overflow-wrap: anywhere; }
+.ui-isc__row-title { font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; color: var(--ui-isc-ink); overflow-wrap: anywhere; }
+.ui-isc__row-hint { font-size: calc(12px * var(--type-scale, 1)); line-height: 18px; color: var(--ui-isc-muted); overflow-wrap: anywhere; }
 .ui-isc__row-control { display: flex; flex: none; align-items: center; gap: 6px; }
 .ui-isc__hint--top { margin: -4px 0 8px; }
 .ui-isc__field--area { height: auto; padding: 8px 10px; }
@@ -367,7 +367,7 @@ const css = /* css */ `
 .ui-isc__field textarea::placeholder { color: var(--ui-isc-faint); }
 .ui-isc__footer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 8px 10px; border-top: 0.5px solid var(--ui-isc-line); }
 .ui-isc[data-off] .ui-isc__footer { border-top: 0; }
-@media (hover: none) and (pointer: coarse) { .ui-isc__field textarea { font-size: 16px; } }
+@media (hover: none) and (pointer: coarse) { .ui-isc__field textarea { font-size: calc(16px * var(--type-scale, 1)); } }
 /* Dark mode: follows a .dark class or data-theme="dark" on any ancestor, e.g. <html> */
 :where(.dark, [data-theme="dark"]) .ui-isc {
   --ui-isc-card: var(--aui-surface, #1c1c1e);

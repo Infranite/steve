@@ -562,7 +562,7 @@ const css = /* css */ `
   min-width: 0;
   color: var(--ui-tclc-ink);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   -webkit-font-smoothing: antialiased;
@@ -644,7 +644,7 @@ const css = /* css */ `
   overflow: hidden;
   color: var(--ui-tclc-strong);
   font-family: var(--ui-tclc-mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   font-weight: 500;
   letter-spacing: 0;
   text-overflow: ellipsis;
@@ -665,7 +665,7 @@ const css = /* css */ `
   gap: 6px;
   flex: none;
   color: var(--ui-tclc-muted);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -728,13 +728,13 @@ const css = /* css */ `
 /* Tiny uppercase labels: "ARGUMENTS", "RESULT" */
 .ui-tclc__label {
   color: var(--ui-tclc-muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--type-scale, 1));
   line-height: 16px;
   font-weight: 500;
   letter-spacing: 0.5px;
   text-transform: uppercase;
 }
-.ui-tclc__pending { margin: 0; color: var(--ui-tclc-muted); font-size: 12px; line-height: 16px; }
+.ui-tclc__pending { margin: 0; color: var(--ui-tclc-muted); font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; }
 
 /* Copy: a small white icon button with the card's hairline */
 .ui-tclc__copy {
@@ -779,7 +779,7 @@ const css = /* css */ `
   box-shadow: inset 0 0 0 0.5px var(--ui-tclc-line);
   color: var(--ui-tclc-muted);
   font-family: var(--ui-tclc-mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 20px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -814,7 +814,7 @@ const css = /* css */ `
   margin-left: -4px;
   border-radius: 6px;
   color: var(--ui-tclc-text);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   font-weight: 500;
   cursor: pointer;
@@ -843,7 +843,7 @@ const css = /* css */ `
   overscroll-behavior: contain;
   white-space: pre-line;
   color: var(--ui-tclc-red);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   overflow-wrap: anywhere;
 }
@@ -860,7 +860,7 @@ const css = /* css */ `
   background: var(--aui-surface, var(--ui-tclc-card));
   box-shadow: var(--ui-tclc-shadow);
   color: var(--ui-tclc-strong);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 500;
   cursor: pointer;
@@ -975,15 +975,15 @@ const css = /* css */ `
 /* Steve: dark mode comes with the tokens above */
 
 /* Steve: "line" – one quiet line in a work trail (no surface, no edge) that becomes a card once opened */
-.ui-tclc[data-variant="line"] { background: transparent; box-shadow: none; font-size: 13px; line-height: 20px; transition: background-color 180ms var(--ui-tclc-ease), box-shadow 180ms var(--ui-tclc-ease); }
+.ui-tclc[data-variant="line"] { background: transparent; box-shadow: none; font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; transition: background-color 180ms var(--ui-tclc-ease), box-shadow 180ms var(--ui-tclc-ease); }
 .ui-tclc[data-variant="line"][data-open] { margin: 4px 0 6px; background: var(--ui-tclc-bg); box-shadow: var(--aui-shadow-card); }
 .ui-tclc[data-variant="line"] > .ui-tclc__head { gap: 8px; min-height: 28px; padding: 3px 6px 3px 4px; border-radius: var(--aui-radius-sm); }
 .ui-tclc[data-variant="line"][data-open] > .ui-tclc__head { padding: 6px 8px 6px 6px; border-radius: var(--aui-radius) var(--aui-radius) 0 0; }
 .ui-tclc[data-variant="line"] .ui-tclc__icon { width: 20px; height: 20px; border-radius: var(--aui-radius-sm); box-shadow: none; color: var(--aui-muted); }
 .ui-tclc[data-variant="line"] .ui-tclc__icon > svg { width: 13px; height: 13px; }
-.ui-tclc[data-variant="line"] .ui-tclc__name { font-size: 12px; font-weight: 400; color: var(--aui-muted); }
+.ui-tclc[data-variant="line"] .ui-tclc__name { font-size: calc(12px * var(--type-scale, 1)); font-weight: 400; color: var(--aui-muted); }
 .ui-tclc[data-variant="line"] .ui-tclc__summary { color: var(--aui-muted); }
-.ui-tclc[data-variant="line"] .ui-tclc__status { font-size: 12px; }
+.ui-tclc[data-variant="line"] .ui-tclc__status { font-size: calc(12px * var(--type-scale, 1)); }
 .ui-tclc[data-variant="line"] .ui-tclc__chevron { opacity: 0; transition: opacity 120ms ease, transform 360ms var(--ui-tclc-ease); }
 .ui-tclc[data-variant="line"] > .ui-tclc__head:is(:hover, :focus-visible) .ui-tclc__chevron,
 .ui-tclc[data-variant="line"][data-open] .ui-tclc__chevron { opacity: 1; }

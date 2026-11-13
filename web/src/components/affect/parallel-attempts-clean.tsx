@@ -316,7 +316,7 @@ const css = /* css */ `
   min-width: 0;
   container: ui-pac / inline-size;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 400;
   line-height: 20px;
   color: var(--ui-pac-text);
@@ -333,7 +333,7 @@ const css = /* css */ `
 .ui-pac__mark { display: grid; flex: none; place-items: center; width: 16px; color: var(--ui-pac-accent); }
 .ui-pac__title { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 500; color: var(--ui-pac-strong); }
 .ui-pac__task { min-width: 0; overflow: hidden; color: var(--ui-pac-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-pac__sum { display: flex; align-items: center; gap: 14px; margin-left: auto; font-size: 12px; line-height: 16px; color: var(--ui-pac-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ui-pac__sum { display: flex; align-items: center; gap: 14px; margin-left: auto; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-pac-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ui-pac__sum b { font-weight: 500; color: var(--ui-pac-ink); }
 
 /* ----- The white panel: one row per attempt ----- */
@@ -342,7 +342,7 @@ const css = /* css */ `
 .ui-pac__row { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr) minmax(120px, 36%) minmax(96px, auto); align-items: center; column-gap: 14px; padding: 12px 16px 12px 12px; border-radius: var(--aui-radius-lg, 10px); background: var(--ui-pac-panel); box-shadow: var(--aui-shadow-card, var(--ui-pac-shadow)); transition: opacity 320ms ease, background-color 500ms ease, box-shadow 300ms ease; animation: ui-pac-in 420ms var(--ui-pac-ease) calc(min(var(--i, 0), 12) * 70ms) backwards; }
 .ui-pac__row > .ui-pac__lane { margin-left: 6px; }
 /* The model's logo on a small square tile */
-.ui-pac__icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--ui-pac-card); box-shadow: var(--ui-pac-shadow); font-size: 12px; font-weight: 500; color: var(--ui-pac-text); }
+.ui-pac__icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--ui-pac-card); box-shadow: var(--ui-pac-shadow); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; color: var(--ui-pac-text); }
 .ui-pac__icon > svg { width: 14px; height: 14px; }
 /* The one in use gets a soft wash; once one is picked, the others step back a little */
 .ui-pac__row[data-picked] { background: linear-gradient(var(--ui-pac-wash), var(--ui-pac-wash)), var(--ui-pac-panel); box-shadow: var(--ui-pac-shadow), 0 0 0 0.5px var(--ui-pac-done-edge); }
@@ -356,7 +356,7 @@ const css = /* css */ `
 .ui-pac__name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ui-pac__approach { flex: 0 100 auto; min-width: 0; overflow: hidden; font-weight: 400; color: var(--ui-pac-muted); text-overflow: ellipsis; }
 .ui-pac__approach::before { content: "·"; margin-right: 6px; color: var(--ui-pac-faint); }
-.ui-pac__line { overflow: hidden; font-size: 12px; line-height: 18px; color: var(--ui-pac-text); white-space: nowrap; text-overflow: ellipsis; animation: ui-pac-fade 320ms ease both; }
+.ui-pac__line { overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 18px; color: var(--ui-pac-text); white-space: nowrap; text-overflow: ellipsis; animation: ui-pac-fade 320ms ease both; }
 .ui-pac__row[data-status="running"] .ui-pac__line { color: var(--k-ink); }
 .ui-pac__row[data-status="failed"] .ui-pac__line { color: var(--ui-pac-failed-ink); }
 
@@ -369,13 +369,13 @@ const css = /* css */ `
 
 /* On the right: the share done, then the score (or Failed) – and under it time and cost, or the pick */
 .ui-pac__end { display: grid; justify-items: end; min-width: 0; text-align: right; }
-.ui-pac__score { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-pac-ink); font-variant-numeric: tabular-nums; animation: ui-pac-fade 320ms ease both; }
+.ui-pac__score { display: inline-flex; align-items: center; gap: 6px; font-size: calc(13px * var(--type-scale, 1)); font-weight: 500; line-height: 20px; color: var(--ui-pac-ink); font-variant-numeric: tabular-nums; animation: ui-pac-fade 320ms ease both; }
 .ui-pac__pct { font-weight: 400; color: var(--ui-pac-muted); }
 .ui-pac__failed { color: var(--ui-pac-failed-ink); }
-.ui-pac__best { height: 18px; padding: 0 6px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-pac-done-bg); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-pac-done-ink); animation: ui-pac-pop 420ms var(--ui-pac-ease) both; }
+.ui-pac__best { height: 18px; padding: 0 6px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-pac-done-bg); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 18px; color: var(--ui-pac-done-ink); animation: ui-pac-pop 420ms var(--ui-pac-ease) both; }
 .ui-pac__meta-slot { position: relative; display: grid; justify-items: end; height: 18px; }
-.ui-pac__meta { font-size: 12px; line-height: 18px; color: var(--ui-pac-muted); font-variant-numeric: tabular-nums; white-space: nowrap; transition: opacity 160ms ease; }
-.ui-pac__use { position: absolute; top: -3px; right: -6px; display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 6px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: 12px; font-weight: 500; color: var(--ui-pac-text); white-space: nowrap; opacity: 0; transition: opacity 160ms ease, background-color 160ms ease, color 160ms ease; }
+.ui-pac__meta { font-size: calc(12px * var(--type-scale, 1)); line-height: 18px; color: var(--ui-pac-muted); font-variant-numeric: tabular-nums; white-space: nowrap; transition: opacity 160ms ease; }
+.ui-pac__use { position: absolute; top: -3px; right: -6px; display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 6px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; color: var(--ui-pac-text); white-space: nowrap; opacity: 0; transition: opacity 160ms ease, background-color 160ms ease, color 160ms ease; }
 /* Pointing at a finished row: its time and cost make room for "Use this one" – the one in use says so */
 .ui-pac__row:hover .ui-pac__meta[data-hide], .ui-pac__row:focus-within .ui-pac__meta[data-hide], .ui-pac__row[data-picked] .ui-pac__meta[data-hide] { opacity: 0; }
 .ui-pac__row:hover .ui-pac__use, .ui-pac__use:focus-visible, .ui-pac__use[data-on] { opacity: 1; }
@@ -398,7 +398,7 @@ const css = /* css */ `
 .ui-pac__row[data-clickable] { cursor: pointer; }
 .ui-pac__row[data-clickable]:hover { box-shadow: var(--aui-shadow-card-hover, var(--ui-pac-shadow)); }
 .ui-pac__row[data-selected], .ui-pac__row[data-selected]:hover { box-shadow: var(--ui-pac-shadow), 0 0 0 1.5px var(--ui-pac-focus); }
-.ui-pac__fig { font-size: 12px; line-height: 18px; color: var(--ui-pac-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ui-pac__fig { font-size: calc(12px * var(--type-scale, 1)); line-height: 18px; color: var(--ui-pac-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ui-pac[data-steps] .ui-pac__meta:empty::before, .ui-pac__fig:empty::before { content: "\\200b"; }
 .ui-pac__act { display: flex; justify-content: flex-end; align-items: center; min-width: 0; }
 /* Steve: steps read as one quiet list, not a stack of cards – no panel or shadow per row, a hover wash instead; a thin
@@ -412,7 +412,7 @@ const css = /* css */ `
 .ui-pac[data-steps] .ui-pac__lane { height: 4px; border-radius: 2px; }
 .ui-pac[data-steps] .ui-pac__fill { border-radius: 2px; box-shadow: none; }
 .ui-pac[data-steps] .ui-pac__row[data-status="done"] .ui-pac__lane { visibility: hidden; }
-.ui-pac[data-steps] .ui-pac__name { font-size: 13px; }
+.ui-pac[data-steps] .ui-pac__name { font-size: calc(13px * var(--type-scale, 1)); }
 @media (hover: hover) {
   .ui-pac[data-steps] .ui-pac__act { opacity: 0; transition: opacity 120ms ease; }
   .ui-pac[data-steps] .ui-pac__row:hover .ui-pac__act, .ui-pac[data-steps] .ui-pac__row:focus-within .ui-pac__act, .ui-pac[data-steps] .ui-pac__row[data-selected] .ui-pac__act { opacity: 1; }
@@ -443,7 +443,7 @@ const css = /* css */ `
   /* who ran the step stays: on its own line under the step's name */
   .ui-pac[data-steps] .ui-pac__name { flex-wrap: wrap; row-gap: 0; }
   .ui-pac[data-steps] .ui-pac__name-text { flex: 1 1 100%; }
-  .ui-pac[data-steps] .ui-pac__approach { display: block; flex: 1 1 100%; font-size: 12px; line-height: 16px; white-space: nowrap; }
+  .ui-pac[data-steps] .ui-pac__approach { display: block; flex: 1 1 100%; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; white-space: nowrap; }
   .ui-pac[data-steps] .ui-pac__approach::before { content: none; }
   .ui-pac__act { grid-area: act; }
   .ui-pac__act:empty { display: none; }

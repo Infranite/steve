@@ -122,7 +122,7 @@ const css = /* css */ `
   box-shadow: var(--ui-crdc-shadow);
   color: var(--ui-crdc-ink);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   text-align: start;
   list-style: none;
@@ -137,14 +137,14 @@ const css = /* css */ `
 /* A larger icon tile sits beside both lines; a 16px icon on the title's line */
 .ui-crdc__icon > svg { display: block; width: 16px; height: 16px; }
 .ui-crdc__titles { display: grid; flex: 1; gap: 2px; min-width: 0; }
-.ui-crdc__title { margin: 0; font-size: 13px; line-height: 20px; font-weight: 500; letter-spacing: 0; color: var(--ui-crdc-strong); overflow-wrap: anywhere; }
-.ui-crdc__desc { margin: 0; font-size: 13px; line-height: 20px; color: var(--ui-crdc-muted); overflow-wrap: anywhere; }
+.ui-crdc__title { margin: 0; font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; font-weight: 500; letter-spacing: 0; color: var(--ui-crdc-strong); overflow-wrap: anywhere; }
+.ui-crdc__desc { margin: 0; font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; color: var(--ui-crdc-muted); overflow-wrap: anywhere; }
 /* The action sits on the title's line, centred on it – a 28px button reaches 4px above and below */
 .ui-crdc__action { display: flex; flex: none; align-items: center; gap: 4px; height: 20px; }
 
 /* ----- Content and footer ----- */
 .ui-crdc__body { min-width: 0; overflow-wrap: anywhere; }
-.ui-crdc__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; min-height: 28px; font-size: 12px; line-height: 16px; color: var(--ui-crdc-muted); }
+.ui-crdc__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; min-height: 28px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-crdc-muted); }
 
 /* ----- Interactive: the whole card is a click target ----- */
 .ui-crdc[data-interactive] { cursor: pointer; }

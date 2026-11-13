@@ -280,7 +280,7 @@ const css = /* css */ `
   --ui-tac-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
   --ui-tac-ease: cubic-bezier(0.22, 1, 0.36, 1);
 
-  --fs: 13px;
+  --fs: calc(13px * var(--type-scale, 1));
   --lh: 20px;
 
   display: flex;
@@ -288,19 +288,19 @@ const css = /* css */ `
   gap: 6px;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-tac-ink);
   -webkit-font-smoothing: antialiased;
 }
 /* Touch screens: 16px text, so iOS doesn't zoom in on focus */
 @media (pointer: coarse) {
-  .ui-tac { --fs: 16px; --lh: 24px; }
+  .ui-tac { --fs: calc(16px * var(--type-scale, 1)); --lh: 24px; }
 }
 
 .ui-tac__head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .ui-tac__label { min-width: 0; font-weight: 500; color: var(--ui-tac-title); overflow-wrap: anywhere; cursor: default; }
-.ui-tac__optional { flex: none; font-size: 12px; line-height: 16px; color: var(--ui-tac-subtle); }
+.ui-tac__optional { flex: none; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-tac-subtle); }
 
 /* The box: white, a hairline shadow as its edge; hover and focus only make that edge firmer */
 .ui-tac__box {
@@ -385,14 +385,14 @@ const css = /* css */ `
   flex: 1;
   min-width: 0;
   margin: 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   color: var(--ui-tac-subtle);
   overflow-wrap: anywhere;
   animation: ui-tac-message 260ms var(--ui-tac-ease);
 }
 .ui-tac[data-invalid] .ui-tac__message { color: var(--ui-tac-danger); }
-.ui-tac__count { flex: none; margin-left: auto; font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--ui-tac-faint); transition: color 140ms ease; }
+.ui-tac__count { flex: none; margin-left: auto; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; font-variant-numeric: tabular-nums; color: var(--ui-tac-faint); transition: color 140ms ease; }
 .ui-tac__count[data-full] { color: var(--ui-tac-muted); }
 .ui-tac__count[data-over] { color: var(--ui-tac-danger); }
 

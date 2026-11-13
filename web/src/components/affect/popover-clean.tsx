@@ -303,7 +303,7 @@ const css = /* css */ `
   box-shadow: var(--ui-popc-shadow);
   color: var(--ui-popc-ink);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   text-align: start;
@@ -331,7 +331,7 @@ const css = /* css */ `
 .ui-popc__head { display: grid; gap: 2px; min-width: 0; }
 .ui-popc__head:not(:last-child) { margin-bottom: 12px; }
 .ui-popc__title { margin: 0; font-weight: 500; color: var(--ui-popc-strong); overflow-wrap: anywhere; }
-.ui-popc__desc { margin: 0; font-size: 12px; line-height: 16px; color: var(--ui-popc-muted); overflow-wrap: anywhere; }
+.ui-popc__desc { margin: 0; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-popc-muted); overflow-wrap: anywhere; }
 
 @keyframes ui-popc-in { from { opacity: 0; transform: scale(0.96) translateY(-4px); } }
 @keyframes ui-popc-in-up { from { opacity: 0; transform: scale(0.96) translateY(4px); } }
@@ -340,8 +340,8 @@ const css = /* css */ `
 
 /* Touch screens: 15px text, so it reads like the rest of a phone UI */
 @media (pointer: coarse) {
-  .ui-popc { padding: 16px; font-size: 15px; line-height: 22px; }
-  .ui-popc__desc { font-size: 13px; line-height: 18px; }
+  .ui-popc { padding: 16px; font-size: calc(15px * var(--type-scale, 1)); line-height: 22px; }
+  .ui-popc__desc { font-size: calc(13px * var(--type-scale, 1)); line-height: 18px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -3,6 +3,7 @@
 
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { t, useT } from "@/i18n";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Away Summary – the "While you were away" card for a chat thread, in a single self-contained file.
@@ -103,7 +104,7 @@ const duration = (ms: number) => {
   if (h < 24) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
   return h % 24 ? `${Math.floor(h / 24)}d ${h % 24}h` : `${Math.floor(h / 24)}d`;
 };
-const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reduced = () => reducedMotion();
 
 /* ---------- Marks and icons: Hugeicons Free (MIT, © Hugeicons, hugeicons.com) for the chevrons and tick ---------- */
 
@@ -499,7 +500,7 @@ const css = /* css */ `
   width: 100%;
   container: ui-awc / inline-size;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 400;
   line-height: 20px;
   color: var(--ui-awc-text);
@@ -525,7 +526,7 @@ const css = /* css */ `
 .ui-awc__divider { display: flex; align-items: center; gap: 8px; min-width: 0; }
 /* The lines give way first, so a narrow divider keeps its words */
 .ui-awc__rule { flex: 1 1 0; min-width: 8px; height: 0.5px; background: var(--ui-awc-rule); }
-.ui-awc__divider-btn { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; height: 28px; padding-inline: 10px 8px; border-radius: 14px; font-size: 12px; line-height: 16px; color: var(--ui-awc-muted); transition: background-color 140ms ease, color 140ms ease; }
+.ui-awc__divider-btn { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; height: 28px; padding-inline: 10px 8px; border-radius: 14px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-awc-muted); transition: background-color 140ms ease, color 140ms ease; }
 .ui-awc__divider-btn:hover { background: var(--ui-awc-fill); color: var(--ui-awc-ink); }
 .ui-awc__divider-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 /* The fold clips anything outside the line – the ring sits inside the pill */
@@ -535,9 +536,9 @@ const css = /* css */ `
 /* ----- The card ----- */
 .ui-awc__card { display: grid; grid-template-columns: minmax(0, 1fr); border-radius: calc(var(--aui-radius-lg, 10px) + 2px); background: var(--ui-awc-card); box-shadow: var(--aui-shadow-card, var(--ui-awc-shadow)); }
 .ui-awc__head { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 12px; row-gap: 2px; min-width: 0; padding: 10px 14px 9px; border-bottom: 0.5px solid var(--ui-awc-line); }
-.ui-awc__title { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-awc-strong); white-space: nowrap; text-overflow: ellipsis; }
+.ui-awc__title { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: calc(13px * var(--type-scale, 1)); font-weight: 500; line-height: 20px; color: var(--ui-awc-strong); white-space: nowrap; text-overflow: ellipsis; }
 .ui-awc__when { font-weight: 400; color: var(--ui-awc-muted); font-variant-numeric: tabular-nums; }
-.ui-awc__counts { display: flex; flex: none; flex-wrap: wrap; align-items: center; column-gap: 6px; font-size: 12px; line-height: 16px; color: var(--ui-awc-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ui-awc__counts { display: flex; flex: none; flex-wrap: wrap; align-items: center; column-gap: 6px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-awc-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ui-awc__count { display: inline-flex; align-items: center; gap: 6px; }
 .ui-awc__sep { color: var(--ui-awc-faint); }
 .ui-awc__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ui-awc-muted); }
@@ -567,11 +568,11 @@ const css = /* css */ `
 /* Lines line up with the card's own direction, also when a title reads right to left */
 .ui-awc__text { text-align: left; }
 .ui-awc__text:dir(rtl) { text-align: right; }
-.ui-awc__name { min-width: 0; overflow: hidden; font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-awc-ink); white-space: nowrap; text-overflow: ellipsis; }
-.ui-awc__detail { min-width: 0; overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-awc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-awc__name { min-width: 0; overflow: hidden; font-size: calc(13px * var(--type-scale, 1)); font-weight: 500; line-height: 20px; color: var(--ui-awc-ink); white-space: nowrap; text-overflow: ellipsis; }
+.ui-awc__detail { min-width: 0; overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-awc-muted); white-space: nowrap; text-overflow: ellipsis; }
 .ui-awc__detail[data-pop] { animation: ui-awc-fade 320ms ease both; }
 
-.ui-awc__act { position: relative; display: inline-grid; place-items: center; min-width: 56px; max-width: max(64px, 42cqi); height: 26px; padding: 0 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-awc-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease, box-shadow 140ms ease; }
+.ui-awc__act { position: relative; display: inline-grid; place-items: center; min-width: 56px; max-width: max(64px, 42cqi); height: 26px; padding: 0 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-awc-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease, box-shadow 140ms ease; }
 .ui-awc__act:hover { background: var(--ui-awc-fill); color: var(--ui-awc-ink); }
 /* The one that needs you is a real button; Open and Retry stay quiet */
 .ui-awc__act[data-kind="needs-you"] { background: var(--ui-awc-card); box-shadow: var(--ui-awc-shadow); color: var(--ui-awc-ink); }
@@ -583,11 +584,11 @@ const css = /* css */ `
 .ui-awc__act[aria-busy] .ui-awc__act-label { opacity: 0; }
 .ui-awc__spin { position: absolute; width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--ui-awc-fill); border-top-color: var(--ui-awc-muted); animation: ui-awc-spin 700ms linear infinite; }
 
-.ui-awc__empty { padding: 14px; font-size: 12px; line-height: 16px; color: var(--ui-awc-muted); }
+.ui-awc__empty { padding: 14px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-awc-muted); }
 
 /* ----- Show more and Got it ----- */
 .ui-awc__foot { display: flex; align-items: center; gap: 4px; padding: 4px 6px 6px; border-top: 0.5px solid var(--ui-awc-line); }
-.ui-awc__more, .ui-awc__done-btn { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-awc-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease; }
+.ui-awc__more, .ui-awc__done-btn { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-awc-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease; }
 .ui-awc__more > svg { color: var(--ui-awc-faint); }
 .ui-awc__done-btn { gap: 6px; margin-inline-start: auto; padding-inline: 8px 10px; }
 .ui-awc__done-btn > svg { color: var(--ui-awc-muted); }

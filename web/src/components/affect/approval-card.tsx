@@ -586,7 +586,7 @@ const css = /* css */ `
   background: var(--ui-apc-tray);
   color: var(--ui-apc-text);
   font-family: var(--aui-font, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 1.45;
   letter-spacing: -0.006em;
   text-align: left;
@@ -659,7 +659,7 @@ const css = /* css */ `
   margin: 0;
   overflow: hidden;
   color: var(--ui-apc-ink);
-  font-size: 14px;
+  font-size: calc(14px * var(--type-scale, 1));
   font-weight: 550;
   line-height: 20px;
   letter-spacing: -0.011em;
@@ -671,7 +671,7 @@ const css = /* css */ `
 .ui-apc__desc {
   margin: 1px 0 0;
   overflow: hidden;
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 18px;
   text-align: start;
   white-space: nowrap;
@@ -688,7 +688,7 @@ const css = /* css */ `
   border-radius: calc(var(--aui-radius-sm, 5px) + 1px);
   background: var(--ui-apc-low-bg);
   color: var(--ui-apc-low-ink);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -824,7 +824,7 @@ const css = /* css */ `
   overflow: hidden;
   padding: 6px 8px 4px;
   color: var(--ui-apc-muted);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--type-scale, 1));
   line-height: 16px;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -856,7 +856,7 @@ const css = /* css */ `
   gap: 6px;
   min-width: 0;
   color: var(--ui-apc-muted);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--type-scale, 1));
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   transition: color 300ms ease;
@@ -893,7 +893,7 @@ const css = /* css */ `
   border: 0;
   border-radius: calc(var(--aui-radius, 7px) + 3px);
   font: inherit;
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -955,7 +955,7 @@ const css = /* css */ `
   background: var(--ui-apc-kbd);
   color: var(--ui-apc-muted);
   font: inherit;
-  font-size: 11px;
+  font-size: calc(11px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 1;
 }
@@ -1023,7 +1023,7 @@ const css = /* css */ `
   min-width: 0;
   overflow: hidden;
   color: var(--ui-apc-ink);
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--type-scale, 1));
   font-weight: 500;
   white-space: nowrap;
   text-overflow: ellipsis;

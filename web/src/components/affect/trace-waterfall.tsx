@@ -6,6 +6,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties,
 import { t, useT } from "@/i18n";
 import { clockDur, msDur, num } from "@/i18n/format";
 import { fmtN } from "@/stats/format";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Trace Waterfall – where the time and the money of an agent run go, in a single self-contained file.
@@ -120,7 +121,7 @@ const tokensOf = (s: TraceSpan): [number, number] =>
     },
     [s.tokensIn ?? 0, s.tokensOut ?? 0],
   );
-const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reduced = () => reducedMotion();
 const ease = (p: number) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
 
 type Row = { span: TraceSpan; depth: number; parentId?: string; hidden: boolean; leaving?: number };
@@ -844,7 +845,7 @@ const css = /* css */ `
   box-shadow: var(--aui-shadow-card, var(--ui-trwc-shadow));
   container: ui-trwc / inline-size;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 400;
   line-height: 20px;
   color: var(--ui-trwc-text);
@@ -862,7 +863,7 @@ const css = /* css */ `
 .ui-trwc__spark { display: grid; flex: none; place-items: center; width: 16px; color: var(--ui-trwc-accent); }
 .ui-trwc__heading { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 500; color: var(--ui-trwc-strong); }
 .ui-trwc__task { flex: 1; min-width: 0; overflow: hidden; color: var(--ui-trwc-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-trwc__pill { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-trwc-fill); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-trwc-text); white-space: nowrap; }
+.ui-trwc__pill { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-trwc-fill); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-trwc-text); white-space: nowrap; }
 .ui-trwc__pill[data-status="running"] { background: var(--ui-trwc-brand-bg); color: var(--ui-trwc-brand-fg); }
 .ui-trwc__pill[data-status="done"] { background: var(--ui-trwc-ok-bg); color: var(--ui-trwc-ok-fg); }
 .ui-trwc__pill[data-status="failed"] { background: var(--ui-trwc-error-bg); color: var(--ui-trwc-error-ink); }
@@ -876,8 +877,8 @@ const css = /* css */ `
 .ui-trwc__stat:first-child { padding-left: 22px; }
 .ui-trwc__stat:last-child { padding-right: 10px; }
 .ui-trwc__stat + .ui-trwc__stat { border-left: 0.5px solid var(--ui-trwc-line); }
-.ui-trwc__stat dt { overflow: hidden; font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-trwc-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-trwc__stat dd { overflow: hidden; font-size: 15px; font-weight: 500; line-height: 24px; color: var(--ui-trwc-ink); white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.ui-trwc__stat dt { overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-trwc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-trwc__stat dd { overflow: hidden; font-size: calc(15px * var(--type-scale, 1)); font-weight: 500; line-height: 24px; color: var(--ui-trwc-ink); white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .ui-trwc__stat[data-kind="failed"] dd { color: var(--ui-trwc-error-ink); }
 
 .ui-trwc__body { position: relative; padding-bottom: 18px; }
@@ -886,12 +887,12 @@ const css = /* css */ `
 .ui-trwc__tick { position: absolute; top: 0; bottom: 0; left: calc(var(--v) * 100% / var(--ui-trwc-range)); width: 0.5px; background: var(--ui-trwc-grid); animation: ui-trwc-fade 420ms ease both; transition: opacity 420ms ease; }
 .ui-trwc__tick[data-zero] { width: 0.5px; background: rgba(0, 0, 0, 0.1); }
 .ui-trwc__tick[data-leaving] { opacity: 0; }
-.ui-trwc__tick > span { position: absolute; top: 7px; left: 6px; font-size: 12px; line-height: 16px; color: var(--ui-trwc-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ui-trwc__tick > span { position: absolute; top: 7px; left: 6px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-trwc-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Steve: a label too near the end of the axis would be cut off – its line stays, the label goes */
 .ui-trwc__tick[data-edge] > span { display: none; }
 .ui-trwc__now { position: absolute; top: 0; bottom: 0; left: calc(var(--ui-trwc-at) * 100% / var(--ui-trwc-range)); width: 1px; background: var(--ui-trwc-now); }
 .ui-trwc__now::before { content: ""; position: absolute; top: calc(var(--ui-trwc-axis) - 2.5px); left: -2px; width: 5px; height: 5px; border-radius: 50%; background: var(--ui-trwc-accent); box-shadow: 0 0 0 3px var(--aui-surface, var(--ui-trwc-card)); }
-.ui-trwc__axis { display: flex; align-items: center; height: var(--ui-trwc-axis); padding-left: calc(var(--ui-trwc-pad) + 6px); border-bottom: 0.5px solid var(--ui-trwc-line); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-trwc-muted); }
+.ui-trwc__axis { display: flex; align-items: center; height: var(--ui-trwc-axis); padding-left: calc(var(--ui-trwc-pad) + 6px); border-bottom: 0.5px solid var(--ui-trwc-line); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-trwc-muted); }
 .ui-trwc__rows { position: relative; padding-top: 4px; }
 
 /* ----- One row: its name on the left, its bar on the right ----- */
@@ -929,8 +930,8 @@ const css = /* css */ `
 .ui-trwc__label { display: flex; align-items: baseline; gap: 6px; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
 .ui-trwc__title { flex: none; max-width: 100%; overflow: hidden; color: var(--ui-trwc-ink); text-overflow: ellipsis; }
 .ui-trwc__row[data-parent] .ui-trwc__title { font-weight: 500; color: var(--ui-trwc-strong); }
-.ui-trwc__detail { min-width: 0; overflow: hidden; font-size: 12px; color: var(--ui-trwc-muted); text-overflow: ellipsis; }
-.ui-trwc__more { flex: none; height: 18px; margin-left: 6px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-trwc-fill); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-trwc-text); font-variant-numeric: tabular-nums; animation: ui-trwc-pop 220ms var(--ui-trwc-ease) both; }
+.ui-trwc__detail { min-width: 0; overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); color: var(--ui-trwc-muted); text-overflow: ellipsis; }
+.ui-trwc__more { flex: none; height: 18px; margin-left: 6px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-trwc-fill); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 18px; color: var(--ui-trwc-text); font-variant-numeric: tabular-nums; animation: ui-trwc-pop 220ms var(--ui-trwc-ease) both; }
 .ui-trwc__state { display: grid; flex: none; place-items: center; width: 16px; margin-left: 4px; }
 .ui-trwc__state[data-status="running"] { color: var(--ui-trwc-brand-fg); }
 .ui-trwc__state[data-status="failed"] { color: var(--ui-trwc-error-ink); }
@@ -966,13 +967,13 @@ const css = /* css */ `
 .ui-trwc__bar[data-status="running"]::after { content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: min(28px, 100%); background: linear-gradient(90deg, transparent, var(--k-edge)); animation: ui-trwc-glow 1100ms ease-in-out infinite alternate; }
 
 /* How long it took – on the card's color, so grid lines and the "now" line pass behind it */
-.ui-trwc__tag { position: absolute; top: calc(50% - 9px); display: flex; align-items: center; gap: 6px; height: 18px; padding: 0 4px; border-radius: 4px; background: var(--aui-surface, var(--ui-trwc-card)); font-size: 12px; line-height: 16px; color: var(--ui-trwc-text); white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; }
+.ui-trwc__tag { position: absolute; top: calc(50% - 9px); display: flex; align-items: center; gap: 6px; height: 18px; padding: 0 4px; border-radius: 4px; background: var(--aui-surface, var(--ui-trwc-card)); font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-trwc-text); white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; }
 .ui-trwc__tag[data-side="after"] { left: calc((var(--s) + var(--d)) * 100% / var(--ui-trwc-range) + 2px); }
 .ui-trwc__tag[data-side="inside"] { right: calc(100% - (var(--s) + var(--d)) * 100% / var(--ui-trwc-range) + 2px); flex-direction: row-reverse; background: none; color: var(--k-ink); }
 .ui-trwc__tag[data-side="before"] { right: calc(100% - var(--s) * 100% / var(--ui-trwc-range) + 2px); flex-direction: row-reverse; }
 .ui-trwc__row[data-open] .ui-trwc__tag { background: none; }
 .ui-trwc__row[data-status="failed"] .ui-trwc__tag { color: var(--ui-trwc-error-ink); }
-.ui-trwc__slow { flex: none; height: 16px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-trwc-slow-bg); font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--ui-trwc-slow-fg); animation: ui-trwc-pop 260ms var(--ui-trwc-ease) both; }
+.ui-trwc__slow { flex: none; height: 16px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-trwc-slow-bg); font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--ui-trwc-slow-fg); animation: ui-trwc-pop 260ms var(--ui-trwc-ease) both; }
 /* Numbers that still climb: a light shimmer runs over them */
 .ui-trwc__amount[data-live] {
   background: linear-gradient(90deg, currentColor 0%, currentColor 38%, var(--ui-trwc-shine) 50%, currentColor 62%, currentColor 100%) 0 0 / 300% 100%;
@@ -991,19 +992,19 @@ const css = /* css */ `
 .ui-trwc__pop-head .ui-trwc__icon > svg { width: 15px; height: 15px; }
 .ui-trwc__pop-who { display: grid; flex: 1; min-width: 0; }
 .ui-trwc__pop-name { overflow: hidden; font-weight: 500; line-height: 18px; color: var(--ui-trwc-strong); overflow-wrap: anywhere; }
-.ui-trwc__pop-kind { overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-trwc-muted); overflow-wrap: anywhere; }
-.ui-trwc__pop-head .ui-trwc__pill { height: 18px; margin-left: 8px; padding: 0 6px; font-size: 11px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); }
+.ui-trwc__pop-kind { overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-trwc-muted); overflow-wrap: anywhere; }
+.ui-trwc__pop-head .ui-trwc__pill { height: 18px; margin-left: 8px; padding: 0 6px; font-size: calc(11px * var(--type-scale, 1)); border-radius: calc(var(--aui-radius-sm, 5px) - 1px); }
 .ui-trwc__close { display: grid; flex: none; place-items: center; width: 28px; height: 28px; margin: -2px -4px 0 4px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-trwc-muted); transition: background-color 140ms ease, color 140ms ease; }
 .ui-trwc__close:hover { background: var(--ui-trwc-fill); color: var(--ui-trwc-ink); }
 .ui-trwc__pop-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 8px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 3px); background: var(--ui-trwc-wash); box-shadow: inset 0 0 0 0.5px var(--ui-trwc-line); }
-.ui-trwc__pop-stats dt { font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-trwc-muted); }
+.ui-trwc__pop-stats dt { font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-trwc-muted); }
 .ui-trwc__pop-stats dd { font-weight: 500; line-height: 20px; color: var(--ui-trwc-ink); font-variant-numeric: tabular-nums; }
-.ui-trwc__pop-error { display: flex; gap: 8px; padding: 8px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 3px); background: var(--ui-trwc-error-bg); font-size: 12px; line-height: 16px; color: var(--ui-trwc-error-ink); }
+.ui-trwc__pop-error { display: flex; gap: 8px; padding: 8px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 3px); background: var(--ui-trwc-error-bg); font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-trwc-error-ink); }
 .ui-trwc__pop-error > svg { margin-top: 2px; }
 .ui-trwc__pop-error-text { min-width: 0; overflow-wrap: anywhere; }
 .ui-trwc__pop-io { display: grid; gap: 2px; }
-.ui-trwc__pop-io > span { font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-trwc-muted); }
-.ui-trwc__pop-io > p { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; font-size: 12px; line-height: 16px; color: var(--ui-trwc-text); -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.ui-trwc__pop-io > span { font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-trwc-muted); }
+.ui-trwc__pop-io > p { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-trwc-text); -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 
 /* ----- Narrow: the name on its own line, its bar under it across the whole width ----- */
 @container ui-trwc (max-width: 560px) {
@@ -1029,7 +1030,7 @@ const css = /* css */ `
   .ui-trwc__bar { border-radius: 3px; }
   .ui-trwc__mark { top: calc(50% - 2px); height: 4px; }
   .ui-trwc__tag { display: none; }
-  .ui-trwc__meta { display: flex; flex: none; align-items: center; gap: 6px; margin-left: 8px; font-size: 12px; line-height: 16px; color: var(--ui-trwc-text); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .ui-trwc__meta { display: flex; flex: none; align-items: center; gap: 6px; margin-left: 8px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-trwc-text); white-space: nowrap; font-variant-numeric: tabular-nums; }
   .ui-trwc__row[data-status="failed"] .ui-trwc__meta { color: var(--ui-trwc-error-ink); }
   .ui-trwc__pop-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

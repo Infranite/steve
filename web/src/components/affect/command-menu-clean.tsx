@@ -456,7 +456,7 @@ const css = /* css */ `
   width: 100%;
   max-width: 600px;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 14px;
+  font-size: calc(14px * var(--type-scale, 1));
   line-height: 22px;
   font-weight: 400;
   color: var(--ui-cmc-ink);
@@ -472,7 +472,7 @@ const css = /* css */ `
 /* Search row */
 .ui-cmc__search { display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 12px 0 14px; border-bottom: 0.5px solid var(--ui-cmc-line); cursor: text; }
 .ui-cmc__search > svg { width: 16px; height: 16px; fill: none; stroke: var(--ui-cmc-icon); stroke-width: 1.1; stroke-linecap: round; }
-.ui-cmc__search input { flex: 1; min-width: 0; height: 20px; padding: 0; border: 0; background: transparent; font: inherit; font-size: 14px; line-height: 20px; color: var(--ui-cmc-ink); caret-color: var(--ui-cmc-accent); outline: none; }
+.ui-cmc__search input { flex: 1; min-width: 0; height: 20px; padding: 0; border: 0; background: transparent; font: inherit; font-size: calc(14px * var(--type-scale, 1)); line-height: 20px; color: var(--ui-cmc-ink); caret-color: var(--ui-cmc-accent); outline: none; }
 .ui-cmc__search input::placeholder { color: var(--ui-cmc-faint); }
 .ui-cmc__search input:focus-visible { outline: none; }
 .ui-cmc__enter svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.1; stroke-linecap: round; stroke-linejoin: round; }
@@ -480,7 +480,7 @@ const css = /* css */ `
 /* Results */
 .ui-cmc__list { position: relative; max-height: 360px; padding: 0 4px 4px; overflow-y: auto; scrollbar-width: thin; transition: height 320ms var(--ui-cmc-ease); }
 .ui-cmc__group { display: flex; flex-direction: column; }
-.ui-cmc__label { padding: 10px 8px 4px; overflow-wrap: anywhere; font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-cmc-muted); }
+.ui-cmc__label { padding: 10px 8px 4px; overflow-wrap: anywhere; font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-cmc-muted); }
 /* With text typed, the assistant row sits on top without a label */
 .ui-cmc__group:first-child:not(:has(.ui-cmc__label)) { padding-top: 4px; }
 /* The highlight follows the active row */
@@ -514,14 +514,14 @@ const css = /* css */ `
 .ui-cmc__logo img { width: 12px; height: 12px; object-fit: contain; }
 .ui-cmc__icon img { width: 16px; height: 16px; object-fit: contain; }
 .ui-cmc__logo[data-broken] > *, .ui-cmc__icon[data-broken] > * { display: none; }
-.ui-cmc__logo[data-broken]::after, .ui-cmc__icon[data-broken]::after { content: attr(data-letter); font-size: 10px; font-weight: 600; line-height: 1; color: var(--ui-cmc-text); }
+.ui-cmc__logo[data-broken]::after, .ui-cmc__icon[data-broken]::after { content: attr(data-letter); font-size: calc(10px * var(--type-scale, 1)); font-weight: 600; line-height: 1; color: var(--ui-cmc-text); }
 .ui-cmc__icon { display: grid; place-items: center; flex: none; width: 20px; height: 20px; color: var(--ui-cmc-icon); transition: color 140ms ease; }
 /* Steve: lucide glyphs and a status dot sit in the icon box at the size the rest of Steve uses */
 .ui-cmc__icon > svg { width: 16px; height: 16px; }
-.ui-cmc__empty { margin: 0; padding: 28px 8px; text-align: center; font-size: 13px; line-height: 20px; color: var(--ui-cmc-muted); }
+.ui-cmc__empty { margin: 0; padding: 28px 8px; text-align: center; font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; color: var(--ui-cmc-muted); }
 .ui-cmc__busy { flex: none; width: 14px; height: 14px; margin: 0 4px; border-radius: 50%; border: 1.5px solid var(--ui-cmc-line-strong); border-top-color: var(--ui-cmc-icon); animation: ui-cmc-spin 700ms linear infinite; }
 @keyframes ui-cmc-spin { to { transform: rotate(360deg); } }
-.ui-cmc__hint[data-mono] { font-family: var(--aui-font-mono, ui-monospace, monospace); font-size: 12px; }
+.ui-cmc__hint[data-mono] { font-family: var(--aui-font-mono, ui-monospace, monospace); font-size: calc(12px * var(--type-scale, 1)); }
 .ui-cmc__glyph { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.1; stroke-linecap: round; stroke-linejoin: round; }
 .ui-cmc__glyph path { vector-effect: non-scaling-stroke; }
 .ui-cmc__item[aria-selected="true"] .ui-cmc__icon { color: var(--ui-cmc-ink); }
@@ -541,7 +541,7 @@ const css = /* css */ `
   border-radius: var(--aui-radius-sm, 5px);
   box-shadow: inset 0 0 0 0.5px var(--ui-cmc-line-strong);
   font-family: inherit;
-  font-size: 11px;
+  font-size: calc(11px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 16px;
   color: var(--ui-cmc-muted);
@@ -562,7 +562,7 @@ const css = /* css */ `
   height: 40px;
   padding: 0 12px;
   border-top: 0.5px solid var(--ui-cmc-line);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   color: var(--ui-cmc-muted);
 }

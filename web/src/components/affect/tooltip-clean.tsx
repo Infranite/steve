@@ -335,7 +335,7 @@ const css = /* css */ `
   box-shadow: var(--ui-tipc-shadow);
   color: var(--ui-tipc-ink);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   font-weight: 500;
   text-align: start;
@@ -369,7 +369,7 @@ const css = /* css */ `
 
 /* Touch screens (a tablet with a mouse or pen): a little larger type */
 @media (pointer: coarse) {
-  .ui-tipc { padding: 5px 9px; font-size: 13px; line-height: 18px; }
+  .ui-tipc { padding: 5px 9px; font-size: calc(13px * var(--type-scale, 1)); line-height: 18px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -365,7 +365,7 @@ const css = /* css */ `
   box-shadow: 0 0 0 0.5px var(--ui-codec-line);
   color: var(--ui-codec-ink);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   -webkit-font-smoothing: antialiased;
 }
@@ -386,7 +386,7 @@ const css = /* css */ `
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   font-weight: 500;
   color: var(--ui-codec-muted);
@@ -454,7 +454,7 @@ const css = /* css */ `
   margin: 0;
   padding: 10px 0;
   font-family: var(--ui-codec-mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-codec-ink);
   tab-size: 2;

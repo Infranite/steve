@@ -15,6 +15,7 @@ import {
   type InputHTMLAttributes,
   type ReactNode,
 } from "react";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Stepper Form (Clean) – a multi-step flow for onboarding, checkout or setup wizards, in a single self-contained file.
@@ -97,7 +98,7 @@ const text = (v: unknown) => (v == null ? "" : String(v));
 const fmt = (x: number) => x.toLocaleString("en-US");
 /** "Billing Details" → "billing details", but "API & SSO" stays as it is */
 const lower = (t: string) => t.replace(/\p{Lu}\p{Ll}+/gu, (w) => w.toLowerCase());
-const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reduced = () => reducedMotion();
 
 /** A short, calm shake – Web Animations, so it can run again on the same element without remounting it */
 function shake(el: HTMLElement | null) {
@@ -643,7 +644,7 @@ const css = /* css */ `
   background: var(--ui-stpc-card);
   box-shadow: var(--aui-shadow-card, var(--ui-stpc-shadow));
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   color: var(--ui-stpc-ink);
@@ -704,7 +705,7 @@ button.ui-stpc__step-btn:hover { background: var(--ui-stpc-wash); }
   justify-content: flex-start;
   min-width: 12px;
   height: 16px;
-  font-size: 10px;
+  font-size: calc(10px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
@@ -718,7 +719,7 @@ button.ui-stpc__step-btn:hover { background: var(--ui-stpc-wash); }
 .ui-stpc__step-label {
   overflow: hidden;
   min-width: 0;
-  font-size: 10px;
+  font-size: calc(10px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 16px;
   letter-spacing: var(--ui-stpc-label-tracking, 0.5px);
@@ -737,7 +738,7 @@ button.ui-stpc__step-btn:hover .ui-stpc__step-label { color: var(--ui-stpc-ink);
 .ui-stpc__compact-text {
   display: flex;
   min-width: 0;
-  font-size: 10px;
+  font-size: calc(10px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 16px;
   letter-spacing: var(--ui-stpc-label-tracking, 0.5px);
@@ -759,14 +760,14 @@ button.ui-stpc__step-btn:hover .ui-stpc__step-label { color: var(--ui-stpc-ink);
 .ui-stpc__pane[data-first] { animation: none; }
 .ui-stpc__pane[data-pane="leaving"] { position: absolute; top: 0; left: 0; right: 0; pointer-events: none; animation: ui-stpc-leave 280ms var(--ui-stpc-ease) both; }
 .ui-stpc__pane[data-pane="leaving"][data-dir="-1"] { animation-name: ui-stpc-leave-back; }
-.ui-stpc__heading { font-size: 15px; font-weight: 500; line-height: 24px; color: var(--ui-stpc-strong); outline: none; overflow-wrap: anywhere; }
+.ui-stpc__heading { font-size: calc(15px * var(--type-scale, 1)); font-weight: 500; line-height: 24px; color: var(--ui-stpc-strong); outline: none; overflow-wrap: anywhere; }
 .ui-stpc__desc { color: var(--ui-stpc-text); text-wrap: pretty; white-space: pre-line; overflow-wrap: anywhere; }
 /* Steve: one shrinkable column, so a long unbreakable line (a path) is cut inside the card instead of widening it */
 .ui-stpc__body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin-top: 16px; }
 
 /* Fields */
 .ui-stpc__field { display: grid; min-width: 0; }
-.ui-stpc__label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0 0 6px 2px; font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-stpc-text); }
+.ui-stpc__label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0 0 6px 2px; font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-stpc-text); }
 .ui-stpc__label-text { min-width: 0; overflow-wrap: anywhere; }
 .ui-stpc__optional { flex: none; font-weight: 400; color: var(--ui-stpc-muted); }
 .ui-stpc__control { min-width: 0; }
@@ -807,7 +808,7 @@ button.ui-stpc__step-btn:hover .ui-stpc__step-label { color: var(--ui-stpc-ink);
 .ui-stpc__fold { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 260ms var(--ui-stpc-ease), opacity 200ms ease; }
 .ui-stpc__fold[data-open] { grid-template-rows: 1fr; opacity: 1; }
 .ui-stpc__fold > div { min-height: 0; overflow: hidden; }
-.ui-stpc__msg, .ui-stpc__hint { padding: 6px 0 0 2px; font-size: 12px; line-height: 16px; text-wrap: pretty; overflow-wrap: anywhere; }
+.ui-stpc__msg, .ui-stpc__hint { padding: 6px 0 0 2px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; text-wrap: pretty; overflow-wrap: anywhere; }
 .ui-stpc__msg { color: var(--ui-stpc-danger); animation: ui-stpc-in 240ms var(--ui-stpc-ease) both; }
 .ui-stpc__hint { color: var(--ui-stpc-muted); }
 
@@ -843,7 +844,7 @@ button.ui-stpc__step-btn:hover .ui-stpc__step-label { color: var(--ui-stpc-ink);
   flex: none;
   height: 28px;
   border-radius: calc(var(--aui-radius, 7px) - 1px);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
@@ -868,7 +869,7 @@ button.ui-stpc__step-btn:hover .ui-stpc__step-label { color: var(--ui-stpc-ink);
 .ui-stpc__btn-inner { display: inline-flex; flex: none; align-items: center; gap: 6px; max-width: calc(100cqw - 112px); padding: 0 10px; }
 .ui-stpc__btn-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; animation: ui-stpc-in 240ms var(--ui-stpc-ease) both; }
 .ui-stpc__spinner { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid currentColor; border-right-color: transparent; animation: ui-stpc-spin 700ms linear infinite; }
-.ui-stpc__submit-error { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 12px; line-height: 16px; color: var(--ui-stpc-danger); animation: ui-stpc-in 240ms var(--ui-stpc-ease) both; }
+.ui-stpc__submit-error { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-stpc-danger); animation: ui-stpc-in 240ms var(--ui-stpc-ease) both; }
 
 @keyframes ui-stpc-in { from { opacity: 0; transform: translateY(3px); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
 @keyframes ui-stpc-enter { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
@@ -892,7 +893,7 @@ button.ui-stpc__step-btn:hover .ui-stpc__step-label { color: var(--ui-stpc-ink);
 }
 /* Touch screens: 16px fields (no zoom on iOS) and taller targets */
 @media (hover: none) and (pointer: coarse) {
-  .ui-stpc__input input, .ui-stpc__prefix { font-size: 16px; }
+  .ui-stpc__input input, .ui-stpc__prefix { font-size: calc(16px * var(--type-scale, 1)); }
   .ui-stpc__input, .ui-stpc__input input { height: 40px; }
   .ui-stpc__btn { height: 36px; }
   .ui-stpc__foot::before { height: 56px; }

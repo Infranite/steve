@@ -212,7 +212,7 @@ const css = /* css */ `
   --ui-tlc-done: var(--aui-success);
   --ui-tlc-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
   --ui-tlc-h: 32px;
-  --ui-tlc-font: 13px;
+  --ui-tlc-font: calc(13px * var(--type-scale, 1));
   --ui-tlc-lh: 20px;
   --ui-tlc-icon: 16px;
   display: inline-flex;
@@ -236,7 +236,7 @@ const css = /* css */ `
 }
 .ui-tlc[data-size="sm"] {
   --ui-tlc-h: 26px;
-  --ui-tlc-font: 12px;
+  --ui-tlc-font: calc(12px * var(--type-scale, 1));
   --ui-tlc-lh: 16px;
   --ui-tlc-icon: 14px;
   gap: 5px;

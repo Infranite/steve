@@ -494,7 +494,7 @@ const css = /* css */ `
   --ui-ccc-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
   --ui-ccc-ease-pop: cubic-bezier(0.34, 1.5, 0.64, 1);
   /* Steve: the message in the body size of the conversation it joins */
-  --ui-ccc-size: 14px;
+  --ui-ccc-size: calc(14px * var(--type-scale, 1));
   --ui-ccc-leading: 22px;
   position: relative;
   container-type: inline-size;
@@ -507,7 +507,7 @@ const css = /* css */ `
   background: var(--ui-ccc-card);
   box-shadow: 0 0 0 1px var(--ui-ccc-line), var(--ui-ccc-shadow);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   color: var(--ui-ccc-text);
@@ -610,7 +610,7 @@ const css = /* css */ `
   height: 28px;
   min-width: 0;
   padding: 0 6px;
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   white-space: nowrap;
   color: var(--ui-ccc-muted);
 }
@@ -685,9 +685,9 @@ const css = /* css */ `
 .ui-ccc__option-logo svg { width: 100%; height: 100%; }
 .ui-ccc__option-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 /* Names in the body text: 13px regular in the ink gray – the picked one in medium and full black */
-.ui-ccc__option-name { overflow: hidden; text-align: start; font-size: 13px; font-weight: 400; line-height: 20px; white-space: nowrap; text-overflow: ellipsis; color: var(--ui-ccc-ink); }
+.ui-ccc__option-name { overflow: hidden; text-align: start; font-size: calc(13px * var(--type-scale, 1)); font-weight: 400; line-height: 20px; white-space: nowrap; text-overflow: ellipsis; color: var(--ui-ccc-ink); }
 .ui-ccc__option[aria-selected="true"] .ui-ccc__option-name { color: var(--ui-ccc-strong); }
-.ui-ccc__option-desc { text-align: start; font-size: 12px; line-height: 16px; color: var(--ui-ccc-hint); }
+.ui-ccc__option-desc { text-align: start; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-ccc-hint); }
 .ui-ccc__option-check { flex: none; width: 16px; height: 16px; margin-top: 2px; color: var(--ui-ccc-ink); opacity: 0; transform: scale(0.6); transition: opacity 160ms ease-out, transform 260ms var(--ui-ccc-ease-pop); }
 .ui-ccc__option-check svg { width: 100%; height: 100%; }
 .ui-ccc__option[data-checked] .ui-ccc__option-check { opacity: 1; transform: none; }
@@ -695,14 +695,14 @@ const css = /* css */ `
 .ui-ccc__option[data-tone="alert"] :is(.ui-ccc__option-logo, .ui-ccc__option-name) { color: var(--ui-ccc-alert); }
 /* The plus menu: one line per row, the description beside the name */
 .ui-ccc__menu[data-inline] .ui-ccc__option-text { flex-direction: row; align-items: baseline; gap: 8px; }
-.ui-ccc__menu[data-inline] .ui-ccc__option-desc { overflow: hidden; font-size: 13px; line-height: 20px; white-space: nowrap; text-overflow: ellipsis; }
+.ui-ccc__menu[data-inline] .ui-ccc__option-desc { overflow: hidden; font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; white-space: nowrap; text-overflow: ellipsis; }
 /* A question with a link on top, titles over the sections */
-.ui-ccc__menu-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 6px 8px 4px; font-size: 12px; line-height: 16px; color: var(--ui-ccc-hint); }
-.ui-ccc__menu-link { flex: none; font-size: 12px; color: var(--ui-ccc-muted) !important; transition: color 140ms ease; }
+.ui-ccc__menu-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 6px 8px 4px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-ccc-hint); }
+.ui-ccc__menu-link { flex: none; font-size: calc(12px * var(--type-scale, 1)); color: var(--ui-ccc-muted) !important; transition: color 140ms ease; }
 .ui-ccc__menu-link:hover { color: var(--ui-ccc-ink) !important; text-decoration: underline; text-underline-offset: 3px; }
 .ui-ccc__menu-section { display: flex; flex-direction: column; }
 .ui-ccc__menu-section + .ui-ccc__menu-section { margin-top: 4px; }
-.ui-ccc__menu-title { padding: 6px 8px 2px; font-size: 12px; line-height: 16px; color: var(--ui-ccc-muted); }
+.ui-ccc__menu-title { padding: 6px 8px 2px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-ccc-muted); }
 
 .ui-ccc__sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 

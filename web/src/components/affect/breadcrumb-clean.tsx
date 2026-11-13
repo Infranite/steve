@@ -416,7 +416,7 @@ const css = /* css */ `
   display: block;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   color: var(--ui-bcrc-muted);
@@ -525,7 +525,7 @@ const css = /* css */ `
   box-shadow: var(--ui-bcrc-shadow);
   color: var(--ui-bcrc-text);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   overflow-y: auto;
   overscroll-behavior: contain;

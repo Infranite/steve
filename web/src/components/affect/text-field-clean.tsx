@@ -330,7 +330,7 @@ const css = /* css */ `
 
   --h: 32px;
   --px: 10px;
-  --fs: 13px;
+  --fs: calc(13px * var(--type-scale, 1));
   --radius: var(--aui-radius, 7px);
 
   display: flex;
@@ -338,16 +338,16 @@ const css = /* css */ `
   gap: 6px;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-tfc-ink);
   -webkit-font-smoothing: antialiased;
 }
-.ui-tfc[data-size="sm"] { --h: 28px; --px: 8px; --fs: 13px; --radius: calc(var(--aui-radius, 7px) - 1px); }
-.ui-tfc[data-size="lg"] { --h: 36px; --px: 12px; --fs: 14px; --radius: calc(var(--aui-radius, 7px) + 1px); }
+.ui-tfc[data-size="sm"] { --h: 28px; --px: 8px; --fs: calc(13px * var(--type-scale, 1)); --radius: calc(var(--aui-radius, 7px) - 1px); }
+.ui-tfc[data-size="lg"] { --h: 36px; --px: 12px; --fs: calc(14px * var(--type-scale, 1)); --radius: calc(var(--aui-radius, 7px) + 1px); }
 /* Touch screens: a comfortable tap height, and 16px text so iOS doesn't zoom in on focus */
 @media (pointer: coarse) {
-  .ui-tfc { --fs: 16px; }
+  .ui-tfc { --fs: calc(16px * var(--type-scale, 1)); }
   .ui-tfc[data-size="sm"] { --h: 34px; }
   .ui-tfc[data-size="md"] { --h: 38px; }
   .ui-tfc[data-size="lg"] { --h: 40px; }
@@ -355,7 +355,7 @@ const css = /* css */ `
 
 .ui-tfc__head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .ui-tfc__label { min-width: 0; font-weight: 500; color: var(--ui-tfc-title); overflow-wrap: anywhere; cursor: default; }
-.ui-tfc__optional { flex: none; font-size: 12px; line-height: 16px; color: var(--ui-tfc-subtle); }
+.ui-tfc__optional { flex: none; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-tfc-subtle); }
 
 /* The box: white, a hairline shadow as its edge; hover and focus only make that edge firmer */
 .ui-tfc__box {
@@ -477,14 +477,14 @@ const css = /* css */ `
   flex: 1;
   min-width: 0;
   margin: 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   color: var(--ui-tfc-subtle);
   overflow-wrap: anywhere;
   animation: ui-tfc-message 260ms var(--ui-tfc-ease);
 }
 .ui-tfc[data-invalid] .ui-tfc__message { color: var(--ui-tfc-danger); }
-.ui-tfc__count { flex: none; margin-left: auto; font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--ui-tfc-faint); transition: color 140ms ease; }
+.ui-tfc__count { flex: none; margin-left: auto; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; font-variant-numeric: tabular-nums; color: var(--ui-tfc-faint); transition: color 140ms ease; }
 .ui-tfc__count[data-over] { color: var(--ui-tfc-danger); }
 .ui-tfc__sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .ui-tfc__count[data-full] { color: var(--ui-tfc-muted); }

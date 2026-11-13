@@ -178,25 +178,35 @@
 
 /* elevation: cards are hairline-only; only floating layers cast shadows */
 
+/* type size (Settings → 外观 → 字号): every size of the type scale, the Tailwind text-* sizes and the affectUI parts'
+ * font sizes are multiplied by --type-scale; "大" sets html.font-large (web/src/lib/motion.ts). Spacing and widths stay,
+ * so layouts keep their geometry and only the words grow */
+:root { --type-scale: 1; }
+html.font-large { --type-scale: 1.125; }
+@theme {
+  --text-xs: calc(0.75rem * var(--type-scale)); --text-sm: calc(0.875rem * var(--type-scale)); --text-base: calc(1rem * var(--type-scale));
+  --text-lg: calc(1.125rem * var(--type-scale)); --text-xl: calc(1.25rem * var(--type-scale)); --text-2xl: calc(1.5rem * var(--type-scale));
+}
+
 /* type scale — the only sizes (no text-[Npx]): display · title · headline · body · chat · callout · footnote · label · code */
-@utility type-display { font-family: var(--font-heading); font-size: 28px; line-height: 36px; font-weight: 600; letter-spacing: -0.022em; }
-@utility type-large-title { font-family: var(--font-heading); font-size: 28px; line-height: 36px; font-weight: 600; letter-spacing: -0.022em; }
-@utility type-title { font-family: var(--font-heading); font-size: 20px; line-height: 28px; font-weight: 600; letter-spacing: -0.014em; }
-@utility type-headline { font-size: 15px; line-height: 22px; font-weight: 600; letter-spacing: -0.006em; }
-@utility type-body { font-size: 14px; line-height: 22px; font-weight: 400; }
+@utility type-display { font-family: var(--font-heading); font-size: calc(28px * var(--type-scale)); line-height: calc(36px * var(--type-scale)); font-weight: 600; letter-spacing: -0.022em; }
+@utility type-large-title { font-family: var(--font-heading); font-size: calc(28px * var(--type-scale)); line-height: calc(36px * var(--type-scale)); font-weight: 600; letter-spacing: -0.022em; }
+@utility type-title { font-family: var(--font-heading); font-size: calc(20px * var(--type-scale)); line-height: calc(28px * var(--type-scale)); font-weight: 600; letter-spacing: -0.014em; }
+@utility type-headline { font-size: calc(15px * var(--type-scale)); line-height: calc(22px * var(--type-scale)); font-weight: 600; letter-spacing: -0.006em; }
+@utility type-body { font-size: calc(14px * var(--type-scale)); line-height: calc(22px * var(--type-scale)); font-weight: 400; }
 /* conversation text: one step up from body, CJK needs the extra leading */
-@utility type-chat { font-size: 15px; line-height: 26px; font-weight: 400; }
-@utility type-callout { font-size: 13px; line-height: 20px; font-weight: 400; }
-@utility type-footnote { font-size: 12px; line-height: 18px; font-weight: 400; }
-@utility type-label { font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.01em; }
-@utility type-code { font-family: var(--font-mono); font-size: 12.5px; line-height: 20px; }
+@utility type-chat { font-size: calc(15px * var(--type-scale)); line-height: calc(26px * var(--type-scale)); font-weight: 400; }
+@utility type-callout { font-size: calc(13px * var(--type-scale)); line-height: calc(20px * var(--type-scale)); font-weight: 400; }
+@utility type-footnote { font-size: calc(12px * var(--type-scale)); line-height: calc(18px * var(--type-scale)); font-weight: 400; }
+@utility type-label { font-size: calc(12px * var(--type-scale)); line-height: calc(16px * var(--type-scale)); font-weight: 500; letter-spacing: 0.01em; }
+@utility type-code { font-family: var(--font-mono); font-size: calc(12.5px * var(--type-scale)); line-height: calc(20px * var(--type-scale)); }
 
 @layer base {
   * { @apply border-border outline-ring/50; }
   html { @apply font-sans; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
   /* a sideways swipe must not pull the page past its edge (ST-50: a light seam showed beside the conversation) */
   html, body { overflow-x: clip; overscroll-behavior-x: none; }
-  body { @apply bg-background text-foreground; font-size: 14px; line-height: 22px; font-feature-settings: "kern", "ss01"; }
+  body { @apply bg-background text-foreground; font-size: calc(14px * var(--type-scale)); line-height: calc(22px * var(--type-scale)); font-feature-settings: "kern", "ss01"; }
   /* figures line up wherever they are compared */
   .font-mono, .tabular-nums, time { font-variant-numeric: tabular-nums; }
   /* every interactive surface eases its colors instead of snapping */
@@ -216,6 +226,11 @@
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
 }
+/* the reduced-motion setting (Settings → 外观) does the same as the system preference, on any system */
+html.reduce-motion *, html.reduce-motion *::before, html.reduce-motion *::after {
+  animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; scroll-behavior: auto !important;
+}
+html.reduce-motion::view-transition-group(*), html.reduce-motion::view-transition-old(*), html.reduce-motion::view-transition-new(*) { animation: none !important; }
 
 /* React Flow — quiet chrome */
 .react-flow__attribution { display: none; }
@@ -252,8 +267,8 @@ details[open]::details-content { height: auto; }
 /* Markdown in messages and cards — sized to the type scale, not a document */
 .md { overflow-wrap: anywhere; }
 .md > * + * { margin-top: 8px; }
-.md :is(h1, h2, h3, h4, h5, h6) { margin: 14px 0 4px; font-size: 15px; line-height: 22px; font-weight: 600; }
-.md :is(h1, h2) { font-size: 16px; }
+.md :is(h1, h2, h3, h4, h5, h6) { margin: 14px 0 4px; font-size: calc(15px * var(--type-scale)); line-height: calc(22px * var(--type-scale)); font-weight: 600; }
+.md :is(h1, h2) { font-size: calc(16px * var(--type-scale)); }
 /* Streamdown lists are list-inside with padded items: wrapped lines fall under the bullet and items drift apart. Hang them instead */
 .md :is(ul, ol) { list-style-position: outside; padding-left: 1.35em; }
 .md li { padding: 0; }
@@ -262,17 +277,17 @@ details[open]::details-content { height: auto; }
 .md li::marker { color: var(--muted-foreground); }
 /* code: one surface, a quiet header, no frame inside the frame */
 .md [data-streamdown="code-block"] { margin: 12px 0; padding: 0; gap: 0; border-radius: 10px; background: var(--code); overflow: hidden; }
-.md [data-streamdown="code-block-header"] { height: 32px; padding: 0 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.md [data-streamdown="code-block-header"] { height: 32px; padding: 0 12px; border-bottom: 1px solid var(--border); font-size: calc(12px * var(--type-scale)); }
 .md [data-streamdown="code-block-header"] > span { margin-left: 0; }
-.md [data-streamdown="code-block-body"] { border: 0; border-radius: 0; background: transparent; padding: 10px 14px; font-size: 12.5px; line-height: 20px; }
+.md [data-streamdown="code-block-body"] { border: 0; border-radius: 0; background: transparent; padding: 10px 14px; font-size: calc(12.5px * var(--type-scale)); line-height: calc(20px * var(--type-scale)); }
 .md [data-streamdown="code-block-actions"] { border: 0; background: transparent; padding: 0; backdrop-filter: none; }
 .md [data-streamdown="code-block"] > .absolute { top: 2px; right: 6px; }
 .md :not(pre) > code { padding: 1px 5px; border-radius: 5px; background: var(--muted); font-size: 0.9em; }
-.md table { font-size: 13px; }
+.md table { font-size: calc(13px * var(--type-scale)); }
 /* tables sit in the text, no frame or toolbar: rules between rows, the header in secondary weight */
 /* as wide as its content up to the column; wider content scrolls sideways */
 .md [data-md-table] table { width: auto; border-collapse: collapse; }
-.md [data-md-table] :is(th, td) { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; line-height: 20px; }
+.md [data-md-table] :is(th, td) { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; line-height: calc(20px * var(--type-scale)); }
 .md [data-md-table] :is(th, td):last-child { padding-right: 0; }
 .md [data-md-table] th { font-weight: 600; color: var(--muted-foreground); white-space: nowrap; }
 .md [data-md-table] tbody tr:last-child > td { border-bottom: 0; }

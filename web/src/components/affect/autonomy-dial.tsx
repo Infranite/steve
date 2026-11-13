@@ -3,6 +3,7 @@
 
 import { Children, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { t, useT } from "@/i18n";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Autonomy Dial – how much an agent may do on its own, in a single self-contained file.
@@ -105,7 +106,7 @@ const TEXT = (): DialText => ({
   announce: (level, own, ask) => t("core:affect.dial.announce", { level, own, ask }),
 });
 const LEVEL_IDS: AutonomyLevel[] = [0, 1, 2];
-const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reduced = () => reducedMotion();
 /** A calm in-and-out – the rows settle without a snap */
 const EASE = "cubic-bezier(0.4, 0, 0.2, 1)";
 const clamp = (n: number): AutonomyLevel => (Math.max(0, Math.min(2, Math.round(n))) as AutonomyLevel);
@@ -475,7 +476,7 @@ const css = /* css */ `
   max-width: var(--ui-adlc-max, 400px);
   container-type: inline-size;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 400;
   line-height: 20px;
   color: var(--ui-adlc-text);
@@ -498,29 +499,29 @@ const css = /* css */ `
 .ui-adlc__spark { display: grid; flex: none; place-items: center; width: 16px; color: var(--ui-adlc-accent); }
 .ui-adlc__heading { display: grid; min-width: 0; }
 .ui-adlc__title { overflow: hidden; font-weight: 500; color: var(--ui-adlc-strong); white-space: nowrap; text-overflow: ellipsis; }
-.ui-adlc__sub { overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-adlc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-adlc__sub { overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-adlc-muted); white-space: nowrap; text-overflow: ellipsis; }
 
 /* ----- The levels: three tab buttons ----- */
 .ui-adlc__levels { padding: 16px 16px 18px; }
 /* Steve: the levels wrap rather than clip when the dialog is narrow or the words are long */
 .ui-adlc__segmented { position: relative; display: flex; flex-wrap: wrap; gap: 8px; }
 /* Separate buttons: the others are gray, the chosen one is white with a hairline and a soft lift */
-.ui-adlc__level { position: relative; flex: 1 1 0; min-width: fit-content; max-width: 100%; padding: 3px 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-adlc-fill); font-size: 12px; font-weight: 500; line-height: 18px; color: var(--ui-adlc-text); text-align: center !important; overflow-wrap: break-word; transition: color 180ms ease, background-color 180ms ease, box-shadow 180ms ease; }
+.ui-adlc__level { position: relative; flex: 1 1 0; min-width: fit-content; max-width: 100%; padding: 3px 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-adlc-fill); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 18px; color: var(--ui-adlc-text); text-align: center !important; overflow-wrap: break-word; transition: color 180ms ease, background-color 180ms ease, box-shadow 180ms ease; }
 .ui-adlc__level[aria-checked="true"] { background: var(--ui-adlc-card); box-shadow: var(--ui-adlc-shadow); color: var(--ui-adlc-strong); }
 .ui-adlc__level[aria-checked="false"]:not(:disabled):hover { background: var(--ui-adlc-fill-hover); color: var(--ui-adlc-ink); }
 /* Steve: levels that can't be picked now, the one in force while another is picked, full access in its colour, the hint */
 .ui-adlc__level:disabled { cursor: default; opacity: 0.45; }
 .ui-adlc__current { display: inline-block; width: 5px; height: 5px; margin: 0 0 1px 6px; border-radius: 50%; background: currentColor; opacity: 0.55; vertical-align: middle; }
 .ui-adlc__level[data-tone="attention"][aria-checked="true"] { color: var(--ui-adlc-warn-fg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-adlc-warn-fg) 45%, transparent); background: color-mix(in srgb, var(--ui-adlc-warn-fg) 9%, var(--ui-adlc-card)); }
-.ui-adlc__hint { margin: 10px 2px 0; font-size: 12px; line-height: 18px; color: var(--ui-adlc-muted); overflow-wrap: anywhere; }
+.ui-adlc__hint { margin: 10px 2px 0; font-size: calc(12px * var(--type-scale, 1)); line-height: 18px; color: var(--ui-adlc-muted); overflow-wrap: anywhere; }
 .ui-adlc__pin[data-fixed] { opacity: 1; cursor: default; color: var(--ui-adlc-muted); }
 .ui-adlc__pin[data-fixed]:hover { background: none; }
 
 /* ----- The two groups: spacing between them, one hairline above ----- */
 .ui-adlc__groups { display: grid; gap: 14px; padding: 14px 10px 12px; border-top: 0.5px solid var(--ui-adlc-line); }
-.ui-adlc__group-head { display: flex; align-items: center; gap: 6px; margin: 0 6px 4px !important; font-size: 12px; font-weight: 400; line-height: 16px; color: var(--ui-adlc-muted); }
+.ui-adlc__group-head { display: flex; align-items: center; gap: 6px; margin: 0 6px 4px !important; font-size: calc(12px * var(--type-scale, 1)); font-weight: 400; line-height: 16px; color: var(--ui-adlc-muted); }
 /* The count: a small white label with a hairline and a soft lift – no taller than the heading */
-.ui-adlc__count { display: grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; overflow: hidden; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-adlc-card); box-shadow: var(--ui-adlc-shadow); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-adlc-text); font-variant-numeric: tabular-nums; }
+.ui-adlc__count { display: grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; overflow: hidden; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-adlc-card); box-shadow: var(--ui-adlc-shadow); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-adlc-text); font-variant-numeric: tabular-nums; }
 .ui-adlc__roll { display: block; }
 .ui-adlc__roll[data-dir="up"] { animation: ui-adlc-roll-up 360ms var(--ui-adlc-ease) both; }
 .ui-adlc__roll[data-dir="down"] { animation: ui-adlc-roll-down 360ms var(--ui-adlc-ease) both; }
@@ -537,9 +538,9 @@ const css = /* css */ `
 /* Steve: names and details wrap rather than clip – Chinese action names run long */
 .ui-adlc__line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
 .ui-adlc__label { min-width: 0; color: var(--ui-adlc-ink); overflow-wrap: anywhere; }
-.ui-adlc__detail { font-size: 12px; line-height: 16px; color: var(--ui-adlc-muted); overflow-wrap: anywhere; }
+.ui-adlc__detail { font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-adlc-muted); overflow-wrap: anywhere; }
 /* Risk: a small tag right after the name – glyph and word on a subtle tone; safe actions carry nothing */
-.ui-adlc__risk { display: inline-flex; flex: none; align-items: center; gap: 3px; height: 18px; padding: 0 6px 0 4px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-adlc-warn-bg); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-adlc-warn-fg); }
+.ui-adlc__risk { display: inline-flex; flex: none; align-items: center; gap: 3px; height: 18px; padding: 0 6px 0 4px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-adlc-warn-bg); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-adlc-warn-fg); }
 .ui-adlc__risk > svg { width: 12px; height: 12px; }
 .ui-adlc__risk[data-risk="destructive"] { background: var(--ui-adlc-danger-bg); color: var(--ui-adlc-danger-fg); }
 .ui-adlc__pin { display: grid; flex: none; place-items: center; width: 28px; height: 28px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-adlc-faint); opacity: 0; transition: opacity 160ms ease, color 160ms ease, background-color 160ms ease; }
@@ -547,7 +548,7 @@ const css = /* css */ `
 .ui-adlc__pin:hover { background: var(--ui-adlc-fill); color: var(--ui-adlc-ink); }
 .ui-adlc__pin[aria-pressed="true"] { color: var(--ui-adlc-icon); }
 /* Empty group: one quiet gray tag across the whole width */
-.ui-adlc__empty { display: flex; align-items: center; justify-content: center; min-height: 30px; margin: 2px 0; padding: 6px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-adlc-wash); font-size: 12px; line-height: 16px; color: var(--ui-adlc-muted); text-align: center; }
+.ui-adlc__empty { display: flex; align-items: center; justify-content: center; min-height: 30px; margin: 2px 0; padding: 6px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-adlc-wash); font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-adlc-muted); text-align: center; }
 
 @keyframes ui-adlc-roll-up { from { opacity: 0; transform: translateY(70%); } }
 @keyframes ui-adlc-roll-down { from { opacity: 0; transform: translateY(-70%); } }
@@ -555,7 +556,7 @@ const css = /* css */ `
 /* Narrow containers: the detail lines go, the levels get tighter */
 @container (max-width: 340px) {
   .ui-adlc__segmented { gap: 4px; }
-  .ui-adlc__level { padding: 4px 6px; font-size: 12px; }
+  .ui-adlc__level { padding: 4px 6px; font-size: calc(12px * var(--type-scale, 1)); }
 }
 /* Touch: no hover – the locks are always visible */
 @media (hover: none) {

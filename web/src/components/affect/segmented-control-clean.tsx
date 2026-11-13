@@ -431,7 +431,7 @@ const css = /* css */ `
   /* Size: md – 28px chips, 4px 10px */
   --ui-segc-h: 28px;
   --ui-segc-px: 10px;
-  --ui-segc-fs: 13px;
+  --ui-segc-fs: calc(13px * var(--type-scale, 1));
   --ui-segc-lh: 20px;
   --ui-segc-icon: 16px;
   --ui-segc-gap: 8px;
@@ -450,7 +450,7 @@ const css = /* css */ `
   color: var(--ui-segc-text);
   -webkit-font-smoothing: antialiased;
 }
-.ui-segc[data-size="sm"] { --ui-segc-h: 24px; --ui-segc-px: 8px; --ui-segc-fs: 12px; --ui-segc-lh: 16px; --ui-segc-icon: 14px; --ui-segc-gap: 6px; }
+.ui-segc[data-size="sm"] { --ui-segc-h: 24px; --ui-segc-px: 8px; --ui-segc-fs: calc(12px * var(--type-scale, 1)); --ui-segc-lh: 16px; --ui-segc-icon: 14px; --ui-segc-gap: 6px; }
 .ui-segc[data-size="lg"] { --ui-segc-h: 32px; --ui-segc-px: 12px; --ui-segc-icon: 16px; --ui-segc-gap: 8px; }
 .ui-segc[data-full] { display: flex; width: 100%; }
 .ui-segc[data-disabled] { opacity: 0.5; pointer-events: none; }
@@ -534,7 +534,7 @@ const css = /* css */ `
   padding: 0 4px;
   border-radius: var(--aui-radius-sm, 5px);
   background: var(--ui-segc-fill);
-  font-size: 11px;
+  font-size: calc(11px * var(--type-scale, 1));
   line-height: 16px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -542,7 +542,7 @@ const css = /* css */ `
   animation: ui-segc-in 200ms var(--ui-segc-ease) both;
 }
 .ui-segc__opt[data-active] .ui-segc__count { background: var(--ui-segc-card); box-shadow: 0 0 0 0.5px var(--ui-segc-line); color: var(--ui-segc-ink); }
-.ui-segc[data-size="sm"] .ui-segc__count { min-width: 14px; height: 14px; padding: 0 3px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); font-size: 10px; line-height: 14px; }
+.ui-segc[data-size="sm"] .ui-segc__count { min-width: 14px; height: 14px; padding: 0 3px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); font-size: calc(10px * var(--type-scale, 1)); line-height: 14px; }
 .ui-segc__badge {
   display: inline-flex;
   align-items: center;
@@ -550,12 +550,12 @@ const css = /* css */ `
   padding: 0 6px;
   border-radius: var(--aui-radius-sm, 5px);
   background: var(--ui-segc-accent-soft);
-  font-size: 11px;
+  font-size: calc(11px * var(--type-scale, 1));
   line-height: 16px;
   font-weight: 500;
   color: var(--ui-segc-accent);
 }
-.ui-segc[data-size="sm"] .ui-segc__badge { height: 16px; padding: 0 5px; font-size: 10px; }
+.ui-segc[data-size="sm"] .ui-segc__badge { height: 16px; padding: 0 5px; font-size: calc(10px * var(--type-scale, 1)); }
 
 /* The indicator: left and right edges slide separately – the one facing the target leads a touch. Short and crisp */
 .ui-segc__pill {

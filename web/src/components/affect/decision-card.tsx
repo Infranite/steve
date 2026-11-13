@@ -523,7 +523,7 @@ const css = /* css */ `
   min-width: 0;
   container: ui-dcc / inline-size;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 400;
   line-height: 20px;
   color: var(--ui-dcc-text);
@@ -551,24 +551,24 @@ const css = /* css */ `
 .ui-dcc__box { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 6px; border-radius: calc(var(--aui-radius-lg, 10px) + 4px); background: var(--aui-surface, var(--ui-dcc-card)); box-shadow: var(--aui-shadow-card, var(--ui-dcc-float)); animation: ui-dcc-in 260ms ease both; transition: background-color 400ms ease; }
 .ui-dcc__box[data-pulse] { background: color-mix(in srgb, var(--ui-dcc-card), #808080 9%); }
 .ui-dcc__head { display: flex; align-items: center; gap: 8px; min-width: 0; height: 28px; padding: 0 2px 0 6px; }
-.ui-dcc__badge { flex: none; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-dcc-wait-bg); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-dcc-wait-fg); white-space: nowrap; }
-.ui-dcc__task { flex: 1; min-width: 0; overflow: hidden; font-size: 12px; color: var(--ui-dcc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-dcc__badge { flex: none; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-dcc-wait-bg); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 18px; color: var(--ui-dcc-wait-fg); white-space: nowrap; }
+.ui-dcc__task { flex: 1; min-width: 0; overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); color: var(--ui-dcc-muted); white-space: nowrap; text-overflow: ellipsis; }
 .ui-dcc__tools { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; }
 .ui-dcc__count { text-align: center; }
-.ui-dcc__pager { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: var(--ui-dcc-muted); white-space: nowrap; }
+.ui-dcc__pager { display: inline-flex; align-items: center; gap: 2px; font-size: calc(12px * var(--type-scale, 1)); color: var(--ui-dcc-muted); white-space: nowrap; }
 .ui-dcc__page { display: grid; place-items: center; width: 22px; height: 22px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-dcc-muted); transition: background-color 140ms ease, color 140ms ease; }
 .ui-dcc__page:hover { background: var(--ui-dcc-fill); color: var(--ui-dcc-ink); }
-.ui-dcc__link { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: 12px; font-weight: 500; color: var(--ui-dcc-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease; }
+.ui-dcc__link { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; color: var(--ui-dcc-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease; }
 .ui-dcc__link:hover { background: var(--ui-dcc-fill); color: var(--ui-dcc-ink); }
 .ui-dcc__box--min { animation-duration: 200ms; }
 .ui-dcc__box--min .ui-dcc__head { height: 28px; }
 
 /* ----- Question, rows and your own answer ----- */
 .ui-dcc__body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.ui-dcc__q { padding: 4px 6px 2px; font-size: 15px; font-weight: 600; line-height: 22px; letter-spacing: -0.006em; color: var(--ui-dcc-ink); overflow-wrap: anywhere; }
+.ui-dcc__q { padding: 4px 6px 2px; font-size: calc(15px * var(--type-scale, 1)); font-weight: 600; line-height: 22px; letter-spacing: -0.006em; color: var(--ui-dcc-ink); overflow-wrap: anywhere; }
 /* The labels share one column, as wide as the longest (up to 112px) – values wrap to two lines, then end in … */
 .ui-dcc__facts { display: grid; grid-template-columns: minmax(56px, max-content) minmax(0, 1fr); gap: 2px 12px; padding: 2px 6px 4px; }
-.ui-dcc__facts > div { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; font-size: 13px; line-height: 20px; }
+.ui-dcc__facts > div { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; }
 .ui-dcc__facts dt { max-width: 112px; overflow: hidden; color: var(--ui-dcc-muted); white-space: nowrap; text-overflow: ellipsis; }
 .ui-dcc__facts dd { display: -webkit-box; min-width: 0; overflow: hidden; color: var(--ui-dcc-ink); overflow-wrap: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 
@@ -577,12 +577,12 @@ const css = /* css */ `
 .ui-dcc__opt:hover, .ui-dcc__rows:focus-within .ui-dcc__opt[aria-selected="true"] { background: var(--ui-dcc-fill); }
 .ui-dcc :is(.ui-dcc__opt, .ui-dcc__tile):focus-visible { outline-offset: -2px; }
 .ui-dcc__row { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; }
-.ui-dcc__key { display: grid; flex: none; place-items: center; width: 22px; height: 22px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-dcc-fill); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-dcc-muted); transition: background-color 120ms ease, box-shadow 120ms ease; }
+.ui-dcc__key { display: grid; flex: none; place-items: center; width: 22px; height: 22px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-dcc-fill); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-dcc-muted); transition: background-color 120ms ease, box-shadow 120ms ease; }
 .ui-dcc__text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 /* A long title wraps to a second line, then ends in … – the summary stays on one */
-.ui-dcc__title { display: -webkit-box; overflow: hidden; font-size: 13px; font-weight: 500; line-height: 20px; overflow-wrap: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
-.ui-dcc__summary { overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-dcc-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-dcc__tag { flex: none; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-dcc-fill); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-dcc-muted); white-space: nowrap; transition: background-color 120ms ease, box-shadow 120ms ease; }
+.ui-dcc__title { display: -webkit-box; overflow: hidden; font-size: calc(13px * var(--type-scale, 1)); font-weight: 500; line-height: 20px; overflow-wrap: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.ui-dcc__summary { overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-dcc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-dcc__tag { flex: none; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-dcc-fill); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 18px; color: var(--ui-dcc-muted); white-space: nowrap; transition: background-color 120ms ease, box-shadow 120ms ease; }
 /* On a gray row the number and the tag turn white, so they stay apart from it */
 .ui-dcc__opt:hover :is(.ui-dcc__key, .ui-dcc__tag), .ui-dcc__rows:focus-within .ui-dcc__opt[aria-selected="true"] :is(.ui-dcc__key, .ui-dcc__tag) { background: var(--ui-dcc-card); box-shadow: var(--ui-dcc-shadow); }
 
@@ -600,7 +600,7 @@ const css = /* css */ `
 .ui-dcc__wire [data-tone="mid"] { fill: var(--ui-dcc-wire-mid); }
 .ui-dcc__wire [data-tone="soft"] { fill: var(--ui-dcc-wire-soft); }
 .ui-dcc__tile .ui-dcc__row { align-items: flex-start; gap: 8px; padding: 0 2px 2px; }
-.ui-dcc__tile .ui-dcc__key { width: 20px; height: 20px; font-size: 11px; }
+.ui-dcc__tile .ui-dcc__key { width: 20px; height: 20px; font-size: calc(11px * var(--type-scale, 1)); }
 .ui-dcc__tile:hover .ui-dcc__key, .ui-dcc__tiles:focus-within .ui-dcc__tile[aria-selected="true"] .ui-dcc__key { background: var(--ui-dcc-card); box-shadow: var(--ui-dcc-shadow); }
 
 /* ----- Your own answer: the last row ----- */
@@ -608,13 +608,13 @@ const css = /* css */ `
 .ui-dcc__own:hover { background: var(--ui-dcc-well); }
 /* Typing: no ring – the caret shows where you are, the edge only firms up a little */
 .ui-dcc__own:focus-within { background: var(--ui-dcc-well); box-shadow: inset 0 0 0 1px var(--ui-dcc-line); }
-.ui-dcc__input { flex: 1; min-width: 0; text-overflow: ellipsis; height: 28px; margin: 0; padding: 0; border: 0; background: none; font: inherit; font-size: 13px; color: var(--ui-dcc-ink); outline: none; }
+.ui-dcc__input { flex: 1; min-width: 0; text-overflow: ellipsis; height: 28px; margin: 0; padding: 0; border: 0; background: none; font: inherit; font-size: calc(13px * var(--type-scale, 1)); color: var(--ui-dcc-ink); outline: none; }
 .ui-dcc__input::placeholder { color: var(--ui-dcc-placeholder); }
 .ui-dcc__send { display: grid; flex: none; place-items: center; width: 24px; height: 24px; border-radius: 999px; background: var(--ui-dcc-solid); color: var(--ui-dcc-on-solid); opacity: 0; transform: scale(0.8); pointer-events: none; transition: opacity 140ms ease, transform 180ms var(--ui-dcc-ease); }
 .ui-dcc__send[data-shown] { opacity: 1; transform: none; pointer-events: auto; }
 .ui-dcc__send[data-shown]:active { transform: scale(0.92); }
 /* Steve: a send button with its word (the answer the field gives, e.g. "Send back for rework") */
-.ui-dcc__send--word { width: auto; height: 28px; padding: 0 10px; border-radius: var(--aui-radius-sm, 7px); font-size: 12px; font-weight: 500; white-space: nowrap; }
+.ui-dcc__send--word { width: auto; height: 28px; padding: 0 10px; border-radius: var(--aui-radius-sm, 7px); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; white-space: nowrap; }
 .ui-dcc__send--word:disabled { opacity: 0.45; cursor: default; }
 /* Steve: a field that needs words keeps its send out of the way until there are some; one that may go empty shows it quiet until you type */
 .ui-dcc__send--word:not([data-shown]) { display: none; }
@@ -623,7 +623,7 @@ const css = /* css */ `
 .ui-dcc__opt[aria-disabled="true"] { opacity: 0.55; cursor: default; }
 /* Steve: what the question is about – a draft, a command, the conversation it came from */
 .ui-dcc__detail:empty { display: none; }
-.ui-dcc__detail { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 2px 6px 6px; font-size: 13px; line-height: 20px; color: var(--ui-dcc-text); overflow-wrap: anywhere; }
+.ui-dcc__detail { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 2px 6px 6px; font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; color: var(--ui-dcc-text); overflow-wrap: anywhere; }
 
 /* Phones: everything stays inside the card's edges */
 @container ui-dcc (max-width: 560px) {
@@ -636,7 +636,7 @@ const css = /* css */ `
   .ui-dcc__tiles, .ui-dcc__tiles[data-many] { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .ui-dcc__tile { flex-direction: row; align-items: center; gap: 10px; min-height: 44px; padding: 4px 6px; border-radius: calc(var(--aui-radius-sm, 5px) + 3px); }
   .ui-dcc__tile .ui-dcc__row { flex: 1; align-items: center; gap: 10px; padding: 0; }
-  .ui-dcc__tile .ui-dcc__key { width: 22px; height: 22px; font-size: 12px; }
+  .ui-dcc__tile .ui-dcc__key { width: 22px; height: 22px; font-size: calc(12px * var(--type-scale, 1)); }
   .ui-dcc__frame { order: 1; flex: none; width: 54px; padding: 3px; border-radius: 6px; }
   .ui-dcc__tile .ui-dcc__tag--tile { display: none; }
   .ui-dcc__tile .ui-dcc__tag--row { display: block; }

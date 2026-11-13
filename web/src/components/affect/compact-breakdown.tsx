@@ -4,6 +4,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useT } from "@/i18n";
 import { num as localNum } from "@/i18n/format";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Compact Breakdown (clean style) – one total split into its parts, in one white card with hairline shadows
@@ -59,7 +60,7 @@ const defaultFormat = (n: number) => new Intl.NumberFormat("en-US", { maximumFra
 const PALETTE = ["var(--ui-cbc-c1)", "var(--ui-cbc-c2)", "var(--ui-cbc-c3)", "var(--ui-cbc-c4)", "var(--ui-cbc-c5)"];
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
 const ease = (t: number) => 1 - Math.pow(1 - t, 4);
-const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reduced = () => reducedMotion();
 const keyOf = (item: BreakdownItem) => item.id ?? item.label;
 // NaN, Infinity and negatives count as nothing, so no share or width turns into NaN
 const num = (n: number) => (Number.isFinite(n) ? Math.max(0, n) : 0);
@@ -409,7 +410,7 @@ const css = /* css */ `
   background: var(--ui-cbc-card);
   box-shadow: var(--ui-cbc-shadow);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   color: var(--ui-cbc-ink);
@@ -428,7 +429,7 @@ const css = /* css */ `
 
 /* Head: title, the period switch on the right */
 .ui-cbc__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; }
-.ui-cbc__title { overflow: hidden; font-size: 15px; font-weight: 500; line-height: 24px; color: var(--ui-cbc-strong); white-space: nowrap; text-overflow: ellipsis; }
+.ui-cbc__title { overflow: hidden; font-size: calc(15px * var(--type-scale, 1)); font-weight: 500; line-height: 24px; color: var(--ui-cbc-strong); white-space: nowrap; text-overflow: ellipsis; }
 /* The "button switch": separate chips with a hairline; the light-gray fill slides to the chosen one */
 .ui-cbc__switch { position: relative; display: grid; grid-auto-columns: minmax(0, auto); grid-auto-flow: column; gap: 4px; flex: 0 1 auto; min-width: 0; }
 .ui-cbc__pill {
@@ -448,7 +449,7 @@ const css = /* css */ `
   padding: 4px 10px;
   border-radius: calc(var(--aui-radius-sm, 5px) + 1px);
   box-shadow: inset 0 0 0 0.5px var(--ui-cbc-line);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 20px;
   color: var(--ui-cbc-text);
@@ -466,7 +467,7 @@ const css = /* css */ `
 
 /* The big number and the change against the period before */
 .ui-cbc__figure { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
-.ui-cbc__big { font-size: 24px; font-weight: 500; line-height: 32px; letter-spacing: -0.02em; color: var(--ui-cbc-strong); font-variant-numeric: tabular-nums; }
+.ui-cbc__big { font-size: calc(24px * var(--type-scale, 1)); font-weight: 500; line-height: 32px; letter-spacing: -0.02em; color: var(--ui-cbc-strong); font-variant-numeric: tabular-nums; }
 .ui-cbc__delta {
   display: inline-flex;
   align-items: center;
@@ -476,7 +477,7 @@ const css = /* css */ `
   border-radius: var(--aui-radius-sm, 5px);
   background: var(--ui-cbc-down-bg);
   color: var(--ui-cbc-down);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
@@ -486,7 +487,7 @@ const css = /* css */ `
 /* Steve: a change that is neither good nor bad (spend) – muted, like the page's own "vs. last period" text */
 .ui-cbc__delta[data-tone="neutral"] { background: var(--ui-cbc-wash); color: var(--ui-cbc-muted); }
 .ui-cbc__delta svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
-.ui-cbc__caption { height: 16px; overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-cbc-muted); font-variant-numeric: tabular-nums; }
+.ui-cbc__caption { height: 16px; overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-cbc-muted); font-variant-numeric: tabular-nums; }
 .ui-cbc__caption-label { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .ui-cbc__caption-share { flex: none; }
 .ui-cbc__caption-in { display: inline-flex; max-width: 100%; align-items: center; gap: 6px; animation: ui-cbc-in 260ms var(--ui-cbc-ease) both; }
@@ -523,7 +524,7 @@ const css = /* css */ `
 .ui-cbc__swatch { flex: none; width: 8px; height: 8px; border-radius: 2px; }
 .ui-cbc__label { flex: 1; min-width: 0; overflow: hidden; color: var(--ui-cbc-ink); white-space: nowrap; text-overflow: ellipsis; }
 .ui-cbc__value { flex: none; white-space: nowrap; color: var(--ui-cbc-ink); font-weight: 500; font-variant-numeric: tabular-nums; }
-.ui-cbc__share { flex: none; width: 34px; white-space: nowrap; font-size: 12px; line-height: 16px; text-align: right; color: var(--ui-cbc-muted); font-variant-numeric: tabular-nums; }
+.ui-cbc__share { flex: none; width: 34px; white-space: nowrap; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; text-align: right; color: var(--ui-cbc-muted); font-variant-numeric: tabular-nums; }
 
 /* The last row inside the card */
 .ui-cbc__foot {
@@ -533,7 +534,7 @@ const css = /* css */ `
   padding: 0 16px;
   overflow: hidden;
   border-top: 0.5px solid var(--ui-cbc-line);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   color: var(--ui-cbc-muted);
   white-space: nowrap;

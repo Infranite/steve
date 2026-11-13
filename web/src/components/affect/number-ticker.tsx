@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Number Ticker – animated numbers like an odometer, in a single self-contained file.
@@ -108,7 +109,7 @@ export function NumberTicker({ value, format, locale, duration = 900, delay = 0,
     // Same value again (e.g. a format change) keeps the last direction
     if (value !== prev.current) up.current = value > prev.current;
     prev.current = value;
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduce = reducedMotion();
     const keys = new Set<string>();
 
     for (const p of parts) {

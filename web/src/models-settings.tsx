@@ -19,6 +19,7 @@ import { Robot } from "@/robot"
 import { ModelPicker, harnessName } from "@/model-picker"
 import { HarnessMark } from "@/components/harness-mark"
 import { editBot } from "@/manage"
+import { reducedMotion } from "@/lib/motion"
 
 /* the label and description are read when the settings list renders, so they follow the UI language */
 export const MODELS_CAT = Object.defineProperties(["models", "", CpuIcon, ""], {
@@ -96,7 +97,7 @@ export function ModelsSettingsPane() {
   const failing = v.purposes.filter((p) => failedOf(p) > 0)
   const failed = failing.reduce((n, p) => n + failedOf(p), 0)
   const editing = edit && v.purposes.find((p) => p.key === edit.key)
-  const showLog = () => { setLog(true); requestAnimationFrame(() => logRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })) }
+  const showLog = () => { setLog(true); requestAnimationFrame(() => logRef.current?.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" })) }
   return (
     <div className="flex flex-col gap-8" data-models-settings>
       <Section data-models-default label={t("pages:models.defaultSection")} note={t("pages:models.defaultUses", { name: s.name })}>

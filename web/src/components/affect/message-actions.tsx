@@ -3,6 +3,7 @@
 
 import { Fragment, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
 import { t, useT } from "@/i18n";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Message Actions (Clean) – the small bar under an AI chat message, in one self-contained file.
@@ -64,8 +65,7 @@ export type MessageMoreAction = { key: string; label: string; icon: ReactNode; o
 
 /* ---------- Helpers ---------- */
 
-const reduced = () =>
-  typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+const reduced = () => reducedMotion();
 
 /** Text that changes without a jump: the old one fades out underneath while the new one fades in */
 function Swap({ id, children, className }: { id: string; children: ReactNode; className?: string }) {
@@ -600,7 +600,7 @@ const css = /* css */ `
   min-width: 0;
   container-type: inline-size;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 400;
   line-height: 20px;
   color: var(--ui-mac-ink);
@@ -665,7 +665,7 @@ const css = /* css */ `
 .ui-mac__eq[data-on] i:nth-child(4) { animation-delay: -140ms; animation-duration: 820ms; }
 
 /* ----- Tooltips: a small white popover above the button – on hover after a beat, on keyboard focus, and briefly after Copy ----- */
-.ui-mac__tip { position: absolute; bottom: calc(100% + 6px); left: 50%; z-index: 3; display: block; width: max-content; padding: 2px 8px; border-radius: 6px; background: var(--aui-overlay, var(--ui-mac-card)); box-shadow: var(--ui-mac-shadow-pop); font-size: 12px; font-weight: 500; line-height: 20px; color: var(--ui-mac-ink); white-space: nowrap; pointer-events: none; opacity: 0; transform: translate(-50%, 3px); transition: opacity 140ms ease, transform 200ms var(--ui-mac-ease); }
+.ui-mac__tip { position: absolute; bottom: calc(100% + 6px); left: 50%; z-index: 3; display: block; width: max-content; padding: 2px 8px; border-radius: 6px; background: var(--aui-overlay, var(--ui-mac-card)); box-shadow: var(--ui-mac-shadow-pop); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 20px; color: var(--ui-mac-ink); white-space: nowrap; pointer-events: none; opacity: 0; transform: translate(-50%, 3px); transition: opacity 140ms ease, transform 200ms var(--ui-mac-ease); }
 /* Steve: the bar starts at the message's edge, so the first tooltip opens to the right instead of off the screen */
 .ui-mac__bar > .ui-mac__item:first-child .ui-mac__tip { left: 0; transform: translate(0, 3px); }
 .ui-mac__bar > .ui-mac__item:first-child:is(:hover, [data-flash], :has(:focus-visible)) .ui-mac__tip { transform: translate(0, 0); }
@@ -684,7 +684,7 @@ const css = /* css */ `
 .ui-mac__step[data-dir="prev"] .ui-mac__glyph { transform: scaleX(-1); }
 .ui-mac__step:hover:not(:disabled) { background: var(--ui-mac-wash); color: var(--ui-mac-ink); }
 .ui-mac__step:disabled { cursor: default; opacity: 0.45; }
-.ui-mac__count { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px; font-size: 12px; line-height: 16px; color: var(--aui-placeholder, var(--ui-mac-faint)); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ui-mac__count { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--aui-placeholder, var(--ui-mac-faint)); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ui-mac__count-now { color: var(--ui-mac-ink); font-weight: 500; }
 .ui-mac__count > .ui-mac__swap:last-child { color: var(--ui-mac-muted); }
 
@@ -699,23 +699,23 @@ const css = /* css */ `
 .ui-mac__clip { min-height: 0; overflow: hidden; margin: -3px; padding: 3px; }  /* the 3px keep hairlines and focus rings from being clipped */
 .ui-mac__panel { padding: 10px 8px 8px; }
 .ui-mac__panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; }
-.ui-mac__ask { font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-mac-strong); }
+.ui-mac__ask { font-size: calc(13px * var(--type-scale, 1)); font-weight: 500; line-height: 20px; color: var(--ui-mac-strong); }
 .ui-mac__close { display: grid; flex: none; place-items: center; width: 24px; height: 24px; margin-right: -4px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-mac-icon); transition: background-color 160ms ease, color 160ms ease; }
 .ui-mac__close:hover { background: var(--ui-mac-wash); color: var(--ui-mac-ink); }
 .ui-mac__chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 /* Reasons: the tab-button look – a hairline, gray text; the picked one gets the gray fill */
-.ui-mac__chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; height: 28px; padding: 4px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); box-shadow: inset 0 0 0 0.5px var(--ui-mac-line); font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-mac-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease, opacity 200ms ease; }
+.ui-mac__chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; height: 28px; padding: 4px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); box-shadow: inset 0 0 0 0.5px var(--ui-mac-line); font-size: calc(13px * var(--type-scale, 1)); font-weight: 500; line-height: 20px; color: var(--ui-mac-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease, opacity 200ms ease; }
 .ui-mac__chip:hover:not(:disabled) { background: var(--ui-mac-wash); color: var(--ui-mac-ink); }
 .ui-mac__chip[aria-pressed="true"], .ui-mac__chip[aria-pressed="true"]:hover:not(:disabled) { background: var(--ui-mac-fill); color: var(--ui-mac-ink); }
 .ui-mac__chip:disabled { cursor: default; }
 .ui-mac__chip:disabled:not([aria-pressed="true"]) { opacity: 0.45; }
 /* Send: the dark chip; once sent a soft green fill */
-.ui-mac__send { display: inline-flex; align-items: center; justify-content: center; min-width: 60px; height: 28px; margin-left: auto; padding: 0 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-mac-solid); font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-mac-on-solid); white-space: nowrap; transition: background-color 220ms ease, color 220ms ease, opacity 200ms ease; }
+.ui-mac__send { display: inline-flex; align-items: center; justify-content: center; min-width: 60px; height: 28px; margin-left: auto; padding: 0 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-mac-solid); font-size: calc(13px * var(--type-scale, 1)); font-weight: 500; line-height: 20px; color: var(--ui-mac-on-solid); white-space: nowrap; transition: background-color 220ms ease, color 220ms ease, opacity 200ms ease; }
 .ui-mac__send:hover:not(:disabled):not([data-sent]) { background: var(--ui-mac-solid-hover); }
 .ui-mac__send:disabled { cursor: default; opacity: 0.3; }
 .ui-mac__send[data-sent] { cursor: default; background: var(--ui-mac-ok-bg); color: var(--ui-mac-ok); }
 .ui-mac__send .ui-mac__glyph { width: 14px; height: 14px; stroke-width: 1.5; }
-.ui-mac__input { display: block; width: 100%; height: 32px; margin-top: 8px; padding: 0 10px; border: 0; border-radius: calc(var(--aui-radius, 7px) - 1px); background: var(--ui-mac-card); box-shadow: var(--ui-mac-shadow); font: inherit; font-size: 13px; line-height: 20px; color: var(--ui-mac-ink); outline: none; }
+.ui-mac__input { display: block; width: 100%; height: 32px; margin-top: 8px; padding: 0 10px; border: 0; border-radius: calc(var(--aui-radius, 7px) - 1px); background: var(--ui-mac-card); box-shadow: var(--ui-mac-shadow); font: inherit; font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; color: var(--ui-mac-ink); outline: none; }
 .ui-mac__input::placeholder { color: var(--aui-placeholder, var(--ui-mac-faint)); }
 
 /* ----- Message text that crossfades between versions (MessageText) ----- */

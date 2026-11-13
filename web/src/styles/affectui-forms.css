@@ -8,7 +8,7 @@
   .ui-buttonc > svg, .ui-buttonc__label svg { flex: none; pointer-events: none; }
   .ui-buttonc__label:has(> *) { display: inline-flex; align-items: center; gap: var(--gap); }
   /* Steve's lg (36) and its square sizes that show a short label (… or a count) instead of an icon */
-  .ui-buttonc:is([data-steve-size="lg"], [data-steve-size="icon-lg"]) { --h: 36px; --px: 14px; --fs: 14px; }
+  .ui-buttonc:is([data-steve-size="lg"], [data-steve-size="icon-lg"]) { --h: 36px; --px: 14px; --fs: calc(14px * var(--type-scale, 1)); }
   .ui-buttonc[data-square] { width: var(--h); padding: 0; }
   /* Steve's secondary: a muted fill, no edge */
   .ui-buttonc[data-steve-variant="secondary"] { background: var(--secondary); color: var(--secondary-foreground); box-shadow: none; }

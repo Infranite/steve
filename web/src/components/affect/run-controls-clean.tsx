@@ -209,7 +209,7 @@ const css = /* css */ `
   box-sizing: border-box;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-rclc-ink);
   -webkit-font-smoothing: antialiased;
@@ -224,10 +224,10 @@ const css = /* css */ `
 
 /* ----- The queue: what waits for the run, next first – a soft tray, four rows before it scrolls ----- */
 .ui-rclc__queue-box { display: flex; flex-direction: column; border-radius: 10px; background: var(--ui-rclc-tray); animation: ui-rclc-rise 260ms var(--ui-rclc-ease) both; }
-.ui-rclc__queue-note { display: flex; align-items: center; gap: 6px; padding: 7px 10px 2px; font-size: 12px; line-height: 18px; color: var(--ui-rclc-muted); }
+.ui-rclc__queue-note { display: flex; align-items: center; gap: 6px; padding: 7px 10px 2px; font-size: calc(12px * var(--type-scale, 1)); line-height: 18px; color: var(--ui-rclc-muted); }
 .ui-rclc__queue-note > svg { width: 14px; height: 14px; }
 .ui-rclc__queue { display: grid; grid-template-columns: minmax(0, 1fr); max-height: min(232px, 34vh); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 2px 4px 4px; }
-.ui-rclc__queued { display: flex; align-items: flex-start; gap: 8px; min-height: 32px; padding: 5px 2px 5px 6px; border-radius: 7px; font-size: 13px; color: var(--ui-rclc-muted); animation: ui-rclc-rise 260ms var(--ui-rclc-ease) both; }
+.ui-rclc__queued { display: flex; align-items: flex-start; gap: 8px; min-height: 32px; padding: 5px 2px 5px 6px; border-radius: 7px; font-size: calc(13px * var(--type-scale, 1)); color: var(--ui-rclc-muted); animation: ui-rclc-rise 260ms var(--ui-rclc-ease) both; }
 .ui-rclc__queued + .ui-rclc__queued { box-shadow: 0 -0.5px 0 var(--ui-rclc-line); border-radius: 0; }
 .ui-rclc__queued-text { flex: 1; min-width: 0; padding-top: 1px; color: var(--ui-rclc-ink); overflow-wrap: anywhere; }
 .ui-rclc__queued-side { display: flex; flex: none; align-items: center; gap: 2px; min-height: 22px; }
@@ -238,10 +238,10 @@ const css = /* css */ `
   .ui-rclc__queued { flex-direction: column; align-items: stretch; gap: 4px; }
   .ui-rclc__queued > .ui-rclc__queued-text { flex: none; width: 100%; }
 }
-.ui-rclc__queued-n { flex: none; margin-inline-end: 4px; font-size: 11.5px; color: var(--ui-rclc-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ui-rclc__queued-n { flex: none; margin-inline-end: 4px; font-size: calc(11.5px * var(--type-scale, 1)); color: var(--ui-rclc-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ui-rclc__icon { display: grid; flex: none; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--ui-rclc-muted); transition: background-color 120ms ease, color 120ms ease; }
 .ui-rclc__icon:hover:not(:disabled) { background: var(--ui-rclc-wash); color: var(--ui-rclc-ink); }
-.ui-rclc__act { display: inline-flex; flex: none; align-items: center; gap: 4px; height: 24px; padding: 0 7px 0 5px; border-radius: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; color: var(--ui-rclc-muted); transition: background-color 120ms ease, color 120ms ease; }
+.ui-rclc__act { display: inline-flex; flex: none; align-items: center; gap: 4px; height: 24px; padding: 0 7px 0 5px; border-radius: 6px; font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; white-space: nowrap; color: var(--ui-rclc-muted); transition: background-color 120ms ease, color 120ms ease; }
 .ui-rclc__act:hover:not(:disabled) { background: var(--ui-rclc-wash); color: var(--ui-rclc-ink); }
 .ui-rclc__act[data-tone="accent"] { color: var(--ui-rclc-info); }
 .ui-rclc__act[data-tone="accent"]:hover:not(:disabled) { background: color-mix(in srgb, var(--ui-rclc-info) 10%, transparent); color: var(--ui-rclc-info); }
@@ -257,14 +257,14 @@ const css = /* css */ `
 .ui-rclc__round[data-quiet], .ui-rclc__round[data-stopping] { background: transparent; color: var(--ui-rclc-ink); box-shadow: inset 0 0 0 1px var(--ui-rclc-hair); }
 .ui-rclc__round[data-quiet]:hover:not(:disabled) { background: var(--ui-rclc-wash); }
 .ui-rclc__round[data-stopping] { color: var(--ui-rclc-muted); }
-.ui-rclc__btn { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 28px; padding: 0 10px 0 8px; border-radius: 8px; font-size: 12.5px; font-weight: 500; white-space: nowrap; color: var(--ui-rclc-muted); transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease; animation: ui-rclc-pop 180ms var(--ui-rclc-ease) both; }
+.ui-rclc__btn { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 28px; padding: 0 10px 0 8px; border-radius: 8px; font-size: calc(12.5px * var(--type-scale, 1)); font-weight: 500; white-space: nowrap; color: var(--ui-rclc-muted); transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease; animation: ui-rclc-pop 180ms var(--ui-rclc-ease) both; }
 .ui-rclc__btn:hover:not(:disabled) { background: var(--ui-rclc-wash); color: var(--ui-rclc-ink); }
 .ui-rclc__btn[data-solid] { background: var(--ui-rclc-solid); color: var(--ui-rclc-on-solid); }
 .ui-rclc__btn[data-solid]:hover:not(:disabled) { background: var(--ui-rclc-solid-hover); color: var(--ui-rclc-on-solid); }
 .ui-rclc__btn:disabled { opacity: 0.5; cursor: default; }
 
 /* ----- Context: a small ring, orange once it's nearly full ----- */
-.ui-rclc__ctx { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 28px; padding: 0 4px; font-size: 12px; color: var(--ui-rclc-muted); font-variant-numeric: tabular-nums; }
+.ui-rclc__ctx { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 28px; padding: 0 4px; font-size: calc(12px * var(--type-scale, 1)); color: var(--ui-rclc-muted); font-variant-numeric: tabular-nums; }
 .ui-rclc__ctx-track { fill: none; stroke: var(--ui-rclc-line); stroke-width: 2; }
 .ui-rclc__ctx-fill { fill: none; stroke: var(--ui-rclc-muted); stroke-width: 2; stroke-linecap: round; transition: stroke-dasharray 260ms var(--ui-rclc-ease), stroke 180ms ease; }
 .ui-rclc__ctx[data-high] { color: var(--ui-rclc-warn); }

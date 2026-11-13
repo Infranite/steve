@@ -107,7 +107,7 @@ const css = /* css */ `
   background: var(--ui-estc-frame);
   box-shadow: inset 0 0 0 0.5px var(--ui-estc-line);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   text-align: center;
   -webkit-font-smoothing: antialiased;

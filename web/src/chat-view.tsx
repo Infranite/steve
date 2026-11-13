@@ -32,6 +32,7 @@ import { cn } from "cn"
 import { ArrowDownIcon, CircleStopIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon, Undo2Icon } from "lucide-react"
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { lang, t as tr, useT } from "@/i18n"
+import { reducedMotion } from "@/lib/motion"
 
 
 /* ═════════ 对话 ═════════ */
@@ -317,7 +318,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
               <div className="flex min-w-0 items-baseline gap-2 px-1 type-footnote text-tertiary" data-chat-author><span className="truncate type-callout font-semibold text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>
               <QuoteHead id={m.replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} inText={!m.cardOnly && m.card.delivery?.text === m.t} /> : <Updates m={m} />}{m.stopped && <div className="mt-2 flex items-center gap-1.5 type-callout text-muted-foreground" data-stopped><CircleStopIcon className="size-3.5" aria-hidden />{t("pages:chat.stopped")}</div>}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.meet && meeting() && m.id === st.settings.onboardFrom && <Button size="sm" variant="ghost" className="-mt-1 self-start text-muted-foreground" onClick={() => void endMeeting()} data-meet-skip>{t("pages:chat.onboard.meetSkip")}</Button>}{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <ChanOutNote m={rawOf(m)} /> : <MsgActions m={m} />}</div></Fragment>
           })}
-          {!conv && away > 0 && <Away from={away} onDecide={(d) => { if (!inThread.has(d)) { setReveal((n) => n + 1); return } const el = document.querySelector(`[data-decision-id="${CSS.escape(d)}"]`); el?.scrollIntoView({ block: "center", behavior: "smooth" }); el?.querySelector<HTMLElement>('[role="option"][tabindex="0"], button, input')?.focus({ preventScroll: true }) }} />}
+          {!conv && away > 0 && <Away from={away} onDecide={(d) => { if (!inThread.has(d)) { setReveal((n) => n + 1); return } const el = document.querySelector(`[data-decision-id="${CSS.escape(d)}"]`); el?.scrollIntoView({ block: "center", behavior: reducedMotion() ? "auto" : "smooth" }); el?.querySelector<HTMLElement>('[role="option"][tabindex="0"], button, input')?.focus({ preventScroll: true }) }} />}
           {!conv && <Onboarding />}
         </div>
       </div>

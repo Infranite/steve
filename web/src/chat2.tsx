@@ -18,6 +18,7 @@ import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote, SidePanel, 
 import type { RNotice } from "@/api"
 import { ResearchLive, researchSummary, researchStep } from "@/thread/parts"
 import { t, useT } from "@/i18n"
+import { reducedMotion } from "@/lib/motion"
 
 /* ───────── what Steve did ───────── */
 /* labels are functions so they follow a language change */
@@ -53,7 +54,7 @@ export function openSteps(id: string) { window.dispatchEvent(new CustomEvent(OPE
 export function StepsBlock({ m }: { m: Msg }) {
   const s = m.steps, [open, setOpen] = useState(false), t = useT()
   useEffect(() => {
-    const h = (e: Event) => { if ((e as CustomEvent).detail !== m.id) return; setOpen(true); document.getElementById("steps-" + m.id)?.scrollIntoView({ behavior: "smooth", block: "center" }) }
+    const h = (e: Event) => { if ((e as CustomEvent).detail !== m.id) return; setOpen(true); document.getElementById("steps-" + m.id)?.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "center" }) }
     window.addEventListener(OPEN_EV, h); return () => window.removeEventListener(OPEN_EV, h)
   }, [m.id])
   if (!s || (!s.route && !s.tools.length)) return null
@@ -142,7 +143,7 @@ export function toggleRail() {
   bump()
 }
 export function setHistory(open: boolean) { historyOpen = open; if (open && !wide()) sheetOpen = false; bump() }
-export function showNotices() { if (wide()) { historyOpen = false; if (!railOpen) toggleRail(); else bump() } else { sheetOpen = true; bump() } setTimeout(() => document.querySelector("[data-rail-notices]")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50) }
+export function showNotices() { if (wide()) { historyOpen = false; if (!railOpen) toggleRail(); else bump() } else { sheetOpen = true; bump() } setTimeout(() => document.querySelector("[data-rail-notices]")?.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" }), 50) }
 
 /* the same notice again (a disk that keeps filling, the same release failing): one line, the latest, with the others under it */
 const family = (n: RNotice) => n.kind + ":" + n.text.split(/[\d(:,\uFF08\uFF1A\uFF0C]/)[0].trim()

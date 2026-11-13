@@ -208,7 +208,7 @@ const css = /* css */ `
   /* Size: md – 28px chips, 4px 10px */
   --ui-tglc-h: 28px;
   --ui-tglc-px: 10px;
-  --ui-tglc-fs: 13px;
+  --ui-tglc-fs: calc(13px * var(--type-scale, 1));
   --ui-tglc-lh: 20px;
   --ui-tglc-icon-size: 16px;
   --ui-tglc-gap: 8px;
@@ -230,7 +230,7 @@ const css = /* css */ `
   color: var(--ui-tglc-text);
   -webkit-font-smoothing: antialiased;
 }
-.ui-tglc[data-size="sm"] { --ui-tglc-h: 24px; --ui-tglc-px: 8px; --ui-tglc-fs: 12px; --ui-tglc-lh: 16px; --ui-tglc-icon-size: 14px; --ui-tglc-gap: 6px; }
+.ui-tglc[data-size="sm"] { --ui-tglc-h: 24px; --ui-tglc-px: 8px; --ui-tglc-fs: calc(12px * var(--type-scale, 1)); --ui-tglc-lh: 16px; --ui-tglc-icon-size: 14px; --ui-tglc-gap: 6px; }
 .ui-tglc[data-size="lg"] { --ui-tglc-h: 32px; --ui-tglc-px: 12px; }
 .ui-tglc[data-disabled] { opacity: 0.5; }
 .ui-tglc *, .ui-tglc *::before, .ui-tglc *::after { box-sizing: border-box; }

@@ -270,7 +270,7 @@ const css = /* css */ `
   width: 100%;
   max-width: 260px;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   color: var(--ui-pmc-ink);
@@ -316,7 +316,7 @@ const css = /* css */ `
 }
 .ui-pmc__email {
   overflow: hidden;
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   color: var(--ui-pmc-muted);
   white-space: nowrap;
@@ -374,7 +374,7 @@ const css = /* css */ `
   padding: 0 6px;
   border-radius: var(--aui-radius-sm, 5px);
   background: var(--ui-pmc-badge-wash);
-  font-size: 11px;
+  font-size: calc(11px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 18px;
   color: var(--ui-pmc-badge);
@@ -392,7 +392,7 @@ const css = /* css */ `
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
 }
 .ui-pmc__setup-title { color: var(--ui-pmc-text); font-weight: 500; }

@@ -8,7 +8,7 @@
   background: var(--popover);
   color: var(--popover-foreground);
   box-shadow: 0 0 0 1px var(--border), 0 4px 12px rgb(0 0 0 / 0.12);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 18px;
   font-variant-numeric: tabular-nums;
 }

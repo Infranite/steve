@@ -527,7 +527,7 @@ const css = /* css */ `
 
   --h: 32px;
   --px: 10px;
-  --fs: 13px;
+  --fs: calc(13px * var(--type-scale, 1));
   --radius: var(--aui-radius, 7px);
   --cell: 32px;
 
@@ -536,16 +536,16 @@ const css = /* css */ `
   gap: 6px;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-dpkc-ink);
   -webkit-font-smoothing: antialiased;
 }
 .ui-dpkc[data-size="sm"] { --h: 28px; --px: 8px; --radius: calc(var(--aui-radius, 7px) - 1px); }
-.ui-dpkc[data-size="lg"] { --h: 36px; --px: 12px; --fs: 14px; --radius: calc(var(--aui-radius, 7px) + 1px); }
+.ui-dpkc[data-size="lg"] { --h: 36px; --px: 12px; --fs: calc(14px * var(--type-scale, 1)); --radius: calc(var(--aui-radius, 7px) + 1px); }
 /* Touch screens: a comfortable tap height, 16px text and bigger days */
 @media (pointer: coarse) {
-  .ui-dpkc { --fs: 16px; --cell: 40px; }
+  .ui-dpkc { --fs: calc(16px * var(--type-scale, 1)); --cell: 40px; }
   .ui-dpkc[data-size="sm"] { --h: 34px; }
   .ui-dpkc[data-size="md"] { --h: 38px; }
   .ui-dpkc[data-size="lg"] { --h: 40px; }
@@ -557,7 +557,7 @@ const css = /* css */ `
 
 .ui-dpkc__head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .ui-dpkc__label { min-width: 0; font-weight: 500; color: var(--ui-dpkc-title); overflow-wrap: anywhere; cursor: default; }
-.ui-dpkc__optional { flex: none; font-size: 12px; line-height: 16px; color: var(--ui-dpkc-subtle); }
+.ui-dpkc__optional { flex: none; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-dpkc-subtle); }
 
 /* The field: the Text Field's look – white, a hairline edge that firms up on hover and while open */
 .ui-dpkc__trigger {
@@ -602,7 +602,7 @@ const css = /* css */ `
   box-shadow: var(--ui-dpkc-shadow-pop);
   color: var(--ui-dpkc-ink);
   font: inherit;
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   overflow: hidden;
   transform-origin: top left;
   animation: ui-dpkc-open 200ms var(--ui-dpkc-ease) both;
@@ -623,7 +623,7 @@ const css = /* css */ `
 /* The month: weekday heads and six weeks of days that touch */
 .ui-dpkc__grid { display: grid; }
 .ui-dpkc__weekdays, .ui-dpkc__week { display: grid; grid-template-columns: repeat(7, minmax(0, var(--cell))); justify-content: center; }
-.ui-dpkc__weekday { height: 24px; overflow: hidden; font-size: 10px; font-weight: 500; line-height: 24px; letter-spacing: 0.5px; text-transform: uppercase; text-align: center; white-space: nowrap; color: var(--ui-dpkc-subtle); }
+.ui-dpkc__weekday { height: 24px; overflow: hidden; font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; line-height: 24px; letter-spacing: 0.5px; text-transform: uppercase; text-align: center; white-space: nowrap; color: var(--ui-dpkc-subtle); }
 .ui-dpkc__weekday abbr { text-decoration: none; cursor: default; }
 .ui-dpkc__weeks { animation: ui-dpkc-slide 260ms var(--ui-dpkc-ease) both; }
 .ui-dpkc__weeks[data-dir="-1"] { animation-name: ui-dpkc-slide-back; }
@@ -632,7 +632,7 @@ const css = /* css */ `
   position: relative;
   margin: 2px;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-variant-numeric: tabular-nums;
   color: var(--ui-dpkc-ink);
@@ -652,7 +652,7 @@ const css = /* css */ `
 .ui-dpkc__day[data-chosen] { background: var(--ui-dpkc-chip); color: var(--ui-dpkc-on-chip); font-weight: 500; animation: ui-dpkc-pick 380ms var(--ui-dpkc-spring); }
 .ui-dpkc__day[data-chosen][aria-current="date"]::after { background: var(--ui-dpkc-today-on-chip); }
 
-.ui-dpkc__message { margin: 0; font-size: 12px; line-height: 16px; color: var(--ui-dpkc-subtle); overflow-wrap: anywhere; animation: ui-dpkc-message 260ms var(--ui-dpkc-ease); }
+.ui-dpkc__message { margin: 0; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-dpkc-subtle); overflow-wrap: anywhere; animation: ui-dpkc-message 260ms var(--ui-dpkc-ease); }
 .ui-dpkc[data-invalid] .ui-dpkc__message { color: var(--ui-dpkc-danger); }
 
 @keyframes ui-dpkc-open { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }

@@ -2,6 +2,7 @@
 "use client";
 
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Agent Fleet – several agents at work side by side, in a single self-contained file.
@@ -134,7 +135,7 @@ const initials = (name: string) =>
     .toUpperCase();
 const walk = (a: FleetAgent): FleetAgent[] => [a, ...(a.children ?? []).flatMap(walk)];
 const costOf = (a: FleetAgent): number => (a.cost ?? 0) + (a.children ?? []).reduce((sum, c) => sum + costOf(c), 0);
-const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reduced = () => reducedMotion();
 const muted = (s: FleetAgentStatus) => s === "queued" || s === "stopped";
 
 /** Position of an element inside the fleet, from offsets – so the cards' own motion doesn't throw the connectors off */
@@ -952,7 +953,7 @@ const css = /* css */ `
   box-sizing: border-box;
   width: 100%;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 400;
   line-height: 20px;
   color: var(--ui-agfc-text);
@@ -971,7 +972,7 @@ const css = /* css */ `
 .ui-agfc__spark { display: grid; flex: none; place-items: center; width: 16px; color: var(--ui-agfc-accent); }
 /* The title gives way first – the numbers only wrap when even they don't fit */
 .ui-agfc__title { flex: 1 1 0; min-width: min(120px, 100%); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 500; color: var(--ui-agfc-strong); }
-.ui-agfc__sum { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px 10px; margin-left: auto; font-size: 12px; line-height: 16px; color: var(--ui-agfc-muted); font-variant-numeric: tabular-nums; }
+.ui-agfc__sum { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px 10px; margin-left: auto; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-agfc-muted); font-variant-numeric: tabular-nums; }
 .ui-agfc__sum-cost { min-width: 44px; color: var(--ui-agfc-ink); font-weight: 500; text-align: right; }
 
 /* ----- The body: the column of main agents, and the open tree beside it ----- */
@@ -982,7 +983,7 @@ const css = /* css */ `
 .ui-agfc__list { position: relative; z-index: 1; display: grid; gap: 8px; min-width: 0; }
 /* No agents at all: one quiet line across the whole fleet */
 .ui-agfc__list:has(> .ui-agfc__none) { grid-column: 1 / -1; }
-.ui-agfc__none { padding: 28px 12px; border-radius: var(--aui-radius-lg, 10px); box-shadow: inset 0 0 0 0.5px var(--ui-agfc-line); font-size: 12px; line-height: 16px; color: var(--ui-agfc-muted); text-align: center; }
+.ui-agfc__none { padding: 28px 12px; border-radius: var(--aui-radius-lg, 10px); box-shadow: inset 0 0 0 0.5px var(--ui-agfc-line); font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-agfc-muted); text-align: center; }
 .ui-agfc__side { position: relative; z-index: 1; min-width: 0; }
 
 /* One main agent: a white card that opens its tree */
@@ -994,7 +995,7 @@ const css = /* css */ `
 .ui-agfc__list[data-picked] > .ui-agfc__main:not([data-open]):is(:hover, :focus-visible) { opacity: 0.85; }
 .ui-agfc__foot { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 20px; }
 /* The progress circle sits on the phrase's text line */
-.ui-agfc__say { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 5px; min-width: 0; font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-agfc-muted); font-variant-numeric: tabular-nums; }
+.ui-agfc__say { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 5px; min-width: 0; font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-agfc-muted); font-variant-numeric: tabular-nums; }
 .ui-agfc__say-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 /* Text and circle stay gray – the phrase says what needs you */
 .ui-agfc__ring { transform: rotate(-90deg); }
@@ -1008,7 +1009,7 @@ const css = /* css */ `
 .ui-agfc__below { display: grid; gap: 10px; padding-left: var(--ui-agfc-indent); }
 .ui-agfc__sub { width: var(--ui-agfc-card-w); }
 :is(.ui-agfc__main, .ui-agfc__sub)[data-faded] { opacity: var(--ui-agfc-dim) !important; }
-.ui-agfc__empty { padding: 10px 2px; font-size: 12px; line-height: 16px; color: var(--ui-agfc-muted); animation: ui-agfc-fade-in 240ms ease both; }
+.ui-agfc__empty { padding: 10px 2px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-agfc-muted); animation: ui-agfc-fade-in 240ms ease both; }
 .ui-agfc:not([data-wide]) .ui-agfc__branch { display: grid; grid-template-rows: 1fr; padding-left: var(--ui-agfc-indent); animation: ui-agfc-open 360ms var(--ui-agfc-ease) both; }
 .ui-agfc:not([data-wide]) .ui-agfc__branch[data-leaving] { animation: ui-agfc-close var(--ui-agfc-exit, 300ms) var(--ui-agfc-ease) forwards; }
 /* A little room around the cards, so their hairlines aren't clipped while the branch opens */
@@ -1018,7 +1019,7 @@ const css = /* css */ `
 .ui-agfc:not([data-wide]) .ui-agfc__sub { width: auto; }
 
 /* Steve: what a waiting sub-agent asks or why a failed one stopped, on its card */
-.ui-agfc__said { display: -webkit-box; margin-top: 4px; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-size: 12px; line-height: 17px; }
+.ui-agfc__said { display: -webkit-box; margin-top: 4px; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-size: calc(12px * var(--type-scale, 1)); line-height: 17px; }
 .ui-agfc__said[data-kind="waiting"] { color: var(--ui-agfc-warn-fg); }
 .ui-agfc__said[data-kind="failed"] { color: var(--ui-agfc-danger-fg); }
 /* One sub-agent: a small white card that rises in a moment after its connector */
@@ -1032,65 +1033,65 @@ const css = /* css */ `
 
 /* What both cards share */
 .ui-agfc__top { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.ui-agfc__avatar { display: grid; flex: none; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: var(--ui-agfc-card); box-shadow: var(--ui-agfc-shadow); font-size: 10px; font-weight: 500; color: var(--ui-agfc-text); }
+.ui-agfc__avatar { display: grid; flex: none; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: var(--ui-agfc-card); box-shadow: var(--ui-agfc-shadow); font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; color: var(--ui-agfc-text); }
 .ui-agfc__avatar[data-logo] > svg { width: 13px; height: 13px; }
 .ui-agfc__who { display: grid; flex: 1; min-width: 0; }
 .ui-agfc__name { overflow: hidden; font-weight: 500; line-height: 16px; color: var(--ui-agfc-strong); white-space: nowrap; text-overflow: ellipsis; }
-.ui-agfc__model { overflow: hidden; font-size: 11px; line-height: 14px; color: var(--ui-agfc-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-agfc__status { display: inline-flex; flex: none; align-self: start; align-items: center; gap: 4px; height: 18px; padding: 0 6px 0 4px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-agfc-fill); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-agfc-text); white-space: nowrap; }
+.ui-agfc__model { overflow: hidden; font-size: calc(11px * var(--type-scale, 1)); line-height: 14px; color: var(--ui-agfc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-agfc__status { display: inline-flex; flex: none; align-self: start; align-items: center; gap: 4px; height: 18px; padding: 0 6px 0 4px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-agfc-fill); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-agfc-text); white-space: nowrap; }
 .ui-agfc__status[data-status="running"] { background: var(--ui-agfc-brand-bg); color: var(--ui-agfc-brand-fg); }
 .ui-agfc__status[data-status="waiting"] { background: var(--ui-agfc-warn-bg); color: var(--ui-agfc-warn-fg); }
 .ui-agfc__status[data-status="done"] { background: var(--ui-agfc-ok-bg); color: var(--ui-agfc-ok-fg); }
 .ui-agfc__status[data-status="failed"] { background: var(--ui-agfc-danger-bg); color: var(--ui-agfc-danger-fg); }
 .ui-agfc__spin { animation: ui-agfc-spin 900ms linear infinite; }
 /* One line of what it does, led by its tools – every card keeps its height */
-.ui-agfc__task { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--ui-agfc-text); }
+.ui-agfc__task { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-agfc-text); }
 .ui-agfc__task-text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 /* The tools: small white tiles, each slightly over the one before */
 .ui-agfc__tools { display: inline-flex; flex: none; }
 .ui-agfc__tool { display: grid; flex: none; place-items: center; width: 16px; height: 16px; border-radius: 4px; background: var(--ui-agfc-card); box-shadow: var(--ui-agfc-shadow); }
 .ui-agfc__tool + .ui-agfc__tool { margin-left: -4px; }
 .ui-agfc__tool > svg { width: 10px; height: 10px; }
-.ui-agfc__tool--more { width: auto; min-width: 16px; padding: 0 3px; font-size: 9px; font-weight: 600; line-height: 16px; color: var(--ui-agfc-muted); font-variant-numeric: tabular-nums; }
+.ui-agfc__tool--more { width: auto; min-width: 16px; padding: 0 3px; font-size: calc(9px * var(--type-scale, 1)); font-weight: 600; line-height: 16px; color: var(--ui-agfc-muted); font-variant-numeric: tabular-nums; }
 .ui-agfc__meta { display: flex; align-items: center; gap: 8px; min-height: 20px; }
 /* A sub-agent that needs you or failed: a small button opens the window with the answers */
-.ui-agfc__review { flex: none; display: inline-flex; align-items: center; height: 20px; margin: 0 -2px 0 auto; padding: 0 8px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-agfc-card); box-shadow: var(--ui-agfc-shadow); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-agfc-ink); transition: background-color 160ms ease; }
+.ui-agfc__review { flex: none; display: inline-flex; align-items: center; height: 20px; margin: 0 -2px 0 auto; padding: 0 8px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-agfc-card); box-shadow: var(--ui-agfc-shadow); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-agfc-ink); transition: background-color 160ms ease; }
 .ui-agfc__review:hover { background: var(--ui-agfc-fill); }
 .ui-agfc__sub[data-popped] .ui-agfc__review { background: var(--ui-agfc-fill); }
 /* What it needs from you, at the top of the window, with the two answers */
 .ui-agfc__ask { display: grid; gap: 4px; padding: 4px 6px 8px; }
 .ui-agfc__ask + .ui-agfc__pop-head { margin-top: 2px; padding-top: 8px; border-top: 0.5px solid var(--ui-agfc-line); }
-.ui-agfc__ask-label { font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-agfc-ink); }
-.ui-agfc__ask-text { overflow-wrap: anywhere; font-size: 12px; line-height: 16px; color: var(--ui-agfc-text); }
+.ui-agfc__ask-label { font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-agfc-ink); }
+.ui-agfc__ask-text { overflow-wrap: anywhere; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-agfc-text); }
 .ui-agfc__ask-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
 /* The answers are as small as the card's Answer button */
-.ui-agfc__btn { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-agfc-card); box-shadow: var(--ui-agfc-shadow); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-agfc-ink); transition: background-color 160ms ease, opacity 160ms ease; }
+.ui-agfc__btn { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-agfc-card); box-shadow: var(--ui-agfc-shadow); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-agfc-ink); transition: background-color 160ms ease, opacity 160ms ease; }
 .ui-agfc__btn:hover { background: var(--ui-agfc-fill); }
 .ui-agfc__btn--primary { background: var(--ui-agfc-solid); box-shadow: none; color: var(--ui-agfc-on-solid); }
 .ui-agfc__btn--primary:hover { background: var(--ui-agfc-solid); opacity: 0.88; }
 .ui-agfc button:focus-visible { outline: 2px solid var(--ui-agfc-focus); outline-offset: 2px; }
-.ui-agfc__count { flex: none; margin-left: auto; font-size: 11px; line-height: 16px; color: var(--ui-agfc-muted); font-variant-numeric: tabular-nums; }
+.ui-agfc__count { flex: none; margin-left: auto; font-size: calc(11px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-agfc-muted); font-variant-numeric: tabular-nums; }
 
 /* The tasks window: drops down from the sub-agent, over everything below it */
 .ui-agfc__body[data-pop] > :is(.ui-agfc__list, .ui-agfc__side) { z-index: 4; }
 .ui-agfc__sub[data-popped] { z-index: 5; box-shadow: var(--ui-agfc-hover); }
 .ui-agfc__pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 5; display: grid; gap: 2px; width: max(100%, 312px); max-width: calc(100vw - 32px); max-height: min(380px, 70vh); overflow-y: auto; overscroll-behavior: contain; padding: 6px; border-radius: var(--aui-radius-lg, 10px); background: var(--aui-overlay, var(--ui-agfc-card)); box-shadow: var(--ui-agfc-pop); cursor: default; transform-origin: 24px 0; animation: ui-agfc-drop 220ms var(--ui-agfc-ease) both; }
-.ui-agfc__pop-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 2px 6px 6px; font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-agfc-ink); font-variant-numeric: tabular-nums; }
-.ui-agfc__pop-head > :last-child { font-size: 11px; font-weight: 400; color: var(--ui-agfc-muted); }
+.ui-agfc__pop-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 2px 6px 6px; font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-agfc-ink); font-variant-numeric: tabular-nums; }
+.ui-agfc__pop-head > :last-child { font-size: calc(11px * var(--type-scale, 1)); font-weight: 400; color: var(--ui-agfc-muted); }
 /* The rows sit together on one soft gray well – no lines between them */
 .ui-agfc__steps { display: grid; margin: 0; padding: 2px; border-radius: calc(var(--aui-radius-lg, 10px) - 3px); background: var(--ui-agfc-well); list-style: none; }
 .ui-agfc__step { display: flex; align-items: center; gap: 8px; min-width: 0; height: 28px; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); animation: ui-agfc-step 260ms var(--ui-agfc-ease) both; }
 /* Where a task stands reads from its text: done is quiet, the one at work stands out, what's still to come is faint */
-.ui-agfc__step-title { flex: 1; min-width: 0; overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-agfc-text); white-space: nowrap; text-overflow: ellipsis; transition: color 240ms ease; }
+.ui-agfc__step-title { flex: 1; min-width: 0; overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-agfc-text); white-space: nowrap; text-overflow: ellipsis; transition: color 240ms ease; }
 .ui-agfc__step:is([data-status="running"], [data-status="waiting"], [data-status="failed"]) .ui-agfc__step-title { color: var(--ui-agfc-strong); font-weight: 500; }
 .ui-agfc__step:is([data-status="queued"], [data-status="stopped"]) .ui-agfc__step-title { color: var(--ui-agfc-faint); }
 .ui-agfc__step:is([data-status="queued"], [data-status="stopped"]) .ui-agfc__tool { opacity: 0.5; }
-.ui-agfc__step-end { flex: none; font-size: 11px; line-height: 16px; color: var(--ui-agfc-muted); font-variant-numeric: tabular-nums; }
+.ui-agfc__step-end { flex: none; font-size: calc(11px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-agfc-muted); font-variant-numeric: tabular-nums; }
 .ui-agfc__step[data-status="running"] .ui-agfc__step-end { font-weight: 500; color: var(--ui-agfc-ink); }
 .ui-agfc__step:is([data-status="waiting"], [data-status="failed"]) .ui-agfc__step-end { font-weight: 500; color: var(--ui-agfc-ink); }
 .ui-agfc__step:is([data-status="queued"], [data-status="stopped"]) .ui-agfc__step-end { color: var(--ui-agfc-faint); }
 .ui-agfc__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.ui-agfc__cost { min-width: 0; overflow: hidden; font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-agfc-ink); white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.ui-agfc__cost { min-width: 0; overflow: hidden; font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-agfc-ink); white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .ui-agfc__time { font-weight: 400; color: var(--ui-agfc-muted); }
 /* Costs that still climb: a light shimmer runs over the amount */
 .ui-agfc__amount[data-live] {

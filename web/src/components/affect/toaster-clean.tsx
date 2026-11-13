@@ -727,7 +727,7 @@ const css = /* css */ `
   margin: 0;
   padding: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 400;
   line-height: 20px;
   color: var(--ui-tsc-text);
@@ -784,7 +784,7 @@ const css = /* css */ `
 
 .ui-tsc__text { position: relative; flex: 1; min-width: 0; }
 .ui-tsc__title { font-weight: 500; line-height: 20px; color: var(--ui-tsc-strong); overflow-wrap: anywhere; }
-.ui-tsc__desc { font-size: 13px; line-height: 20px; color: var(--ui-tsc-text); overflow-wrap: anywhere; }
+.ui-tsc__desc { font-size: calc(13px * var(--type-scale, 1)); line-height: 20px; color: var(--ui-tsc-text); overflow-wrap: anywhere; }
 /* Changed text slides in with a soft blur; the old text fades out on top */
 .ui-tsc__copy[data-changed] { animation: ui-tsc-text-in 300ms var(--ui-tsc-ease) both; }
 .ui-tsc__ghost { position: absolute; top: 0; left: 0; right: 0; pointer-events: none; animation: ui-tsc-text-out 220ms ease both; }
@@ -820,7 +820,7 @@ const css = /* css */ `
   margin: -4px 0;
   padding: 0 10px;
   border-radius: calc(var(--aui-radius-sm, 5px) + 1px);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;

@@ -3,6 +3,7 @@
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { t, useT } from "@/i18n";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Agent Inbox – every background task your agents are working on, as a calm board, in a single self-contained file.
@@ -192,7 +193,7 @@ const Clock = ({ since, fixed }: { since?: number; fixed: number }) => {
   const now = useNow(since !== undefined);
   return <>{clock(since !== undefined ? now - since : fixed)}</>;
 };
-const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reduced = () => reducedMotion();
 const EASE = "cubic-bezier(0.32, 0.72, 0.24, 1)";
 
 /* ---------- Icons ---------- */
@@ -603,7 +604,7 @@ const css = /* css */ `
   /* Steve: named, so the narrow-inbox rules below ask the inbox and not the nearest card */
   container: ui-aic / inline-size;
   font-family: var(--aui-font, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-aic-text);
   text-align: left;
@@ -618,12 +619,12 @@ const css = /* css */ `
 
 /* ----- Bar: where you are, and the layout ----- */
 .ui-aic__bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 0 2px; }
-.ui-aic__heading { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 14px; font-weight: 500; color: var(--ui-aic-ink); white-space: nowrap; }
+.ui-aic__heading { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: calc(14px * var(--type-scale, 1)); font-weight: 500; color: var(--ui-aic-ink); white-space: nowrap; }
 .ui-aic__crumb { flex: none; color: var(--ui-aic-muted); font-weight: 400; }
 .ui-aic__slash { flex: none; color: var(--aui-placeholder, var(--ui-aic-faint)); }
 .ui-aic__heading-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ui-aic__views { display: flex; flex: none; gap: 2px; padding: 3px; border-radius: calc(var(--aui-radius, 7px) + 3px); background: var(--ui-aic-lane); }
-.ui-aic__view { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: var(--aui-radius, 7px); font-size: 12.5px; font-weight: 500; color: var(--ui-aic-muted); transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease; }
+.ui-aic__view { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: var(--aui-radius, 7px); font-size: calc(12.5px * var(--type-scale, 1)); font-weight: 500; color: var(--ui-aic-muted); transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease; }
 .ui-aic__view:hover { color: var(--ui-aic-ink); }
 .ui-aic__view[aria-checked="true"] { background: var(--ui-aic-card); color: var(--ui-aic-ink); box-shadow: var(--aui-shadow-card, 0 1px 2px rgba(0, 0, 0, 0.08)); }
 
@@ -636,10 +637,10 @@ const css = /* css */ `
 .ui-aic__lane[data-lane="done"] .ui-aic__lane-spark { color: var(--ui-aic-green); }
 .ui-aic__lane[data-lane="paused"] .ui-aic__lane-spark { color: var(--ui-aic-muted); }
 /* Steve: 12px – Chinese names have no capitals to carry a smaller size */
-.ui-aic__lane-name { overflow: hidden; font-size: 12px; font-weight: 500; letter-spacing: 0.04em; text-align: center; text-transform: uppercase; color: var(--ui-aic-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-aic__count { display: grid; place-items: center; min-width: 20px; height: 18px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: color-mix(in srgb, var(--aui-ink, #000) 6%, transparent); font-size: 11px; font-weight: 500; color: var(--ui-aic-text); font-variant-numeric: tabular-nums; }
+.ui-aic__lane-name { overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; letter-spacing: 0.04em; text-align: center; text-transform: uppercase; color: var(--ui-aic-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-aic__count { display: grid; place-items: center; min-width: 20px; height: 18px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: color-mix(in srgb, var(--aui-ink, #000) 6%, transparent); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; color: var(--ui-aic-text); font-variant-numeric: tabular-nums; }
 .ui-aic__cards { display: grid; gap: 6px; }
-.ui-aic__empty { padding: 18px 0 20px; font-size: 12.5px; text-align: center; color: var(--aui-placeholder, var(--ui-aic-faint)); }
+.ui-aic__empty { padding: 18px 0 20px; font-size: calc(12.5px * var(--type-scale, 1)); text-align: center; color: var(--aui-placeholder, var(--ui-aic-faint)); }
 
 /* ----- A card ----- */
 .ui-aic__card[data-faded] { opacity: 0.4; }
@@ -647,7 +648,7 @@ const css = /* css */ `
 .ui-aic__card:hover, .ui-aic__card[data-open] { box-shadow: var(--aui-shadow-card-hover, var(--lift-hover, 0 0 0 1px #dcdce1, 0 4px 14px -6px rgba(0, 0, 0, 0.12))); }
 .ui-aic__card-main { display: grid; gap: 6px; width: 100%; padding: 12px 14px 12px 12px; border-radius: var(--aui-radius-lg, 10px); container: aic-card / inline-size; }
 /* Top-aligned: the spark stays on the first line when a long title wraps */
-.ui-aic__code { padding-left: 26px; font-family: var(--aui-font-mono, ui-monospace, monospace); font-size: 12px; line-height: 16px; color: var(--ui-aic-muted); text-align: start; }
+.ui-aic__code { padding-left: 26px; font-family: var(--aui-font-mono, ui-monospace, monospace); font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-aic-muted); text-align: start; }
 .ui-aic__plan { position: relative; display: block; width: 32px; height: 4px; border-radius: 999px; background: var(--ui-aic-track); overflow: hidden; }
 .ui-aic__plan > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--ui-aic-muted); }
 .ui-aic__card[data-tone="pause"] .ui-aic__spark, .ui-aic__card[data-tone="neutral"] .ui-aic__spark { color: var(--ui-aic-muted); }
@@ -658,13 +659,13 @@ const css = /* css */ `
 .ui-aic__card[data-status="failed"] .ui-aic__spark { color: var(--ui-aic-red); }
 .ui-aic__card[data-status="done"] .ui-aic__spark { color: var(--ui-aic-green); }
 /* Steve: two lines before it is cut, so a slim card still says what the task is */
-.ui-aic__title { display: -webkit-box; min-width: 0; overflow: hidden; font-size: 14px; font-weight: 600; line-height: 20px; color: var(--ui-aic-ink); text-align: start; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.ui-aic__desc { display: -webkit-box; padding-left: 26px; overflow: hidden; font-size: 13px; line-height: 19px; color: var(--ui-aic-text); text-align: start; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ui-aic__title { display: -webkit-box; min-width: 0; overflow: hidden; font-size: calc(14px * var(--type-scale, 1)); font-weight: 600; line-height: 20px; color: var(--ui-aic-ink); text-align: start; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ui-aic__desc { display: -webkit-box; padding-left: 26px; overflow: hidden; font-size: calc(13px * var(--type-scale, 1)); line-height: 19px; color: var(--ui-aic-text); text-align: start; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 /* Open: the whole title and description, nothing cut off */
 .ui-aic__card[data-open] .ui-aic__title { -webkit-line-clamp: unset; }
 .ui-aic__card[data-open] .ui-aic__desc { -webkit-line-clamp: unset; }
 .ui-aic__foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; margin-top: 4px; padding-left: 26px; }
-.ui-aic__state { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; color: var(--ui-aic-text); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ui-aic__state { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font-size: calc(12.5px * var(--type-scale, 1)); color: var(--ui-aic-text); white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Never cut down to a single letter – a few letters and … at least; a space's width to the time, cut or not */
 .ui-aic__state-word { min-width: 2.6em; overflow: hidden; text-overflow: ellipsis; white-space: pre; margin-right: calc(0.28em - 8px); }
 .ui-aic__time { flex: none; }
@@ -676,7 +677,7 @@ const css = /* css */ `
 .ui-aic__state-icon[data-status="waiting"] { color: var(--ui-aic-amber); }
 .ui-aic__state-icon[data-status="done"] { color: var(--ui-aic-green); }
 .ui-aic__state-icon[data-status="failed"] { color: var(--ui-aic-red); }
-.ui-aic__meta { display: inline-flex; flex: none; align-items: center; font-size: 12px; color: var(--ui-aic-muted); font-variant-numeric: tabular-nums; }
+.ui-aic__meta { display: inline-flex; flex: none; align-items: center; font-size: calc(12px * var(--type-scale, 1)); color: var(--ui-aic-muted); font-variant-numeric: tabular-nums; }
 .ui-aic__meta > span { display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; }
 .ui-aic__meta > span + span { border-left: 1px solid var(--ui-aic-line); }
 .ui-aic__meta > span:last-child { padding-right: 0; }
@@ -687,17 +688,17 @@ const css = /* css */ `
 .ui-aic__clip { min-height: 0; overflow: hidden; }
 /* Starts at the card's left edge, like the spark – the full width for reading */
 .ui-aic__more { margin: 0 14px 0 12px; padding: 10px 0 12px; border-top: 1px solid var(--ui-aic-line); }
-.ui-aic__agent { font-size: 12px; color: var(--ui-aic-muted); }
-.ui-aic__details { margin-top: 6px; font-size: 12.5px; color: var(--ui-aic-muted); }
+.ui-aic__agent { font-size: calc(12px * var(--type-scale, 1)); color: var(--ui-aic-muted); }
+.ui-aic__details { margin-top: 6px; font-size: calc(12.5px * var(--type-scale, 1)); color: var(--ui-aic-muted); }
 /* Steve: Open, one click, in the card's top corner; the card's first line leaves it room */
 .ui-aic__go { position: absolute; top: 9px; right: 9px; display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--aui-radius-sm, 8px); color: var(--ui-aic-faint); transition: background-color 160ms ease, color 160ms ease; }
 .ui-aic__go:hover { background: var(--ui-aic-chip); color: var(--ui-aic-ink); }
 .ui-aic__card[data-go] .ui-aic__card-main > :first-child { padding-right: 24px; }
 /* Steve: a capped column's Show all */
-.ui-aic__all { display: block; width: 100%; height: 32px; border-radius: var(--aui-radius, 10px); font-size: 13px; font-weight: 500; color: var(--ui-aic-muted); text-align: center; transition: background-color 160ms ease, color 160ms ease; }
+.ui-aic__all { display: block; width: 100%; height: 32px; border-radius: var(--aui-radius, 10px); font-size: calc(13px * var(--type-scale, 1)); font-weight: 500; color: var(--ui-aic-muted); text-align: center; transition: background-color 160ms ease, color 160ms ease; }
 .ui-aic__all:hover { background: var(--ui-aic-track); color: var(--ui-aic-ink); }
 .ui-aic__steps { position: relative; display: grid; gap: 5px; margin-top: 6px !important; padding-left: 12px !important; }
-.ui-aic__steps li { position: relative; display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; line-height: 18px; color: var(--ui-aic-text); }
+.ui-aic__steps li { position: relative; display: flex; justify-content: space-between; gap: 10px; font-size: calc(12.5px * var(--type-scale, 1)); line-height: 18px; color: var(--ui-aic-text); }
 .ui-aic__steps li::before { content: ""; position: absolute; top: 7px; left: -12px; width: 4px; height: 4px; border-radius: 50%; background: var(--ui-aic-faint); }
 /* Short line segments between the dots, with a little air on both ends */
 .ui-aic__steps li:not(:last-child)::after { content: ""; position: absolute; top: 15px; bottom: -8px; left: -10.5px; width: 1px; background: var(--ui-aic-line); }
@@ -707,7 +708,7 @@ const css = /* css */ `
 .ui-aic__steps time { flex: none; max-width: 45%; color: var(--ui-aic-muted); text-align: end; }
 .ui-aic__actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
 .ui-aic__actions:empty { display: none; }
-.ui-aic__btn { display: inline-flex; align-items: center; height: 28px; padding: 0 12px; border-radius: calc(var(--aui-radius, 7px) + 1px); box-shadow: inset 0 0 0 1px var(--ui-aic-line); background: var(--ui-aic-card); font-size: 12.5px; font-weight: 500; color: var(--ui-aic-ink); transition: background-color 160ms ease; }
+.ui-aic__btn { display: inline-flex; align-items: center; height: 28px; padding: 0 12px; border-radius: calc(var(--aui-radius, 7px) + 1px); box-shadow: inset 0 0 0 1px var(--ui-aic-line); background: var(--ui-aic-card); font-size: calc(12.5px * var(--type-scale, 1)); font-weight: 500; color: var(--ui-aic-ink); transition: background-color 160ms ease; }
 .ui-aic__btn:hover { background: var(--ui-aic-lane); }
 .ui-aic__btn--primary { background: var(--aui-primary, var(--ui-aic-ink)); box-shadow: none; color: var(--aui-on-primary, var(--ui-aic-card)); }
 .ui-aic__btn--primary:hover { background: color-mix(in srgb, var(--aui-primary, #171717) 88%, var(--aui-ink, #000)); }

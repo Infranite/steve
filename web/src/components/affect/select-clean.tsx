@@ -404,7 +404,7 @@ const css = /* css */ `
 
   --h: 32px;
   --px: 10px;
-  --fs: 13px;
+  --fs: calc(13px * var(--type-scale, 1));
   --radius: var(--aui-radius, 7px);
 
   display: flex;
@@ -412,16 +412,16 @@ const css = /* css */ `
   gap: 6px;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-selc-ink);
   -webkit-font-smoothing: antialiased;
 }
 .ui-selc[data-size="sm"] { --h: 28px; --px: 8px; --radius: calc(var(--aui-radius, 7px) - 1px); }
-.ui-selc[data-size="lg"] { --h: 36px; --px: 12px; --fs: 14px; --radius: calc(var(--aui-radius, 7px) + 1px); }
+.ui-selc[data-size="lg"] { --h: 36px; --px: 12px; --fs: calc(14px * var(--type-scale, 1)); --radius: calc(var(--aui-radius, 7px) + 1px); }
 /* Touch screens: a comfortable tap height and 16px text */
 @media (pointer: coarse) {
-  .ui-selc { --fs: 16px; }
+  .ui-selc { --fs: calc(16px * var(--type-scale, 1)); }
   .ui-selc[data-size="sm"] { --h: 34px; }
   .ui-selc[data-size="md"] { --h: 38px; }
   .ui-selc[data-size="lg"] { --h: 40px; }
@@ -429,7 +429,7 @@ const css = /* css */ `
 
 .ui-selc__head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .ui-selc__label { min-width: 0; font-weight: 500; color: var(--ui-selc-title); overflow-wrap: anywhere; cursor: default; }
-.ui-selc__optional { flex: none; font-size: 12px; line-height: 16px; color: var(--ui-selc-subtle); }
+.ui-selc__optional { flex: none; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-selc-subtle); }
 
 /* The field: the Text Field's look – white, a hairline edge that firms up on hover and while open */
 .ui-selc__trigger {
@@ -512,7 +512,7 @@ const css = /* css */ `
   padding: 6px 8px;
   box-sizing: border-box;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   cursor: pointer;
   user-select: none;
@@ -522,14 +522,14 @@ const css = /* css */ `
 .ui-selc__text { display: grid; flex: 1; min-width: 0; }
 .ui-selc__option-label { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .ui-selc__option[aria-selected="true"] .ui-selc__option-label { font-weight: 500; }
-.ui-selc__option-hint { overflow: hidden; font-size: 12px; line-height: 16px; white-space: nowrap; text-overflow: ellipsis; color: var(--ui-selc-subtle); }
+.ui-selc__option-hint { overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; white-space: nowrap; text-overflow: ellipsis; color: var(--ui-selc-subtle); }
 .ui-selc__check { display: grid; flex: none; place-items: center; width: 16px; height: 16px; color: var(--ui-selc-ink); }
 .ui-selc__tick { stroke-dasharray: 1; animation: ui-selc-draw 280ms 40ms var(--ui-selc-ease) both; }
 @media (pointer: coarse) {
-  .ui-selc__option { min-height: 40px; font-size: 15px; }
+  .ui-selc__option { min-height: 40px; font-size: calc(15px * var(--type-scale, 1)); }
 }
 
-.ui-selc__message { margin: 0; font-size: 12px; line-height: 16px; color: var(--ui-selc-subtle); overflow-wrap: anywhere; animation: ui-selc-message 260ms var(--ui-selc-ease); }
+.ui-selc__message { margin: 0; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-selc-subtle); overflow-wrap: anywhere; animation: ui-selc-message 260ms var(--ui-selc-ease); }
 .ui-selc[data-invalid] .ui-selc__message { color: var(--ui-selc-danger); }
 
 @keyframes ui-selc-in {

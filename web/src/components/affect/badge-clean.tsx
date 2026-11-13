@@ -138,7 +138,7 @@ const css = /* css */ `
   background: var(--bg);
   color: var(--fg);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 11px;
+  font-size: calc(11px * var(--type-scale, 1));
   font-weight: 500;
   line-height: 16px;
   letter-spacing: 0;
@@ -154,7 +154,7 @@ const css = /* css */ `
   --mark: 13px;
   gap: 5px;
   border-radius: var(--aui-radius-sm, 5px);
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
 }
 /* A dot or icon in front sits a little closer to the edge, so it looks as far in as the text on the other side */
 .ui-bdgc[data-lead] {

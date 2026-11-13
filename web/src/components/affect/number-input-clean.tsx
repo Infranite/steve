@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useRef, useState, type ComponentPropsWithRef, type ReactNode } from "react";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Number Input – a single self-contained file, clean style.
@@ -369,7 +370,7 @@ function round(v: number, step: number) {
 /** The one motion: the new value rolls in from the direction it moved */
 function roll(el: HTMLInputElement | null, dir: 1 | -1) {
   if (!el || typeof el.animate !== "function") return;
-  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  if (reducedMotion()) return;
   el.animate(
     [
       { transform: `translateY(${dir * 5}px)`, opacity: 0.35, filter: "blur(1.5px)" },
@@ -418,7 +419,7 @@ const css = /* css */ `
 
   --h: 32px;
   --px: 10px;
-  --fs: 13px;
+  --fs: calc(13px * var(--type-scale, 1));
   --radius: var(--aui-radius, 7px);
 
   display: flex;
@@ -426,16 +427,16 @@ const css = /* css */ `
   gap: 6px;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-nmic-ink);
   -webkit-font-smoothing: antialiased;
 }
 .ui-nmic[data-size="sm"] { --h: 28px; --px: 8px; --radius: calc(var(--aui-radius, 7px) - 1px); }
-.ui-nmic[data-size="lg"] { --h: 36px; --px: 12px; --fs: 14px; --radius: calc(var(--aui-radius, 7px) + 1px); }
+.ui-nmic[data-size="lg"] { --h: 36px; --px: 12px; --fs: calc(14px * var(--type-scale, 1)); --radius: calc(var(--aui-radius, 7px) + 1px); }
 /* Touch screens: a comfortable tap height, and 16px text so iOS doesn't zoom in on focus */
 @media (pointer: coarse) {
-  .ui-nmic { --fs: 16px; }
+  .ui-nmic { --fs: calc(16px * var(--type-scale, 1)); }
   .ui-nmic[data-size="sm"] { --h: 36px; }
   .ui-nmic[data-size="md"] { --h: 40px; }
   .ui-nmic[data-size="lg"] { --h: 44px; }
@@ -443,7 +444,7 @@ const css = /* css */ `
 
 .ui-nmic__head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .ui-nmic__label { min-width: 0; font-weight: 500; color: var(--ui-nmic-title); overflow-wrap: anywhere; cursor: default; }
-.ui-nmic__optional { flex: none; font-size: 12px; line-height: 16px; color: var(--ui-nmic-subtle); }
+.ui-nmic__optional { flex: none; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-nmic-subtle); }
 
 /* The box: white, a hairline shadow as its edge; hover and focus only make that edge firmer – no ring */
 .ui-nmic__box {
@@ -546,7 +547,7 @@ const css = /* css */ `
 /* Under the field: the hint, or the error in its place */
 .ui-nmic__message {
   margin: 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--type-scale, 1));
   line-height: 16px;
   color: var(--ui-nmic-subtle);
   overflow-wrap: anywhere;

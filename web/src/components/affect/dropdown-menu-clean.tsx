@@ -711,7 +711,7 @@ const css = /* css */ `
   box-shadow: var(--ui-dmc-shadow);
   color: var(--ui-dmc-ink);
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   text-align: start;
@@ -727,7 +727,7 @@ const css = /* css */ `
 .ui-dmc__panel[data-side="right"] { transform-origin: top left; animation-name: ui-dmc-in-side; animation-duration: 160ms; }
 .ui-dmc__panel[data-side="left"] { transform-origin: top right; animation-name: ui-dmc-in-side; animation-duration: 160ms; }
 
-.ui-dmc__title { display: block; flex: none; padding: 6px 10px 4px; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--ui-dmc-faint); }
+.ui-dmc__title { display: block; flex: none; padding: 6px 10px 4px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; font-weight: 500; color: var(--ui-dmc-faint); }
 
 /* The rows; a long menu scrolls inside the card */
 .ui-dmc__list {
@@ -794,9 +794,9 @@ const css = /* css */ `
 /* Long names stay on one line – the full name on hover */
 .ui-dmc__label { display: grid; flex: 1; gap: 1px; min-width: 0; }
 .ui-dmc__text, .ui-dmc__desc { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.ui-dmc__desc { font-size: 12px; line-height: 16px; font-weight: 400; color: var(--ui-dmc-faint); }
+.ui-dmc__desc { font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; font-weight: 400; color: var(--ui-dmc-faint); }
 
-.ui-dmc__kbd { flex: none; padding-left: 16px; font: inherit; font-size: 12px; font-weight: 400; letter-spacing: 0.04em; color: var(--ui-dmc-faint); }
+.ui-dmc__kbd { flex: none; padding-left: 16px; font: inherit; font-size: calc(12px * var(--type-scale, 1)); font-weight: 400; letter-spacing: 0.04em; color: var(--ui-dmc-faint); }
 .ui-dmc__more, .ui-dmc__check { display: grid; flex: none; place-items: center; width: 14px; height: 14px; }
 .ui-dmc__more { color: var(--ui-dmc-faint); }
 .ui-dmc__check { color: var(--ui-dmc-ink); }

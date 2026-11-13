@@ -89,7 +89,7 @@ const css = /* css */ `
 
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-swc-ink);
   -webkit-font-smoothing: antialiased;
@@ -136,11 +136,11 @@ const css = /* css */ `
 
 .ui-swc__text { display: grid; flex: 1; min-width: 0; }
 .ui-swc__label { color: var(--ui-swc-ink); overflow-wrap: anywhere; }
-.ui-swc__desc { font-size: 12px; line-height: 16px; color: var(--ui-swc-subtle); overflow-wrap: anywhere; }
+.ui-swc__desc { font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-swc-subtle); overflow-wrap: anywhere; }
 
 /* Touch screens: a bigger switch and 15px text */
 @media (pointer: coarse) {
-  .ui-swc { --w: 40px; --h: 24px; font-size: 15px; line-height: 22px; }
+  .ui-swc { --w: 40px; --h: 24px; font-size: calc(15px * var(--type-scale, 1)); line-height: 22px; }
   .ui-swc[data-size="sm"] { --w: 34px; --h: 20px; }
   .ui-swc__control { height: max(var(--h), 22px); }
 }

@@ -276,14 +276,14 @@ const css = /* css */ `
   --ui-avtc-fg-s: 48%;
 
   --s: 32px;
-  --fs: 12px;
+  --fs: calc(12px * var(--type-scale, 1));
   --dot: 9px;
   --sq: 4px;
   --gap: 2px;
 }
-.ui-avtc[data-size="20"], .ui-avtc__group[data-size="20"] { --s: 20px; --fs: 8.5px; --dot: 6px; --sq: 3px; --gap: 1px; }
-.ui-avtc[data-size="24"], .ui-avtc__group[data-size="24"] { --s: 24px; --fs: 10px; --dot: 7px; --sq: 3px; --gap: 1.5px; }
-.ui-avtc[data-size="40"], .ui-avtc__group[data-size="40"] { --s: 40px; --fs: 14px; --dot: 10px; --sq: 5px; --gap: 2.5px; }
+.ui-avtc[data-size="20"], .ui-avtc__group[data-size="20"] { --s: 20px; --fs: calc(8.5px * var(--type-scale, 1)); --dot: 6px; --sq: 3px; --gap: 1px; }
+.ui-avtc[data-size="24"], .ui-avtc__group[data-size="24"] { --s: 24px; --fs: calc(10px * var(--type-scale, 1)); --dot: 7px; --sq: 3px; --gap: 1.5px; }
+.ui-avtc[data-size="40"], .ui-avtc__group[data-size="40"] { --s: 40px; --fs: calc(14px * var(--type-scale, 1)); --dot: 10px; --sq: 5px; --gap: 2.5px; }
 
 .ui-avtc {
   position: relative;

@@ -19,7 +19,7 @@ function harness(local = { getItem: () => "1" }) {
   const state = { workspace: { id: "ws", item_prefix: "ST" }, workspaces: [], items: [], bots: [], allBots: [], projects: [], sessions: [session("a"), session("b")], decisions: [], recent: [], thread: [], tags: [], tagUses: {}, settings: {}, devices: [], runtimes: [] }
   let onEvent, onOpen, cursorFn, opens = 0, closes = 0
   const marks = new WeakMap(), wm = { cursor: null }
-  const timers = [], cues = [], notices = [], pageWs = []
+  const timers = [], cues = [], notices = [], pageWs = [], looks = []
   const api = { state: async () => { const s = structuredClone(state); if (wm.cursor) marks.set(s, wm.cursor); return s }, events: async () => [], switchWs: async () => {} }
   const exports = {}
   runInNewContext(code, {
@@ -32,6 +32,7 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./i18n/format") return format
       if (id === "./i18n") return { __esModule: true, ...i18n }
       if (id === "./composer-draft") return composerDraft
+      if (id === "./lib/motion") return { applyLook: (x) => looks.push({ fontSize: x.fontSize, reduceMotion: x.reduceMotion }) }
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "./components/ui/toaster") return { toast: (x) => notices.push(x) }
       if (id === "react") return {}
@@ -41,7 +42,7 @@ function harness(local = { getItem: () => "1" }) {
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
     requestAnimationFrame: (f) => { timers.push({ f, ms: 0 }); return 1 }, crypto: { randomUUID: () => "client-1" },
   })
-  return { store: exports, api, state, cues, notices, pageWs, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
+  return { store: exports, api, state, cues, notices, pageWs, looks, event: (e) => onEvent(e), reconnect: (resumed) => onOpen(resumed), wm, streamCursor: () => cursorFn?.(), opens: () => opens, closes: () => closes, cursorFn: () => cursorFn, tick: async (ms) => {
     const due = timers.splice(0); for (const t of due) { if (t.cancelled) continue; if (t.ms <= ms) t.f(); else timers.push(t) } await flush()
   } }
 }
@@ -54,6 +55,16 @@ test("stream paint preserves unrelated sessions, bots, items and thread referenc
   await h.tick(80)
   assert.equal(s.st.S.a.ev[0][1], "hello")
   assert.equal(s.st.S.b, before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.st.items, before.items); assert.equal(s.st.thread, before.thread)
+})
+
+test("each state refresh applies the Hub's type size and reduced-motion settings to the page", async () => {
+  const h = harness(), s = h.store
+  h.state.settings = { fontSize: "大", reduceMotion: "开" }
+  s.start(); await flush()
+  assert.deepEqual(h.looks.at(-1), { fontSize: "大", reduceMotion: "开" })
+  h.state.settings = { fontSize: "标准", reduceMotion: "关" }
+  await s.refresh()
+  assert.deepEqual(h.looks.at(-1), { fontSize: "标准", reduceMotion: "关" })
 })
 
 const chatMessage = (id, author, origin) => ({ id, author, text: id, created: 1, item_id: null, meta: origin ? { origin } : {} })

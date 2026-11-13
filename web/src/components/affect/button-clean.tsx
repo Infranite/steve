@@ -11,6 +11,7 @@ import {
   type SyntheticEvent,
   type ReactNode,
 } from "react";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Button – a single self-contained file, clean style.
@@ -81,7 +82,7 @@ export function Button({
     lastWidth.current = width;
     lastContent.current = content;
     if (!changed || !from || Math.abs(from - width) < 0.5) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (reducedMotion()) return;
     el.animate([{ width: `${from}px` }, { width: `${width}px` }], {
       duration: 480,
       easing: "cubic-bezier(0.25, 1, 0.5, 1)",
@@ -209,7 +210,7 @@ const css = /* css */ `
   --h: 28px;
   --px: 10px;
   --gap: 6px;
-  --fs: 13px;
+  --fs: calc(13px * var(--type-scale, 1));
   --lh: 20px;
   --icon: 16px;
   --radius: var(--aui-radius, 6px);
@@ -251,7 +252,7 @@ const css = /* css */ `
   --h: 24px;
   --px: 8px;
   --gap: 4px;
-  --fs: 12px;
+  --fs: calc(12px * var(--type-scale, 1));
   --lh: 16px;
   --icon: 14px;
   --radius: var(--aui-radius, 6px);
@@ -260,7 +261,7 @@ const css = /* css */ `
   --h: 32px;
   --px: 12px;
   --gap: 6px;
-  --fs: 13px;
+  --fs: calc(13px * var(--type-scale, 1));
   --icon: 16px;
   --radius: var(--aui-radius, 6px);
 }

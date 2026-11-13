@@ -557,7 +557,7 @@ const css = /* css */ `
 
   --h: 32px;
   --px: 10px;
-  --fs: 13px;
+  --fs: calc(13px * var(--type-scale, 1));
   --radius: var(--aui-radius, 7px);
 
   display: flex;
@@ -565,16 +565,16 @@ const css = /* css */ `
   gap: 6px;
   min-width: 0;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   color: var(--ui-tpkc-ink);
   -webkit-font-smoothing: antialiased;
 }
 .ui-tpkc[data-size="sm"] { --h: 28px; --px: 8px; --radius: calc(var(--aui-radius, 7px) - 1px); }
-.ui-tpkc[data-size="lg"] { --h: 36px; --px: 12px; --fs: 14px; --radius: calc(var(--aui-radius, 7px) + 1px); }
+.ui-tpkc[data-size="lg"] { --h: 36px; --px: 12px; --fs: calc(14px * var(--type-scale, 1)); --radius: calc(var(--aui-radius, 7px) + 1px); }
 /* Touch screens: a comfortable tap height, and 16px text so iOS doesn't zoom in on focus */
 @media (pointer: coarse) {
-  .ui-tpkc { --fs: 16px; }
+  .ui-tpkc { --fs: calc(16px * var(--type-scale, 1)); }
   .ui-tpkc[data-size="sm"] { --h: 34px; }
   .ui-tpkc[data-size="md"] { --h: 38px; }
   .ui-tpkc[data-size="lg"] { --h: 40px; }
@@ -583,7 +583,7 @@ const css = /* css */ `
 
 .ui-tpkc__head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .ui-tpkc__label { min-width: 0; font-weight: 500; color: var(--ui-tpkc-title); overflow-wrap: anywhere; cursor: default; }
-.ui-tpkc__optional { flex: none; font-size: 12px; line-height: 16px; color: var(--ui-tpkc-subtle); }
+.ui-tpkc__optional { flex: none; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-tpkc-subtle); }
 
 /* The field: white, a hairline edge that firms up on hover and while typing – no ring on a text field */
 .ui-tpkc__box {
@@ -689,7 +689,7 @@ const css = /* css */ `
   height: 32px;
   padding: 0 8px;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -702,11 +702,11 @@ const css = /* css */ `
 .ui-tpkc__check svg { display: block; }
 .ui-tpkc__tick { stroke-dasharray: 1; animation: ui-tpkc-draw 280ms 40ms var(--ui-tpkc-ease) both; }
 @media (pointer: coarse) {
-  .ui-tpkc__option { height: 40px; font-size: 15px; }
+  .ui-tpkc__option { height: 40px; font-size: calc(15px * var(--type-scale, 1)); }
   .ui-tpkc__toggle { width: 32px; height: 32px; }
 }
 
-.ui-tpkc__message { margin: 0; font-size: 12px; line-height: 16px; color: var(--ui-tpkc-subtle); overflow-wrap: anywhere; animation: ui-tpkc-message 260ms var(--ui-tpkc-ease); }
+.ui-tpkc__message { margin: 0; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-tpkc-subtle); overflow-wrap: anywhere; animation: ui-tpkc-message 260ms var(--ui-tpkc-ease); }
 .ui-tpkc[data-invalid] .ui-tpkc__message { color: var(--ui-tpkc-danger); }
 
 @keyframes ui-tpkc-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }

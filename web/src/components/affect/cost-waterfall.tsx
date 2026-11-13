@@ -3,6 +3,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useT } from "@/i18n";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Cost Waterfall – where the money and the tokens of an agent run go, in a single self-contained file.
@@ -139,7 +140,7 @@ const tokensOf = (s: CostStep): [number, number, number] =>
   );
 const unpricedOf = (s: CostStep): number => Math.max(0, real(s.unpriced) ?? 0) + (s.children ?? []).reduce((sum, c) => sum + unpricedOf(c), 0);
 const hasCost = (s: CostStep): boolean => real(s.cost) !== undefined || (s.children ?? []).some(hasCost);
-const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reduced = () => reducedMotion();
 const ease = (p: number) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
 
 /** A round axis end a little past the total, and round steps between its ticks */
@@ -836,7 +837,7 @@ const css = /* css */ `
   box-shadow: var(--aui-shadow-card, var(--ui-cwfc-shadow));
   container: ui-cwfc / inline-size;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   font-weight: 400;
   line-height: 20px;
   color: var(--ui-cwfc-text);
@@ -858,9 +859,9 @@ const css = /* css */ `
 /* The white thumb slides under the chosen view */
 .ui-cwfc__switch::before { content: ""; position: absolute; top: 2px; bottom: 2px; left: 2px; width: calc(50% - 2px); border-radius: var(--aui-radius-sm, 5px); background: var(--ui-cwfc-card); box-shadow: var(--ui-cwfc-shadow); transition: transform 320ms var(--ui-cwfc-ease); }
 .ui-cwfc[data-mode="tokens"] .ui-cwfc__switch::before { transform: translateX(100%); }
-.ui-cwfc__switch > button { position: relative; height: 24px; padding: 0 10px; border-radius: var(--aui-radius-sm, 5px); font-size: 12px; font-weight: 500; line-height: 16px; text-align: center; color: var(--ui-cwfc-text); transition: color 200ms ease; }
+.ui-cwfc__switch > button { position: relative; height: 24px; padding: 0 10px; border-radius: var(--aui-radius-sm, 5px); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; text-align: center; color: var(--ui-cwfc-text); transition: color 200ms ease; }
 .ui-cwfc__switch > button[aria-pressed="true"] { color: var(--ui-cwfc-ink); }
-.ui-cwfc__pill { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-cwfc-fill); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-cwfc-text); white-space: nowrap; }
+.ui-cwfc__pill { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-cwfc-fill); font-size: calc(12px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; color: var(--ui-cwfc-text); white-space: nowrap; }
 .ui-cwfc__pill[data-status="running"] { background: var(--ui-cwfc-brand-bg); color: var(--ui-cwfc-brand-fg); }
 .ui-cwfc__pill[data-status="done"] { background: var(--ui-cwfc-ok-bg); color: var(--ui-cwfc-ok-fg); }
 .ui-cwfc__pill[data-status="failed"] { background: var(--ui-cwfc-error-bg); color: var(--ui-cwfc-error-ink); }
@@ -871,9 +872,9 @@ const css = /* css */ `
 .ui-cwfc__stat { display: grid; gap: 2px; min-width: 0; padding: 0 16px; }
 .ui-cwfc__stat:first-child { padding-left: 22px; }
 .ui-cwfc__stat + .ui-cwfc__stat { border-left: 0.5px solid var(--ui-cwfc-line); }
-.ui-cwfc__stat dt { overflow: hidden; font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-cwfc-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-cwfc__stat dd { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; font-size: 15px; font-weight: 500; line-height: 24px; color: var(--ui-cwfc-ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.ui-cwfc__sub { flex: none; font-size: 12px; font-weight: 400; line-height: 16px; color: var(--ui-cwfc-muted); font-variant-numeric: tabular-nums; }
+.ui-cwfc__stat dt { overflow: hidden; font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-cwfc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-cwfc__stat dd { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; font-size: calc(15px * var(--type-scale, 1)); font-weight: 500; line-height: 24px; color: var(--ui-cwfc-ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ui-cwfc__sub { flex: none; font-size: calc(12px * var(--type-scale, 1)); font-weight: 400; line-height: 16px; color: var(--ui-cwfc-muted); font-variant-numeric: tabular-nums; }
 /* The hover fill reaches 6px past the text on both sides – the value's box widens by as much, so it isn't clipped */
 .ui-cwfc__stat dd:has(.ui-cwfc__top) { margin: 0 -6px; padding: 0 6px; }
 .ui-cwfc__top { display: flex; align-items: baseline; gap: 8px; min-width: 0; max-width: calc(100% + 12px); margin: 0 -6px; padding: 0 6px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); transition: background-color 140ms ease; }
@@ -891,7 +892,7 @@ const css = /* css */ `
   column-gap: var(--ui-cwfc-gap);
   padding: 0 var(--ui-cwfc-end) 0 var(--ui-cwfc-pad);
 }
-.ui-cwfc__cols { align-items: center; height: var(--ui-cwfc-head); border-bottom: 0.5px solid var(--ui-cwfc-line); font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-cwfc-muted); }
+.ui-cwfc__cols { align-items: center; height: var(--ui-cwfc-head); border-bottom: 0.5px solid var(--ui-cwfc-line); font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-cwfc-muted); }
 .ui-cwfc__cols > span:first-child { padding-left: 6px; }
 .ui-cwfc__cols > [data-col] { text-align: right; }
 /* The grid lines and tick labels sit over the bar column only */
@@ -906,13 +907,13 @@ const css = /* css */ `
 }
 .ui-cwfc__tick { position: absolute; top: 0; bottom: 0; left: calc(var(--v) * 100% / var(--ui-cwfc-range)); width: 0.5px; background: var(--ui-cwfc-grid); animation: ui-cwfc-fade 420ms ease both; }
 .ui-cwfc__tick[data-zero] { background: rgba(0, 0, 0, 0.1); }
-.ui-cwfc__tick > span { position: absolute; top: 7px; left: 6px; font-size: 12px; line-height: 16px; color: var(--ui-cwfc-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ui-cwfc__tick > span { position: absolute; top: 7px; left: 6px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-cwfc-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* No room above or below the rows: a selected row's fill meets the column heads and the card's edge */
 .ui-cwfc__rows { position: relative; }
 .ui-cwfc__rows[data-scroll] { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 /* Nothing to measure yet: the grid lines stay in the head, so they don't cross the message */
 .ui-cwfc__body:has(.ui-cwfc__empty) .ui-cwfc__tick { bottom: auto; height: var(--ui-cwfc-head); }
-.ui-cwfc__empty { position: relative; margin: 0; padding: 22px 16px 24px; font-size: 12px; line-height: 16px; text-align: center; color: var(--ui-cwfc-muted); }
+.ui-cwfc__empty { position: relative; margin: 0; padding: 22px 16px 24px; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; text-align: center; color: var(--ui-cwfc-muted); }
 .ui-cwfc__item:last-child .ui-cwfc__clip { border-radius: 0 0 calc(var(--aui-radius-lg, 10px) + 2px) calc(var(--aui-radius-lg, 10px) + 2px); }
 
 /* ----- One row ----- */
@@ -937,18 +938,18 @@ const css = /* css */ `
 .ui-cwfc__label { display: flex; align-items: baseline; gap: 6px; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
 .ui-cwfc__title { flex: none; max-width: 100%; overflow: hidden; color: var(--ui-cwfc-ink); text-overflow: ellipsis; }
 .ui-cwfc__row[data-parent] .ui-cwfc__title { font-weight: 500; color: var(--ui-cwfc-strong); }
-.ui-cwfc__model { min-width: 0; overflow: hidden; font-size: 12px; color: var(--ui-cwfc-muted); text-overflow: ellipsis; }
+.ui-cwfc__model { min-width: 0; overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); color: var(--ui-cwfc-muted); text-overflow: ellipsis; }
 /* Steve: a long title gives way to its agent rather than leave a sliver of it – the title ends in an ellipsis, the agent stays whole */
 .ui-cwfc__title { flex: 0 1 auto; min-width: 0; }
 .ui-cwfc__model { flex: none; max-width: 40%; }
-.ui-cwfc__more { flex: none; height: 18px; margin-left: 6px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-cwfc-fill); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-cwfc-text); font-variant-numeric: tabular-nums; animation: ui-cwfc-pop 220ms var(--ui-cwfc-ease) both; }
-.ui-cwfc__flag { flex: none; height: 16px; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--ui-cwfc-top-bg); font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--ui-cwfc-top-fg); animation: ui-cwfc-pop 260ms var(--ui-cwfc-ease) both; }
+.ui-cwfc__more { flex: none; height: 18px; margin-left: 6px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-cwfc-fill); font-size: calc(11px * var(--type-scale, 1)); font-weight: 500; line-height: 18px; color: var(--ui-cwfc-text); font-variant-numeric: tabular-nums; animation: ui-cwfc-pop 220ms var(--ui-cwfc-ease) both; }
+.ui-cwfc__flag { flex: none; height: 16px; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--ui-cwfc-top-bg); font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--ui-cwfc-top-fg); animation: ui-cwfc-pop 260ms var(--ui-cwfc-ease) both; }
 .ui-cwfc__state { display: grid; flex: none; place-items: center; width: 16px; margin-left: 4px; }
 .ui-cwfc__state[data-status="running"] { color: var(--ui-cwfc-brand-fg); }
 .ui-cwfc__state[data-status="failed"] { color: var(--ui-cwfc-error-ink); }
 .ui-cwfc__spin { animation: ui-cwfc-spin 900ms linear infinite; }
 
-.ui-cwfc__num { min-width: 0; overflow: hidden; font-size: 12px; line-height: 16px; text-align: right; color: var(--ui-cwfc-text); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ui-cwfc__num { min-width: 0; overflow: hidden; font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; text-align: right; color: var(--ui-cwfc-text); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ui-cwfc__num[data-col="cost"] { color: var(--ui-cwfc-ink); }
 /* Steve: the unpriced mark before a cost, muted, so the amounts stay aligned on the right */
 .ui-cwfc__unpriced { display: inline-grid; place-items: center; margin-right: 3px; vertical-align: -1px; color: var(--ui-cwfc-muted); cursor: help; }
@@ -1007,13 +1008,13 @@ const css = /* css */ `
 .ui-cwfc__detail-in > .ui-cwfc__guides { position: absolute; top: 0; bottom: 0; left: var(--ui-cwfc-pad); width: var(--ui-cwfc-in); }
 .ui-cwfc__io { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
 .ui-cwfc__io > div { display: grid; align-content: start; gap: 4px; min-width: 0; padding: 8px 10px; border-radius: calc(var(--aui-radius-lg, 10px) - 2px); background: var(--aui-surface, var(--ui-cwfc-card)); box-shadow: var(--aui-shadow-card, var(--ui-cwfc-shadow)); }
-.ui-cwfc__io span { font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-cwfc-muted); }
+.ui-cwfc__io span { font-size: calc(10px * var(--type-scale, 1)); font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-cwfc-muted); }
 /* Up to six lines, then the text scrolls in its box – a pasted thread or a long tool payload stays readable */
-.ui-cwfc__io p { max-height: 108px; margin: 0 -4px; padding: 0 4px; overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere; font-size: 12px; line-height: 18px; color: var(--ui-cwfc-ink); white-space: pre-line; border-radius: 4px; outline: none; scrollbar-width: thin; }
+.ui-cwfc__io p { max-height: 108px; margin: 0 -4px; padding: 0 4px; overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere; font-size: calc(12px * var(--type-scale, 1)); line-height: 18px; color: var(--ui-cwfc-ink); white-space: pre-line; border-radius: 4px; outline: none; scrollbar-width: thin; }
 .ui-cwfc__io p:focus-visible { outline: 2px solid var(--ui-cwfc-focus); outline-offset: 2px; }
-.ui-cwfc__io p[data-mono] { font-family: var(--aui-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace); font-size: 11.5px; }
+.ui-cwfc__io p[data-mono] { font-family: var(--aui-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace); font-size: calc(11.5px * var(--type-scale, 1)); }
 .ui-cwfc__io p[data-live] { color: var(--ui-cwfc-muted); }
-.ui-cwfc__error { display: flex; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--ui-cwfc-error-bg); font-size: 12px; line-height: 16px; color: var(--ui-cwfc-error-ink); }
+.ui-cwfc__error { display: flex; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--ui-cwfc-error-bg); font-size: calc(12px * var(--type-scale, 1)); line-height: 16px; color: var(--ui-cwfc-error-ink); }
 .ui-cwfc__error > svg { margin-top: 2px; }
 .ui-cwfc__error > span { min-width: 0; overflow-wrap: anywhere; }
 

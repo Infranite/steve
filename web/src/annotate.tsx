@@ -8,6 +8,7 @@ import { CrosshairIcon, FileTextIcon, MessageSquarePlusIcon, PencilIcon, SendIco
 import { useEffect, useRef, useState, type PointerEvent as PE, type RefObject } from "react"
 import { t, useT } from "@/i18n"
 import { Trans } from "react-i18next"
+import { reducedMotion } from "@/lib/motion"
 
 /* notes on an output (ST-38): a region of a picture, selected text, a PDF page or the whole file. A note is a draft on the
  * Hub (so it survives a reload) until the user sends the item's drafts; they then reach the item as one message of the
@@ -92,7 +93,7 @@ export function markText(box: HTMLElement, quote: string): boolean {
   const H = (globalThis as any).Highlight, reg = (CSS as any).highlights
   if (H && reg) reg.set("steve-ann", new H(r))
   else { const s = document.getSelection(); s?.removeAllRanges(); s?.addRange(r) }
-  sn.parentElement?.scrollIntoView({ block: "center", behavior: "smooth" })
+  sn.parentElement?.scrollIntoView({ block: "center", behavior: reducedMotion() ? "auto" : "smooth" })
   return true
 }
 export const clearMark = () => (CSS as any).highlights?.delete?.("steve-ann")

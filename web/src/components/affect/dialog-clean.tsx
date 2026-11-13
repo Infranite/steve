@@ -16,6 +16,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { reducedMotion } from "@/lib/motion";
 
 /*
  * Dialog – a single self-contained file, clean style.
@@ -437,7 +438,7 @@ function withTrigger(trigger: ReactElement<TriggerProps> | undefined, open: bool
 /** Text or an element – not true, false, null or an empty string */
 const shows = (v: ReactNode) => v != null && typeof v !== "boolean" && v !== "";
 
-const reduced = () => typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+const reduced = () => reducedMotion();
 
 const FOCUSABLE = "input, textarea, select, button, [href], [tabindex], [contenteditable='true']";
 
@@ -535,7 +536,7 @@ const css = /* css */ `
   overscroll-behavior: contain;
   container: ui-dlgc / size;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 13px;
+  font-size: calc(13px * var(--type-scale, 1));
   line-height: 20px;
   font-weight: 400;
   text-align: start;
@@ -582,7 +583,7 @@ dialog.ui-dlgc:not([open]) { display: none; }
 .ui-dlgc__head:last-child { padding-bottom: 20px; }
 .ui-dlgc__panel[data-alert] .ui-dlgc__head { padding-top: 20px; }
 .ui-dlgc__heading { display: grid; flex: 1; gap: 4px; min-width: 0; }
-.ui-dlgc__title { margin: 0; font-size: 15px; line-height: 22px; font-weight: 500; letter-spacing: -0.005em; color: var(--ui-dlgc-strong); overflow-wrap: anywhere; }
+.ui-dlgc__title { margin: 0; font-size: calc(15px * var(--type-scale, 1)); line-height: 22px; font-weight: 500; letter-spacing: -0.005em; color: var(--ui-dlgc-strong); overflow-wrap: anywhere; }
 .ui-dlgc__desc { margin: 0; color: var(--ui-dlgc-text); overflow-wrap: anywhere; }
 
 .ui-dlgc__close {
