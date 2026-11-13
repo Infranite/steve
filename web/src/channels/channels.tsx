@@ -5,11 +5,12 @@
  * on 接入 (#/integrations); nothing here is specific to one provider. */
 import { useMemo, useState } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, PlugIcon } from "lucide-react"
+import { ChevronRightIcon, MessagesSquareIcon, PlugIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
 import { go, Page, Group, Row, SectionLabel, Empty, StatusDot } from "@/ui"
+import { ConnectPrompt } from "@/integrations/kit"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { tm } from "@/store"
@@ -65,26 +66,24 @@ function ChannelsView() {
         {many && <Select testId="ch-account" value={acc} onChange={setAcc} options={[{ v: ALL, l: t("channels:list.allAccounts") }, ...accounts.map((a) => ({ v: a.connection.id, l: t("channels:list.accountOption", { name: a.name, mode: t(a.mode === "self" ? "channels:word.you" : "channels:word.bot") }) }))]} />}
       </div>}>
       <div className="flex flex-col gap-8" data-channels-page>
-        {!all.length ? <div className="flex flex-col items-start gap-3 rounded-xl border px-4 py-3.5" data-channels-empty>
-          <div><div className="type-headline">{t("channels:list.emptyTitle")}</div>
-            <div className="mt-0.5 type-callout text-muted-foreground">{t("channels:list.emptySub")}</div></div>
-          <Button size="sm" variant="outline" onClick={() => go("#/integrations")} data-goto-integrations><PlugIcon />{t("channels:list.goConnect")}</Button></div>
+        {!all.length ? <ConnectPrompt icon={<MessagesSquareIcon />} title={t("channels:list.emptyTitle")} sub={t("channels:list.emptySub")} data-channels-empty
+          action={<Button onClick={() => go("#/integrations")} data-goto-integrations><PlugIcon />{t("channels:list.goConnect")}</Button>} />
           : <>
-            <section><SectionLabel right={(blocked.length > 0 || showBlocked) && <button type="button" aria-pressed={showBlocked} onClick={() => setShowBlocked(!showBlocked)} className={cn("h-6 rounded-full px-2.5 text-[12px]", showBlocked ? "bg-foreground text-background" : "bg-muted text-muted-foreground hover:text-foreground")} data-blocked-filter>{showBlocked ? t("channels:list.showAll") : t("channels:list.blockedFilter", { n: blocked.length })}</button>}>
+            <section><SectionLabel right={(blocked.length > 0 || showBlocked) && <button type="button" aria-pressed={showBlocked} onClick={() => setShowBlocked(!showBlocked)} className={cn("h-6 rounded-full px-2.5 type-footnote", showBlocked ? "bg-primary/10 font-medium text-primary" : "bg-muted text-muted-foreground hover:text-foreground")} data-blocked-filter>{showBlocked ? t("channels:list.showAll") : t("channels:list.blockedFilter", { n: blocked.length })}</button>}>
               {t(showBlocked ? "channels:list.blockedLabel" : "channels:list.spacesLabel", { n: spaces.length })}</SectionLabel>
               {spaces.length ? <Group>{spaces.map(({ s, a }) => (
                 <div key={s.id} className="group/space flex min-w-0 items-center gap-1" data-space-item={s.id}>
                   <Row className="min-w-0 flex-1" icon={<SpaceAvatar s={s} size={32} />} onClick={() => go("#/channels/space/" + s.id)} data-space-row={spaceTitle(s)} data-space-kind={s.kind}
                     title={<span className="flex min-w-0 items-center gap-1.5"><Name className={cn(attentionOf(s) !== "realtime" && "text-muted-foreground")}>{spaceTitle(s)}</Name>
                       <AttentionTag a={attentionOf(s)} />{s.muted && attentionOf(s) === "realtime" && <span className="shrink-0 type-footnote text-muted-foreground">{t("channels:word.recordOnly")}</span>}
-                      {s.has_external && <Badge variant="outline" className="shrink-0 font-normal text-muted-foreground">{t("channels:word.external")}</Badge>}{!s.configured && <Badge variant="outline" className="shrink-0 font-normal text-attention">{t("channels:word.new")}</Badge>}</span>}
+                      {s.has_external && <Badge variant="secondary" className="shrink-0 text-muted-foreground">{t("channels:word.external")}</Badge>}{!s.configured && <Badge variant="secondary" className="shrink-0 bg-attention/12 text-attention">{t("channels:word.new")}</Badge>}</span>}
                     sub={<span className="block truncate">{[kindLine(s), a.provider.name, a.mode === "self" ? t("channels:list.nameSelf", { name: a.name }) : a.name, s.last_message ? t("channels:list.recent", { time: tm(s.last_message) }) : ""].filter(Boolean).join(" · ")}</span>}>
                     <ChevronRightIcon className="size-4 text-tertiary" /></Row>
                   <AttentionMenu s={s} disabled={busy} onPick={(x) => pick(s, x)} /></div>))}</Group>
-                : <div className="rounded-xl border border-dashed px-4 py-3.5 type-callout text-muted-foreground">{t(showBlocked ? "channels:list.noBlocked" : acc !== ALL || prov !== ALL ? "channels:list.noMatch" : "channels:list.noSpaces")}</div>}</section>
+                : <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground">{t(showBlocked ? "channels:list.noBlocked" : acc !== ALL || prov !== ALL ? "channels:list.noMatch" : "channels:list.noSpaces")}</div>}</section>
             <section><SectionLabel>{t("channels:list.accountsLabel", { n: accounts.length })}</SectionLabel>
               <Group>{accounts.map((a) => <AccountRow key={a.connection.id} a={a} />)}</Group>
-              <div className="mt-2 px-1 type-footnote text-muted-foreground"><Trans t={t} i18nKey="channels:list.connectMore" components={{ link: <button type="button" className="text-blue hover:underline" onClick={() => go("#/integrations")} /> }} /></div></section>
+              <div className="mt-3 type-footnote text-muted-foreground"><Trans t={t} i18nKey="channels:list.connectMore" components={{ link: <button type="button" className="text-blue hover:underline" onClick={() => go("#/integrations")} /> }} /></div></section>
           </>}
         <PersonasSection />
       </div>
@@ -97,7 +96,7 @@ function AccountRow({ a }: { a: ChannelAccount }) {
   const [s, dot] = CONN_STATUS[a.connection.status] ?? [a.connection.status, "idle"]
   return (
     <Row icon={<PersonaAvatar bot={a.mode === "self" ? null : a.personaBot} size={32} />} onClick={() => go("#/channels/acc/" + a.connection.id)} data-channel-row={a.connection.id}
-      title={<span className="flex min-w-0 items-center gap-1.5"><Name>{a.name}</Name><Badge variant="outline" className="shrink-0 font-normal text-muted-foreground">{t(a.mode === "self" ? "channels:word.you" : "channels:word.bot")}</Badge><span className="shrink-0 type-footnote text-muted-foreground">{a.provider.name}</span></span>}
+      title={<span className="flex min-w-0 items-center gap-1.5"><Name>{a.name}</Name><Badge variant="secondary" className="shrink-0 text-muted-foreground">{t(a.mode === "self" ? "channels:word.you" : "channels:word.bot")}</Badge><span className="shrink-0 type-footnote text-muted-foreground">{a.provider.name}</span></span>}
       sub={a.mode === "self" ? t("channels:list.rowSelf", { count: a.spaces.length }) : t("channels:list.rowBot", { count: a.spaces.length, persona: a.persona?.name ?? t("channels:word.defaultPersona") })}>
       {a.connection.status === "ok" ? <span className="type-footnote text-muted-foreground">{t("channels:list.statusOk")}</span> : <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span>}
       <ChevronRightIcon className="size-4 text-tertiary" /></Row>

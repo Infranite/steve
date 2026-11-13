@@ -47,7 +47,7 @@ export function PersonasSection({ bot }: { bot?: string }) {
           title={<span className="inline-flex items-center gap-1.5">{p.name}{p.is_default && <span className="type-footnote text-muted-foreground">{t("channels:persona.isDefault")}</span>}</span>}
           sub={t("channels:persona.rowSub", { bot: botName(p.bot_id), used: usedText(p) })}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
         : <Empty title={t("channels:persona.emptyTitle")} sub={t("channels:persona.emptySub")} />}
-      <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("channels:persona.explain")}</div>
+      <div className="mt-3 type-footnote text-muted-foreground">{t("channels:persona.explain")}</div>
     </section>
   )
 }
@@ -109,7 +109,7 @@ function PersonaView({ id }: { id: string }) {
         <section data-reveal><SectionLabel>{t("channels:persona.revealLabel")}</SectionLabel>
           <Group>{RV.map((k) => { const l = t(`channels:persona.rv.${k}`); return <Row key={k} title={l} sub={t(`channels:persona.rv.${k}Sub`)}><Switch aria-label={t("channels:persona.revealAria", { what: l })} checked={reveal[k]} disabled={busy} onCheckedChange={(v) => void setRv(k, v)} data-reveal-key={k} /></Row> })}</Group>
           <div className="mt-3 rounded-xl bg-muted/60 px-4 py-3" aria-live="polite"><div className="type-footnote text-muted-foreground">{t("channels:persona.askWho")}</div><div className="mt-1 type-body" data-intro-preview>{preview}</div></div>
-          <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("channels:persona.revealNote")}</div></section>
+          <div className="mt-3 type-footnote text-muted-foreground">{t("channels:persona.revealNote")}</div></section>
         <section><SectionLabel>{t("channels:persona.usedIn")}</SectionLabel>
           {accN + p.used_by.spaces.length ? <Group>
             {p.used_by.accounts.map((a) => <Row key={a.account_id} title={a.name} sub={t("channels:persona.usedAccount")} onClick={() => go("#/channels/acc/" + a.account_id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
@@ -121,7 +121,7 @@ function PersonaView({ id }: { id: string }) {
 }
 /** a labelled field; the counter shows near the limit */
 const F = ({ label, hint, children, n, max }: { label: string; hint?: string; children: React.ReactNode; n?: number; max?: number }) => (
-    <Field className="gap-1.5"><FieldLabel className="type-label text-muted-foreground">{label}{max !== undefined && n !== undefined && n > max * 0.8 && <span className={n > max ? "ml-auto text-destructive" : "ml-auto"}>{n}/{max}</span>}</FieldLabel>{children}{hint && <FieldDescription className="type-footnote">{hint}</FieldDescription>}</Field>)
+    <Field className="gap-1.5"><FieldLabel className="type-label text-muted-foreground">{label}{max !== undefined && n !== undefined && n > max * 0.8 && <span className={n > max ? "ml-auto tabular-nums text-destructive" : "ml-auto tabular-nums"}>{n}/{max}</span>}</FieldLabel>{children}{hint && <FieldDescription className="type-footnote">{hint}</FieldDescription>}</Field>)
 /** what deleting a persona changes: the accounts that default to it, the spaces that chose it */
 function delImpact(accN: number, ownSpaces: number) {
   if (!(accN + ownSpaces)) return t("channels:persona.delNone")

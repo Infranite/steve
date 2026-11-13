@@ -11,7 +11,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { go, Group, Row, SectionLabel, Segmented, Empty } from "@/ui"
 import { looksLikeHandle, nameOf, people, type Contact, type MergeProposal, type PendingContact } from "@/api/people"
 import { tm, toast } from "@/store"
-import { ContactAvatar, Loading, act, joinList, useLoad } from "@/people/common"
+import { ContactAvatar, Loading, FormSelect, act, joinList, useLoad } from "@/people/common"
 import { t as tr, useT } from "@/i18n"
 import { orgLine } from "@/people/contacts"
 import type { Wait } from "@/store"
@@ -55,7 +55,7 @@ export function PendingContacts() {
         <SectionLabel right={<Segmented size="sm" value={order} onChange={(v) => { corder = v; setOrder(v) }} options={[["active", t("people:pending.order.active")], ["space", t("people:pending.order.space")]] as const} />}>{t("people:pending.judgeHead", { n: unk.length })}</SectionLabel>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <Input className="min-w-40 flex-1" aria-label={t("people:pending.searchAria")} placeholder={t("people:pending.searchPh")} value={query} disabled={busy} onChange={(e) => setQuery(e.target.value)} />
-          <select className="h-9 rounded-md border bg-background px-2 text-sm" aria-label={t("people:pending.filterAria")} value={filter} disabled={busy} onChange={(e) => setFilter(e.target.value)}><option value="all">{t("people:pending.filter.all")}</option><option value="nameless">{t("people:pending.filter.nameless")}</option><option value="named">{t("people:pending.filter.named")}</option></select>
+          <FormSelect label={t("people:pending.filterAria")} value={filter} disabled={busy} onChange={setFilter} options={(["all", "nameless", "named"] as const).map((v) => ({ v, l: t(`people:pending.filter.${v}`) }))} />
         </div>
         <div className="mb-3 flex flex-wrap items-center gap-2" role="toolbar" aria-label={t("people:pending.bulk")}>
           <Button size="sm" variant="outline" disabled={busy || !visible.length} onClick={() => setSel((prev) => [...new Set([...prev, ...visible.map((c) => c.id)])])}>{t("people:pending.selectAll", { n: visible.length })}</Button>
@@ -64,14 +64,14 @@ export function PendingContacts() {
           {selected.length > 0 && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setSel([])}>{t("people:pending.unselect")}</Button>}
           <span className="type-footnote text-muted-foreground" role="status">{busy ? t("people:pending.working", { progress }) : t("people:pending.selected", { count: selected.length })}</span>
         </div>
-        {failure && <div role="alert" className="mb-3 text-sm text-destructive">{failure}{retry && <Button size="sm" variant="outline" disabled={busy} onClick={() => void batch(retry.ids, retry.run, retry.ok)}>{t("people:pending.retryFailed")}</Button>}<Button size="sm" variant="ghost" disabled={busy} onClick={() => { setQuery(""); setFilter("all") }}>{t("people:pending.showFailed")}</Button></div>}
+        {failure && <div role="alert" className="mb-3 flex flex-wrap items-center gap-2 rounded-xl bg-destructive/10 px-4 py-2.5 type-callout text-destructive anim-in">{failure}{retry && <Button size="sm" variant="outline" disabled={busy} onClick={() => void batch(retry.ids, retry.run, retry.ok)}>{t("people:pending.retryFailed")}</Button>}<Button size="sm" variant="ghost" disabled={busy} onClick={() => { setQuery(""); setFilter("all") }}>{t("people:pending.showFailed")}</Button></div>}
         {!visible.length && <Empty title={t("people:shared.noMatch")} sub={t("people:pending.noMatchSub")} />}
         <div className="flex flex-col gap-4">{groups.map(([g, xs]) => (
           <div key={g || "all"} data-pending-group={g || undefined}>
-            {g && <div className="mb-1.5 px-1 type-footnote font-medium text-muted-foreground">{g === NEVER_SEEN ? t("people:pending.neverSeen") : g} · {xs.length}</div>}
+            {g && <SectionLabel>{g === NEVER_SEEN ? t("people:pending.neverSeen") : g} · {xs.length}</SectionLabel>}
             <Group>{xs.map((c) => <UnknownRow key={c.id} c={c} checked={sel.includes(c.id)} onCheck={(v) => toggle(c.id, v)} busy={busy} onChanged={() => void reload()} />)}</Group>
           </div>))}</div>
-        <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("people:pending.note")}{quiet > 0 && " " + t("people:pending.quiet", { count: quiet })}</div>
+        <div className="mt-3 type-footnote text-muted-foreground">{t("people:pending.note")}{quiet > 0 && " " + t("people:pending.quiet", { count: quiet })}</div>
       </section>}
     </div>
   )
@@ -120,9 +120,9 @@ function ProposalCard({ m }: { m: MergeProposal }) {
   const run = async (p: Promise<unknown>, ok: string) => { setBusy(true); await act(p, ok); setBusy(false) }
   const merge = () => run(m.decision_id ? api.decide(m.decision_id, "merge") : people.merge(m.from.id, m.into.id), t("people:pending.mergedSplit", { name: m.into.name }))
   return (
-    <div className="rounded-xl border px-4 py-3" data-merge={m.id}>
+    <div className="rounded-xl bg-card px-5 py-4 shadow-[var(--lift)]" data-merge={m.id}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <span className="inline-flex min-w-0 items-center gap-2"><ContactAvatar name={m.from.name} unconfirmed={m.from.kind === "unconfirmed"} size={32} /><span className="truncate type-callout font-mono text-[13px]">{m.account?.handle ?? m.from.name}</span></span>
+        <span className="inline-flex min-w-0 items-center gap-2"><ContactAvatar name={m.from.name} unconfirmed={m.from.kind === "unconfirmed"} size={32} /><span className="truncate font-mono type-callout">{m.account?.handle ?? m.from.name}</span></span>
         <ChevronRightIcon className="size-4 text-tertiary" aria-label={t("people:pending.maybe")} />
         <a href={"#/contacts/" + m.into.id} className="inline-flex min-w-0 items-center gap-2 hover:underline"><ContactAvatar name={m.into.name} size={32} /><span className="type-body">{m.into.name}</span></a>
         {orgLine(m.into) && <span className="type-footnote text-muted-foreground">{orgLine(m.into)}</span>}
@@ -153,9 +153,9 @@ export function MergeDialog({ from, onClose }: { from: Pick<Contact, "id" | "nam
       <DialogContent className="gap-4 rounded-2xl sm:max-w-[460px]">
         <DialogHeader><DialogTitle className="type-headline">{t("people:merge.title", { name: nameOf(from) })}</DialogTitle><DialogDescription className="type-callout">{t("people:merge.desc")}</DialogDescription></DialogHeader>
         <Input autoFocus className="rounded-lg" aria-label={t("people:shared.searchContacts")} placeholder={t("people:shared.searchContactsPh")} value={q} onChange={(e) => setQ(e.target.value)} data-merge-search />
-        <div className="max-h-64 overflow-y-auto rounded-lg border" role="radiogroup" aria-label={t("people:merge.into")}>
+        <div className="max-h-64 overflow-y-auto rounded-xl bg-muted/60 p-1" role="radiogroup" aria-label={t("people:merge.into")}>
           {!cs.data ? <Loading /> : !xs.length ? <div className="px-3 py-3 type-callout text-muted-foreground">{t("people:shared.noMatch")}</div> : xs.map((c) => (
-            <button key={c.id} type="button" role="radio" aria-checked={into === c.id} onClick={() => setInto(c.id)} className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-accent aria-checked:bg-blue/5" data-merge-opt={c.name}>
+            <button key={c.id} type="button" role="radio" aria-checked={into === c.id} onClick={() => setInto(c.id)} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left hover:bg-accent aria-checked:bg-primary/10" data-merge-opt={c.name}>
               <ContactAvatar name={c.name} size={20} /><span className="type-callout">{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}</span><span className="ml-auto type-footnote text-muted-foreground">{orgLine(c)}</span></button>))}
         </div>
         <DialogFooter className="gap-2"><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!into || busy} onClick={() => void merge()} data-merge-go>{target ? t("people:shared.mergeInto", { name: target.name }) : t("people:shared.merge")}</Button></DialogFooter>

@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Chevron, Disclosure, DISC_TRIGGER, PANEL, SUMMARY } from "@/integrations/kit"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { go, SectionLabel } from "@/ui"
@@ -48,12 +50,12 @@ export function PermissionList({ checks }: { checks: PermissionCheck[] | null })
   return (
     <div className="flex flex-col gap-1.5" data-permissions={checks ? "checked" : "static"}>
       {checks && missing.length > 0 && <div className="rounded-lg bg-destructive/10 px-3 py-2 type-footnote text-destructive" role="alert">{t("integrations:feishu.missingRequired", { count: missing.length })}</div>}
-      <ul className="flex flex-col divide-y rounded-lg border" aria-label={t("integrations:feishu.permissions")}>{rows.map((r) => { const [label, I, c] = STATUS[r.status] ?? STATUS.unknown, l = label(); return (
-        <li key={r.scope} className="flex items-start gap-2.5 px-3 py-2" data-perm={r.scope} data-perm-status={r.status}>
+      <ul className="flex flex-col divide-y rounded-xl bg-muted/60" aria-label={t("integrations:feishu.permissions")}>{rows.map((r) => { const [label, I, c] = STATUS[r.status] ?? STATUS.unknown, l = label(); return (
+        <li key={r.scope} className="flex items-start gap-2.5 px-3.5 py-2.5" data-perm={r.scope} data-perm-status={r.status}>
           {checks ? <I className={"mt-0.5 size-4 shrink-0 " + c} aria-label={l} /> : <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-tertiary" aria-hidden />}
-          <div className="min-w-0 flex-1"><div className="type-callout">{r.purpose}</div><div className="type-footnote text-muted-foreground">{levelLabel(r.level)}{checks ? ` · ${l}` : ""}</div><details className="mt-1 type-footnote text-muted-foreground"><summary className="cursor-pointer">{t("integrations:feishu.scopeId")}</summary><code className="break-all">{r.scope}</code></details></div>
+          <div className="min-w-0 flex-1"><div className="type-callout">{r.purpose}</div><div className="type-footnote text-muted-foreground">{levelLabel(r.level)}{checks ? ` · ${l}` : ""}</div><details className="group/disc mt-1 type-footnote text-muted-foreground"><summary className={SUMMARY}><Chevron className="size-3" />{t("integrations:feishu.scopeId")}</summary><code className="mt-0.5 block break-all pl-4 font-mono">{r.scope}</code></details></div>
         </li>) })}</ul>
-      {!checks && <div className="px-1 type-footnote text-muted-foreground">{t("integrations:feishu.staticNote")}</div>}
+      {!checks && <div className="type-footnote text-muted-foreground">{t("integrations:feishu.staticNote")}</div>}
     </div>
   )
 }
@@ -118,23 +120,23 @@ export function FeishuConnectDialog({ bots, onClose, initial = "bot", side }: { 
                 : <Input id={"fs-" + f.key} className="rounded-lg font-mono" type={f.secret ? "password" : "text"} autoComplete="off" spellCheck={false} required={f.required} value={val(f)} onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })} data-cred-field={f.key} />}
               {f.hint && f.key !== "domain" && <FieldDescription>{f.hint}</FieldDescription>}
             </Field>))}
-          <Collapsible open={advanced} onOpenChange={setAdvanced}><CollapsibleTrigger className="rounded type-callout text-blue">{t("integrations:feishu.advancedWebhook")}</CollapsibleTrigger><CollapsibleContent className="mt-2 type-footnote text-muted-foreground">{t("integrations:feishu.advancedWebhookNote")}</CollapsibleContent></Collapsible>
+          <Disclosure open={advanced} onOpenChange={setAdvanced} label={t("integrations:feishu.advancedWebhook")}><div className="pl-[18px] pt-2 type-footnote text-muted-foreground">{t("integrations:feishu.advancedWebhookNote")}</div></Disclosure>
           {personas.length > 0 && <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("integrations:feishu.persona")}</FieldLabel><FieldDescription>{t("integrations:feishu.personaSub")}</FieldDescription></div>
             <Select align="end" testId="acc-persona" value={persona} onChange={setPersona} options={personas.map((p) => ({ v: p.id, l: p.name }))} /></Field>}
         </FieldGroup>
-        <Collapsible><CollapsibleTrigger className="inline-flex items-center gap-1 rounded type-callout text-blue hover:underline" data-console-steps>{t("integrations:feishu.consoleSteps")}</CollapsibleTrigger>
-          <CollapsibleContent className="mt-3 flex flex-col gap-3">
+        <Collapsible><CollapsibleTrigger className={DISC_TRIGGER} data-console-steps><Chevron />{t("integrations:feishu.consoleSteps")}</CollapsibleTrigger>
+          <CollapsibleContent className={PANEL}><div className="pt-3 flex flex-col gap-3">
             <ol className="list-decimal pl-5 type-callout text-muted-foreground">{consoleSteps().map((s) => <li key={s}>{s}</li>)}</ol>
             <PermissionList checks={null} />
-            <div className="px-1 type-footnote text-muted-foreground">{t("integrations:feishu.userPermsLine", { perms: userPerms() })}</div>
-            <div className="px-1 type-footnote text-muted-foreground">{t("integrations:feishu.oneReceiver")}</div>
-          </CollapsibleContent></Collapsible>
+            <div className="type-footnote text-muted-foreground">{t("integrations:feishu.userPermsLine", { perms: userPerms() })}</div>
+            <div className="type-footnote text-muted-foreground">{t("integrations:feishu.oneReceiver")}</div>
+          </div></CollapsibleContent></Collapsible>
         <button type="submit" hidden />
       </form> : bots.length ? <FieldGroup className="gap-4">
         <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("integrations:feishu.viaApp")}</FieldLabel><FieldDescription>{t("integrations:feishu.viaAppSub")}</FieldDescription></div>
           <Select align="end" testId="self-app" value={app} onChange={setApp} options={bots.map((a) => ({ v: a.id, l: a.name }))} /></Field>
-        <div className="type-footnote text-muted-foreground">{t("integrations:feishu.selfNote")}</div><details className="type-footnote text-muted-foreground"><summary className="cursor-pointer">{t("integrations:feishu.showScopes")}</summary>{userPerms()}</details>
-      </FieldGroup> : <div className="rounded-xl border border-dashed px-4 py-3.5 type-callout text-muted-foreground">{t("integrations:feishu.botFirst")}</div>}
+        <div className="type-footnote text-muted-foreground">{t("integrations:feishu.selfNote")}</div><details className="group/disc type-footnote text-muted-foreground"><summary className={SUMMARY}><Chevron className="size-3" />{t("integrations:feishu.showScopes")}</summary><div className="mt-0.5 pl-4">{userPerms()}</div></details>
+      </FieldGroup> : <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground">{t("integrations:feishu.botFirst")}</div>}
     </Modal>
   )
 }
@@ -146,7 +148,7 @@ function Connected({ d, persona, onClose, side }: { d: Done; persona?: Persona; 
       footer={<>{side !== null && <SelfButtons app={d.connection_id} variant="outline" label={t("integrations:feishu.authorizeSelfOptional")} side={side} />}<Button onClick={() => { onClose(); go("#/channels/acc/" + d.connection_id) }} data-goto-acc>{t("integrations:feishu.goSettings")}</Button></>}>
       <div className="flex flex-col gap-4" data-connected={d.connection_id}>
         <section><SectionLabel>{t("integrations:feishu.permCheck")}</SectionLabel>
-          {d.permissions ? <PermissionList checks={d.permissions} /> : <div className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground" data-permissions="none">{t("integrations:feishu.noPermCheck")}</div>}</section>
+          {d.permissions ? <PermissionList checks={d.permissions} /> : <div className="rounded-xl bg-muted/60 px-4 py-3 type-callout text-muted-foreground" data-permissions="none">{t("integrations:feishu.noPermCheck")}</div>}</section>
         <div className="type-callout text-muted-foreground">{t("integrations:feishu.longConn")}{d.webhook && <> {t("integrations:feishu.webhookNote")}</>}</div>
         {!d.bound && <div className="type-footnote text-muted-foreground">{persona && !persona.is_default ? t("integrations:feishu.notBoundPersona", { name: persona.name }) : t("integrations:feishu.notBound")}</div>}
       </div>
@@ -188,7 +190,7 @@ export function SelfButtons({ app, disabled, variant = "default", label, scopes,
     {choose && <Modal title={t("integrations:feishu.chooseTitle")} desc={t("integrations:feishu.chooseDesc")} onClose={() => setChoose(false)} w={460}
       footer={<><Button variant="outline" disabled={busy} onClick={() => setChoose(false)}>{t("integrations:feishu.notNow")}</Button><Button disabled={busy} onClick={() => void start([...USER_READ_SCOPES, ...(sendAsMe ? ["im:message.send_as_user"] : [])])}>{busy && <Spinner />}{t("integrations:feishu.continueOfficial")}</Button></>}>
       <div className="type-callout">{t("integrations:feishu.readNote")}</div>
-      <label className="flex cursor-pointer items-start gap-3 rounded-lg border p-3 type-callout"><input type="checkbox" className="mt-1" checked={sendAsMe} onChange={(e) => setSendAsMe(e.target.checked)} /><span>{t("integrations:feishu.sendAsMe")}<span className="mt-1 block type-footnote text-muted-foreground">{t("integrations:feishu.sendAsMeNote")}</span></span></label>
+      <label className="flex cursor-pointer items-start gap-3 rounded-lg bg-muted/60 p-3 type-callout transition-colors duration-[180ms] hover:bg-accent"><Checkbox className="mt-0.5" checked={sendAsMe} onCheckedChange={(v) => setSendAsMe(!!v)} /><span>{t("integrations:feishu.sendAsMe")}<span className="mt-1 block type-footnote text-muted-foreground">{t("integrations:feishu.sendAsMeNote")}</span></span></label>
     </Modal>}
     {device && showDevice && <DeviceDialog d={device} onClose={() => setShowDevice(false)} onFinished={() => { setDevice(null); setShowDevice(false) }} />}
     {form && side && <ConnectDialog adapter={asAdapter(side, "feishu")} onClose={() => setForm(false)} />}
@@ -241,7 +243,7 @@ function DeviceDialog({ d, onClose, onFinished }: { d: RDevice; onClose: () => v
   return <Modal title={t("integrations:feishu.authorizeSelf")} desc={t("integrations:feishu.deviceDesc")} onClose={onClose} w={440}
     footer={terminal ? <Button onClick={onFinished}>{t("integrations:feishu.closeRestart")}</Button> : <><Button variant="outline" disabled={busy} onClick={() => void cancel()}>{t("integrations:feishu.cancelAuth")}</Button><Button variant="outline" onClick={onClose}>{t("integrations:feishu.later")}</Button></>}>
     <div className="flex flex-col items-center gap-3 py-2" data-device-flow>
-      <div className="select-all rounded-xl bg-muted px-5 py-3 font-mono text-[26px] tracking-[0.2em]" aria-label={t("integrations:feishu.deviceCode")} data-device-code>{d.user_code}</div>
+      <div className="select-all rounded-xl bg-muted/60 px-6 py-3 type-display font-mono! tabular-nums tracking-[0.2em]!" aria-label={t("integrations:feishu.deviceCode")} data-device-code>{d.user_code}</div>
       {!terminal && url && <Button nativeButton={false} render={<a href={url} target="_blank" rel="noreferrer noopener" />}><ExternalLinkIcon />{t("integrations:feishu.openAuth")}</Button>}
       {!url && <p role="alert" className="type-callout text-destructive">{t("integrations:feishu.noAuthUrl")}</p>}
       <div className="type-footnote text-muted-foreground" role="status">{err ? <span className="text-destructive">{err}</span> : <span className="inline-flex items-center gap-1.5"><Spinner className="size-3" />{t("integrations:feishu.waiting")}</span>}</div>
@@ -263,28 +265,28 @@ export function FeishuGuide({ adapters, bots, selfDone, callbackUrls }: { adapte
     {dlg && <FeishuConnectDialog bots={bots} onClose={() => setDlg(false)} side={side} />}
     <SectionLabel>{bots.length ? t("integrations:feishu.moreApps") : t("integrations:feishu.connectFeishuLark")}</SectionLabel>
     <FeishuRegistrationPanel />
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4">
-      <div className="min-w-0"><div className="type-callout font-medium">{t("integrations:feishu.existingTitle")}</div><div className="type-footnote text-muted-foreground">{t("integrations:feishu.existingSub")}</div></div>
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]">
+      <div className="min-w-0"><div className="type-headline">{t("integrations:feishu.existingTitle")}</div><div className="mt-0.5 type-callout text-muted-foreground">{t("integrations:feishu.existingSub")}</div></div>
       <Button variant="outline" onClick={() => setDlg(true)} data-feishu-bot>{t("integrations:feishu.useExisting")}</Button>
     </div>
-    {bots.length > 0 && side && <div className="flex flex-col gap-3 rounded-xl bg-muted/40 p-4" data-self-optional>
-      <div className="type-callout font-medium">{t("integrations:feishu.selfOptional")}</div>
-      <p className="type-footnote text-muted-foreground">{t("integrations:feishu.selfOptionalNote")}{selfDone && " " + t("integrations:feishu.selfDoneNote")}</p>
+    {bots.length > 0 && side && <div className="flex flex-col gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]" data-self-optional>
+      <div className="type-headline">{t("integrations:feishu.selfOptional")}</div>
+      <p className="type-callout text-muted-foreground">{t("integrations:feishu.selfOptionalNote")}{selfDone && " " + t("integrations:feishu.selfDoneNote")}</p>
       <div className="flex flex-wrap items-center gap-2">
         {bots.length > 1 && <Select testId="guide-self-app" value={selected} onChange={setApp} options={bots.map((b) => ({ v: b.id, l: b.name }))} />}
         <SelfButtons app={selected} variant="outline" side={side} />
       </div>
     </div>}
-    <Collapsible><CollapsibleTrigger className="rounded text-left type-callout text-blue">{t("integrations:feishu.advancedOAuth")}</CollapsibleTrigger>
-      <CollapsibleContent className="mt-3 flex flex-col gap-2 type-footnote text-muted-foreground">
+    <Collapsible><CollapsibleTrigger className={DISC_TRIGGER + " text-left"}><Chevron />{t("integrations:feishu.advancedOAuth")}</CollapsibleTrigger>
+      <CollapsibleContent className={PANEL}><div className="pt-3 flex flex-col gap-2 type-footnote text-muted-foreground">
         <p>{t("integrations:feishu.oauthNoUrl")}</p>
         {callbackUrls.length ? <>
           <p>{t("integrations:feishu.callbackUrls")}</p>
-          {callbackUrls.map((u) => <code key={u} className="select-all break-all rounded bg-muted p-2" data-redirect-url>{u}</code>)}
+          {callbackUrls.map((u) => <code key={u} className="select-all break-all rounded-lg bg-muted/60 px-3 py-2 type-code text-foreground" data-redirect-url>{u}</code>)}
           {selected && side && offers(startsOf(side), "oauth") && (bots.find((b) => b.id === selected)?.domain === "feishu" ? <SelfButtons app={selected} variant="outline" oauthAvailable side={side} /> : <p>{t("integrations:feishu.larkNoOAuth")}</p>)}
         </> : <p>{t("integrations:feishu.noCallback")}</p>}
         <p>{t("integrations:feishu.publicUrl")}</p>
-      </CollapsibleContent>
+      </div></CollapsibleContent>
     </Collapsible>
   </section>
 }

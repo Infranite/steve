@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { api } from "@/api"
-import { go, Group, Row } from "@/ui"
+import { go, Group, Row, SectionLabel } from "@/ui"
 import { ownership, objectHref, type Holding, type ObjectInfo, type ObjectType } from "@/api/ownership"
 import { Loading, Section, SubMeta, act, joinList, label, useLoad } from "@/people/common"
 import { useT } from "@/i18n"
@@ -29,19 +29,19 @@ export function HoldingsSection({ person, name, isMe, isBot }: { person: string;
       {!h ? <Loading /> : <div className="flex flex-col gap-4" data-holdings>
         {isBot && <Group><Row title={t("people:shared.owner")} sub={t("people:holdings.botOwnerSub")}><OwnerChip objectType="party" objectId={person} bare /></Row></Group>}
         <div>
-          <div className="mb-1.5 px-1 type-footnote text-muted-foreground">{t("people:holdings.accounts", { n: nAcc })}</div>
+          <SectionLabel>{t("people:holdings.accounts", { n: nAcc })}</SectionLabel>
           {nAcc ? <Group>{h.accounts.flatMap((g) => g.accounts.map((a) => (
-            <Row key={a.id} title={<span className="font-mono text-[13px]">{a.handle}</span>}
+            <Row key={a.id} title={<span className="font-mono type-callout">{a.handle}</span>}
               sub={<SubMeta><span>{g.system}</span><span>{a.kind_label}</span>{a.name && a.name !== a.handle && <span>{a.name}</span>}</SubMeta>}
               onClick={() => go("#/accounts/" + a.id)} data-holding-acct={a.handle}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)))}</Group>
-            : <div className="px-1 py-1 type-callout text-muted-foreground">{t("people:holdings.noAccounts")}</div>}
+            : <div className="py-1 type-callout text-muted-foreground">{t("people:holdings.noAccounts")}</div>}
         </div>
         {!isBot && <div>
-          <div className="mb-1.5 px-1 type-footnote text-muted-foreground">{t("people:holdings.responsible", { n: h.responsible.length })}</div>
+          <SectionLabel>{t("people:holdings.responsible", { n: h.responsible.length })}</SectionLabel>
           {h.responsible.length ? <Group>{h.responsible.map((x) => <HoldingRow key={x.object.object_type + x.object.object_id + x.role} x={x} person={person} />)}</Group>
-            : <div className="px-1 py-1 type-callout text-muted-foreground">{t("people:holdings.noResponsible")}</div>}
+            : <div className="py-1 type-callout text-muted-foreground">{t("people:holdings.noResponsible")}</div>}
         </div>}
-        <div className="px-1 type-footnote text-muted-foreground">{isBot ? t("people:holdings.botNote") : isMe ? t("people:holdings.noteMe") : t("people:holdings.noteOther", { name })}</div>
+        <div className="type-footnote text-muted-foreground">{isBot ? t("people:holdings.botNote") : isMe ? t("people:holdings.noteMe") : t("people:holdings.noteOther", { name })}</div>
       </div>}
     </Section>
   )
@@ -54,8 +54,8 @@ function HoldingRow({ x, person }: { x: Holding; person: string }) {
   const others = x.others.filter((s) => s.role === "owner" && s.status === "confirmed").map((s) => s.person_name)
   return (
     <Row icon={<ObjIcon t={o.object_type} />} onClick={href ? () => go(href) : undefined} controls data-holding={o.name}
-      title={<span className="inline-flex items-center gap-1.5">{o.name}{x.status !== "confirmed" && <Badge variant="outline" className="font-normal text-attention">{t("people:shared.pending")}</Badge>}</span>}
-      sub={<SubMeta><span>{o.type_label}</span><span>{x.role_label}</span>{o.detail && <span>{clip(o.detail)}</span>}<span>{label("source", x.source)}</span>{others.length > 0 && <span>{t("people:holdings.alsoOwners", { names: joinList(others) })}</span>}</SubMeta>}>
+      title={<span className="inline-flex items-center gap-1.5">{o.name}{x.status !== "confirmed" && <Badge variant="secondary" className="bg-attention/12 text-attention">{t("people:shared.pending")}</Badge>}</span>}
+      sub={<><SubMeta><span>{o.type_label}</span><span>{x.role_label}</span><span>{label("source", x.source)}</span>{others.length > 0 && <span>{t("people:holdings.alsoOwners", { names: joinList(others) })}</span>}</SubMeta>{o.detail && <span className="block truncate">{clip(o.detail)}</span>}</>}>
       {x.status !== "confirmed" && x.decision_id && <span className="flex gap-1" onClick={(e) => e.stopPropagation()}>
         <Button size="xs" variant="outline" onClick={() => void act(api.decide(x.decision_id!, "yes"), t("people:holdings.confirmed"))} data-holding-yes>{t("common:action.confirm")}</Button>
         <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void act(api.decide(x.decision_id!, "no"), t("people:holdings.ignored"))}>{t("people:shared.wrong")}</Button></span>}
@@ -93,9 +93,10 @@ export function UnownedSection() {
   return (
     <section className="mt-8" data-unowned><Section label={t("people:holdings.unowned", { n: L.data.length })}>
       <Group>{L.data.map((o) => { const href = objectHref(o); return (
-        <Row key={o.object_type + o.object_id} icon={<ObjIcon t={o.object_type} />} title={o.name} sub={<SubMeta><span>{o.type_label}</span>{o.detail && <span>{clip(o.detail)}</span>}</SubMeta>} onClick={href ? () => go(href) : undefined} controls data-unowned-row={o.name}>
+        <Row key={o.object_type + o.object_id} icon={<ObjIcon t={o.object_type} />} className="[&>[data-slot=item-actions]]:self-start"
+          title={<span className="inline-flex flex-wrap items-baseline gap-x-1.5">{o.name}<span className="type-footnote text-muted-foreground">{o.type_label}</span></span>} sub={o.detail ? clip(o.detail) : undefined} onClick={href ? () => go(href) : undefined} controls data-unowned-row={o.name}>
           <OwnerChip objectType={o.object_type} objectId={o.object_id} bare /></Row>) })}</Group>
-      <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("people:holdings.unownedNote")}</div>
+      <div className="mt-3 type-footnote text-muted-foreground">{t("people:holdings.unownedNote")}</div>
     </Section></section>
   )
 }

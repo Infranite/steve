@@ -36,9 +36,9 @@ function Props({ d, setD }: { d: Doc; setD: (d: Doc) => void }) {
   useEffect(() => { kb.sources().then((xs) => { const s = xs.find((x) => x.id === d.source.id); if (s) setSrc({ level: s.level, visibility: s.visibility }) }, () => {}) }, [d.source.id])
   const patch = async (p: Parameters<typeof kb.patchDoc>[1], msg: string) => { try { setD(await kb.patchDoc(d.id, p)); toast(msg) } catch (e) { toast(errMsg(e)) } }
   return (
-    <section aria-label={t("knowledge:doc.props")} className="rounded-xl border px-4 py-1.5" data-doc-props>
+    <section aria-label={t("knowledge:doc.props")} className="rounded-xl bg-card px-4 py-1.5 shadow-[var(--lift)]" data-doc-props>
       <Prop label={t("knowledge:doc.source")}><span>{d.source.name}<span className="text-muted-foreground"> · {SOURCE_KIND[d.source.kind] ?? d.source.kind}</span></span></Prop>
-      {d.source.kind !== "notes" && d.ref && <Prop label={t("knowledge:doc.path")}><span className="truncate font-mono text-[12.5px]">{d.ref}</span></Prop>}
+      {d.source.kind !== "notes" && d.ref && <Prop label={t("knowledge:doc.path")}><span className="truncate font-mono type-footnote">{d.ref}</span></Prop>}
       <Prop label={t("knowledge:doc.level")}><LevelSel v={d.inherited.level ? "" : d.level} inherit={src?.level ?? d.level} on={(l) => void patch({ level: l || null }, l ? t("knowledge:doc.changedTo", { label: levelLabel(l) }) : t("knowledge:doc.backToInherit"))} testId="doc-level" /></Prop>
       <Prop label={t("knowledge:doc.visibility")}><VisSel v={d.inherited.visibility ? "" : d.visibility} inherit={src?.visibility ?? d.visibility} on={(v) => void patch({ visibility: v || null }, v ? t("knowledge:doc.changedTo", { label: visLabel(v) }) : t("knowledge:doc.backToInherit"))} testId="doc-vis" /></Prop>
       {d.about.length > 0 && <Prop label={t("knowledge:doc.about")}><span className="flex flex-wrap gap-1">{d.about.map((a) => <span key={a.type + a.id} className="inline-flex h-6 items-center rounded-full bg-muted px-2 type-footnote">{a.name ?? a.id}</span>)}</span></Prop>}
@@ -71,8 +71,8 @@ function Chunks({ d }: { d: Doc }) {
   return (
     <section ref={box} aria-label={t("knowledge:doc.chunksAria")}><SectionLabel>{d.preview.length < d.chunks ? t("knowledge:doc.chunksTitlePartial", { count: d.chunks, shown: d.preview.length }) : t("knowledge:doc.chunksTitle", { count: d.chunks })}</SectionLabel>
       <div className="flex flex-col gap-2">{d.preview.map((c) => (
-        <div key={c.seq} data-seq={c.seq} aria-current={c.seq === seq ? "true" : undefined} className={cn("scroll-mt-24 rounded-xl border px-4 py-3", c.seq === seq && "border-blue/50 bg-blue/5 ring-2 ring-blue/20")}>
-          {c.heading && <div className="mb-1 type-footnote font-medium text-muted-foreground">{c.heading}</div>}
+        <div key={c.seq} data-seq={c.seq} aria-current={c.seq === seq ? "true" : undefined} className={cn("scroll-mt-24 rounded-xl bg-card px-4 py-3 shadow-[var(--lift)]", c.seq === seq && "bg-primary/5 ring-2 ring-primary/30")}>
+          {c.heading && <SectionLabel className="mb-1 min-h-0">{c.heading}</SectionLabel>}
           <div className="min-w-0 break-words" data-chunk-text><Markdown text={c.text} className="type-callout" /></div>
         </div>))}</div>
     </section>
@@ -90,7 +90,7 @@ export function DocView({ id }: { id: string }) {
   if (isNote) return null
   const removable = d.source.kind === "files"
   return (
-    <Page title={d.title} back={back()} max={760} sub={<Meta><span>{d.source.name}</span>{d.ref && <span className="font-mono text-[12px]">{d.ref}</span>}</Meta>} actions={removable ? <DeleteButton d={d} /> : undefined}>
+    <Page title={d.title} back={back()} max={760} sub={<Meta><span>{d.source.name}</span>{d.ref && <span className="font-mono">{d.ref}</span>}</Meta>} actions={removable ? <DeleteButton d={d} /> : undefined}>
       <div className="flex flex-col gap-8"><Props d={d} setD={setD} /><Chunks d={d} /></div>
     </Page>
   )
@@ -124,10 +124,10 @@ export function NoteView({ id }: { id: string }) {
         <section className="flex flex-col gap-3" aria-label={t("knowledge:doc.body")}>
           <div className="flex flex-wrap items-center justify-between gap-2"><Segmented size="sm" value={mode} onChange={setMode} options={[["edit", t("knowledge:doc.modeEdit")], ["preview", t("knowledge:doc.modePreview")], ["chunks", t("knowledge:doc.modeChunks")]] as const} /><span className="type-footnote text-muted-foreground">{t("knowledge:doc.saveHint")}</span></div>
           {mode === "edit" && <>
-            <Input aria-label={t("knowledge:newNote.titleLabel")} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} className="h-10 text-[15px] font-medium" data-note-title />
-            <Textarea aria-label={t("knowledge:doc.body")} value={body} onChange={(e) => setBody(e.target.value)} className="min-h-[360px] font-mono text-[13px] leading-[20px]" placeholder={t("knowledge:doc.bodyPlaceholder")} data-note-body />
+            <Input aria-label={t("knowledge:newNote.titleLabel")} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} className="h-10 md:type-headline!" data-note-title />
+            <Textarea aria-label={t("knowledge:doc.body")} value={body} onChange={(e) => setBody(e.target.value)} className="min-h-[360px] font-mono md:type-code!" placeholder={t("knowledge:doc.bodyPlaceholder")} data-note-body />
           </>}
-          {mode === "preview" && <div className="min-h-40 rounded-xl border px-4 py-3 type-body">{body.trim() ? <Markdown text={body} /> : <span className="text-muted-foreground">{t("knowledge:doc.noBody")}</span>}</div>}
+          {mode === "preview" && <div className="min-h-40 rounded-xl bg-card px-5 py-4 type-body shadow-[var(--lift)] anim-in">{body.trim() ? <Markdown text={body} /> : <span className="text-muted-foreground">{t("knowledge:doc.noBody")}</span>}</div>}
           {mode === "chunks" && <Chunks d={d} />}
         </section>
       </div>

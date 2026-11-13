@@ -64,28 +64,29 @@ export function SignalsView() {
     <Page title={t("misc:signals.title")} sub={t("misc:signals.sub")} max={760}
       toolbar={<Segmented value={mode} onChange={(v) => { mode = v; r() }} options={[["outcome", t("misc:signals.byOutcome")], ["source", t("misc:signals.bySource")]] as const} />}>
       <div className="mb-6 flex flex-wrap items-center gap-2">
-        <label className="relative min-w-0 flex-1"><span className="sr-only">{t("misc:signals.search")}</span><SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" aria-hidden />
-          <Input className="h-9 rounded-xl bg-muted/70 pl-9 text-[14px]" placeholder={t("misc:signals.searchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} data-sig-search /></label>
+        <label className="relative min-w-0 basis-full sm:basis-0 sm:flex-1"><span className="sr-only">{t("misc:signals.search")}</span><SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" aria-hidden />
+          <Input className="h-9 rounded-lg pl-9 md:type-callout!" placeholder={t("misc:signals.searchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} data-sig-search /></label>
         {/* Chips shows its values, so they are the labels here and map back to the range */}
         <Chips value={rangeLabel(range)} onChange={(v) => { range = v === rangeLabel("today") ? "today" : "7d"; r() }} options={[rangeLabel("today"), rangeLabel("7d")]} />
       </div>
-      <div className="mb-8 grid grid-cols-2 gap-y-4 sm:grid-cols-4" data-sig-stats>
+      {/* nothing in range: the empty state says so once, without a row of zeros above it */}
+      {stats?.total !== 0 && <div className="mb-8 grid grid-cols-2 gap-y-1 rounded-xl bg-card px-1 py-2 shadow-[var(--lift)] sm:grid-cols-4" data-sig-stats>
         {([[range === "today" ? t("misc:signals.stat.today") : t("misc:signals.stat.week"), stats?.total], [t("misc:signals.stat.need"), stats?.need], [t("misc:signals.stat.item"), stats?.item], [t("misc:signals.stat.quiet"), stats?.quiet]] as const).map(([l, n]) => (
-          <div key={l}><div className="text-[24px] font-semibold leading-7 tabular-nums tracking-tight">{n ?? "–"}</div><div className="mt-0.5 type-footnote text-muted-foreground">{l}</div></div>
+          <div key={l} className="px-4 py-2"><div className="type-title tabular-nums">{n ?? "–"}</div><div className="mt-0.5 type-footnote text-muted-foreground">{l}</div></div>
         ))}
-      </div>
+      </div>}
       {L.data && !L.data.items.length && <Empty title={query ? t("misc:signals.empty.noMatch") : range === "today" ? t("misc:signals.empty.today") : t("misc:signals.empty.week")} sub={query ? undefined : t("misc:signals.empty.sub")} />}
-      <div className="flex flex-col gap-6">
+      <div key={mode} className="flex flex-col gap-6 anim-in">
         {groups.map(([gk, gl, xs]) => {
           const open = mode === "source" || openGroups.has(gk)
           const byG = groupRows(xs)
           return (
             <Collapsible key={gk} open={open} onOpenChange={(o) => { o ? openGroups.add(gk) : openGroups.delete(gk); r() }}>
-              <CollapsibleTrigger className="group/sg mb-2 flex w-full items-center gap-1.5 px-1 text-left" data-sig-group={gk}>
-                <ChevronRightIcon className="size-3.5 text-muted-foreground transition-transform duration-200 group-aria-expanded/sg:rotate-90" aria-hidden />
-                <span className="type-label text-foreground">{gl}</span><span className="type-footnote text-muted-foreground">{t("misc:signals.groupMeta", { signals: t("misc:signals.count", { count: xs.length }), groups: t("misc:signals.groups", { count: byG.length }) })}</span>
+              <CollapsibleTrigger className="group/sg mb-2 flex w-full items-center gap-1.5 text-left" data-sig-group={gk}>
+                <ChevronRightIcon className="size-3.5 text-muted-foreground transition-transform duration-[180ms] ease-out group-aria-expanded/sg:rotate-90" aria-hidden />
+                <span className="type-label text-muted-foreground group-hover/sg:text-foreground">{gl}</span><span className="type-footnote text-muted-foreground">{t("misc:signals.groupMeta", { signals: t("misc:signals.count", { count: xs.length }), groups: t("misc:signals.groups", { count: byG.length }) })}</span>
               </CollapsibleTrigger>
-              <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-200 data-ending-style:h-0 data-starting-style:h-0">
+              <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-out data-ending-style:h-0 data-starting-style:h-0">
                 <Group>{byG.map((g) => <SignalRow key={rowKey(g[0])} g={g} open={row === rowKey(g[0])} onOpen={(o) => setRow(o ? rowKey(g[0]) : null)} reload={() => void L.reload()} />)}</Group>
               </CollapsibleContent>
             </Collapsible>
@@ -114,8 +115,8 @@ function SignalRow({ g, open, onOpen, reload }: { g: Signal[]; open: boolean; on
         <span className="hidden items-center gap-1.5 type-footnote text-muted-foreground sm:inline-flex"><StatusDot s={dotOf(s0.outcome)} />{s0.outcome_label}</span>
         <span className="w-16 shrink-0 text-right type-footnote tabular-nums text-muted-foreground">{tm(s0.received)}</span>
       </CollapsibleTrigger>
-      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-200 data-ending-style:h-0 data-starting-style:h-0" data-sig-detail={s0.id}>
-        {open && <SignalDetailBox g={g} reload={reload} />}
+      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-out data-ending-style:h-0 data-starting-style:h-0" data-sig-detail={s0.id}>
+        <SignalDetailBox g={g} reload={reload} />
       </CollapsibleContent>
     </Collapsible>
   )
@@ -151,12 +152,12 @@ function SignalDetailBox({ g, reload }: { g: Signal[]; reload: () => void }) {
   const who = s0.handled_by ? botName(s0.handled_by) : ""
   return (
     <div className="flex flex-col gap-2.5 px-2 pb-4 pl-9 type-callout text-muted-foreground">
-      {many && <div className="max-h-48 overflow-y-auto border-l pl-3">{g.map((x) => <div key={x.id} className="py-0.5 text-foreground">{x.summary} <span className="text-muted-foreground">{tm(x.received)}</span></div>)}</div>}
+      {many && <div className="max-h-48 overflow-y-auto border-l pl-3">{g.map((x) => <div key={x.id} className="py-0.5 text-foreground">{x.summary} <span className="tabular-nums text-muted-foreground">{tm(x.received)}</span></div>)}</div>}
       {!many && (s0.actor || s0.connection) && <div className="type-footnote">{[s0.actor?.name, s0.connection?.name, sourceLabel(s0.source)].filter(Boolean).join(" · ")}</div>}
       {s0.reason && <div>{who ? <Trans t={t} i18nKey="misc:signals.reason" values={{ who, reason: s0.reason }} components={{ who: <span className="text-foreground" /> }} /> : s0.reason}</div>}
       <div>
         <button type="button" className="inline-flex items-center gap-1 type-footnote hover:text-foreground" onClick={() => void toggleRaw()} aria-expanded={!!raw} data-raw={s0.id}><FileIcon className="size-3.5" aria-hidden />{raw ? t("misc:signals.rawHide") : t("misc:signals.rawShow")}<span className="text-tertiary">{t("misc:signals.keep", { count: Number(keepDays()) })}</span></button>
-        {raw && (raw.gone ? <div className="mt-1.5 type-footnote" data-raw-gone>{t("misc:signals.rawGone")}</div> : raw.err ? <div className="mt-1.5 type-footnote text-destructive">{raw.err}</div> : <Json v={raw.v} className="mt-1.5 max-h-72 text-[12px]" />)}
+        {raw && (raw.gone ? <div className="mt-1.5 type-footnote" data-raw-gone>{t("misc:signals.rawGone")}</div> : raw.err ? <div className="mt-1.5 type-footnote text-destructive">{raw.err}</div> : <Json v={raw.v} className="mt-1.5 max-h-72" />)}
       </div>
       {s0.flow && <a href={s0.flow.kind === "schedule" ? "#/auto/schedules" : "#/auto/rule/" + s0.flow.id} className="inline-flex items-center gap-1 hover:text-foreground" data-sig-flow><WorkflowIcon className="size-3.5" aria-hidden />{s0.flow.kind === "schedule" ? t("misc:signals.bySchedule", { name: s0.flow.name }) : t("misc:signals.byFlow", { name: s0.flow.name })}</a>}
       {s0.work_item_id && <a href={"#/items/" + s0.work_item_id} className="inline-flex items-center gap-1 text-blue hover:underline">{s0.work_item_id} {st.items.find((i) => i.id === s0.work_item_id)?.t ?? ""}<ArrowRightIcon className="size-3" aria-hidden /></a>}
@@ -180,7 +181,7 @@ export function RunSteps({ runs }: { runs: SignalDetail["runs"] }) {
   return (
     <div className="mt-1.5 flex flex-col gap-3" data-run-steps>
       {runs.map((run) => (
-        <div key={run.id} className="rounded-lg border px-3 py-2">
+        <div key={run.id} className="rounded-lg bg-muted/60 px-3 py-2.5">
           <div className="mb-1 flex items-center gap-1.5 type-footnote"><StatusDot s={RUN_STATUS[run.status]?.[1] ?? "idle"} /><span className="text-foreground">{RUN_STATUS[run.status]?.[0] ?? run.status}</span><span>· v{run.flow_version}</span>{run.outcome_label && <span>· {run.outcome_label}</span>}<a className="ml-auto hover:text-foreground" href={"#/auto/rule/" + run.flow_id + "?run=" + run.id}>{t("misc:signals.viewInFlow")}</a></div>
           <ol className="flex flex-col gap-0.5">{(run.steps ?? []).map((s) => (
             <li key={s.seq} className="flex items-baseline gap-2 type-footnote"><span className="w-4 shrink-0 text-right font-mono tabular-nums text-tertiary">{s.seq}</span><span className="font-mono text-foreground">{s.node_id}</span>

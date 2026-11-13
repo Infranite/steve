@@ -37,18 +37,20 @@ function Contacts() {
       actions={<><Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => go("#/contacts/me")} data-my-contact><UserRoundIcon />{t("people:contacts.me")}</Button>
         <Button size="sm" onClick={() => setNewOpen(true)} data-new-contact><PlusIcon />{t("people:contacts.new")}</Button></>}
       toolbar={<Segmented value={tab} onChange={(v) => { ctab = v; setTab(v) }} options={[["contacts", t("people:contacts.tab.contacts")], ["teams", t("people:contacts.tab.teams")], ["orgs", t("people:contacts.tab.orgs")],
-        ["pending", <span key="p" className="inline-flex items-center gap-1">{t("people:contacts.tab.pending")}{n > 0 && <span className="rounded-full bg-attention px-1.5 text-[10px] font-semibold text-white" aria-label={t("people:contacts.pendingCount", { count: n })} data-pending-count>{n}</span>}</span>, t("people:contacts.tab.pending")]] as const} />}>
+        ["pending", <span key="p" className="inline-flex items-center gap-1">{t("people:contacts.tab.pending")}{n > 0 && <span className="rounded-full bg-attention/14 px-1.5 type-label tabular-nums text-attention" aria-label={t("people:contacts.pendingCount", { count: n })} data-pending-count>{n}</span>}</span>, t("people:contacts.tab.pending")]] as const} />}>
       {newOpen && <NewContactDialog onClose={() => setNewOpen(false)} />}
       <AskSteve className="mb-6" ctx={{ kind: "global" }} placeholder={t("people:contacts.ask")} />
+      <div key={tab} className="anim-in" data-contacts-tab={tab}>
       {tab === "contacts" && <>
         <div className="mb-5 flex flex-wrap items-center gap-2"><Chips value={filterLabel(rel)} onChange={(v) => { const f = FILTER_KEYS.find((k) => filterLabel(k) === v) ?? "all"; crel = f; setRel(f) }} options={FILTER_KEYS.map(filterLabel)} className="flex-wrap" /><span className="flex-1" />
-          <Input className="h-7 w-full rounded-lg text-[13px] sm:w-60" aria-label={t("people:shared.searchContacts")} placeholder={t("people:shared.searchContactsPh")} value={q} onChange={(e) => { cq = e.target.value; setQ(e.target.value) }} data-contact-search /></div>
+          <Input className="h-8 w-full rounded-lg sm:w-60 md:type-callout!" aria-label={t("people:shared.searchContacts")} placeholder={t("people:shared.searchContactsPh")} value={q} onChange={(e) => { cq = e.target.value; setQ(e.target.value) }} data-contact-search /></div>
         <ContactList q={dq} f={FILTERS[rel] ?? {}} />
         {!dq && rel === "all" && <UnownedSection />}
       </>}
       {tab === "teams" && <TeamsTab />}
       {tab === "orgs" && <OrgList />}
       {tab === "pending" && <PendingContacts />}
+      </div>
     </Page>
   )
 }
@@ -66,7 +68,7 @@ function ContactList({ q, f }: { q: string; f: { rel?: string; kind?: string } }
   return (
     <Group>{xs.map((c) => (
       <Row key={c.id} icon={<ContactAvatar name={nameOf(c)} size={36} />} onClick={() => go("#/contacts/" + c.id)} data-contact-row={c.name}
-        title={<span className="inline-flex items-center gap-1.5">{nameOf(c)}{c.important && <StarIcon className="size-3.5 fill-current text-tertiary" aria-label={t("people:contacts.important")} />}{c.kind === "virtual" && <Badge variant="outline" className="font-normal text-muted-foreground">{label("kind", "virtual")}</Badge>}{c.kind === "bot" && <Badge variant="outline" className="font-normal text-muted-foreground">{label("kind", "bot")}</Badge>}</span>}
+        title={<span className="inline-flex items-center gap-1.5">{nameOf(c)}{c.important && <StarIcon className="size-3.5 fill-current text-tertiary" aria-label={t("people:contacts.important")} />}{c.kind === "virtual" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "virtual")}</Badge>}{c.kind === "bot" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "bot")}</Badge>}</span>}
         sub={<SubMeta>{orgLine(c) && <span>{orgLine(c)}</span>}{c.rels.filter((r) => r !== "me").length > 0 && <span>{joinList(c.rels.filter((r) => r !== "me").map(relLabel))}</span>}<span>{t("people:contacts.accounts", { count: c.accounts })}</span>{c.items > 0 && <span>{t("people:contacts.items", { count: c.items })}</span>}</SubMeta>}>
         <Tags ids={c.tags} max={2} /><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
   )

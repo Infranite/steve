@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { people, type Org } from "@/api/people"
-import { ContactAvatar, Loading, PeopleGate, Section, act, codes, joinList, label, useLoad , SubMeta } from "@/people/common"
+import { ContactAvatar, Loading, FormSelect, PeopleGate, Section, act, codes, joinList, label, useLoad , SubMeta } from "@/people/common"
 import { useT } from "@/i18n"
 import { AttrRow, MemSection, NewAttr, ctxOf } from "@/people/contact"
 
@@ -29,8 +29,8 @@ function OrgPage({ id }: { id: string }) {
     <Page actions={<Button size="sm" variant="outline" onClick={() => setEdit(true)}>{t("people:org.edit")}</Button>} title={o.name} back={back} max={720} sub={<SubMeta>{o.kind && <span>{label("orgKind", o.kind)}</span>}<span>{joinList(o.domains) || t("people:shared.noDomain")}</span>{o.aliases.length > 0 && <span>{t("people:shared.aka", { names: joinList(o.aliases) })}</span>}</SubMeta>}>
       {edit && <EditOrg o={o} onClose={() => setEdit(false)} onSaved={() => { setEdit(false); void reload() }} />}
       <div className="flex flex-col gap-8">
-        {(o.name_state === "placeholder" || o.name_state === "workspace") && <div className="rounded-lg border p-3 text-sm"><p>{o.name_reason === "external_unavailable" ? t("people:org.externalName") : o.name_reason === "permission" ? (o.name_scope ? t("people:org.noPermissionScope", { scope: o.name_scope }) : t("people:org.noPermission")) : t("people:org.incomplete")}</p><Button size="sm" variant="outline" className="mt-2" onClick={() => setEdit(true)}>{t("people:org.name")}</Button></div>}
-        {o.tenant && <div className="break-all text-xs text-muted-foreground">{t("people:org.tenant", { key: o.tenant.key })}</div>}
+        {(o.name_state === "placeholder" || o.name_state === "workspace") && <div className="rounded-xl bg-muted/60 px-4 py-3 type-callout"><p>{o.name_reason === "external_unavailable" ? t("people:org.externalName") : o.name_reason === "permission" ? (o.name_scope ? t("people:org.noPermissionScope", { scope: o.name_scope }) : t("people:org.noPermission")) : t("people:org.incomplete")}</p><Button size="sm" variant="outline" className="mt-2" onClick={() => setEdit(true)}>{t("people:org.name")}</Button></div>}
+        {o.tenant && <div className="-mt-4 break-all type-footnote text-muted-foreground">{t("people:org.tenant", { key: o.tenant.key })}</div>}
         {o.note && <p className="-mt-2 whitespace-pre-wrap type-body text-muted-foreground">{o.note}</p>}
         <AskSteve key={o.id} ctx={ctxOf("org", o.id)} placeholder={t("people:org.ask", { name: o.name })} />
         <Section label={t("people:org.people", { n: ps.length })}>{ps.length ? <Group>{ps.map((c) => <Row key={c.id} icon={<ContactAvatar name={c.name} size={28} />} title={c.name} sub={c.title ?? undefined} onClick={() => go("#/contacts/" + c.id)} data-org-person={c.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group> : <Empty title={t("people:shared.noContacts")} />}</Section>
@@ -59,11 +59,11 @@ function EditOrg({ o, onClose, onSaved }: { o: Org; onClose: () => void; onSaved
   }
   return <Dialog open onOpenChange={(v) => !v && !busy && onClose()}><DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-[460px]">
     <DialogHeader><DialogTitle>{t("people:org.edit")}</DialogTitle><DialogDescription>{t("people:editOrg.desc")}</DialogDescription></DialogHeader>
-    <label className="space-y-1 text-sm">{t("people:editOrg.name")}<Input aria-label={t("people:editOrg.name")} value={name} maxLength={80} onChange={(e) => setName(e.target.value)} /></label>
-    <label className="space-y-1 text-sm">{t("people:editOrg.aliases")}<Input aria-label={t("people:editOrg.aliasesAria")} value={aliases} placeholder={t("people:editOrg.aliasesPh")} onChange={(e) => setAliases(e.target.value)} /></label>
-    <label className="space-y-1 text-sm">{t("people:org.domains")}<Input aria-label={t("people:editOrg.domainsAria")} value={domains} placeholder={t("people:editOrg.domainsPh")} onChange={(e) => setDomains(e.target.value)} /></label>
-    <label className="space-y-1 text-sm">{t("people:editOrg.kind")}<select aria-label={t("people:editOrg.kindAria")} className="block h-9 w-full rounded-md border bg-background px-2" disabled={o.kind === "self" || busy} value={kind} onChange={(e) => setKind(e.target.value)}>{codes("orgKind").filter((k) => k !== "self" || o.kind === "self").map((k) => <option key={k} value={k}>{label("orgKind", k)}</option>)}</select></label>
-    <label className="space-y-1 text-sm">{t("people:shared.note")}<Textarea aria-label={t("people:editOrg.noteAria")} value={note} maxLength={2000} onChange={(e) => setNote(e.target.value)} /></label>
+    <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:editOrg.name")}<Input aria-label={t("people:editOrg.name")} value={name} maxLength={80} onChange={(e) => setName(e.target.value)} /></label>
+    <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:editOrg.aliases")}<Input aria-label={t("people:editOrg.aliasesAria")} value={aliases} placeholder={t("people:editOrg.aliasesPh")} onChange={(e) => setAliases(e.target.value)} /></label>
+    <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:org.domains")}<Input aria-label={t("people:editOrg.domainsAria")} value={domains} placeholder={t("people:editOrg.domainsPh")} onChange={(e) => setDomains(e.target.value)} /></label>
+    <div className="flex flex-col gap-1.5 type-callout font-medium">{t("people:editOrg.kind")}<FormSelect label={t("people:editOrg.kindAria")} className="w-full font-normal" disabled={o.kind === "self" || busy} value={kind} onChange={setKind} options={codes("orgKind").filter((k) => k !== "self" || o.kind === "self").map((k) => ({ v: k, l: label("orgKind", k) }))} /></div>
+    <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:shared.note")}<Textarea aria-label={t("people:editOrg.noteAria")} value={note} maxLength={2000} onChange={(e) => setNote(e.target.value)} /></label>
     <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={busy || !name.trim()} onClick={() => void save()}>{t("common:action.save")}</Button></DialogFooter>
   </DialogContent></Dialog>
 }

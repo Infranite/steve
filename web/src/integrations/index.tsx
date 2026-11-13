@@ -8,6 +8,7 @@ import { CalendarIcon, ChevronRightIcon, GitPullRequestIcon, HashIcon, MailIcon,
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot } from "@/ui"
+import { ConnectPrompt } from "@/integrations/kit"
 import { Unwired } from "@/unwired"
 import { t as tr, useT } from "@/i18n"
 import { useLoad } from "@/accounts/load"
@@ -26,8 +27,8 @@ export const ProviderIcon = ({ id, size = 32 }: { id: string; size?: number }) =
   const I = ICON[id] ?? PlugIcon
   return <span className="flex shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground" style={{ width: size, height: size }} aria-hidden><I className="size-4" strokeWidth={1.5} /></span>
 }
-const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-2 px-1 type-footnote text-muted-foreground">{children}</div>
-const Hint = ({ children, ...rest }: { children: React.ReactNode; [k: string]: any }) => <div className="rounded-xl border border-dashed px-4 py-3.5 type-callout text-muted-foreground" {...rest}>{children}</div>
+const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-3 type-footnote text-muted-foreground">{children}</div>
+const Hint = ({ children, ...rest }: { children: React.ReactNode; [k: string]: any }) => <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground" {...rest}>{children}</div>
 const join = (xs: string[]) => xs.join(tr("integrations:list.sep"))
 /** #/integrations and #/integrations/:provider */
 export function IntegrationsRoute({ id }: { id?: string }) {
@@ -52,8 +53,7 @@ function Overview({ x }: { x: Integrations }) {
   return (
     <Page title={t("integrations:page.title")} sub={t("integrations:page.overviewSub")} max={760}>
       <div className="flex flex-col gap-8" data-integrations data-connections={n}>
-        {n === 0 && <div className="rounded-xl border px-4 py-3.5" data-none-connected><div className="type-headline">{t("integrations:page.noneTitle")}</div>
-          <div className="mt-0.5 type-callout text-muted-foreground">{t("integrations:page.noneSub")}</div></div>}
+        {n === 0 && <ConnectPrompt icon={<PlugIcon />} title={t("integrations:page.noneTitle")} sub={t("integrations:page.noneSub")} data-none-connected />}
         <section><SectionLabel>{t("integrations:page.available", { n: live.length })}</SectionLabel>
           <div className="flex flex-col gap-6">{on.map((p) => <InstallBlock key={p.id} p={p} insts={installationsOf(x, p.id)} />)}
             {off.length > 0 && <Group>{off.map((p) => <ProviderRow key={p.id} p={p} />)}</Group>}</div></section>

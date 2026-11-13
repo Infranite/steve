@@ -10,11 +10,11 @@ const components: Components = {
     return safe ? <a href={safe} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" className="text-blue underline break-all">{children}</a> : <span>{children}</span>
   },
   img: ({ alt }) => <span className="text-muted-foreground">{alt ? t("channels:card.imageAlt", { alt }) : t("channels:card.image")}</span>,
-  code: ({ children }) => <code className="whitespace-pre-wrap break-all rounded bg-muted px-1">{children}</code>,
+  code: ({ children }) => <code className="whitespace-pre-wrap break-all rounded-md bg-muted px-1 font-mono">{children}</code>,
 }
 
 export default function CardMarkdown({ text }: { text: string }) {
-  return <Streamdown className="md min-w-0 break-words [overflow-wrap:anywhere]" components={components}
+  return <Streamdown className="md min-w-0 space-y-2 break-words [overflow-wrap:anywhere]" components={components}
     remarkPlugins={[...Object.values(defaultRemarkPlugins), remarkBreaks]}
     rehypePlugins={[defaultRehypePlugins.sanitize, defaultRehypePlugins.harden]}
     controls={false} mode="static">{text}</Streamdown>

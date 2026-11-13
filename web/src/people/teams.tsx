@@ -43,11 +43,11 @@ export function TeamsTab() {
       {open && <NewTeamDialog onClose={() => setOpen(false)} />}
       <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setOpen(true)} data-new-team><PlusIcon />{t("people:teams.new")}</Button>}>{t("people:teams.virtual", { n: data.virtual.length })}</SectionLabel>
         {data.virtual.length ? <Group>{data.virtual.map((g) => <TeamRow key={g.id} g={g} spaces={spaces.data} />)}</Group> : <Empty title={t("people:teams.noVirtual")} sub={t("people:teams.noVirtualSub")} />}
-        <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("people:teams.virtualNote")}</div></section>
+        <div className="mt-3 type-footnote text-muted-foreground">{t("people:teams.virtualNote")}</div></section>
       <section><SectionLabel right={<button type="button" disabled={syncing} className="inline-flex items-center gap-1 font-normal hover:text-foreground disabled:opacity-50" onClick={() => void sync()} aria-label={t("people:teams.sync")} data-sync><RefreshCwIcon className={syncing ? "size-3 animate-spin" : "size-3"} />{data.sync ? `${data.sync.label} · ${tm(data.sync.at)}` : t("people:teams.noSyncSource")}</button>}>{t("people:teams.chart")}</SectionLabel>
         <DirectoryNotes ds={data.directory} />
         {data.chart.length ? <Group>{data.chart.map((g) => <TeamRow key={g.id} g={g} indent={g.depth ?? 0} spaces={spaces.data} />)}</Group> : <Empty title={t("people:teams.noChart")} sub={t("people:teams.noChartSub")} />}
-        <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("people:teams.chartNote")}</div></section>
+        <div className="mt-3 type-footnote text-muted-foreground">{t("people:teams.chartNote")}</div></section>
     </div>
   )
 }
@@ -58,7 +58,7 @@ export function DirectoryNotes({ ds }: { ds?: DirectoryStatus[] }) {
   const xs = (ds ?? []).filter((d) => d.note)
   if (!xs.length) return null
   return <div className="mb-3 flex flex-col gap-1.5" role="note" data-directory-notes>{xs.map((d) => (
-    <div key={d.connection_id} className="rounded-lg border border-attention/30 bg-attention/5 px-3 py-2 type-footnote text-foreground/80">
+    <div key={d.connection_id} className="rounded-lg bg-attention/10 px-3 py-2 type-footnote text-foreground/80">
       <span className="font-medium">{d.label}</span>{t("people:teams.colon")}{d.note}{d.missing_scopes.length > 0 && <> · <a href="#/integrations" className="underline hover:text-foreground">{t("people:teams.openScopes")}</a></>}
     </div>))}</div>
 }
@@ -94,18 +94,18 @@ function TeamPage({ id }: { id: string }) {
         <Section label={t("people:team.purpose")}><Input className="rounded-lg" aria-label={t("people:team.purposeAria")} maxLength={400} value={purpose ?? g.purpose} onChange={(e) => setPurpose(e.target.value)} onBlur={savePurpose} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) (e.target as HTMLInputElement).blur() }} placeholder={t("people:team.purposePh")} data-team-purpose /></Section>
         <Section label={t("people:team.members", { n: members.length })} right={v ? <AddMember have={members.map((m) => m.contact_id)} onPick={(cid) => put([...cur, { contact_id: cid, role: "member" }])} /> : undefined}>
           {members.length ? <Group>{members.map((m) => (
-            <Row key={m.contact_id} icon={<ContactAvatar name={m.name} size={28} />} title={<span className="inline-flex items-center gap-1.5"><a href={"#/contacts/" + m.contact_id} className="hover:underline">{m.name}</a>{m.external && <Badge variant="outline" className="font-normal text-muted-foreground">{t("people:team.external")}</Badge>}</span>} data-member={m.name}>
+            <Row key={m.contact_id} icon={<ContactAvatar name={m.name} size={28} />} title={<span className="inline-flex items-center gap-1.5"><a href={"#/contacts/" + m.contact_id} className="hover:underline">{m.name}</a>{m.external && <Badge variant="secondary" className="text-muted-foreground">{t("people:team.external")}</Badge>}</span>} data-member={m.name}>
               {v && m.source !== "sync" ? <><span><Select align="end" quiet testId={"role-" + m.name} value={m.role} onChange={(x) => put(cur.map((c) => (c.contact_id === m.contact_id ? { ...c, role: x } : c)))} options={codes("role").map((x) => ({ v: x, l: <span className="type-footnote">{label("role", x)}</span> }))} /></span>
                 <Button variant="ghost" size="icon-xs" aria-label={t("people:team.removeMember", { name: m.name })} className="text-muted-foreground" onClick={() => put(cur.filter((c) => c.contact_id !== m.contact_id))} data-rm-member={m.name}><XIcon /></Button></>
                 : <span className="type-footnote text-muted-foreground">{label("role", m.role)}</span>}</Row>))}</Group> : <Empty title={t("people:team.noMembers")} />}
-          {!v && <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("people:team.syncedMembers")}</div>}
+          {!v && <div className="mt-3 type-footnote text-muted-foreground">{t("people:team.syncedMembers")}</div>}
         </Section>
         {subs.length > 0 && <Section label={t("people:team.subs")}><Group>{subs.map((x) => <TeamRow key={x.id} g={x} spaces={spaces.data} />)}</Group></Section>}
         {spaces.data && <Section label={t("people:team.space")}><Group><Row title={spaces.data.find((x) => x.id === g.space_id)?.name ?? t("people:team.noSpace")} sub={t("people:team.spaceSub")}>
           <Select align="end" testId="team-space" value={g.space_id ?? "none"} onChange={(x) => void act(people.patchTeam(g.id, { space_id: x === "none" ? null : x }))} options={[{ v: "none", l: t("people:team.unbind") }, ...spaces.data.map((x) => ({ v: x.id, l: x.name }))]} /></Row></Group></Section>}
         <Section label={t("people:team.items", { n: items.data?.length ?? 0 })}>{!items.data ? <Loading /> : items.data.length ? <Group>{[...new Map(items.data.map((x) => [x.item_id, x])).values()].map((x) => { const i = st.items.find((y) => y.id === x.item_id); return <Row key={x.item_id} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={label("itemRole", x.role)} onClick={() => go("#/items/" + x.item_id)}>{i && <Status s={itemDisplayStatus(i)} />}</Row> })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}</Section>
         <MemSection party={g.id} mems={mems.data} label={t("people:shared.steveRemembers")} />
-        <div className="px-1 type-footnote text-muted-foreground">{t("people:team.visNote", { vis: visLabel(g.visibility), name: g.name })}</div>
+        <div className="type-footnote text-muted-foreground">{t("people:team.visNote", { vis: visLabel(g.visibility), name: g.name })}</div>
       </div>
     </Page>
   )
@@ -146,8 +146,8 @@ export function NewTeamDialog({ onClose }: { onClose: () => void }) {
           <Field><FieldLabel htmlFor="nt-name">{t("people:newTeam.name")}</FieldLabel><Input id="nt-name" autoFocus className="rounded-lg" maxLength={40} value={n} onChange={(e) => setN(e.target.value)} placeholder={t("people:newTeam.namePh")} data-nt-name /></Field>
           <Field><FieldLabel htmlFor="nt-purpose">{t("people:newTeam.purpose")}</FieldLabel><Input id="nt-purpose" className="rounded-lg" maxLength={400} value={pur} onChange={(e) => setPur(e.target.value)} placeholder={t("people:newTeam.purposePh")} /></Field>
           <Field><FieldLabel>{t("people:team.members", { n: pick.length })}</FieldLabel>
-            <div className="max-h-52 overflow-y-auto rounded-lg border" role="group" aria-label={t("people:newTeam.pick")}>{!cs.data ? <Loading /> : xs.map((c) => (
-              <label key={c.id} className="flex cursor-pointer items-center gap-2.5 px-3 py-2 hover:bg-accent" data-nt-pick={c.name}><Checkbox checked={pick.includes(c.id)} onCheckedChange={(v) => setPick(v ? [...pick, c.id] : pick.filter((x) => x !== c.id))} /><ContactAvatar name={c.name} size={20} /><span className="type-callout">{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}</span><span className="ml-auto type-footnote text-muted-foreground">{c.org?.name}</span></label>))}</div></Field>
+            <div className="max-h-52 overflow-y-auto rounded-xl bg-muted/60 p-1" role="group" aria-label={t("people:newTeam.pick")}>{!cs.data ? <Loading /> : xs.map((c) => (
+              <label key={c.id} className="flex cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 hover:bg-accent" data-nt-pick={c.name}><Checkbox checked={pick.includes(c.id)} onCheckedChange={(v) => setPick(v ? [...pick, c.id] : pick.filter((x) => x !== c.id))} /><ContactAvatar name={c.name} size={20} /><span className="type-callout">{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}</span><span className="ml-auto type-footnote text-muted-foreground">{c.org?.name}</span></label>))}</div></Field>
         </FieldGroup>
         <DialogFooter className="gap-2"><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!n.trim() || pick.length < 2 || busy} data-testid="nt-go" onClick={() => void create()}>{t("people:shared.create")}</Button></DialogFooter>
       </DialogContent>

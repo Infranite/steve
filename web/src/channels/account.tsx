@@ -26,7 +26,7 @@ import { integrationsApi, type IAdapter } from "@/api/integrations"
 import { receiveNote, selfSidesFor } from "@/integrations/sides"
 import { useT } from "@/i18n"
 
-const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-2 px-1 type-footnote text-muted-foreground">{children}</div>
+const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-3 type-footnote text-muted-foreground">{children}</div>
 const TRIGGER_WORD = /^\/[A-Za-z0-9_]{1,20}$/
 /** the undo windows an account can choose (seconds; the Hub takes 0–60) */
 const SEND_DELAYS = [0, 3, 5, 10, 20, 30, 60]
@@ -78,7 +78,7 @@ export function AccountView({ id }: { id: string }) {
             <Rules rules={rulesNow} self={me} onChange={setRules} note={t("channels:account.rulesNote")} />
             {rules && <div className="mt-2 flex gap-2"><Button size="sm" disabled={busy || !rules.every(ruleOk)} onClick={() => void patch({ rules }, t("channels:word.rulesSaved")).then((ok) => ok && setRules(null))} data-acc-rules-save>{t("channels:word.saveRules")}</Button><Button size="sm" variant="ghost" onClick={() => setRules(null)}>{t("channels:word.revert")}</Button></div>}
           </> : a.rules ? <><Group>{a.rules.map((r, n) => <Row key={n} title={ruleText(r, me)} />)}</Group><Note>{a.editable ? "" : t("channels:account.rulesReadonly")}</Note></>
-            : <div className="rounded-xl border border-dashed px-4 py-3.5 type-callout text-muted-foreground">{t("channels:account.rulesUnknown")}</div>}</section>
+            : <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground">{t("channels:account.rulesUnknown")}</div>}</section>
         {a.editable && a.sendDelay && <section><SectionLabel>{t("channels:account.sendDelay")}</SectionLabel>
           <Group><Row title={t("channels:account.sendDelayTitle")} sub={t("channels:account.sendDelaySub")}>
             <Select align="end" testId="acc-send-delay" value={a.sendDelay.set === null ? "default" : String(a.sendDelay.set)}
@@ -87,16 +87,16 @@ export function AccountView({ id }: { id: string }) {
         {me && <TriggerSection a={a} onSave={(x) => patch({ trigger: x }, t("channels:account.triggerSaved"))} busy={busy} />}
         {side && <section><SectionLabel>{t("channels:word.you")}</SectionLabel>
           {self.length ? <Group>{self.map((s) => <Row key={s.id} icon={<PersonaAvatar bot={null} size={28} />} title={t("channels:account.selfAuthorized")} sub={t("channels:account.selfAuthorizedSub", { status: CONN_STATUS[s.status]?.[0] ?? s.status })} onClick={() => go("#/channels/acc/" + s.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
-            : <div className="flex flex-col gap-3 rounded-xl border px-4 py-3.5" data-self-auth>
+            : <div className="flex flex-col gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]" data-self-auth>
               <div className="type-callout text-muted-foreground">{t("channels:account.selfAuthHint")}</div>
               <div className="flex flex-wrap justify-end gap-2"><SelfButtons app={c.id} side={side} /></div></div>}</section>}
-        {!me && <section><SectionLabel>{t("channels:account.permissions")}</SectionLabel>{a.permissions ? <PermissionList checks={a.permissions} /> : <div className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground" data-permissions="none">{t("channels:account.permissionsNone")}</div>}</section>}
+        {!me && <section><SectionLabel>{t("channels:account.permissions")}</SectionLabel>{a.permissions ? <PermissionList checks={a.permissions} /> : <div className="rounded-xl bg-muted/60 px-4 py-3 type-callout text-muted-foreground" data-permissions="none">{t("channels:account.permissionsNone")}</div>}</section>}
         <section><SectionLabel>{t("channels:account.spacesLabel", { n: a.spaces.length })}</SectionLabel>
           {a.spaces.length ? <Group>{a.spaces.map((s) => (
             <Row key={s.id} icon={<SpaceAvatar s={s} size={28} />} onClick={() => go("#/channels/space/" + s.id)} data-space-row={spaceTitle(s)}
-              title={<span className="flex min-w-0 items-center gap-1.5"><Name>{spaceTitle(s)}</Name><span className="shrink-0 type-footnote text-muted-foreground">{kindLine(s)}</span><AttentionTag a={attentionOf(s)} />{s.has_external && <Badge variant="outline" className="shrink-0 font-normal text-muted-foreground">{t("channels:word.external")}</Badge>}{s.muted && <span className="shrink-0 type-footnote text-muted-foreground">{t("channels:word.recordOnly")}</span>}{!s.configured && <Badge variant="outline" className="shrink-0 font-normal text-attention">{t("channels:word.new")}</Badge>}</span>}
+              title={<span className="flex min-w-0 items-center gap-1.5"><Name>{spaceTitle(s)}</Name><span className="shrink-0 type-footnote text-muted-foreground">{kindLine(s)}</span><AttentionTag a={attentionOf(s)} />{s.has_external && <Badge variant="secondary" className="shrink-0 text-muted-foreground">{t("channels:word.external")}</Badge>}{s.muted && <span className="shrink-0 type-footnote text-muted-foreground">{t("channels:word.recordOnly")}</span>}{!s.configured && <Badge variant="secondary" className="shrink-0 bg-attention/12 text-attention">{t("channels:word.new")}</Badge>}</span>}
               sub={<span className="block truncate">{t(s.persona && !s.persona.inherited ? "channels:account.spaceSubOwn" : "channels:account.spaceSub", { who: me ? t("channels:word.you") : s.persona?.name ?? "—", duty: s.duty ? s.duty : t("channels:account.noDuty") })}</span>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
-            : <div className="rounded-xl border border-dashed px-4 py-3.5 type-callout text-muted-foreground">{t(me ? "channels:account.noSessions" : "channels:account.noGroups")}</div>}
+            : <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground">{t(me ? "channels:account.noSessions" : "channels:account.noGroups")}</div>}
         </section>
       </div>
     </Page>
@@ -116,7 +116,7 @@ function TriggerSection({ a, onSave, busy }: { a: ChannelAccount; onSave: (t: Pa
   const [picking, setPicking] = useState(false), [some, setSome] = useState(false)
   const tr = a.trigger
   if (!a.editable || !tr) return <section><SectionLabel>{t("channels:trigger.label")}</SectionLabel>
-    <div className="rounded-xl border border-dashed px-4 py-3.5 type-callout text-muted-foreground">{t("channels:trigger.unsupported")}</div></section>
+    <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground">{t("channels:trigger.unsupported")}</div></section>
   const add = () => { const w = word.trim().startsWith("/") ? word.trim() : "/" + word.trim(); if (!TRIGGER_WORD.test(w)) { toast(t("channels:trigger.invalid")); return } if (!tr.words.includes(w) && tr.words.length < 10) void onSave({ words: [...tr.words, w] }); setWord("") }
   const spaces = all ?? a.spaces
   const scope: Scope = some ? "some" : scopeOf(tr.where)
@@ -134,22 +134,22 @@ function TriggerSection({ a, onSave, busy }: { a: ChannelAccount; onSave: (t: Pa
       <Group>
         <Row title={t("channels:trigger.enable")} sub={t("channels:trigger.enableSub")}><Switch aria-label={t("channels:trigger.enable")} checked={tr.on} disabled={busy} onCheckedChange={(v) => void onSave({ on: v })} data-trigger-on /></Row>
         <Row title={t("channels:trigger.words")} sub={t("channels:trigger.wordsSub")}>
-          <span className="flex flex-wrap items-center justify-end gap-1">{tr.words.map((w) => <span key={w} className="inline-flex h-6 items-center gap-1 rounded-full bg-muted pl-2.5 pr-1 font-mono text-[12px]">{w}<button type="button" aria-label={t("channels:trigger.removeWord", { word: w })} disabled={busy} onClick={() => void onSave({ words: tr.words.filter((x) => x !== w) })} className="flex size-4 items-center justify-center rounded-full hover:bg-background"><XIcon className="size-3" /></button></span>)}
-            <Input aria-label={t("channels:trigger.addAria")} className="h-7 w-24 rounded-full text-[12px]" placeholder={t("channels:trigger.addPlaceholder")} value={word} onChange={(e) => setWord(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && word.trim()) { e.preventDefault(); add() } }} data-trigger-word /></span></Row>
+          <span className="flex flex-wrap items-center justify-end gap-1">{tr.words.map((w) => <span key={w} className="inline-flex h-6 items-center gap-1 rounded-full bg-muted pl-2.5 pr-1 type-footnote font-mono">{w}<button type="button" aria-label={t("channels:trigger.removeWord", { word: w })} disabled={busy} onClick={() => void onSave({ words: tr.words.filter((x) => x !== w) })} className="flex size-4 items-center justify-center rounded-full hover:bg-background"><XIcon className="size-3" /></button></span>)}
+            <Input aria-label={t("channels:trigger.addAria")} className="h-7 w-24 rounded-full md:type-footnote!" placeholder={t("channels:trigger.addPlaceholder")} value={word} onChange={(e) => setWord(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && word.trim()) { e.preventDefault(); add() } }} data-trigger-word /></span></Row>
         <div className="flex min-w-0 flex-col gap-2 px-2 py-2.5" data-trigger-scope={scope}>
           <div className="type-body">{t("channels:trigger.where")}</div>
           <Segmented className="w-full [&>div]:w-full" size="sm" value={scope} onChange={setScope} options={[["all", t("channels:trigger.scopeAll")], ["dms", t("channels:trigger.scopeDms")], ["some", t("channels:trigger.scopeSome")]] as const} />
           {scope === "some" && <div className="flex min-w-0 flex-wrap items-center gap-1" data-trigger-chosen>
             {chosen.slice(0, SCOPE_MAX).map((id) => { const x = byId.get(id); const name = x ? spaceTitle(x) : t("channels:trigger.goneSpace"); return (
-              <span key={id} className="inline-flex h-6 min-w-0 max-w-[12rem] items-center gap-1 rounded-full bg-foreground pl-2.5 pr-1 text-[12px] text-background" title={name} data-trigger-where={name}>
+              <span key={id} className="inline-flex h-6 min-w-0 max-w-[12rem] items-center gap-1 rounded-full bg-primary/10 pl-2.5 pr-1 type-footnote font-medium text-primary" title={name} data-trigger-where={name}>
                 <span className="truncate">{name}</span>
-                <button type="button" aria-label={t("channels:trigger.removeWhere", { name })} disabled={busy} onClick={() => { const rest = chosen.filter((y) => y !== id); void onSave({ where: rest.length ? rest : [TRIGGER_EVERYWHERE] }); if (!rest.length) setSome(false) }} className="flex size-4 shrink-0 items-center justify-center rounded-full hover:bg-background/20"><XIcon className="size-3" /></button></span>) })}
-            {chosen.length > SCOPE_MAX && <button type="button" onClick={() => setPicking(true)} className="h-6 rounded-full bg-muted px-2.5 text-[12px] text-muted-foreground hover:text-foreground" data-trigger-more>+{chosen.length - SCOPE_MAX}</button>}
-            <button type="button" onClick={() => setPicking(true)} className="h-6 rounded-full border border-dashed px-2.5 text-[12px] text-muted-foreground hover:text-foreground" data-trigger-pick>{t(chosen.length ? "channels:trigger.change" : "channels:trigger.pick")}</button>
+                <button type="button" aria-label={t("channels:trigger.removeWhere", { name })} disabled={busy} onClick={() => { const rest = chosen.filter((y) => y !== id); void onSave({ where: rest.length ? rest : [TRIGGER_EVERYWHERE] }); if (!rest.length) setSome(false) }} className="flex size-4 shrink-0 items-center justify-center rounded-full hover:bg-primary/15"><XIcon className="size-3" /></button></span>) })}
+            {chosen.length > SCOPE_MAX && <button type="button" onClick={() => setPicking(true)} className="h-6 rounded-full bg-muted px-2.5 type-footnote tabular-nums text-muted-foreground hover:text-foreground" data-trigger-more>+{chosen.length - SCOPE_MAX}</button>}
+            <button type="button" onClick={() => setPicking(true)} className="h-6 rounded-full border border-dashed px-2.5 type-footnote text-muted-foreground hover:border-solid hover:text-foreground" data-trigger-pick>{t(chosen.length ? "channels:trigger.change" : "channels:trigger.pick")}</button>
             {!chosen.length && <span className="type-footnote text-muted-foreground">{t("channels:trigger.notPicked")}</span>}
           </div>}
           <div className="type-footnote text-muted-foreground">{scope === "all" ? t("channels:trigger.hintAll", { word: word0 }) : t(scope === "dms" ? "channels:trigger.hintDms" : "channels:trigger.hintSome")}</div>
-          {blockedHere.length > 0 && <div className="flex items-start gap-1.5 rounded-lg bg-attention/10 px-3 py-2 type-footnote" data-trigger-blocked>
+          {blockedHere.length > 0 && <div className="flex items-start gap-1.5 rounded-lg bg-attention/10 px-3 py-2 type-footnote anim-in" data-trigger-blocked>
             <BanIcon className="mt-px size-3.5 shrink-0 text-attention" aria-hidden /><span className="min-w-0">{blockedHere.length === 1 ? t("channels:trigger.blockedOne", { n: 1, name: spaceTitle(blockedHere[0]), word: word0 }) : t("channels:trigger.blockedMany", { count: blockedHere.length, word: word0 })}</span></div>}
         </div>
         <Row title={t("channels:trigger.mark")} sub={t("channels:trigger.markSub")}><Switch aria-label={t("channels:trigger.markAria")} checked={tr.mark} disabled={busy} onCheckedChange={(v) => void onSave({ mark: v })} /></Row>

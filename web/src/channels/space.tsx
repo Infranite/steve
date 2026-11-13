@@ -21,7 +21,7 @@ import { Rules, ruleText, ruleOk } from "@/channels/rules"
 import { BasisView, PersonaAvatar } from "@/channels/basis"
 import { useT } from "@/i18n"
 
-const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-2 px-1 type-footnote text-muted-foreground">{children}</div>
+const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-3 type-footnote text-muted-foreground">{children}</div>
 
 export function SpaceView({ id }: { id: string }) {
   const t = useT()
@@ -59,7 +59,7 @@ export function SpaceView({ id }: { id: string }) {
       sub={<span className="flex min-w-0 items-center gap-2"><SpaceAvatar s={s} size={22} /><Meta>{acc && <span>{acc.provider.name}</span>}<span>{kindLine(s)}</span>{s.counterpart && s.counterpart.name !== title && <span>{s.counterpart.name}</span>}{s.has_external && <span>{t("channels:word.externalMembers")}</span>}<span>{t("channels:space.via", { name: accName })}</span>{s.status !== "active" && <span>{t(s.status === "left" ? "channels:space.left" : "channels:space.archived")}</span>}</Meta></span>}
       actions={<AttentionTag a={att} />}>
       <div className="flex flex-col gap-8" data-space={s.id}>
-        {!s.configured && <div className="rounded-xl border px-4 py-3 type-callout" data-space-new>{t("channels:space.newNote", { kind: kindLine(s).split(" · ")[0] })}{s.suggest_quiet && <span className="mt-1 block text-muted-foreground">{t("channels:space.suggestQuiet", { reason: s.suggest_quiet })}</span>}</div>}
+        {!s.configured && <div className="rounded-xl bg-muted/60 px-4 py-3 type-callout" data-space-new>{t("channels:space.newNote", { kind: kindLine(s).split(" · ")[0] })}{s.suggest_quiet && <span className="mt-1 block text-muted-foreground">{t("channels:space.suggestQuiet", { reason: s.suggest_quiet })}</span>}</div>}
         {s.attention !== undefined && <section data-attention><SectionLabel>{t("channels:bits.disturb")}</SectionLabel>
           <Segmented className="w-full [&>div]:w-full" value={att} onChange={(v) => v !== att && setAttention(v)} options={(Object.keys(ATTENTION) as Attention[]).map((a) => [a, ATTENTION[a][0]] as const)} />
           <Note>{ATTENTION[att][1]}</Note>
@@ -98,7 +98,7 @@ export function SpaceView({ id }: { id: string }) {
                 <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void save({ rules: null }, t("channels:space.followedToast")).then((ok) => ok && setRules(null))} data-follow-account>{t("channels:space.followAccount")}</Button>
                 {!rules && <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void toFlow()} data-to-flow><WorkflowIcon />{t("channels:space.convertFlow")}</Button>}
               </div></>
-            : <div className="flex flex-col gap-2"><div className="px-1 type-footnote text-muted-foreground">{t("channels:space.inherited")}</div>
+            : <div className="flex flex-col gap-2"><div className="type-footnote text-muted-foreground">{t("channels:space.inherited")}</div>
               <Group>{s.effective_rules.map((r, n) => <Row key={n} title={ruleText(r, me)} />)}</Group>
               <div className="flex flex-wrap gap-2"><Button size="xs" variant="outline" onClick={() => setRules(s.effective_rules.map((r) => ({ ...r })))} data-override-rules>{t("channels:space.override")}</Button>
                 <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void toFlow()} data-to-flow><WorkflowIcon />{t("channels:space.convertFlow")}</Button></div></div>}
@@ -120,10 +120,10 @@ export function SpaceView({ id }: { id: string }) {
           </Group></section>
         <section><SectionLabel>{t("channels:space.members")}</SectionLabel>
           <Group><Row title={s.member_count ? t("channels:bits.members", { count: s.member_count }) : t("channels:space.membersUnknown")} sub={[t(s.has_external ? "channels:space.externalSub" : "channels:space.internalSub"), s.teams.length ? t("channels:space.teams", { count: s.teams.length }) : ""].filter(Boolean).join(" · ")}>
-            {s.has_external && <Badge variant="outline" className="font-normal text-muted-foreground">{t("channels:word.external")}</Badge>}</Row></Group>
+            {s.has_external && <Badge variant="secondary" className="text-muted-foreground">{t("channels:word.external")}</Badge>}</Row></Group>
           <Note>{t("channels:space.membersNote")}</Note></section>
         <section><SectionLabel>{t("channels:space.recent")}</SectionLabel>
-          {recent.length ? <div className="flex flex-col gap-3" data-recent>{recent.map((m) => <Msg key={m.id} m={m} bot={persona?.bot_id} me={me} />)}
+          {recent.length ? <div className="flex flex-col gap-1" data-recent>{recent.map((m) => <Msg key={m.id} m={m} bot={persona?.bot_id} me={me} />)}
             {more !== "end" && recent.length >= 30 && <Button size="sm" variant="ghost" className="self-center text-muted-foreground" disabled={more === "loading"} onClick={() => void loadOlder()} data-older>{more === "loading" && <Spinner />}{t("channels:space.older")}</Button>}</div>
             : <Empty title={t("channels:space.noMessages")} sub={t("channels:space.noMessagesSub")} />}
         </section>
@@ -136,10 +136,10 @@ function Msg({ m, bot, me }: { m: ChanMessage; bot?: string; me: boolean }) {
   const t = useT()
   const out = m.direction === "out"
   return (
-    <div className={cn("flex gap-2.5", out && "rounded-xl bg-muted/40 p-2.5")} data-msg={m.id}>
-      {out ? <PersonaAvatar bot={me ? null : bot} size={24} /> : <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] text-muted-foreground" aria-hidden>{(m.sender.name || "?")[0]}</span>}
+    <div className={cn("-mx-3 flex gap-2.5 rounded-xl px-3 py-2.5", out && "bg-muted/60")} data-msg={m.id}>
+      {out ? <PersonaAvatar bot={me ? null : bot} size={24} /> : <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted type-label text-muted-foreground" aria-hidden>{(m.sender.name || "?")[0]}</span>}
       <div className="min-w-0 flex-1">
-        <div className="type-footnote text-muted-foreground">{m.sender.name || t("channels:space.unknownSender")} · {tm(m.created)}{MSG_STATUS[m.status] && <span className={m.status === "failed" ? "text-destructive" : undefined}> · {MSG_STATUS[m.status]}</span>}{m.on_behalf === "proxy" && ` · ${t("channels:space.proxy")}`}{m.history && <span title={t(m.history === "late" ? "channels:space.historyLateHint" : m.history === "backfill" ? "channels:space.historyBackfillHint" : "channels:space.historyBeforeHint")}> · {t("channels:space.history")}</span>}</div>
+        <div className="type-footnote text-muted-foreground"><span className="font-medium text-foreground/80">{m.sender.name || t("channels:space.unknownSender")}</span> · <span className="tabular-nums">{tm(m.created)}</span>{MSG_STATUS[m.status] && <span className={m.status === "failed" ? "text-destructive" : undefined}> · {MSG_STATUS[m.status]}</span>}{m.on_behalf === "proxy" && ` · ${t("channels:space.proxy")}`}{m.history && <span title={t(m.history === "late" ? "channels:space.historyLateHint" : m.history === "backfill" ? "channels:space.historyBackfillHint" : "channels:space.historyBeforeHint")}> · {t("channels:space.history")}</span>}</div>
         <ChannelMessageBody message={m} />
         {m.work_item_id && <button type="button" className="mt-1 type-footnote text-blue hover:underline" onClick={() => go("#/items/" + m.work_item_id)}>{t("channels:space.madeItem", { id: m.work_item_id })}</button>}
         {m.decision_id && m.status === "draft" && <button type="button" className="mt-1 block type-footnote text-blue hover:underline" onClick={() => go("#/inbox")}>{t("channels:space.approve")}</button>}

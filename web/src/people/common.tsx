@@ -7,6 +7,7 @@ import { Unauthenticated } from "@/api"
 import { META_SEP, metaParts, SectionLabel } from "@/ui"
 import { cn } from "cn"
 import { Select } from "@/view-shared"
+import { Select as UISelect, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Unwired } from "@/unwired"
 import { usePeopleOn, type Level, type Visibility } from "@/api/people"
 import { t } from "@/i18n"
@@ -73,6 +74,15 @@ export function PeopleGate({ children }: { children: () => ReactNode }) {
 export const SubMeta = ({ children }: { children: ReactNode }) => (
   <span className={cn("flex min-w-0 flex-wrap items-center gap-y-1 type-footnote text-muted-foreground", META_SEP)}>{metaParts(children)}</span>
 )
+/** a form's picker: the system Select, named for assistive tech and tests by `label` */
+export function FormSelect({ value, onChange, options, label, disabled, placeholder, className }: { value: string; onChange: (v: string) => void; options: { v: string; l: string }[]; label: string; disabled?: boolean; placeholder?: string; className?: string }) {
+  return (
+    <UISelect items={Object.fromEntries(options.map((o) => [o.v, o.l]))} value={value || null} onValueChange={(v) => v != null && onChange(String(v))} disabled={disabled}>
+      <SelectTrigger aria-label={label} className={cn("h-8 min-w-0 type-callout", className)}><SelectValue placeholder={placeholder} className="min-w-0 truncate" /></SelectTrigger>
+      <SelectContent className="min-w-44">{options.map((o) => <SelectItem key={o.v} value={o.v}>{o.l}</SelectItem>)}</SelectContent>
+    </UISelect>
+  )
+}
 export const Loading = () => <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
 /** "YYYY-MM" or a date → "10-08" style */
 export const day = (ts: number) => monthDayShort(ts)

@@ -52,7 +52,7 @@ function ThreadPage({ t, reload, back }: { t: Thread; reload: () => Promise<void
       <div className="flex flex-col gap-6">
         {t.messages.length > 1 && <div className="-mb-4 flex justify-end"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setOpen(allOpen ? new Set([t.messages[last].id]) : new Set(t.messages.map((m) => m.id)))} data-expand-all>
           <ChevronsUpDownIcon />{allOpen ? tr("mail:thread.collapse") : tr("mail:thread.expandAll")}</Button></div>}
-        <ol className="flex flex-col overflow-hidden rounded-xl border" aria-label={tr("mail:thread.messagesAria")} data-messages>
+        <ol className="flex flex-col overflow-hidden rounded-xl bg-card shadow-[var(--lift)]" aria-label={tr("mail:thread.messagesAria")} data-messages>
           {t.messages.map((m, n) => <li key={m.id} className={cn(n > 0 && "border-t")}><MessageBlock m={m} open={open.has(m.id)} onToggle={() => toggle(m.id)} /></li>)}
         </ol>
         {drafts.map((d) => <ThreadDraft key={d.id} d={d} onChange={() => void reload()} />)}
@@ -70,7 +70,7 @@ function MessageBlock({ m, open, onToggle }: { m: Message; open: boolean; onTogg
   const sep = t("mail:shared.listSep")
   const line = (m.text_new ?? m.text ?? "").replace(/\s+/g, " ").trim()
   const head = (
-    <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-start gap-3 px-4 py-3 text-left hover:bg-accent/60" data-message-toggle={m.id}>
+    <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-start gap-3 px-4 py-3.5 text-left hover:bg-accent/60" data-message-toggle={m.id}>
       <ContactAvatar name={who(m.from)} size={28} className="mt-0.5" />
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-2"><span className="min-w-0 truncate type-body font-medium">{m.direction === "out" ? t("mail:thread.me") : who(m.from)}</span>
@@ -87,7 +87,7 @@ function MessageBlock({ m, open, onToggle }: { m: Message; open: boolean; onTogg
   return (
     <div data-message={m.id} data-open="1">
       {head}
-      <div className="px-4 pb-4 sm:pl-[56px]">
+      <div className="px-4 pb-5 anim-in sm:pl-14">
         {m.purged ? <div className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground">{t("mail:thread.purgedSummary", { line: line || "—" })}</div>
           : html ? <HtmlBody id={m.id} />
           : <div className="whitespace-pre-wrap break-words type-body" data-message-text>{quoted ? m.text : m.text_new ?? m.text ?? ""}</div>}
@@ -124,8 +124,8 @@ function AttachmentChip({ a }: { a: MailAttachment }) {
     window.open(fileUrl(f!, true), "_blank", "noopener")
   }
   return (
-    <button type="button" disabled={busy} onClick={() => void open()} className="inline-flex h-8 max-w-[260px] items-center gap-1.5 rounded-full border bg-card px-2.5 type-footnote hover:bg-muted disabled:opacity-60" data-mail-attachment={a.id}>
-      {busy ? <Spinner className="size-3.5" /> : <PaperclipIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}<span className="min-w-0 truncate">{a.name}</span><span className="shrink-0 text-muted-foreground">{size(a.size)}</span>
+    <button type="button" disabled={busy} onClick={() => void open()} className="inline-flex h-8 max-w-[260px] items-center gap-1.5 rounded-full bg-muted px-3 type-footnote hover:bg-accent disabled:opacity-60" data-mail-attachment={a.id}>
+      {busy ? <Spinner className="size-3.5" /> : <PaperclipIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}<span className="min-w-0 truncate">{a.name}</span><span className="shrink-0 tabular-nums text-muted-foreground">{size(a.size)}</span>
     </button>
   )
 }
@@ -163,7 +163,7 @@ function Compose({ t, hasDraft, reload }: { t: Thread; hasDraft: boolean; reload
   }
   if (hasDraft && !mode) return null
   if (mode === "bot") return (
-    <form className="flex flex-col gap-2 rounded-xl border p-3" onSubmit={(e) => { e.preventDefault(); void botDraft() }} data-bot-draft-form>
+    <form className="flex flex-col gap-3 rounded-xl bg-card p-4 shadow-[var(--lift)] anim-in" onSubmit={(e) => { e.preventDefault(); void botDraft() }} data-bot-draft-form>
       <label htmlFor="mail-ins" className="type-callout text-muted-foreground">{tr("mail:thread.insLabel")}</label>
       <Textarea id="mail-ins" autoFocus className="min-h-16 rounded-lg" maxLength={2000} placeholder={tr("mail:thread.insPlaceholder")} value={ins} onChange={(e) => setIns(e.target.value)} data-bot-draft-ins />
       <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={() => setMode("")}>{tr("common:action.cancel")}</Button><Button type="submit" disabled={busy} data-bot-draft-go>{busy ? <Spinner /> : <SparklesIcon />}{busy ? tr("mail:thread.drafting") : tr("mail:thread.draft")}</Button></div>

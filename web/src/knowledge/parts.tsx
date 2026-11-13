@@ -25,17 +25,17 @@ export function Cites({ cites }: { cites?: Cite[] }) {
   if (!cites?.length) return null
   return (
     <Collapsible className="-mt-1 self-start pl-1" data-cites>
-      <CollapsibleTrigger className="inline-flex items-center gap-1 rounded type-footnote text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" data-cites-toggle>
+      <CollapsibleTrigger className="inline-flex items-center gap-1 rounded-md type-footnote text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" data-cites-toggle>
         <BookOpenIcon className="size-3.5" strokeWidth={1.75} />{t("knowledge:parts.cites", { count: cites.length })}
       </CollapsibleTrigger>
-      <CollapsibleContent className="mt-2 flex max-w-[min(520px,88vw)] flex-col gap-0.5 rounded-lg bg-muted/60 px-1.5 py-1.5" data-cites-body>
+      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-out data-ending-style:h-0 data-starting-style:h-0" data-cites-body><div className="pt-2"><div className="flex max-w-[min(520px,88vw)] flex-col gap-0.5 rounded-lg bg-muted/60 px-1.5 py-1.5">
         {cites.map((c) => (
           <button key={c.n} type="button" disabled={!c.href} onClick={() => c.href && go(c.href)} className="flex items-start gap-2 rounded-md px-1.5 py-1 text-left type-footnote enabled:hover:bg-background/70" data-cite={c.n}>
             <StatusDot s={LEVEL_DOT[c.level] ?? "idle"} className="mt-1" />
             <span className="min-w-0 flex-1"><span className="mr-1 font-mono tabular-nums text-muted-foreground">[{c.n}]</span><span className="text-foreground">{c.label}</span>
               <span className="text-muted-foreground"> · {levelLabel(c.level)}</span></span>
           </button>))}
-      </CollapsibleContent>
+      </div></div></CollapsibleContent>
     </Collapsible>
   )
 }
@@ -58,7 +58,7 @@ export function SessionKnowledge({ id }: { id: string }) {
             <span className="block truncate type-footnote text-muted-foreground">{h.deleted ? t("knowledge:parts.deleted") : `${h.label} · ${levelLabel(h.level)}`}</span></span>
           {!h.deleted && <ChevronRightIcon className="mt-1 size-3.5 shrink-0 text-tertiary" />}
         </button>))}</div>
-        : <div className="px-1 type-callout text-muted-foreground">{t("knowledge:parts.sessionNone")}</div>}
+        : <div className="type-callout text-muted-foreground">{t("knowledge:parts.sessionNone")}</div>}
     </div>
   )
 }

@@ -14,6 +14,8 @@ import { toast } from "@/store"
 import { report } from "@/accounts/load"
 import { accountsApi, type RUsage } from "@/api/accounts"
 import { cleanupApi, LEVEL_TEXT, type CleanupLevel, type CleanupPlan, type CleanupTarget } from "@/api/cleanup"
+import { SectionLabel } from "@/ui"
+import { Chevron, SUMMARY } from "@/integrations/kit"
 
 /** one identity being disconnected: `stops` says what it no longer does */
 export type Leaving = { id: string; label: string; stops: string }
@@ -40,10 +42,10 @@ export function PlanSummary({ plan, level }: { plan: CleanupPlan; level: Cleanup
   const sentence = plan.kept_count <= 0 ? t("integrations:cleanup.sentence", { head })
     : reasons.length ? t("integrations:cleanup.sentenceKeptWhy", { head, kept, reasons: reasons.slice(0, 2).join(sep) }) : t("integrations:cleanup.sentenceKept", { head, kept })
   return (
-    <div className="flex flex-col gap-2 rounded-lg border px-3 py-2.5 type-callout" data-cleanup-plan data-plan-spaces={plan.spaces} data-plan-messages={plan.messages} data-plan-contacts={plan.contacts} data-plan-kept={plan.kept_count}>
+    <div className="flex flex-col gap-2 rounded-xl bg-muted/60 px-4 py-3 type-callout" data-cleanup-plan data-plan-spaces={plan.spaces} data-plan-messages={plan.messages} data-plan-contacts={plan.contacts} data-plan-kept={plan.kept_count}>
       <div>{sentence}</div>
       {(plan.decisions ?? 0) > 0 && <div className="type-footnote text-muted-foreground" data-cleanup-undo-note>{t("integrations:cleanup.undoNote")}</div>}
-      {plan.kept.length > 0 && <details className="type-footnote text-muted-foreground"><summary className="cursor-pointer select-none">{t("integrations:cleanup.showKept")}</summary>
+      {plan.kept.length > 0 && <details className="group/disc type-footnote text-muted-foreground"><summary className={SUMMARY}><Chevron className="size-3" />{t("integrations:cleanup.showKept")}</summary>
         <ul className="mt-1 flex max-h-40 flex-col gap-0.5 overflow-y-auto">{plan.kept.map((k) => <li key={k.kind + k.id}>{k.name || k.id} · {k.reason}</li>)}</ul></details>}
     </div>
   )
@@ -55,11 +57,11 @@ function Choices({ value, onChange, allowKeep, offered }: { value: Choice; onCha
   return (
     <RadioGroup value={value} onValueChange={(v) => onChange(v as Choice)} className="gap-2" aria-label={t("integrations:cleanup.history")}>
       {opts.map((o) => (
-        <label key={o} className={"flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2.5 " + (value === o ? "border-primary/60 bg-muted/40" : "")} data-cleanup-choice={o}>
+        <label key={o} className={"flex cursor-pointer items-start gap-2.5 rounded-lg px-3 py-2.5 transition-[background-color,box-shadow] duration-[180ms] ease-out " + (value === o ? "bg-primary/8 ring-1 ring-primary/40" : "bg-muted/60 hover:bg-accent")} data-cleanup-choice={o}>
           <RadioGroupItem value={o} disabled={o !== "keep" && !offered} className="mt-0.5" />
           <span className="min-w-0"><span className={"type-body " + (o === "all" ? "text-destructive" : "")}>{LEVEL_TEXT[o][0]}</span><span className="block type-footnote text-muted-foreground">{LEVEL_TEXT[o][1]}</span></span>
         </label>))}
-      {!offered && <div className="px-1 type-footnote text-muted-foreground">{t("integrations:cleanup.notOffered")}</div>}
+      {!offered && <div className="type-footnote text-muted-foreground">{t("integrations:cleanup.notOffered")}</div>}
     </RadioGroup>
   )
 }
@@ -103,23 +105,23 @@ export function DisconnectDialog({ title, name, leaving, keptNote, onClose, onDo
         <DialogHeader><DialogTitle className="type-headline">{title}</DialogTitle>
           <DialogDescription className="type-callout">{t("integrations:cleanup.desc")}</DialogDescription></DialogHeader>
         <div className="flex flex-col gap-1.5 type-callout" data-disconnect-effects>
-          <div className="font-medium">{t("integrations:cleanup.stops")}</div>
+          <SectionLabel className="mb-0">{t("integrations:cleanup.stops")}</SectionLabel>
           <ul className="list-disc pl-5 text-muted-foreground">
             {leaving.map((l) => <li key={l.id}>{t("integrations:cleanup.stopLine", { label: l.label, stops: l.stops })}</li>)}
             {used.map((u) => <li key={u}>{u}</li>)}
           </ul>
-          <div className="mt-1 font-medium">{t("integrations:cleanup.keeps")}</div>
+          <SectionLabel className="mb-0 mt-2">{t("integrations:cleanup.keeps")}</SectionLabel>
           <ul className="list-disc pl-5 text-muted-foreground">
             <li>{spaces ? t("integrations:cleanup.keptChats", { count: spaces }) : t("integrations:cleanup.keptChatsAny")}</li>
             <li>{t("integrations:cleanup.keptRefs")}</li>
             {keptNote && <li>{keptNote}</li>}
           </ul>
         </div>
-        <div className="flex flex-col gap-2"><div className="type-callout font-medium">{t("integrations:cleanup.history")}</div>
+        <div className="flex flex-col gap-2"><SectionLabel className="mb-0">{t("integrations:cleanup.history")}</SectionLabel>
           <Choices value={choice} onChange={setChoice} allowKeep offered={offered} />
           {choice !== "keep" && (plan === undefined ? <div className="flex items-center gap-2 type-footnote text-muted-foreground"><Spinner className="size-3" />{t("integrations:cleanup.counting")}</div> : plan && <PlanSummary plan={plan} level={choice} />)}
           {needName && <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("integrations:cleanup.typeToConfirm", { name })}<Input className="rounded-lg" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label={t("integrations:cleanup.typeAria", { name })} data-cleanup-typed /></label>}
-          {choice !== "keep" && <div className="px-1 type-footnote text-muted-foreground">{t("integrations:cleanup.backupFirst")}</div>}
+          {choice !== "keep" && <div className="type-footnote text-muted-foreground">{t("integrations:cleanup.backupFirst")}</div>}
         </div>
         <DialogFooter className="gap-2"><Button variant="outline" disabled={busy} onClick={onClose}>{t("common:action.cancel")}</Button>
           <Button variant="destructive" disabled={busy || !usage || !ok || (choice !== "keep" && !plan)} onClick={() => void go()} data-disconnect-confirm>{busy && <Spinner />}{choice === "keep" ? t("integrations:cleanup.disconnect") : t("integrations:cleanup.disconnectDelete")}</Button></DialogFooter>

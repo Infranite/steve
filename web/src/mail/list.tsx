@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Page, Group, Segmented, Chips, Empty, ItemNo, StatusDot, go } from "@/ui"
+import { ConnectPrompt } from "@/integrations/kit"
 import { Unwired } from "@/unwired"
 import { tm } from "@/store"
 import { ContactAvatar } from "@/people/avatar"
@@ -38,14 +39,8 @@ function Onboarding() {
   const t = useT()
   return (
     <Page title={t("mail:shared.title")} sub={t("mail:list.onboardingSub")} max={640}>
-      <div className="flex items-start gap-3 rounded-xl border px-4 py-4" data-mail-onboarding>
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><MailIcon className="size-[18px]" strokeWidth={1.5} /></span>
-        <div className="min-w-0 flex-1">
-          <div className="type-headline">{t("mail:list.onboardingTitle")}</div>
-          <div className="mt-0.5 type-callout text-muted-foreground">{t("mail:list.onboardingBody")}</div>
-          <Button size="sm" className="mt-3" onClick={() => go("#/integrations/mail")} data-mail-connect><PlusIcon />{t("mail:list.connect")}</Button>
-        </div>
-      </div>
+      <ConnectPrompt icon={<MailIcon />} title={t("mail:list.onboardingTitle")} sub={t("mail:list.onboardingBody")} data-mail-onboarding
+        action={<Button onClick={() => go("#/integrations/mail")} data-mail-connect><PlusIcon />{t("mail:list.connect")}</Button>} />
     </Page>
   )
 }
@@ -83,7 +78,7 @@ function ThreadRow({ t, showAccount }: { t: ThreadBrief; showAccount: boolean })
   const tr = useT()
   const name = t.from?.name || t.from?.addr || tr("mail:list.noSender")
   return (
-    <button type="button" onClick={() => go("#/mail/t/" + t.id)} role="listitem" className="flex w-full items-start gap-3 rounded-lg px-2 py-2.5 text-left transition-colors hover:bg-accent" data-thread-row={t.id} data-unread={t.unread > 0 || undefined}>
+    <button type="button" onClick={() => go("#/mail/t/" + t.id)} role="listitem" className="flex w-full items-start gap-3 rounded-lg px-2 py-3 text-left transition-colors hover:bg-accent" data-thread-row={t.id} data-unread={t.unread > 0 || undefined}>
       <ContactAvatar name={name} size={32} className="mt-0.5" />
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-baseline gap-1.5">
@@ -94,9 +89,9 @@ function ThreadRow({ t, showAccount }: { t: ThreadBrief; showAccount: boolean })
           {t.has_attachments && <PaperclipIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label={tr("mail:shared.hasAttachments")} />}
           <span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{tm(t.last_at)}</span>
         </span>
-        <span className={cn("block truncate type-callout", t.unread > 0 ? "text-foreground" : "text-foreground/85")}>{t.unread > 0 && <span className="mr-1.5 inline-block size-2 rounded-full bg-blue align-middle" aria-label={tr("mail:list.unread")} />}{t.subject || tr("mail:shared.noSubject")}</span>
-        <span className="block truncate type-footnote text-muted-foreground">{t.snippet}</span>
-        {(t.signal || t.item_id || t.draft || showAccount) && <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 type-footnote text-muted-foreground">
+        <span className={cn("mt-0.5 block truncate type-callout", t.unread > 0 ? "font-medium text-foreground" : "text-foreground/85")}>{t.unread > 0 && <span className="mr-1.5 inline-block size-2 rounded-full bg-blue align-middle" aria-label={tr("mail:list.unread")} />}{t.subject || tr("mail:shared.noSubject")}</span>
+        <span className="block truncate type-callout text-muted-foreground">{t.snippet}</span>
+        {(t.signal || t.item_id || t.draft || showAccount) && <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 type-footnote text-muted-foreground">
           {t.signal && <span className="inline-flex items-center gap-1.5" data-thread-signal><StatusDot s={/等你|需要/.test(t.signal.outcome_label) ? "wait" : "idle"} />{t.signal.outcome_label}</span>}
           {t.draft && <span className="inline-flex items-center gap-1.5" data-thread-draft-status={t.draft.status}><StatusDot s={DRAFT_STATUS[t.draft.status]?.[1] ?? "idle"} />{tr("mail:list.draftStatus", { status: DRAFT_STATUS[t.draft.status]?.[0] ?? t.draft.status })}</span>}
           {t.item_id && <ItemNo id={t.item_id} />}
