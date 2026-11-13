@@ -70,17 +70,20 @@ export function InboxView() {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const p = pendingCards(), sz = snoozed(), mems = memCards().length
+  /* an item whose graph cannot run (its Node is gone, a Bot is off…) counts as waiting on you everywhere else, but asks
+   * nothing: it is listed here too, with why, so 等你 always has something to open */
+  const stuck = st.items.filter((i) => !i.arch && !p.some((c) => c.i.id === i.id) && itemDisplayState(i).kind === "unavailable")
   const types = ["accept", "approve", "ask", "propose", "fail", "confirm"] as const
   const typeKeys = ["all", ...types.filter((ty) => p.some((c) => c.w.type === ty))]
   const typeLabel = (k: string) => (k === "all" ? t("views:inbox.all") : WT[k])
   const xs = p.filter((c) => ibType === "all" || c.w.type === ibType)
   return (
-    <Page title={t("views:inbox.title")} sub={p.length ? t("views:inbox.sub", { count: p.length }) : t("views:inbox.subNone")} max={640}
+    <Page title={t("views:inbox.title")} sub={p.length + stuck.length ? t("views:inbox.sub", { count: p.length + stuck.length }) : t("views:inbox.subNone")} max={640}
       toolbar={<><YoloPill className="max-sm:hidden" /><YoloPill short className="sm:hidden" /><Segmented value={ibTab} onChange={(v) => { ibTab = v; r() }} options={[["pending", t("views:inbox.tabPending")], ["done", t("views:inbox.tabDone")]] as const} /></>}>
       {ibTab === "pending" && <>
         {yoloState(st.yolo) === "paused" && <RunState className="mb-6 rounded-xl bg-destructive/10 px-4 py-3" />}
         {p.length > 0 && <Chips className="mb-6" value={typeLabel(typeKeys.includes(ibType) ? ibType : "all")} onChange={(v) => { ibType = typeKeys.find((k) => typeLabel(k) === v) ?? "all"; r() }} options={typeKeys.map(typeLabel)} />}
-        {p.length === 0 && !mems && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
+        {p.length === 0 && !stuck.length && !mems && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
         {mems > 0 && <button type="button" onClick={() => go("#/knowledge?tab=pending")} className="mb-8 flex w-full items-center gap-3 rounded-xl bg-card px-4 py-3 text-left type-body shadow-[var(--lift)] hover:shadow-[var(--lift-hover)]" data-inbox-mems>
           <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue/10 text-blue"><BookOpenIcon className="size-4" strokeWidth={1.75} /></span><span className="min-w-0 flex-1">{t("views:inbox.mems", { count: mems })}</span><ChevronRightIcon className="size-4 shrink-0 text-tertiary" /></button>}
         <div className="flex flex-col gap-8">
@@ -88,6 +91,9 @@ export function InboxView() {
             const g = xs.filter((c) => c.w.type === ty)
             return g.length ? <section key={ty} className="anim-in"><SectionLabel>{WT[ty]}<Count n={g.length} /></SectionLabel><div className="flex flex-col gap-3">{g.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} />)}</div></section> : null
           })}
+          {stuck.length > 0 && <section className="anim-in" data-inbox-stuck><SectionLabel>{t("views:inbox.stuck")}<Count n={stuck.length} /></SectionLabel>
+            <Group>{stuck.map((i) => <Row key={i.id} onClick={() => go("#/items/" + i.id)} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0 truncate">{i.t}</span></span>}
+              sub={<span className="line-clamp-2 text-destructive/90">{itemDisplayState(i).detail ?? t("views:inbox.stuckWhy")}</span>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group></section>}
           {sz.length > 0 && <section data-snoozed><SectionLabel>{t("views:inbox.snoozed")}<Count n={sz.length} /></SectionLabel>
             <Group>{sz.map((i) => <Row key={i.id} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0">{i.t}</span></span>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: lang() === "zh-CN" ? i.snooze : nearTime(i.snoozeUntil) })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>)}</Group></section>}
         </div>

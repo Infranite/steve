@@ -1,0 +1,1 @@
+An item whose collaboration cannot run (its Node is unavailable, a Bot is off) counts as waiting on you, so 待处理 now lists it under 无法继续 with the reason, and the item states that reason instead of "协作已暂停".

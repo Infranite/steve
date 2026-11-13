@@ -133,6 +133,8 @@ export default {
     all: "全部",
     emptyTitle: "都处理完了",
     emptySub: "新的决定会出现在这里，也会推送到手机。",
+    stuck: "无法继续",
+    stuckWhy: "协作无法执行，打开看看要你做什么",
     snoozed: "稍后提醒",
     snoozedAt: "{{type}} · {{when}}提醒",
     handleNow: "现在处理",

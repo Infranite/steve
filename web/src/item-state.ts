@@ -40,7 +40,8 @@ export function itemState(i: StateItem, workflow: Workflow | null | undefined, r
   if (running) return make("working", i.now)
   // a graph from an earlier cycle is history: the item goes on in the current cycle like any other
   if (workflow && workflow.acceptance_mode !== "single_session" && workflow.current_cycle !== false) {
-    if (workflow.execution_ready === false) return make("unavailable", workflow.blockers[0])
+    /* the Hub puts why the graph cannot run after the completion blockers */
+    if (workflow.execution_ready === false) return make("unavailable", workflow.blockers[workflow.blockers.length - 1])
     if (workflow.paused) return make("graphPaused", workflow.blockers[0])
   }
   if (i.st === "pause") return make("paused")

@@ -143,6 +143,8 @@ export default {
     all: "All",
     emptyTitle: "All caught up",
     emptySub: "New decisions show up here and are pushed to your phone.",
+    stuck: "Can't go on",
+    stuckWhy: "The collaboration can't run; open it to see what it needs from you",
     snoozed: "Snoozed",
     snoozedAt: "{{type}} · reminder: {{when}}",
     handleNow: "Handle now",
