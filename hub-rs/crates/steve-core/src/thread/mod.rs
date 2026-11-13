@@ -979,7 +979,7 @@ impl Core {
     }
 
     /// Queues a stored message on its conversation's routing lane (its own lane when its way is fixed).
-    fn enqueue(&self, ws: &str, mut job: Job) {
+    fn enqueue(&self, ws: &str, job: Job) {
         // Persist only the waiting routing work. Once routing starts, its outcome can be
         // effectful; a crash must not blindly replay it. Planned drain waits for that permit.
         let key = format!("thread.pending.{}", job.mid);
@@ -994,6 +994,13 @@ impl Core {
             tracing::error!("persist thread queue: {e}");
             return;
         }
+        self.admit(ws, job);
+    }
+
+    /// Puts a persisted job on its lane. It never writes the job back: one a lane has claimed (and so
+    /// deleted) since it was read is found gone at its own claim and dropped, so a message read for
+    /// resuming while its lane takes it is still routed once.
+    fn admit(&self, ws: &str, mut job: Job) {
         if !lock(&self.0.thread.admitted).insert(job.mid.clone()) {
             return;
         }
@@ -1556,7 +1563,7 @@ impl Core {
                         out.failed += 1;
                         continue;
                     }
-                    self.enqueue(&ws, job);
+                    self.admit(&ws, job);
                 }
                 Err(e) => {
                     tracing::error!("invalid persisted thread job: {e}");
