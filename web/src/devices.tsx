@@ -5,9 +5,9 @@ import { cn } from "cn"
 import { ActivityIcon, ChevronRightIcon, CpuIcon, FolderIcon, LinkIcon, MonitorSmartphoneIcon, PauseIcon, PlayIcon, PlusIcon, RefreshCwIcon, ServerIcon, SquareTerminalIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Meter, Panel, PanelFoot, PanelRow, StatStrip, Tag, type Tone } from "@/panel"
+import { Meter, Panel, PanelFoot, PanelRow, Tag, type Tone } from "@/panel"
 import { Spinner } from "@/components/ui/spinner"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { st, toast, refresh, tm } from "@/store"
 import { api, type RDevice, type RNode, type RPairing, type RRuntime } from "@/api"
 import { Input } from "@/components/ui/input"
@@ -16,7 +16,7 @@ import { go, Page, Meta, Empty, Status, closeSheet, openSheet } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
 import { VitalsSection, VitalsStrip } from "@/devices-vitals"
 import { NodeTags } from "@/devices-tags"
-import { TailcatSection } from "@/devices-tailcat"
+import { CODE, TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
 import { useHubAddress } from "@/hub-ui"
 
@@ -72,7 +72,7 @@ export function DevicesView() {
       actions={<Button size="sm" variant="outline" onClick={() => openSheet("pair")} data-pair><PlusIcon />{t("shell:devices.add")}</Button>}>
       <div className="flex flex-col gap-4">
         {hub && <Panel k="hub" icon={<ServerIcon />} data-device-row={hub.name}
-          title={<span className="inline-flex items-center gap-2">{hub.name}<span className="font-mono text-[11px] font-normal text-muted-foreground">Hub</span></span>}
+          title={<span className="inline-flex items-center gap-2">{hub.name}<Tag className="h-5 px-1.5">Hub</Tag></span>}
           sub={<Meta><span>{hub.roles.filter((r) => r !== "Hub").map(roleLabel).join(" · ") || "Hub"}</span>{hub.version && <span className="font-mono" data-hub-version>{hub.version}</span>}<span>{st.runtimes.filter((r) => r.ok).map((r) => r.name).join(t("shell:list.sep")) || t("shell:devices.noHarness")}</span></Meta>}
           right={<><Tag tone={hub.status === "暂停接活" ? "wait" : "ok"} data-hub-state><span className="size-1.5 rounded-full bg-current" />{stateText(hub)}</Tag><OwnerChip objectType="device" objectId={hub.id} bare /></>}>
           <VitalsStrip node="local" />
@@ -80,17 +80,17 @@ export function DevicesView() {
             <Button size="sm" variant="outline" onClick={() => go("#/devices/" + hub.id)} data-device-open>{t("shell:devices.details")}<ChevronRightIcon /></Button>
           </PanelFoot>
         </Panel>}
-        <Panel k="others" icon={<MonitorSmartphoneIcon />} title={nodes !== null && !error ? t("shell:devices.others", { count: rest.length + nodes.length }) : t("shell:devices.othersTitle")} sub={off ? t("shell:devices.nodesOff") : t("shell:devices.othersSub")}
-          right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={loading} onClick={reload} data-refresh-nodes>{loading ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.refreshNodes")}</Button>}>
-          {(rest.length > 0 || !!nodes?.length) && <div className="py-1.5">{rest.map((d) => <PanelRow key={d.id} title={d.name} sub={d.roles.map(roleLabel).join(" · ")} onClick={() => go("#/devices/" + d.id)} controls><OwnerChip objectType="device" objectId={d.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
+        <Panel k="others" icon={<MonitorSmartphoneIcon />} title={nodes !== null && !error ? t("shell:devices.others", { count: rest.length + nodes.length }) : t("shell:devices.othersTitle")} sub={t("shell:devices.othersSub")}
+          right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={loading} onClick={reload} aria-label={t("shell:devices.refreshNodes")} data-refresh-nodes>{loading ? <Spinner className="size-3" /> : <RefreshCwIcon />}<span className="max-sm:hidden">{t("shell:devices.refreshNodes")}</span></Button>}>
+          {off && <div className="px-5 pb-3"><p className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground" data-nodes-off>{t("shell:devices.nodesOff")}</p></div>}
+          {(rest.length > 0 || !!nodes?.length) && <div className="anim-in py-1.5">{rest.map((d) => <PanelRow key={d.id} title={d.name} sub={d.roles.map(roleLabel).join(" · ")} onClick={() => go("#/devices/" + d.id)} controls><OwnerChip objectType="device" objectId={d.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
             {nodes?.map(n => <PanelRow key={n.node_id} data-node-row={n.node_id} onClick={() => setSelected(n.node_id)}
               title={<span className="inline-flex items-center gap-2"><NodeDot node={n} stale={!!error} />{n.name}</span>}
               sub={<Meta><span>{connection(n)}</span>{!n.linked && n.link_error && <span className="line-clamp-1 text-destructive" title={n.link_error.error}>{n.link_error.error}</span>}<span className="font-mono">{n.node_id}</span></Meta>}><Tag tone={regTone(n)}>{registration(n)}</Tag><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
           </div>}
           {error && <p role="alert" className="px-5 py-3 type-callout text-destructive" data-node-error>{t("shell:devices.nodesUnavailable")} · {error}</p>}
           {nodes === null && !error && <p className="px-5 py-4 type-callout text-muted-foreground" role="status" data-nodes-loading>{t("shell:devices.loadingNodes")}</p>}
-          {nodes !== null && !error && !rest.length && !nodes.length && <div className="px-5 py-6"><div className="type-callout text-foreground">{t("shell:devices.noOthers")}</div><div className="mt-0.5 type-footnote text-muted-foreground">{t("shell:devices.noOthersSub")}</div></div>}
-          <PanelFoot meta={t("shell:devices.pairDesc")}><Button size="sm" variant="outline" onClick={() => openSheet("pair")}><PlusIcon />{t("shell:devices.add")}</Button></PanelFoot>
+          {nodes !== null && !error && !rest.length && !nodes.length && <div className="anim-in border-t-0! px-5 pt-1 pb-5" data-no-others><div className="type-body text-foreground">{t("shell:devices.noOthers")}</div><div className="mt-0.5 type-callout text-muted-foreground">{t("shell:devices.noOthersSub")}</div></div>}
         </Panel>
       </div>
     </Page>
@@ -101,12 +101,11 @@ export function DevicesView() {
         <PanelRow title={t("shell:devices.connection")}><span className="type-callout text-muted-foreground">{connection(node)}</span></PanelRow>
         <PanelRow title={t("shell:devices.nodeId")} sub={<span className="font-mono break-all select-all whitespace-normal">{node.node_id}</span>} />
         <PanelRow title={t("shell:devices.fingerprint")} sub={<span className="font-mono break-all select-all whitespace-normal">{node.fingerprint}</span>} />
-        {node.last_seen != null && <PanelRow title={t("shell:devices.lastConnected")}><span className="font-mono text-[12.5px] tabular-nums text-muted-foreground">{tm(node.last_seen)}</span></PanelRow>}
+        {node.last_seen != null && <PanelRow title={t("shell:devices.lastConnected")}><span className="type-callout tabular-nums text-muted-foreground">{tm(node.last_seen)}</span></PanelRow>}
         {!node.linked && node.link_error && <PanelRow title={t("shell:devices.linkError")} sub={<span className="break-all whitespace-normal text-destructive" data-node-link-error>{tm(node.link_error.at)} · {node.link_error.error}</span>} />}
       </Panel> : <p role="status">{t("shell:devices.nodeNotVisible")}</p>}
       {node && <NodeTags node={node.node_id} />}
       {node && <VitalsSection node={node.node_id} />}
-      <DialogFooter><Button variant="outline" onClick={() => setSelected(null)}>{t("shell:devices.gotIt")}</Button></DialogFooter>
     </DialogContent></Dialog>}
     </>
   )
@@ -132,24 +131,23 @@ export function DeviceView({ id }: { id: string }) {
       actions={pauseButton}>
       <div className="flex flex-col gap-4">
         {isHub ? <VitalsSection node="local" right={stateTag}>
-          <PanelFoot meta={t("shell:devices.lastSeenAt", { time: tm(d.seen) })}>{pauseButton}</PanelFoot>
+          <PanelFoot meta={t("shell:devices.lastSeenAt", { time: tm(d.seen) })} />
         </VitalsSection> : <Panel k="state" icon={<ActivityIcon />} title={t("shell:devices.vitals.title")} sub={t("shell:devices.lastSeenAt", { time: tm(d.seen) })} right={stateTag} />}
         <Panel k="sessions" icon={<SquareTerminalIcon />} title={t("shell:devices.sessionsHere", { count: ss.length })} sub={t("shell:devices.maxSessions", { count: d.max_sessions })}
-          right={<span className="flex flex-col items-end gap-1.5" data-running><span className="font-mono text-[12px] leading-4 tabular-nums text-muted-foreground">{t("shell:devices.runningOf", { n: running, max: d.max_sessions })}</span><Meter value={d.max_sessions ? running / d.max_sessions : 0} tone={d.max_sessions && running >= d.max_sessions ? "wait" : "run"} className="w-20" /></span>}>
-          {ss.length ? <div className="py-1.5">{shown.map((k) => { const s = st.S[k]; return <PanelRow key={k} title={s.title} sub={s.item ? t("shell:devices.sessionSub", { item: s.item, n: s.n, up: s.up }) : t("shell:devices.noItem")} onClick={() => go("#/sessions/" + k)}><Status s={s.st} sess /></PanelRow> })}</div>
+          right={<span className="flex flex-col items-end gap-1.5" data-running><span className="type-footnote tabular-nums text-muted-foreground">{t("shell:devices.runningOf", { n: running, max: d.max_sessions })}</span><Meter value={d.max_sessions ? running / d.max_sessions : 0} tone={d.max_sessions && running >= d.max_sessions ? "wait" : "run"} className="w-20" /></span>}>
+          {ss.length ? <div className="py-1.5">{shown.map((k) => { const s = st.S[k]; return <PanelRow key={k} title={s.title} sub={s.item ? t("shell:devices.sessionSub", { item: s.item, n: s.n, up: s.up }) : t("shell:devices.noItem")} onClick={() => go("#/sessions/" + k)}><Status s={s.st} sess /></PanelRow> })}{ss.length > shown.length && <div className="px-3 pt-1"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setAll(true)} data-sessions-more>{t("shell:devices.moreSessions", { count: ss.length - shown.length })}</Button></div>}</div>
             : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noSessions")}</div>}
-          {ss.length > shown.length && <PanelFoot><Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setAll(true)} data-sessions-more>{t("shell:devices.moreSessions", { count: ss.length - shown.length })}</Button></PanelFoot>}
         </Panel>
         <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={t("shell:devices.runtimesSub", { ok: st.runtimes.filter((r) => r.ok).length, count: st.runtimes.length })}
           right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>
-          {st.runtimes.length ? <div className="py-1.5">{st.runtimes.map((r) => <div key={r.id} className="flex items-start gap-4 px-5 py-3 [&+&]:border-t [&+&]:border-border/60" data-runtime={r.id}>
+          {st.runtimes.length ? <div className="py-1.5">{st.runtimes.map((r) => <div key={r.id} className="relative mx-2 flex items-start gap-4 rounded-lg px-3 py-3 [&+&]:before:absolute [&+&]:before:inset-x-3 [&+&]:before:top-0 [&+&]:before:h-px [&+&]:before:bg-border/60" data-runtime={r.id}>
             <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2 type-callout text-foreground">{r.name}<span className="font-mono text-[11.5px] text-muted-foreground">{r.version || r.adapter_version}</span><span className="type-footnote text-tertiary">{r.custom ? t("shell:devices.harness.custom") : t("shell:devices.harness.builtin")}</span></div>
+              <div className="flex flex-wrap items-center gap-2 type-body text-foreground">{r.name}<span className="font-mono type-footnote text-muted-foreground">{r.version || r.adapter_version}</span><span className="type-footnote text-tertiary">{r.custom ? t("shell:devices.harness.custom") : t("shell:devices.harness.builtin")}</span></div>
               <div className="mt-0.5 flex flex-col gap-0.5 type-footnote text-muted-foreground"><span className="truncate">{r.note} · <span className="font-mono">{r.path.replace(/^\/Users\/[^/]+/, "~")}</span></span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></div>
             </div>
             <Tag tone={r.ok ? "ok" : "wait"}>{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</Tag>
           </div>)}</div> : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noRuntimes")}</div>}
-          {isHub && <div className="px-5 py-3"><AddHarness /></div>}
+          {isHub && <div className="px-5 pt-3 pb-4"><AddHarness /></div>}
         </Panel>
         {isHub && <NodeTags node="local" />}
         <Panel k="projects" icon={<FolderIcon />} title={t("shell:devices.projectsTitle")} sub={t("shell:devices.projectsSub", { count: dirs.length })}
@@ -164,9 +162,7 @@ export function DeviceView({ id }: { id: string }) {
             <PanelRow title={t("shell:devices.models")} sub={t("shell:devices.modelsSub")} />
           </div>
         </Panel>}
-        <Panel k="connection" icon={<LinkIcon />} title={t("shell:devices.connection")} sub={t("shell:devices.ownerSub")} right={<OwnerChip objectType="device" objectId={d.id} bare />}>
-          <StatStrip items={[{ k: "seen", label: t("shell:devices.lastSeen"), value: tm(d.seen) }, { k: "max", label: t("shell:devices.maxShort"), value: d.max_sessions }]} />
-        </Panel>
+        <Panel k="connection" icon={<LinkIcon />} title={t("shell:devices.connection")} sub={t("shell:devices.ownerSub")} right={<OwnerChip objectType="device" objectId={d.id} bare />} />
       </div>
     </Page>
   )
@@ -202,7 +198,7 @@ function AddHarness() {
   const t = useT()
   const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("")
   const [id, setId] = useState(""), [name, setName] = useState(""), [command, setCommand] = useState(""), [args, setArgs] = useState(""), [env, setEnv] = useState(""), [props, setProps] = useState("")
-  if (!open) return <Button size="sm" variant="outline" className="mt-2" onClick={() => setOpen(true)} data-add-harness><PlusIcon />{t("shell:devices.harness.add")}</Button>
+  if (!open) return <Button size="sm" variant="outline" onClick={() => setOpen(true)} data-add-harness><PlusIcon />{t("shell:devices.harness.add")}</Button>
   const save = async () => {
     setBusy(true); setError("")
     try {
@@ -214,17 +210,17 @@ function AddHarness() {
       toast(t("shell:devices.harness.saved")); setOpen(false); await refresh()
     } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
-  return <div className="mt-2 flex flex-col gap-2 rounded-lg border p-3" data-harness-form>
-    <div className="type-footnote text-muted-foreground">{t("shell:devices.harness.intro")}</div>
+  return <div className="anim-in flex flex-col gap-2 rounded-xl bg-muted/60 p-4" data-harness-form>
+    <div className="mb-1 type-callout text-muted-foreground">{t("shell:devices.harness.intro")}</div>
     <Input placeholder={t("shell:devices.harness.id")} value={id} onChange={(e) => setId(e.target.value)} data-harness-id />
     <Input placeholder={t("shell:devices.harness.name")} value={name} onChange={(e) => setName(e.target.value)} />
     <Input placeholder={t("shell:devices.harness.command")} value={command} onChange={(e) => setCommand(e.target.value)} className="font-mono" data-harness-command />
     <Input placeholder={t("shell:devices.harness.args")} value={args} onChange={(e) => setArgs(e.target.value)} className="font-mono" />
     <Textarea placeholder={t("shell:devices.harness.env")} value={env} onChange={(e) => setEnv(e.target.value)} className="min-h-14 font-mono" />
-    <details><summary className="type-footnote text-muted-foreground">{t("shell:devices.harness.advanced")}</summary>
+    <details><summary className="cursor-pointer type-callout text-muted-foreground hover:text-foreground">{t("shell:devices.harness.advanced")}</summary>
       <Textarea placeholder='{"modes": {"ask": "default"}, "nested_sandbox": true}' value={props} onChange={(e) => setProps(e.target.value)} className="mt-1 min-h-20 font-mono" /></details>
-    {error && <div className="type-footnote text-attention" role="alert">{error}</div>}
-    <div className="flex gap-2"><Button size="sm" disabled={busy || !id.trim() || !command.trim()} onClick={() => void save()} data-harness-save>{busy && <Spinner className="size-3" />}{t("common:action.save")}</Button><Button size="sm" variant="ghost" onClick={() => setOpen(false)}>{t("common:action.cancel")}</Button></div>
+    {error && <div className="type-callout text-attention" role="alert">{error}</div>}
+    <div className="mt-1 flex gap-2"><Button size="sm" disabled={busy || !id.trim() || !command.trim()} onClick={() => void save()} data-harness-save>{busy && <Spinner className="size-3" />}{t("common:action.save")}</Button><Button size="sm" variant="ghost" onClick={() => setOpen(false)}>{t("common:action.cancel")}</Button></div>
   </div>
 }
 
@@ -251,28 +247,29 @@ export function PairDialog() {
   return (
     <Dialog open onOpenChange={(x) => !x && closeSheet()}>
       <DialogContent className="gap-4 rounded-2xl sm:max-w-[600px] max-h-[85vh] overflow-y-auto" data-pair-dialog>
-        <DialogHeader><DialogTitle className="type-headline">{t("shell:devices.add")}</DialogTitle><DialogDescription className="type-callout">{t("shell:devices.pairDesc")}</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle className="type-title">{t("shell:devices.add")}</DialogTitle><DialogDescription className="type-callout">{t("shell:devices.pairHelp")}</DialogDescription></DialogHeader>
         {error && <p role="alert" className="type-callout text-destructive">{error}</p>}
-        <p className="type-callout text-muted-foreground">{t("shell:devices.pairHelp")}</p>
-        <Button disabled={busy || !!pairing && now < pairing.expires} onClick={() => void act(async () => { setPairing(await api.createPairing()) })}>{t("shell:devices.createCode")}</Button>
-        {pairing && <div className="rounded-xl border p-4 space-y-2 type-callout">
-          {now < pairing.expires ? <><p>{t("shell:devices.codeExpires", { time: new Date(pairing.expires).toLocaleTimeString() })}</p><code className="block break-all select-all">{pairing.code}</code></> : <p>{t("shell:devices.codeExpired")}</p>}
-          {pairing.pin && <><p>{t("shell:devices.hubPin")}</p><code className="block break-all select-all">{pairing.pin}</code></>}
-          <p>{t("shell:devices.setupCommand")}</p><code className="block break-all select-all" data-setup-command>steve setup node --hub {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
-          <p>{t("shell:devices.pairCommand")}</p><code className="block break-all select-all" data-pair-command>steve-node pair {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
+        <Button className="justify-self-start self-start max-sm:w-full max-sm:justify-self-stretch" disabled={busy || !!pairing && now < pairing.expires} onClick={() => void act(async () => { setPairing(await api.createPairing()) })}>{t("shell:devices.createCode")}</Button>
+        {pairing && <div className="anim-in space-y-2 rounded-xl bg-muted/60 p-4 type-callout">
+          {now < pairing.expires ? <><p className="text-muted-foreground">{t("shell:devices.codeExpires", { time: new Date(pairing.expires).toLocaleTimeString() })}</p><code className={CODE}>{pairing.code}</code></> : <p className="text-muted-foreground">{t("shell:devices.codeExpired")}</p>}
+          {pairing.pin && <><p className="text-muted-foreground">{t("shell:devices.hubPin")}</p><code className={CODE}>{pairing.pin}</code></>}
+          <p className="text-muted-foreground">{t("shell:devices.setupCommand")}</p><code className={CODE} data-setup-command>steve setup node --hub {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
+          <p className="text-muted-foreground">{t("shell:devices.pairCommand")}</p><code className={CODE} data-pair-command>steve-node pair {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
         </div>}
         <TailcatSection />
-        <Button variant="outline" disabled={busy} onClick={() => void act(reload)}><RefreshCwIcon />{t("shell:devices.refreshNodes")}</Button>
-        {nodes.map(n => <div key={n.node_id} className="rounded-xl border p-4 space-y-2 type-callout">
-          <p className="font-medium">{n.name} · {t(`shell:devices.nodeState.${n.state}`)} · {n.linked ? t("shell:devices.linked") : t("shell:devices.disconnected")}</p>
-          <code className="block break-all">{n.node_id}</code><code className="block break-all">{n.fingerprint}</code>
+        {(pairing || nodes.length > 0) && <div className="-mb-1 flex items-center justify-between gap-3">
+          <span className="type-label text-tertiary">{t("shell:devices.othersTitle")}</span>
+          <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(reload)} data-pair-refresh><RefreshCwIcon />{t("shell:devices.refreshNodes")}</Button>
+        </div>}
+        {nodes.map(n => <div key={n.node_id} className="anim-in space-y-2 rounded-xl bg-muted/60 p-4 type-callout">
+          <p className="type-body font-medium">{n.name} <span className="font-normal text-muted-foreground">· {t(`shell:devices.nodeState.${n.state}`)} · {n.linked ? t("shell:devices.linked") : t("shell:devices.disconnected")}</span></p>
+          <code className="block break-all type-code text-muted-foreground">{n.node_id}</code><code className="block break-all type-code text-muted-foreground">{n.fingerprint}</code>
           {n.state === "pending" && <>
-            <label className="block" htmlFor={`fingerprint-${n.node_id}`}>{t("shell:devices.checkFingerprint")}</label>
-            <input id={`fingerprint-${n.node_id}`} className="w-full rounded-md border bg-background px-3 py-2 font-mono" value={fingerprints[n.node_id] ?? ""} onChange={e => setFingerprints(v => ({ ...v, [n.node_id]: e.target.value }))} autoComplete="off" spellCheck={false} />
+            <label className="block text-muted-foreground" htmlFor={`fingerprint-${n.node_id}`}>{t("shell:devices.checkFingerprint")}</label>
+            <Input id={`fingerprint-${n.node_id}`} className="font-mono" value={fingerprints[n.node_id] ?? ""} onChange={e => setFingerprints(v => ({ ...v, [n.node_id]: e.target.value }))} autoComplete="off" spellCheck={false} />
             <Button disabled={busy || !n.fingerprint || fingerprints[n.node_id]?.trim() !== n.fingerprint} onClick={() => void act(async () => { await api.confirmNode(n.node_id); await reload() })}>{t("shell:devices.confirmFingerprint")}</Button>
           </>}
         </div>)}
-        <DialogFooter><Button variant="outline" onClick={closeSheet}>{t("shell:devices.gotIt")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )

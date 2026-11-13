@@ -62,7 +62,7 @@ export function VitalsSection({ node, right, children }: { node: string; right?:
           <Spark values={series.map(p => p.mem)} label={t("shell:devices.vitals.memory")} className="max-sm:hidden" /><MeterValue value={pct(memUsed)} ratio={memUsed} tone={fill(memUsed)} /></PanelRow>}
         {disks.map(d => { const used = d.total ? 1 - d.free / d.total : 0; return (
           <PanelRow key={d.names.join()} title={t("shell:devices.vitals.disk", { root: d.names.join(t("shell:list.sep")) })} sub={t("shell:devices.vitals.diskSub", { free: gb(d.free), total: gb(d.total) })} data-vital="disk">
-            <MeterValue value={pct(used)} ratio={used} tone={fill(used)} /></PanelRow>) })}
+            <Spark values={[]} label="" className="max-sm:hidden" /><MeterValue value={pct(used)} ratio={used} tone={fill(used)} /></PanelRow>) })}
         {l.rtt_ms != null && <PanelRow title={t("shell:devices.vitals.rtt")} sub={t("shell:devices.vitals.rttSub")} data-vital="rtt">
           <Spark values={series.map(p => p.rtt == null ? null : Math.min(1, p.rtt / 1000))} label={t("shell:devices.vitals.rtt")} className="max-sm:hidden" /><MeterValue value={l.rtt_ms + " ms"} ratio={Math.min(1, l.rtt_ms / 1000)} tone={l.rtt_ms >= 500 ? "wait" : undefined} /></PanelRow>}
       </PanelSection>

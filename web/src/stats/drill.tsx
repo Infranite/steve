@@ -7,7 +7,7 @@ import { Panel, Tag } from "@/panel"
 import { Spinner } from "@/components/ui/spinner"
 import { stats, type ItemDetail } from "@/api/stats"
 import { st } from "@/store"
-import { go, Page, Empty, ItemNo } from "@/ui"
+import { go, Page, Empty } from "@/ui"
 import { Unwired } from "@/unwired"
 import { Kpi, Est, kpiRow } from "@/stats/kpi"
 import { Table, num, th } from "@/stats/tables"
@@ -26,7 +26,7 @@ export function StatsItemView({ id }: { id: string }) {
   if (d.s === "absent") return <Unwired id="stats" />
   const title = d.s === "ok" ? d.v.title : st.items.find((i) => i.id === id)?.t ?? id
   return (
-    <Page title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={id} className="text-[15px]" /><span className="min-w-0 break-words">{title}</span></span>} back={["#/stats", t("stats:page.title")]} max={1040}
+    <Page title={<span className="flex min-w-0 items-baseline gap-2"><span className="shrink-0 font-mono font-normal tabular-nums text-tertiary" data-no>{id}</span><span className="min-w-0 break-words">{title}</span></span>} back={["#/stats", t("stats:page.title")]} max={1280}
       sub={<a href={"#/items/" + id} className="inline-flex items-center gap-0.5 text-blue hover:underline" data-item-link>{t("stats:drill.openItem")}<ChevronRightIcon className="size-3.5" /></a>}>
       {d.s === "loading" ? <div className="flex justify-center py-24"><Spinner className="size-5 text-muted-foreground" /></div>
         : d.s === "error" ? <Empty title={t("stats:drill.loadFailed")} sub={d.msg} />
@@ -44,25 +44,25 @@ function Drill({ d }: { d: ItemDetail }) {
   return (
     <div className="flex flex-col gap-4" data-drill>
       <Panel k="report" className="@container" icon={<ChartGanttIcon />} title={t("stats:drill.report")} sub={t("stats:drill.reportSub", { created: time(f.created) })}
-        right={open ? <Tag tone="run"><span className="size-1.5 animate-pulse rounded-full bg-current" />{t("stats:word.running")}</Tag> : f.done_at ? <Tag tone="ok">{t("stats:drill.doneMark")}</Tag> : <Tag>{t("stats:drill.dropMark")}</Tag>}>
+        right={open ? <Tag tone="run"><span className="size-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none" />{t("stats:word.running")}</Tag> : f.done_at ? <Tag tone="ok">{t("stats:drill.doneMark")}</Tag> : <Tag>{t("stats:drill.dropMark")}</Tag>}>
         <Timeline d={d} />
         <div className={kpiRow(6)}>
           <Kpi k="tokens" label="tokens" value={fmtN(u.total)} foot={u.hit_rate != null ? t("stats:drill.hit", { pct: fmtPct(u.hit_rate) }) : ""} def={t("stats:drill.tokensDef")} />
-          <Kpi k="est" label={t("stats:word.estCost")} badge={<Est />} value={u.total ? (u.unpriced_tokens ? (u.est >= 0.01 ? "≥" + fmtUsd(u.est) : "—") : fmtUsd(u.est)) : u.reported ? "≥" + fmtUsd(u.reported) : "—"} foot={u.unpriced_tokens ? t("stats:drill.incomplete", { n: fmtN(u.unpriced_tokens) }) : u.reported ? t("stats:word.adapterQuote", { usd: fmtUsd(u.reported) }) : ""} def={t("stats:drill.estDef")} />
+          <Kpi k="est" label={t("stats:col.cost")} badge={<Est />} value={u.total ? (u.unpriced_tokens ? (u.est >= 0.01 ? "≥" + fmtUsd(u.est) : "—") : fmtUsd(u.est)) : u.reported ? "≥" + fmtUsd(u.reported) : "—"} foot={u.unpriced_tokens ? t("stats:drill.incomplete", { n: fmtN(u.unpriced_tokens) }) : u.reported ? t("stats:word.adapterQuote", { usd: fmtUsd(u.reported) }) : ""} def={t("stats:drill.estDef")} />
           <Kpi k="lead" label={t("stats:drill.lead")} value={fmtMs(f.lead_ms ?? d.age_ms)} foot={f.lead_ms != null ? t("stats:drill.leadDone") : t("stats:drill.leadOpen")} def={t("stats:drill.leadDef")} />
           <Kpi k="agent" label={t("stats:drill.agent")} value={fmtMs(f.agent_ms)} foot={t("stats:drill.turns", { count: f.turns })} def={t("stats:drill.agentDef")} />
           <Kpi k="wait" label={t("stats:drill.wait")} value={fmtMs(f.wait_ms)} tone={f.wait_ms && f.agent_ms && f.wait_ms > f.agent_ms ? "wait" : undefined} foot={t("stats:drill.decisions", { count: f.decisions })} def={t("stats:drill.waitDef")} />
           <Kpi k="reworks" label={t("stats:drill.reworks")} value={f.reworks} tone={f.reworks ? "wait" : undefined} foot={f.first_pass == null ? t("stats:drill.noVerdict") : f.first_pass ? t("stats:drill.firstPass") : t("stats:drill.firstFail")} def={t("stats:drill.reworksDef")} />
         </div>
       </Panel>
-      <Panel k="turns" icon={<RepeatIcon />} title={t("stats:drill.turns")} sub={t("stats:drill.turnsSub")} right={<span className="font-mono text-[12px] tabular-nums text-muted-foreground">{turns.length}</span>}>
+      <Panel k="turns" icon={<RepeatIcon />} title={turns.length ? `${t("stats:drill.turns")} · ${turns.length}` : t("stats:drill.turns")} sub={t("stats:drill.turnsSub")}>
         {!turns.length ? <div className="px-5 py-6 type-callout text-muted-foreground">{t("stats:drill.noTurns")}</div> : (
-          <div className="py-2"><Table label={t("stats:drill.turns")} min={820} head={<tr><th className={th}>{t("stats:col.start")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.duration")}</th><th className={cn(th, "pl-4")}>{t("stats:col.stopReason")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.tools")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.failed")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.input")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.output")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheRead")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheWrite")}</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:col.est")}<Est /></span></th></tr>}>
+          <div className="pb-2"><Table label={t("stats:drill.turns")} min={820} head={<tr><th className={th}>{t("stats:col.start")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.duration")}</th><th className={cn(th, "pl-8")}>{t("stats:col.stopReason")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.tools")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.failed")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.input")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.output")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheRead")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheWrite")}</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:col.cost")}<Est /></span></th></tr>}>
             {turns.map((tn) => (
-              <tr key={tn.id} className="cursor-pointer hover:bg-accent" onClick={() => go("#/sessions/" + tn.session_id)} data-turn={tn.id}>
-                <td className="py-2 font-mono text-[12.5px] tabular-nums">{time(tn.started)}{tn.attempt > 0 && <span className="ml-1 font-sans type-footnote text-muted-foreground">{t("stats:drill.retry", { n: tn.attempt })}</span>}</td>
+              <tr key={tn.id} className="cursor-pointer hover:bg-muted/60" onClick={() => go("#/sessions/" + tn.session_id)} data-turn={tn.id}>
+                <td className="py-2.5 tabular-nums">{time(tn.started)}{tn.attempt > 0 && <span className="ml-1 type-footnote text-muted-foreground">{t("stats:drill.retry", { n: tn.attempt })}</span>}</td>
                 <td className={num}>{tn.ended ? fmtMs(tn.ended - tn.started) : t("stats:word.running")}</td>
-                <td className="py-2 pl-4"><span className="inline-flex items-center gap-1.5">{(tn.stop_reason === "error" || tn.transient) && <span aria-hidden className="size-2 rounded-full bg-destructive" />}{tn.transient ? t("stats:drill.gatewayDown") : stop[tn.stop_reason ?? ""] ?? tn.stop_reason ?? "—"}</span></td>
+                <td className="py-2.5 pl-8"><span className="inline-flex items-center gap-1.5">{(tn.stop_reason === "error" || tn.transient) && <span aria-hidden className="size-2 rounded-full bg-destructive" />}{tn.transient ? t("stats:drill.gatewayDown") : stop[tn.stop_reason ?? ""] ?? tn.stop_reason ?? "—"}</span></td>
                 <td className={num}>{tn.tools}</td><td className={num}>{tn.tool_errors || "—"}</td>
                 <td className={num}>{fmtN(tn.usage.input)}</td><td className={num}>{fmtN(tn.usage.output)}</td><td className={num}>{fmtN(tn.usage.cache_read)}</td><td className={num}>{fmtN(tn.usage.cache_write)}</td>
                 <td className={num}>{tn.usage.total ? fmtEst(tn.usage.est, tn.usage.unpriced_tokens) : "—"}</td>
@@ -73,9 +73,9 @@ function Drill({ d }: { d: ItemDetail }) {
       </Panel>
       {!!d.by_model?.length && (
         <Panel k="by-model" icon={<CpuIcon />} title={t("stats:drill.byModel")} sub={t("stats:drill.byModelSub")}>
-          <div className="py-2"><Table label={t("stats:drill.byModel")} min={640} head={<tr><th className={th}>{t("stats:col.model")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.input")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.output")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheRead")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheWrite")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.hitRate")}</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:word.estCost")}<Est /></span></th></tr>}>
+          <div className="pb-2"><Table label={t("stats:drill.byModel")} min={640} head={<tr><th className={th}>{t("stats:col.model")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.input")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.output")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheRead")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheWrite")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.hitRate")}</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:col.cost")}<Est /></span></th></tr>}>
             {d.by_model.map((m) => (
-              <tr key={m.model} data-model={m.model}><td className="py-2">{m.label}</td><td className={num}>{fmtN(m.input)}</td><td className={num}>{fmtN(m.output)}</td><td className={num}>{fmtN(m.cache_read)}</td><td className={num}>{fmtN(m.cache_write)}</td><td className={num}>{fmtPct(m.hit_rate)}</td>
+              <tr key={m.model} data-model={m.model}><td className="py-2.5">{m.label}</td><td className={num}>{fmtN(m.input)}</td><td className={num}>{fmtN(m.output)}</td><td className={num}>{fmtN(m.cache_read)}</td><td className={num}>{fmtN(m.cache_write)}</td><td className={num}>{fmtPct(m.hit_rate)}</td>
                 <td className={num}>{m.total ? (m.unpriced_tokens ? <a href="#/settings/stats" className="text-blue hover:underline">{t("stats:word.unpriced")}</a> : fmtUsd(m.est)) : m.reported ? <span title={t("stats:word.adapterQuoteLowerBound")}>≥{fmtUsd(m.reported)}</span> : "—"}</td></tr>
             ))}
           </Table></div>
@@ -110,24 +110,24 @@ function Timeline({ d }: { d: ItemDetail }) {
   const tickAt: [number, string, boolean][] = [[t0, edge(t0), true], ...inner.map((ts): [number, string, boolean] => [ts, tickLabel(ts), false]), [t1, edge(t1), true]]
   const lanes: [keyof typeof Y, string][] = [["turns", t("stats:drill.laneTurns")], ["decs", t("stats:drill.laneDecisions")], ["marks", t("stats:drill.laneMarks")]]
   return (
-    <section className="px-5 pt-4 pb-3" data-timeline>
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <span className="type-footnote text-muted-foreground">{t("stats:drill.timeline")}</span>
-        <span className="font-mono text-[12px] tabular-nums text-muted-foreground">{fmtMs(t1 - t0)}</span>
+    <section className="px-5 pt-2 pb-4" data-timeline>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <span className="type-label text-tertiary">{t("stats:drill.timeline")}</span>
+        <span className="type-footnote tabular-nums text-muted-foreground">{fmtMs(t1 - t0)}</span>
       </div>
       <div ref={box} className="relative" onMouseLeave={() => setTip(null)}>
         <svg width={w} height={H} role="img" aria-label={t("stats:drill.timelineAria")} className="block overflow-visible">
           {tickAt.map(([ts, label, end], i) => <g key={i}>
-            <line x1={x(ts)} x2={x(ts)} y1={0} y2={AXIS} stroke="var(--border)" strokeDasharray={end ? undefined : "2 3"} />
-            <text x={x(ts)} y={AXIS + 15} textAnchor={i === 0 ? "start" : i === tickAt.length - 1 ? "end" : "middle"} className="fill-muted-foreground font-mono text-[10.5px] tabular-nums">{label}</text>
+            <line x1={x(ts)} x2={x(ts)} y1={0} y2={AXIS} stroke="var(--border)" strokeOpacity={end ? 1 : 0.6} />
+            <text x={x(ts)} y={AXIS + 16} textAnchor={i === 0 ? "start" : i === tickAt.length - 1 ? "end" : "middle"} className="fill-tertiary type-footnote tabular-nums">{label}</text>
           </g>)}
           {lanes.map(([k, label]) => <g key={k}>
-            {LABEL > 0 && <text x={0} y={Y[k]} dy="0.35em" className="fill-muted-foreground text-[11.5px]">{label}</text>}
+            {LABEL > 0 && <text x={0} y={Y[k]} dy="0.35em" className="fill-muted-foreground type-footnote">{label}</text>}
             <line x1={L} x2={L + W} y1={Y[k]} y2={Y[k]} stroke="var(--border)" strokeOpacity={0.6} />
           </g>)}
           <g>{turns.map((tn) => {
             const a = x(tn.started), b = x(tn.ended ?? now), bad = tn.stop_reason === "error" || tn.transient
-            return <rect key={tn.id} x={a} y={Y.turns - 6} width={Math.max(3, b - a)} height={12} rx={3} className={cn("cursor-default", bad ? "fill-destructive/80" : tn.ended ? "fill-blue/70 hover:fill-blue" : "fill-blue")}
+            return <rect key={tn.id} x={a} y={Y.turns - 6} width={Math.max(3, b - a)} height={12} rx={4} className={cn("cursor-default transition-[fill] duration-[120ms]", bad ? "fill-destructive/80" : tn.ended ? "fill-blue/70 hover:fill-blue" : "fill-blue")}
               onMouseEnter={() => show(tn.started, Y.turns, t("stats:drill.turnTip", { time: time(tn.started), dur: tn.ended ? fmtMs(tn.ended - tn.started) : t("stats:word.running"), tokens: fmtN(tn.usage.total), tools: tn.tools }))} />
           })}</g>
           <g>{decs.map((c) => {
@@ -154,7 +154,7 @@ function Timeline({ d }: { d: ItemDetail }) {
             <line x1={x(now)} x2={x(now)} y1={0} y2={AXIS} stroke="var(--foreground)" strokeOpacity={0.5} strokeDasharray="3 3" />
           </g>}
         </svg>
-        {tip && <div className="pointer-events-none absolute z-10 whitespace-nowrap rounded-md border bg-popover px-2 py-1 font-mono text-[11.5px] text-popover-foreground shadow-sm" style={{ left: Math.min(Math.max(0, tip.x - 40), Math.max(0, w - 280)), top: tip.y - 34 }} role="status">{tip.text}</div>}
+        {tip && <div className="pointer-events-none absolute z-10 whitespace-nowrap rounded-lg bg-popover px-2.5 py-1 type-footnote tabular-nums text-popover-foreground shadow-md" style={{ left: Math.min(Math.max(0, tip.x - 40), Math.max(0, w - 280)), top: tip.y - 34 }} role="status">{tip.text}</div>}
       </div>
     </section>
   )

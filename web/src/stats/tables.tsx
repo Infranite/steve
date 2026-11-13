@@ -1,12 +1,13 @@
 /* 统计页的分节（stats.md §6.3 第 4–7 条，ST-40 重整）：耗时、用量明细、质量与介入、Agent。
  * 每一节是一组面板（panel.tsx）：头部讲这张图是什么，正文是图，数字条给这一节的几个数，脚注放说明；分布用横向条形（HBars），趋势用图。
  * 颜色同概览：完成绿、等你橙、失败红、Agent 工作蓝，其余灰；“谁”的分组用 SERIES。 */
-import { useState, type ReactNode } from "react"
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { BotIcon, ChevronDownIcon, ChevronRightIcon, ShieldCheckIcon, TableIcon, TimerIcon } from "lucide-react"
+import { BotIcon, ChevronRightIcon, ShieldCheckIcon, TableIcon, TimerIcon } from "lucide-react"
 import { stats, type CountRow, type Filter, type Summary, type UsageRow } from "@/api/stats"
 import { Segmented } from "@/ui"
 import { Spinner } from "@/components/ui/spinner"
+import { Button } from "@/components/ui/button"
 import { ChartBody, Chart, ChartHead, ChartTable, HBars, Legend, Share, STATE, SERIES } from "@/stats/chart"
 import { Est, Kpi, kpiRow } from "@/stats/kpi"
 import { Loading, ModeSwitch } from "@/stats/overview"
@@ -15,8 +16,8 @@ import { Panel, PanelFoot, PanelSection } from "@/panel"
 import { harnessName } from "@/model-picker"
 import { t, useT } from "@/i18n"
 
-export const th = "whitespace-nowrap py-2 font-medium text-muted-foreground"
-export const num = "whitespace-nowrap py-2 pl-4 text-right font-mono text-[12.5px] tabular-nums"
+export const th = "whitespace-nowrap py-2 type-footnote font-medium text-muted-foreground"
+export const num = "whitespace-nowrap py-2.5 pl-4 text-right tabular-nums"
 
 /** a part of the page: its panels, under a heading only screen readers need (each panel names itself and its range) */
 export function Section({ title, meta, children, k }: { title: ReactNode; meta?: ReactNode; children: ReactNode; k: string }) {
@@ -28,12 +29,22 @@ export function Section({ title, meta, children, k }: { title: ReactNode; meta?:
   )
 }
 
-/** a hairline table inside a panel, scrolling sideways on a phone */
-export function Table({ head, children, label, min = 560 }: { head: ReactNode; children: ReactNode; label: string; min?: number }) {
+/** a table inside a panel: a rule under its head and hairlines only between rows, scrolling sideways on a phone. While more
+ *  columns lie to the right, the right edge fades out (the cue that it scrolls); `stick` keeps the first column in place */
+export function Table({ head, children, label, min = 560, stick = false }: { head: ReactNode; children: ReactNode; label: string; min?: number; stick?: boolean }) {
+  const box = useRef<HTMLDivElement>(null)
+  const [more, setMore] = useState(false)
+  useLayoutEffect(() => {
+    const el = box.current; if (!el) return
+    const check = () => setMore(el.scrollLeft + el.clientWidth < el.scrollWidth - 1)
+    const ro = new ResizeObserver(check); ro.observe(el); check()
+    el.addEventListener("scroll", check, { passive: true })
+    return () => { ro.disconnect(); el.removeEventListener("scroll", check) }
+  }, [])
   return (
-    <div className="overflow-x-auto px-5">
-      <table className="w-full type-callout" style={{ minWidth: min }} aria-label={label}>
-        <thead className="border-b text-left type-footnote">{head}</thead>
+    <div ref={box} className={cn("overflow-x-auto overscroll-x-contain px-5", more && "[mask-image:linear-gradient(to_right,black_calc(100%-40px),transparent)]")} data-table-scroll={more || undefined}>
+      <table className={cn("w-full type-callout", stick && "[&_tr>:first-child]:sticky [&_tr>:first-child]:left-0 [&_tr>:first-child]:z-[1] [&_tr>:first-child]:bg-card")} style={{ minWidth: min }} aria-label={label}>
+        <thead className="border-b text-left">{head}</thead>
         <tbody className="[&>tr]:border-b [&>tr]:border-border/60 [&>tr:last-child]:border-0">{children}</tbody>
       </table>
     </div>
@@ -68,15 +79,15 @@ function UsageTable({ f, by, fkey, live }: { f: Filter; by: UsageTab; fkey: stri
   const est = rows.reduce((a, r) => a + r.est, 0), tok = rows.reduce((a, r) => a + r.total, 0)
   const share = (r: UsageRow) => (est > 0 ? r.est / est : tok > 0 ? r.total / tok : 0)
   return (
-    <Table label={t("stats:usage.title")} min={720} head={<tr><th className={th}>{t("stats:col.name")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.input")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.output")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheRead")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheWrite")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.hitRate")}</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:word.estCost")}<Est /></span></th><th className={cn(th, "w-24 pl-4")}>{t("stats:col.share")}</th></tr>}>
+    <Table label={t("stats:usage.title")} min={720} stick head={<tr><th className={th}>{t("stats:col.name")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.input")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.output")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheRead")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheWrite")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.hitRate")}</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:col.cost")}<Est /></span></th><th className={cn(th, "w-24 pl-4")}>{t("stats:col.share")}</th></tr>}>
       {rows.map((r) => (
         <tr key={r.key} data-usage-row={r.key}>
-          <td className="max-w-56 truncate py-2 pr-2" title={r.key}>{r.label}{by === "model" && r.key && !r.priced && <span className="ml-1 type-footnote text-muted-foreground">{t("stats:usage.unpricedTag")}</span>}
-            {by === "purpose" && !!r.models?.length && <span className="block truncate text-[11.5px] text-muted-foreground" title={r.models.map((m) => `${m.harness ? harnessName(m.harness) + " · " : ""}${m.model} ×${m.calls}`).join(t("stats:word.commaSep"))} data-purpose-models>{r.models.map((m, i) => <span key={i}>{i > 0 && " · "}{m.harness && (i === 0 || m.harness !== r.models![i - 1].harness) ? `${harnessName(m.harness)} ` : ""}<span className="font-mono">{m.model.replace(/^claude-/, "")}</span>{r.models!.length > 1 ? ` ×${m.calls}` : ""}</span>)}</span>}</td>
+          <td className="max-w-56 truncate py-2.5 pr-2" title={r.key}>{r.label}{by === "model" && r.key && !r.priced && <span className="ml-1 type-footnote text-muted-foreground">{t("stats:usage.unpricedTag")}</span>}
+            {by === "purpose" && !!r.models?.length && <span className="block truncate type-footnote text-muted-foreground" title={r.models.map((m) => `${m.harness ? harnessName(m.harness) + " · " : ""}${m.model} ×${m.calls}`).join(t("stats:word.commaSep"))} data-purpose-models>{r.models.map((m, i) => <span key={i}>{i > 0 && " · "}{m.harness && (i === 0 || m.harness !== r.models![i - 1].harness) ? `${harnessName(m.harness)} ` : ""}<span className="font-mono">{m.model.replace(/^claude-/, "")}</span>{r.models!.length > 1 ? ` ×${m.calls}` : ""}</span>)}</span>}</td>
           <td className={num}>{fmtN(r.input)}</td><td className={num}>{fmtN(r.output)}</td><td className={num}>{fmtN(r.cache_read)}</td><td className={num}>{fmtN(r.cache_write)}</td>
           <td className={num}>{fmtPct(r.hit_rate)}</td>
           <td className={num}>{r.total === 0 && r.reported > 0 ? <span className="text-muted-foreground" title={t("stats:word.sessionQuoteIsFloor")}>{t("stats:word.quoteFloor", { usd: fmtUsd(r.reported) })}</span> : by === "model" && r.key && !r.priced ? <a href="#/settings/stats" className="text-blue hover:underline" data-unpriced>{t("stats:word.unpriced")}</a> : <span title={[r.price_source ? (r.price_source === "models_dev" ? t("stats:usage.fromMd") : t("stats:usage.fromTable")) : "", r.reported ? t("stats:word.adapterQuote", { usd: fmtUsd(r.reported) }) : ""].filter(Boolean).join(t("stats:usage.titleSep")) || undefined} data-price-source={by === "model" ? r.price_source ?? undefined : undefined}>{fmtUsd(r.est)}</span>}</td>
-          <td className="py-2 pl-4"><Share r={share(r)} /></td>
+          <td className="py-2.5 pl-4"><Share r={share(r)} /></td>
         </tr>
       ))}
     </Table>
@@ -103,9 +114,9 @@ export function TimeSection({ s, f, fkey, live, range }: { s: Summary; f: Filter
       <div className="grid grid-cols-1 gap-4 @4xl/stats:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <Panel k="lead" className="@container" data-lead-chart>
           <ChartHead k="lead" icon={<TimerIcon />} title={t("stats:time.leadTitle")} sub={t("stats:panel.leadSub")} meta={hourly ? t("stats:time.leadMetaHourly", { unit, range, zone: zoneName(s.range.tz) }) : t("stats:time.leadMetaDaily", { unit, range })}
-            legend={[{ label: t("stats:time.median"), c: SERIES[0], line: true }, { label: t("stats:time.medianToP85"), c: STATE.band }]} right={<ModeSwitch table={table} set={setTable} />} />
+            legend={[{ label: t("stats:time.median"), c: SERIES[0], line: true }, { label: t("stats:time.medianToP85"), c: SERIES[0], band: true }]} right={<ModeSwitch table={table} set={setTable} />} />
           <ChartBody>
-            {!d ? <Loading err={lead.s === "error" ? lead.msg : null} /> : table ? <ChartTable data={d} fmt={fmtMs} /> : <Chart data={d} kind="band" fmt={fmt} tipFmt={fmtMs} unit={div} colors={[SERIES[0], STATE.band]} label={hourly ? t("stats:time.leadAriaHourly") : t("stats:time.leadAriaDaily")} height={200} />}
+            {!d ? <Loading err={lead.s === "error" ? lead.msg : null} /> : table ? <ChartTable data={d} fmt={fmtMs} height={200} /> : <Chart data={d} kind="band" fmt={fmt} tipFmt={fmtMs} unit={div} colors={[SERIES[0], SERIES[0]]} label={hourly ? t("stats:time.leadAriaHourly") : t("stats:time.leadAriaDaily")} height={200} />}
             {d && d.series.every((l) => l.values.every((v) => v == null)) && <div className="mt-2 type-footnote text-muted-foreground">{t("stats:time.leadEmpty")}</div>}
           </ChartBody>
           <div className={kpiRow(4)} data-lead-sum>
@@ -119,8 +130,8 @@ export function TimeSection({ s, f, fkey, live, range }: { s: Summary; f: Filter
           <PanelSection k="split" label={t("stats:panel.share")} meta={all > 0 ? fmtMs(all) : undefined}>
             <div data-time-split>
               {all > 0 ? <>
-                <div className="flex h-2.5 gap-[2px] overflow-hidden rounded-full" role="img" aria-label={parts.map(([l, v]) => t("stats:time.splitPart", { label: l, pct: fmtPct(v / all) })).join(t("stats:word.commaSep"))}>
-                  {parts.map(([l, v, c]) => v > 0 && <span key={l} style={{ width: `${(v / all) * 100}%`, background: c }} />)}
+                <div className="flex h-2 gap-0.5 overflow-hidden rounded-full" role="img" aria-label={parts.map(([l, v]) => t("stats:time.splitPart", { label: l, pct: fmtPct(v / all) })).join(t("stats:word.commaSep"))}>
+                  {parts.map(([l, v, c]) => v > 0 && <span key={l} className="first:rounded-l-full last:rounded-r-full transition-[width] duration-[260ms] ease-[var(--ease-out)]" style={{ width: `${(v / all) * 100}%`, background: c }} />)}
                 </div>
                 <Legend className="mt-2.5" items={parts.map(([l, v, c]) => ({ label: t("stats:time.splitLegend", { label: l, pct: fmtPct(v / all), dur: fmtMs(v) }), c }))} />
               </> : <div className="type-callout text-muted-foreground">{t("stats:time.splitEmpty")}</div>}
@@ -137,6 +148,8 @@ export function TimeSection({ s, f, fkey, live, range }: { s: Summary; f: Filter
 }
 const ClockSplit = () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 3v9l6.4 6.4" /></svg>
 
+/** a bar that counts without a status: the neutral grey of the page's share bars */
+const NEUTRAL = "color-mix(in oklab, var(--foreground) 35%, transparent)"
 const FAIL_LABEL = (): Record<string, string> => ({ stall: t("stats:quality.fail.stall"), error: t("stats:quality.fail.error"), restart: t("stats:quality.fail.restart"), release: t("stats:quality.fail.release"), other: t("stats:quality.fail.other") })
 
 /** 质量与介入 */
@@ -149,7 +162,7 @@ export function QualityHuman({ s, f, fkey, live, range, prevName }: { s: Summary
   return (
     <Section k="quality" title={t("stats:quality.title")} meta={range}>
       <Panel k="quality" className="@container" icon={<ShieldCheckIcon />} title={t("stats:quality.title")} sub={t("stats:panel.qualitySub")}>
-        <div className="grid grid-cols-1 @2xl:grid-cols-2 @2xl:[&>*+*]:border-l @max-2xl:[&>*+*]:border-t">
+        <div className="grid grid-cols-1 items-start gap-y-2 @2xl:grid-cols-2 @2xl:gap-x-6 @max-2xl:[&>*+*]:border-t @max-2xl:[&>*+*]:border-border/70">
           <PanelSection k="fails" label={t("stats:quality.fails")} meta={t("stats:quality.failsMeta", { count: failN })}>
             <div data-fails>
               {failN === 0 ? <div className="py-4 type-callout text-muted-foreground">{t("stats:quality.failsEmpty")}</div>
@@ -159,7 +172,7 @@ export function QualityHuman({ s, f, fkey, live, range, prevName }: { s: Summary
           <PanelSection k="decisions" label={t("stats:quality.decisions")} meta={t("stats:quality.decisionsMeta", { count: h.decisions })}>
             <div data-human>
               {dk.s !== "ok" ? <Loading h={96} err={dk.s === "loading" ? null : t("stats:quality.decisionsFailed")} /> : dk.v.rows.length === 0 ? <div className="py-4 type-callout text-muted-foreground">{t("stats:quality.decisionsEmpty")}</div>
-                : <div className="-mx-1.5"><HBars k="decisions" vw="w-28" label={t("stats:quality.decisionsAria")} rows={dk.v.rows.map((r: CountRow) => ({ key: r.key, label: r.label, value: r.count, c: STATE.wait, sub: r.response?.p50 != null ? fmtMs(r.response.p50) : "—", title: r.response?.p85 != null ? `p85 ${fmtMs(r.response.p85)}` : undefined }))} /></div>}
+                : <div className="-mx-1.5"><HBars k="decisions" vw="w-28" label={t("stats:quality.decisionsAria")} rows={dk.v.rows.map((r: CountRow) => ({ key: r.key, label: r.label, value: r.count, c: NEUTRAL, sub: r.response?.p50 != null ? fmtMs(r.response.p50) : "—", title: r.response?.p85 != null ? `p85 ${fmtMs(r.response.p85)}` : undefined }))} /><div className="mt-2 px-1.5 type-footnote text-tertiary">{t("stats:quality.decisionsNote")}</div></div>}
             </div>
           </PanelSection>
         </div>
@@ -185,7 +198,6 @@ export function QualityHuman({ s, f, fkey, live, range, prevName }: { s: Summary
 export function AgentSection({ s, f, fkey, live, range }: { s: Summary; f: Filter; fkey: string; live: boolean; range: string }) {
   const t = useT()
   const [tk] = useStats(() => stats.counts(f, "tool"), [fkey], live)
-  const [open, setOpen] = useState(false)
   const [all, setAll] = useState(false)
   const a = s.agents
   const rows = tk.s === "ok" ? tk.v.rows : []
@@ -209,14 +221,17 @@ export function AgentSection({ s, f, fkey, live, range }: { s: Summary; f: Filte
           {!kinds.length ? <div className="py-4 type-callout text-muted-foreground">{t("stats:agent.toolKindsEmpty")}</div>
             : <div className="-mx-1.5 grid grid-cols-1 gap-x-10 @3xl/stats:grid-cols-2">{[shown.slice(0, Math.ceil(shown.length / 2)), shown.slice(Math.ceil(shown.length / 2))].map((half, i) => half.length > 0 &&
               <HBars key={i} k="tools" lw="w-32 sm:w-48" label={t("stats:agent.toolKindsAria")} fmt={fmtN} total={kinds[0]?.count} rows={half.map((r) => ({ key: r.key, label: r.dim === "mcp" ? `Steve · ${r.label}` : r.label, title: r.dim === "mcp" ? `Steve · ${r.label}` : r.label, value: r.count, c: SERIES[0], sub: total ? fmtPct(r.count / total) : undefined }))} />)}</div>}
-          {kinds.length > shown.length && <button type="button" className="mt-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setAll(true)} data-tool-kinds-more>{t("stats:overview.showMore", { count: kinds.length - shown.length })}</button>}
+          {kinds.length > shown.length && <Button size="xs" variant="ghost" className="mt-2 -ml-2 text-muted-foreground" onClick={() => setAll(true)} data-tool-kinds-more>{t("stats:overview.showMore", { count: kinds.length - shown.length })}</Button>}
         </PanelSection>
         {names.length > 0 && (
           <PanelSection k="tool-names">
-            <button type="button" className="inline-flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)} aria-expanded={open} data-tool-names>
-              {open ? <ChevronDownIcon className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />}{t("stats:agent.toolNames", { count: names.length })}
-            </button>
-            {open && <div className="mt-2">{names.map((r) => <div key={r.key} className="flex justify-between border-b border-border/60 py-1.5 type-callout last:border-0"><span className="font-mono text-[12.5px]">{r.label}</span><span className="font-mono text-[12.5px] tabular-nums">{r.count}</span></div>)}</div>}
+            <details className="group/names">
+              <summary className="-ml-1.5 inline-flex cursor-pointer list-none items-center gap-1 rounded-md px-1.5 py-0.5 type-callout text-muted-foreground transition-colors hover:bg-muted hover:text-foreground [&::-webkit-details-marker]:hidden" data-tool-names>
+                <ChevronRightIcon className="size-3.5 transition-transform duration-[180ms] ease-[var(--ease-out)] group-open/names:rotate-90" />{t("stats:agent.toolNames", { count: names.length })}
+              </summary>
+              <div className="-mx-1.5 mt-2 grid grid-cols-1 gap-x-10 @3xl/stats:grid-cols-2">{[names.slice(0, Math.ceil(names.length / 2)), names.slice(Math.ceil(names.length / 2))].map((half, i) => half.length > 0 &&
+                <HBars key={i} k="tool-names" lw="w-32 sm:w-48" label={t("stats:agent.toolNames", { count: names.length })} fmt={fmtN} total={names[0]?.count} rows={half.map((r) => ({ key: r.key, label: <span className="type-code">{r.label}</span>, title: r.label, value: r.count, c: NEUTRAL }))} />)}</div>
+            </details>
           </PanelSection>
         )}
       </Panel>

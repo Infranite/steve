@@ -151,6 +151,9 @@ try {
       await page.waitForFunction(() => document.querySelector('[data-events] [data-stat="turn"]')?.textContent?.includes("24"))
       assert.ok(calls.some((c) => c.startsWith("/api/stats/events") && c.includes("a=") && c.includes("b=")), "the window is asked for")
       assert.match(await ev.locator("[data-brush-label]").innerText(), /48 个事件/)
+      // the list shows its first 30 rows in the page (no scroll box inside it), the rest on request
+      assert.equal(await ev.locator("[data-event]").count(), 30)
+      await ev.locator("[data-events-more]").click()
       assert.equal(await ev.locator("[data-event]").count(), 48)
       await ev.locator("[data-zoom-in]").click()
       await ev.locator('[data-zoom-level="0"]').waitFor()

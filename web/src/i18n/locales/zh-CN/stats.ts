@@ -28,6 +28,7 @@ export default {
   },
   /* table column heads */
   col: {
+    cost: "费用",
     model: "模型",
     input: "输入",
     output: "输出",
@@ -352,7 +353,8 @@ export default {
     failsEmpty: "这段时间没有失败卡。",
     failsAria: "失败卡按原因",
     decisions: "需要你决定的事 · 按种类",
-    decisionsMeta_other: "个 · 共 {{count}} 个；数字下面是你的响应中位时间",
+    decisionsMeta_other: "个 · 共 {{count}} 个",
+    decisionsNote: "数字下面是你的响应中位时间",
     decisionsFailed: "读不到决定",
     decisionsEmpty: "这段时间没有需要你决定的事。",
     decisionsAria: "决定按种类",
@@ -427,7 +429,7 @@ export default {
     estDef: "tokens × 单价（先价格表，再 Models.dev），是估算；未定价的 tokens 不计入。",
     lead: "前置",
     leadDone: "新建到完成",
-    leadOpen: "还没完成，已经过去",
+    leadOpen: "未完成，至今已过",
     leadDef: "从新建到完成的时间；没完成时是到现在为止。",
     agent: "Agent 工作",
     turns_other: "{{count}} 个回合",

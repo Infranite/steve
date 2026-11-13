@@ -47,11 +47,10 @@ function Tile({ k, label, scope, value, foot, def, tone, on, onClick }: { k: str
   return (
     <Tooltip>
       <TooltipTrigger render={<button type="button" onClick={onClick} aria-pressed={on} aria-label={t("stats:overview.tileAria", { label, scope })}
-        className={cn("relative min-w-0 border-border px-5 py-4 text-left outline-none transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 [&:not(:first-child)]:border-l @max-3xl/stats:[&:nth-child(3)]:border-l-0 @max-3xl/stats:[&:nth-child(n+3)]:border-t", on && "bg-muted/60 hover:bg-muted/60")} data-kpi={k} />}>
-        {on && <span aria-hidden className="absolute inset-x-0 top-0 h-0.5" style={{ background: tone }} />}
-        <span className="flex items-center gap-1.5 type-footnote text-muted-foreground"><span aria-hidden className="size-2 shrink-0 rounded-[3px]" style={{ background: tone }} />{label}<span className="text-tertiary">· {scope}</span></span>
-        <span className="mt-2 block truncate font-mono text-[28px] leading-8 tabular-nums tracking-[-0.03em] text-foreground">{value}</span>
-        <span className="mt-1 block min-h-4 truncate type-footnote text-muted-foreground">{foot}</span>
+        className={cn("relative min-w-0 rounded-lg px-3 py-3 text-left outline-none hover:bg-muted/50 focus-visible:bg-muted/60 active:scale-[0.99]", on && "bg-muted hover:bg-muted")} data-kpi={k} />}>
+        <span className="flex items-center gap-1.5 type-footnote text-muted-foreground"><span aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: tone }} />{label}<span className="text-tertiary">· {scope}</span></span>
+        <span className="mt-1.5 block truncate type-display tabular-nums text-foreground">{value}</span>
+        <span className="block min-h-[18px] truncate type-footnote text-tertiary">{foot}</span>
       </TooltipTrigger>
       <TooltipContent className="max-w-64">{def}</TooltipContent>
     </Tooltip>
@@ -65,7 +64,7 @@ export function CoreKpis({ s, f, prevName, rangeName, drill, setDrill }: { s: Su
   const toggle = (d: Drill) => setDrill(drill === d ? null : d)
   const d = delta(s.throughput.done, s.prev?.throughput.done)
   return (
-    <div className="grid grid-cols-2 @3xl/stats:grid-cols-4" data-core-kpis>
+    <div className="grid grid-cols-2 gap-1 px-2 pt-1 pb-2 @3xl/stats:grid-cols-4" data-core-kpis>
       <Tile k="run" label={t("stats:overview.run")} scope={t("stats:overview.now")} value={now.run.length} tone={STATE.run} foot={t("stats:overview.runFoot", { count: now.by("run").length + now.by("wait").length + now.by("block").length + now.by("pause").length })}
         def={t("stats:overview.runDef")} on={drill === "run"} onClick={() => toggle("run")} />
       <Tile k="wait" label={t("stats:overview.wait")} scope={t("stats:overview.now")} value={now.cards.length} tone={STATE.wait} foot={now.cards.length ? t("stats:overview.waitFoot", { count: new Set(now.cards.map((c) => c.i.id || c.w.decision)).size }) : t("stats:overview.noneWaiting")}
@@ -107,7 +106,7 @@ export function FlowChart({ s, f, fkey, live, drill, setDrill }: { s: Summary; f
         legend={[{ label: t("stats:overview.flowCreated", { count: s.throughput.created }), c: STATE.created }, { label: t("stats:overview.flowDone", { count: s.throughput.done }), c: STATE.done }, ...(hourly && data?.current != null ? [{ label: t("stats:overview.flowCurrent"), c: "var(--muted)" }] : [])]}
         right={<ModeSwitch table={table} set={setTable} />} />
       <ChartBody>
-        {!data ? <Loading err={err} /> : table ? <ChartTable data={data} fmt={(v) => String(Math.round(v))} picked={picked} onPick={pick} />
+        {!data ? <Loading err={err} /> : table ? <ChartTable data={data} fmt={(v) => String(Math.round(v))} picked={picked} onPick={pick} height={200} />
           : <Chart data={data} kind="group" int fmt={(v) => String(Math.round(v))} colors={[STATE.created, STATE.done]} picked={picked} onPick={pick} label={hourly ? t("stats:overview.flowAriaHourly") : t("stats:overview.flowAriaDaily")} height={200} />}
         {data && data.series.every((l) => l.values.every((v) => !v)) && <div className="mt-2 type-footnote text-muted-foreground">{t("stats:overview.flowEmpty")}</div>}
       </ChartBody>
@@ -128,9 +127,9 @@ export function StatusBars({ f, drill, setDrill }: { f: Filter; drill: Drill | n
   const total = rows.reduce((a, r) => a + r.value, 0)
   const fails = now.fail.filter((i) => i.waits.some((w) => w.type === "fail")).length
   return (
-    <Panel k="status" data-status-bars>
+    <Panel k="status" className="self-start" data-status-bars>
       <ChartHead k="status" icon={<ListTodoIcon />} title={t("stats:overview.statusTitle")} sub={t("stats:panel.statusSub")} meta={t("stats:overview.statusMeta", { count: total })} />
-      <ChartBody className="flex-1">
+      <ChartBody>
         {total === 0 ? <div className="py-8 text-center type-callout text-muted-foreground">{t("stats:overview.statusNone")}</div>
           : <div className="-mx-1.5"><HBars k="status" label={t("stats:overview.statusAria")} rows={rows} total={Math.max(...rows.map((r) => r.value))} picked={drill?.startsWith("status:") ? drill.slice(7) : null} onPick={(k) => setDrill(drill === `status:${k}` ? null : `status:${k}` as Drill)} /></div>}
       </ChartBody>
@@ -144,14 +143,14 @@ export function StatusBars({ f, drill, setDrill }: { f: Filter; drill: Drill | n
 function ItemLines({ rows, empty }: { rows: { i: Item; sub?: ReactNode; key?: string }[]; empty: string }) {
   const t = useT()
   const [all, setAll] = useState(false)
-  if (!rows.length) return <div className="py-6 type-callout text-muted-foreground">{empty}</div>
+  if (!rows.length) return <div className="py-6 type-callout text-muted-foreground anim-in">{empty}</div>
   const shown = all ? rows : rows.slice(0, 12)
   return (
     <div className="flex flex-col" data-drill-list>
       {shown.map(({ i, sub, key }) => (
-        <button key={key ?? i.id} type="button" onClick={() => go(i.id ? "#/items/" + i.id : "#/inbox")} className="flex w-full min-w-0 items-center gap-3 border-b px-1 py-2 text-left last:border-0 hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none" data-drill-row={i.id || key}>
+        <button key={key ?? i.id} type="button" onClick={() => go(i.id ? "#/items/" + i.id : "#/inbox")} className="flex w-full min-w-0 items-center gap-3 rounded-lg px-2 py-2 text-left hover:bg-muted focus-visible:bg-muted focus-visible:outline-none" data-drill-row={i.id || key}>
           <StatusDot s={i.st} />{i.id && <ItemNo id={i.id} />}
-          <span className="min-w-0 flex-1 truncate type-callout">{i.t}{sub && <span className="ml-2 type-footnote text-muted-foreground">{sub}</span>}</span>
+          <span className="min-w-0 flex-1 truncate type-body">{i.t}{sub && <span className="ml-2 type-callout text-muted-foreground">{sub}</span>}</span>
           <span className="shrink-0 type-footnote tabular-nums text-muted-foreground max-sm:hidden">{ago(i.updated)}</span>
         </button>
       ))}
@@ -191,13 +190,13 @@ export function DrillPanel({ d, f, fkey, live, rangeName, close }: { d: Drill; f
     body = <ItemsTable key={dayTab} f={g} fkey={fkey + d + dayTab} live={live} only={dayTab} sort0={dayTab === "done" ? "done_at" : "est"} />
   }
   return (
-    <section className="bg-muted/20 px-5 pt-3.5 pb-2" aria-label={t("stats:overview.drillAria")} data-drill={d}>
-      <div className="mb-2 flex items-center gap-2">
-        <h3 className="min-w-0 flex-1 text-[14px] font-medium">{title}</h3>
-        {more && <span className="type-footnote">{more}</span>}
+    <section className="anim-in mx-2 mb-2 rounded-lg bg-muted/60 px-3 pt-3 pb-2 border-t-0!" aria-label={t("stats:overview.drillAria")} data-drill={d}>
+      <div className="mb-1 flex items-center gap-2 px-2">
+        <h3 className="min-w-0 flex-1 type-body font-medium">{title}</h3>
+        {more && <span className="type-callout">{more}</span>}
         <Button size="icon-xs" variant="ghost" className="text-muted-foreground" aria-label={t("stats:overview.drillClose")} onClick={close} data-drill-close><XIcon /></Button>
       </div>
-      <div className={cn(d === "done" || d.startsWith("day:") ? "-mx-5" : undefined)}>{body}</div>
+      <div className={cn(d === "done" || d.startsWith("day:") ? "-mx-3" : undefined)}>{body}</div>
     </section>
   )
 }

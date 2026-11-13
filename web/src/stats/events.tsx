@@ -60,15 +60,15 @@ export function EventExplorer({ f, fkey, live }: { f: Filter; fkey: string; live
   return (
     <Panel k="events" className="@container/events" data-events icon={<RadarIcon />} title={t("stats:events.title")} sub={t("stats:events.sub")}
       right={<Segmented size="sm" value={kind} onChange={(k) => setKind(k)} options={[["all", t("stats:events.all")], ["turn", t("stats:events.turns")], ["decision", t("stats:events.decisions")], ["mark", t("stats:events.marks")]] as const} />}>
-      <div className="flex min-h-12 flex-wrap items-center gap-2 px-5 py-2.5" data-events-crumbs>
-        <span className="type-footnote text-muted-foreground">{t("stats:events.span")}</span>
-        <button type="button" className={cn("rounded-md px-1.5 py-0.5 font-mono text-[12px] tabular-nums", zoom.length ? "text-muted-foreground hover:text-foreground" : "text-foreground")} onClick={() => { setZoom([]); setSel(null) }}>{t("stats:events.whole")}</button>
+      <div className="flex min-h-10 flex-wrap items-center gap-1.5 px-5 pt-1 pb-1" data-events-crumbs>
+        <span className="mr-0.5 type-label text-tertiary">{t("stats:events.span")}</span>
+        <button type="button" className={cn("rounded-md px-1.5 py-0.5 type-footnote tabular-nums", zoom.length ? "text-muted-foreground hover:bg-muted hover:text-foreground" : "font-medium text-foreground")} onClick={() => { setZoom([]); setSel(null) }}>{t("stats:events.whole")}</button>
         {zoom.map((w, i) => <span key={i} className="inline-flex items-center gap-2"><span className="text-tertiary">/</span>
-          <button type="button" className={cn("rounded-md px-1.5 py-0.5 font-mono text-[12px] tabular-nums", i === zoom.length - 1 ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")} onClick={() => { setZoom(zoom.slice(0, i + 1)); setSel(null) }} data-zoom-level={i}>{at(w[0], true)} – {at(w[1], true)}</button></span>)}
+          <button type="button" className={cn("anim-in rounded-md px-1.5 py-0.5 type-footnote tabular-nums", i === zoom.length - 1 ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground")} onClick={() => { setZoom(zoom.slice(0, i + 1)); setSel(null) }} data-zoom-level={i}>{at(w[0], true)} – {at(w[1], true)}</button></span>)}
         <span className="flex-1" />
-        {sel && <span className="inline-flex h-6 items-center gap-1 rounded-md border bg-muted/40 pr-1 pl-2 font-mono text-[11.5px] tabular-nums text-foreground" data-events-window>
-          <span className="font-sans text-muted-foreground">{t("stats:events.time")}</span>{at(sel[0], long)} – {at(sel[1], long)}
-          <button type="button" aria-label={t("stats:events.clear")} className="ml-0.5 rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => setSel(null)}><XIcon className="size-3" /></button></span>}
+        {sel && <span className="anim-in inline-flex h-6 items-center gap-1 rounded-md bg-primary/10 pr-1 pl-2 type-footnote tabular-nums text-foreground" data-events-window>
+          <span className="text-muted-foreground">{t("stats:events.time")}</span>{at(sel[0], long)} – {at(sel[1], long)}
+          <button type="button" aria-label={t("stats:events.clear")} className="ml-0.5 rounded-md p-0.5 text-muted-foreground hover:text-foreground" onClick={() => setSel(null)}><XIcon className="size-3" /></button></span>}
       </div>
       <div className="border-t-0! px-5 pb-2">
         {!v ? <Loading h={150} err={d.s === "error" ? d.msg : null} />
@@ -181,44 +181,44 @@ function Brush({ v, sel, long, onSel, onZoom, canOut, onOut }: { v: Events; sel:
   return (
     <div ref={box} className="relative w-full select-none" data-brush>
       {win && !live && (
-        <div ref={label} className="absolute top-0 z-10 flex items-center gap-1 whitespace-nowrap rounded-lg border bg-popover/95 py-0.5 pr-0.5 pl-2 text-popover-foreground shadow-sm backdrop-blur"
+        <div ref={label} className="anim-in absolute top-0 z-10 flex items-center gap-1 whitespace-nowrap rounded-lg bg-popover/95 py-0.5 pr-0.5 pl-2.5 text-popover-foreground shadow-md backdrop-blur"
           style={{ left: place((xa + xb) / 2) }} data-brush-label>
-          <span className="font-mono text-[11.5px] tabular-nums">{at(win[0], long)} – {at(win[1], long)}</span>
+          <span className="type-footnote font-medium tabular-nums">{at(win[0], long)} – {at(win[1], long)}</span>
           <span className="type-footnote text-muted-foreground">· {t("stats:events.count", { count: v.a === win[0] && v.b === win[1] ? v.total : winCount })}</span>
           <Button size="icon-xs" variant="ghost" aria-label={t("stats:events.zoomIn")} title={t("stats:events.zoomIn")} onClick={() => onZoom(win)} data-zoom-in><ZoomInIcon /></Button>
           {canOut && <Button size="icon-xs" variant="ghost" aria-label={t("stats:events.zoomOut")} title={t("stats:events.zoomOut")} onClick={onOut} data-zoom-out><ZoomOutIcon /></Button>}
           <Button size="icon-xs" variant="ghost" aria-label={t("stats:events.clear")} title={t("stats:events.clear")} onClick={() => onSel(null)}><XIcon /></Button>
         </div>
       )}
-      {live && <div ref={label} className="pointer-events-none absolute top-1 z-10 whitespace-nowrap rounded-md bg-foreground px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-background" style={{ left: place((xa + xb) / 2) }}>{at(live[0], long)} – {at(live[1], long)} · {t("stats:events.count", { count: winCount })}</div>}
+      {live && <div ref={label} className="pointer-events-none absolute top-1 z-10 whitespace-nowrap rounded-md bg-foreground px-2 py-0.5 type-footnote tabular-nums text-background" style={{ left: place((xa + xb) / 2) }}>{at(live[0], long)} – {at(live[1], long)} · {t("stats:events.count", { count: winCount })}</div>}
       {!win && canOut && <Button size="xs" variant="ghost" className="absolute top-0 right-0 z-10 text-muted-foreground" onClick={onOut} data-zoom-out><ZoomOutIcon />{t("stats:events.zoomOut")}</Button>}
       <svg width={w} height={H} role="img" aria-label={t("stats:events.aria")} tabIndex={0} onKeyDown={key}
         className={cn("block touch-none overflow-visible rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring", cursor)}
         onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={() => { drag.current = null; setLive(null) }} onPointerLeave={() => setHover(null)}>
-        {win && <rect x={xa} y={TOP - 6} width={Math.max(1, xb - xa)} height={base - TOP + 6} fill="var(--foreground)" opacity={0.05} />}
+        {win && <rect x={xa} y={TOP - 6} width={Math.max(1, xb - xa)} height={base - TOP + 6} rx={6} fill="var(--primary)" opacity={0.07} />}
         {counts.map((c, i) => {
           const hh = scale(c), lit = win ? inWin(i) : hover === i
           return <rect key={i} x={i * slot + (slot - bw) / 2} y={base - hh} width={bw} height={hh} rx={Math.min(2, bw / 2)}
-            fill="var(--foreground)" opacity={win ? (lit ? 0.92 : 0.2) : lit ? 0.8 : 0.42} data-bucket={i} />
+            fill={lit ? "var(--primary)" : "var(--muted-foreground)"} opacity={win ? (lit ? 0.9 : 0.22) : lit ? 0.9 : 0.4} className="transition-[opacity,fill] duration-[120ms]" data-bucket={i} />
         })}
         {h.bad.map((b, i) => b > 0 && (
           <g key={"bad" + i} data-bad={i}>
             <rect x={i * slot + (slot - bw) / 2} y={base - scale(b * (counts[i] ? 1 : 0))} width={bw} height={Math.min(scale(b), scale(counts[i]))} rx={Math.min(2, bw / 2)} fill="var(--destructive)" opacity={win && !inWin(i) ? 0.35 : 0.9} />
-            <rect x={i * slot + slot / 2 - 3.5} y={base - scale(counts[i]) - 11} width={7} height={7} rx={1.5} fill="none" stroke="var(--destructive)" strokeWidth={1.5} opacity={win && !inWin(i) ? 0.4 : 1}><title>{t("stats:events.badN", { count: b })}</title></rect>
+            <circle cx={i * slot + slot / 2} cy={base - scale(counts[i]) - 7} r={2.5} fill="var(--destructive)" opacity={win && !inWin(i) ? 0.4 : 1}><title>{t("stats:events.badN", { count: b })}</title></circle>
           </g>
         ))}
         {win && <>
-          <line x1={xa} x2={xa} y1={TOP - 8} y2={base} stroke="var(--foreground)" strokeWidth={1.5} className="cursor-ew-resize" />
-          <line x1={xb} x2={xb} y1={TOP - 8} y2={base} stroke="var(--foreground)" strokeWidth={1.5} className="cursor-ew-resize" />
+          <line x1={xa} x2={xa} y1={TOP - 8} y2={base} stroke="var(--primary)" strokeWidth={1.5} strokeLinecap="round" className="cursor-ew-resize" />
+          <line x1={xb} x2={xb} y1={TOP - 8} y2={base} stroke="var(--primary)" strokeWidth={1.5} strokeLinecap="round" className="cursor-ew-resize" />
         </>}
         <line x1={0} x2={w} y1={base} y2={base} stroke="var(--border)" />
         {ticks.map((ts) => { const tx = x(ts); return <g key={ts} data-tick={ts}>
           <line x1={tx} x2={tx} y1={base} y2={base + 4} stroke="var(--border)" />
-          <text x={tx} y={H - 5} textAnchor={tx < 24 ? "start" : tx > w - 24 ? "end" : "middle"} className="fill-muted-foreground font-mono text-[10.5px] tabular-nums">{tickLabel(ts)}</text>
+          <text x={tx} y={H - 5} textAnchor={tx < 24 ? "start" : tx > w - 24 ? "end" : "middle"} className="fill-tertiary type-footnote tabular-nums">{tickLabel(ts)}</text>
         </g> })}
       </svg>
       {hover != null && !win && !drag.current && counts[hover] > 0 && (
-        <div className="pointer-events-none absolute z-10 rounded-md border bg-popover px-2 py-1 font-mono text-[11px] tabular-nums text-popover-foreground shadow-sm" style={{ left: Math.min(Math.max(0, hover * slot - 50), w - 170), top: TOP - 4 }} data-brush-tip>
+        <div className="pointer-events-none absolute z-10 rounded-lg bg-popover px-2.5 py-1 type-footnote tabular-nums text-popover-foreground shadow-md" style={{ left: Math.min(Math.max(0, hover * slot - 50), w - 170), top: TOP - 4 }} data-brush-tip>
           {at(h.start + hover * h.step, long)} – {at(Math.min(v.hi, h.start + (hover + 1) * h.step), long)} · {t("stats:events.count", { count: counts[hover] })}{h.bad[hover] ? <span className="text-destructive"> · {t("stats:events.badN", { count: h.bad[hover] })}</span> : null}
         </div>
       )}
@@ -228,28 +228,32 @@ function Brush({ v, sel, long, onSel, onZoom, canOut, onOut }: { v: Events; sel:
 
 function EventList({ v, long }: { v: Events; long: boolean }) {
   const t = useT()
-  if (!v.rows.length) return <div className="px-5 py-8 text-center type-callout text-muted-foreground">{t("stats:events.empty")}</div>
+  /* the first rows, then more on request: one scrolling page, no scroll box inside it */
+  const [all, setAll] = useState(false)
+  if (!v.rows.length) return <div className="anim-in px-5 py-8 text-center type-callout text-muted-foreground">{t("stats:events.empty")}</div>
+  const shown = all ? v.rows : v.rows.slice(0, 30)
   return (
-    <div className="max-h-[420px] overflow-y-auto py-1" data-event-list>
-      {v.rows.map((e) => {
+    <div className="px-2 py-1.5" data-event-list>
+      {shown.map((e) => {
         const open = () => go(e.kind === "turn" && e.session_id ? "#/sessions/" + e.session_id : e.item_id ? "#/items/" + e.item_id : "#/inbox")
         const detail = e.kind === "turn"
           ? [e.dur_ms != null ? fmtMs(e.dur_ms) : "", e.tokens ? fmtN(e.tokens) + " tokens" : "", e.tools ? t("stats:events.tools", { count: e.tools }) + (e.tool_errors ? " · " + t("stats:events.toolErrors", { count: e.tool_errors }) : "") : ""].filter(Boolean).join(" · ")
           : e.kind === "decision" ? (e.dur_ms != null ? t("stats:events.answered", { dur: fmtMs(e.dur_ms) }) : "") : e.by ?? ""
         return (
-          <button key={e.kind + e.id} type="button" onClick={open} className="grid w-full grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)] items-center gap-x-4 px-5 py-2 text-left transition-colors hover:bg-muted/40 @3xl/events:grid-cols-[7.5rem_minmax(0,14rem)_minmax(0,1fr)_auto]" data-event={e.kind} data-event-bad={e.bad || undefined}>
-            <span className="font-mono text-[12px] tabular-nums text-muted-foreground">{at(e.ts, long, true)}</span>
+          <button key={e.kind + e.id} type="button" onClick={open} className="grid w-full grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)] items-center gap-x-4 rounded-lg px-3 py-2 text-left hover:bg-muted/60 @3xl/events:grid-cols-[7.5rem_minmax(0,14rem)_minmax(0,1fr)_auto]" data-event={e.kind} data-event-bad={e.bad || undefined}>
+            <span className="font-mono type-footnote tabular-nums text-muted-foreground">{at(e.ts, long, true)}</span>
             <span className="flex min-w-0 items-center gap-2 type-callout">
-              <span aria-hidden className={cn("size-2 shrink-0 rounded-[3px]", e.open && "animate-pulse")} style={{ background: e.bad ? "var(--destructive)" : KIND_COLOR[e.kind] }} />
+              <span aria-hidden className={cn("size-2 shrink-0 rounded-full", e.open && "animate-pulse motion-reduce:animate-none")} style={{ background: e.bad ? "var(--destructive)" : KIND_COLOR[e.kind] }} />
               <span className={cn("truncate", e.bad && "text-destructive")}>{eventLabel(e)}</span>
             </span>
             <span className="col-span-2 flex min-w-0 items-center gap-2 pl-[8.5rem] @3xl/events:col-span-1 @3xl/events:pl-0">
-              {e.item_id ? <><ItemNo id={e.item_id} /><span className="truncate type-callout text-foreground/85">{e.title}</span></> : <span className="type-footnote text-tertiary">{t("stats:events.noItem")}</span>}
+              {e.item_id ? <><ItemNo id={e.item_id} /><span className="truncate type-callout text-foreground/90">{e.title}</span></> : <span className="type-footnote text-tertiary">{t("stats:events.noItem")}</span>}
             </span>
-            <span className="hidden max-w-80 truncate text-right font-mono text-[11.5px] tabular-nums text-muted-foreground @3xl/events:block" title={detail || undefined}>{detail}</span>
+            <span className="hidden max-w-80 truncate text-right type-footnote tabular-nums text-muted-foreground @3xl/events:block" title={detail || undefined}>{detail}</span>
           </button>
         )
       })}
+      {v.rows.length > shown.length && <div className="px-1 pt-1 pb-1"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setAll(true)} data-events-more>{t("stats:overview.showMore", { count: v.rows.length - shown.length })}</Button></div>}
     </div>
   )
 }

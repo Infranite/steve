@@ -2,7 +2,11 @@
 import { useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { api, type RInstall, type RTailcat } from "@/api"
+import { Input } from "@/components/ui/input"
 import { useT } from "@/i18n"
+
+/** a command or code to copy: a raised line in the code face, on the muted block it sits in */
+export const CODE = "block select-all break-all rounded-lg bg-background px-3 py-2 type-code text-foreground shadow-[var(--lift)]"
 
 export function TailcatSection() {
   const t = useT()
@@ -21,14 +25,14 @@ export function TailcatSection() {
     finally { setBusy(false) }
   }
   return (
-    <div className="rounded-xl border p-4 space-y-2 type-callout" data-tailcat>
-      <p className="font-medium">{t("shell:devices.tailcat.title")}</p>
+    <div className="space-y-2 rounded-xl bg-muted/60 p-4 type-callout" data-tailcat>
+      <p className="type-body font-medium">{t("shell:devices.tailcat.title")}</p>
       <p className="text-muted-foreground">{s.available ? t("shell:devices.tailcat.help") : t("shell:devices.tailcat.missing")}</p>
       {error && <p role="alert" className="text-destructive">{error}</p>}
       {s.enabled && !s.running && s.error && <p className="text-destructive">{s.error}</p>}
       {s.enabled && s.hub_url && <>
-        <p>{t("shell:devices.tailcat.command")}</p>
-        <code className="block break-all select-all" data-tailcat-command>steve setup node --hub {s.hub_url}</code>
+        <p className="text-muted-foreground">{t("shell:devices.tailcat.command")}</p>
+        <code className={CODE} data-tailcat-command>steve setup node --hub {s.hub_url}</code>
         <p className="text-muted-foreground">{t("shell:devices.tailcat.secret")}</p>
       </>}
       {(s.available || s.enabled) && <Button variant="outline" disabled={busy} onClick={() => void toggle()}>{s.enabled ? t("shell:devices.tailcat.off") : t("shell:devices.tailcat.on")}</Button>}
@@ -57,13 +61,13 @@ function RemoteInstall() {
     <Button variant="outline" disabled={busy} onClick={() => void act(async () => { setOp(await api.createInstall()) })}>{t("shell:devices.install.start")}</Button>
   </div>
   return (
-    <div className="border-t pt-3 space-y-2" data-remote-install>
-      <p className="font-medium">{t("shell:devices.install.title")}</p>
+    <div className="anim-in space-y-2 border-t border-border/70 pt-3" data-remote-install>
+      <p className="type-body font-medium">{t("shell:devices.install.title")}</p>
       {op.state === "waiting" || op.state === "failed" ? <>
-        <p>{t("shell:devices.install.step1")}</p>
-        <code className="block break-all select-all" data-install-command>{op.command}</code>
-        <label className="block" htmlFor="install-address">{t("shell:devices.install.step2")}</label>
-        <input id="install-address" className="w-full rounded-md border bg-background px-3 py-2 font-mono" value={address} onChange={e => setAddress(e.target.value)} placeholder="tc…" autoComplete="off" spellCheck={false} data-install-address />
+        <p className="text-muted-foreground">{t("shell:devices.install.step1")}</p>
+        <code className={CODE} data-install-command>{op.command}</code>
+        <label className="block text-muted-foreground" htmlFor="install-address">{t("shell:devices.install.step2")}</label>
+        <Input id="install-address" className="font-mono" value={address} onChange={e => setAddress(e.target.value)} placeholder="tc…" autoComplete="off" spellCheck={false} data-install-address />
         <Button disabled={busy || !address.trim()} onClick={() => void act(async () => { setOp(await api.runInstall(op.id, address)) })}>{op.state === "failed" ? t("shell:devices.install.retry") : t("shell:devices.install.run")}</Button>
       </> : null}
       {op.steps.length > 0 && <ol className="list-decimal pl-5 space-y-1" data-install-steps>{op.steps.map((s, i) => <li key={i} className={i === op.steps.length - 1 && op.state === "running" ? "font-medium" : "text-muted-foreground"}>{s.text}</li>)}</ol>}
