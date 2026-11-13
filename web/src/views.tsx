@@ -308,7 +308,7 @@ const STATE_TONE: Record<ItemState["tone"], [string, string]> = {
 }
 const ROOT_STATUS: Record<ItemState["kind"], AgentStatus> = {
   done: "done", dropped: "stopped", failed: "failed", proposed: "proposed", asking: "asking", unavailable: "blocked",
-  graphPaused: "paused", paused: "paused", blocked: "blocked", working: "running", queued: "starting", idle: "idle",
+  graphPaused: "paused", paused: "paused", blocked: "blocked", working: "running", queued: "idle", idle: "idle",
 }
 const NOW_RING: Record<ItemState["tone"], string> = { run: "border-blue/30", wait: "border-attention/40 bg-attention/[0.03]", pause: "border-border", done: "border-border", fail: "border-destructive/35", neutral: "border-border" }
 const STATE_ICON: Record<ItemState["kind"], typeof CheckIcon> = {
