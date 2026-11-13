@@ -13,7 +13,7 @@ const codeBlockVariants = cva(
     variants: {
       variant: {
         default:
-          "bg-muted text-foreground ring-1 ring-foreground/5 dark:ring-foreground/10",
+          "bg-muted text-foreground ",
         destructive:
           "bg-destructive/5 text-destructive ring-1 ring-destructive/15 dark:bg-destructive/10 dark:ring-destructive/20",
       },

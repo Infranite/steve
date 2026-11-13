@@ -1,6 +1,7 @@
 /* Shared building blocks for the Steve prototype — see DESIGN.md.
  * Quiet chrome: grey scale everywhere, blue = selected/running, orange = needs you. */
 import { Children, Fragment, memo, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
+import { flushSync } from "react-dom"
 import { Robot } from "@/robot"
 import { cue } from "@/bus"
 import { clockDur } from "@/i18n/format"
@@ -58,7 +59,16 @@ import { isPeopleDecision, PeopleDecisionBody } from "@/people/pending"
 import { usePeopleOn } from "@/api/people"
 
 /* ───────── routing ───────── */
-const hashSub = (cb: () => void) => { window.addEventListener("hashchange", cb); return () => window.removeEventListener("hashchange", cb) }
+/* a route change cross-fades the content area (view-transition-name: page) while the sidebar stays; without view
+ * transitions, or with reduced motion, it just changes */
+const hashSub = (cb: () => void) => {
+  const on = () => {
+    const d = document as Document & { startViewTransition?: (f: () => void) => unknown }
+    if (d.startViewTransition && !matchMedia("(prefers-reduced-motion: reduce)").matches) d.startViewTransition(() => flushSync(cb))
+    else cb()
+  }
+  window.addEventListener("hashchange", on); return () => window.removeEventListener("hashchange", on)
+}
 export function useRoute() { const h = useSyncExternalStore(hashSub, () => location.hash); return h.replace(/^#\/?/, "").split("/") }
 export const go = (h: string) => { location.hash = h }
 
@@ -135,7 +145,7 @@ export function BotName({ k, className }: { k: string | null; className?: string
 export function KindTag({ id, className }: { id: string; className?: string }) {
   const tr = useT(), t = tag(id)
   if (!t) return null
-  return <span title={tr("core:tag.kindTitle", { desc: tagDesc(t) })} className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-border bg-background px-1.5 font-mono text-[11px] leading-none text-foreground", className)} data-kind={t.name}>
+  return <span title={tr("core:tag.kindTitle", { desc: tagDesc(t) })} className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded-md bg-muted px-1.5 type-footnote leading-none text-foreground/80", className)} data-kind={t.name}>
     <span aria-hidden className="size-1.5 rounded-full" style={{ background: kindColor(t.name) }} />{t.name}</span>
 }
 /** tags: type first, then delivery and domain; delivery nature stays visible without a hover */
@@ -149,10 +159,11 @@ export function Tags({ ids, className, onRemove, max }: { ids?: string[]; classN
     <span className={cn("inline-flex flex-wrap items-center gap-1", className)} data-tags>
       {kinds.map((t) => <KindTag key={t.id} id={t.id} />)}
       {shown.map((t) => (
-        <span key={t.id} title={tr("core:tag.title", { cat: tagCatLabel(t.cat), desc: tagDesc(t) })} className={cn("inline-flex h-5 items-center gap-0.5 rounded-full px-2 text-[11.5px] leading-none", t.cat === "交付" ? "border border-border bg-background text-foreground" : "bg-muted text-muted-foreground")} data-tag={t.name} data-delivery={t.cat === "交付" || undefined}>
-          {t.cat === "交付" && <span className="mr-0.5 text-muted-foreground">{tagCatLabel(t.cat)} ·</span>}{tagLabel(t)}{onRemove && <button type="button" aria-label={tr("core:tag.remove", { name: tagLabel(t) })} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-muted hover:text-foreground"><XIcon className="size-3" /></button>}
+        <span key={t.id} title={tr("core:tag.title", { cat: tagCatLabel(t.cat), desc: tagDesc(t) })} className={cn("inline-flex h-5 items-center gap-0.5 rounded-md bg-muted px-1.5 type-footnote leading-none", t.cat === "交付" ? "text-foreground/80" : "text-muted-foreground")} data-tag={t.name} data-delivery={t.cat === "交付" || undefined}>
+          {/* in a list the delivery kind reads without its category (the title says it); editing it shows it whole */}
+          {t.cat === "交付" && onRemove && <span className="mr-0.5 text-muted-foreground">{tagCatLabel(t.cat)} ·</span>}{tagLabel(t)}{onRemove && <button type="button" aria-label={tr("core:tag.remove", { name: tagLabel(t) })} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-muted hover:text-foreground"><XIcon className="size-3" /></button>}
         </span>))}
-      {max && rest.length > max && <span className="text-[11.5px] text-muted-foreground">+{rest.length - max}</span>}
+      {max && rest.length > max && <span className="type-footnote text-muted-foreground">+{rest.length - max}</span>}
     </span>
   )
 }
@@ -205,7 +216,7 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
       <TabsList aria-label={label} className={cn("bg-muted", size === "sm" && "h-7!")}>
         {options.map((o) => {
           const [v, l, tip] = typeof o === "string" ? [o, o, undefined] : o
-          return <TabsTrigger key={v} value={v} aria-label={tip} title={tip} data-seg={v} className={cn("px-3 text-[13px]", iconOnly && "px-2", size === "sm" && "px-2.5 text-[12px]")}>{l}</TabsTrigger>
+          return <TabsTrigger key={v} value={v} aria-label={tip} title={tip} data-seg={v} className={cn("px-3 type-callout font-medium", iconOnly && "px-2", size === "sm" && "px-2.5 type-footnote font-medium")}>{l}</TabsTrigger>
         })}
       </TabsList>
     </Tabs>
@@ -215,7 +226,7 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
 export function Chips<T extends string>({ value, onChange, options, className }: { value: T; onChange: (v: T) => void; options: readonly T[]; className?: string }) {
   return (
     <ToggleGroup value={[value]} onValueChange={(v: any[]) => v.length && onChange(v[v.length - 1] as T)} size="sm" spacing={1} className={className}>
-      {options.map((o) => <ToggleGroupItem key={o} value={o} data-seg={o} className="h-7 rounded-full px-3 text-[12.5px] text-muted-foreground hover:text-foreground data-pressed:bg-muted data-pressed:text-foreground">{o}</ToggleGroupItem>)}
+      {options.map((o) => <ToggleGroupItem key={o} value={o} data-seg={o} className="h-7 rounded-md px-2.5 type-callout text-muted-foreground hover:bg-accent hover:text-foreground data-pressed:bg-accent data-pressed:font-medium data-pressed:text-foreground">{o}</ToggleGroupItem>)}
     </ToggleGroup>
   )
 }
@@ -260,21 +271,28 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
         <div className="flex shrink-0 items-center gap-1.5">{actions}</div>
       </header>
       <div ref={scrollRef ?? own} onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 36)} className="min-h-0 flex-1 overflow-y-auto">
-        <div className={cn("mx-auto w-full px-4 sm:px-8", footer ? "pb-6" : "pb-24 md:pb-12")} style={{ maxWidth: max + 64 }}>
+        {/* one frame for every page (1040, or 1280 for wide ones) so a title is always in the same place; a reading
+          * page keeps its narrower column on the frame's left edge instead of centring a width of its own */}
+        <div className={cn("mx-auto w-full px-4 sm:px-8", footer ? "pb-6" : "pb-24 md:pb-12")} style={{ maxWidth: frameOf(max) + 64 }}>
+          <div style={{ maxWidth: max <= 820 ? READING : undefined }}>
           {/* the title block keeps 20rem before the toolbar beside it wraps below, so a phone never squeezes the description */}
           {!noTitle && (
-            <div className="flex flex-wrap items-end gap-x-4 gap-y-3 pb-6 pt-1">
-              <div className="min-w-[min(100%,20rem)] flex-1"><h1 className={cn(small ? "type-title" : "type-large-title", "text-foreground")}>{title}</h1>{sub && <div className="mt-1 type-callout text-muted-foreground">{sub}</div>}</div>
+            <div className="flex flex-wrap items-end gap-x-4 gap-y-3 pb-8 pt-3">
+              <div className="min-w-[min(100%,20rem)] flex-1"><h1 className={cn(small ? "type-title" : "type-display", "text-foreground")}>{title}</h1>{sub && <div className="mt-1.5 type-callout text-muted-foreground">{sub}</div>}</div>
               {toolbar && <div className={cn("flex flex-wrap items-center gap-2", toolbarTop && "self-start")}>{toolbar}</div>}
             </div>
           )}
           {children}
+          </div>
         </div>
       </div>
       {footer}
     </div>
   )
 }
+/** the page widths: reading (conversation-like and settings pages), standard, wide (stats, an item with its side column) */
+const READING = 760
+const frameOf = (max: number) => (max > 1080 ? 1280 : 1040)
 
 /* ───────── shell ───────── */
 type NavGroup = "work" | "connect" | "automate"
@@ -329,12 +347,12 @@ export function Sidebar({ route: full }: { route: string }) {
   }, [route])
   const item = (h: string, l: string, I: any, on: boolean) => (
     <SidebarMenuItem key={h}>
-      <SidebarMenuButton isActive={on} tooltip={l} render={<a href={"#/" + h} data-nav={h || "chat"} aria-current={on ? "page" : undefined} />} className="text-[14px] text-foreground/85 data-active:font-medium data-active:text-foreground">
-        <I className="size-[18px]! text-muted-foreground" strokeWidth={1.5} /><span>{l}</span>
+      <SidebarMenuButton isActive={on} tooltip={l} render={<a href={"#/" + h} data-nav={h || "chat"} aria-current={on ? "page" : undefined} />} className="type-callout text-foreground/75 hover:text-foreground data-active:font-medium data-active:text-foreground data-active:[&>svg]:text-primary">
+        <I className="size-4! text-muted-foreground transition-colors" strokeWidth={1.75} /><span>{l}</span>
       </SidebarMenuButton>
       {!!cnt[h] && (h === "inbox"
-        ? <SidebarMenuBadge className="bg-attention px-1.5 text-[11px] font-semibold text-white! peer-hover/menu-button:text-white!">{cnt[h]}</SidebarMenuBadge>
-        : <SidebarMenuBadge className="text-muted-foreground">{cnt[h]}</SidebarMenuBadge>)}
+        ? <SidebarMenuBadge className="h-[18px] min-w-[18px] rounded-full bg-attention px-1.5 type-footnote font-semibold tabular-nums text-white! peer-hover/menu-button:text-white!">{cnt[h]}</SidebarMenuBadge>
+        : <SidebarMenuBadge className="type-footnote tabular-nums text-muted-foreground">{cnt[h]}</SidebarMenuBadge>)}
     </SidebarMenuItem>
   )
   return (
@@ -360,7 +378,7 @@ export function Sidebar({ route: full }: { route: string }) {
        *  with more beyond it fades and the footer keeps a hairline, so the lower groups read as scrolled, not cut off */}
       <SidebarContent ref={nav} className="[scrollbar-width:thin]! data-[more~=end]:mask-b-from-[calc(100%-2rem)] data-[more~=start]:mask-t-from-[calc(100%-2rem)]" data-sidebar-nav data-more={more}>
         {NAV_GROUPS.map((group) => <SidebarGroup key={group} className="py-1">
-          <SidebarGroupLabel className="h-6 text-[11px] text-muted-foreground">{t(`core:navGroup.${group}`)}</SidebarGroupLabel>
+          <SidebarGroupLabel className="h-7 type-label text-tertiary">{t(`core:navGroup.${group}`)}</SidebarGroupLabel>
           <SidebarGroupContent><SidebarMenu>{NAV.filter((x) => x.group === group).map((x) => item(x.h, t(`core:nav.${x.l}`), x.I, (route === x.h && !(x.h === "contacts" && meOn)) || (x.h === "contacts" && (route === "orgs" || route === "teams"))))}</SidebarMenu></SidebarGroupContent>
         </SidebarGroup>)}
       </SidebarContent>
