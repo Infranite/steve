@@ -563,7 +563,7 @@ export function AgentMonitor({
                   <span className="ui-agmc__step-label" title={x.label}>
                     {x.label}
                   </span>
-                  <span className="ui-agmc__step-time">{x.state === "failed" ? t("core:affect.monitor.failed") : secs(tookOf(x))}</span>
+                  <span className="ui-agmc__step-time">{x.state === "failed" ? t("core:affect.monitor.failed") : x.state === "done" && x.took == null ? "—" /* Steve: not timed */ : secs(tookOf(x))}</span>
                 </li>
               ))}
             </ol>

@@ -46,6 +46,7 @@ export function Cites({ cites }: { cites?: Cite[] }) {
 export function SessionKnowledge({ id }: { id: string }) {
   const t = useT()
   const [hits, setHits] = useState<Use[] | null | "absent">(null)
+  const [all, setAll] = useState(false)
   useEffect(() => { let on = true; kb.uses("session", id).then((r) => on && setHits(r.hits), (e) => on && setHits(e instanceof NotWired ? "absent" : [])); return () => { on = false } }, [id])
   if (hits === "absent" || hits === null) return null
   /* one search, one group; a document comes once in it, however many of its snippets came back */
@@ -59,7 +60,7 @@ export function SessionKnowledge({ id }: { id: string }) {
   return (
     <section data-session-knowledge>
       <SectionLabel>{count ? t("knowledge:parts.sessionTitleN", { count }) : t("knowledge:parts.sessionTitle")}</SectionLabel>
-      {count ? <div className="flex flex-col gap-2">{[...uses.entries()].map(([uid, u]) => (
+      {count ? <div className="flex flex-col gap-2">{[...uses.entries()].slice(0, all ? undefined : 2).map(([uid, u]) => (
         <div key={uid} className="rounded-xl bg-card px-2 pb-1.5 pt-3 shadow-[var(--lift)]" data-use-group={uid}>
           <Collapsible className="px-2" data-use-why>
             <CollapsibleTrigger className="group/why flex w-full min-w-0 items-start gap-1.5 text-left type-footnote text-muted-foreground hover:text-foreground">
@@ -75,7 +76,8 @@ export function SessionKnowledge({ id }: { id: string }) {
                 <span className="block truncate type-footnote text-muted-foreground">{h.deleted ? t("knowledge:parts.deleted") : [h.label.split(" · ")[0], levelLabel(h.level), n > 1 ? t("knowledge:parts.snippets", { count: n }) : null].filter(Boolean).join(" · ")}</span></span>
               {!h.deleted && <ChevronRightIcon className="mt-1 size-3.5 shrink-0 text-tertiary" />}
             </button>))}</div>
-        </div>))}</div>
+        </div>))}
+        {uses.size > 2 && <button type="button" onClick={() => setAll(!all)} className="self-start px-1 type-footnote text-muted-foreground hover:text-foreground" data-uses-more>{all ? t("knowledge:parts.fewerSearches") : t("knowledge:parts.moreSearches", { count: uses.size - 2 })}</button>}</div>
         : <div className="rounded-xl bg-card p-4 type-callout text-muted-foreground shadow-[var(--lift)]">{t("knowledge:parts.sessionNone")}</div>}
     </section>
   )

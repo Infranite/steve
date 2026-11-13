@@ -60,7 +60,7 @@ function Monitor({ s, turns, tot }: { s: Sess; turns: Turn[]; tot?: SessionTotal
       u?.total ? t("views:sessionPanel.turnTokens", { tokens: fmtN(u.total) }) : null, u && u.est > 0 ? fmtEst(u.est, u.unpriced_tokens) : null].filter(Boolean).join(" · ")
     return {
       id: String(x.idx), label: x.prompt || t("views:sessionPanel.turnN", { n: x.n }), icon: <I strokeWidth={1.75} />,
-      state: x.live ? "running" : "done", since: x.live ? x.start : undefined, took: x.end ? x.end - x.start : 0,
+      state: x.live ? "running" : "done", since: x.live ? x.start : undefined, took: x.end && x.end > x.start ? x.end - x.start : undefined,
       tool: t("views:sessionPanel.turnOf", { n: x.n, by: t(`views:sessionPanel.by.${x.by || "none"}`) }), detail: facts,
       output: x.stop && x.stop !== "end_turn" ? t("views:sessionPanel.stopped", { reason: x.stop }) : undefined,
     }
@@ -141,7 +141,7 @@ function Time({ s, turns }: { s: Sess; turns: Turn[] }) {
     <section data-session-time>
       <SectionLabel>{t("views:sessionPanel.time")}</SectionLabel>
       <Card className="grid grid-cols-2 gap-x-4 gap-y-3.5 p-4">
-        {cells.map(([k, v, sub]) => <div key={k} className="min-w-0"><div className="type-footnote text-muted-foreground">{k}</div><div className="truncate type-headline tabular-nums">{v}</div>{sub && <div className="truncate type-footnote text-tertiary">{sub}</div>}</div>)}
+        {cells.map(([k, v, sub]) => <div key={k} className="min-w-0"><div className="type-footnote text-muted-foreground">{k}</div><div className="truncate type-headline tabular-nums">{v}</div>{sub && <div className="line-clamp-2 type-footnote text-tertiary">{sub}</div>}</div>)}
       </Card>
     </section>
   )
@@ -151,23 +151,27 @@ function Time({ s, turns }: { s: Sess; turns: Turn[] }) {
 function Outputs({ s, det }: { s: Sess; det: RItemDetail | null }) {
   const t = useT()
   const [view, setView] = useState<OutOpen | null>(null)
-  const [allFiles, setAllFiles] = useState(false)
+  const [allFiles, setAllFiles] = useState(false), [allOuts, setAllOuts] = useState(false)
   const files = useMemo(() => filesOf(s.ev), [s.ev])
   const arts = det ? outputsOf(s.id, det.artifacts, det.timeline, det.sessionIds) : []
-  const outs: Out[] = arts.map((a) => [a.kind, a.title, a.location, a.id, a.created, det?.artifactRoles?.[a.id] as Out[5]])
+  /* the results first, the records of the work after them; the newest first in each */
+  const outs: Out[] = arts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det?.artifactRoles?.[a.id] as Out[5]])
+    .sort((a, b) => Number(a[5] === "record") - Number(b[5] === "record") || (b[4] ?? 0) - (a[4] ?? 0))
+  const outsShown = allOuts ? outs : outs.slice(0, 4)
   const add = files.reduce((n, f) => n + f[1], 0), del = files.reduce((n, f) => n + f[2], 0)
   const shown = allFiles ? files : files.slice(0, 5)
   return (
     <section data-session-outputs={outs.length}>
       <SectionLabel>{t("views:sessionPanel.outputs")}</SectionLabel>
       {!outs.length && !files.length ? <Card><p className="type-callout text-muted-foreground">{s.loaded ? t("views:sessionPanel.noOutputs") : t("common:state.loading")}</p></Card> : <div className="flex flex-col gap-2">
-        {outs.map((o) => (
+        {outsShown.map((o) => (
           <button key={o[3]} type="button" onClick={() => setView({ o })} className="group flex w-full items-start gap-3 rounded-xl bg-card p-3.5 text-left shadow-[var(--lift)] transition-shadow duration-180 hover:shadow-[var(--lift-hover)]" data-session-out={o[3]}>
             <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><PackageIcon className="size-4" strokeWidth={1.75} /></span>
             <span className="min-w-0 flex-1"><span className="line-clamp-2 type-callout font-medium text-foreground">{o[1]}</span>
               <span className="mt-0.5 flex min-w-0 items-center gap-1.5 type-footnote text-muted-foreground"><span className="shrink-0 rounded-md bg-muted px-1.5">{o[0]}</span>{o[5] === "record" && <span className="shrink-0">{t("shell:outs.record")}</span>}{o[4] ? <span className="truncate">{t("views:sessionPanel.deliveredAt", { time: monthDayTime(o[4]) })}</span> : null}</span></span>
             <ChevronRightIcon className="mt-2 size-4 shrink-0 text-tertiary transition-transform group-hover:translate-x-0.5" />
           </button>))}
+        {outs.length > 4 && <button type="button" onClick={() => setAllOuts(!allOuts)} className="self-start px-1 type-footnote text-muted-foreground hover:text-foreground" data-session-outs-more>{allOuts ? t("views:sessionPanel.less") : t("views:sessionPanel.more", { count: outs.length - 4 })}</button>}
         {files.length > 0 && <Card className="p-0 py-2.5" data-session-files={files.length}>
           <div className="flex items-center gap-2 px-4 pb-1.5 type-callout"><FileDiffIcon className="size-4 text-muted-foreground" strokeWidth={1.75} /><span className="font-medium">{t("core:transcript.filesChanged", { count: files.length })}</span>
             <span className="ml-auto type-footnote font-mono tabular-nums"><span className={add ? "text-success" : "text-tertiary"}>+{add}</span> <span className={del ? "text-destructive" : "text-tertiary"}>−{del}</span></span></div>
