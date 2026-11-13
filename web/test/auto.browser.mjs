@@ -1,7 +1,9 @@
 // Automation against a fake Hub: a filter whose branches and edges disagree is warned about on the canvas
 // (strong for an edge no branch names, weak for a branch without an edge), renaming a branch in the
-// inspector renames its edge, the internal hosts flows may reach are your own setting, and a new
-// schedule's budget follows its mode until you type one. 1280 and 390 px, light and dark.
+// inspector renames its edge, the canvas (affectUI Workflow Builder) adds a node from its palette after
+// the selected one and plays a dry run's real steps in its run panel, the internal hosts flows may reach
+// are your own setting, and a new schedule's budget follows its mode until you type one. 1280 and 390 px,
+// light and dark.
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
@@ -20,11 +22,15 @@ const graph = {
 }
 const MODE = { item_auto: "建事项并开始，自动验收", report: "在对话里发一条汇报" }
 const flow = { id: "flw_1", kind: "flow", name: "分支对不上", description: "", enabled: false, version: 1, origin: "user", origin_label: "", trigger: { source: "manual", types: [] }, uses_ai: false, outcomes: 2, runs24: 0, last_run: null, created: 1, updated: 1, graph, versions: [{ version: 1, author: "usr_dev", note: "", created: 1 }] }
+const dryRun = { id: "run_d", flow_id: "flw_1", flow_version: 1, status: "done", dry_run: true, event_id: null, outcome: "ignored", outcome_label: "忽略了", started: 2, ended: 3, steps: [
+  { seq: 1, node_id: "t", status: "ok", branch: null, input: { summary: "样例" }, output: { summary: "样例" }, ms: 1, error: null },
+  { seq: 2, node_id: "f", status: "ok", branch: "是", input: {}, output: {}, ms: 2, error: null },
+  { seq: 3, node_id: "a", status: "ok", branch: null, input: {}, output: { skipped: "试运行不执行" }, ms: 1, error: null }] }
 const run = async ({ width, height, scheme }) => {
   const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height }, colorScheme: scheme, reducedMotion: "reduce" })
   page.setDefaultTimeout(10000)
   const errors = []; page.on("pageerror", (e) => errors.push(e.message))
-  let hosts = ["nas.local"]; const created = []
+  let hosts = ["nas.local"]; const created = [], dry = []
   await page.route("**/*", async (route) => {
     const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (!u.pathname.startsWith("/api/")) return route.continue()
     const method = route.request().method(), p = u.pathname.slice(4)
@@ -34,6 +40,7 @@ const run = async ({ width, height, scheme }) => {
     else if (p === "/flows" && u.searchParams.get("kind") === "flow") data = [flow]
     else if (p === "/flows/flw_1") data = flow
     else if (p === "/flows/flw_1/runs") data = []
+    else if (p === "/flows/flw_1/dry-run") { dry.push(route.request().postDataJSON()); data = dryRun }
     else if (p === "/schedules" && method === "POST") { created.push(route.request().postDataJSON()); data = { id: "flw_s", next_at: null, ...created.at(-1) } }
     else if (p === "/signals") data = { stats: { total: 0, need: 0, item: 0, quiet: 0 }, items: [] }
     else if (p === "/flows/parse-when" || p === "/schedules/parse") data = { cron: "0 9 * * 1", tz: "Asia/Taipei", describe: "每周一 09:00", next: [], by: "rule" }
@@ -57,6 +64,58 @@ const run = async ({ width, height, scheme }) => {
     assert.equal(await page.locator('[data-edge-label="b"]').inputValue(), "其他")
     assert.equal(await page.locator("[data-branch-warnings]").count(), 0)
     await fits(); await shot("rule-renamed")
+    // the canvas: a card per node, the filter's two branches as its two outputs
+    assert.equal(await page.locator("[data-rule-node]").count(), 4)
+    assert.equal(await page.locator('[data-rule-node="f"] [data-out]').count(), 2)
+    // a flow that has its nodes opens on the canvas, the palette behind Add node
+    assert.equal(await page.locator(".ui-wf-pal").count(), 0)
+    // the palette adds a node after the selected one: joined to it, its settings open
+    if (width < 640) await page.locator(".ui-wf-scrim").click({ position: { x: 5, y: 5 } })
+    await page.locator(".ui-wf-tb__add").click()
+    await page.locator('.ui-wf-pal [data-palette-item="action:notify"]').click()
+    await page.locator('[data-inspector][data-kind="action"]').waitFor()
+    assert.equal(await page.locator("[data-rule-node]").count(), 5)
+    await page.locator(".ui-wf-set__head button").last().click(); await page.locator(".ui-wf-set").waitFor({ state: "detached" })
+    // dropped on empty canvas with nothing selected, a node joins nothing: its card and the page say so and Save waits
+    // (the Hub refuses a node the trigger can't reach); ⌘Z takes the drop back
+    const empty = async () => page.evaluate(() => {
+      const v = document.querySelector(".ui-wf-vp").getBoundingClientRect()
+      for (let y = v.top + 30; y < v.bottom - 90; y += 20) for (let x = v.left + 20; x < v.right - 20; x += 20) {
+        const el = document.elementFromPoint(x, y)
+        if (el?.classList.contains("ui-wf-vp") && [[-160, -110], [160, 110], [-160, 110], [160, -110], [0, -110], [0, 110], [-160, 0], [160, 0]].every(([dx, dy]) => document.elementFromPoint(x + dx, y + dy)?.classList.contains("ui-wf-vp"))) return { x, y }
+      }
+      return null
+    })
+    let spot = await empty(); assert.ok(spot, "an empty spot on the canvas")
+    await page.mouse.click(spot.x, spot.y)
+    assert.equal(await page.locator(".ui-wf-node[data-selected]").count(), 0)
+    if (width < 640 && await page.locator(".ui-wf-scrim").count()) await page.locator(".ui-wf-scrim").click({ position: { x: 5, y: 5 } })
+    if (!await page.locator(".ui-wf-pal").count()) await page.locator(".ui-wf-tb__add").click()
+    const item = await page.locator('.ui-wf-pal [data-palette-item="filter"]').boundingBox()
+    await page.mouse.move(item.x + 20, item.y + item.height / 2); await page.mouse.down()
+    await page.mouse.move(item.x + 40, item.y + item.height / 2, { steps: 3 })
+    spot = await empty(); assert.ok(spot, "an empty spot while dragging")
+    await page.mouse.move(spot.x, spot.y, { steps: 8 }); await page.mouse.up()
+    await page.locator("[data-unreachable]").waitFor()
+    assert.equal(await page.locator("[data-rule-node]").count(), 6)
+    const orphan = await page.locator("[data-unreachable]").getAttribute("data-unreachable")
+    assert.match(await page.locator(`[data-rule-node="${orphan}"] .ui-wf-node__chip`).innerText(), /未连接/)
+    assert.match(await page.locator("[data-unreachable]").innerText(), /保存/)
+    assert.equal(await page.locator("[data-save-rule]").isDisabled(), true)
+    await fits(); await shot("rule-orphan")
+    if (await page.locator(".ui-wf-set").count()) { await page.locator(".ui-wf-set__head button").last().click(); await page.locator(".ui-wf-set").waitFor({ state: "detached" }) }
+    if (width < 640 && await page.locator(".ui-wf-scrim").count()) await page.locator(".ui-wf-scrim").click({ position: { x: 5, y: 5 } })
+    await page.locator(".ui-wf-vp").focus(); await page.keyboard.press("ControlOrMeta+z")
+    await page.locator("[data-unreachable]").waitFor({ state: "detached" })
+    assert.equal(await page.locator("[data-rule-node]").count(), 5)
+    assert.equal(await page.locator("[data-save-rule]").isDisabled(), false)
+    // Run makes a dry run with the edited graph and plays its steps; the node it didn't pass steps back
+    await page.locator(".ui-wf-tb__run").click()
+    await page.locator('.ui-wf-run[data-open] [data-step="a"]').waitFor()
+    assert.equal(dry.length, 1); assert.equal(dry[0].graph.nodes.length, 5)
+    assert.deepEqual(await page.locator(".ui-wf-run [data-step]").evaluateAll((xs) => xs.map((x) => x.dataset.step)), ["t", "f", "a"])
+    await page.locator('[data-rule-node="b"][data-skipped]').waitFor()
+    await fits(); await shot("rule-dry-run")
     // the flow list: the internal hosts are a setting you save
     await page.goto(base + "/test/fixtures/auto.html#/auto/rules"); await page.locator("[data-allow-private] input").waitFor()
     assert.equal(await page.locator("[data-allow-private] input").inputValue(), "nas.local")

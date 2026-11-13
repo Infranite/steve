@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { branchWarnings, renameBranchEdges, branchLabels } from "../src/auto/branches.ts"
+import { branchWarnings, renameBranchEdges, branchLabels, unreachableNodes } from "../src/auto/branches.ts"
 
 const filter = (labels, other) => ({ id: "f", kind: "filter", title: "是不是", config: { rules: labels.map((label) => ({ label, when: "true" })), else_label: other } })
 const graph = (f, edges) => ({ nodes: [{ id: "t", kind: "trigger", title: "", config: {} }, f, { id: "a", kind: "action", title: "", config: {} }, { id: "b", kind: "action", title: "", config: {} }], edges: [{ from: "t", to: "f", label: "" }, ...edges] })
@@ -26,4 +26,10 @@ test("renaming a branch on the canvas renames its edges and its on_fail branch",
   // an emptied label, or one more branch, renames nothing
   assert.equal(renameBranchEdges(g, "f", ["是", "否"], ["", "否"]), g)
   assert.equal(renameBranchEdges(g, "f", ["是", "否"], ["是", "否", "也许"]), g)
+})
+
+test("a node the trigger can't reach is listed, as the hub refuses it on save", () => {
+  const nodes = [{ id: "t", kind: "trigger", config: {} }, { id: "f", kind: "filter", config: {} }, { id: "a", kind: "action", config: {} }, { id: "b", kind: "action", config: {} }, { id: "c", kind: "action", config: {} }]
+  assert.deepEqual(unreachableNodes({ nodes, edges: [{ from: "t", to: "f", label: "" }, { from: "f", to: "a", label: "" }, { from: "b", to: "c", label: "" }] }), ["b", "c"])
+  assert.deepEqual(unreachableNodes({ nodes, edges: [{ from: "t", to: "f", label: "" }, { from: "f", to: "a", label: "" }, { from: "a", to: "b", label: "" }, { from: "f", to: "c", label: "x" }] }), [])
 })

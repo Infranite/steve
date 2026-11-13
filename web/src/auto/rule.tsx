@@ -8,23 +8,24 @@ import { Input } from "@/components/ui/input"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { Page, Row, Segmented, StatusDot, Meta, Empty, Composer, go, Panel, SectionLabel, Blank } from "@/ui"
+import { Page, Row, Segmented, StatusDot, Meta, Empty, Composer, go, Panel, SectionLabel } from "@/ui"
 import { tm, toast } from "@/store"
 import { Unwired } from "@/unwired"
-import { flowApi, useLoad, errText, sourceLabel, type Flow, type Graph, type Run } from "@/api/flow"
+import { flowApi, useLoad, errText, sourceLabel, type Flow, type GNode, type Graph, type Run } from "@/api/flow"
 import { HubError } from "@/api"
 import { traceOf } from "@/auto/trace"
 import { lazyView } from "@/lazy"
 const FlowCanvas = lazyView(() => import("@/auto/canvas").then((m) => ({ default: m.FlowCanvas })))
-import { Inspector, toYaml, kindOf, branchWarnings } from "@/auto/nodes"
-import { Loading, Failed, Modal, Json, ms, RUN_STATUS } from "@/auto/common"
+import { Inspector, toYaml, kindOf, branchWarnings, unreachableNodes } from "@/auto/nodes"
+import { Loading, Failed, Modal, Json } from "@/auto/common"
 import { t as tr, useT } from "@/i18n"
 
 const back = (): [string, string] => ["#/auto/rules", tr("auto:title")]
 const runParam = () => new URLSearchParams(location.hash.split("?")[1] ?? "").get("run")
 const authorLabel = (a: string) => (a === "steve" ? "Steve" : a.startsWith("plugin:") ? tr("auto:rule.authorPlugin") : tr("auto:rule.authorYou"))
 
-type Trace = { path: string[]; ran: Record<string, any>; run: Run; label: string }
+/** the run shown on the canvas: `key` replays it there, `path` / `ran` are what the inspector and the banner read */
+type Trace = { key: string; path: string[]; ran: Record<string, any>; run: Run; label: string }
 
 export function RuleView({ id }: { id: string }) {
   const L = useLoad(() => flowApi.flow(id), [id], ["flow"])
@@ -32,7 +33,7 @@ export function RuleView({ id }: { id: string }) {
   const sources = useLoad(() => flowApi.sources().catch(() => []), [])
   const runs = useLoad(() => flowApi.flowRuns(id, 10), [id], ["run"])
   const [work, setWork] = useState<Graph | null>(null), [dirty, setDirty] = useState(false), [rev, setRev] = useState(0)
-  const [sel, setSel] = useState<string | null>("t"), [fresh, setFresh] = useState<string | null>(null)
+  const [sel, setSel] = useState<string | null>(null)
   const [trace, setTrace] = useState<Trace | null>(null)
   const [undo, setUndo] = useState<{ g: Graph; note: string } | null>(null)
   const [view, setView] = useState<"canvas" | "code">("canvas")
@@ -43,7 +44,7 @@ export function RuleView({ id }: { id: string }) {
   const t = useT(), BACK = back()
 
   /* the saved graph replaces the working copy unless you are editing it */
-  useEffect(() => { if (f && !dirty) { setWork(f.graph); setRev((x) => x + 1); if (!f.graph.nodes.some((n) => n.id === sel)) setSel(f.graph.nodes[0]?.id ?? null) } }, [f])
+  useEffect(() => { if (f && !dirty) { setWork(f.graph); setRev((x) => x + 1); if (sel && !f.graph.nodes.some((n) => n.id === sel)) setSel(null) } }, [f])
   /* #/auto/rule/<id>?run=<run>: show that run's path */
   useEffect(() => { const r = runParam(); if (r) void openRun(r) }, [id])
 
@@ -54,33 +55,43 @@ export function RuleView({ id }: { id: string }) {
   if (!f || !work) return <Loading title={t("auto:rule.page")} back={BACK} />
   if (f.kind === "schedule") { setTimeout(() => go("#/auto/schedules")); return null }
 
-  const n = work.nodes.find((x) => x.id === sel)
-  const edit = (g: Graph, s?: string) => { setWork(g); setDirty(true); setTrace(null); if (s) { setSel(s); setFresh(s) } }
+  const edit = (g: Graph, s?: string) => { setWork(g); setDirty(true); setTrace(null); if (s) setSel(s); else if (sel && !g.nodes.some((x) => x.id === sel)) setSel(null) }
   const act = async <T,>(key: string, p: () => Promise<T>, ok?: string | ((v: T) => string)) => {
     setBusy(key)
     try { const v = await p(); if (ok) toast(typeof ok === "string" ? ok : ok(v)); return v } catch (e) { toast(errText(e)); return undefined } finally { setBusy(null) }
   }
   const save = async () => {
     const r = await act("save", () => flowApi.saveFlow(id, work, undo?.note), (v) => t("auto:rule.savedAs", { v: v.version }))
-    if (r) { setDirty(false); setUndo(null); setFresh(null); L.set(r); void runs.reload() }
+    if (r) { setDirty(false); setUndo(null); L.set(r); void runs.reload() }
   }
-  const discard = () => { setWork(f.graph); setDirty(false); setUndo(null); setFresh(null); setTrace(null); setRev((x) => x + 1) }
+  const discard = () => { setWork(f.graph); setDirty(false); setUndo(null); setTrace(null); setRev((x) => x + 1) }
   const dry = async (sampleObj?: object) => {
     const r = await act("dry", () => flowApi.dryRun(id, { graph: dirty ? work : undefined, sample: sampleObj }))
-    if (r) { const tc = traceOf(r.steps ?? []); setTrace({ ...tc, run: r, label: sampleObj ? t("auto:rule.labelSample") : r.steps?.[0]?.output?.summary ? t("auto:rule.labelLatest", { summary: String(r.steps[0].output.summary).slice(0, 40) }) : t("auto:rule.labelEmpty") }); setSel(tc.path[tc.path.length - 1] ?? sel); toast(t("auto:rule.dryDone")) }
+    if (r) { const tc = traceOf(r.steps ?? []); setTrace({ ...tc, key: "dry:" + Date.now(), run: r, label: sampleObj ? t("auto:rule.labelSample") : r.steps?.[0]?.output?.summary ? t("auto:rule.labelLatest", { summary: String(r.steps[0].output.summary).slice(0, 40) }) : t("auto:rule.labelEmpty") }); toast(t("auto:rule.dryDone")) }
   }
   async function openRun(rid: string) {
-    try { const r = await flowApi.run(rid); const tc = traceOf(r.steps ?? []); setTrace({ ...tc, run: r, label: tr("auto:rule.labelRun", { time: tm(r.started) }) }); setView("canvas") } catch (e) { toast(errText(e)) }
+    try { const r = await flowApi.run(rid); const tc = traceOf(r.steps ?? []); setTrace({ ...tc, key: rid + ":" + Date.now(), run: r, label: tr("auto:rule.labelRun", { time: tm(r.started) }) }); setView("canvas") } catch (e) { toast(errText(e)) }
   }
   const steve = async (text: string) => {
     const before = work
     const r = await act("steve", () => flowApi.editDraft(id, text, work))
-    if (r) { setWork(r.graph); setDirty(true); setTrace(null); setUndo({ g: before, note: r.note }); setRev((x) => x + 1); const added = r.graph.nodes.find((x) => !before.nodes.some((y) => y.id === x.id)); if (added) { setSel(added.id); setFresh(added.id) } toast(t("auto:rule.steveDone")) }
+    if (r) { setWork(r.graph); setDirty(true); setTrace(null); setUndo({ g: before, note: r.note }); setRev((x) => x + 1); const added = r.graph.nodes.find((x) => !before.nodes.some((y) => y.id === x.id)); if (added) setSel(added.id); toast(t("auto:rule.steveDone")) }
   }
   const usesAI = work.nodes.some((x) => x.kind === "bot")
   const warnings = branchWarnings(work)
+  /* nodes the trigger doesn't reach: the Hub refuses to save the flow (graph.rs `flow.graph.unreachable`) */
+  const lost = unreachableNodes(work)
   const nodeName = (nid: string) => { const x = work.nodes.find((y) => y.id === nid); return x?.title?.trim() || nid }
-  const step = trace && n ? [...(trace.run.steps ?? [])].reverse().find((s) => s.node_id === n.id) : undefined
+
+  /* the settings of a node on the canvas: Steve's inspector, and what the shown run did there */
+  const nodeSettings = (n: GNode) => {
+    const st = trace ? [...(trace.run.steps ?? [])].reverse().find((s) => s.node_id === n.id) : undefined
+    return (<>
+      <Inspector key={n.id + ":" + rev} g={work} n={n} onChange={edit} flows={flows.data ?? []} sources={sources.data ?? []} step={st} flowId={id} />
+      {trace && !st && <div className="px-1 type-footnote text-muted-foreground">{t(trace.run.dry_run ? "auto:rule.notPassedDry" : "auto:rule.notPassedRun", { name: n.title || kindOf(n.kind)[0] })}</div>}
+      {n.kind === "trigger" && trace?.run.dry_run && trace.run.steps?.[0] && <div className="px-1"><div className="mb-1.5 type-label text-tertiary">{t("auto:rule.eventUsed")}</div><Json v={trace.run.steps[0].input} /></div>}
+    </>)
+  }
 
   return (
     <Page title={f.name} back={BACK} max={1180}
@@ -88,8 +99,7 @@ export function RuleView({ id }: { id: string }) {
       actions={<>
         <span className="hidden type-footnote text-muted-foreground sm:inline">{f.enabled ? t("auto:enabled") : t("auto:rule.notEnabled")}</span>
         <Switch checked={f.enabled} disabled={busy === "on"} onCheckedChange={(v) => void act("on", () => flowApi.patchFlow(id, { enabled: v }), v ? t("auto:flows.enabledToast") : t("auto:flows.disabledToast")).then((r) => r && L.set(r))} aria-label={t("auto:rule.enableAria")} data-rule-on />
-        <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void dry()} data-dry><PlayIcon /><span className="max-sm:sr-only">{t("auto:rule.dryRun")}</span></Button>
-        <Button size="sm" disabled={!dirty || !!busy} onClick={() => void save()} data-save-rule>{t("common:action.save")}</Button>
+        <Button size="sm" disabled={!dirty || !!busy || lost.length > 0} onClick={() => void save()} data-save-rule>{t("common:action.save")}</Button>
         <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-rule-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-44">
             <DropdownMenuItem onClick={() => setSampleOpen(true)}><FlaskConicalIcon />{t("auto:rule.dryWithSample")}</DropdownMenuItem>
@@ -111,64 +121,42 @@ export function RuleView({ id }: { id: string }) {
       {undo && (
         <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl bg-blue/10 px-4 py-2.5 type-callout anim-in" data-steve-change>
           <SparklesIcon className="size-4 text-blue" aria-hidden /><span className="min-w-0 flex-1">{t("auto:rule.steveChanged", { note: undo.note })}</span>
-          <Button size="sm" variant="ghost" onClick={() => { setWork(undo.g); setUndo(null); setFresh(null); setRev((x) => x + 1); setDirty(JSON.stringify(undo.g) !== JSON.stringify(f.graph)) }}>{t("auto:rule.undo")}</Button>
+          <Button size="sm" variant="ghost" onClick={() => { setWork(undo.g); setUndo(null); setRev((x) => x + 1); setDirty(JSON.stringify(undo.g) !== JSON.stringify(f.graph)) }}>{t("auto:rule.undo")}</Button>
         </div>
       )}
       {dirty && !undo && <div className="mb-4 flex items-center gap-2 type-footnote text-muted-foreground" data-dirty><StatusDot s="wait" />{t("auto:rule.dirty", { v: f.version + 1 })}<button type="button" className="text-blue hover:underline" onClick={discard}>{t("auto:rule.discard")}</button></div>}
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <div className="flex min-w-0 flex-col gap-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <Segmented size="sm" value={view} onChange={setView} options={[["canvas", t("auto:rule.viewCanvas")], ["code", t("auto:rule.viewCode")]] as const} />
-            {trace && <span className="inline-flex flex-wrap items-center gap-1.5 type-footnote text-muted-foreground" data-trace-banner><StatusDot s={trace.run.status === "failed" ? "fail" : "done"} />{t(trace.run.dry_run ? "auto:rule.traceDry" : "auto:rule.traceRun", { count: trace.path.length, label: trace.label })}<button type="button" className="text-blue hover:underline" onClick={() => setTrace(null)}>{t("auto:rule.clear")}</button></span>}
-          </div>
-          {warnings.length > 0 && <ul className="flex flex-col gap-1.5 rounded-xl bg-attention/10 px-4 py-3 type-callout anim-in" data-branch-warnings>
-            {warnings.map((w) => <li key={w.kind + w.node + w.label} className="flex items-start gap-2" data-branch-warning={w.strong ? "strong" : "weak"}>
-              <StatusDot s={w.strong ? "fail" : "wait"} className="mt-1.5" /><button type="button" className={"min-w-0 text-left hover:underline " + (w.strong ? "text-foreground" : "text-muted-foreground")} onClick={() => { setSel(w.node); setView("canvas") }}>
-                {t(w.kind === "edge" ? "auto:rule.warnEdge" : "auto:rule.warnBranch", { node: nodeName(w.node), label: w.label })}</button></li>)}
-          </ul>}
-          {view === "canvas" ? <FlowCanvas g={work} sel={sel} onSel={(x) => { setSel(x); setFresh(null) }} fresh={fresh} trace={trace} />
-            : <div className="flex flex-col gap-2" data-code-view>
-                <Textarea aria-label={t("auto:rule.codeAria")} className="min-h-[460px] rounded-xl bg-muted/60 type-code" value={toYaml(f.name, f.version, work)} readOnly />
-                <div className="flex items-center gap-2 px-1 type-footnote text-muted-foreground"><span className="flex-1">{t("auto:rule.codeHint")}</span>
-                  <Button size="xs" variant="ghost" onClick={() => void navigator.clipboard.writeText(JSON.stringify(work, null, 2)).then(() => toast(t("auto:rule.copiedJson")))}><CopyIcon />{t("auto:rule.copyJson")}</Button></div>
-              </div>}
-          <Composer placeholder={t("auto:rule.composer")} onSend={(x) => void steve(x)} testId="rule" disabled={busy === "steve"} />
-          {trace && (
-            <section className="anim-in" data-dry-result>
-              <SectionLabel right={trace.run.outcome_label ? <span className="font-normal">{trace.run.outcome_label}</span> : undefined}>{trace.run.dry_run ? t("auto:rule.stepsDry") : t("auto:rule.stepsRun")}</SectionLabel>
-              <Panel>{(trace.run.steps ?? []).map((s) => { const x = work.nodes.find((y) => y.id === s.node_id); return (
-                <Row key={s.seq} onClick={() => { setSel(s.node_id); setView("canvas") }} data-step={s.node_id}
-                  title={<span><span className="mr-2 font-mono type-footnote text-muted-foreground">{s.seq}</span>{x?.title ?? s.node_id}{s.branch && <span className="ml-1.5 type-footnote text-muted-foreground">→ {s.branch}</span>}</span>}
-                  sub={s.error ? <span className="text-destructive">{s.error}</span> : s.output?.skipped ? String(s.output.skipped) : s.status === "waiting" ? t("auto:runStatus.waiting") : JSON.stringify(s.output ?? null).slice(0, 100)}>
-                  <span className="type-footnote tabular-nums text-muted-foreground">{ms(s.ms)}</span></Row>) })}</Panel>
-              {trace.run.error && <div className="mt-2 px-1 type-footnote text-destructive">{trace.run.error}</div>}
-            </section>
-          )}
-          <section>
-            <SectionLabel right={<a href="#/signals" className="font-normal text-blue hover:underline">{t("auto:rule.viewInSignals")}</a>}>{t("auto:rule.recentRuns")}</SectionLabel>
-            {runs.data?.length ? <Panel>{runs.data.map((r) => (
-              <Row key={r.id} onClick={() => void openRun(r.id)} controls={r.status === "running" || r.status === "waiting"} data-run-row={r.id}
-                title={<span className="inline-flex items-center gap-1.5"><StatusDot s={RUN_STATUS[r.status]?.[1] ?? "idle"} />{r.outcome_label || RUN_STATUS[r.status]?.[0] || r.status}</span>}
-                sub={[r.dry_run ? t("auto:rule.dryRun") : "", "v" + r.flow_version, r.error ?? "", t("auto:rule.clickSteps")].filter(Boolean).join(" · ")}>
-                {(r.status === "running" || r.status === "waiting") && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={(e) => { e.stopPropagation(); void act("cancel", () => flowApi.cancelRun(r.id), t("auto:rule.runCancelled")).then(() => runs.reload()) }}>{t("common:action.cancel")}</Button>}
-                <span className="type-footnote tabular-nums text-muted-foreground">{tm(r.started)}</span></Row>))}</Panel>
-              : <Blank>{runs.data ? t("auto:noRuns") : t("auto:loading")}</Blank>}
-          </section>
-          <section data-versions>
-            <SectionLabel>{t("auto:rule.versions")}</SectionLabel>
-            <Panel>{f.versions.map((v) => (
-              <Row key={v.version} title={v.version === f.version ? `v${v.version} · ${t("auto:rule.current")}` : `v${v.version}`} sub={[tm(v.created), authorLabel(v.author), v.note].filter(Boolean).join(" · ")} data-version={v.version}>
-                {v.version !== f.version && <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={!!busy} onClick={() => void act("rb", () => flowApi.rollback(id, v.version), (r) => t("auto:rule.rolledBack", { from: v.version, to: r.version })).then((r) => { if (r) { setDirty(false); setUndo(null); L.set(r) } })} data-rollback={v.version}>{t("auto:rule.rollback")}</Button>}
-              </Row>))}</Panel>
-          </section>
+      <div className="flex min-w-0 flex-col gap-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <Segmented size="sm" value={view} onChange={setView} options={[["canvas", t("auto:rule.viewCanvas")], ["code", t("auto:rule.viewCode")]] as const} />
+          {trace && <span className="inline-flex flex-wrap items-center gap-1.5 type-footnote text-muted-foreground" data-trace-banner><StatusDot s={trace.run.status === "failed" ? "fail" : "done"} />{t(trace.run.dry_run ? "auto:rule.traceDry" : "auto:rule.traceRun", { count: trace.path.length, label: trace.label })}<button type="button" className="text-blue hover:underline" onClick={() => setTrace(null)}>{t("auto:rule.clear")}</button></span>}
         </div>
-        <aside className="flex flex-col gap-4 lg:sticky lg:top-2 lg:max-h-[calc(100dvh-4rem)] lg:self-start lg:overflow-y-auto lg:border-l lg:pl-6" aria-label={t("auto:rule.nodeSettings")}>
-          {n ? <Inspector key={n.id + ":" + rev} g={work} n={n} onChange={edit} onSelect={setSel} flows={flows.data ?? []} sources={sources.data ?? []} step={step} flowId={id} />
-            : <Blank>{t("auto:rule.pickNode")}</Blank>}
-          {n && trace && !step && <div className="px-1 type-footnote text-muted-foreground">{t(trace.run.dry_run ? "auto:rule.notPassedDry" : "auto:rule.notPassedRun", { name: n.title || kindOf(n.kind)[0] })}</div>}
-          {n?.kind === "trigger" && trace?.run.dry_run && trace.run.steps?.[0] && <div className="px-1"><div className="mb-1.5 type-label text-tertiary">{t("auto:rule.eventUsed")}</div><Json v={trace.run.steps[0].input} /></div>}
-          <div className="mt-auto border-t pt-4 type-footnote text-muted-foreground">{t("auto:rule.footer")}</div>
-        </aside>
+        {warnings.length + lost.length > 0 && <ul className="flex flex-col gap-1.5 rounded-xl bg-attention/10 px-4 py-3 type-callout anim-in" data-branch-warnings>
+          {lost.map((nid) => <li key={"lost" + nid} className="flex items-start gap-2" data-branch-warning="strong" data-unreachable={nid}>
+            <StatusDot s="fail" className="mt-1.5" /><button type="button" className="min-w-0 text-left text-foreground hover:underline" onClick={() => { setSel(nid); setView("canvas") }}>
+              {t("auto:rule.warnUnreachable", { node: nodeName(nid) })}</button></li>)}
+          {warnings.map((w) => <li key={w.kind + w.node + w.label} className="flex items-start gap-2" data-branch-warning={w.strong ? "strong" : "weak"}>
+            <StatusDot s={w.strong ? "fail" : "wait"} className="mt-1.5" /><button type="button" className={"min-w-0 text-left hover:underline " + (w.strong ? "text-foreground" : "text-muted-foreground")} onClick={() => { setSel(w.node); setView("canvas") }}>
+              {t(w.kind === "edge" ? "auto:rule.warnEdge" : "auto:rule.warnBranch", { node: nodeName(w.node), label: w.label })}</button></li>)}
+        </ul>}
+        {view === "canvas" ? <FlowCanvas className="h-[min(760px,calc(100dvh-13rem))] min-h-[520px] max-sm:h-[calc(100dvh-11rem)] max-sm:min-h-[480px]" g={work} flowId={id} flows={flows.data ?? []} sel={sel} onSel={setSel} onChange={edit}
+            renderSettings={(nid) => { const x = work.nodes.find((y) => y.id === nid); return x ? nodeSettings(x) : null }}
+            runs={runs.data ?? []} played={trace ? { key: trace.key, run: trace.run } : null} busy={busy === "dry"}
+            onDry={() => void dry()} onOpenRun={(rid) => void openRun(rid)} onCloseRun={() => setTrace(null)}
+            runExtra={(r) => (r.status === "running" || r.status === "waiting") && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void act("cancel", () => flowApi.cancelRun(r.id), t("auto:rule.runCancelled")).then(() => runs.reload())}>{t("common:action.cancel")}</Button>} />
+          : <div className="flex flex-col gap-2" data-code-view>
+              <Textarea aria-label={t("auto:rule.codeAria")} className="min-h-[460px] rounded-xl bg-muted/60 type-code" value={toYaml(f.name, f.version, work)} readOnly />
+              <div className="flex items-center gap-2 px-1 type-footnote text-muted-foreground"><span className="flex-1">{t("auto:rule.codeHint")}</span>
+                <Button size="xs" variant="ghost" onClick={() => void navigator.clipboard.writeText(JSON.stringify(work, null, 2)).then(() => toast(t("auto:rule.copiedJson")))}><CopyIcon />{t("auto:rule.copyJson")}</Button></div>
+            </div>}
+        <Composer placeholder={t("auto:rule.composer")} onSend={(x) => void steve(x)} testId="rule" disabled={busy === "steve"} />
+        <div className="px-1 type-footnote text-muted-foreground">{t("auto:rule.footer")} <a href="#/signals" className="text-blue hover:underline">{t("auto:rule.viewInSignals")}</a></div>
+        <section data-versions>
+          <SectionLabel>{t("auto:rule.versions")}</SectionLabel>
+          <Panel>{f.versions.map((v) => (
+            <Row key={v.version} title={v.version === f.version ? `v${v.version} · ${t("auto:rule.current")}` : `v${v.version}`} sub={[tm(v.created), authorLabel(v.author), v.note].filter(Boolean).join(" · ")} data-version={v.version}>
+              {v.version !== f.version && <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={!!busy} onClick={() => void act("rb", () => flowApi.rollback(id, v.version), (r) => t("auto:rule.rolledBack", { from: v.version, to: r.version })).then((r) => { if (r) { setDirty(false); setUndo(null); L.set(r) } })} data-rollback={v.version}>{t("auto:rule.rollback")}</Button>}
+            </Row>))}</Panel>
+        </section>
       </div>
     </Page>
   )

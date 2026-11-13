@@ -1,6 +1,6 @@
 /* Flow node kinds: labels, the palette, defaults, graph edits and the inspector (signals-automation.md §3.2,
  * prototype KIND / PALETTE / TableEditor / the RuleView aside) */
-import { useState, type ReactNode } from "react"
+import type { ReactNode } from "react"
 import { Trans } from "react-i18next"
 import { ArrowRightIcon, BotIcon, CodeIcon, FilterIcon, GlobeIcon, HourglassIcon, PlusIcon, TableIcon, TerminalSquareIcon, TrashIcon, UserCheckIcon, WorkflowIcon, ZapIcon, type LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -9,14 +9,12 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command"
 import { Segmented } from "@/ui"
 import { SOURCE_LABEL, type FlowSummary, type GEdge, type GNode, type Graph, type Source, type Step } from "@/api/flow"
 import { Pick, Json, botOptions, srcIcon, ms } from "@/auto/common"
 import { t, useT } from "@/i18n"
 import { branchLabels, renameBranchEdges, RENAMES_EDGES } from "@/auto/branches"
-export { branchLabels, renameBranchEdges, branchWarnings, type BranchWarning } from "@/auto/branches"
+export { branchLabels, renameBranchEdges, branchWarnings, unreachableNodes, type BranchWarning } from "@/auto/branches"
 
 type Grp = "trigger" | "logic" | "code" | "connect" | "ai" | "wait" | "result"
 /* [icon, group]; the group drives the palette and the inspector heading */
@@ -56,12 +54,6 @@ const clone = (g: Graph): Graph => JSON.parse(JSON.stringify(g))
 export function freshId(g: Graph, kind: string) {
   const base = ({ trigger: "t", filter: "f", table: "tb", script: "s", cmd: "c", http: "h", flow: "fl", bot: "b", wait: "w", approve: "ap", action: "a" } as Record<string, string>)[kind] ?? "n"
   for (let n = 1; ; n++) { const id = base + n; if (!g.nodes.some((x) => x.id === id)) return id }
-}
-export function addAfter(g0: Graph, from: string, kind: string, title: string, config: Record<string, any>, label = ""): [Graph, string] {
-  const g = clone(g0), id = freshId(g, kind)
-  g.nodes.push({ id, kind, title, note: "", config: JSON.parse(JSON.stringify(config)) })
-  g.edges.push({ from, to: id, label })
-  return [g, id]
 }
 /** remove a node; its parents take over its children (with the child edge's label) */
 export function removeNode(g0: Graph, id: string): Graph {
@@ -110,22 +102,19 @@ const F = ({ label, children, hint }: { label: string; children: ReactNode; hint
 )
 const list = (s: string) => s.split(/[,，、]/).map((x) => x.trim()).filter(Boolean)
 
-export function Inspector({ g, n, onChange, onSelect, flows, sources, step, flowId }: {
-  g: Graph; n: GNode; onChange: (g: Graph, sel?: string) => void; onSelect: (id: string | null) => void; flows: FlowSummary[]; sources: Source[]; step?: Step; flowId: string
+export function Inspector({ g, n, onChange, flows, sources, step, flowId }: {
+  g: Graph; n: GNode; onChange: (g: Graph, sel?: string) => void; flows: FlowSummary[]; sources: Source[]; step?: Step; flowId: string
 }) {
-  const [paletteOpen, setPalette] = useState(false)
   const t = useT()
   const set = (f: (c: Record<string, any>, n: GNode) => void) => {
     const next = patchNode(g, n.id, (x) => { x.config ??= {}; f(x.config, x) }), m = next.nodes.find((x) => x.id === n.id)
     onChange(m && RENAMES_EDGES.has(n.kind) ? renameBranchEdges(next, n.id, branchLabels(n), branchLabels(m)) : next)
   }
   const c = n.config ?? {}
-  const [label, , group] = kindOf(n.kind)
   const outs = g.edges.filter((e) => e.from === n.id), labels = branchLabels(n)
   const prev = upstream(g, n.id)
   return (
     <div className="flex flex-col gap-4" data-inspector data-kind={n.kind}>
-      <div className="flex min-h-6 items-baseline justify-between gap-2"><span className="type-headline">{label}{n.kind === "action" && c.action ? " · " + (actionLabel(c.action) ?? c.action) : ""}</span>{group !== label && <span className="type-footnote text-muted-foreground">{group}</span>}</div>
       <div className="flex flex-col gap-3 px-1">
         <F label={t("auto:node.name")}><Input  value={n.title} onChange={(e) => onChange(patchNode(g, n.id, (x) => { x.title = e.target.value }))} data-node-title /></F>
         <F label={t("auto:node.note")}><Input  value={n.note ?? ""} onChange={(e) => onChange(patchNode(g, n.id, (x) => { x.note = e.target.value }))} /></F>
@@ -161,29 +150,6 @@ export function Inspector({ g, n, onChange, onSelect, flows, sources, step, flow
         </div>
       )}
       {step && <div className="px-1"><div className="mb-1 type-footnote text-muted-foreground">{[t("auto:node.thisRun", { ms: ms(step.ms) }), step.branch ? t("auto:node.tookBranch", { branch: step.branch }) : ""].filter(Boolean).join(" · ")}</div>{step.error ? <div className="type-footnote text-destructive">{step.error}</div> : <Json v={step.output} />}</div>}
-      <div className="flex flex-wrap gap-2 px-1">
-        {n.kind !== "action" && (
-          <Popover open={paletteOpen} onOpenChange={setPalette}>
-            <PopoverTrigger render={<Button size="sm" variant="outline" data-add-node />}><PlusIcon />{t("auto:node.addAfter")}</PopoverTrigger>
-            <PopoverContent align="start" className="w-80 p-0">
-              <Command filter={(v, s) => (v.toLowerCase().includes(s.trim().toLowerCase()) ? 1 : 0)}>
-                <CommandInput placeholder={t("auto:node.search")} data-palette-search />
-                <CommandList className="max-h-80">
-                  <CommandEmpty>{t("auto:node.noMatch")}</CommandEmpty>
-                  {palette().map((grp, gi) => <div key={grp.g}>{gi > 0 && <CommandSeparator />}<CommandGroup heading={grp.g}>
-                    {grp.items.map(([k, title, d, cfg]) => { const I = kindOf(k)[1]; return <CommandItem key={title} value={title + " " + d} onSelect={() => {
-                      setPalette(false)
-                      const used = new Set(outs.map((e) => e.label)), lab = labels.find((l) => l && !used.has(l)) ?? ""
-                      const [g2, id] = addAfter(g, n.id, k, title, cfg, lab); onChange(g2, id)
-                    }} data-action-opt={title}><I /><span className="whitespace-nowrap">{title}</span><span className="ml-auto truncate type-footnote text-muted-foreground">{d}</span></CommandItem> })}
-                  </CommandGroup></div>)}
-                </CommandList>
-              </Command>
-            </PopoverContent>
-          </Popover>
-        )}
-        {n.kind !== "trigger" && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { onChange(removeNode(g, n.id)); onSelect(null) }} data-del-node><TrashIcon />{t("auto:node.remove")}</Button>}
-      </div>
     </div>
   )
 }
