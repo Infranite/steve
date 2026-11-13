@@ -65,15 +65,17 @@ export function ProfileMenu({
   // The progress bar fills up once the card is on screen
   const [filled, setFilled] = useState(false);
   const rootRef = useRef<HTMLElement>(null);
+  // Steve: only a card with a setup progress has a bar to fill
+  const hasSetup = !!setup;
   useEffect(() => {
     const el = rootRef.current;
-    if (!el) return;
+    if (!el || !hasSetup) return;
     const io = new IntersectionObserver(([e]) => e.isIntersecting && (setFilled(true), io.disconnect()), {
       threshold: 0.3,
     });
     io.observe(el);
     return () => io.disconnect();
-  }, []);
+  }, [hasSetup]);
 
   // Arrow keys move between the actions, like in a native menu
   const onKey = (e: KeyboardEvent) => {

@@ -47,6 +47,9 @@ export type BreadcrumbProps = Omit<ComponentPropsWithRef<"nav">, "children"> & {
   maxItems?: number;
   /** Steve: false keeps every crumb a link – a trail that leads up from a page whose own name is shown elsewhere */
   currentLast?: boolean;
+  /** Steve: the … button's name for n folded crumbs, and the name of its menu (in the page's language) */
+  moreLabel?: (n: number) => string;
+  menuLabel?: string;
 };
 
 export function Breadcrumb({
@@ -54,6 +57,8 @@ export function Breadcrumb({
   separator = "slash",
   maxItems = 4,
   currentLast = true,
+  moreLabel,
+  menuLabel,
   className,
   "aria-label": ariaLabel = "Breadcrumb",
   ref,
@@ -112,7 +117,7 @@ export function Breadcrumb({
         nodes.push(sep("s-more"));
         nodes.push(
           <li key="more" className="ui-bcrc__item">
-            <More items={folded} />
+            <More items={folded} label={moreLabel} menuLabel={menuLabel} />
           </li>,
         );
       }
@@ -208,7 +213,7 @@ const CAP = 200;
 
 /* ---------- The folded crumbs: … and its menu ---------- */
 
-function More({ items }: { items: BreadcrumbItem[] }) {
+function More({ items, label, menuLabel = "More crumbs" }: { items: BreadcrumbItem[]; label?: (n: number) => string; menuLabel?: string }) {
   const uid = useId();
   const [open, setOpen] = useState(false);
   const button = useRef<HTMLButtonElement>(null);
@@ -275,7 +280,7 @@ function More({ items }: { items: BreadcrumbItem[] }) {
         ref={button}
         type="button"
         className="ui-bcrc__more"
-        aria-label={items.length === 1 ? "Show 1 more crumb" : `Show ${items.length} more crumbs`}
+        aria-label={label ? label(items.length) : items.length === 1 ? "Show 1 more crumb" : `Show ${items.length} more crumbs`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? `${uid}-menu` : undefined}
@@ -291,7 +296,7 @@ function More({ items }: { items: BreadcrumbItem[] }) {
         <MoreIcon />
       </button>
       {open && (
-        <div ref={panel} id={`${uid}-menu`} className="ui-bcrc__menu" role="menu" aria-label="More crumbs" popover="manual" onKeyDown={onKey}>
+        <div ref={panel} id={`${uid}-menu`} className="ui-bcrc__menu" role="menu" aria-label={menuLabel} popover="manual" onKeyDown={onKey}>
           {items.map((item, i) => {
             const body = (
               <>

@@ -499,7 +499,7 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
       <header className={cn("relative z-10 flex h-12 shrink-0 items-center gap-2 px-3 transition-[border-color,background-color] duration-180 sm:px-5", scrolled || noTitle ? "border-b bg-background/80 backdrop-blur-xl" : "border-b border-transparent")} data-page-bar>
         {back ? (
           /* beside a custom bar the way back keeps its width and the bar truncates; it used to slide under the bar */
-          <Breadcrumb aria-label={t("core:sidebar.breadcrumb")} separator="chevron" currentLast={!bar && !!textOf(title)} data-quiet={scrolled || noTitle ? undefined : ""}
+          <Breadcrumb aria-label={t("core:sidebar.breadcrumb")} moreLabel={(count) => t("core:sidebar.crumbsMore", { count })} menuLabel={t("core:sidebar.crumbsMenu")} separator="chevron" currentLast={!bar && !!textOf(title)} data-quiet={scrolled || noTitle ? undefined : ""}
             className={cn("steve-crumbs type-callout", bar ? "shrink-0" : "min-w-0")}
             items={[{ label: back[1], href: back[0], icon: <ChevronLeftIcon className="size-4" />, data: { "data-back": "" } }, ...(!bar && textOf(title) ? [{ label: textOf(title) }] : [])]} />
         ) : null}

@@ -68,7 +68,7 @@ try {
     // App Shell: the account at the bottom holds the places that were icons there; the head's button folds the sidebar
     const { page } = await open({ locale: "zh-CN" })
     const account = page.locator("[data-account]")
-    assert.equal((await account.innerText()).trim(), "账户", "before /me answers the row says 账户")
+    assert.equal((await account.innerText()).trim(), "当前用户", "before /me answers the row says 当前用户, not to be read as 账号")
     await account.click()
     const menu = page.locator("[data-account-menu]")
     await menu.waitFor()

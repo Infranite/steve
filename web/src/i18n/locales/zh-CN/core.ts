@@ -237,7 +237,6 @@ export default {
   },
   navGroup: { work: "工作", connect: "连接与资料", automate: "自动化" },
   sidebar: {
-    assistant: "你的助手",
     searchTip: "搜索 ⌘K",
     appearance: "外观",
     webUpdate: "前端有更新 · 查看",
@@ -249,8 +248,10 @@ export default {
     collapse: "收起侧栏",
     expand: "展开侧栏",
     /* the signed-in user at the bottom of the sidebar, before /me answers; and their role under the name */
-    account: "账户",
-    role: { owner: "负责人", maintainer: "维护人", user: "使用人" },
+    account: "当前用户",
+    role: { owner: "负责人", member: "成员" },
+    crumbsMore: "再显示 {{count}} 级",
+    crumbsMenu: "更多层级",
     breadcrumb: "所在位置",
     tabs: "主导航",
   },

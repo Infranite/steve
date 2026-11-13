@@ -69,7 +69,8 @@ function ThemeCycle({ className }: { className?: string }) {
 }
 
 type Me = { name: string; email: string | null; role: string }
-/** who is signed in (GET /me), once per page; a fixture or a Hub that does not answer leaves it unknown */
+/** who is signed in (GET /me), once per page: the name and email do not change with the workspace (the role does, and
+ *  comes from the store's workspaces); a fixture or a Hub that does not answer leaves it unknown */
 function useMe() {
   const [me, setMe] = useState<Me | null>(null)
   useEffect(() => { let on = true; api.me().then((r) => { if (on) setMe(r.user) }, () => {}); return () => { on = false } }, [])
@@ -88,7 +89,9 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
   const [open, setOpen] = useState(false)
   const leave = (h: string) => { setOpen(false); go(h) }
   const name = me?.name || t("core:sidebar.account")
-  const role = me ? (["owner", "maintainer", "user"].includes(me.role) ? t(`core:sidebar.role.${me.role as "owner" | "maintainer" | "user"}`) : me.role) : ""
+  /* the role in the workspace open now (a workspace switch does not reload the page), the instance role until it is known */
+  const r = st.workspaces.find((w) => w.id === st.workspace?.id)?.role ?? me?.role ?? ""
+  const role = r === "owner" || r === "member" ? t(`core:sidebar.role.${r}`) : r
   const place = (id: string, h: string, label: string, I: any, current: boolean): ProfileMenuItem =>
     ({ id, label, icon: <I strokeWidth={1.75} />, current, onSelect: () => leave("#/" + h), data: { "data-nav": h } })
   const items: ProfileMenuItem[] = [
@@ -102,7 +105,7 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
   return (
     <SidebarMenuItem className="min-w-0 flex-1">
       <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger render={<SidebarMenuButton isActive={on} tooltip={open ? undefined : name} className={cn(ROW, "h-8 font-medium")} data-account={me ? me.role : ""} />}>
+        <PopoverTrigger render={<SidebarMenuButton isActive={on} tooltip={open ? undefined : name} className={cn(ROW, "h-8 font-medium")} data-account={me ? r : ""} />}>
           <Initials name={me?.name ?? ""} className="size-5 type-label leading-none" />
           <span className="min-w-0 flex-1 truncate">{name}</span>
           <ChevronsUpDownIcon className="size-3.5! text-tertiary" />
