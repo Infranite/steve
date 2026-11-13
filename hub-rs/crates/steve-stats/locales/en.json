@@ -41,6 +41,8 @@
   "stats.total.lead": "Lead time",
   "stats.total.hit_rate": "Cache hit rate",
   "stats.total.turns": "Turns",
+  "stats.total.turn_ms": "Agent time",
+  "stats.total.wait_ms": "Time waiting on you",
   "stats.total.active": "Pieces of work",
   "stats.total.decisions": "Decisions",
   "stats.price_note.official": "List price",

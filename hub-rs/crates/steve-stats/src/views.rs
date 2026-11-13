@@ -174,6 +174,12 @@ pub enum Metric {
     Lead,
     HitRate,
     Turns,
+    /// Milliseconds agents spent in turns, each turn counted whole in the bucket it ended in (the cube's
+    /// `turn_ms`, so the buckets add up to the summary's `usage.turn_ms`).
+    TurnMs,
+    /// Milliseconds a person was waited on: per item, the time any of its cards for a person was open
+    /// (an item's `wait_ms`), cut at the bucket edges; a card with no item counts on its own.
+    WaitMs,
     Decisions,
     /// Distinct pieces of work an agent turned on: an item counts once per bucket, and a conversation with no
     /// item is a piece of its own (the sessions page's activity heatmap).
@@ -191,6 +197,8 @@ impl Metric {
             "lead" => Metric::Lead,
             "hit_rate" => Metric::HitRate,
             "turns" => Metric::Turns,
+            "turn_ms" => Metric::TurnMs,
+            "wait_ms" => Metric::WaitMs,
             "decisions" => Metric::Decisions,
             "active" => Metric::Active,
             _ => return None,
@@ -201,8 +209,8 @@ impl Metric {
     pub fn allows(&self, group: &str) -> bool {
         match self {
             Metric::Tokens | Metric::Cost => true,
-            Metric::HitRate | Metric::Turns => group != "token_type",
-            Metric::Done | Metric::Created | Metric::Active => {
+            Metric::HitRate | Metric::Turns | Metric::TurnMs => group != "token_type",
+            Metric::Done | Metric::Created | Metric::Active | Metric::WaitMs => {
                 matches!(group, "none" | "bot" | "project")
             }
             Metric::Wip | Metric::Lead | Metric::Decisions => group == "none",
@@ -398,13 +406,15 @@ fn lines(
         Metric::Lead => steve_i18n::t!("stats.total.lead"),
         Metric::HitRate => steve_i18n::t!("stats.total.hit_rate"),
         Metric::Turns => steve_i18n::t!("stats.total.turns"),
+        Metric::TurnMs => steve_i18n::t!("stats.total.turn_ms"),
+        Metric::WaitMs => steve_i18n::t!("stats.total.wait_ms"),
         Metric::Decisions => steve_i18n::t!("stats.total.decisions"),
         Metric::Active => steve_i18n::t!("stats.total.active"),
     };
     let mut rate = false;
     let mut order: &[&str] = &[];
     match metric {
-        Metric::Tokens | Metric::Cost | Metric::HitRate | Metric::Turns => {
+        Metric::Tokens | Metric::Cost | Metric::HitRate | Metric::Turns | Metric::TurnMs => {
             let prices = metrics::book_of(c, &q.workspace_id)?;
             let rows = if spans.is_some() {
                 metrics::hourly(c, q)?
@@ -442,6 +452,7 @@ fn lines(
                         }
                     }
                     Metric::HitRate => acc.add(key, i, n, d.cache_read as f64, d.hit_base as f64),
+                    Metric::TurnMs => acc.add(key, i, n, d.turn_ms as f64, 0.0),
                     _ => acc.add(key, i, n, d.turns as f64, 0.0),
                 }
             }
@@ -521,6 +532,59 @@ fn lines(
                     _ => "total",
                 };
                 acc.add(key, i, n, 1.0, 0.0);
+            }
+        }
+        Metric::WaitMs => {
+            let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+                return Ok(vec![]);
+            };
+            // each bucket's [start, end): the hours' own spans, or the local days'
+            let edges: Vec<(i64, i64)> = match spans {
+                Some(h) => h.iter().map(|x| (x.1, x.2)).collect(),
+                None => buckets
+                    .iter()
+                    .map(|d| bounds(d, d, tz).unwrap_or((0, 0)))
+                    .collect(),
+            };
+            let now = steve_store::now();
+            let filtered = q.project.is_some() || q.bot.is_some();
+            let sql = if filtered {
+                "SELECT d.id, d.kind, d.status, d.created, d.resolved, d.result, d.item_id, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '')
+                 FROM decisions d JOIN items i ON i.id = d.item_id
+                 WHERE d.workspace_id = ?1 AND d.created < ?3 AND (d.resolved IS NULL OR d.resolved > ?2)
+                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)"
+            } else {
+                "SELECT d.id, d.kind, d.status, d.created, d.resolved, d.result, d.item_id, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '')
+                 FROM decisions d LEFT JOIN items i ON i.id = d.item_id
+                 WHERE d.workspace_id = ?1 AND d.created < ?3 AND (d.resolved IS NULL OR d.resolved > ?2) AND ?4 IS NULL AND ?5 IS NULL"
+            };
+            type Card = (items::DecisionRow, Option<String>, String, String);
+            let rows: Vec<Card> = c
+                .prepare_cached(sql)?
+                .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
+                    Ok((items::decision_row(r)?, r.get(6)?, r.get(7)?, r.get(8)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            // per piece of work: its line and the spans a person was waited on
+            let mut work: BTreeMap<String, (String, Vec<(i64, i64)>)> = BTreeMap::new();
+            for (card, item, bot, project) in rows.into_iter().filter(|r| r.0.human()) {
+                let key = match group {
+                    "bot" => bot,
+                    "project" => project,
+                    _ => "total".into(),
+                };
+                let w = work
+                    .entry(item.unwrap_or_else(|| format!("decision:{}", card.id)))
+                    .or_insert_with(|| (key, vec![]));
+                w.1.push((card.created, card.resolved.unwrap_or(now).min(now)));
+            }
+            for (key, spans) in work.into_values() {
+                for (i, (start, end)) in edges.iter().enumerate() {
+                    let ms = items::union_ms(spans.iter().copied(), *start, *end);
+                    if ms > 0 {
+                        acc.add(&key, i, n, ms as f64, 0.0);
+                    }
+                }
             }
         }
         Metric::Wip => {

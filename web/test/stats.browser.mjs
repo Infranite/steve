@@ -37,6 +37,7 @@ const series = (metric, group) => {
   if (metric === "done") return { buckets: days, series: [line("total", "完成", done)] }
   if (metric === "lead") return { buckets: days, series: [line("p50", "中位数", [4, null, 6, 3, null, 8, 5].map((v) => v && v * H)), line("p85", "p85", [9, null, 10, 7, null, 20, 9].map((v) => v && v * H))] }
   if (metric === "hit_rate") return { buckets: days, series: [line("total", "命中率", [0.6, 0.7, 0.75, 0.71, 0.8, 0.68, 0.72])] }
+  if (metric === "turn_ms") return { buckets: days, series: [line("total", "Agent 时长", [2, 0, 3.5, 5, 1, 4.25, 6].map((v) => v * H))] }
   const scale = metric === "cost" ? 1 / 400000 : 1
   if (group === "token_type") return { buckets: days, series: ["input", "output", "cache_read", "cache_write"].map((k, i) => line(k, k, days.map((_, d) => (i + 1) * 100000 * (d + 2) * scale))) }
   if (group === "model") return { buckets: days, series: ["opus", "sonnet", "haiku", "gpt", "kimi", "qwen", "glm"].map((k, i) => line(k, k, days.map((_, d) => (7 - i) * 50000 * (d + 1) * scale))) }
@@ -160,8 +161,19 @@ try {
       // the line can be the turns instead
       await daily.locator('[data-seg="turns"]').click()
       await daily.locator('[data-overlay="turns"]').waitFor()
+      // or the agents' working time, on an axis in hours, exact in the tooltip and the legend
+      await daily.locator('[data-seg="turn_ms"]').click()
+      await daily.locator('[data-overlay="turn_ms"] path').waitFor()
+      assert.ok(calls.some((c) => c.includes("metric=turn_ms")))
+      assert.match(await daily.locator('[data-chart-head="daily"]').innerText(), /Agent 时长 26 小时（右轴）/)
+      assert.deepEqual(await daily.locator("[data-axis-right]").allTextContents(), ["0", "5 小时", "10 小时"])
+      await page.mouse.move(dx, box.y + 100)
+      await page.locator("[data-chart-tip] [data-tip-overlay]").waitFor()
+      assert.match(await page.locator("[data-chart-tip]").innerText(), /Agent 时长\s*4 小时 15 分/)
+      if (shots) await daily.screenshot({ path: `${shots}/stats-daily-turn-ms-${theme}.png` })
       await daily.locator('[data-seg="cost"]').click()
     }
+    if (shots) await daily.screenshot({ path: `${shots}/stats-daily-${width}-${theme}.png` })
 
     /* where the money went: the split (Compact Breakdown) of the range's cost by Bot by default, then by model; the time too */
     const split = page.locator("[data-where-split]")
