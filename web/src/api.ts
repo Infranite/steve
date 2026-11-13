@@ -112,6 +112,8 @@ export type RTailcat = { available: boolean; enabled: boolean; running?: boolean
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
   adapter_version?: string | null; default_model?: string | null; efforts?: string[]; modes?: string[] | null
+  /** its adapter declares where it reads skills, so a Bot's skills reach its sessions (absent: not said) */
+  skills?: boolean
   caps?: { sessions: boolean; jobs: boolean; images: boolean; resume: boolean; history: boolean; mcp_http: boolean; system_prompt: boolean; fork?: boolean } | null
   auth?: { id: string; name: string; description?: string | null }[]
   /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */

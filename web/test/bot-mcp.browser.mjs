@@ -8,7 +8,7 @@ const shots = process.env.STEVE_TEST_SHOTS; if (shots) mkdirSync(shots, { recurs
 /* 能力 → MCP 服务器 against a mocked Hub (/bots/:id/mcp-servers): a Bot without servers shows what MCP servers are;
  * one with servers shows a card each (transport, a secret by name only, the switch saving at once); the dialog edits a
  * server keeping its secret when the value is left empty, adds an http server with a secret header, and a delete asks
- * first. 技能 and A2A are named as planned, nothing more. */
+ * first. A2A is named as planned, nothing more (技能 is bot-skills.browser.mjs). */
 const bot = (id, name, extra = {}) => ({ id, name, role: name + '的职责', main: id === 'steve', harness: 'claude-code', model: null, reasoning_effort: null, rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'default', avatar: { color: '#8b7cf6' }, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['default'], memories: 0, ...extra })
 const server = (id, name, transport, extra = {}) => ({ id, bot_id: 'dev', name, transport, command: null, args: [], env: [], url: null, headers: [], enabled: true, created: 0, updated: 0, ...extra })
 let bots, servers, calls
@@ -63,11 +63,12 @@ const run = async ({ width, height, scheme }) => {
   }
   await page.addInitScript(() => { localStorage.setItem('steve-lang', 'zh-CN') })
 
-  /* no servers: what MCP servers are, and the way to add one; 技能 and A2A are planned only */
+  /* no servers: what MCP servers are, and the way to add one; A2A is planned only */
   await caps('doc')
   await page.locator('[data-mcp-empty]').waitFor()
   assert.match(await page.locator('[data-mcp-empty]').innerText(), /MCP 服务器给 Bot 增加工具/)
-  for (const k of ['skills', 'a2a']) {
+  assert.equal(await page.locator('[data-planned=skills]').count(), 0, 'skills are no longer planned')
+  for (const k of ['a2a']) {
     const r = page.locator(`[data-planned=${k}]`)
     assert.match(await r.innerText(), /规划中/)
     assert.equal(await r.locator('button, input, a').count(), 0, `${k} has nothing to press`)

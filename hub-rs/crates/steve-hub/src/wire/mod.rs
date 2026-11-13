@@ -8,6 +8,7 @@
 pub mod acp_stats;
 pub mod auth;
 pub mod bot_mcp;
+pub mod bot_skills;
 pub mod chan;
 pub mod core;
 pub mod diagnostics;

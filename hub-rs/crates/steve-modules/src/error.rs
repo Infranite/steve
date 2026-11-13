@@ -71,6 +71,7 @@ fn not_found_message(noun: &str) -> String {
         "身份" => t!("modules.not_found.persona"),
         "机器人" => t!("modules.not_found.bot"),
         "MCP 服务器" => t!("modules.not_found.mcp_server"),
+        "技能" => t!("modules.not_found.skill"),
         "Bot" => t!("modules.not_found.bot_latin"),
         "事项" => t!("modules.not_found.item"),
         "项目" => t!("modules.not_found.project"),

@@ -158,6 +158,10 @@ pub struct AdapterProperties {
     /// judgments (routing, titles) are put on once. None: they follow Steve's model like everything
     /// else.
     pub fast_models: Vec<String>,
+    /// Where it reads skills (`<name>/SKILL.md`, a Markdown file with `name` and `description` in
+    /// its front matter): a directory under its own state directory ([`Self::state`]). A Bot's
+    /// skills are put there before its session opens. `None`: it reads none Steve can give it.
+    pub skills: Option<String>,
 }
 
 /// Where a call's tokens are read when the adapter does not report them.
@@ -190,12 +194,13 @@ impl Default for AdapterProperties {
             fallback_efforts: vec![],
             model_fallback: false,
             fast_models: vec![],
+            skills: None,
         }
     }
 }
 
 /// The keys of [`PropertiesPatch`] (what a manifest's `properties` may hold).
-pub const PROPERTY_KEYS: [&str; 15] = [
+pub const PROPERTY_KEYS: [&str; 16] = [
     "self_read_only",
     "nested_sandbox",
     "state",
@@ -211,6 +216,7 @@ pub const PROPERTY_KEYS: [&str; 15] = [
     "fallback_efforts",
     "model_fallback",
     "fast_models",
+    "skills",
 ];
 
 /// Declared properties, each optional: what is given replaces the built-in (or default) value.
@@ -247,6 +253,9 @@ pub struct PropertiesPatch {
     pub model_fallback: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_models: Option<Vec<String>>,
+    /// `""`: it reads none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<String>,
 }
 
 impl PropertiesPatch {
@@ -306,6 +315,9 @@ impl PropertiesPatch {
         }
         if let Some(v) = &self.fast_models {
             p.fast_models = v.clone();
+        }
+        if let Some(v) = &self.skills {
+            p.skills = Some(v.clone()).filter(|v| !v.trim().is_empty());
         }
     }
 }
@@ -412,6 +424,8 @@ const BUILTINS: &[Builtin] = &[
             fallback_efforts: strings(&["low", "medium", "high", "xhigh", "max"]),
             model_fallback: true,
             fast_models: strings(&["haiku"]),
+            // its user skills: `$CLAUDE_CONFIG_DIR/skills/<name>/SKILL.md`
+            skills: Some("skills".into()),
         },
     },
     Builtin {
@@ -460,6 +474,8 @@ const BUILTINS: &[Builtin] = &[
             model_fallback: false,
             // what Codex calls its quick tier now, then what it called it before
             fast_models: strings(&["luna", "mini"]),
+            // its user skills: `$CODEX_HOME/skills/<name>/SKILL.md`
+            skills: Some("skills".into()),
         },
     },
 ];

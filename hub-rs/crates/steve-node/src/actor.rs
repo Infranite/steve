@@ -2077,6 +2077,22 @@ async fn open_harness(
         (Some(s), Some(sd)) => Some((sd.env.clone(), harness_state(inner, s, &sd)?)),
         _ => None,
     };
+    // the Bot's skills where the adapter declares it reads them, in that directory
+    match (
+        &state,
+        inner.cfg.acp.adapter_properties(&harness).skills.as_deref(),
+    ) {
+        (Some((_, dir)), Some(sub)) => {
+            if let Err(why) = crate::bot_skills::place(dir, sub, &row.open.skills) {
+                tracing::warn!(session = %session, "the Bot's skills were not placed: {why}");
+            }
+        }
+        _ if !row.open.skills.is_empty() => tracing::info!(
+            session = %session,
+            "the Bot's skills are not given: the harness reads none, or the session has no harness directory of its own"
+        ),
+        _ => {}
+    }
     // its toolchains' outputs and caches in the item's and the person's own places
     let tools = crate::toolchain::for_run(
         &inner.cfg.home,

@@ -140,6 +140,8 @@ A bot is a harness (Claude Code or Codex) plus a model and thinking effort, a ro
 
 A bot can also have MCP servers of its own (the bot's **Capabilities** tab): a local command (stdio) or an HTTP or SSE endpoint, with environment variables or headers. Every session of the bot gets them through ACP, next to Steve's own tools, the same way for every harness. Secret values are kept in the vault and handed to the session's Node only when the harness opens. See [Bot MCP servers](docs/deployment.md#bot-mcp-servers).
 
+A bot can have skills too: `SKILL.md` instructions (a name, when to use it, then the steps) that its harness follows when a task calls for one. They are written where the harness reads skills when a session opens; which harnesses read skills, and where, is declared by each harness adapter (Claude Code and Codex do). See [Bot skills](docs/deployment.md#bot-skills).
+
 Steve stays out of your harness settings. It answers a permission prompt for that one call and never writes "always allow". It never edits your Codex config. Every session shows the command to resume it in the harness itself, and you can import your local Claude Code and Codex history.
 
 - **Memories** are proposed from finished items, chat days, mail and agents, each with the quote it came from and the memory it would replace. Nothing takes effect until you confirm it.

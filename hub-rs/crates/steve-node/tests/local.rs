@@ -240,6 +240,7 @@ fn open_body(session: &str) -> OpenSession {
         state: Default::default(),
         artifact_view: None,
         mcp_servers: vec![],
+        skills: vec![],
     }
 }
 
@@ -4869,4 +4870,63 @@ async fn a_bots_mcp_servers_reach_session_new_after_steves_with_secrets_taken_th
         },
     }];
     assert!(n.open_session(now_cmd("op_open_s_2", bad)).await.is_err());
+}
+
+/// A Bot's skills are written where the adapter declares it reads them, in the session's own harness
+/// directory, before session/new; the next open makes Steve's skills there exactly the session's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bots_skills_are_in_its_harness_directory_before_the_session_opens() {
+    let t = T::new(&[]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let skill = |name: &str, content: &str| Skill {
+        name: name.into(),
+        description: format!("Use for {name}."),
+        content: content.into(),
+    };
+    let open = |s: &str, skills: Vec<Skill>| {
+        let mut b = open_body(s);
+        b.state = Some(HarnessState {
+            dir: "default/owner/dev/claude-code".into(),
+            import_owner: false,
+        });
+        b.skills = skills;
+        b
+    };
+    n.open_session(now_cmd(
+        "op_open_s_1",
+        open(
+            "s_1",
+            vec![skill("code-review", "# Review\n"), skill("ship", "Ship.")],
+        ),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_1").await));
+    t.until("session/new", |t| t.sent("session/new") == 1).await;
+    let dir = t
+        .home
+        .join("state/default/owner/dev/claude-code/harness/skills");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("code-review/SKILL.md")).unwrap(),
+        "---\nname: code-review\ndescription: \"Use for code-review.\"\n---\n\n# Review\n"
+    );
+    assert!(dir.join("ship/SKILL.md").is_file());
+    // another session of the same Bot after one was switched off
+    n.open_session(now_cmd(
+        "op_open_s_2",
+        open("s_2", vec![skill("code-review", "# Review\n")]),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_2").await));
+    assert!(dir.join("code-review/SKILL.md").is_file());
+    assert!(!dir.join("ship").exists());
+    // what a Node is given is checked
+    let mut bad = open_body("s_3");
+    bad.skills = vec![skill("Bad Name", "x")];
+    assert!(n.open_session(now_cmd("op_open_s_3", bad)).await.is_err());
 }

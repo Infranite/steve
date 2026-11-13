@@ -299,5 +299,9 @@
   "modules.not_found.mcp_server": "没有这个 MCP 服务器",
   "modules.bot_mcp.name_taken": "这个 Bot 已经有一个叫 %{name} 的 MCP 服务器",
   "modules.bot_mcp.secret_needed": "%{name} 是机密，第一次保存时要填上它的值",
-  "modules.bot_mcp.too_many": "一个 Bot 最多接 %{max} 个 MCP 服务器"
+  "modules.bot_mcp.too_many": "一个 Bot 最多接 %{max} 个 MCP 服务器",
+  "modules.not_found.skill": "没有这个技能",
+  "modules.bot_skills.name_taken": "这个 Bot 已经有一个叫 %{name} 的技能",
+  "modules.bot_skills.too_many": "一个 Bot 最多有 %{max} 个技能",
+  "modules.bot_skills.too_large": "一个 Bot 启用的技能加起来最多 %{kib} KiB"
 }

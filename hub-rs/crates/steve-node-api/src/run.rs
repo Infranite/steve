@@ -198,6 +198,89 @@ pub struct OpenSession {
     /// harness, and it is never journaled. An older Node ignores them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServer>,
+    /// The skills of the session's Bot. A harness whose adapter declares where it reads skills
+    /// (`AdapterProperties::skills`, under its own state directory) finds them there when it
+    /// opens; the Node keeps that directory's Steve-made skills to exactly these. Ignored by an
+    /// adapter that reads none and when the session has no state directory of its own. An older
+    /// Node ignores them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<Skill>,
+}
+
+/// One skill: written as `<name>/SKILL.md`, its front matter `name` and `description`, then
+/// `content` (Markdown instructions for the harness).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub content: String,
+}
+
+impl Skill {
+    /// The most skills a session is given.
+    pub const MAX: usize = 32;
+    /// The most bytes of one skill's content, and of all of a session's together.
+    pub const MAX_CONTENT: usize = 32 * 1024;
+    pub const MAX_TOTAL: usize = 128 * 1024;
+    /// The most characters of a description.
+    pub const MAX_DESCRIPTION: usize = 1024;
+
+    /// A usable skill name: 1–64 of `a-z`, `0-9` and single `-` between them (a directory name
+    /// every harness takes).
+    pub fn name_ok(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && !name.starts_with('-')
+            && !name.ends_with('-')
+            && !name.contains("--")
+    }
+
+    /// The `SKILL.md` text: the front matter (the description as a quoted string), then the content.
+    pub fn markdown(&self) -> String {
+        let quoted = serde_json::to_string(self.description.trim()).unwrap_or_default();
+        format!(
+            "---\nname: {}\ndescription: {quoted}\n---\n\n{}\n",
+            self.name,
+            self.content.trim_end()
+        )
+    }
+
+    /// Checks what a Node is given: at most [`Self::MAX`], names usable and once each, a
+    /// description of one line, content within [`Self::MAX_CONTENT`] (all together within
+    /// [`Self::MAX_TOTAL`]), no NUL anywhere.
+    pub fn check_all(skills: &[Skill]) -> crate::common::ApiResult<()> {
+        use crate::common::{ApiError, ErrorCode};
+        let bad = |m: &str| Err(ApiError::new(ErrorCode::Invalid, m.to_string()));
+        if skills.len() > Self::MAX {
+            return bad("too many skills");
+        }
+        let mut names: Vec<&str> = vec![];
+        let mut total = 0usize;
+        for s in skills {
+            if !Self::name_ok(&s.name) || names.contains(&s.name.as_str()) {
+                return bad("a skill name that is not usable");
+            }
+            names.push(&s.name);
+            let d = s.description.trim();
+            if d.is_empty()
+                || d.chars().count() > Self::MAX_DESCRIPTION
+                || d.contains(['\n', '\r', '\0'])
+            {
+                return bad("a skill description that is not usable");
+            }
+            if s.content.len() > Self::MAX_CONTENT || s.content.contains('\0') {
+                return bad("a skill content that is not usable");
+            }
+            total += s.content.len();
+        }
+        if total > Self::MAX_TOTAL {
+            return bad("too much skill content");
+        }
+        Ok(())
+    }
 }
 
 /// One MCP server for the harness, as ACP's `McpServer` (stdio, http or sse).

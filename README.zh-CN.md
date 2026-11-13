@@ -136,6 +136,8 @@ Steve 把密钥放进命令的环境变量、标准输入或临时文件来执�
 
 Bot 还可以接自己的 MCP 服务器（Bot 页的「能力」）：本地命令（stdio），或者 HTTP / SSE 地址，带环境变量或请求头。这个 Bot 的每个会话都通过 ACP 拿到它们，和 Steve 自己的工具并列，哪种 harness 都一样。机密的值存在保险箱里，只在 harness 打开时交给会话所在的 Node。见 [Bot 的 MCP 服务器](docs/deployment.md#bot-mcp-servers)。
 
+Bot 也可以有技能：一份 `SKILL.md` 做事说明（名称、什么时候用、具体步骤），遇到相关的任务时 harness 会照着做。会话打开时，技能写到 harness 读技能的地方；哪种 harness 读、读哪里，由各自的 harness 适配器声明（Claude Code 和 Codex 都读）。见 [Bot 的技能](docs/deployment.md#bot-skills)。
+
 Steve 不动你的 harness 设置。权限提示只答这一次，从不写“始终允许”，也从不改你的 Codex 配置。每个会话都给出在 harness 里接着跑的命令，本机已有的 Claude Code 和 Codex 历史也能导进来。
 
 - **记忆**：Steve 从完成的事项、每天的对话、邮件和智能体那里提出候选记忆，附上出处原话和要替换的旧记忆。你确认之前都不生效。

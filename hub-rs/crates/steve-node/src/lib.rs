@@ -34,6 +34,7 @@ mod scan;
 mod staging;
 mod secrets;
 mod bot_mcp;
+mod bot_skills;
 mod toolchain;
 mod tools;
 mod vitals;
@@ -2171,6 +2172,7 @@ impl SessionExecutor for LocalNode {
             self.check_harness(&o.choice.harness)?;
             self.check_policy(&o.policy)?;
             McpServer::check_all(&o.mcp_servers)?;
+            Skill::check_all(&o.skills)?;
             let w = t
                 .workspace(&o.workspace.id)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;

@@ -65,6 +65,7 @@ impl NodeRuntime {
             artifact_view: None,
             // set in the bind's transaction, from its Bot
             mcp_servers: vec![],
+            skills: vec![],
         };
         let fresh = self.tx(|tx| {
             self.session_owners_work_in(tx, &b.session)?;
@@ -121,6 +122,8 @@ impl NodeRuntime {
             open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), &b.session)?;
             // its Bot's own MCP servers, secrets by reference
             open.mcp_servers = super::super::bot_mcp::for_session(tx, &b.session)?;
+            // and its skills
+            open.skills = super::super::bot_skills::for_session(tx, &b.session)?;
             if self.principal_state.load(Ordering::Relaxed) {
                 open.state = super::super::principal::harness_state_in(
                     tx,
@@ -225,6 +228,7 @@ impl NodeRuntime {
         open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), session)?;
         // and the Bot's MCP servers as they are now
         open.mcp_servers = super::super::bot_mcp::for_session(tx, session)?;
+        open.skills = super::super::bot_skills::for_session(tx, session)?;
         let op = uid(&format!("op_open_{session}"));
         let (req, digest) = command(&op, open)?;
         rt::insert_command_in(

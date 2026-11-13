@@ -134,6 +134,8 @@ const PERM_MODE: Record<string, string> = { plan: "plan", default: "ask", accept
 export const permModes = (harness: string): string[] => { const m = raw.state?.runtimes?.find((r) => r.id === harness)?.modes; return Object.keys(PERM).filter((k) => !m || m.includes(PERM_MODE[k])) }
 /** the reasoning efforts `harness` takes, as its adapter reported them */
 export const harnessEfforts = (harness: string): string[] => raw.state?.runtimes?.find((r) => r.id === harness)?.efforts ?? []
+/** whether `harness` reads a Bot's skills, as its adapter declares (undefined: the Hub did not say) */
+export const harnessSkills = (harness: string): boolean | undefined => raw.state?.runtimes?.find((r) => r.id === harness)?.skills
 /** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
 export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
 export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const, (k) => t(`core:perm.${k}`))

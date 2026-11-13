@@ -2,6 +2,7 @@ api DELETE /accounts/x
 api DELETE /attr-defs/x
 api DELETE /attrs/x
 api DELETE /bots/x/mcp-servers/x
+api DELETE /bots/x/skills/x
 api DELETE /connections/x
 api DELETE /contacts/x
 api DELETE /contacts/x/jobs/x
@@ -27,6 +28,7 @@ api GET /accounts/x
 api GET /attr-defs
 api GET /bots/x/flows
 api GET /bots/x/mcp-servers
+api GET /bots/x/skills
 api GET /chan-messages/x/basis
 api GET /chan-messages/x/context
 api GET /chan-messages/x/resources/x
@@ -128,6 +130,7 @@ api PATCH /accounts/x
 api PATCH /attr-defs/x
 api PATCH /attrs/x
 api PATCH /bots/x/mcp-servers/x
+api PATCH /bots/x/skills/x
 api PATCH /channels/x
 api PATCH /connections/x
 api PATCH /contacts/x
@@ -151,6 +154,7 @@ api PATCH /vault/items/x
 api POST /accounts
 api POST /attr-defs
 api POST /bots/x/mcp-servers
+api POST /bots/x/skills
 api POST /chan-messages/x/recall
 api POST /channels
 api POST /channels/cleanup

@@ -631,6 +631,10 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let routes = routes
         .with_state(modules.clone())
         .merge(steve_modules::bot_mcp::routes(bot_mcp.clone()))
+        // a Bot's skills, written where its harness reads them when a session opens
+        .merge(steve_modules::bot_skills::routes(
+            steve_modules::bot_skills::BotSkills::new(store.clone()),
+        ))
         .merge(steve_modules::vault::routes(vault.clone()))
         .merge(steve_modules::vault::use_api::routes(vault))
         .merge(vault_items)

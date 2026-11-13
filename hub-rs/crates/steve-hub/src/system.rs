@@ -266,6 +266,8 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 "note": note,
                 "error": adapter.and_then(|a| a.error.clone().or_else(|| a.session_error.clone())),
                 "install_hint": spec.install_hint,
+                // it reads skills where Steve can put a Bot's (declared by its adapter)
+                "skills": spec.properties.skills.is_some(),
             })
         })
         .collect()

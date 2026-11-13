@@ -1,9 +1,9 @@
 /* 能力 → MCP 服务器：一个 Bot 自己接的 MCP 服务器（GET/POST/PATCH/DELETE /bots/:id/mcp-servers）。每个服务器是一张
  * affectUI 的 Integration Settings 卡片：名字、连接方式、开关（马上保存），环境变量或请求头的名字（机密只显示名字），编辑和删除。
  * 编辑在对话框里：stdio 填命令、参数和环境变量，http / sse 填地址和请求头，每一项可以标成机密——机密的值交给 Hub 存进保险箱，
- * 页面再也拿不到它；编辑时留空就保留原来的值。下面是还没有做的「技能」和「A2A」，只标“规划中”，没有假功能。 */
+ * 页面再也拿不到它；编辑时留空就保留原来的值。技能在 bot-skills.tsx；下面是还没有做的「A2A」，只标“规划中”，没有假功能。 */
 import { useEffect, useState } from "react"
-import { GlobeIcon, LockIcon, PencilIcon, PlusIcon, PlugIcon, RadioTowerIcon, TerminalIcon, TrashIcon, XIcon, SparklesIcon, NetworkIcon } from "lucide-react"
+import { GlobeIcon, LockIcon, PencilIcon, PlusIcon, PlugIcon, RadioTowerIcon, TerminalIcon, TrashIcon, XIcon, NetworkIcon } from "lucide-react"
 import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
 import { Input, TextField } from "@/components/ui/input"
@@ -148,12 +148,11 @@ function ServerDialog({ bot, x, onClose, onSaved }: { bot: string; x: McpServer 
   )
 }
 
-/** what a Bot will be able to have besides tools: named here, marked planned, nothing to press */
+/** what a Bot will be able to have besides tools and skills: named here, marked planned, nothing to press */
 export function PlannedCaps() {
   const t = useT()
   return (
     <Panel data-caps-planned>
-      <Row icon={<Tile I={SparklesIcon} />} title={t("manage:mcp.skills")} sub={t("manage:mcp.skillsSub")} data-planned="skills"><Pill>{t("manage:mcp.planned")}</Pill></Row>
       <Row icon={<Tile I={NetworkIcon} />} title={t("manage:mcp.a2a")} sub={t("manage:mcp.a2aSub")} data-planned="a2a"><Pill>{t("manage:mcp.planned")}</Pill></Row>
     </Panel>
   )
