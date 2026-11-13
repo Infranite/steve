@@ -251,9 +251,9 @@ At startup, the Hub repairs old output records that point to a prose summary whe
 
 ## Plugins
 
-A plugin is a program that is not part of Steve, installed from a plugin library and run beside the Hub as a process of its own. It is reached through one of Steve's documented contracts and never links into the Hub. The first kind is a channel plugin: a [channel service](#an-external-channel-service) the Hub starts and connects for you.
+A plugin is something that is not part of Steve, installed from a plugin library: a program run beside the Hub as a process of its own, or data the web client reads. It is reached through one of Steve's documented contracts and never links into the Hub. There are two kinds: a channel plugin, a [channel service](#an-external-channel-service) the Hub starts and connects for you, and a theme plugin, a skin for the web client that is only data.
 
-**Using them.** On the Plugins page the instance's owner adds libraries and installs, upgrades and uninstalls plugins; anyone signed in connects an installed plugin with their own settings (an address, a token, whatever that plugin asks for). Connecting starts one process for that person and creates an external-channel connection of theirs, which then appears in Accounts like any other. The connection's token is kept in the vault, so the vault has to be turned on first. Disconnecting it in Accounts stops the process and removes its settings and data. A library with something installed from it, and a plugin somebody is connected through, cannot be removed until that is undone.
+**Using them.** Plugins are in Settings → Plugins (`#/settings/plugins`): first anything that needs attention (a connection whose plugin is not running, a library that could not be read), then what is installed, what the libraries offer, and the libraries. Plugins sit under Settings rather than beside Capabilities because they are the instance's, installed once by its owner for everyone, while Capabilities are what each Bot is given. The instance's owner adds libraries and installs, upgrades and uninstalls plugins; anyone signed in connects an installed plugin with their own settings (an address, a token, whatever that plugin asks for). Connecting starts one process for that person and creates an external-channel connection of theirs, which then appears in Accounts like any other. The connection's token is kept in the vault, so the vault has to be turned on first. Disconnecting it in Accounts stops the process and removes its settings and data. A library with something installed from it, and a plugin somebody is connected through, cannot be removed until that is undone.
 
 **Trust.** Installing a plugin runs its program as the Hub's user, outside the sandbox the Node gives agent runs. A library is trusted as much as the owner trusts it by adding it; what is installed is exactly the archive whose sha256 the library's index names. The official library, `https://github.com/Infranite/steve-extensions`, is listed on a new installation and nothing is read from it until the owner asks. `STEVE_PLUGIN_LIBRARY` names another first library, or `off` for none; once the owner has changed the list, the list is what they made it.
 
@@ -294,7 +294,8 @@ A plugin is a program that is not part of Steve, installed from a plugin library
 - `version` is a semantic version. The index names one version of each plugin, the one to install now; an installed plugin with an older version is offered as an update after the owner reads the library again.
 - `config` lists the settings a person enters when connecting. A `secret` one is entered like a password and never shown again; a setting is required unless it says `"required": false`.
 - `artifacts` is keyed by the target the Hub was built for (`steve-hub --build-info` prints it). A plugin without an artifact for the Hub's target is listed and cannot be installed there. `url` is `https://`, or a path relative to the index, which is the only form a directory library uses. The archive is a `.tar.gz` of regular files and directories, at most 256 MiB; an archive with a link or a path that leaves it is refused. `entry` is the executable in it.
-- `kind` and `contract` say how the Hub runs the plugin. One whose kind or contract this Hub does not know is listed as needing a newer Steve.
+- `kind` and `contract` say how the Hub runs the plugin: `channel` or `theme`, each at contract 1. One whose kind or contract this Hub does not know is listed as needing a newer Steve.
+- An artifact keyed `any` is used on every target that has none of its own; a theme, which is data, usually has only that one.
 
 **A channel plugin** (`"kind": "channel"`, `"contract": 1`) implements the external channel protocol (`hub-rs/crates/steve-channels/src/adapters/ext_ws/protocol.rs`) for one signed-in person. The Hub starts its `entry` once per connection, with `PATH`, `HOME`, the locale, `TMPDIR` and `TZ` of its own environment and these variables:
 
@@ -307,6 +308,16 @@ A plugin is a program that is not part of Steve, installed from a plugin library
 | `STEVE_PLUGIN_SUPERVISED` | `1`: the Hub holds standard input open; exit when it reaches end of file, which means the Hub is gone |
 
 The plugin has 20 seconds to start listening when it is first connected. One that exits is started again after a pause that grows from a second to a minute; meanwhile its connection behaves like any external channel whose service is unreachable. To stop it the Hub closes its standard input and sends `SIGTERM`, and kills it after five seconds.
+
+**A theme plugin** (`"kind": "theme"`, `"contract": 1`) is a skin for the web client. Nothing of it runs, on the Hub or in the browser: its `entry` is a [theme manifest](#appearance-and-themes) in the archive, a JSON object of at most 64 KiB, and the Hub refuses to install an archive whose `entry` is not one. It has no `config` and is not connected. Once it is installed the web client reads the installed manifests (`GET /api/plugins/themes`, for anyone signed in), checks each one and registers it, and the theme is a choice of its kind in Settings → Appearance for everyone on the Hub, on each of their devices. A manifest the client refuses is shown as refused on the Plugins page, with the reason. Uninstalling it removes the choice; a device that used it goes back to the default.
+
+```json
+{
+  "id": "ocean", "name": {"en": "Ocean", "zh-CN": "海洋"}, "summary": "A blue accent",
+  "kind": "theme", "version": "1.0.0", "contract": 1, "entry": "theme.json",
+  "artifacts": {"any": {"url": "dist/ocean-1.0.0.tar.gz", "sha256": "…"}}
+}
+```
 
 **On disk**, everything is under `<home>/plugins` and readable without a running Hub:
 
@@ -771,7 +782,7 @@ manifest overrides a whitelist of the design tokens in `web/src/index.css`, sepa
 Only the light text on `primary` and the `blue` text on the page and cards need WCAG AA (4.5:1); the built-ins are
 tested for it on every neutral in both modes (`web/test/themes.test.mjs`).
 
-Themes from elsewhere, such as a future theme plugin, are added in the web client with `registerTheme(manifest)` from
+A [theme plugin](#plugins) installed on the Hub is registered this way for everyone on it. Themes from elsewhere are added in the web client with `registerTheme(manifest)` from
 `web/src/themes` (also `window.steveThemes.registerTheme` for a script that is not bundled with the client). It
 returns `{ ok: true }` or `{ ok: false, errors }`: a manifest with an unknown field or token, a token its kind may not
 set, or a value outside the syntax above is refused as a whole and nothing on screen changes. A registered theme
