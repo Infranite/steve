@@ -16,7 +16,8 @@ import { draftKey } from "@/composer-draft"
 import { ProposalCard } from "@/config-ui"
 import { Cites, linkCites } from "@/knowledge/parts"
 import { Robot } from "@/robot"
-import { chatBusy, chatSend, emit, endMeeting, finishOnboarding, focusItem, meet, meeting, skipOnboarding, isPromoting, isThinking, makeItem, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, type Item, type Msg } from "@/store"
+import { Onboarding } from "@/onboarding"
+import { chatBusy, chatSend, endMeeting, focusItem, meeting, isPromoting, isThinking, makeItem, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, type Item, type Msg } from "@/store"
 import { ChatQueue } from "@/queue"
 import { AwaySummary, type AwayItem } from "@/components/affect/away-summary"
 import { MessageActions, type MessageMoreAction } from "@/components/affect/message-actions"
@@ -127,32 +128,6 @@ function MeActions({ m }: { m: Msg }) {
       </Popover>
     </div>
   )
-}
-
-/* first-run onboarding, inline in the conversation */
-function Onboarding() {
-  const t = useT()
-  const n = st.onboard
-  if (n < 0) return null
-  const rt = st.runtimes.filter((r) => r.ok).map((r) => r.name)
-  /* each step: what Steve says, the step's name, and the answers offered (by id) */
-  type Opt = "ok" | "devices" | "seeProjects" | "finish" | "meetGo" | "later"
-  const steps: [string, string, Opt[]][] = [
-    [t("pages:chat.onboard.hello"), t("pages:chat.onboard.start"), ["ok"]],
-    [rt.length ? t("pages:chat.onboard.runtimes", { list: rt.join(t("pages:listSep")), first: rt[0] }) : t("pages:chat.onboard.noRuntime"), t("pages:chat.onboard.runtime"), ["ok", "devices"]],
-    [t("pages:chat.onboard.projects", { space: st.workspace?.name, count: st.projects.length }), t("pages:chat.onboard.project"), ["ok", "seeProjects"]],
-    /* the instance's owner ends with the first meeting; anyone else with a first task */
-    st.owner ? [t("pages:chat.onboard.meet"), t("pages:chat.onboard.meetStep"), ["meetGo", "later"]] : [t("pages:chat.onboard.first"), t("pages:chat.onboard.firstTask"), ["finish"]],
-  ]
-  return <>
-    {steps.slice(0, n + 1).map(([q, step, opts], j) => (
-      <div key={j} className="flex flex-col gap-2" data-onboard={j}>
-        <SteveSays sub={t("pages:chat.onboard.sub", { n: j + 1, total: steps.length, step })}>{q}</SteveSays>
-        {j === n && <div className="flex flex-wrap gap-2 self-start">{opts.map((o) => <Button key={o} size="sm" variant="outline" className="rounded-full" data-onboard-opt={o}
-          onClick={() => { if (o === "devices") { go("#/devices"); return } if (o === "seeProjects") { go("#/projects"); return } if (o === "meetGo") { void meet(); return } if (o === "later") { skipOnboarding(); return } if (j === steps.length - 1) { finishOnboarding(); toast(t("pages:chat.onboard.done")); return } st.onboard = j + 1; emit() }}>{t(`pages:chat.onboard.${o}`)}</Button>)}
-          <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={skipOnboarding} data-onboard-skip>{t("pages:chat.onboard.skip")}</Button></div>}
-      </div>))}
-  </>
 }
 
 /* while you were away (affectUI Away Summary): what waits on you, what failed and what got done since you last looked.
