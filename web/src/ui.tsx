@@ -62,8 +62,9 @@ import { usePeopleOn } from "@/api/people"
  * transitions, or with reduced motion, it just changes */
 const hashSub = (cb: () => void) => {
   const on = () => {
-    const d = document as Document & { startViewTransition?: (f: () => void) => unknown }
-    if (d.startViewTransition && !matchMedia("(prefers-reduced-motion: reduce)").matches) d.startViewTransition(() => flushSync(cb))
+    const d = document as Document & { startViewTransition?: (f: () => void) => { ready: Promise<void>; finished: Promise<void> } }
+    /* a transition the browser skips (a second route change before the first one drew) rejects its promises: nothing failed */
+    if (d.startViewTransition && !matchMedia("(prefers-reduced-motion: reduce)").matches) { const v = d.startViewTransition(() => flushSync(cb)); v.ready.catch(() => {}); v.finished.catch(() => {}) }
     else cb()
   }
   window.addEventListener("hashchange", on); return () => window.removeEventListener("hashchange", on)
