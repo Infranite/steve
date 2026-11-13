@@ -375,6 +375,8 @@ export default {
     },
   },
   queue: {
+    next: "Next",
+    place: "#{{n}}",
     afterRelease: "sends after the release",
     afterTurn: "sends when this turn ends",
     afterStart: "sends once the session has started",
@@ -850,8 +852,6 @@ export default {
     tooLarge: "Over {{mb}} MB",
     uploading: "Uploading…",
     remove: "Remove {{name}}",
-    add: "Attach files",
-    addHint: "Attach files (you can also paste a screenshot or drag files in)",
     zoom: "Enlarge {{name}}",
     download: "Download",
   },

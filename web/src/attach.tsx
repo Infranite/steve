@@ -1,7 +1,7 @@
 /* Attachments: upload state for a composer, and how attached files look wherever a message shows
  * (chat bubbles, item comments, session transcripts). Images preview and zoom; other files are a chip that downloads. */
-import { useEffect, useRef, useState, useSyncExternalStore } from "react"
-import { DownloadIcon, FileArchiveIcon, FileIcon, FileTextIcon, PaperclipIcon, XIcon } from "lucide-react"
+import { useEffect, useState, useSyncExternalStore } from "react"
+import { DownloadIcon, FileArchiveIcon, FileIcon, FileTextIcon, XIcon } from "lucide-react"
 import { cn } from "cn"
 import { api, fileUrl, type RFile } from "@/api"
 import { Attachment, AttachmentAction, AttachmentActions, AttachmentContent, AttachmentDescription, AttachmentMedia, AttachmentTitle } from "@/components/ui/attachment"
@@ -75,17 +75,6 @@ export function PendingList({ list, onRemove }: { list: Pending[]; onRemove: (ke
         </Attachment>
       ))}
     </div>
-  )
-}
-
-export function AttachButton({ onFiles, disabled }: { onFiles: (f: FileList) => void; disabled?: boolean }) {
-  const ref = useRef<HTMLInputElement>(null), t = useT()
-  return (
-    <>
-      <button type="button" aria-label={t("shell:attach.add")} title={t("shell:attach.addHint")} disabled={disabled} onClick={() => ref.current?.click()} data-attach
-        className="flex size-8 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"><PaperclipIcon className="size-4" strokeWidth={1.75} /></button>
-      <input ref={ref} type="file" multiple accept={ACCEPT} className="hidden" data-file-input onChange={(e) => { if (e.target.files?.length) onFiles(e.target.files); e.target.value = "" }} />
-    </>
   )
 }
 

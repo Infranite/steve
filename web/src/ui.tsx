@@ -3,14 +3,11 @@
 import { Children, Fragment, Suspense, lazy, memo, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
 import { flushSync } from "react-dom"
 import { Robot } from "@/robot"
-import { cue } from "@/bus"
 import { clockDur } from "@/i18n/format"
 import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
 import { itemDisplayStatus } from "@/item-workflow-relation"
-import { ArrowUpIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon,
-  MoonIcon, PencilIcon, SearchIcon, SquareTerminalIcon,
-  SunIcon, TerminalIcon, ArrowUpRightIcon, UsersRoundIcon, CornerDownRightIcon, MonitorIcon, HashIcon, AtSignIcon, SlashIcon, XIcon, SquareIcon, CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
+import { ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon, MoonIcon, PencilIcon, SearchIcon, SquareTerminalIcon, SunIcon, TerminalIcon, ArrowUpRightIcon, CornerDownRightIcon, MonitorIcon, XIcon, CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -20,12 +17,9 @@ import { Item as UIItem, ItemActions, ItemContent, ItemDescription, ItemGroup, I
 import { Empty as UIEmpty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Card as UICard, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Breadcrumb } from "@/components/affect/breadcrumb-clean"
-import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { Kbd } from "@/components/ui/kbd"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group"
 import { CodeBlock, CodeBlockContent, CodeBlockLine } from "@/components/ui/code-block"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Spinner } from "@/components/ui/spinner"
@@ -36,15 +30,12 @@ import { permissionDecision, useStore } from "@/store"
 import { st, emit, briefHead, ST, SS, WT, tagCatLabel, tagLabel, tagDesc, botName, decide, tag, isKind, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import { RunningNowPill } from "@/running-pill"
-import { useUploads, PendingList, AttachButton, Files } from "@/attach"
-import type { RFile } from "@/api"
+import { Files } from "@/attach"
 import { MemConfirm, memAsk } from "@/knowledge/parts"
 import { FLOW_SUBJECTS, FlowDecisionBody } from "@/auto/decision"
 import { MODULE_CARDS } from "@/vault/decisions"
 import { MailDraftCard } from "@/mail/draft"
 import { CardTools, InlineDecision, isToolCall, mapDecision, ToolApproval } from "@/thread/decide"
-import { useMentions } from "@/people/mention"
-import { clearSentDraft, draftToSend, readDraft, saveDraft } from "@/composer-draft"
 import { isPeopleDecision, PeopleDecisionBody } from "@/people/pending"
 
 /* ───────── routing ───────── */
@@ -579,185 +570,8 @@ export const openSheet = (kind: string, payload?: any) => { sheet = { kind, payl
 export const closeSheet = () => { sheet = null; emit() }
 export const getSheet = () => sheet
 
-/* ───────── composer (InputGroup) ───────── */
-/** the composer's slash commands: [the token the Hub reads after "/", the command id]; label and description by id */
-export const COMMANDS: [string, "newItem" | "newProject" | "digest" | "newBot"][] = [["新事项", "newItem"], ["新项目", "newProject"], ["汇报", "digest"], ["新 Bot", "newBot"]]
-type MenuKind = "#" | "@" | "/"
-/* what the composer marks in its text: the same tokens the Hub reads (an item id, “@名字”, a leading “/命令”), plus the one being typed */
-type Mark = "item" | "bot" | "party" | "cmd" | "typing"
-const MARK: Record<Mark, string> = {
-  item: "bg-blue/12 text-blue ring-blue/12", bot: "bg-blue/12 text-blue ring-blue/12",
-  party: "bg-foreground/10 text-foreground ring-foreground/10", cmd: "bg-foreground/10 text-foreground ring-foreground/10",
-  typing: "bg-foreground/[0.05] text-muted-foreground ring-foreground/[0.05]",
-}
-const TOKEN = /(?<![\w@#-])#?[A-Za-z]{1,6}-\d+(?![\w-])|(?<!\S)@[^\s#@]+|^\/\S+/g
-export function markText(v: string, at: (ins: string) => "bot" | "party" | undefined, typing?: [number, number] | null): [string, Mark | null][] {
-  const rs: [number, number, Mark][] = []
-  for (const m of v.matchAll(TOKEN)) {
-    const t = m[0], k: Mark | undefined = t[0] === "@" ? at(t) : t[0] === "/" ? (COMMANDS.some(([n]) => "/" + n.replace(/\s+/g, "") === t.replace(/\s+/g, "")) ? "cmd" : undefined)
-      : st.items.some((i) => i.id === t.replace(/^#/, "").toUpperCase()) ? "item" : undefined
-    if (k) rs.push([m.index, m.index + t.length, k])
-  }
-  if (typing && typing[1] > typing[0] && !rs.some(([a, b]) => a < typing[1] && typing[0] < b)) rs.push([typing[0], typing[1], "typing"])
-  rs.sort((a, b) => a[0] - b[0])
-  const out: [string, Mark | null][] = []
-  let at0 = 0
-  for (const [a, b, k] of rs) { if (a > at0) out.push([v.slice(at0, a), null]); out.push([v.slice(a, b), k]); at0 = b }
-  if (at0 < v.length) out.push([v.slice(at0), null])
-  return out
-}
-/** what a page may do with its composer: a withdrawn queued message goes back into it when it is empty */
-export type ComposerHandle = { empty: () => boolean; fill: (text: string, files: RFile[]) => void; focus: () => void }
-type ComposerProps = {
-  handle?: { current: ComposerHandle | null }
-  draftKey?: string
-  /** `clientId`: the same for every retry of one unchanged draft (send idempotency) */
-  placeholder: string; onSend: (t: string, files: string[], refs: RFile[], mentions: { kind: "party" | "bot"; id: string }[], clientId: string) => void | boolean | Promise<void | boolean>; model?: string; onModel?: (m: string) => void; left?: ReactNode; autoFocus?: boolean; className?: string; testId?: string; disabled?: boolean
-  /** `busy`: the other side is working. With `onStop` there is a stop button beside send (and Esc), and sending still
-   * works: the page queues what is sent meanwhile */
-  busy?: boolean; onStop?: () => void | Promise<void>; onCommand?: (c: string) => void
-}
-export function Composer(props: ComposerProps) {
-  return <ComposerInput key={props.draftKey} {...props} />
-}
-function ComposerInput({ placeholder, onSend, model, left, autoFocus, className, testId, disabled, busy, onStop, onCommand, handle, draftKey }: ComposerProps) {
-  const tr = useT()
-  const [initial] = useState(() => readDraft(draftKey))
-  const [v, setV] = useState(initial.text)
-  const [sending, setSending] = useState(false)
-  /* stop was pressed and the turn has not ended yet; a stop that never lands frees the button again */
-  const [stopping, setStopping] = useState(false)
-  useEffect(() => { if (!busy) setStopping(false) }, [busy])
-  useEffect(() => { if (!stopping) return; const t = setTimeout(() => setStopping(false), 10_000); return () => clearTimeout(t) }, [stopping])
-  const stop = () => { if (!onStop || stopping) return; setStopping(true); void Promise.resolve(onStop()).catch(() => setStopping(false)) }
-  const queues = !!busy && !!onStop
-  const inFlight = useRef(false)
-  const up = useUploads(initial.files, draftKey, (files) => {
-    const draft = readDraft(draftKey)
-    saveDraft(draftKey, { ...draft, files })
-  })
-  const [drag, setDrag] = useState(0)
-  const [menu, setMenu] = useState<{ kind: MenuKind; q: string; start: number; end: number } | null>(null)
-  const [sel, setSel] = useState(0)
-  const ta = useRef<HTMLTextAreaElement>(null)
-  const chat = testId === "chat"
-  const men = useMentions(chat && menu?.kind === "@" ? menu.q : null, initial.mentions)
-  useEffect(() => { saveDraft(draftKey, { text: v, files: up.ready, mentions: men.snapshot() }) }, [draftKey, v, up.list])
-  /* attachments go by id once uploaded; sending waits until every upload has finished (failed ones are just left out) */
-  const live = useRef({ v, n: up.list.length }); live.current = { v, n: up.list.length }
-  useEffect(() => {
-    if (!handle) return
-    handle.current = { empty: () => !live.current.v.trim() && !live.current.n, focus: () => ta.current?.focus(), fill: (t, fs) => { setV(t); up.put(fs); requestAnimationFrame(() => { ta.current?.focus(); ta.current?.setSelectionRange(t.length, t.length) }) } }
-    return () => { handle.current = null }
-  }, [handle])
-  const send = async () => {
-    const t = v.trim()
-    if (disabled || (busy && !onStop) || inFlight.current || up.uploading || (!t && !up.ready.length)) return
-    const sentDraft = draftToSend(draftKey, { text: v, files: up.ready, mentions: men.snapshot() })
-    inFlight.current = true; setSending(true)
-    try {
-      const sent = await onSend(t || "（附件）", up.ready.map((f) => f.id), up.ready, men.take(t), sentDraft.clientId)
-      if (sent === false) return
-      if (clearSentDraft(draftKey, sentDraft)) { setV(""); up.clear(); men.clear(); setMenu(null) }
-    } catch { /* the action reports its error; keep the draft for retry */ }
-    finally { inFlight.current = false; setSending(false) }
-  }
-  const takeFiles = (fs: FileList | File[] | null | undefined) => { if (!disabled && !inFlight.current && fs && fs.length) { up.add(fs); return true } return false }
-  const isFileDrag = (e: React.DragEvent) => [...(e.dataTransfer?.types ?? [])].includes("Files")
-  type Opt = { id: string; label: ReactNode; ins: string; cmd?: string }
-  const opts: Opt[] = !menu ? [] : menu.kind === "#"
-    ? st.items.filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={itemDisplayStatus(i)} /></> }))
-    : menu.kind === "@" && men.opts ? men.opts
-    : menu.kind === "@"
-    ? [...Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><BotAvatar k={k} size={18} /><span className="type-callout">{tr("core:composer.botName", { name: st.bots[k].n })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> })),
-      ...st.pp.contacts.filter((c) => !c.me && c.kind !== "未确认" && (!menu.q || [c.n, ...c.aliases].some((x) => x.toLowerCase().includes(menu.q.toLowerCase())))).slice(0, 5).map((c) => ({ id: c.id, ins: "@" + c.n.split(" ")[0], label: <><span className="flex size-4.5 items-center justify-center rounded-full bg-muted type-label leading-none text-muted-foreground">{c.n[0]}</span><span className="type-callout">{c.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.relate", { info: [st.pp.orgs.find((o) => o.id === c.org)?.n, c.title].filter(Boolean).join(" · ") })}</span></> })),
-      ...st.pp.teams.filter((g) => !menu.q || g.n.includes(menu.q)).slice(0, 3).map((g) => ({ id: g.id, ins: "@" + g.n.replace(/\s+/g, ""), label: <><UsersRoundIcon className="size-4.5 text-muted-foreground" /><span className="type-callout">{g.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.team", { count: g.members.length })}</span></> }))]
-    : COMMANDS.filter(([n, c]) => !menu.q || n.includes(menu.q) || tr(`core:cmd.${c}`).toLowerCase().includes(menu.q.toLowerCase())).map(([, c]) => ({ id: c, ins: "", cmd: c, label: <><SlashIcon className="size-3.5 text-muted-foreground" /><span className="type-callout">{tr(`core:cmd.${c}`)}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr(`core:cmd.${c}Desc`)}</span></> }))
-  const track = (val: string, caret: number) => {
-    const before = val.slice(0, caret)
-    const m = before.match(/#([^\s#@]{0,24})$/) || (chat ? before.match(/(?:^|\s)@([^\s#@]{0,12})$/) : null) || (chat ? before.match(/^\/(\S{0,12})$/) : null)
-    const kind: MenuKind | null = !m ? null : m[0].trim().startsWith("#") ? "#" : m[0].trim().startsWith("@") ? "@" : "/"
-    if (kind === "#" && !menu && chat) cue("inspect")
-    setMenu(m && kind ? { kind, q: m[1], start: caret - m[0].trimStart().length, end: caret } : null); setSel(0)
-  }
-  const insert = (o: Opt) => {
-    if (!menu) return
-    men.pick(o)
-    if (o.cmd) { setV(""); setMenu(null); onCommand?.(o.cmd); return }
-    const nv = v.slice(0, menu.start) + o.ins + " " + v.slice(menu.end), pos = menu.start + o.ins.length + 1
-    setV(nv); setMenu(null); requestAnimationFrame(() => { ta.current?.focus(); ta.current?.setSelectionRange(pos, pos) })
-  }
-  /* the textarea's own text is transparent; this copy behind it, laid out the same way, shows the marks */
-  const mirror = useRef<HTMLDivElement>(null)
-  const atKind = (ins: string): "bot" | "party" | undefined => {
-    const m = men.known(ins); if (m) return m.kind
-    const n = ins.slice(1)
-    if (Object.values(st.bots).some((b) => b.on && [b.n, b.n + "Bot"].map((x) => x.replace(/\s+/g, "")).includes(n))) return "bot"
-    if (st.pp.contacts.some((c) => !c.me && c.n.split(" ")[0] === n) || st.pp.teams.some((g) => g.n.replace(/\s+/g, "") === n)) return "party"
-  }
-  const marked = markText(v, atKind, menu && [menu.start, menu.end])
-  useLayoutEffect(() => { if (mirror.current && ta.current) mirror.current.scrollTop = ta.current.scrollTop })
-  const head = menu?.kind === "#" ? <><HashIcon className="size-3.5" />{tr("core:composer.headItem")}</> : menu?.kind === "@" ? <><AtSignIcon className="size-3.5" />{tr("core:composer.headMention")}</> : <><SlashIcon className="size-3.5" />{tr("core:composer.headCommand")}</>
-  const [floating, leaving] = useLinger(menu && opts.length > 0 && { kind: menu.kind, opts, groups: menu.kind === "@" && men.opts ? men.groups(opts) : [{ head, xs: opts }] })
-  return (
-    <div className="relative" data-dropzone
-      onDragEnter={(e) => { if (isFileDrag(e)) { e.preventDefault(); setDrag((n) => n + 1) } }}
-      onDragOver={(e) => { if (isFileDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy" } }}
-      onDragLeave={(e) => { if (isFileDrag(e)) setDrag((n) => Math.max(0, n - 1)) }}
-      onDrop={(e) => { if (isFileDrag(e)) { e.preventDefault(); setDrag(0); takeFiles(e.dataTransfer.files) } }}>
-      {floating && (
-        <Command shouldFilter={false} value={floating.opts[sel]?.id} className="absolute inset-x-2 bottom-full z-30 mb-2 h-auto max-w-md origin-bottom-left rounded-xl bg-popover shadow-lg anim-float" data-ref-menu={leaving ? undefined : floating.kind} data-leaving={leaving || undefined} aria-hidden={leaving || undefined}>
-          <CommandList>
-            {floating.groups.filter((g) => g.xs.length).map((g, k) => (
-            <CommandGroup key={k} heading={<span className="inline-flex items-center gap-1.5">{g.head}</span>}>
-              {g.xs.map((o) => { const n = floating.opts.indexOf(o); return (
-                <CommandItem key={o.id} value={o.id} onMouseDown={(e) => { e.preventDefault(); insert(o) }} onSelect={() => insert(o)} onMouseEnter={() => setSel(n)} data-ref-opt={o.id} className="gap-2.5 rounded-lg">{o.label}</CommandItem>
-              ) })}
-            </CommandGroup>))}
-          </CommandList>
-        </Command>
-      )}
-      <InputGroup className={cn("rounded-2xl border-border bg-card shadow-[var(--lift-hover)] transition-[border-color,box-shadow] duration-180 ease-(--ease-out) dark:border-transparent has-[[data-slot=input-group-control]:focus-visible]:border-ring/50 has-[[data-slot=input-group-control]:focus-visible]:ring-3 has-[[data-slot=input-group-control]:focus-visible]:ring-ring/10", disabled && "opacity-60", drag > 0 && "border-blue ring-3 ring-blue/15", className)} data-composer={testId}>
-        {up.list.length > 0 && (
-          <InputGroupAddon align="block-start" className="px-3 pt-3">
-            <PendingList list={up.list} onRemove={(key) => { if (!inFlight.current) up.remove(key) }} />
-          </InputGroupAddon>
-        )}
-        <div className="relative w-full">
-        <div ref={mirror} aria-hidden data-composer-marks className="pointer-events-none absolute inset-0 overflow-hidden [scrollbar-gutter:stable] whitespace-pre-wrap break-words px-4 pb-2 pt-3 type-body text-foreground">
-          {marked.map(([t, k], n) => k ? <span key={n} data-mark={k} className={cn("rounded-md ring-2", MARK[k])}>{t}</span> : <Fragment key={n}>{t}</Fragment>)}{v.endsWith("\n") && "\u200b"}
-        </div>
-        <InputGroupTextarea ref={ta} autoFocus={autoFocus} disabled={disabled || sending} value={v} placeholder={drag > 0 ? tr("core:composer.dropFiles") : placeholder} rows={1}
-          onPaste={(e) => { if (e.clipboardData?.files?.length && takeFiles(e.clipboardData.files)) e.preventDefault() }}
-          onChange={(e) => { if (chat && !v && e.target.value) cue("input"); else if (chat && v && !e.target.value && !st.thinking) cue("idle"); setV(e.target.value); track(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
-          onScroll={(e) => { if (mirror.current) mirror.current.scrollTop = e.currentTarget.scrollTop }}
-          className="relative max-h-40 min-h-11 [scrollbar-gutter:stable] px-4 pt-3 focus-visible:bg-transparent dark:focus-visible:bg-transparent type-body leading-5.5 text-transparent caret-foreground placeholder:text-tertiary selection:bg-blue/25 selection:text-transparent"
-          onKeyDown={(e) => {
-            if (menu && opts.length) {
-              if (e.key === "ArrowDown") { e.preventDefault(); setSel((x) => (x + 1) % opts.length); return }
-              if (e.key === "ArrowUp") { e.preventDefault(); setSel((x) => (x - 1 + opts.length) % opts.length); return }
-              if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); insert(opts[sel]); return }
-              if (e.key === "Escape") { setMenu(null); return }
-            }
-            if (e.key === "Escape" && queues && !e.nativeEvent.isComposing) { e.preventDefault(); stop(); return }
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!busy || onStop) send() }
-          }} />
-        </div>
-        <InputGroupAddon align="block-end" className="gap-1 px-2.5 pb-2.5">
-          <AttachButton onFiles={(f) => takeFiles(f)} disabled={disabled || sending} />
-          {model && <span className="px-1.5 type-footnote text-muted-foreground" data-model>{model}</span>}
-          {/* a phone gives the caller's toggles the small size, so the composer stays one compact row */}
-          {left && <span className="contents max-sm:[&_[data-slot=tabs-list]]:h-7! max-sm:[&_[data-slot=tabs-trigger]]:px-2 max-sm:[&_[data-slot=tabs-trigger]]:type-footnote">{left}</span>}
-          <span className="flex-1" />
-          <span className={cn("mr-1 hidden items-center gap-1 whitespace-nowrap type-footnote text-tertiary", chat ? "lg:inline-flex" : "xl:inline-flex")}>{chat && <><Kbd>#</Kbd>{tr("core:composer.hintItem")}<Kbd>@</Kbd>Bot<Kbd>/</Kbd>{tr("core:composer.hintCommand")}</>}{!chat && <><Kbd>⏎</Kbd>{tr("core:composer.hintSend")}<Kbd>⇧⏎</Kbd>{tr("core:composer.hintNewline")}</>}</span>
-          {queues && <Tooltip><TooltipTrigger render={<InputGroupButton size="icon-sm" variant="outline" aria-label={tr(stopping ? "core:composer.stopping" : "core:composer.stop")} data-stop data-stopping={stopping || undefined} onClick={stop} disabled={stopping} className="rounded-full" />}>
-            {stopping ? <Spinner className="size-4" /> : <SquareIcon className="size-3 fill-current" />}</TooltipTrigger><TooltipContent>{stopping ? tr("core:composer.stoppingTip") : <>{tr("core:composer.stopTip")} <Kbd>Esc</Kbd></>}</TooltipContent></Tooltip>}
-          <InputGroupButton size="icon-sm" variant="default" aria-label={tr(sending ? "core:composer.submitting" : queues ? "core:composer.queueSend" : "core:composer.send")} title={queues ? tr("core:composer.queueSendTip") : undefined} data-send data-send-queues={queues || undefined} onClick={() => void send()} disabled={sending || up.uploading || (!v.trim() && !up.ready.length) || disabled} className="rounded-full shadow-xs disabled:bg-muted disabled:text-tertiary disabled:opacity-100 disabled:shadow-none">{sending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" strokeWidth={2.25} />}</InputGroupButton>
-        </InputGroupAddon>
-      </InputGroup>
-    </div>
-  )
-}
+/* ───────── composer: its own module (composer.tsx), still reachable from here ───────── */
+export { COMMANDS, Composer, markText, type ComposerHandle, type ComposerProps, type SendHow } from "@/composer"
 
 /* ───────── transcript ─────────
  * read like a coding agent's own app: each turn is the message, a work block (thinking, commands, reads, edits —
@@ -1104,8 +918,8 @@ function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: stri
 
 /** the session's state at a glance, above the composer: running and doing what, waiting on you, or done and how it went.
  *  Only a running or waiting turn keeps its tinted box; a finished one (done, stopped, ended) is one quiet line. On a
- *  phone the bar keeps the state and the time, not the step summary. */
-export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
+ *  phone the bar keeps the state and the time, not the step summary. Stopping the turn is the composer's (its Stop and Esc). */
+export function RunBar({ k }: { k: string }) {
   const t = useT()
   const s = st.S[k], run = s?.st === "run"
   const now = useNow(run)
@@ -1132,7 +946,6 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
       {/* plain text in its own box: a flex row cuts text off without the ellipsis */}
       {what && <span className={cn("flex min-w-0 items-baseline gap-1.5 truncate max-sm:hidden", run ? "text-foreground/85" : "text-muted-foreground")} data-doing>{typeof what === "string" ? <span className="min-w-0 truncate">{what}</span> : what}</span>}
       <span className="ml-auto shrink-0 type-footnote tabular-nums text-muted-foreground">{run ? clock(now - t0) : endAt && t0 ? t("core:runBar.took", { dur: fmtDur(endAt - t0) }) : ""}</span>
-      {run && onStop && <Button size="xs" variant="outline" className="shrink-0 bg-card" onClick={onStop} data-interrupt><SquareIcon className="fill-current" />{t("core:runBar.interrupt")}</Button>}
     </div>
   )
 }

@@ -17,9 +17,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card"
 import { Input } from "@/components/ui/input"
-import { Progress } from "@/components/ui/progress"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
@@ -542,9 +540,9 @@ export function ItemView({ id }: { id: string }) {
         onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== i.t) patchItem(i.id, { t: v }); setTitleEdit(false) }} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setTitleEdit(false) }} />
       : <span className="cursor-text" onDoubleClick={() => setTitleEdit(true)} data-title>{i.t}</span>} back={["#/items", t("views:items.title")]} actions={actions} toolbar={quick} toolbarTop max={1080}
       footer={<div className="w-full shrink-0 border-t bg-background/85 backdrop-blur-xl"><div className="mx-auto w-full px-4 pb-[76px] pt-3 sm:px-8 md:pb-4" style={{ maxWidth: 1040 + 64 }}><div className="lg:pr-[340px]">
-        {i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} />}
         <div className="mb-2 type-footnote font-medium text-foreground/80" data-item-feedback-label>{t("views:item.messageBot")}</div>
         <Composer draftKey={draftKey(st.workspace?.id, "item", i.id)} handle={itemComposer} placeholder={t("views:item.composer", { id: i.id })} testId="item" onSend={(text, files) => supp(i.id, text, target, files)}
+          queue={i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} numbered={false} />}
           left={<Segmented size="sm" value={targets.includes(target) ? target : "auto"} onChange={setTarget} options={targets.map((x) => [x, targetLabel[x]] as const)} />} />
       </div></div></div>}
       sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><StatePill state={state} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span>{st.yolo && !over && <YoloItemSwitch i={i} />}</Meta>}>
@@ -674,7 +672,7 @@ export function ItemView({ id }: { id: string }) {
 
 export function SessionView({ k }: { k: string }) {
   const t = useT()
-  const [mode, setMode] = useState<"插话" | "排队">("插话"), [renaming, setRenaming] = useState(false)
+  const [renaming, setRenaming] = useState(false)
   const [infoOpen, setInfoOpen] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
   const composer = useRef<ComposerHandle | null>(null)
@@ -701,12 +699,6 @@ export function SessionView({ k }: { k: string }) {
       </DropdownMenuContent>
     </DropdownMenu>
   )
-  const ctx = (
-    <HoverCard>
-      <HoverCardTrigger render={<button type="button" className="rounded-full px-2 py-1 type-footnote tabular-nums text-muted-foreground hover:bg-accent" />}>{s.contextKnown ? t("views:session.ctxPct", { pct: s.ctx }) : t("views:session.ctxUnknown")}</HoverCardTrigger>
-      <HoverCardContent className="w-60"><div className="type-label text-tertiary">{t("views:session.ctx")}</div>{s.contextKnown && <Progress value={Math.min(100, s.ctx)} className="my-2.5" />}<div className="type-callout text-muted-foreground">{s.contextKnown ? t("views:session.ctxUsed", { pct: s.ctx }) : t("views:session.ctxNone")}</div></HoverCardContent>
-    </HoverCard>
-  )
   const panel = (
     <div className="flex flex-col gap-8">
       {i ? (
@@ -728,27 +720,29 @@ export function SessionView({ k }: { k: string }) {
       <div className="min-w-0 flex-1">
         <Page noTitle title={t("views:session.numbered", { n: s.n })} back={i ? ["#/items/" + i.id, t("views:items.title")] : ["#/sessions", t("views:sessions.title")]} max={720} scrollRef={scroller}
           bar={<div className="flex min-w-0 items-center gap-2"><span className="truncate type-headline">{s.n ? t("views:session.numberedBar", { n: s.n }) : ""}{renaming ? <Input autoFocus defaultValue={s.title} className="inline-flex h-7 w-56 rounded-md" data-rename-input onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.title) sessPatch(k, { title: v }, t("views:session.renamed")); setRenaming(false) }} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} /> : s.title}</span><Status s={s.st} sess pill className="hidden sm:inline-flex" />{i && <ProjectChip id={i.project} className="hidden shrink-0 type-footnote text-muted-foreground sm:inline-flex" />}</div>}
-          actions={<>{!s.ro && <SessionStats id={k} />}{/* the runtime line under the conversation says it too: below xl the title needs the room */}<span className="hidden xl:inline-flex">{ctx}</span><Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)}>{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
+          actions={<>{!s.ro && <SessionStats id={k} />}<Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)}>{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
           footer={
             /* on the page's own frame and reading width: the composer and the transcript share one left edge */
             <div className="mx-auto w-full max-w-[1104px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div className="max-w-[760px]">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-tertiary" data-session-runtime>
-                <span>Harness <span className="text-muted-foreground">{s.h ?? t("views:session.unknown")}</span></span>
+                {/* harness and model: the composer's label says them (the read-only note has none, so here it does) */}
+                {s.ro && <span className="break-all">{hm(s)}</span>}
                 <NativeIdLine k={k} label={t("views:session.nativeId")} className="w-auto" />
-                <span className="break-all">{t("views:session.model")} <span className="text-muted-foreground">{s.m ?? t("views:session.defaultModel")}</span></span>
                 <span>{t("views:session.effortLabel")} <span className="text-muted-foreground">{s.reasoningEffort ?? t("views:session.effortInherit")}</span></span>
-                {/* the header says it from xl up */}
-                <span className={cn("tabular-nums xl:hidden", s.ctx >= 80 ? "text-attention" : "text-muted-foreground")}>{s.contextKnown ? t("views:session.ctxPct", { pct: s.ctx }) : t("views:session.ctxUnknown")}</span>
+                {/* a reported context is the composer's ring; that nothing is reported is said here */}
+                {!s.ro && !s.contextKnown && <span data-session-ctx-unreported>{t("views:session.ctxLabel")} <span className="text-muted-foreground">{t("views:session.unreported")}</span></span>}
               </div>
-              <RunBar k={k} onStop={s.ro ? undefined : () => interrupt(k)} />
-              {!s.ro && <QueueStrip sid={k} rows={s.queue} note={queueNote(s)} starting={s.starting} composer={composer} />}
+              <RunBar k={k} />
               {s.ro ? (
                 <div className="flex flex-wrap items-center gap-3 rounded-xl bg-muted/60 px-4 py-3" data-readonly>
                   <LockIcon className="size-4 text-muted-foreground" /><span className="min-w-0 flex-1 type-callout text-muted-foreground">{t("views:session.readOnlyNote", { src: s.src.startsWith("本机 ") ? t("views:session.srcLocal", { h: s.src.slice(3) }) : s.src })}</span>
                   <Button size="sm" variant="outline" onClick={() => openSheet("fork", { k, at: Math.max(0, s.ev.length - 1) })}>{t("views:session.toItem")}</Button>
                 </div>
-              ) : <Composer key={k} draftKey={draftKey(st.workspace?.id, "session", k)} handle={composer} testId="session" model={hm(s)} placeholder={s.st === "ended" ? t("views:session.endedPlaceholder") : t("views:session.placeholder")} onSend={(text, files) => sessSend(k, text, mode, files)}
-                left={run ? <Segmented size="sm" value={mode} onChange={setMode} options={[["插话", t("views:session.modeSteer")], ["排队", t("views:session.modeQueue")]] as const} /> : undefined} />}
+              ) : <Composer key={k} draftKey={draftKey(st.workspace?.id, "session", k)} handle={composer} testId="session" model={hm(s)} placeholder={s.st === "ended" ? t("views:session.endedPlaceholder") : t("views:session.placeholder")}
+                /* while a turn runs Enter steers it (插话) and ⌥ Enter queues (排队); Stop and Esc interrupt it */
+                busy={run} steers onStop={() => interrupt(k)} onSend={(text, files, _refs, _mentions, _id, how) => sessSend(k, text, how === "queue" ? "排队" : "插话", files)}
+                queue={<QueueStrip sid={k} rows={s.queue} note={queueNote(s)} starting={s.starting} composer={composer} />}
+                context={s.contextKnown ? { value: s.ctx / 100, title: t("views:session.ctxUsed", { pct: s.ctx }) } : undefined} />}
             </div></div>
           }>
           <div className="pt-6"><Transcript k={k} /><SessionCards k={k} /></div>

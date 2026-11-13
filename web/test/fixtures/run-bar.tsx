@@ -40,7 +40,7 @@ function Fixture() {
   return (
     <TooltipProvider><SidebarProvider>
       <main className="flex w-full max-w-3xl flex-col gap-10 p-4 sm:p-8">
-        <section data-fixture="run"><RunBar k="s1" onStop={() => {}} /><Transcript k="s1" /></section>
+        <section data-fixture="run"><RunBar k="s1" /><Transcript k="s1" /></section>
         <section data-fixture="stopped"><Transcript k="s2" /></section>
       </main>
     </SidebarProvider></TooltipProvider>

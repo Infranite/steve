@@ -27,7 +27,7 @@ try {
     assert.ok(cut.right <= width, `label ends inside the viewport: ${cut.right}`)
     assert.equal(await bar.locator('[aria-live]').count(), 1)
     assert.equal(await bar.getAttribute("aria-live"), null)
-    assert.equal(await bar.locator("[data-interrupt]").isVisible(), true)
+    assert.equal(await bar.locator("button").count(), 0, "stopping the turn is the composer's (composer-run.browser.mjs), not the bar's")
 
     /* interrupted: the steps say so, and so does the timeline – never a green "Done" */
     const work = page.locator('[data-fixture="stopped"] [data-work="done"]')

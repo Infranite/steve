@@ -21,6 +21,9 @@ import { CostWaterfall, type CostStep } from "@/components/affect/cost-waterfall
 import { CompactBreakdown } from "@/components/affect/compact-breakdown"
 import { AutonomyDial, type AutonomyLevel } from "@/components/affect/autonomy-dial"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
+import { ChatComposer } from "@/components/affect/chat-composer-clean"
+import { IconEdit, IconSteer, IconUndo, RunActions, RunAct, RunContext, RunQueue, RunQueued } from "@/components/affect/run-controls-clean"
+import { runLabels } from "@/composer"
 import { PermissionDetails } from "@/components/permission"
 import { dcLabels } from "@/thread/decide"
 import { dialActions, dialText, LOCKED } from "@/yolo/switch"
@@ -137,7 +140,28 @@ function State({ label, children, className }: { label: string; children: ReactN
 const L = (t: T, k: keyof Copy["st"]) => t(`views:showroom.st.${k}`)
 
 /* ───────── the page ───────── */
-const IDS: Id[] = ["agent-lanes", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel"]
+/** a session's composer as Steve draws it, with its words kept here: nothing it does leaves the page */
+function SampleComposer({ running, text: first = "", queue = [], ctx }: { running?: boolean; text?: string; queue?: string[]; ctx?: number }) {
+  const t = useT()
+  const [text, setText] = useState(first), [stopped, setStopped] = useState(false)
+  const live = running && !stopped, has = !!text.trim()
+  return (
+    <ChatComposer model="Claude Code · gpt-6.1-sol" addLabel={t("core:composer.add")} add={[{ rows: [{ id: "files", label: t("core:composer.addFiles"), description: t("core:composer.addFilesDesc") }] }]} onAdd={noop}
+      head={queue.length ? <RunQueue label={t("shell:queue.region")} note={t("shell:queue.queuedN", { count: queue.length, note: t("shell:queue.afterTurn") })}>
+        {queue.map((q, n) => <RunQueued key={n} place={n === 0 ? t("shell:queue.next") : t("shell:queue.place", { n: n + 1 })} actions={<>
+          <RunAct icon={<IconEdit />} label={t("shell:queue.editAria", { text: q })} onClick={noop} />
+          <RunAct icon={<IconUndo />} label={t("shell:queue.withdrawAria", { text: q })} onClick={noop} />
+          <RunAct icon={<IconSteer />} text={t("shell:queue.sendNow")} tone="accent" label={t("shell:queue.sendNowAria", { text: q })} onClick={noop} />
+        </>}><span className="type-callout">{q}</span></RunQueued>)}
+      </RunQueue> : undefined}
+      end={<>{ctx !== undefined && <RunContext value={ctx} title={t("views:session.ctxUsed", { pct: Math.round(ctx * 100) })} />}
+        <RunActions running={live} has={has} canSend={has} steers labels={runLabels(t, true)} onStop={() => setStopped(true)} onSend={() => setText("")} onQueue={() => setText("")} onSteer={() => setText("")} /></>}>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} rows={1} placeholder={t("views:session.placeholder")} aria-label={t("views:session.placeholder")} className="ui-ccc__message" />
+    </ChatComposer>
+  )
+}
+
+const IDS: Id[] = ["agent-lanes", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel", "chat-composer"]
 
 export function DesignShowroom() {
   const t = useT()
@@ -311,6 +335,11 @@ export function DesignShowroom() {
             <MemoryPanel className="[--ui-mp-width:100%]" title={t("knowledge:tab.mems")} showTitle={false} searchable={false} memories={memories(t, kind)} categories={["rule", "preference"].map(kind)}
               maxHeight={0} showSwitch={false} text={mk} addedSource={t("knowledge:mems.youWrote")} onChange={noop} onAdd={noop} onEdit={noop} onPause={noop} onForget={noop} onRestore={noop} />
           </State>
+        </Exhibit>
+
+        <Exhibit id="chat-composer">
+          <State label={L(t, "ccIdle")}><SampleComposer text={S(t, "ccIdleText")} ctx={0.54} /></State>
+          <State label={L(t, "ccRunning")}><SampleComposer running text={S(t, "ccTyped")} queue={[S(t, "ccQ1"), S(t, "ccQ2")]} ctx={0.86} /></State>
         </Exhibit>
 
         <a href="#/design" className="inline-flex items-center gap-1.5 self-start type-callout text-blue hover:underline"><ArrowLeftIcon className="size-4" />{t("views:design.title")}</a>

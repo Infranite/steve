@@ -358,6 +358,8 @@ export default {
   },
   /* queue.tsx: messages waiting for a conversation's next turn */
   queue: {
+    next: "下一条",
+    place: "第 {{n}} 条",
     afterRelease: "等发布完成后发送",
     afterTurn: "本回合结束后发送",
     afterStart: "会话启动后发送",
@@ -814,8 +816,6 @@ export default {
     tooLarge: "超过 {{mb}} MB",
     uploading: "上传中…",
     remove: "移除 {{name}}",
-    add: "添加附件",
-    addHint: "添加附件（也可以粘贴截图或拖进来）",
     zoom: "放大查看 {{name}}",
     download: "下载",
   },
