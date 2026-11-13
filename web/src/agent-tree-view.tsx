@@ -24,7 +24,7 @@ import { botName, loadItem, st } from "@/store"
 import { BotAvatar } from "@/ui"
 import { Markdown } from "@/components/markdown"
 import { OutDialog, type OutOpen } from "@/item-outputs"
-import { orderedUnits, type Workflow } from "@/workflow"
+import { orderedUnits, stopPending, type Workflow } from "@/workflow"
 import type { ItemState } from "@/item-state"
 import { buildAgentTree, workTime, findNode, isActive, isOver, rollup, summarize, teamLanes, type AgentNode, type AgentStatus, type Cost, type TeamRow, type TreeItem, type TreeStat } from "@/agent-tree"
 import { ParallelAttempts, type Attempt, type AttemptStatus, type PacLabels } from "@/components/affect/parallel-attempts-clean"
@@ -81,7 +81,7 @@ export function useAgentTree(root: string, workflow?: Workflow | null, rootStatu
   })() : []
   const running = (s: string) => s === "running" || s === "dispatching"
   const activeAffected = affected.find((u) => running(u.status))
-  const stoppingAffected = affected.some((u) => u.stop_pending)
+  const stoppingAffected = affected.some(stopPending)
   const otherActive = rework !== null && units.some((u) => !affected.some((a) => a.id === u.id) && running(u.status))
   const old = workflow?.current_cycle === false
   const dialogs = workflow && <>
@@ -445,7 +445,7 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
     {u && <div className="flex flex-col gap-1.5 type-footnote">
       {node.waitingOn.length > 0 && <p className="text-muted-foreground">{t("views:workflow.waitingFor", { names: node.waitingOn.join(" · ") })}</p>}
       {running && u.activity?.state !== "confirmed" && <p className="text-muted-foreground">{u.activity?.reason ?? t("views:workflow.activityUnknown")}</p>}
-      {u.stop_pending && <p className="text-attention">{t("views:workflow.stopPending")}</p>}
+      {stopPending(u) && <p className="text-attention">{t("views:workflow.stopPending")}</p>}
       {st.bots[u.bot_id]?.on === false && <p className="text-attention">{t("views:workflow.botDisabled")}</p>}
     </div>}
     {node.reason && <p className="break-words rounded-lg bg-muted/60 px-3 py-2 type-callout">{node.reason}</p>}

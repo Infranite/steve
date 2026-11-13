@@ -31,6 +31,19 @@ pub fn workspace_ref_of(c: &rusqlite::Connection, session: &str) -> Result<Optio
     .optional()?)
 }
 
+/// The session's binding was let go and nothing of it is in flight: its phase is `released`, no
+/// attempt is active and every turn has finished. Such a session holds no process on any Node, so
+/// it is idle even while that Node is not attached (a parked binding otherwise counts as busy).
+/// False for an unbound session: that one is judged by its own status.
+pub fn released_idle(c: &rusqlite::Connection, session: &str) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?1 AND phase='released' AND active_attempt IS NULL)
+           AND NOT EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=?1 AND state<>'finished')",
+        [session],
+        |r| r.get(0),
+    )?)
+}
+
 /// Idempotent insert; a reused session with a different binding is a conflict.
 pub fn bind_session_in(tx: &Tx<'_>, b: &SessionBinding<'_>, now: i64) -> Result<bool> {
     let workspace = to_json(b.workspace)?;

@@ -1,0 +1,1 @@
+- Finished work units no longer show "Stop not yet confirmed" in the item's collaboration view and the agent detail panel. The note now shows only on a cancelled or failed unit whose execution has not been confirmed over. A unit that ended normally holds nothing up while its Node is offline or not attached: replanning, retrying and completing the item are no longer blocked by it.

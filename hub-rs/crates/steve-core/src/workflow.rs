@@ -169,7 +169,15 @@ impl Tx<'_> {
             return Ok(false);
         };
         for s in self.db().sessions_of_item(id)? {
-            if self.busy(&s.id)
+            // A binding that was let go with nothing in flight holds no process anywhere. Asking
+            // the runtime instead would count it busy whenever its Node is not attached (a parked
+            // session is busy by default), and every finished unit would look like it was still
+            // stopping and hold up replans, retries and completion.
+            let released = self
+                .db()
+                .store()
+                .reader(|c| steve_store::runtime::released_idle(c, &s.id))?;
+            if (!released && self.busy(&s.id))
                 || self.rt().uncertain(&s.id)
                 || matches!(s.status.as_str(), "running" | "starting")
                 || !self.db().queued(&s.id)?.is_empty()
@@ -278,8 +286,11 @@ impl Tx<'_> {
                         })
                         .collect::<Vec<_>>()
                 );
+                // A stop is pending only where one was asked for: a cancelled or failed unit whose
+                // execution has not been confirmed over. A unit that succeeded was never stopped;
+                // its turn may still be ending after the delivery, which the blockers say.
                 row["stop_pending"] = json!(
-                    matches!(unit.status.as_str(), "succeeded" | "failed" | "cancelled")
+                    matches!(unit.status.as_str(), "failed" | "cancelled")
                         && self.workflow_busy(unit)?
                 );
                 if matches!(unit.status.as_str(), "running" | "dispatching") {

@@ -1087,3 +1087,87 @@ fn a_plan_that_cannot_run_anything_at_once_is_said_back() {
     ];
     assert!(crate::workflow::plan_notes(&good, None).is_empty());
 }
+
+fn unit_row(k: &Kit, parent: &str, id: &str) -> Value {
+    k.core.workflow_get(parent).unwrap()["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["id"] == id)
+        .unwrap()
+        .clone()
+}
+
+fn busy_blocker(k: &Kit, parent: &str, id: &str) -> bool {
+    k.core.workflow_get(parent).unwrap()["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b.as_str() == Some(&format!("{id}：执行或取消仍未确认结束")))
+}
+
+/// What the Hub recorded once a Node let a session go: phase released, nothing in flight.
+fn release_binding(k: &Kit, sid: &str) {
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute("INSERT OR IGNORE INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created,last_seen) VALUES ('local','me','node',zeroblob(32),'fingerprint','active',1,1)", [])?;
+            c.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,'local','{}',?1,'r','released',1)", [sid])?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_succeeded_unit_is_never_stopping_and_a_released_binding_is_idle_without_its_node() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let sa = unit(&k, &parent, "a").session_id.unwrap();
+    let sb = unit(&k, &parent, "b").session_id.unwrap();
+
+    // Delivered while its turn is still ending: done, not "stop not yet confirmed". Completion
+    // still waits for the turn, which the blockers say.
+    report(&k, &parent, "a").unwrap();
+    assert_eq!(unit_row(&k, &parent, "a")["status"], "succeeded");
+    assert_eq!(unit_row(&k, &parent, "a")["stop_pending"], false);
+    assert!(busy_blocker(&k, &parent, "a"));
+    k.rt.end_turn(&k.core, &sa, "end_turn", None);
+    assert!(!busy_blocker(&k, &parent, "a"));
+
+    // Its Node is not attached (a snapshot Hub, a Node that is down): the runtime reports a parked
+    // session as busy. The binding the Hub recorded says it was let go with nothing in flight, so
+    // the finished unit holds nothing up.
+    k.rt.st().turning.insert(sa.clone());
+    assert!(
+        busy_blocker(&k, &parent, "a"),
+        "an unreleased parked session stays busy"
+    );
+    release_binding(&k, &sa);
+    assert!(!busy_blocker(&k, &parent, "a"));
+    assert_eq!(unit_row(&k, &parent, "a")["stop_pending"], false);
+
+    // A cancelled unit whose execution goes on is the one stop that is pending, until its binding
+    // is released with nothing in flight.
+    change(&k, &parent, "cancel", Some("b")).unwrap();
+    k.rt.st().turning.insert(sb.clone());
+    assert_eq!(unit_row(&k, &parent, "b")["status"], "cancelled");
+    assert_eq!(unit_row(&k, &parent, "b")["stop_pending"], true);
+    release_binding(&k, &sb);
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute("UPDATE sessions SET status='idle' WHERE id=?1", [&sb])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(unit_row(&k, &parent, "b")["stop_pending"], false);
+    // a turn the Hub still has open on that binding keeps it busy again
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES ('t_open',?1,'running',1,1)", [&sb])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(unit_row(&k, &parent, "b")["stop_pending"], true);
+}

@@ -10,6 +10,9 @@ export type WorkflowUnit = {
   outputs?: { kind: string; title: string; location?: string | null; role?: string | null }[]
   checks?: { name: string; passed: boolean; operated?: boolean }[]
 }
+/** "停止尚未确认" belongs to a unit that was stopped (cancelled, or failed) while its execution is not confirmed over.
+ *  A unit that succeeded was never stopped, so the flag never shows on it, whatever an older Hub sends. */
+export const stopPending = (u: Pick<WorkflowUnit, "status" | "stop_pending">) => !!u.stop_pending && (u.status === "cancelled" || u.status === "failed")
 export type Workflow = {
   item_id: string; revision: number; paused: boolean; max_parallel: number; max_attempts: number
   units: WorkflowUnit[]; blockers: string[]; execution_ready?: boolean
