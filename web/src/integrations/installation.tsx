@@ -19,7 +19,8 @@ import { accountsApi, CONN_STATUS, connStatusOf } from "@/api/accounts"
 import { selfSideOf } from "@/integrations/sides"
 import { channelsApi, type ChannelAccount, type Rule, type Space } from "@/api/channels"
 import { areaLabel, feishuGrantUrl, type FeishuAppDetail, type FeishuUserDetail, type IAdapter, type IConnection, type IInstallation, type IProvider, type MissingRow } from "@/api/integrations"
-import { ProviderIcon } from "@/integrations/index"
+import { ProviderGlyph } from "@/integrations/index"
+import { IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
 import { FeishuConnectDialog, SelfButtons } from "@/integrations/feishu"
 import { CleanupDialog, DisconnectDialog, type Leaving } from "@/integrations/disconnect"
 import { OwnerChip } from "../people/owner-chip"
@@ -71,38 +72,28 @@ export function InstallationCard({ inst, p, chans, onChange }: { inst: IInstalla
   const all = inst.identities.map((i) => ({ id: i.connection.id, label: label(i.kind), stops: stops(i.kind) }))
   const chanOf = (c?: IConnection) => (c ? chans?.find((a) => a.connection.id === c.id) ?? null : null)
   return (
-    <section className="overflow-hidden rounded-xl bg-card shadow-[var(--lift)]" data-installation={inst.id} data-installation-missing={inst.missing} aria-label={inst.name}>
-      {leave && <DisconnectDialog title={leave.title} name={inst.name} leaving={leave.leaving} onClose={() => setLeave(null)} onDone={() => { setLeave(null); onChange() }}
-        keptNote={feishu ? t("integrations:inst.keptNoteFeishu") : undefined} />}
-      <header className="flex items-start gap-3 border-b px-5 py-4">
-        <ProviderIcon id={p.id} size={36} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5"><span className="type-headline" data-installation-name>{inst.name}</span>
-            {inst.missing > 0 && <Badge variant="secondary" className="bg-attention/12 text-attention" data-missing-badge>{t("integrations:inst.missingBadge", { count: inst.missing })}</Badge>}</div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 type-footnote text-muted-foreground">
-            <span className="inline-flex items-center gap-1"><StatusDot s={dot} />{s}</span>
-            <span className="text-tertiary">·</span><span>{feishu ? (app?.domain === "lark" ? t("integrations:inst.larkApp") : t("integrations:inst.feishuApp")) : p.name}</span>
-            {app && <><span className="text-tertiary">·</span><span className="font-mono">{app.app_id}</span></>}
-          </div>
-        </div>
-        {app && <a className="hidden shrink-0 items-center gap-1 rounded-md type-callout text-blue hover:underline sm:inline-flex" href={app.console_url} target="_blank" rel="noreferrer noopener">{t("integrations:inst.console")}<ExternalLinkIcon className="size-3" /></a>}
-      </header>
-      {feishu && <div className="border-b bg-muted/60 px-5 py-2.5 type-callout text-muted-foreground" data-who-works>
-        {t("integrations:inst.whoWorks")}</div>}
-      <div className="flex flex-col divide-y">
-        {(["steve", "you"] as const).map((k) => {
-          const c = k === "steve" ? steve : you
-          if (c) return <Identity key={k} kind={k} c={c} p={p} chan={chanOf(c)} app={app} appConn={steve} onLeave={() => setLeave({ title: t("integrations:inst.disconnectWhat", { what: label(k) }), leaving: [{ id: c.id, label: label(k), stops: stops(k) }] })} />
-          if (!hasAdapter(k)) return null
-          return <Enable key={k} kind={k} p={p} inst={inst} />
-        })}
-      </div>
-      {steve && you && feishu && <VoiceRule bot={chanOf(steve)} me={chanOf(you)} />}
-      <footer className="flex flex-wrap items-center justify-between gap-2 border-t px-5 py-3">
+    <IntegrationSettings name={inst.name} logo={<ProviderGlyph id={p.id} />} data-installation={inst.id} data-installation-missing={inst.missing}
+      badge={inst.missing > 0 ? <Badge variant="secondary" className="bg-attention/12 text-attention" data-missing-badge>{t("integrations:inst.missingBadge", { count: inst.missing })}</Badge> : undefined}
+      meta={<span className="inline-flex flex-wrap items-center gap-x-1.5" data-installation-name={inst.name}>
+        <span className="inline-flex items-center gap-1"><StatusDot s={dot} />{s}</span>
+        <span className="text-tertiary">·</span><span>{feishu ? (app?.domain === "lark" ? t("integrations:inst.larkApp") : t("integrations:inst.feishuApp")) : p.name}</span>
+        {app && <><span className="text-tertiary">·</span><span className="font-mono">{app.app_id}</span></>}</span>}
+      aside={app && <a className="hidden shrink-0 items-center gap-1 rounded-md type-callout text-blue hover:underline sm:inline-flex" href={app.console_url} target="_blank" rel="noreferrer noopener">{t("integrations:inst.console")}<ExternalLinkIcon className="size-3" /></a>}
+      footer={<div className="flex w-full flex-wrap items-center justify-between gap-2 px-1">
         <Tech inst={inst} p={p} />
         {inst.identities.length > 1 && <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setLeave({ title: t(feishu ? "integrations:inst.disconnectAllFeishu" : "integrations:inst.disconnectAllOther", { name: inst.name }), leaving: all })} data-disconnect-installation>{feishu ? t("integrations:inst.disconnectAllApp") : t("integrations:inst.disconnectAllConn")}</Button>}
-      </footer>
-    </section>
+      </div>}>
+      {leave && <DisconnectDialog title={leave.title} name={inst.name} leaving={leave.leaving} onClose={() => setLeave(null)} onDone={() => { setLeave(null); onChange() }}
+        keptNote={feishu ? t("integrations:inst.keptNoteFeishu") : undefined} />}
+      {feishu && <IntegrationSection data-who-works><div className="type-callout text-muted-foreground">{t("integrations:inst.whoWorks")}</div></IntegrationSection>}
+      {(["steve", "you"] as const).map((k) => {
+        const c = k === "steve" ? steve : you
+        if (c) return <IntegrationSection key={k}><Identity kind={k} c={c} p={p} chan={chanOf(c)} app={app} appConn={steve} onLeave={() => setLeave({ title: t("integrations:inst.disconnectWhat", { what: label(k) }), leaving: [{ id: c.id, label: label(k), stops: stops(k) }] })} /></IntegrationSection>
+        if (!hasAdapter(k)) return null
+        return <IntegrationSection key={k}><Enable kind={k} p={p} inst={inst} /></IntegrationSection>
+      })}
+      {steve && you && feishu && <IntegrationSection><VoiceRule bot={chanOf(steve)} me={chanOf(you)} /></IntegrationSection>}
+    </IntegrationSettings>
   )
 }
 
@@ -112,7 +103,7 @@ function Enable({ kind, p, inst }: { kind: "steve" | "you"; p: IProvider; inst: 
   const [dlg, setDlg] = useState(false)
   const feishu = isFeishu(p.id), side = selfSideOf(p.adapters) as IAdapter | null
   return (
-    <div className="px-5 py-5" data-identity={kind} data-identity-state="off">
+    <div className="py-1" data-identity={kind} data-identity-state="off">
       {dlg && <FeishuConnectDialog bots={[]} onClose={() => setDlg(false)} side={side} />}
       <div className="flex flex-wrap items-center gap-2"><span className="type-headline">{kind === "steve" ? t("integrations:inst.titleSteveBot") : t("integrations:inst.titleYouFeishu")}</span><Badge variant="secondary" className="font-medium text-muted-foreground">{t("integrations:inst.optionalOff")}</Badge></div>
       <Line className="mt-1">{kind === "you"
@@ -140,7 +131,7 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
       : <Trans t={t} i18nKey="integrations:inst.whatYouFeishu" values={{ name }} components={{ code: <code className="font-mono" /> }} />
     : kind === "steve" ? t("integrations:inst.whatSteve", { name }) : t("integrations:inst.whatYou", { name })
   return (
-    <div className="flex flex-col gap-4 px-5 py-5" data-identity={kind} data-identity-state="on" data-conn={c.id}>
+    <div className="flex flex-col gap-4 py-1" data-identity={kind} data-identity-state="on" data-conn={c.id}>
       <div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5"><span className="type-headline">{title}</span>
           <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span></div>
@@ -303,7 +294,7 @@ function VoiceRule({ bot, me }: { bot: ChannelAccount | null; me: ChannelAccount
   // one space per chat: a group both identities see is the same space in both lists
   const mine = groups(me), shared: Space[] = groups(bot).filter((s) => mine.some((m) => m.id === s.id))
   return (
-    <div className="flex gap-2.5 border-t bg-muted/60 px-5 py-4" data-voice-rule data-shared-groups={shared.length}>
+    <div className="flex gap-2.5" data-voice-rule data-shared-groups={shared.length}>
       <InfoIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
       <div className="min-w-0 flex-1 type-callout">
         <div className="font-medium">{t("integrations:inst.voiceTitle")}</div>

@@ -96,6 +96,7 @@ export default {
     identitySub: "在群里以什么身份出现、什么时候回复",
     replaceCred: "更换凭据",
     disconnectAction: "断开接入",
+    open: "打开",
   },
   newAccount: {
     added: "已添加账号",

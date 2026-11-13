@@ -99,6 +99,7 @@ export default {
     identitySub: "How it appears in group chats and when it replies",
     replaceCred: "Replace credentials",
     disconnectAction: "Disconnect",
+    open: "Open",
   },
   newAccount: {
     added: "Account added",

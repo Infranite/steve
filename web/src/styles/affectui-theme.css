@@ -1,4 +1,4 @@
-/* affectUI components (web/src/components/affect) read these 36 --aui-* tokens. Each points at a Steve token that
+/* affectUI components (web/src/components/affect) read these 38 --aui-* tokens. Each points at a Steve token that
  * already switches between light and dark, so one block covers both modes and the components look like the rest of
  * the app: Geist, the slate neutrals, the one indigo accent, Steve's radii, shadows and easing. */
 :root {
@@ -17,6 +17,8 @@
   --aui-border-strong: var(--input);
   --aui-primary: var(--primary);
   --aui-on-primary: var(--primary-foreground);
+  /* the hover of a solid primary button, as Steve's own Button: darker in light mode, lighter in dark */
+  --aui-primary-hover: color-mix(in oklch, var(--primary), black 9%);
   --aui-focus: color-mix(in srgb, var(--ring) 70%, transparent);
   --aui-danger: var(--destructive);
   --aui-danger-soft: color-mix(in srgb, var(--destructive) 12%, transparent);
@@ -32,6 +34,7 @@
   --aui-orange: var(--attention);
   --aui-red: var(--destructive);
   --aui-shadow-card: var(--lift);
+  --aui-shadow-card-hover: var(--lift-hover);
   --aui-shadow-popover: var(--sh-lg);
   --aui-ease: var(--ease-out);
 }
@@ -62,4 +65,8 @@
   [data-slot="item"]:has(> [data-slot="item-actions"] > [data-set-select]) { flex-direction: column; align-items: stretch; gap: 0.5rem; }
   [data-slot="item"]:has(> [data-slot="item-actions"] > [data-set-select]) > [data-slot="item-actions"] { width: 100%; }
   [data-slot="item-actions"] > [data-set-select] { width: 100%; }
+}
+
+.dark {
+  --aui-primary-hover: color-mix(in oklch, var(--primary), white 8%);
 }

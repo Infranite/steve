@@ -1,7 +1,7 @@
 /* 账号 (accounts-vault.md §8, prototype people.tsx AccountsView / AccountDetail): your and your company's accounts, grouped
  * by system; connections to Steve with their health, capabilities, re-authorization, pause and disconnect. */
 import { useEffect, useMemo, useState } from "react"
-import { PlugIcon, CloudIcon, CodeIcon, CalendarIcon, CreditCardIcon, LockIcon, MailIcon, MessageSquareIcon, PhoneIcon, PlusIcon, RefreshCwIcon, KeyRoundIcon } from "lucide-react"
+import { PlugIcon, CloudIcon, CodeIcon, CalendarIcon, CreditCardIcon, GitPullRequestIcon, LockIcon, MailIcon, MessageSquareIcon, PhoneIcon, PlusIcon, RefreshCwIcon, KeyRoundIcon, WebhookIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -16,7 +16,8 @@ import { accountsApi, capLabel, kindLabel, KIND_LABEL, CONN_STATUS, connStatusOf
 import { useLoad, useBusy, report } from "@/accounts/load"
 import { NewAccountDialog, ConnectDialog, CredentialDialog } from "@/accounts/dialogs"
 import { NewVaultDialog } from "@/vault/new-item"
-import { MailSettingsSection } from "@/mail/settings"; import { MAIL_ADAPTERS } from "@/api/mail"
+import { MailSettingsSections, useMailSettings } from "@/mail/settings"; import { MAIL_ADAPTERS } from "@/api/mail"
+import { IntegrationRow, IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
 import { useT } from "@/i18n"
 import { num } from "@/i18n/format"
 
@@ -150,8 +151,7 @@ function AccountDetail({ id }: { id: string }) {
         <Section label={t("accounts:detail.owner")}><Panel><Row title={a.party.name} sub={t(a.verified ? "accounts:detail.verifiedSource" : "accounts:detail.unverifiedSource", { source: a.source_label || a.source })} onClick={() => go("#/contacts/" + a.party.id)} controls={!a.verified}>
           {!a.verified && <Button size="xs" variant="outline" disabled={busy} onClick={(e) => { e.stopPropagation(); void act(() => accountsApi.patchAccount(a.id, { verified: true }), t("accounts:detail.verified")).then((r) => r && L.reload()) }} data-verify-account>{t("common:action.confirm")}</Button>}
           <Chevron /></Row></Panel></Section>
-        {mine && c && MAIL_ADAPTERS.includes(c.adapter) && <MailSettingsSection connection={c.id} />}
-        {mine && <Section label={t("accounts:detail.connection")}>{c ? <Connection c={c} adapter={adapter} label={a.display_name || a.handle} onChange={L.reload} />
+        {mine && <Section label={t("accounts:detail.connection")}>{c ? <Connection c={c} adapter={adapter} label={a.display_name || a.handle} mine={mine} onChange={L.reload} />
           : <Blank>{a.system.kind === "finance" ? t("accounts:detail.notConnectedFinance") : t("accounts:detail.notConnected")}</Blank>}</Section>}
         {mine && <Section label={t("accounts:detail.vaultSection", { n: num(a.vault_items.length) })} right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setNewItem(true)} data-new-vault-for-account><PlusIcon />{t("accounts:detail.newVaultItem")}</Button>}>
           {a.vault_items.length ? <Panel>{a.vault_items.map((v) => <Row key={v.id} icon={<Tile I={KeyRoundIcon} />} title={v.title} onClick={() => go("#/vault/" + v.id)} data-vault-row={v.title}><Chevron /></Row>)}</Panel>
@@ -177,9 +177,17 @@ function EditAccount({ a, onClose, onDone }: { a: RAccount; onClose: () => void;
   )
 }
 
-function Connection({ c, adapter, label, onChange }: { c: RConnection; adapter: RAdapter | null; label: string; onChange: () => void }) {
+/** the provider mark of an adapter: its connection card's logo */
+const ADAPTER_I: [RegExp, any][] = [[/^imap|mail/, MailIcon], [/^github/, GitPullRequestIcon], [/^feishu|^slack/, MessageSquareIcon], [/^ext_/, WebhookIcon]]
+const adapterIcon = (id: string) => { const I = ADAPTER_I.find(([r]) => r.test(id))?.[1] ?? PlugIcon; return <I className="size-5 text-muted-foreground" strokeWidth={1.5} aria-hidden /> }
+
+/** one connection as an affectUI settings card: the switch is whether it receives; a mailbox's settings and the
+ * capabilities it may use are its sections. Everything saves at once except a mailbox's two texts, which have their own
+ * save bar; pausing waits until those are saved or discarded, so folding the card never hides an unsaved edit */
+function Connection({ c, adapter, label, mine, onChange }: { c: RConnection; adapter: RAdapter | null; label: string; mine: boolean; onChange: () => void }) {
   const t = useT()
   const [busy, act] = useBusy(), [cred, setCred] = useState<string[] | null>(null), [usage, setUsage] = useState<RUsage | null>(null), [asking, setAsking] = useState(false)
+  const m = useMailSettings(mine && MAIL_ADAPTERS.includes(c.adapter) ? c.id : null)
   const [s, dot] = connStatusOf(c)
   const reauth = async () => {
     const r = await act(() => accountsApi.reauth(c.id))
@@ -192,8 +200,10 @@ function Connection({ c, adapter, label, onChange }: { c: RConnection; adapter: 
   const askDisconnect = async () => { setAsking(true); try { setUsage(await accountsApi.usage(c.id)) } catch (e) { report(e) } finally { setAsking(false) } }
   const used = usage ? [...usage.flows.map((f) => t("accounts:conn.usedFlow", { name: f.name })), ...usage.sources.map((x) => t("accounts:conn.usedSource", { name: x.name })), ...(usage.spaces ? [t("accounts:conn.usedSpaces", { count: usage.spaces })] : [])] : []
   const toggleCap = (cap: string, on: boolean) => void act(() => accountsApi.patchConnection(c.id, { caps: on ? [...c.caps, cap] : c.caps.filter((x) => x !== cap) })).then((r) => r && onChange())
+  const pause = (on: boolean) => void act(() => accountsApi.patchConnection(c.id, { paused: !on }), on ? t("accounts:conn.resumed") : t("accounts:conn.paused")).then((r) => r && onChange())
+  const meta = <Meta inline><span className="inline-flex items-center gap-1" data-conn-state><StatusDot s={dot} />{s}</span>{c.last_sync ? <span>{t("accounts:conn.lastSync", { time: tm(c.last_sync) })}</span> : null}{c.health.last_ok ? <span>{t("accounts:conn.lastOk", { time: tm(c.health.last_ok) })}</span> : null}</Meta>
   return (
-    <div className="flex flex-col gap-4" data-connection={c.id} data-connection-status={c.status}>
+    <div className="flex flex-col gap-4">
       {cred && adapter && <CredentialDialog adapter={adapter} connection={c.id} only={cred} onClose={() => setCred(null)} onDone={onChange} />}
       <AlertDialog open={!!usage} onOpenChange={(o) => !o && setUsage(null)}><AlertDialogContent>
         <AlertDialogHeader><AlertDialogTitle>{t("accounts:conn.disconnectTitle", { label })}</AlertDialogTitle><AlertDialogDescription>{used.length ? t("accounts:conn.disconnectDesc") : t("accounts:conn.disconnectDescUnused")}</AlertDialogDescription></AlertDialogHeader>
@@ -201,20 +211,25 @@ function Connection({ c, adapter, label, onChange }: { c: RConnection; adapter: 
         <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={async () => { if (await act(() => accountsApi.disconnect(c.id), t("accounts:conn.disconnected"))) onChange() }} data-disconnect-confirm>{t("accounts:conn.disconnect")}</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent></AlertDialog>
       {c.installed === false && <Notice data-conn-not-installed>{t("api:notInstalledNote")}</Notice>}
-      <Panel>
-        <Row title={<span className="inline-flex items-center gap-2"><StatusDot s={dot} />{s}</span>} data-conn-state
-          sub={<Meta inline><span>{adapter?.name ?? c.adapter}</span>{c.last_sync ? <span>{t("accounts:conn.lastSync", { time: tm(c.last_sync) })}</span> : null}{c.health.last_ok ? <span>{t("accounts:conn.lastOk", { time: tm(c.health.last_ok) })}</span> : null}</Meta>}>
-          <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy || c.installed === false} onClick={() => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(r.status === "ok" ? t("accounts:conn.testOk") : t("accounts:conn.testFailed")); onChange() } })} data-conn-test><RefreshCwIcon />{t("accounts:conn.test")}</Button></Row>
-        {c.health.last_error && c.status !== "ok" && <Row title={t("accounts:conn.lastError")} sub={<span className="type-code break-words">{c.health.last_error}</span>}>{c.health.error_at ? <span className="type-footnote text-muted-foreground">{tm(c.health.error_at)}</span> : null}</Row>}
-        {c.installed !== false && (c.status === "reauth" || c.status === "error") && <Row title={t("accounts:conn.reauth")} sub={c.auth === "oauth" ? t("accounts:conn.reauthOAuth") : t("accounts:conn.reauthCred")}><Button size="sm" disabled={busy} onClick={() => void reauth()} data-reauth>{t("accounts:conn.reauth")}</Button></Row>}
-        <Row title={t("accounts:conn.receiving")} sub={c.status === "paused" ? t("accounts:conn.pausedSub") : t("accounts:conn.receivingSub")}>
-          <Switch aria-label={t("accounts:conn.receiving")} checked={c.status !== "paused"} disabled={busy || c.status === "revoked"} onCheckedChange={(v) => void act(() => accountsApi.patchConnection(c.id, { paused: !v }), v ? t("accounts:conn.resumed") : t("accounts:conn.paused")).then((r) => r && onChange())} data-conn-pause /></Row>
-      </Panel>
-      {c.available_caps.length > 0 && <div><div className="mb-2 px-1 type-label text-tertiary">{t("accounts:conn.allow")}</div><Panel>{c.available_caps.map((cap) => (
-        <Row key={cap} title={capLabel(cap)}><Switch aria-label={capLabel(cap)} checked={c.caps.includes(cap)} disabled={busy} onCheckedChange={(v) => toggleCap(cap, v)} data-cap-toggle={cap} /></Row>))}</Panel></div>}
-      {c.caps.includes("msg.receive") && <Panel><Row title={t("accounts:conn.identity")} sub={t("accounts:conn.identitySub")} onClick={() => go("#/channels/acc/" + c.account_id)}><Chevron /></Row></Panel>}
-      {c.auth === "credential" && c.status === "ok" && adapter?.fields?.some((f) => f.secret) && <Button size="sm" variant="ghost" className="self-start text-muted-foreground" disabled={busy} onClick={() => setCred(adapter.fields!.filter((f) => f.secret).map((f) => f.key))} data-replace-cred>{t("accounts:conn.replaceCred")}</Button>}
-      <Button size="sm" variant="ghost" className="self-start text-destructive" disabled={asking || busy} onClick={() => void askDisconnect()} data-disconnect>{asking && <Spinner />}{t("accounts:conn.disconnectAction")}</Button>
+      <IntegrationSettings name={adapter?.name ?? c.adapter} logo={adapterIcon(c.adapter)} meta={meta}
+        pausedMeta={<span className="inline-flex items-center gap-1"><StatusDot s="pause" />{t("accounts:conn.pausedSub")}</span>}
+        enabled={c.status !== "paused"} switchLabel={t("accounts:conn.receiving")} switchDisabled={busy || c.status === "revoked" || m.dirty} onToggle={pause}
+        data-connection={c.id} data-connection-status={c.status}
+        footer={<>
+          <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy || c.installed === false} onClick={() => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(r.status === "ok" ? t("accounts:conn.testOk") : t("accounts:conn.testFailed")); onChange() } })} data-conn-test><RefreshCwIcon />{t("accounts:conn.test")}</Button>
+          {c.auth === "credential" && c.status === "ok" && adapter?.fields?.some((f) => f.secret) && <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => setCred(adapter.fields!.filter((f) => f.secret).map((f) => f.key))} data-replace-cred>{t("accounts:conn.replaceCred")}</Button>}
+          <Button size="sm" variant="ghost" className="ml-auto text-destructive" disabled={asking || busy} onClick={() => void askDisconnect()} data-disconnect>{asking && <Spinner />}{t("accounts:conn.disconnectAction")}</Button>
+        </>}>
+        {((c.health.last_error && c.status !== "ok") || (c.installed !== false && (c.status === "reauth" || c.status === "error"))) && <IntegrationSection data-conn-problem>
+          {c.health.last_error && <IntegrationRow title={t("accounts:conn.lastError")} hint={<span className="type-code break-words">{c.health.last_error}</span>}>{c.health.error_at ? <span className="type-footnote text-muted-foreground">{tm(c.health.error_at)}</span> : null}</IntegrationRow>}
+          {c.installed !== false && (c.status === "reauth" || c.status === "error") && <IntegrationRow title={t("accounts:conn.reauth")} hint={c.auth === "oauth" ? t("accounts:conn.reauthOAuth") : t("accounts:conn.reauthCred")}><Button size="sm" disabled={busy} onClick={() => void reauth()} data-reauth>{t("accounts:conn.reauth")}</Button></IntegrationRow>}
+        </IntegrationSection>}
+        <MailSettingsSections m={m} connection={c.id} />
+        {c.available_caps.length > 0 && <IntegrationSection label={t("accounts:conn.allow")}>{c.available_caps.map((cap) => (
+          <IntegrationRow key={cap} title={capLabel(cap)}><Switch aria-label={capLabel(cap)} checked={c.caps.includes(cap)} disabled={busy} onCheckedChange={(v) => toggleCap(cap, v)} data-cap-toggle={cap} /></IntegrationRow>))}</IntegrationSection>}
+        {c.caps.includes("msg.receive") && <IntegrationSection><IntegrationRow title={t("accounts:conn.identity")} hint={t("accounts:conn.identitySub")}>
+          <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/channels/acc/" + c.account_id)} data-conn-identity>{t("accounts:conn.open")}<Chevron /></Button></IntegrationRow></IntegrationSection>}
+      </IntegrationSettings>
     </div>
   )
 }
