@@ -1,5 +1,5 @@
 /* Small pieces shared by the signal, flow, schedule and source pages */
-import type { ReactNode } from "react"
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "@/lib/utils"
 import { BellIcon, CalendarIcon, ClockIcon, GitPullRequestIcon, HandIcon, ListTodoIcon, MailIcon, MessageSquareIcon, RadioIcon, SirenIcon, type LucideIcon } from "lucide-react"
 import { msDur, nearTime } from "@/i18n/format"
@@ -61,3 +61,17 @@ export function Json({ v, className }: { v: unknown; className?: string }) {
 const RUN_DOT = { running: "run", waiting: "wait", done: "done", failed: "fail", cancelled: "idle", skipped: "idle" } as const
 export const RUN_STATUS: Record<string, [string, string]> = Object.defineProperties({}, Object.fromEntries(Object.entries(RUN_DOT).map(([k, dot]) =>
   [k, { enumerable: true, get: (): [string, string] => [t(`auto:runStatus.${k as keyof typeof RUN_DOT}`), dot] }])))
+
+/** long text (an error, a reason) as at most `lines` lines; “全文” opens the rest in place when it is cut */
+export function Clamp({ text, lines = 2, className }: { text: string; lines?: 1 | 2 | 3; className?: string }) {
+  const t = useT(), ref = useRef<HTMLSpanElement>(null)
+  const [open, setOpen] = useState(false), [cut, setCut] = useState(false)
+  useLayoutEffect(() => { const el = ref.current; if (el && !open) setCut(el.scrollHeight > el.clientHeight + 1) }, [text, open, lines])
+  const lc = lines === 1 ? "line-clamp-1" : lines === 2 ? "line-clamp-2" : "line-clamp-3"
+  return (
+    <span className={cn("block min-w-0", className)} data-clamp>
+      <span ref={ref} className={cn("block [overflow-wrap:anywhere]", !open && lc)}>{text}</span>
+      {(cut || open) && <button type="button" className="type-footnote text-muted-foreground hover:text-foreground hover:underline" onClick={(e) => { e.stopPropagation(); setOpen(!open) }} aria-expanded={open} data-clamp-toggle>{open ? t("auto:less") : t("auto:more")}</button>}
+    </span>
+  )
+}

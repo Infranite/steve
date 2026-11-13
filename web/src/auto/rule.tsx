@@ -8,10 +8,10 @@ import { Input } from "@/components/ui/input"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { Page, Row, Segmented, StatusDot, Meta, Empty, Composer, go, Panel, SectionLabel } from "@/ui"
+import { Page, Row, Segmented, StatusDot, Meta, Empty, Composer, go, Panel, SectionLabel, Pill } from "@/ui"
 import { tm, toast } from "@/store"
 import { Unwired } from "@/unwired"
-import { flowApi, useLoad, errText, sourceLabel, type Flow, type GNode, type Graph, type Run } from "@/api/flow"
+import { flowApi, useLoad, errText, type Flow, type GNode, type Graph, type Run } from "@/api/flow"
 import { HubError } from "@/api"
 import { traceOf } from "@/auto/trace"
 import { lazyView } from "@/lazy"
@@ -39,7 +39,7 @@ export function RuleView({ id }: { id: string }) {
   const [view, setView] = useState<"canvas" | "code">("canvas")
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmDel, setConfirmDel] = useState(false), [rename, setRename] = useState(false), [sampleOpen, setSampleOpen] = useState(false)
-  const [sample, setSample] = useState("")
+  const [sample, setSample] = useState(""), [allVersions, setAllVersions] = useState(false)
   const f = L.data
   const t = useT(), BACK = back()
 
@@ -77,7 +77,6 @@ export function RuleView({ id }: { id: string }) {
     const r = await act("steve", () => flowApi.editDraft(id, text, work))
     if (r) { setWork(r.graph); setDirty(true); setTrace(null); setUndo({ g: before, note: r.note }); setRev((x) => x + 1); const added = r.graph.nodes.find((x) => !before.nodes.some((y) => y.id === x.id)); if (added) setSel(added.id); toast(t("auto:rule.steveDone")) }
   }
-  const usesAI = work.nodes.some((x) => x.kind === "bot")
   const warnings = branchWarnings(work)
   /* nodes the trigger doesn't reach: the Hub refuses to save the flow (graph.rs `flow.graph.unreachable`) */
   const lost = unreachableNodes(work)
@@ -95,7 +94,8 @@ export function RuleView({ id }: { id: string }) {
 
   return (
     <Page title={f.name} back={BACK} max={1180}
-      sub={<Meta><span>v{f.version} · {f.origin_label || t("auto:rule.drawnByYou")}</span><span>{sourceLabel(f.trigger?.source)}</span><span>{usesAI ? t("auto:usesAI") : t("auto:noAI")}</span><span>{t("auto:rule.runs24", { count: f.runs24 })}</span>{f.last_run && <span>{t("auto:rule.lastRun", { time: tm(f.last_run) })}</span>}</Meta>}
+      sub={<span className="flex flex-col gap-0.5">{f.description && <span className="line-clamp-2" data-rule-desc>{f.description}</span>}
+        <Meta><span>v{f.version} · {f.origin_label || t("auto:rule.drawnByYou")}</span><span>{t("auto:rule.runs24", { count: f.runs24 })}</span>{f.last_run && <span>{t("auto:rule.lastRun", { time: tm(f.last_run) })}</span>}</Meta></span>}
       actions={<>
         <span className="hidden type-footnote text-muted-foreground sm:inline">{f.enabled ? t("auto:enabled") : t("auto:rule.notEnabled")}</span>
         <Switch checked={f.enabled} disabled={busy === "on"} onCheckedChange={(v) => void act("on", () => flowApi.patchFlow(id, { enabled: v }), v ? t("auto:flows.enabledToast") : t("auto:flows.disabledToast")).then((r) => r && L.set(r))} aria-label={t("auto:rule.enableAria")} data-rule-on />
@@ -152,10 +152,14 @@ export function RuleView({ id }: { id: string }) {
         <div className="px-1 type-footnote text-muted-foreground">{t("auto:rule.footer")} <a href="#/signals" className="text-blue hover:underline">{t("auto:rule.viewInSignals")}</a></div>
         <section data-versions>
           <SectionLabel>{t("auto:rule.versions")}</SectionLabel>
-          <Panel>{f.versions.map((v) => (
-            <Row key={v.version} title={v.version === f.version ? `v${v.version} · ${t("auto:rule.current")}` : `v${v.version}`} sub={[tm(v.created), authorLabel(v.author), v.note].filter(Boolean).join(" · ")} data-version={v.version}>
+          <Panel>{(allVersions ? f.versions : f.versions.slice(0, 3)).map((v) => (
+            <Row key={v.version} data-version={v.version}
+              title={<span className="flex min-w-0 items-center gap-2"><span className="shrink-0 tabular-nums">v{v.version}</span>{v.version === f.version && <Pill tone="success">{t("auto:rule.current")}</Pill>}{v.note && <span className="min-w-0 truncate text-muted-foreground">{v.note}</span>}</span>}
+              sub={[tm(v.created), authorLabel(v.author)].join(" · ")}>
               {v.version !== f.version && <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={!!busy} onClick={() => void act("rb", () => flowApi.rollback(id, v.version), (r) => t("auto:rule.rolledBack", { from: v.version, to: r.version })).then((r) => { if (r) { setDirty(false); setUndo(null); L.set(r) } })} data-rollback={v.version}>{t("auto:rule.rollback")}</Button>}
-            </Row>))}</Panel>
+            </Row>))}
+            {!allVersions && f.versions.length > 3 && <button type="button" className="w-full rounded-lg px-3 py-2.5 text-left type-footnote text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => setAllVersions(true)} data-versions-more>{t("auto:rule.olderVersions", { count: f.versions.length - 3 })}</button>}
+          </Panel>
         </section>
       </div>
     </Page>

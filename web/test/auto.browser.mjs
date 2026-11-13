@@ -2,7 +2,8 @@
 // (strong for an edge no branch names, weak for a branch without an edge), renaming a branch in the
 // inspector renames its edge, the canvas (affectUI Workflow Builder) adds a node from its palette after
 // the selected one and plays a dry run's real steps in its run panel, the internal hosts flows may reach
-// are your own setting, and a new schedule's budget follows its mode until you type one. 1280 and 390 px,
+// are your own setting, a new schedule's budget follows its mode until you type one, and Signals says what to do
+// when nothing is connected and cuts a long reason to two lines. 1280 and 390 px,
 // light and dark.
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
@@ -30,7 +31,7 @@ const run = async ({ width, height, scheme }) => {
   const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height }, colorScheme: scheme, reducedMotion: "reduce" })
   page.setDefaultTimeout(10000)
   const errors = []; page.on("pageerror", (e) => errors.push(e.message))
-  let hosts = ["nas.local"]; const created = [], dry = []
+  let hosts = ["nas.local"], sigs = null, sources = []; const created = [], dry = []
   await page.route("**/*", async (route) => {
     const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (!u.pathname.startsWith("/api/")) return route.continue()
     const method = route.request().method(), p = u.pathname.slice(4)
@@ -42,7 +43,8 @@ const run = async ({ width, height, scheme }) => {
     else if (p === "/flows/flw_1/runs") data = []
     else if (p === "/flows/flw_1/dry-run") { dry.push(route.request().postDataJSON()); data = dryRun }
     else if (p === "/schedules" && method === "POST") { created.push(route.request().postDataJSON()); data = { id: "flw_s", next_at: null, ...created.at(-1) } }
-    else if (p === "/signals") data = { stats: { total: 0, need: 0, item: 0, quiet: 0 }, items: [] }
+    else if (p === "/signals") data = sigs ?? { stats: { total: 0, need: 0, item: 0, quiet: 0 }, items: [] }
+    else if (p === "/sources") data = sources
     else if (p === "/flows/parse-when" || p === "/schedules/parse") data = { cron: "0 9 * * 1", tz: "Asia/Taipei", describe: "每周一 09:00", next: [], by: "rule" }
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(data) })
   })
@@ -116,8 +118,14 @@ const run = async ({ width, height, scheme }) => {
     assert.deepEqual(await page.locator(".ui-wf-run [data-step]").evaluateAll((xs) => xs.map((x) => x.dataset.step)), ["t", "f", "a"])
     await page.locator('[data-rule-node="b"][data-skipped]').waitFor()
     await fits(); await shot("rule-dry-run")
-    // the flow list: the internal hosts are a setting you save
-    await page.goto(base + "/test/fixtures/auto.html#/auto/rules"); await page.locator("[data-allow-private] input").waitFor()
+    // the flow list: one line per flow, nothing to warn about, no first-run guide once a flow exists
+    await page.goto(base + "/test/fixtures/auto.html#/auto/rules"); await page.locator('[data-rule-row="flw_1"]').waitFor()
+    assert.equal(await page.locator("[data-auto-attention]").count(), 0)
+    assert.equal(await page.locator("[data-auto-guide]").count(), 0)
+    // the internal hosts are a setting you save, folded under the list with its value in the line
+    const hostsLine = page.locator("[data-allow-private] > button")
+    assert.match(await hostsLine.innerText(), /nas\.local/)
+    await hostsLine.click(); await page.locator("[data-allow-private] input").waitFor()
     assert.equal(await page.locator("[data-allow-private] input").inputValue(), "nas.local")
     await page.locator("[data-allow-private] input").fill("nas.local, Router.Lan，192.168.1.10")
     await page.locator("[data-allow-private-save]").click()
@@ -137,6 +145,25 @@ const run = async ({ width, height, scheme }) => {
     await mode.click(); await page.getByRole("option", { name: MODE.item_auto }).click()
     assert.equal(await budget.inputValue(), "3")
     await fits(); await shot("schedule-budget")
+    await page.keyboard.press("Escape")
+    // 信号 with nothing connected: what to do about it, and no filters over an empty page
+    await page.goto(base + "/test/fixtures/auto.html#/signals"); await page.locator("[data-sig-connect]").waitFor()
+    assert.equal(await page.locator("[data-sig-search]").count(), 0)
+    await fits(); await shot("signals-connect")
+    // a failed signal: its long reason is two lines until you ask for the rest; the group header is just its count
+    const reason = "bot step timed out after 120s waiting for the model backend: " + "connect ECONNREFUSED 127.0.0.1:443 ".repeat(12)
+    sources = [{ adapter: "imap", source: "mail", name: "邮件", paused: false, triage_bot: null, connections: [{ id: "c1", name: "me", status: "ok", last_sync: 1 }], scopes: [], types: [] }]
+    sigs = { stats: { total: 1, need: 0, item: 0, quiet: 0 }, items: [{ id: "ev_1", source: "mail", type: "mail.received", summary: "AWS 账单", group_key: null, group_label: null, thread_key: null, connection: null, actor: null,
+      outcome: "failed", outcome_label: "处理失败", reason, handled_by: null, flow: null, work_item_id: null, decision_id: null, received: Date.now(), raw_available: false }] }
+    await page.reload(); await page.locator('[data-sig-group="failed"]').waitFor()
+    assert.equal(await page.locator('[data-sig-group="failed"]').innerText(), "处理失败\n1")
+    await page.locator('[data-sig-row="ev_1"]').click()
+    const box = page.locator("[data-sig-reason] [data-clamp] > span").first()
+    await page.locator("[data-sig-reason] [data-clamp-toggle]").waitFor()
+    const cut = await box.evaluate((el) => el.clientHeight)
+    await page.locator("[data-sig-reason] [data-clamp-toggle]").click()
+    assert.ok(await box.evaluate((el) => el.clientHeight) > cut, "the whole reason opens in place")
+    await fits(); await shot("signal-reason")
     assert.deepEqual(errors, [])
   } finally { await page.close() }
 }
