@@ -1,5 +1,6 @@
 /* Bot 菜单与设置：Bot 是独立菜单；设置是分类页。所有改动都写到 Hub，也都可以直接告诉 Steve。 */
 import { ACCESS_CAT, AccessSettingsPane } from "@/access-settings"
+import { itemDisplayStatus } from "@/item-workflow-relation"
 import { useT } from "@/i18n"
 import { Trans } from "react-i18next"
 import { WorkspaceDisk } from "@/disk-settings"
@@ -61,7 +62,7 @@ export function BotsView() {
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const ks = Object.keys(st.bots).filter((k) => !st.bots[k].main && (botFilter === "全部" || (botFilter === "启用") === st.bots[k].on))
   const S = st.bots.steve
-  const runOf = (k: string) => st.items.filter((i) => i.b === k && ["run", "wait", "block"].includes(i.st) && !i.arch).length
+  const runOf = (k: string) => st.items.filter((i) => i.b === k && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
   const others = st.allBots.filter((b) => !st.bots[b.id])
   return (
     <Page title="Bot" sub={t("manage:list.sub")} max={720}

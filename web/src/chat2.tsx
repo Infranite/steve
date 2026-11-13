@@ -2,6 +2,8 @@
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
 import { useEffect, useState, type ReactNode } from "react"
+import { clip } from "@/thread/topics"
+import { itemDisplayStatus } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { ArchiveIcon, BrainIcon, ChevronDownIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -41,6 +43,9 @@ export function stepsSummary(s: Steps): string {
   if (r) return `${kindLabel(r.kind)}${r.kind === "item" ? " · " + botName(r.picked ?? r.bot) : ""}`
   const tool = s.tools[0]; return tool ? TOOL[tool.name]?.[0]() ?? tool.name : ""
 }
+/* the rail names what a piece of thinking was about: research's own summary is how it went ("没有用工具 · 51 秒"),
+ * so it takes the start of its answer instead */
+const railThought = (m: Msg) => m.steps?.research && m.t ? clip(m.t, 60) : stepsSummary(m.steps!)
 const OPEN_EV = "steve-open-steps"
 /** scroll the conversation to a message's steps and unfold them */
 export function openSteps(id: string) { window.dispatchEvent(new CustomEvent(OPEN_EV, { detail: id })) }
@@ -138,10 +143,25 @@ export function toggleRail() {
 export function setHistory(open: boolean) { historyOpen = open; if (open && !wide()) sheetOpen = false; bump() }
 export function showNotices() { if (wide()) { historyOpen = false; if (!railOpen) toggleRail(); else bump() } else { sheetOpen = true; bump() } setTimeout(() => document.querySelector("[data-rail-notices]")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50) }
 
+/* the same notice again (a disk that keeps filling, the same release failing): one line, the latest, with the others under it */
+const family = (n: RNotice) => n.kind + ":" + n.text.split(/[\d(:,\uFF08\uFF1A\uFF0C]/)[0].trim()
+function similar(xs: RNotice[]): [RNotice, RNotice[]][] {
+  const out: [RNotice, RNotice[]][] = [], at = new Map<string, number>()
+  for (const n of xs) { const k = family(n), i = at.get(k); if (i === undefined || !k.split(":")[1]) { at.set(k, out.length); out.push([n, []]) } else out[i][1].push(n) }
+  return out
+}
+function Similar({ n, more, notice }: { n: RNotice; more: RNotice[]; notice: (n: RNotice) => ReactNode }) {
+  const t = useT(), [open, setOpen] = useState(false)
+  return <>{notice(n)}{more.length > 0 && <>
+    {open && more.map(notice)}
+    <button type="button" className="mb-1 ml-7 self-start type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)} aria-expanded={open} data-notice-similar={more.length}>{open ? t("shell:chat.similarHide") : t("shell:chat.similarMore", { count: more.length })}</button>
+  </>}</>
+}
+
 /** 事项: what Steve is following for you (running, waiting on you) and the notices, in the rail */
 export function RailToggle({ className }: { className?: string }) {
   const { railOpen: open } = useRail(), t = useT()
-  const n = unreadNotices().length, waiting = pendingCards().length, run = st.items.filter((i) => i.st === "run" && !i.arch).length
+  const n = unreadNotices().length, waiting = pendingCards().length, run = st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
   const label = [t("shell:chat.railLabel.running", { count: run }), waiting && t("shell:chat.railLabel.waiting", { count: waiting }), n && t("shell:chat.railLabel.unread", { count: n })].filter(Boolean).join(t("shell:chat.railLabel.sep"))
   return (
     <Tooltip>
@@ -177,7 +197,7 @@ function RailBody() {
   const unread = unreadNotices()
   /* what is on screen counts as read, after a moment so the new ones are seen highlighted */
   useEffect(() => { if (!unread.length) return; const h = setTimeout(readNotices, 2500); return () => clearTimeout(h) }, [unread.length])
-  const run = st.items.filter((i) => i.st === "run" && !i.arch), cards = pendingCards()
+  const run = st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch), cards = pendingCards()
   const delivered = st.items.filter((i) => i.st === "done" && !i.arch && Date.now() - i.updated < 7 * DAY).sort((a, b) => b.updated - a.updated).slice(0, 5)
   const thoughts = st.thread.filter((m) => m.k === "steve" && m.steps && (m.steps.route || m.steps.tools.length)).slice(-5).reverse()
   const waiting = (n: RNotice) => !!n.item_id && !!st.items.find((i) => i.id === n.item_id)?.wait
@@ -204,10 +224,10 @@ function RailBody() {
         {cards.slice(0, 5).map(({ i, w }) => <Line key={w.decision} onClick={() => go(i.id ? "#/inbox" : "#/sessions/" + w.session)} test={"wait-" + w.decision}><StatusDot s="wait" />{i.id && <ItemNo id={i.id} />}<span className="min-w-0 flex-1 truncate type-callout">{i.id ? i.t : t("shell:chat.sessionTitle", { title: i.t })}</span><span className="shrink-0 type-footnote text-muted-foreground">{w.subject === "tool_call" ? t("shell:chat.permission") : WT[w.type]}</span></Line>)}
         {cards.length > 5 && <Line onClick={() => go("#/inbox")}><span className="type-footnote text-muted-foreground">{t("shell:chat.moreWaiting", { count: cards.length - 5 })}</span></Line>}</section>}
       {thoughts.length > 0 && <section data-rail-thoughts><SectionLabel>{t("shell:chat.thoughtsHead")}</SectionLabel>
-        {thoughts.map((m) => <Line key={m.id} onClick={() => openSteps(m.id!)} test={"thought-" + m.id}><BrainIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /><span className="min-w-0 flex-1 truncate type-callout">{stepsSummary(m.steps!)}</span><span className="shrink-0 type-footnote text-muted-foreground">{tm(m.created)}</span></Line>)}</section>}
+        {thoughts.map((m) => <Line key={m.id} onClick={() => openSteps(m.id!)} test={"thought-" + m.id}><BrainIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /><span className="min-w-0 flex-1 truncate type-callout" title={stepsSummary(m.steps!)}>{railThought(m)}</span><span className="shrink-0 type-footnote text-muted-foreground">{tm(m.created)}</span></Line>)}</section>}
       <section data-rail-notices><SectionLabel>{unread.length ? t("shell:chat.noticesUnread", { count: unread.length }) : t("shell:chat.notices")}</SectionLabel>
         {!st.notices.length && <div className="type-footnote text-muted-foreground">{t("shell:chat.noticesEmpty")}</div>}
-        {pinned.map(notice)}{fresh.map(notice)}{seen.slice(0, shownSeen).map(notice)}
+        {pinned.map(notice)}{similar(fresh).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}{similar(seen.slice(0, shownSeen)).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}
         {seen.length > shownSeen && <button type="button" className="mt-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(true)} data-older>{t("shell:chat.olderRead", { count: seen.length - shownSeen })}</button>}
         {older && <button type="button" className="mt-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(false)}>{t("shell:chat.hideRead")}</button>}
       </section>

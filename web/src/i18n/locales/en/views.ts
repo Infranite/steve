@@ -345,6 +345,7 @@ export default {
     filterUnlinked: "Unlinked",
     filterImported: "Imported",
     allHarness: "All harnesses",
+    allOn: "all from {{what}}",
     unlinked: "No item",
     readOnly: "Read-only",
     ctx: "Context {{pct}}%",

@@ -331,6 +331,7 @@ export default {
     filterUnlinked: "未关联",
     filterImported: "导入",
     allHarness: "全部 harness",
+    allOn: "都来自 {{what}}",
     unlinked: "未关联事项",
     readOnly: "只读",
     ctx: "上下文 {{pct}}%",

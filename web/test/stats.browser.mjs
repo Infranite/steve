@@ -108,11 +108,12 @@ try {
 
     /* core figures: now from the item list, the range from the summary; every one opens its list */
     const kpi = async (k) => (await page.locator(`[data-kpi="${k}"]`).innerText()).replace(/\s+/g, " ")
-    assert.match(await kpi("run"), /进行中 · 现在 3/)
+    // ST-3 runs but a card of it waits for you: its state is yours, not in progress (item-state.ts)
+    assert.match(await kpi("run"), /进行中 · 现在 2/)
     assert.match(await kpi("wait"), /待你处理 · 现在 2/)
     assert.match(await kpi("done"), new RegExp(`已完成 · 近 7 天 ${sum(done)} 比上个 7 天 ↑ 50%`))
     assert.match(await kpi("fail"), /失败或受阻 · 现在 2 异常卡 1 · 等前置 1/)
-    for (const [k, n] of [["run", 3], ["wait", 2], ["fail", 2]]) {
+    for (const [k, n] of [["run", 2], ["wait", 2], ["fail", 2]]) {
       await page.locator(`[data-kpi="${k}"]`).click()
       assert.equal(await page.locator(`[data-drill="${k}"] [data-drill-row]`).count(), n, `drill ${k}`)
     }
@@ -159,9 +160,9 @@ try {
     }
     // status distribution matches the overview, and opens the same list
     const bars = Object.fromEntries(await page.locator('[data-hbars="status"] [data-hbar]').evaluateAll((xs) => xs.map((x) => [x.getAttribute("data-hbar"), x.textContent])))
-    assert.match(bars.run, /3$/); assert.match(bars.wait, /2$/); assert.match(bars.block, /1$/); assert.match(bars.pause, /1$/)
+    assert.match(bars.run, /2$/); assert.match(bars.wait, /3$/); assert.match(bars.block, /1$/); assert.match(bars.pause, /1$/)
     await page.locator('[data-hbar="run"]').click()
-    assert.equal(await page.locator('[data-drill="status:run"] [data-drill-row]').count(), 3)
+    assert.equal(await page.locator('[data-drill="status:run"] [data-drill-row]').count(), 2)
     // a day on the flow chart drills to that day's items
     if (width === 1440) {
       await page.locator('[data-chart="group"] svg').scrollIntoViewIfNeeded()

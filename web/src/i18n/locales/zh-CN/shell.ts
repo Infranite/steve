@@ -66,6 +66,8 @@ export default {
     moreWaiting_other: "还有 {{count}} 件，去待处理",
     thoughtsHead: "思考摘要",
     noticesUnread_other: "通知 · {{count}} 条未读",
+    similarMore_other: "同类还有 {{count}} 条",
+    similarHide: "收起同类",
     noticesEmpty: "发布结果、自动归档这类消息会出现在这里",
     olderRead_other: "已读的 {{count}} 条",
     hideRead: "收起已读",

@@ -2,6 +2,7 @@
  * options, the research being read, queued questions, quotes, flow-back from items and the focus bar. Built from the
  * existing parts (ItemRef, DecisionCard, Trace) — no new colours. */
 import { useEffect, useState } from "react"
+import { itemDisplayState } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, SquareIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon, TerminalIcon, PencilIcon, GlobeIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -208,8 +209,13 @@ export function cardLook(i: Item, c?: ItemCardState): Look {
   if (w?.type === "approve") return { label: tr("thread:card.status.approve"), dot: "wait", tone: "wait" }
   if (w?.type === "ask") return { label: tr("thread:card.status.answer"), dot: "wait", tone: "wait" }
   if (w) return { label: tr("thread:card.status.waiting"), dot: "wait", tone: "wait" }
-  if (i.st === "block") return { label: tr("thread:card.status.blocked"), dot: "block", tone: "quiet" }
-  if (i.st === "pause") return { label: tr("thread:card.status.paused"), dot: "pause", tone: "quiet" }
+  /* the item page's one state: a paused graph, unavailable collaboration or an idle item is not "running" */
+  const s = itemDisplayState(i)
+  if (s.kind === "blocked") return { label: tr("thread:card.status.blocked"), dot: "block", tone: "quiet" }
+  if (s.kind === "paused") return { label: tr("thread:card.status.paused"), dot: "pause", tone: "quiet" }
+  if (s.kind === "graphPaused") return { label: tr("views:itemState.graphPaused"), dot: "pause", tone: "quiet" }
+  if (s.kind === "unavailable") return { label: tr("views:itemState.unavailable"), dot: "fail", tone: "fail" }
+  if (s.kind === "idle" && !i.rel) return { label: tr("views:itemState.idle"), dot: "pause", tone: "quiet" }
   if (i.rel?.tone === "run") return { label: tr("thread:card.status.releasing"), dot: "run", tone: "run" }
   return { label: tr("thread:card.status.running"), dot: "run", tone: "run" }
 }

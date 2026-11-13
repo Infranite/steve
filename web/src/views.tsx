@@ -687,8 +687,12 @@ export function SessionsView() {
   const all = Object.keys(st.S).map((k) => [k, st.S[k]] as const)
   const xs = all.filter(([k, s]) => (hf === "all" || s.h === hf) && (sf === "all" || (sf === "run" && s.st === "run") || (sf === "unlinked" && !s.item) || (sf === "imported" && !!s.ro))
     && (!sq || s.title.includes(sq) || (s.item ?? "").toLowerCase().includes(sq.toLowerCase()) || !!hits?.has(k)))
+  /* what every listed session shares (one device, one source) is said once above the list, not on every row */
+  const deviceName = (k: string | undefined) => st.devices.find((d) => d.id === k)?.name ?? "Hub"
+  const oneDevice = xs.length > 1 && new Set(xs.map(([, s]) => deviceName(s.device))).size === 1, oneSrc = xs.length > 1 && new Set(xs.map(([, s]) => s.src)).size === 1
+  const shared = [oneDevice && deviceName(xs[0][1].device), oneSrc && xs[0][1].src].filter(Boolean).join(" · ")
   return (
-    <Page title={t("views:sessions.title")} sub={t("views:sessions.sub", { total: all.length, run: all.filter((x) => x[1].st === "run").length })} actions={<Button size="sm" variant="outline" onClick={() => openSheet("import")} data-import><UploadIcon />{t("views:sessions.import")}</Button>}>
+    <Page title={t("views:sessions.title")} sub={t("views:sessions.sub", { total: all.length, run: all.filter((x) => x[1].st === "run").length }) + (shared ? " · " + t("views:sessions.allOn", { what: shared }) : "")} actions={<Button size="sm" variant="outline" onClick={() => openSheet("import")} data-import><UploadIcon />{t("views:sessions.import")}</Button>}>
       <label className="relative mb-3 block"><SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" />
         <Input className="h-10 rounded-xl bg-muted/70 pl-9 text-[14px]" placeholder={t("views:sessions.search")} defaultValue={sq} onChange={(e) => { sq = e.target.value.trim(); r() }} data-session-search /></label>
       <div className="mb-5 flex flex-wrap items-center gap-2"><Chips value={sfLabel(sf)} onChange={(v) => { sf = SFILTS.find((k) => sfLabel(k) === v) ?? "all"; r() }} options={SFILTS.map(sfLabel)} /><span className="flex-1" />
@@ -699,7 +703,7 @@ export function SessionsView() {
             <StatusDot s={s.st} className="mt-[7px]" />
             <div className="min-w-0 flex-1">
               <div className="truncate type-body font-medium">{s.title}</div>
-              <Meta className="mt-0.5">{s.item ? <span className="max-w-[300px] truncate"><span className="font-mono">{s.item}</span> · #{s.n}</span> : <span>{t("views:sessions.unlinked")}</span>}{s.ro && <Badge variant="outline" className="h-4.5 font-normal text-muted-foreground"><LockIcon />{t("views:sessions.readOnly")}</Badge>}<span>{hm(s)}</span><span>{st.devices.find((d) => d.id === s.device)?.name ?? "Hub"}</span><span>{s.src}</span>{s.ctx > 0 && <span>{t("views:sessions.ctx", { pct: s.ctx })}</span>}</Meta>
+              <Meta className="mt-0.5">{s.item ? <span className="max-w-[300px] truncate"><span className="font-mono">{s.item}</span> · #{s.n}</span> : <span>{t("views:sessions.unlinked")}</span>}{s.ro && <Badge variant="outline" className="h-4.5 font-normal text-muted-foreground"><LockIcon />{t("views:sessions.readOnly")}</Badge>}<span>{hm(s)}</span>{!oneDevice && <span>{st.devices.find((d) => d.id === s.device)?.name ?? "Hub"}</span>}{!oneSrc && <span>{s.src}</span>}{s.ctx > 0 && <span>{t("views:sessions.ctx", { pct: s.ctx })}</span>}</Meta>
               {sq && hits?.has(k) && <div className="mt-1 type-footnote text-muted-foreground">{t("views:sessions.contentHit", { q: sq })}</div>}
             </div>
             <span className="shrink-0 type-footnote text-muted-foreground">{s.up}</span>

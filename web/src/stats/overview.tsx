@@ -3,6 +3,7 @@
  * “区间”的数字取自统计接口，下钻用 `only=done|created` 取同一批事项（steve-stats views::items）。
  * 单日范围（今天）按小时（ST-43）：点一个小时，下钻用 `hour` 取那个小时里完成或新建的事项，和柱子同一个区间。 */
 import { useState, type ReactNode } from "react"
+import { itemDisplayStatus } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { ArrowDownUpIcon, ChartColumnIcon, ListTodoIcon, TableIcon, XIcon } from "lucide-react"
 import { Panel, PanelFoot, StatStrip } from "@/panel"
@@ -12,7 +13,7 @@ import { ago } from "@/i18n/format"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { st, pendingCards, WT, type Item, type Orphan } from "@/store"
+import { st, pendingCards, closedSt, WT, type Item, type Orphan } from "@/store"
 import { go, ItemNo, Segmented, StatusDot } from "@/ui"
 import { stats, type Filter, type Series, type Summary } from "@/api/stats"
 import { Chart, ChartBody, ChartHead, ChartTable, HBars, STATE, type BarRow } from "@/stats/chart"
@@ -22,15 +23,15 @@ import { bucketName, delta, fmtRange, isHour, oneDay, zoneName, useStats } from 
 const link = "font-medium text-foreground/80 underline-offset-2 hover:text-foreground hover:underline"
 
 const inScope = (i: Item, f: Filter) => !i.arch && (!f.project || i.project === f.project) && (!f.bot || i.b === f.bot)
-const failing = (i: Item) => i.st === "block" || i.waits.some((w) => w.type === "fail")
+const failing = (i: Item) => itemDisplayStatus(i) === "block" || i.waits.some((w) => w.type === "fail")
 /** the open items of the page's project / Bot, as the overview counts them */
 export function nowSets(f: Filter) {
-  const xs = st.items.filter((i) => inScope(i, f) && i.st !== "done" && i.st !== "drop")
+  const xs = st.items.filter((i) => inScope(i, f) && !closedSt(itemDisplayStatus(i)))
   return {
-    run: xs.filter((i) => i.st === "run"),
+    run: xs.filter((i) => itemDisplayStatus(i) === "run"),
     cards: pendingCards().filter((c) => inScope(c.i, f)),
     fail: xs.filter(failing),
-    by: (k: StatusKey) => xs.filter((i) => GROUPS[k].includes(i.st)),
+    by: (k: StatusKey) => xs.filter((i) => GROUPS[k].includes(itemDisplayStatus(i))),
   }
 }
 
