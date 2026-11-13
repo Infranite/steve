@@ -537,7 +537,7 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
           {/* the title block keeps 20rem before the toolbar beside it wraps below, so a phone never squeezes the description */}
           {!noTitle && (
             <div className="flex flex-wrap items-end gap-x-4 gap-y-3 pb-8 pt-3">
-              <div className={cn("min-w-[min(100%,20rem)] flex-1", lead != null && "flex items-center gap-3 sm:gap-4")}>{lead != null && <div className="shrink-0" data-page-lead>{lead}</div>}<div className="min-w-0 flex-1"><h1 className={cn(small ? "type-title" : "type-display", "text-foreground")}>{title}</h1>{sub && <div className="mt-1.5 type-callout text-muted-foreground">{sub}</div>}</div></div>
+              <div className={cn("min-w-[min(100%,20rem)] flex-1", lead != null && "flex items-start gap-3 sm:gap-4")}>{lead != null && <div className="shrink-0" data-page-lead>{lead}</div>}<div className="min-w-0 flex-1"><h1 className={cn(small ? "type-title" : "type-display", "text-foreground")}>{title}</h1>{sub && <div className="mt-1.5 type-callout text-muted-foreground">{sub}</div>}</div></div>
               {toolbar && <div className={cn("flex flex-wrap items-center gap-2", toolbarTop && "self-start")}>{toolbar}</div>}
             </div>
           )}
