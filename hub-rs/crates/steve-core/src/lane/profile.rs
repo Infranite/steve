@@ -143,11 +143,15 @@ fn profile_with(
     gh: &Path,
     before: impl FnOnce(),
 ) -> Result<Profile, String> {
+    let mut before = Some(before);
     let target = match target_of(dir, branch) {
         Ok(t) => t,
-        Err(e) => {
-            before();
-            return Err(e);
+        // a repository that was never fetched may only learn its default branch from the fetch
+        Err(_) => {
+            if let Some(f) = before.take() {
+                f()
+            }
+            target_of(dir, branch)?
         }
     };
     let host = host_of(&target);
@@ -159,7 +163,9 @@ fn profile_with(
             }
             _ => None,
         };
-        before();
+        if let Some(f) = before.take() {
+            f()
+        }
         let local = Local::read(dir, &target);
         let rules = rules.map(|h| h.join().unwrap_or_else(|_| Err("gh: panicked".to_string())));
         let l = local?;
