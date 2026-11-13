@@ -2,7 +2,7 @@
 import { useState } from "react"
 import { LockIcon, TrashIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { TextField } from "@/components/affect/text-field-clean"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Row, Empty, go, Panel, Section, Loading, FieldRow } from "@/ui"
 import { tm } from "@/store"
@@ -55,7 +55,7 @@ export function VaultSettingsPane() {
       </Panel></Section>
       <Section label={t("vault:settings.recoverSection")} note={t("vault:settings.recoverNote")}>
         <Panel><FieldRow autoComplete="off" onSubmit={async (e) => { e.preventDefault(); const r = await act(() => vaultApi.recover(code.trim()), t("vault:settings.recovered")); setCode(""); if (r) void L.reload() }}>
-          <Input aria-label={t("vault:recovery.label")} type="password" autoComplete="off" spellCheck={false} className="font-mono" value={code} onChange={(e) => setCode(e.target.value)} placeholder={t("vault:settings.recoverPlaceholder")} data-recover-code />
+          <TextField size="sm" className="min-w-0 flex-1" inputClassName="font-mono" aria-label={t("vault:recovery.label")} type="password" autoComplete="off" spellCheck={false} value={code} onChange={(e) => setCode(e.target.value)} placeholder={t("vault:settings.recoverPlaceholder")} data-recover-code />
           <Button size="sm" variant="outline" type="submit" disabled={busy || !code.trim()} data-recover>{t("vault:settings.recover")}</Button>
         </FieldRow></Panel>
       </Section>

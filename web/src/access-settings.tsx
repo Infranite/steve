@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { CheckCircle2Icon, KeyRoundIcon, QrCodeIcon, RefreshCwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
+import { TextField } from "@/components/affect/text-field-clean"
 import { Spinner } from "@/components/ui/spinner"
 import { api, modReq } from "@/api"
 import { HubChooser, useHubAddress } from "@/hub-ui"
@@ -251,9 +251,9 @@ function OidcSection() {
     <Panel>
       <Row title={t("pages:access.oidcCallback")} sub={<span className="type-code break-all">{o.callback}</span>} />
       {o.source === "env" ? <Row title={o.issuer ?? ""} sub={t("pages:access.oidcFromEnv")} /> : <>
-        {field("Issuer", <Input className="h-8" value={f.issuer} onChange={(e) => setF({ ...f, issuer: e.target.value })} placeholder="https://id.example.com/application/o/steve/" data-oidc-issuer />)}
-        {field(t("pages:access.oidcClient"), <Input className="h-8" value={f.client_id} onChange={(e) => setF({ ...f, client_id: e.target.value })} placeholder={t("pages:access.oidcClient")} data-oidc-client />)}
-        {field(t("pages:access.oidcSecret"), <Input className="h-8" type="password" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} placeholder={o.has_secret ? t("pages:access.oidcSecretKept") : t("pages:access.oidcSecret")} autoComplete="new-password" data-oidc-secret />)}
+        {field("Issuer", <TextField size="sm" value={f.issuer} onChange={(e) => setF({ ...f, issuer: e.target.value })} placeholder="https://id.example.com/application/o/steve/" data-oidc-issuer />)}
+        {field(t("pages:access.oidcClient"), <TextField size="sm" value={f.client_id} onChange={(e) => setF({ ...f, client_id: e.target.value })} placeholder={t("pages:access.oidcClient")} data-oidc-client />)}
+        {field(t("pages:access.oidcSecret"), <TextField size="sm" type="password" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} placeholder={o.has_secret ? t("pages:access.oidcSecretKept") : t("pages:access.oidcSecret")} autoComplete="new-password" data-oidc-secret />)}
         <div className="flex justify-end gap-2 px-3 py-2.5">{o.source === "settings" && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void off()} data-oidc-off>{t("pages:access.oidcOff")}</Button>}
           <Button size="sm" variant="outline" onClick={() => void save()} disabled={busy || !f.issuer.trim() || !f.client_id.trim()} data-oidc-save>{busy ? <Spinner className="size-4" /> : t("pages:access.oidcSave")}</Button></div>
       </>}
@@ -321,7 +321,7 @@ export function AccessSettingsPane() {
       <Panel>
         {v.tokens.filter(live).map((x) => <Row key={x.id} title={x.name} sub={t("pages:access.tokenSub", { made: ago(x.created), used: x.last_used ? ago(x.last_used) : t("pages:access.never") })}>
           <Button size="sm" variant="ghost" onClick={() => void revoke(() => access.revokeToken(x.id))} data-revoke-token={x.id}>{t("pages:access.revoke")}</Button></Row>)}
-        <FieldRow onSubmit={(e) => { e.preventDefault(); void create() }}><Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("pages:access.tokenName")} data-token-name />
+        <FieldRow onSubmit={(e) => { e.preventDefault(); void create() }}><TextField size="sm" className="min-w-0 flex-1" value={name} onChange={(e) => setName(e.target.value)} placeholder={t("pages:access.tokenName")} aria-label={t("pages:access.tokenName")} data-token-name />
           <Button size="sm" variant="outline" type="submit" disabled={busy} data-new-token>{busy ? <Spinner className="size-4" /> : t("pages:access.newToken")}</Button></FieldRow>
       </Panel>
     </Section>

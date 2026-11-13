@@ -271,13 +271,14 @@ export default {
   },
   notify: {
     none: "现在还没有推送渠道（手机 App、邮件、IM 都没有接入），需要你决定的事都在“待处理”里。下面的设置先存着，接入后生效。",
-    time: "时间",
     quiet: "免打扰",
+    quietOn: "夜间免打扰",
     quietSub: "期间只记录，不推送；异常除外",
-    quietOff: "关闭",
+    quietHours: "时段",
     digest: "每天汇报",
+    digestDaily: "每天发一份汇报",
     digestSub: "现在可以在对话里输入 /汇报",
-    digestNever: "不发",
+    digestTime: "发送时间",
   },
   look: {
     avatars: "Bot 头像",
@@ -312,6 +313,7 @@ export default {
     clear: "清除",
     clearWhat: "这个工作空间里所有 Bot 的记忆会被删除，不能恢复。",
     cleared: "已清除",
+    danger: "危险操作",
   },
   audit: {
     title: "操作记录",
@@ -410,6 +412,12 @@ export default {
     desc: "说明",
     prefix: "事项编号前缀",
     prefixHint: "新事项的编号，例如 {{example}}；已有编号不变",
+    nameSub: "显示在左上角的工作空间切换里",
+    nameNeeded: "工作空间需要一个名称",
+    unsaved: "没保存上，改动还在这里，可以再试一次",
+    prefixNeeded: "前缀至少要有一个字母",
+    descPlaceholder: "这个工作空间做什么、和其他工作空间怎么分",
+    descHint: "写一两句就够；离开输入框时自动保存",
     here: "这里有",
     projects_other: "{{count}} 个项目",
     bots_other: "{{count}} 个 Bot",
@@ -420,7 +428,7 @@ export default {
     new: "新建工作空间",
   },
   danger: {
-    title: "{{label}}？",
+    confirm: "确认{{label}}",
   },
   kinds: {
     backfill: "检查历史事项",

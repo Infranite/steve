@@ -270,13 +270,14 @@ export default {
   },
   notify: {
     none: "There are no push channels yet (no mobile app, mail or IM connected), so everything that needs you is in “Inbox”. These settings are saved and take effect once a channel is connected.",
-    time: "Timing",
     quiet: "Quiet hours",
+    quietOn: "Quiet at night",
     quietSub: "Only logged, not pushed, except for errors",
-    quietOff: "Off",
+    quietHours: "Hours",
     digest: "Daily summary",
+    digestDaily: "Send a daily summary",
     digestSub: "For now, type / in the chat and choose Report",
-    digestNever: "Don't send",
+    digestTime: "Send at",
   },
   look: {
     avatars: "Bot avatars",
@@ -311,6 +312,7 @@ export default {
     clear: "Clear",
     clearWhat: "All bot memories in this workspace will be deleted. This can't be undone.",
     cleared: "Cleared",
+    danger: "Danger zone",
   },
   audit: {
     title: "Activity log",
@@ -410,6 +412,12 @@ export default {
     desc: "Description",
     prefix: "Item number prefix",
     prefixHint: "Numbers for new items, e.g. {{example}}; existing numbers stay",
+    nameSub: "Shown in the workspace switcher at the top left",
+    nameNeeded: "A workspace needs a name",
+    unsaved: "Not saved. Your change is still here to try again",
+    prefixNeeded: "The prefix needs at least one letter",
+    descPlaceholder: "What this workspace is for and how it differs from the others",
+    descHint: "A sentence or two is enough; it saves when you leave the field",
     here: "In this workspace",
     projects_one: "{{count}} project",
     projects_other: "{{count}} projects",
@@ -423,7 +431,7 @@ export default {
     new: "New workspace",
   },
   danger: {
-    title: "{{label}}?",
+    confirm: "{{label}} for good",
   },
   kinds: {
     backfill: "Check past items",

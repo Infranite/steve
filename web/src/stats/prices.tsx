@@ -4,12 +4,12 @@
 import { useEffect, useState } from "react"
 import { ChartNoAxesColumnIcon, PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { TextField } from "@/components/affect/text-field-clean"
+import { SetSelect } from "@/settings-controls"
 import { Spinner } from "@/components/ui/spinner"
 import { stats, type Price, type Prices, type Quote } from "@/api/stats"
 import { toast } from "@/store"
 import { Group, Row, SectionLabel } from "@/ui"
-import { Select } from "@/view-shared"
 import { t, useT } from "@/i18n"
 import { num } from "@/i18n/format"
 import { fmtN, time, useStats } from "@/stats/format"
@@ -140,9 +140,9 @@ export function StatsSettingsPane() {
             <thead className="border-b text-left type-footnote text-muted-foreground"><tr><th className="py-2 font-medium">{t("stats:col.model")}</th>{cols.map(([, l]) => <th key={l} className="w-20 py-2 pl-2 font-medium">{l}</th>)}<th className="py-2 pl-2 font-medium">{t("stats:col.note")}</th><th className="w-8" /></tr></thead>
             <tbody>{list.map((r, i) => (
               <tr key={i} className="border-b last:border-0" data-price-row={i}>
-                <td className="py-1.5"><Input value={r.match} onChange={(e) => set(i, "match", e.target.value)} aria-label={t("stats:prices.rowModel", { n: i + 1 })} aria-invalid={bad?.[0] === i && bad[1] === "match"} className="h-8 type-code" placeholder={t("stats:prices.matchPlaceholder")} /></td>
-                {cols.map(([k, l]) => <td key={k} className="py-1.5 pl-2"><Input inputMode="decimal" value={r[k as keyof Draft]} onChange={(e) => set(i, k as keyof Draft, e.target.value)} aria-label={t("stats:prices.rowPrice", { n: i + 1, col: l })} aria-invalid={bad?.[0] === i && bad[1] === k} className="h-8 text-right tabular-nums" /></td>)}
-                <td className="py-1.5 pl-2"><Input value={r.note} onChange={(e) => set(i, "note", e.target.value)} aria-label={t("stats:prices.rowNote", { n: i + 1 })} className="h-8" /></td>
+                <td className="py-1.5"><TextField size="sm" value={r.match} onChange={(e) => set(i, "match", e.target.value)} aria-label={t("stats:prices.rowModel", { n: i + 1 })} error={bad?.[0] === i && bad[1] === "match"} inputClassName="type-code" placeholder={t("stats:prices.matchPlaceholder")} /></td>
+                {cols.map(([k, l]) => <td key={k} className="py-1.5 pl-2"><TextField size="sm" inputMode="decimal" value={r[k as keyof Draft]} onChange={(e) => set(i, k as keyof Draft, e.target.value)} aria-label={t("stats:prices.rowPrice", { n: i + 1, col: l })} error={bad?.[0] === i && bad[1] === k} inputClassName="text-right tabular-nums" /></td>)}
+                <td className="py-1.5 pl-2"><TextField size="sm" value={r.note} onChange={(e) => set(i, "note", e.target.value)} aria-label={t("stats:prices.rowNote", { n: i + 1 })} /></td>
                 <td className="py-1.5 pl-1"><Button size="icon-xs" variant="ghost" className="text-muted-foreground" aria-label={t("stats:prices.rowDelete", { n: i + 1 })} onClick={() => setRows(list.filter((_, n) => n !== i))}><TrashIcon /></Button></td>
               </tr>
             ))}</tbody>
@@ -171,7 +171,7 @@ export function StatsSettingsPane() {
         <SectionLabel>{t("stats:prices.tzSection")}</SectionLabel>
         <Group>
           <Row title={t("stats:prices.tz")} sub={v.hub_tz ? t("stats:prices.tzSubHub", { tz: v.hub_tz }) : t("stats:prices.tzSub")}>
-            <Select value={v.tz ?? ""} align="end" testId="stats-tz" onChange={(z) => { void stats.setTz(z || null).then(() => { toast(t("stats:prices.tzChanged")); reload() }, (e) => toast(e instanceof Error ? e.message : String(e))) }}
+            <SetSelect value={v.tz ?? ""} testId="stats-tz" label={t("stats:prices.tz")} className="w-56" onChange={(z) => { void stats.setTz(z || null).then(() => { toast(t("stats:prices.tzChanged")); reload() }, (e) => toast(e instanceof Error ? e.message : String(e))) }}
               options={[{ v: "", l: v.hub_tz ? t("stats:prices.followHubTz", { tz: v.hub_tz }) : t("stats:prices.followHub") }, ...[...new Set([...(v.tz ? [v.tz] : []), ...ZONES])].map((z) => ({ v: z, l: z }))]} />
           </Row>
           <Row title={t("stats:prices.rebuild")} sub={t("stats:prices.rebuildSub")}>

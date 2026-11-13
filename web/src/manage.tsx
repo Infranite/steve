@@ -6,7 +6,7 @@ import { Trans } from "react-i18next"
 import { WorkspaceDisk } from "@/disk-settings"
 import { HubData } from "@/backup-settings"
 import { OutboxDead } from "@/outbox-settings"
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { cn } from "cn"
 import { ChevronRightIcon, PlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -37,6 +37,9 @@ import { STATS_CAT, StatsSettingsPane } from "@/stats/prices"
 import { AUDIT_CAT, AuditSettingsPane } from "@/audit-settings"
 import { MODELS_CAT, ModelsSettingsPane, SteveJudges } from "@/models-settings"
 import { ModelPicker } from "@/model-picker"
+import { SetSelect, SetSwitch } from "@/settings-controls"
+import { TextField } from "@/components/affect/text-field-clean"
+import { TextArea } from "@/components/affect/text-area-clean"
 import { RecentStats } from "@/stats/drill"
 import { AboutVersions } from "@/version"
 import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
@@ -309,8 +312,9 @@ const cats = (t: T): [string, string, any, string][] => [
 const PH_KEYS: Record<string, "phGeneral" | "phItems" | "phTags" | "phModels" | "phNotify" | "phLook" | "phData"> = {
   general: "phGeneral", items: "phItems", tags: "phTags", models: "phModels", notify: "phNotify", look: "phLook", data: "phData",
 }
-const Sel = ({ v, o, on, testId }: { v: string; o: [string, string][]; on: (v: string) => void; testId?: string }) => <Select align="end" testId={testId} value={v} onChange={on} options={o.map(([x, l]) => ({ v: x, l }))} />
-const Later = () => { const t = useT(); return <Pill className="ml-2 align-[1px]">{t("manage:settings.later")}</Pill> }
+const Sel = ({ v, o, on, testId, label }: { v: string; o: [string, string][]; on: (v: string) => void; testId?: string; label?: string }) => <SetSelect testId={testId} label={label} value={v} options={o} onChange={on} />
+/** a row title with the Later pill after it, which moves to its own line when the two do not fit (phones) */
+const Soon = ({ children }: { children: ReactNode }) => { const t = useT(); return <span className="flex flex-wrap items-center gap-x-2 gap-y-1">{children}<Pill>{t("manage:settings.later")}</Pill></span> }
 export function SettingsView() {
   const t = useT()
   const [, cat] = useRoute()
@@ -374,8 +378,8 @@ function Pane({ id }: { id: string }) {
   if (id === "general") return <div className="flex flex-col gap-8">
     <Section label={t("manage:general.assistant")}><Panel><Row icon={<BotAvatar k="steve" size={36} />} title={st.bots.steve?.n} sub={t("manage:general.assistantSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel></Section>
     <Panel>
-      <Row title={t("manage:general.home")} sub={t("manage:general.homeSub")}><Sel v={c.home} o={[["对话", t("manage:general.homeChat")], ["待处理", t("manage:general.homeInbox")], ["事项", t("manage:general.homeItems")]]} on={(v) => setSetting({ home: v })} /></Row>
-      <Row title={t("manage:general.away")} sub={t("manage:general.awaySub")}><Sel v={c.awayH} o={[...[2, 4, 8].map((h): [string, string] => [String(h), t("common:dur.hours", { count: h })]), ["0", t("manage:general.awayNever")]]} on={(v) => setSetting({ awayH: v })} /></Row>
+      <Row title={t("manage:general.home")} sub={t("manage:general.homeSub")}><Sel label={t("manage:general.home")} testId="home" v={c.home} o={[["对话", t("manage:general.homeChat")], ["待处理", t("manage:general.homeInbox")], ["事项", t("manage:general.homeItems")]]} on={(v) => setSetting({ home: v })} /></Row>
+      <Row title={t("manage:general.away")} sub={t("manage:general.awaySub")}><Sel label={t("manage:general.away")} testId="away" v={c.awayH} o={[...[2, 4, 8].map((h): [string, string] => [String(h), t("common:dur.hours", { count: h })]), ["0", t("manage:general.awayNever")]]} on={(v) => setSetting({ awayH: v })} /></Row>
     </Panel>
     <Panel>
       <Row title={t("manage:general.onboard")} sub={t("manage:general.onboardSub")}><Button size="sm" variant="outline" onClick={() => { localStorage.removeItem("steve-onboarded"); st.onboard = 0; emit(); go("#/") }} data-restart-onboard>{t("manage:general.restart")}</Button></Row>
@@ -386,17 +390,12 @@ function Pane({ id }: { id: string }) {
     <Section label={t("manage:items.section")}><Panel>
       <Row title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : "auto"} onChange={(v) => setSetting({ accDefault: v })} options={[["manual", t("manage:acc.manual")], ["auto", t("manage:acc.auto")]] as const} /></Row>
       <Row title={t("manage:items.prefix")} sub={t("manage:items.prefixSub")}><span className="font-mono type-callout">{st.prefix}-{st.noSeq + 1}</span></Row>
-      <Row title={t("manage:items.depsAfter")}><Sel v={c.depsAfter} o={[["自动开始", t("manage:items.depsAuto")], ["提醒我开始", t("manage:items.depsRemind")]]} on={(v) => setSetting({ depsAfter: v })} /></Row>
-      <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel testId="arch-days" v={c.archDays} o={[...[7, 30, 90].map((d): [string, string] => [String(d), t("common:dur.days", { count: d })]), ["0", t("manage:items.archNever")]]} on={(v) => setSetting({ archDays: v })} /></Row></Panel></Section>
+      <Row title={t("manage:items.depsAfter")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter} o={[["自动开始", t("manage:items.depsAuto")], ["提醒我开始", t("manage:items.depsRemind")]]} on={(v) => setSetting({ depsAfter: v })} /></Row>
+      <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays} o={[...[7, 30, 90].map((d): [string, string] => [String(d), t("common:dur.days", { count: d })]), ["0", t("manage:items.archNever")]]} on={(v) => setSetting({ archDays: v })} /></Row></Panel></Section>
     <Section label={t("manage:items.sessions")}><Panel>
-      <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel v={c.handoff ?? "0"} o={[["0", t("manage:items.handoffOff")], ["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
+      <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? "0"} o={[["0", t("manage:items.handoffOff")], ["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
   </div>
-  if (id === "notify") return <div className="flex flex-col gap-8">
-    <Notice>{t("manage:notify.none")}</Notice>
-    <Section label={t("manage:notify.time")}><Panel>
-      <Row title={<>{t("manage:notify.quiet")}<Later /></>} sub={t("manage:notify.quietSub")}><Sel v={c.quiet} o={[["23:00 – 08:00", "23:00 – 08:00"], ["22:00 – 09:00", "22:00 – 09:00"], ["关闭", t("manage:notify.quietOff")]]} on={(v) => setSetting({ quiet: v })} /></Row>
-      <Row title={<>{t("manage:notify.digest")}<Later /></>} sub={t("manage:notify.digestSub")}><Sel v={c.digestAt} o={[["08:30", "08:30"], ["09:00", "09:00"], ["不发", t("manage:notify.digestNever")]]} on={(v) => setSetting({ digestAt: v })} /></Row></Panel></Section>
-  </div>
+  if (id === "notify") return <NotifyPane />
   if (id === "look") return <div className="flex flex-col gap-8">
     <Section label={t("manage:look.avatars")} note={t("manage:look.avatarsHint")}>
       <Card className="flex flex-wrap items-start gap-2 p-3" data-avatar-preview>{Object.keys(st.bots).map((k) => <a key={k} href={"#/bots/" + k} className="flex w-20 flex-col items-center gap-1.5 rounded-lg px-1 py-2 hover:bg-accent"><Robot k={k} size={44} /><span className="max-w-full truncate type-footnote text-muted-foreground">{st.bots[k].n}</span></a>)}</Card></Section>
@@ -404,7 +403,7 @@ function Pane({ id }: { id: string }) {
       <Row title={t("manage:look.theme")} sub={t("manage:look.themeSub")}><ThemeSwitch labels /></Row>
       <LanguageRow />
       <Row title={t("manage:look.fontSize")}><Segmented size="sm" value={c.fontSize} onChange={(v) => setSetting({ fontSize: v })} options={[["标准", t("manage:look.fontNormal")], ["大", t("manage:look.fontLarge")]]} /></Row>
-      <Row title={t("manage:look.reduceMotion")} sub={t("manage:look.reduceMotionSub")}><Switch checked={c.reduceMotion === "开"} onCheckedChange={(v) => setSetting({ reduceMotion: v ? "开" : "关" })} /></Row>
+      <Row title={t("manage:look.reduceMotion")} sub={t("manage:look.reduceMotionSub")}><SetSwitch testId="reduce-motion" label={t("manage:look.reduceMotion")} checked={c.reduceMotion === "开"} onChange={(v) => setSetting({ reduceMotion: v ? "开" : "关" })} /></Row>
     </Panel></Section></div>
   if (id === "data") return <div className="flex flex-col gap-8">
     <HubData />
@@ -413,8 +412,9 @@ function Pane({ id }: { id: string }) {
     <Section label={t("manage:data.keep")}><Panel>
       {/* read-only: whole logs are kept for good; a shorter keepSess (set by a confirmed config draft) compacts archived sessions */}
       <Row title={t("manage:data.sessions")} sub={c.keepSess && c.keepSess !== "永久" ? t("manage:data.sessionsCompact", { period: c.keepSess === "1 年" ? t("manage:data.keepYear") : t("common:dur.days", { count: 90 }) }) : t("manage:data.sessionsForever")} data-keep-sess={c.keepSess || "永久"}>
-        <span className="type-callout text-muted-foreground">{c.keepSess === "1 年" ? t("manage:data.keepYear") : c.keepSess === "90 天" ? t("common:dur.days", { count: 90 }) : t("manage:data.keepForever")}</span></Row>
-      <Row title={t("manage:data.clearMem")} sub={t("manage:data.clearMemSub")}><DangerBtn label={t("manage:data.clear")} what={t("manage:data.clearWhat")} onOk={() => void api.clearMemories().then(() => toast(t("manage:data.cleared")))} /></Row></Panel></Section>
+        <span className="type-callout text-muted-foreground">{c.keepSess === "1 年" ? t("manage:data.keepYear") : c.keepSess === "90 天" ? t("common:dur.days", { count: 90 }) : t("manage:data.keepForever")}</span></Row></Panel></Section>
+    <Section label={t("manage:data.danger")} data-danger-zone><Panel className="shadow-[var(--lift),0_0_0_1px_color-mix(in_srgb,var(--destructive)_18%,transparent)]">
+      <DangerRow testId="clear-mem" title={t("manage:data.clearMem")} sub={t("manage:data.clearMemSub")} label={t("manage:data.clear")} what={t("manage:data.clearWhat")} onOk={() => void api.clearMemories().then(() => toast(t("manage:data.cleared")))} /></Panel></Section>
   </div>
   if (id === "about") return <div className="flex flex-col gap-8">
     <AboutVersions />
@@ -425,20 +425,73 @@ function Pane({ id }: { id: string }) {
   </div>
   return null
 }
+/* the settings-notifications pattern of affectUI: each kind of message is a switch, and its time unfolds under it
+ * while it is on. The stored values stay the Hub's (settings.rs): a time, or 不发 / 关闭 for off. */
+const DIGEST_AT = ["08:30", "09:00"], QUIET = ["23:00 – 08:00", "22:00 – 09:00"]
+function NotifyPane() {
+  const t = useT()
+  const c = st.settings
+  const digest = c.digestAt !== "不发", quiet = c.quiet !== "关闭"
+  /* turning a switch back on brings back the time it had, not the first option */
+  const last = useRef({ digestAt: digest ? c.digestAt : DIGEST_AT[0], quiet: quiet ? c.quiet : QUIET[0] })
+  if (digest) last.current.digestAt = c.digestAt
+  if (quiet) last.current.quiet = c.quiet
+  return <div className="flex flex-col gap-8">
+    <Notice>{t("manage:notify.none")}</Notice>
+    <Section label={t("manage:notify.digest")}><Panel data-notify-digest>
+      <Row title={<Soon>{t("manage:notify.digestDaily")}</Soon>} sub={t("manage:notify.digestSub")}><SetSwitch testId="digest" label={t("manage:notify.digestDaily")} checked={digest} onChange={(v) => setSetting({ digestAt: v ? last.current.digestAt : "不发" })} /></Row>
+      {digest && <Row className="anim-in" title={t("manage:notify.digestTime")}><Sel testId="digest-at" label={t("manage:notify.digestTime")} v={c.digestAt} o={DIGEST_AT.map((x): [string, string] => [x, x])} on={(v) => setSetting({ digestAt: v })} /></Row>}
+    </Panel></Section>
+    <Section label={t("manage:notify.quiet")}><Panel data-notify-quiet>
+      <Row title={<Soon>{t("manage:notify.quietOn")}</Soon>} sub={t("manage:notify.quietSub")}><SetSwitch testId="quiet" label={t("manage:notify.quietOn")} checked={quiet} onChange={(v) => setSetting({ quiet: v ? last.current.quiet : "关闭" })} /></Row>
+      {quiet && <Row className="anim-in" title={t("manage:notify.quietHours")}><Sel testId="quiet-hours" label={t("manage:notify.quietHours")} v={c.quiet} o={QUIET.map((x): [string, string] => [x, x])} on={(v) => setSetting({ quiet: v })} /></Row>}
+    </Panel></Section>
+  </div>
+}
+/* the settings-general pattern of affectUI: name and prefix as rows with their field on the right, the description as a
+ * field of its own below; text saves when it loses focus, so there is no save bar */
 function WorkspacePane() {
   const t = useT()
   const w = st.workspace!
   const [n, setN] = useState(w.name), [d, setD] = useState(w.description), [p, setP] = useState(w.item_prefix)
-  useEffect(() => { setN(w.name); setD(w.description); setP(w.item_prefix) }, [w.id])
+  const [failed, setFailed] = useState(false)
+  /* a save refreshes the workspace; take the new values only into fields the user has not changed since they last
+   * matched the Hub, so typing in one field is never replaced by the refresh that saving another one starts */
+  const seen = useRef({ id: w.id, name: w.name, description: w.description, item_prefix: w.item_prefix })
+  useEffect(() => {
+    const s = seen.current, same = s.id === w.id
+    setN((v) => (same && v !== s.name ? v : w.name))
+    setD((v) => (same && v !== s.description ? v : w.description))
+    setP((v) => (same && v !== s.item_prefix ? v : w.item_prefix))
+    if (!same) setFailed(false)
+    seen.current = { id: w.id, name: w.name, description: w.description, item_prefix: w.item_prefix }
+  }, [w.id, w.name, w.description, w.item_prefix])
   const prefix = p.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 6)
-  const dirty = n.trim() !== w.name || d.trim() !== w.description || prefix !== w.item_prefix
+  const save = () => {
+    const next = { name: n.trim(), description: d.trim(), item_prefix: prefix }
+    if (!next.name) { setN(w.name); toast(t("manage:ws.nameNeeded")); return }
+    if (!next.item_prefix) { setP(w.item_prefix); toast(t("manage:ws.prefixNeeded")); return }
+    if (next.name === w.name && next.description === w.description && next.item_prefix === w.item_prefix) return
+    void api.patchWs(w.id, next).then(() => { setFailed(false); toast(t("common:state.saved")); return import("@/store").then((m) => m.refresh()) }).catch((e) => { setFailed(true); toast(e.message) })
+  }
+  /* Enter saves (by leaving the field); Escape puts back what the Hub has, so the blur after it saves nothing */
+  const keys = (undo: () => void) => (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && e.currentTarget instanceof HTMLInputElement) e.currentTarget.blur()
+    if (e.key === "Escape") { e.preventDefault(); undo(); setFailed(false) }
+  }
+  /* a failed save leaves the text in place to try again, marked as not saved */
+  const unsaved = failed && (n.trim() !== w.name || d.trim() !== w.description || prefix !== w.item_prefix) ? t("manage:ws.unsaved") : undefined
+  /* below 640px the field goes under its label, full width, as on affectUI's settings screens */
+  const stack = "max-sm:flex-col max-sm:items-stretch max-sm:gap-2 [&>[data-slot=item-actions]]:max-sm:w-full"
   return <div className="flex flex-col gap-8">
-    <Section note={t("manage:ws.intro")}><Card className="p-5"><FieldGroup className="gap-5">
-      <F label={t("manage:ws.name")}><Input value={n} onChange={(e) => setN(e.target.value)} /></F>
-      <F label={t("manage:ws.desc")}><Textarea className="min-h-16" value={d} onChange={(e) => setD(e.target.value)} /></F>
-      <F label={t("manage:ws.prefix")} hint={t("manage:ws.prefixHint", { example: `${prefix || "ST"}-${st.noSeq + 1}` })}><Input className="w-28 font-mono uppercase" value={p} maxLength={6} onChange={(e) => setP(e.target.value)} data-prefix /></F>
-      {dirty && <div className="flex gap-2 anim-in"><Button size="sm" disabled={!n.trim() || !prefix} onClick={() => void api.patchWs(w.id, { name: n.trim(), description: d.trim(), item_prefix: prefix }).then(() => { toast(t("common:state.saved")); return import("@/store").then((m) => m.refresh()) }).catch((e) => toast(e.message))}>{t("common:action.save")}</Button><Button size="sm" variant="ghost" onClick={() => { setN(w.name); setD(w.description); setP(w.item_prefix) }}>{t("common:action.cancel")}</Button></div>}
-    </FieldGroup></Card></Section>
+    <Section note={t("manage:ws.intro")}><Panel data-ws-form>
+      <Row className={stack} title={t("manage:ws.name")} sub={t("manage:ws.nameSub")}>
+        <TextField size="sm" className="w-full sm:w-60" value={n} maxLength={60} aria-label={t("manage:ws.name")} error={unsaved && n.trim() !== w.name ? unsaved : undefined} onChange={(e) => setN(e.target.value)} onBlur={save} onKeyDown={keys(() => setN(w.name))} data-ws-name /></Row>
+      <Row className={stack} title={t("manage:ws.prefix")} sub={t("manage:ws.prefixHint", { example: `${prefix || "ST"}-${st.noSeq + 1}` })}>
+        <TextField size="sm" className="w-full sm:w-28" inputClassName="font-mono uppercase" value={p} maxLength={6} spellCheck={false} aria-label={t("manage:ws.prefix")} error={unsaved && prefix !== w.item_prefix ? unsaved : undefined} onChange={(e) => setP(e.target.value)} onBlur={save} onKeyDown={keys(() => setP(w.item_prefix))} data-prefix /></Row>
+    </Panel></Section>
+    <Section label={t("manage:ws.desc")}>
+      <TextArea minRows={3} maxRows={10} value={d} aria-label={t("manage:ws.desc")} placeholder={t("manage:ws.descPlaceholder")} hint={t("manage:ws.descHint")} error={unsaved && d.trim() !== w.description ? unsaved : undefined} onChange={(e) => setD(e.target.value)} onBlur={save} onKeyDown={keys(() => setD(w.description))} data-ws-desc /></Section>
     <Section label={t("manage:ws.here")}><Panel>
       <Row icon={<Tile I={FolderIcon} />} title={t("manage:ws.projects", { count: st.projects.length })} onClick={() => go("#/projects")}><Chevron /></Row>
       <Row icon={<Tile I={BotIcon} />} title={t("manage:ws.bots", { count: Object.keys(st.bots).length })} onClick={() => go("#/bots")}><Chevron /></Row>
@@ -448,16 +501,25 @@ function WorkspacePane() {
       <Button size="sm" variant="outline" className="mt-3" onClick={() => openSheet("newWorkspace")}><PlusIcon />{t("manage:ws.new")}</Button></Section>
   </div>
 }
-function DangerBtn({ label, what, onOk }: { label: string; what: string; onOk: () => void }) {
+/* the danger zone of affectUI's settings-general: the action in red, and confirming opens in place under the row
+ * instead of a dialog; Escape or Cancel folds it back and hands the focus to the button that opened it */
+function DangerRow({ title, sub, label, what, onOk, testId }: { title: string; sub: string; label: string; what: string; onOk: () => void; testId: string }) {
   const t = useT()
   const [o, setO] = useState(false)
-  return <>
-    <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setO(true)}>{label}</Button>
-    <AlertDialog open={o} onOpenChange={setO}><AlertDialogContent>
-      <AlertDialogHeader><AlertDialogTitle>{t("manage:danger.title", { label })}</AlertDialogTitle><AlertDialogDescription>{what}</AlertDialogDescription></AlertDialogHeader>
-      <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { setO(false); onOk() }}>{label}</AlertDialogAction></AlertDialogFooter>
-    </AlertDialogContent></AlertDialog>
-  </>
+  const opener = useRef<HTMLButtonElement>(null)
+  const id = useId()
+  const close = () => { setO(false); setTimeout(() => opener.current?.focus()) }
+  /* the opener stays in place (disabled while the confirm is open, and saying so with aria-expanded); the focus goes to
+   * Cancel, so an Enter pressed twice or held cannot clear anything */
+  return <div data-danger={testId} data-danger-open={o || undefined}>
+    <Row title={title} sub={sub}><Button ref={opener} size="sm" variant="outline" className="border-destructive/35 text-destructive shadow-none hover:bg-destructive/8 hover:text-destructive dark:border-destructive/40" disabled={o} aria-expanded={o} aria-controls={id} onClick={() => setO(true)} data-danger-open-btn><TrashIcon />{label}</Button></Row>
+    {o && <form id={id} role="group" aria-labelledby={id + "-what"} className="anim-in mx-3 flex flex-col gap-3 border-t border-border/60 pt-3 pb-2.5 sm:flex-row sm:items-center sm:justify-between" onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); close() } }} onSubmit={(e) => { e.preventDefault(); setO(false); onOk() }}>
+      <p id={id + "-what"} className="min-w-0 type-callout text-muted-foreground">{what}</p>
+      <div className="flex shrink-0 gap-2 max-sm:[&>*]:flex-1">
+        <Button size="sm" variant="ghost" type="button" autoFocus onClick={close} data-danger-cancel>{t("common:action.cancel")}</Button>
+        <Button size="sm" variant="destructive" type="submit" data-danger-confirm>{t("manage:danger.confirm", { label })}</Button></div>
+    </form>}
+  </div>
 }
 
 /* ═════════ 标签 ═════════ */

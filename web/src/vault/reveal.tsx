@@ -6,6 +6,7 @@ import { FingerprintIcon } from "lucide-react"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { TextField } from "@/components/affect/text-field-clean"
 import { Spinner } from "@/components/ui/spinner"
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { api } from "@/api"
@@ -43,7 +44,10 @@ export function RegisterPasskey({ onDone, compact, row }: { onDone: () => void; 
   if (stale) return <div className="flex flex-col gap-2 rounded-xl bg-attention/12 px-4 py-3" role="alert"><div className="type-callout">{t("vault:passkey.stale")}</div><Button size="sm" className="self-start" onClick={() => void relogin()} data-relogin>{t("vault:passkey.relogin")}</Button></div>
   return (
     <form className={row ? "flex min-w-0 items-center gap-2 px-3 py-2.5" : "flex flex-wrap items-center gap-2"} onSubmit={async (e) => { e.preventDefault(); setBusy(true); const r = await registerPasskey(n.trim() || deviceName()); setBusy(false); if (r === "stale") setStale(true); if (r === "ok") onDone() }}>
-      <Input aria-label={t("vault:passkey.name")} className={row ? "h-8 min-w-0 flex-1" : compact ? "h-8 w-40" : "h-8 w-48"} maxLength={60} value={n} onChange={(e) => setN(e.target.value)} data-passkey-name />
+      {/* as a settings row it matches the recovery-code field under it (affectUI Text Field); in the reveal dialog it
+       *  keeps the dialog's own input */}
+      {row ? <TextField size="sm" className="min-w-0 flex-1" aria-label={t("vault:passkey.name")} maxLength={60} value={n} onChange={(e) => setN(e.target.value)} data-passkey-name />
+        : <Input aria-label={t("vault:passkey.name")} className={compact ? "h-8 w-40" : "h-8 w-48"} maxLength={60} value={n} onChange={(e) => setN(e.target.value)} data-passkey-name />}
       <Button size="sm" variant={row ? "outline" : "default"} type="submit" disabled={busy} data-register-passkey>{busy ? <Spinner /> : <FingerprintIcon />}{t("vault:passkey.register")}</Button>
     </form>
   )

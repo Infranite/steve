@@ -6,7 +6,7 @@ import { CheckIcon, CircleAlertIcon, ChevronsUpDownIcon, KeyRoundIcon, PlusIcon,
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { Input } from "@/components/ui/input"
+import { TextField } from "@/components/affect/text-field-clean"
 import { SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar"
 import { Spinner } from "@/components/ui/spinner"
 import { cn } from "cn"
@@ -159,15 +159,15 @@ export function HubChooser({ manage = false, down = false, focus = false, bare =
       )}
       {error && <div className="type-callout text-destructive" role="alert">{error}</div>}
       {err && errAt === "list" && <div className="-mt-1 type-callout text-destructive" role="alert" data-hub-error>{err}</div>}
-      <form onSubmit={(e) => { e.preventDefault(); if (input.trim()) void act("add", () => dir.add(input, name)) }} className={cn("w-full gap-2", bare ? "grid px-3 py-3 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)_auto] [&>div:not(:has(button))]:col-span-full [&_[data-slot=input]]:h-8" : "flex flex-col")} data-add-hub>
-        <Input value={input} onChange={(e) => setInput(e.target.value)} placeholder={t("shell:hub.addPlaceholder")} autoFocus={focus} inputMode="url" autoCapitalize="off" autoCorrect="off" spellCheck={false} data-add-hub-url />
-        {manage && <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("shell:hub.namePlaceholder")} data-add-hub-name />}
+      <form onSubmit={(e) => { e.preventDefault(); if (input.trim()) void act("add", () => dir.add(input, name)) }} className={cn("w-full gap-2", bare ? "grid px-3 py-3 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)_auto] [&>[role=alert]]:col-span-full [&>[data-add-hint]]:col-span-full" : "flex flex-col")} data-add-hub>
+        <TextField size={bare ? "sm" : "md"} value={input} onChange={(e) => setInput(e.target.value)} placeholder={t("shell:hub.addPlaceholder")} aria-label={t("shell:hub.addPlaceholder")} autoFocus={focus} inputMode="url" autoCapitalize="off" autoCorrect="off" spellCheck={false} data-add-hub-url />
+        {manage && <TextField size={bare ? "sm" : "md"} value={name} onChange={(e) => setName(e.target.value)} placeholder={t("shell:hub.namePlaceholder")} aria-label={t("shell:hub.namePlaceholder")} data-add-hub-name />}
         {err && errAt === "add" && <div className="type-callout text-destructive" role="alert" data-hub-error>{err}</div>}
         <div className="flex gap-2">
           <Button type="submit" className={bare ? "flex-none px-3" : "flex-1"} disabled={!!busy || !input.trim()} data-add-hub-submit>{busy === "add" ? <Spinner className="size-4" /> : t("shell:hub.connect")}</Button>
           {dir.scan && <Button type="button" variant="outline" disabled={!!busy} onClick={() => void act("scan", dir.scan!)} data-hub-scan><QrCodeIcon className="size-4" />{t("shell:hub.scan")}</Button>}
         </div>
-        <div className="type-footnote text-tertiary">{t("shell:hub.addHint")}</div>
+        <div className="type-footnote text-tertiary" data-add-hint>{t("shell:hub.addHint")}</div>
       </form>
     </div>
   )
