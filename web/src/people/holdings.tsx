@@ -2,13 +2,14 @@
  * bots, mailboxes, devices, connections, personas — with add / remove; plus 没有负责人 for the contacts
  * overview. Hidden on a Hub without these routes. */
 import { useState } from "react"
+import { cn } from "cn"
 import { AtSignIcon, BotIcon, ChevronRightIcon, PlugIcon, PlusIcon, ServerIcon, UsersIcon, VenetianMaskIcon, XIcon } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { api } from "@/api"
-import { go, Group, Row, SectionLabel, Meta } from "@/ui"
+import { go, Group, Panel, Row, SectionLabel, Meta } from "@/ui"
 import { ownership, objectHref, type Holding, type ObjectInfo, type ObjectType } from "@/api/ownership"
 import { Loading, Section, act, joinList, label, useLoad } from "@/people/common"
 import { useT } from "@/i18n"
@@ -47,19 +48,38 @@ export function HoldingsSection({ person, name, isMe, isBot }: { person: string;
   )
 }
 
-function HoldingRow({ x, person }: { x: Holding; person: string }) {
+/** 负责的 on a person's page: the bots, devices, connections and identities they answer for, as one plain list;
+ *  nothing at all, and the section is not there (their accounts are the page's 关联账号) */
+export function ResponsibleSection({ person, name, isMe }: { person: string; name: string; isMe: boolean }) {
+  const t = useT()
+  const L = useLoad(() => ownership.holdings(person), [person], ["party", "decision"])
+  const xs = L.data?.responsible ?? []
+  if (L.err || !xs.length) return null
+  return (
+    <Section label={t("people:holdings.responsible", { n: xs.length })} right={<AddHolding person={person} name={name} isMe={isMe} />} data-holdings>
+      <Panel>{xs.map((x) => <HoldingRow key={x.object.object_type + x.object.object_id + x.role} x={x} person={person} plain />)}</Panel>
+    </Section>
+  )
+}
+
+/** `plain` (负责的 on a person's page): one line under the name – the kind and what it is – and the role and how it was
+ *  learned only when they say something (not the usual 负责人 / 默认); removing it shows on hover */
+function HoldingRow({ x, person, plain }: { x: Holding; person: string; plain?: boolean }) {
   const t = useT()
   const href = objectHref(x.object), o = x.object
   const remove = async () => changedToast(await act(ownership.remove(o.object_type, o.object_id, { person_id: person, role: x.role })), t("people:holdings.released", { name: o.name }))
   const others = x.others.filter((s) => s.role === "owner" && s.status === "confirmed").map((s) => s.person_name)
+  const sub = plain
+    ? <span className="block truncate">{[o.type_label, x.role !== "owner" && x.role_label, x.source !== "seed" && x.source !== "manual" && label("source", x.source), others.length > 0 && t("people:holdings.alsoOwners", { names: joinList(others) }), o.detail].filter(Boolean).join(" · ")}</span>
+    : <><Meta inline><span>{o.type_label}</span><span>{x.role_label}</span><span>{label("source", x.source)}</span>{others.length > 0 && <span>{t("people:holdings.alsoOwners", { names: joinList(others) })}</span>}</Meta>{o.detail && <span className="block truncate">{clip(o.detail)}</span>}</>
   return (
-    <Row icon={<ObjIcon t={o.object_type} />} onClick={href ? () => go(href) : undefined} controls data-holding={o.name}
+    <Row icon={<ObjIcon t={o.object_type} />} onClick={href ? () => go(href) : undefined} controls data-holding={o.name} className={plain ? "group/hold" : undefined}
       title={<span className="inline-flex items-center gap-1.5">{o.name}{x.status !== "confirmed" && <Badge variant="secondary" className="bg-attention/12 text-attention">{t("people:shared.pending")}</Badge>}</span>}
-      sub={<><Meta inline><span>{o.type_label}</span><span>{x.role_label}</span><span>{label("source", x.source)}</span>{others.length > 0 && <span>{t("people:holdings.alsoOwners", { names: joinList(others) })}</span>}</Meta>{o.detail && <span className="block truncate">{clip(o.detail)}</span>}</>}>
+      sub={sub}>
       {x.status !== "confirmed" && x.decision_id && <span className="flex gap-1" onClick={(e) => e.stopPropagation()}>
         <Button size="xs" variant="outline" onClick={() => void act(api.decide(x.decision_id!, "yes"), t("people:holdings.confirmed"))} data-holding-yes>{t("common:action.confirm")}</Button>
         <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void act(api.decide(x.decision_id!, "no"), t("people:holdings.ignored"))}>{t("people:shared.wrong")}</Button></span>}
-      {x.status === "confirmed" && <Button variant="ghost" size="icon-xs" aria-label={t("people:holdings.releaseAria", { name: o.name })} className="text-muted-foreground" onClick={(e) => { e.stopPropagation(); void remove() }} data-holding-remove={o.name}><XIcon /></Button>}
+      {x.status === "confirmed" && <Button variant="ghost" size="icon-xs" aria-label={t("people:holdings.releaseAria", { name: o.name })} className={cn("text-muted-foreground", plain && "transition-opacity duration-120 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/hold:opacity-100 [@media(hover:hover)]:group-focus-within/hold:opacity-100")} onClick={(e) => { e.stopPropagation(); void remove() }} data-holding-remove={o.name}><XIcon /></Button>}
     </Row>
   )
 }

@@ -1,14 +1,17 @@
 /* Contacts, organizations and teams (steve-rs-plan/modules/contacts.md §3). Shapes mirror the Rust Hub's
  * steve-modules/src/contacts; the TS Hub has none of these routes, so every page first asks `available()`. */
 import { useEffect, useState } from "react"
-import { modReq as req, Unauthenticated, qs } from "@/api"
+import { modReq as req, Unauthenticated, HubError, NotWired, qs, fileUrl, wsHeaders } from "@/api"
+import { hubUrl } from "@/hub"
 import { t } from "@/i18n"
 
 export type Level = "public" | "conclusion" | "reasoning" | "never"
 export type Visibility = string // workspace | private | team:<id> | space:<id>
 export type ContactKind = "real" | "virtual" | "unconfirmed" | "bot"
 export type OrgRef = { id: string; name: string; title: string | null; dept: string | null }
-type Head = { id: string; name: string; aliases: string[]; kind: ContactKind | null; rels: string[]; important: boolean; org: OrgRef | null; tags: string[]; visibility: Visibility; is_me: boolean; avatar: unknown; updated: number }
+/** a party's picture: `file` is one the Hub stores (an upload, cut to a 256px square), `url` one a provider gave */
+export type AvatarRef = { file?: string; url?: string; seed?: string } | null
+type Head = { id: string; name: string; aliases: string[]; kind: ContactKind | null; rels: string[]; important: boolean; org: OrgRef | null; tags: string[]; visibility: Visibility; is_me: boolean; avatar: AvatarRef | unknown; updated: number }
 export type ContactBrief = Head & { accounts: number; items: number }
 export type Job = { org_id: string; org_name: string; title: string | null; dept: string | null; from: string | null; to: string | null; source: string }
 export type Attr = { id: string; key: string; label: string; value: string; source_label: string; level: Level; status: "confirmed" | "candidate" | "stale" | string }
@@ -52,7 +55,7 @@ const e = encodeURIComponent
 
 export const people = {
   contacts: (f: { q?: string; rel?: string; kind?: string; org?: string; tag?: string; limit?: number } = {}) => get<ContactBrief[]>("/contacts" + qs(f)),
-  contact: (id: string) => get<Contact>("/contacts/" + e(id)),
+  contact: (id: string) => get<Contact>("/contacts/" + e(id)).then(noteMine),
   me: () => get<Contact>("/me/contact"),
   newContact: (b: { name: string; aliases?: string[]; rels?: string[]; org_id?: string; title?: string; kind?: "real" | "virtual"; note?: string; visibility?: Visibility }) => post<Contact>("/contacts", b),
   patchContact: (id: string, b: Partial<{ name: string; aliases: string[]; rels: string[]; important: boolean; note: string; kind: "real" | "virtual"; visibility: Visibility; tags: string[] }>) => patch<Contact>("/contacts/" + e(id), b),
@@ -91,6 +94,16 @@ export const people = {
   mentionOptions: (q: string) => get<MentionOptions>("/mention-options" + qs({ q })),
   /** ⌘K: contacts (我 included), organizations and teams, at most 10 each; an empty `q` finds nothing */
   search: (q: string) => get<{ contacts: PartyOption[]; orgs: PartyOption[]; teams: PartyOption[] }>("/parties/search" + qs({ q })),
+  /** a contact's own picture (PNG, JPEG or WebP, at most 10 MB): the Hub cuts the centre square and stores 256px */
+  setAvatar: async (id: string, f: Blob): Promise<Contact> => {
+    let r: Response
+    try { r = await fetch(hubUrl(`/api/contacts/${e(id)}/avatar`), { method: "PUT", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "include" }) } catch { throw new NotWired() }
+    const j: any = await r.json().catch(() => undefined)
+    if (r.status === 401) throw new Unauthenticated(j?.login ?? null, j?.token === true)
+    if (!r.ok) throw new HubError(r.status, j?.error ?? t("people:avatar.failed"))
+    return noteMine(j as Contact)
+  },
+  clearAvatar: (id: string) => del<Contact>(`/contacts/${e(id)}/avatar`).then(noteMine),
   /* the accounts module (another slice); callers hide its parts when these fail */
   accounts: (party: string) => get<AccountBrief[]>("/accounts" + qs({ party })),
   addAccount: (b: { system_id: string; party_id: string; kind: string; handle: string }) => post<AccountBrief>("/accounts", b),
@@ -99,10 +112,15 @@ export const people = {
 /* ───────── is the module there? ─────────
  * The TS Hub answers 404 (or an SPA page) for these routes. One probe per page load decides; a failed probe is
  * retried on the next mount so a Hub that comes back up is picked up without a reload. */
-let probe: Promise<boolean> | null = null, known: boolean | null = null, meId: string | null = null
+let probe: Promise<boolean> | null = null, known: boolean | null = null, meId: string | null = null, meAvatar: string | undefined
 const listeners = new Set<() => void>()
+/** remembers 我's picture when a contact page or a change brings 我 (the sidebar's account row shows it) */
+function noteMine<C extends { is_me: boolean; avatar: unknown }>(c: C): C {
+  if (c.is_me && avatarSrc(c.avatar) !== meAvatar) { meAvatar = avatarSrc(c.avatar); listeners.forEach((f) => f()) }
+  return c
+}
 export function available(): Promise<boolean> {
-  probe ??= people.me().then((c) => { meId = c.id; return (known = true) }, (err) => {
+  probe ??= people.me().then((c) => { meId = c.id; meAvatar = avatarSrc(c.avatar); return (known = true) }, (err) => {
     probe = null
     if (err instanceof Unauthenticated) throw err
     return (known = false)
@@ -112,6 +130,17 @@ export function available(): Promise<boolean> {
 /** the cached answer (null until the first probe finishes) */
 export const isAvailable = () => known
 export const myContactId = () => meId
+/** the address of a party's own picture, when it has one the Hub stores */
+export function avatarSrc(a: unknown): string | undefined {
+  const f = a && typeof a === "object" ? (a as { file?: unknown }).file : undefined
+  return typeof f === "string" && f ? fileUrl(f) : undefined
+}
+/** 我's picture for the account row; follows uploads and removals made on this page */
+export function useMyAvatar(): string | undefined {
+  const [v, setV] = useState(meAvatar)
+  useEffect(() => { const off = onAvailability(() => setV(meAvatar)); available().catch(() => {}).finally(() => setV(meAvatar)); return off }, [])
+  return v
+}
 export const onAvailability = (f: () => void) => { listeners.add(f); return () => { listeners.delete(f) } }
 /** is the contacts module on this Hub? re-renders when the probe answers */
 export function usePeopleOn(): boolean | null {

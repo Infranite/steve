@@ -6,7 +6,7 @@
 import { useEffect, useState } from "react"
 import { cn } from "cn"
 import { api } from "@/api"
-import { usePeopleOn } from "@/api/people"
+import { usePeopleOn, useMyAvatar } from "@/api/people"
 import { HubSwitcher } from "@/hub-ui"
 import { useT } from "@/i18n"
 import { RunningNowPill } from "@/running-pill"
@@ -77,15 +77,17 @@ function useMe() {
   return me
 }
 const initial = (name: string) => (Array.from(name.trim())[0] ?? "").toUpperCase()
-function Initials({ name, className }: { name: string; className?: string }) {
+/** your picture (uploaded on 我) or your initial */
+function Initials({ name, src, className }: { name: string; src?: string; className?: string }) {
   const c = initial(name)
+  if (src) return <img src={src} alt="" aria-hidden className={cn("shrink-0 rounded-full object-cover", className)} data-account-avatar />
   return <span aria-hidden className={cn("flex shrink-0 items-center justify-center rounded-full bg-primary/12 font-semibold text-primary", className)}>{c || <UserIcon className="size-3.5" strokeWidth={1.75} />}</span>
 }
 
 /** The account at the bottom of the sidebar: who is signed in, and behind it (affectUI Profile Menu) the places that are
  *  theirs – 我, devices, accounts, settings – and signing out. Its row is marked while one of those places is open. */
 function Account({ route, meOn }: { route: string; meOn: boolean }) {
-  const t = useT(), me = useMe(), people = usePeopleOn(), { state, isMobile } = useSidebar()
+  const t = useT(), me = useMe(), people = usePeopleOn(), pic = useMyAvatar(), { state, isMobile } = useSidebar()
   const [open, setOpen] = useState(false)
   const leave = (h: string) => { setOpen(false); go(h) }
   const name = me?.name || t("core:sidebar.account")
@@ -106,14 +108,14 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
     <SidebarMenuItem className="min-w-0 flex-1">
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger render={<SidebarMenuButton isActive={on} tooltip={open ? undefined : name} className={cn(ROW, "h-8 font-medium")} data-account={me ? r : ""} />}>
-          <Initials name={me?.name ?? ""} className="size-5 type-label leading-none" />
+          <Initials name={me?.name ?? ""} src={pic} className="size-5 type-label leading-none" />
           <span className="min-w-0 flex-1 truncate">{name}</span>
           <ChevronsUpDownIcon className="size-3.5! text-tertiary" />
         </PopoverTrigger>
         <PopoverContent side={state === "collapsed" && !isMobile ? "right" : "top"} align="start" sideOffset={6}
           className="w-60 gap-0 rounded-xl bg-transparent p-0 shadow-none ring-0" data-account-menu>
           <ProfileMenu className="max-w-none" name={name} email={me?.email || role} menuLabel={t("core:sidebar.account")}
-            avatar={<Initials name={me?.name ?? ""} className="flex! type-callout" />} items={items} />
+            avatar={<Initials name={me?.name ?? ""} src={pic} className="flex! type-callout" />} items={items} />
         </PopoverContent>
       </Popover>
     </SidebarMenuItem>

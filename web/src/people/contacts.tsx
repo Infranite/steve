@@ -67,7 +67,7 @@ function ContactList({ q, f }: { q: string; f: { rel?: string; kind?: string } }
   if (!xs.length) return <Empty title={q || f.rel || f.kind ? t("people:shared.noMatch") : t("people:shared.noContacts")} sub={q || f.rel || f.kind ? undefined : t("people:contacts.emptySub")} />
   return (
     <Group>{xs.map((c) => (
-      <Row key={c.id} icon={<ContactAvatar name={nameOf(c)} size={36} />} onClick={() => go("#/contacts/" + c.id)} data-contact-row={c.name}
+      <Row key={c.id} icon={<ContactAvatar name={nameOf(c)} avatar={c.avatar} size={36} />} onClick={() => go("#/contacts/" + c.id)} data-contact-row={c.name}
         title={<span className="inline-flex items-center gap-1.5">{nameOf(c)}{c.important && <StarIcon className="size-3.5 fill-current text-tertiary" aria-label={t("people:contacts.important")} />}{c.kind === "virtual" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "virtual")}</Badge>}{c.kind === "bot" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "bot")}</Badge>}</span>}
         sub={<Meta inline>{orgLine(c) && <span>{orgLine(c)}</span>}{c.rels.filter((r) => r !== "me").length > 0 && <span>{joinList(c.rels.filter((r) => r !== "me").map(relLabel))}</span>}<span>{t("people:contacts.accounts", { count: c.accounts })}</span>{c.items > 0 && <span>{t("people:contacts.items", { count: c.items })}</span>}</Meta>}>
         <Tags ids={c.tags} max={2} /><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>

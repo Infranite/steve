@@ -44,13 +44,13 @@ try {
  await page.getByLabel('组织名称',{exact:true}).fill('新组织'); await page.getByRole('button',{name:'保存',exact:true}).click()
  await page.waitForTimeout(200); assert.equal(await page.getByLabel('组织名称',{exact:true}).inputValue(),'新组织')
  await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByRole('heading',{name:'新组织',exact:true}).waitFor(); await fits()
- await page.goto(base+'/test/fixtures/people-management.html?contact'); await page.getByText('飞书不向应用提供外部联系人的此项资料',{exact:true}).waitFor(); await page.getByRole('button',{name:'编辑资料',exact:true}).click()
+ await page.goto(base+'/test/fixtures/people-management.html?contact'); await page.getByText('职位：飞书不向应用提供外部联系人的此项资料',{exact:true}).waitFor(); assert.equal(await page.getByText('资料完整性').count(),0); await page.getByRole('button',{name:'编辑资料',exact:true}).click()
  await page.getByLabel('名字',{exact:true}).fill('新名字'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByRole('heading',{name:'新名字',exact:true}).waitFor()
- await page.getByRole('button',{name:'编辑任职'}).click(); await page.getByLabel('任职组织').click(); await page.getByRole('option',{name:'新组织',exact:true}).click(); await page.getByLabel('部门',{exact:true}).fill('研发部'); await page.getByLabel('职位',{exact:true}).fill('工程师'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByText('新组织 · 研发部 · 工程师',{exact:true}).waitFor(); await fits()
- await page.getByRole('button',{name:'添加邮箱',exact:true}).click(); await page.getByLabel('邮箱地址').fill('colleague@example.com'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByText('colleague@example.com',{exact:true}).waitFor(); assert.equal(contact.profile.fields.email.state,'known'); await fits()
- /* a detail's label keeps its width on a phone: the value and its controls take their own line */
- const labels = await page.locator('[data-attr] [data-slot=item-content]').evaluateAll((xs) => xs.map((x) => x.getBoundingClientRect().width))
- assert.ok(labels.length > 0, 'the contact shows its details'); for (const w of labels) assert.ok(w > 200, `detail label squeezed to ${w}px at 390px`)
+ await page.getByRole('button',{name:'补充组织',exact:true}).click(); await page.getByLabel('任职组织').click(); await page.getByRole('option',{name:'新组织',exact:true}).click(); await page.getByLabel('部门',{exact:true}).fill('研发部'); await page.getByLabel('职位',{exact:true}).fill('工程师'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.locator('[data-fact=org]').getByText('新组织',{exact:true}).waitFor(); await page.locator('[data-fact=title]').getByText('研发部 · 工程师',{exact:true}).waitFor(); await fits()
+ await page.getByRole('button',{name:'补充邮箱',exact:true}).click(); await page.getByLabel('修改 邮箱').fill('colleague@example.com'); await page.keyboard.press('Enter'); await page.locator('[data-fact=email]').getByText('colleague@example.com',{exact:true}).waitFor(); assert.equal(contact.profile.fields.email.state,'known'); await fits()
+ /* a long value wraps in its own column on a phone: never squeezed to a character per line */
+ const values = await page.locator('[data-attr] [data-value]').evaluateAll((xs) => xs.map((x) => x.getBoundingClientRect().width))
+ assert.ok(values.length > 0, 'the contact shows its details'); for (const w of values) assert.ok(w > 120, `detail value squeezed to ${w}px at 390px`)
  await page.setViewportSize({width:1280,height:900}); await fits()
  assert.deepEqual(errors,[]); console.log('PASS: 125 contacts, filtered selection, partial failure/retry, zero results, org save retry/self kind, contact edit/jobs, 390px/1280px layout')
 } catch(e) { console.error(await page.locator("body").innerText(),errors); throw e } finally {await browser.close()}

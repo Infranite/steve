@@ -127,7 +127,7 @@ function ProposalCard({ m }: { m: MergeProposal }) {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <span className="inline-flex min-w-0 items-center gap-2"><ContactAvatar name={m.from.name} unconfirmed={m.from.kind === "unconfirmed"} size={32} /><span className="truncate font-mono type-callout">{m.account?.handle ?? m.from.name}</span></span>
         <ChevronRightIcon className="size-4 text-tertiary" aria-label={t("people:pending.maybe")} />
-        <a href={"#/contacts/" + m.into.id} className="inline-flex min-w-0 items-center gap-2 hover:underline"><ContactAvatar name={m.into.name} size={32} /><span className="type-body">{m.into.name}</span></a>
+        <a href={"#/contacts/" + m.into.id} className="inline-flex min-w-0 items-center gap-2 hover:underline"><ContactAvatar name={m.into.name} avatar={m.into.avatar} size={32} /><span className="type-body">{m.into.name}</span></a>
         {orgLine(m.into) && <span className="type-footnote text-muted-foreground">{orgLine(m.into)}</span>}
       </div>
       {m.reason && <div className="mt-2 type-footnote text-muted-foreground">{t("people:shared.reason", { reason: m.reason })}</div>}
@@ -159,7 +159,7 @@ export function MergeDialog({ from, onClose }: { from: Pick<Contact, "id" | "nam
         <div className="max-h-64 overflow-y-auto rounded-xl bg-muted/60 p-1" role="radiogroup" aria-label={t("people:merge.into")}>
           {!cs.data ? <Loading /> : !xs.length ? <div className="px-3 py-3 type-callout text-muted-foreground">{t("people:shared.noMatch")}</div> : xs.map((c) => (
             <button key={c.id} type="button" role="radio" aria-checked={into === c.id} onClick={() => setInto(c.id)} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left hover:bg-accent aria-checked:bg-primary/10" data-merge-opt={c.name}>
-              <ContactAvatar name={c.name} size={20} /><span className="type-callout">{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}</span><span className="ml-auto type-footnote text-muted-foreground">{orgLine(c)}</span></button>))}
+              <ContactAvatar name={c.name} avatar={c.avatar} size={20} /><span className="type-callout">{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}</span><span className="ml-auto type-footnote text-muted-foreground">{orgLine(c)}</span></button>))}
         </div>
         <DialogFooter className="gap-2"><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!into || busy} onClick={() => void merge()} data-merge-go>{target ? t("people:shared.mergeInto", { name: target.name }) : t("people:shared.merge")}</Button></DialogFooter>
       </DialogContent>
