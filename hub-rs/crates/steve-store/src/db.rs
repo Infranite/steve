@@ -130,6 +130,9 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/063.sql"),
     // 64: what agents changed in the memories (`mem_changes`) and merges (`mem_supersedes`).
     include_str!("../migrations/064.sql"),
+    // 65: the capabilities library: MCP servers, skills and A2A agents per workspace, assigned per
+    // Bot (`bot_capabilities`); 62's and 63's rows move into it.
+    include_str!("../migrations/065.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

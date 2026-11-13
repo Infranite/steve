@@ -1,19 +1,22 @@
 import assert from 'node:assert/strict'
 import { mkdirSync } from 'node:fs'
+import { capsHub, mcpServer } from './caps-mock.mjs'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE })
 const base = process.env.STEVE_TEST_WEB || 'http://127.0.0.1:5195'
 const shots = process.env.STEVE_TEST_SHOTS; if (shots) mkdirSync(shots, { recursive: true })
 
-/* The Bot pages against a mocked Hub: the list as affectUI cards (switch and title as their own targets), 能力 as the
- * Agent / Skills tiles over GET /stats/breakdown?by=tool&bot=, 设置's permission choices (Agent / Permissions) saved
+/* The Bot pages against a mocked Hub: the list as affectUI cards (switch and title as their own targets), 能力 as
+ * Steve · 内置 (its tools folded inside with this Bot's calls over GET /stats/breakdown?by=tool&bot=) and the library
+ * entries the Bot uses, 设置's permission choices (Agent / Permissions) saved
  * with the form, and 记忆 as the Memory Panel with add and forget/undo. */
 const bot = (id, name, extra = {}) => ({ id, name, role: name + '的职责', main: id === 'steve', harness: 'claude-code', model: null, reasoning_effort: null, rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'default', avatar: { color: '#8b7cf6' }, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['default'], memories: 1, ...extra })
-let bots, memories, patches, deletes, posts
+let bots, memories, patches, deletes, posts, hub
 const reset = () => {
   bots = [bot('steve', 'Steve'), bot('dev', '开发'), bot('doc', '文档', { harness: 'codex', enabled: false })]
   memories = [{ id: 'm1', text: '周五下午不安排部署', source: '你加的', created: 0 }]
   patches = []; deletes = []; posts = []
+  hub = capsHub({ mcp: [mcpServer('bmcp_1', 'github', 'stdio', { command: 'npx', args: ['-y', 'server-github'], bots: [{ id: 'dev', enabled: true }] })], skill: [], a2a: [] })
 }
 const state = () => ({ version: 'fixture', web_version: 'fixture', workspace: { id: 'default', name: '默认', description: '', item_prefix: 'ST', sort: 0, created: 0 }, workspaces: [{ id: 'default', name: '默认', description: '', item_prefix: 'ST', sort: 0, created: 0 }], items: [], decisions: [], recent: [], bots, allBots: bots.map((b) => ({ id: b.id, name: b.name, workspaces: b.workspaces })), projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [],
   runtimes: [{ id: 'claude-code', name: 'Claude Code', ok: true, version: '', path: '', models: [], note: '' }, { id: 'codex', name: 'Codex', ok: true, version: '', path: '', models: [], note: '' }] })
@@ -33,6 +36,7 @@ const run = async ({ width, height, scheme }) => {
     const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (!u.pathname.startsWith('/api/')) return route.continue()
     const method = route.request().method(), p = u.pathname
     let data = {}
+    if (await hub.handle(route, method, p)) return
     if (p === '/api/state') data = state()
     else if (p === '/api/stats/breakdown') { statsBot = u.searchParams.get('bot'); data = breakdown }
     else if (p.startsWith('/api/stats/')) return route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })
@@ -64,22 +68,17 @@ const run = async ({ width, height, scheme }) => {
   await page.locator('[data-bot-row=dev]').click()
   await page.waitForFunction(() => location.hash === '#/bots/dev')
 
-  /* 能力: Steve's tools always, other MCP and harness tools once used, each with its calls in 30 days */
+  /* 能力: Steve · 内置 always, its tools folded inside with this Bot's calls; then the servers the Bot uses */
   await page.locator('[data-slot=tabs-trigger]:has-text("能力")').click()
-  await page.locator('[data-caps] [data-skill="steve_update"]').waitFor()
+  await page.locator('[data-caps] [data-steve-server]').waitFor()
   assert.equal(statsBot, 'dev')
-  assert.match(await page.locator('[data-skill="steve_update"]').innerText(), /30 天 3 次/)
-  assert.match(await page.locator('[data-skill="steve_ask"]').innerText(), /30 天没用过/)
-  for (const k of ['mcp:steve_workflow', 'tool:mcp__lark__send', 'tool:Bash']) assert.equal(await page.locator(`[data-skill="${k}"]`).count(), 1, k)
-  /* the Hub counts another MCP server's tools as tool:mcp__<server>__<tool>: they go under 其他 MCP, named by tool, chip by server */
-  assert.match(await page.locator('[data-skill="tool:mcp__lark__send"]').innerText(), /^send\n[^]*\blark\b[^]*30 天 1 次/)
-  await page.locator('[data-skill-cat="其他 MCP"]').click()
-  assert.deepEqual(await page.locator('[data-caps] [data-skill]').evaluateAll((xs) => xs.map((x) => x.getAttribute('data-skill'))), ['tool:mcp__lark__send'], 'other MCP tools are not built into the harness')
-  await shot('caps-mcp')
-  assert.equal(await page.locator('[data-skill="exec"]').count(), 0, 'tool kinds are not tools')
-  await page.locator('[data-skill-cat="Claude Code"]').click()
-  assert.equal(await page.locator('[data-skill-cat="Claude Code"]').getAttribute('aria-selected'), 'true')
-  assert.deepEqual(await page.locator('[data-caps] [data-skill]').evaluateAll((xs) => xs.map((x) => x.getAttribute('data-skill'))), ['tool:Bash'], 'the harness filter shows its tools only')
+  assert.match(await page.locator('[data-steve-server]').innerText(), /Steve · 内置[^]*总是启用[^]*6 个工具/)
+  await page.locator('[data-steve-fold] button').first().click()
+  await page.locator('[data-steve-tool="steve_update"]').waitFor()
+  assert.match(await page.locator('[data-steve-tool="steve_update"]').innerText(), /汇报进展[^]*30 天 3 次/)
+  assert.match(await page.locator('[data-steve-tool="steve_ask"]').innerText(), /30 天没用过/)
+  assert.equal(await page.locator('[data-skill]').count(), 0, 'no flat grid of tool tiles any more')
+  assert.equal(await page.locator('[data-mcp] [data-mcp-server=github]').count(), 1)
   assert.equal(await page.locator('[data-caps-perm]').getAttribute('data-caps-perm'), 'default')
   await fits(); await shot('caps')
 

@@ -160,8 +160,9 @@ pub struct Built {
     pub recall: Arc<dyn steve_core::yolo::undo::Recall>,
     /// What runs for each connection of an adapter with a hook (started by one of `jobs`).
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
-    /// The Bots' own MCP servers: the secret values a session's Node takes ([`super::bot_mcp`]).
-    pub bot_mcp: steve_modules::bot_mcp::BotMcp,
+    /// 能力, the capabilities library: the MCP secrets a session's Node takes
+    /// ([`super::bot_mcp`]) and the remote agents' tools ([`super::mcp_extra`]).
+    pub caps: steve_modules::caps::Capabilities,
 }
 
 /// The objects the event producers call, exactly as wired: G2's sink, E1's events, C1's inbound.
@@ -626,15 +627,12 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         }
         (rt.build(), bus.tap(&["connection"]))
     });
-    // a Bot's own MCP servers, their secrets in the vault
-    let bot_mcp = steve_modules::bot_mcp::BotMcp::new(vault.clone());
+    // 能力: MCP servers, skills and remote agents, defined once and assigned per Bot; the
+    // secrets in the vault
+    let caps = steve_modules::caps::Capabilities::new(vault.clone());
     let routes = routes
         .with_state(modules.clone())
-        .merge(steve_modules::bot_mcp::routes(bot_mcp.clone()))
-        // a Bot's skills, written where its harness reads them when a session opens
-        .merge(steve_modules::bot_skills::routes(
-            steve_modules::bot_skills::BotSkills::new(store.clone()),
-        ))
+        .merge(steve_modules::caps::routes(caps.clone()))
         .merge(steve_modules::vault::routes(vault.clone()))
         .merge(steve_modules::vault::use_api::routes(vault))
         .merge(vault_items)
@@ -771,6 +769,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
             outbox: outbox.clone(),
         }),
         lifecycle,
-        bot_mcp,
+        caps,
     })
 }

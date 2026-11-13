@@ -8,7 +8,7 @@ import { HubData } from "@/backup-settings"
 import { OutboxDead } from "@/outbox-settings"
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, FilePenIcon, ZapIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon, MessageSquareTextIcon, MessageCircleQuestionIcon, ShieldCheckIcon, PackageCheckIcon, RocketIcon, GitMergeIcon, WrenchIcon, PlugIcon, TerminalIcon } from "lucide-react"
+import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, FilePenIcon, ZapIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -23,9 +23,6 @@ import { Robot, Face, AVATAR_COLORS } from "@/robot"
 import { Card as ACard, CardHeader } from "@/components/affect/card-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
-import { SkillGrid, type Skill } from "@/components/affect/agent-skills"
-import { stats } from "@/api/stats"
-import { useStats } from "@/stats/format"
 import {
   st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, finishOnboarding, emit, closedSt,
@@ -39,8 +36,7 @@ import { showTag } from "@/views"
 import { AskSteve } from "@/config-ui"
 import { AppearanceSection } from "@/appearance-settings"
 import { VAULT_CAT, VaultSettingsPane } from "@/vault/settings"
-import { BotMcpSection, PlannedCaps } from "@/bot-mcp"
-import { BotSkillsSection } from "@/bot-skills"
+import { BotCaps } from "@/caps/bot"
 import { STATS_CAT, StatsSettingsPane } from "@/stats/prices"
 import { AUDIT_CAT, AuditSettingsPane } from "@/audit-settings"
 import { MODELS_CAT, ModelsSettingsPane, SteveJudges } from "@/models-settings"
@@ -240,11 +236,11 @@ export function BotView({ k }: { k: string }) {
       actions={<>{!b.main && <><span className="hidden type-footnote text-muted-foreground sm:inline">{b.on ? t("manage:bot.enabled") : t("manage:bot.disabled")}</span><SetSwitch testId="bot-on" checked={b.on} onChange={(v) => void saveBot(k, { on: v }, v ? t("manage:bot.enabled") : t("manage:bot.disabled"))} label={t("manage:bot.enable")} /></>}<BotMenu k={k} /></>}>
       <Strip className="mb-8" watch={botTab}><Segmented full className="min-w-max" value={botTab} onChange={(v) => { botTab = v; r() }} options={tabs} /></Strip>
       {botTab === "概览" && <BotOverview k={k} go={(v) => { botTab = v; r() }}
-        labels={{ pro: proLabel(t, b.pro), perm: permName(t, b.permMode), acc: accLabel(t, b.acc), effort: b.reasoningEffort ? (isEffortKey(b.reasoningEffort) ? t(`manage:effort.${b.reasoningEffort}`) : b.reasoningEffort) : null, steveTools: STEVE_TOOLS.length }} />}
+        labels={{ pro: proLabel(t, b.pro), perm: permName(t, b.permMode), acc: accLabel(t, b.acc), effort: b.reasoningEffort ? (isEffortKey(b.reasoningEffort) ? t(`manage:effort.${b.reasoningEffort}`) : b.reasoningEffort) : null, steveTools: 0 }} />}
       {/* the channels page's list, laid into this page's section and panel */}
       {botTab === "对外身份" && <div className="anim-in"><PersonasSection bot={k} panel /></div>}
       {botTab === "定时与流程" && <BotSchedules k={k} />}
-      {botTab === "能力" && <BotCaps k={k} onPerm={() => { botTab = "设置"; r() }} />}
+      {botTab === "能力" && <BotCaps k={k} permName={permName(t, b.permMode)} permSub={permLabel(t, b.permMode)} onPerm={() => { botTab = "设置"; r() }} />}
       {botTab === "系统提示词" && <BotPrompt k={k} />}
       {botTab === "记忆" && <BotMemories k={k} />}
       {botTab === "设置" && (
@@ -386,59 +382,6 @@ export function SettingsView() {
 function LanguageRow() {
   const t = useT()
   return <Row title={t("common:settings.language")} sub={t("common:settings.languageSub")} data-language-row><LanguageSwitch /></Row>
-}
-/* Steve's own tools every Bot has (steve-mcp tools.json), with what each is for; other steve_* tools show once used */
-const STEVE_TOOLS = [["steve_update", "update", MessageSquareTextIcon], ["steve_ask", "ask", MessageCircleQuestionIcon], ["steve_request_approval", "approval", ShieldCheckIcon], ["steve_deliver", "deliver", PackageCheckIcon], ["steve_publish", "publish", RocketIcon], ["steve_lane_status", "laneStatus", GitMergeIcon]] as const
-/* what Steve's other tools do for the user (the Hub's own MCP tools: items, knowledge, contacts, vault, GitHub, mail,
- * the first meeting); one Steve adds later shows "a tool Steve provides" until it is named here */
-const STEVE_TOOL_DESC = {
-  steve_items_search: "itemsSearch", steve_item_read: "itemRead", steve_item_dependencies: "itemDependencies", steve_sessions_list: "sessionsList",
-  steve_workflow: "workflow", steve_debug: "debug", steve_upgrade: "upgrade", steve_devices: "devices", steve_reply_source: "replySource",
-  steve_event_get: "eventGet", steve_im_read: "imRead", steve_knowledge_search: "knowledgeSearch", steve_knowledge_read: "knowledgeRead",
-  steve_remember: "remember", steve_contacts_find: "contactsFind", steve_contacts_remember: "contactsRemember", steve_whois: "whois",
-  steve_person_holdings: "personHoldings", steve_steward_propose: "stewardPropose", steve_secret_list: "secretList", steve_secret_use: "secretUse",
-  steve_github_status: "githubStatus", steve_github_ci_log: "githubCiLog", steve_github_comment: "githubComment", steve_github_open_pr: "githubOpenPr",
-  steve_mail_thread: "mailThread", steve_mail_attachment: "mailAttachment", steve_mail_draft: "mailDraft",
-  steve_onboard_profile: "onboardProfile", steve_onboard_models: "onboardModels", steve_onboard_bots: "onboardBots", steve_onboard_done: "onboardDone",
-} as const
-const steveToolDesc = (name: string) => (STEVE_TOOL_DESC as Record<string, (typeof STEVE_TOOL_DESC)[keyof typeof STEVE_TOOL_DESC] | undefined>)[name]
-/** 能力: what a Bot can call, as the tiles of affectUI's Agent / Skills screen — Steve's tools (always there), tools from
- *  other MCP servers and the harness's own, each with how often this Bot called it in the last 30 days (GET
- *  /stats/breakdown?by=tool&bot=). The Hub counts Steve's MCP tools as `mcp:<name>` (dim mcp) and every other tool as
- *  `tool:<full name>` (dim tool), so another MCP server's tools arrive as `mcp__<server>__<tool>` among the harness's.
- *  Harness tools are known only once used: Steve has no list of them. */
-const OTHER_MCP = /^mcp__(.+?)__(.+)$/
-function BotCaps({ k, onPerm }: { k: string; onPerm: () => void }) {
-  const t = useT()
-  const b = st.bots[k]
-  const [d] = useStats(() => stats.counts({ range: "30d", bot: k }, "tool"), [k])
-  if (!b) return null
-  const rows = d.s === "ok" ? d.v.rows.filter((x) => x.dim === "tool" || x.dim === "mcp") : []
-  const count = new Map(rows.filter((x) => x.dim === "mcp").map((x) => [x.label, x.count]))
-  const uses = (n: number | undefined) => (d.s !== "ok" ? undefined : n ? t("manage:caps.uses", { count: n }) : t("manage:caps.unused"))
-  const catSteve = t("manage:caps.catSteve"), catMcp = t("manage:caps.catMcp")
-  const known = new Set<string>(STEVE_TOOLS.map(([c]) => c))
-  const byUse = (xs: (Skill & { n: number })[]) => xs.sort((x, y) => y.n - x.n)
-  const steve = byUse([
-    ...STEVE_TOOLS.map(([c, l, I]) => { const used = count.get(c); return { id: c, name: c, description: t(`manage:caps.tool.${l}`), category: catSteve, icon: <I />, tone: "blue", source: catSteve, uses: d.s === "ok" && !used ? `${t("manage:caps.always")} · ${t("manage:caps.unused")}` : uses(used), idle: d.s === "ok" && !used, n: used ?? 0 } }),
-    ...rows.filter((x) => x.dim === "mcp" && !known.has(x.label)).map((x) => { const d = steveToolDesc(x.label); return { id: x.key, name: x.label, description: d ? t(`manage:caps.tool.${d}`) : t("manage:caps.fromSteve"), category: catSteve, icon: <WrenchIcon />, tone: "blue", source: catSteve, uses: uses(x.count), n: x.count } }),
-  ])
-  const tools = rows.filter((x) => x.dim === "tool")
-  const mcp = byUse(tools.flatMap((x) => { const m = OTHER_MCP.exec(x.label); return m ? [{ id: x.key, name: m[2], description: t("manage:caps.fromMcp"), category: catMcp, icon: <PlugIcon />, tone: "amber", source: m[1], uses: uses(x.count), n: x.count }] : [] }))
-  const own = byUse(tools.filter((x) => !OTHER_MCP.test(x.label)).map((x) => ({ id: x.key, name: x.label, description: t("manage:caps.fromHarness", { harness: b.h }), category: b.h, icon: <TerminalIcon />, tone: "teal", source: b.h, uses: uses(x.count), n: x.count })))
-  const skills: Skill[] = [...steve, ...mcp, ...own].map(({ n: _n, ...s }) => s)
-  return (
-    <div className="flex flex-col gap-8 anim-in" data-caps>
-      <Section label={t("manage:caps.tools")} note={d.s === "absent" ? t("manage:caps.usageAbsent") : t("manage:caps.usageNote", { harness: b.h })}>
-        {d.s === "loading" ? <Loading className="py-8" /> : <SkillGrid skills={skills} categories={[catSteve, catMcp, b.h]} labels={{ all: t("manage:caps.all"), categories: t("manage:caps.categories"), empty: t("manage:caps.none") }} />}
-      </Section>
-      <BotMcpSection bot={k} />
-      <BotSkillsSection bot={k} harness={b.harness} />
-      <Section label={t("manage:caps.perm")} note={t("manage:caps.later")}>
-        <Panel><Row title={permName(t, b.permMode)} sub={permLabel(t, b.permMode)} data-caps-perm={b.permMode}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={onPerm}>{t("manage:caps.change")}</Button></Row></Panel></Section>
-      <Section label={t("manage:mcp.more")}><PlannedCaps /></Section>
-    </div>
-  )
 }
 /** a Bot's schedules, read from 自动化 where they are made and changed */
 function BotSchedules({ k }: { k: string }) {

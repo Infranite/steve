@@ -297,11 +297,17 @@
   "modules.not_found.app_registration": "No such app registration",
   "modules.not_found.workspace": "No such workspace",
   "modules.not_found.mcp_server": "No such MCP server",
-  "modules.bot_mcp.name_taken": "This bot already has an MCP server named %{name}",
-  "modules.bot_mcp.secret_needed": "%{name} is a secret: give its value the first time it is saved",
-  "modules.bot_mcp.too_many": "A bot can have at most %{max} MCP servers",
   "modules.not_found.skill": "No such skill",
-  "modules.bot_skills.name_taken": "This bot already has a skill named %{name}",
-  "modules.bot_skills.too_many": "A bot can have at most %{max} skills",
-  "modules.bot_skills.too_large": "A bot's enabled skills can hold at most %{kib} KiB together"
+  "modules.not_found.a2a_agent": "No such remote agent",
+  "modules.caps.too_many": "A bot can use at most %{max} of these",
+  "modules.caps.library_full": "The library holds at most %{max} of these",
+  "modules.caps.name_used": "This bot already uses another one named %{name}",
+  "modules.caps.mcp_name_taken": "There is already an MCP server named %{name}",
+  "modules.caps.skill_name_taken": "There is already a skill named %{name}",
+  "modules.caps.a2a_name_taken": "There is already a remote agent named %{name}",
+  "modules.caps.skills_too_large": "A bot's switched-on skills can hold at most %{kib} KiB together",
+  "modules.caps.secret_needed": "%{name} is a secret: give its value the first time it is saved",
+  "modules.caps.a2a_secret_needed": "This way of signing in needs a secret: give it the first time",
+  "modules.caps.card_unreachable": "No Agent Card could be read there (%{why})",
+  "modules.caps.card_invalid": "That is not an Agent Card: it needs a name and the agent's url"
 }

@@ -32,6 +32,7 @@ pub mod node_tools;
 pub mod onboard_mcp;
 pub mod outbox;
 pub mod output_files;
+pub mod outside_mcp;
 pub mod ports;
 pub mod principal;
 pub mod research;
@@ -853,8 +854,9 @@ pub fn wire_assembly(
         tracing::warn!("single sign-on from the settings: {e}");
     }
     // the secrets of the Bots' own MCP servers, for the Node a session runs on
-    secrets.set_sessions(bot_mcp::McpSecrets::new(db.clone(), built.bot_mcp.clone()));
+    secrets.set_sessions(bot_mcp::McpSecrets::new(db.clone(), built.caps.clone()));
     let extra = mcp_extra::Extra {
+        caps: built.caps.clone(),
         store: db.clone(),
         modules: built.modules.clone(),
         ports: steve_modules::accounts::ports(),

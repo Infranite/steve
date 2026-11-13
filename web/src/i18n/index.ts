@@ -30,7 +30,7 @@ import { initReactI18next, useTranslation } from "react-i18next"
 import zhCN from "./locales/zh-CN/index.ts"
 import en from "./locales/en/index.ts"
 
-export const NAMESPACES = ["accounts", "api", "views", "manage", "core", "pages", "shell", "auto", "channels", "github", "integrations", "knowledge", "mail", "people", "stats", "thread", "vault", "yolo", "misc", "common"] as const
+export const NAMESPACES = ["accounts", "api", "views", "manage", "core", "pages", "shell", "auto", "channels", "github", "integrations", "knowledge", "caps", "mail", "people", "stats", "thread", "vault", "yolo", "misc", "common"] as const
 export type Namespace = (typeof NAMESPACES)[number]
 export const LANGS = ["zh-CN", "en"] as const
 export type Lang = (typeof LANGS)[number]

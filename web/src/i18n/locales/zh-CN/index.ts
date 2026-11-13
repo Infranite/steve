@@ -11,6 +11,7 @@ import channels from "./channels.ts"
 import github from "./github.ts"
 import integrations from "./integrations.ts"
 import knowledge from "./knowledge.ts"
+import caps from "./caps.ts"
 import mail from "./mail.ts"
 import people from "./people.ts"
 import stats from "./stats.ts"
@@ -20,4 +21,4 @@ import yolo from "./yolo.ts"
 import misc from "./misc.ts"
 import common from "./common.ts"
 
-export default { accounts, api, views, manage, core, pages, shell, auto, channels, github, integrations, knowledge, mail, people, stats, thread, vault, yolo, misc, common }
+export default { accounts, api, views, manage, core, pages, shell, auto, channels, github, integrations, knowledge, caps, mail, people, stats, thread, vault, yolo, misc, common }

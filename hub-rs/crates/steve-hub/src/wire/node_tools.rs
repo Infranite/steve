@@ -202,6 +202,12 @@ impl Caller {
 #[async_trait]
 pub trait Service: Send + Sync {
     fn catalog(&self) -> Vec<ToolDescriptor>;
+    /// What a session's turn sees: [`Self::catalog`], and the tools only its Bot has (one per remote
+    /// agent it uses).
+    async fn session_catalog(&self, session: &Session) -> Vec<ToolDescriptor> {
+        let _ = session;
+        self.catalog()
+    }
     async fn call(
         &self,
         session: Session,
@@ -229,6 +235,9 @@ pub trait Service: Send + Sync {
 impl Service for ToolService {
     fn catalog(&self) -> Vec<ToolDescriptor> {
         self.catalog()
+    }
+    async fn session_catalog(&self, session: &Session) -> Vec<ToolDescriptor> {
+        self.session_catalog(session).await
     }
     async fn call(
         &self,
@@ -328,7 +337,7 @@ impl NodeTools {
     }
     async fn catalog_of(service: &dyn Service, caller: &Caller) -> ApiResult<Catalog> {
         let tools = match caller {
-            Caller::Session(_) => service.catalog(),
+            Caller::Session(s) => service.session_catalog(s).await,
             Caller::DependencyManagement(_) => service
                 .catalog()
                 .into_iter()

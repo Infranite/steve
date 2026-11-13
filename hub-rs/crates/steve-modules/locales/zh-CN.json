@@ -297,11 +297,17 @@
   "modules.not_found.app_registration": "没有这个应用注册",
   "modules.not_found.workspace": "没有这个工作空间",
   "modules.not_found.mcp_server": "没有这个 MCP 服务器",
-  "modules.bot_mcp.name_taken": "这个 Bot 已经有一个叫 %{name} 的 MCP 服务器",
-  "modules.bot_mcp.secret_needed": "%{name} 是机密，第一次保存时要填上它的值",
-  "modules.bot_mcp.too_many": "一个 Bot 最多接 %{max} 个 MCP 服务器",
   "modules.not_found.skill": "没有这个技能",
-  "modules.bot_skills.name_taken": "这个 Bot 已经有一个叫 %{name} 的技能",
-  "modules.bot_skills.too_many": "一个 Bot 最多有 %{max} 个技能",
-  "modules.bot_skills.too_large": "一个 Bot 启用的技能加起来最多 %{kib} KiB"
+  "modules.not_found.a2a_agent": "没有这个远程 Agent",
+  "modules.caps.too_many": "一个 Bot 最多用 %{max} 个",
+  "modules.caps.library_full": "能力库里这一类最多 %{max} 个",
+  "modules.caps.name_used": "这个 Bot 已经用了另一个叫 %{name} 的",
+  "modules.caps.mcp_name_taken": "已经有一个叫 %{name} 的 MCP 服务器",
+  "modules.caps.skill_name_taken": "已经有一个叫 %{name} 的技能",
+  "modules.caps.a2a_name_taken": "已经有一个叫 %{name} 的远程 Agent",
+  "modules.caps.skills_too_large": "一个 Bot 启用的技能加起来最多 %{kib} KiB",
+  "modules.caps.secret_needed": "%{name} 是机密，第一次保存时要填上它的值",
+  "modules.caps.a2a_secret_needed": "这种认证方式要一个密钥，第一次保存时要填上",
+  "modules.caps.card_unreachable": "那里读不到 Agent Card（%{why}）",
+  "modules.caps.card_invalid": "这不是一份 Agent Card：它要有 name 和 Agent 的 url"
 }

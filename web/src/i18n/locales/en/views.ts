@@ -522,6 +522,8 @@ export default {
     knowledgeSub: "Memories, notes, documents and sources",
     bots: "Bots",
     botsSub: "What Steve can call on: create, edit, delete",
+    capabilities: "Capabilities",
+    capabilitiesSub: "MCP servers, skills and remote agents, chosen per bot",
     auto: "Automation",
     autoSub: "Flows, schedules and event sources",
     signals: "Signals",
