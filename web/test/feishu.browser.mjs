@@ -50,7 +50,7 @@ try {
   registration = { ...registration, state: "verifying" }
   await page.locator('[data-registration-state="verifying"]').waitFor()
   assert.ok(reads > 0, "the view follows server progress")
-  await page.getByRole("button", { name: "取消本次接入" }).click()
+  await page.getByRole("button", { name: "取消本次连接" }).click()
   await page.locator('[data-registration-state="cancelled"]').waitFor()
   assert.equal(await page.locator("[data-registration-link]").count(), 0)
   await page.getByRole("button", { name: "高级：OAuth 回调（可选）" }).click()
@@ -77,7 +77,7 @@ try {
   await page.getByRole("button", { name: "稍后继续", exact: true }).click()
   assert.equal(deviceCancelled, false, "closing must not claim to cancel")
   await page.getByRole("button", { name: "继续本人授权", exact: true }).click()
-  await page.getByRole("button", { name: "取消授权接入", exact: true }).click()
+  await page.getByRole("button", { name: "取消授权连接", exact: true }).click()
   await page.locator("[data-device-flow]").waitFor({ state: "detached" })
   assert.equal(deviceCancelled, true)
   await page.goto(base + "/test/fixtures/feishu.html?existing&callback")

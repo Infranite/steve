@@ -493,7 +493,7 @@ export default {
     integrations: "连接",
     integrationsSub: "飞书、GitHub、邮箱等服务，每个连接能做什么",
     channels: "群聊与私聊",
-    channelsSub: "各个接入里的群、私聊和对外身份",
+    channelsSub: "各个连接里的群、私聊和对外身份",
     mail: "邮件",
     mailSub: "往来、分诊和回复草稿",
     contacts: "联系人",

@@ -15,7 +15,7 @@ export default {
     optional: "（可选）",
     provider: "邮箱服务商",
     appPasswordHelp: "怎么拿应用专用密码",
-    pickProvider: "选一个服务商，服务器地址和端口会自动填好。Outlook.com 个人邮箱不支持密码方式，请用 Outlook 授权接入。",
+    pickProvider: "选一个服务商，服务器地址和端口会自动填好。Outlook.com 个人邮箱不支持密码方式，请用 Outlook 授权连接。",
     serverSettings: "服务器设置",
   },
   /* 邮箱设置 in the account detail */
@@ -41,7 +41,7 @@ export default {
     sendNow: "立即发出",
     archiveOnDone: "事项完成后归档这串往来",
     syncDays: "回溯天数",
-    syncDaysSub: "接入时读取多久以前的邮件；回溯的旧邮件只记录，不触发流程",
+    syncDaysSub: "连接时读取多久以前的邮件；回溯的旧邮件只记录，不触发流程",
   },
   /* the draft card, in 待处理 and on the thread page */
   draft: {
@@ -81,10 +81,11 @@ export default {
   /* #/mail: the thread list */
   list: {
     onboardingSub: "收件、分诊、起草回复；每封信都在你批准后才发出",
-    onboardingTitle: "要接入邮箱吗？",
-    onboardingBody: "接入后 Steve 帮你分诊来信：需要你回的列出来，邮件 Bot 起草回复，你改过、点发送才会发出。通知类邮件进汇报，不打扰你。",
-    connect: "接入邮箱",
+    onboardingTitle: "要连接邮箱吗？",
+    onboardingBody: "连接后 Steve 帮你分诊来信：需要你回的列出来，邮件 Bot 起草回复，你改过、点发送才会发出。通知类邮件进汇报，不打扰你。",
+    connect: "连接邮箱",
     all: "全部",
+    accountUnread_other: "{{name}} · {{count}} 封未读",
     searchAria: "搜索邮件",
     searchPlaceholder: "搜索主题、发件人",
     noMatch: "没有匹配的邮件",

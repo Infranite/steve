@@ -3,7 +3,8 @@
 // inspector renames its edge, the canvas (affectUI Workflow Builder) adds a node from its palette after
 // the selected one and plays a dry run's real steps in its run panel, the internal hosts flows may reach
 // are your own setting, a new schedule's budget follows its mode until you type one, and Signals says what to do
-// when nothing is connected and cuts a long reason to two lines. 1280 and 390 px,
+// when nothing is connected, cuts a long reason to two lines and names a run's steps by their nodes' titles; a flow
+// that failed today says so under its description on a phone. 1280 and 390 px,
 // light and dark.
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
@@ -44,6 +45,7 @@ const run = async ({ width, height, scheme }) => {
     else if (p === "/flows/flw_1/dry-run") { dry.push(route.request().postDataJSON()); data = dryRun }
     else if (p === "/schedules" && method === "POST") { created.push(route.request().postDataJSON()); data = { id: "flw_s", next_at: null, ...created.at(-1) } }
     else if (p === "/signals") data = sigs ?? { stats: { total: 0, need: 0, item: 0, quiet: 0 }, items: [] }
+    else if (p === "/signals/ev_1") data = { ...sigs.items[0], runs: [{ ...dryRun, id: "run_1", dry_run: false }] }
     else if (p === "/sources") data = sources
     else if (p === "/flows/parse-when" || p === "/schedules/parse") data = { cron: "0 9 * * 1", tz: "Asia/Taipei", describe: "每周一 09:00", next: [], by: "rule" }
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(data) })
@@ -154,7 +156,7 @@ const run = async ({ width, height, scheme }) => {
     const reason = "bot step timed out after 120s waiting for the model backend: " + "connect ECONNREFUSED 127.0.0.1:443 ".repeat(12)
     sources = [{ adapter: "imap", source: "mail", name: "邮件", paused: false, triage_bot: null, connections: [{ id: "c1", name: "me", status: "ok", last_sync: 1 }], scopes: [], types: [] }]
     sigs = { stats: { total: 1, need: 0, item: 0, quiet: 0 }, items: [{ id: "ev_1", source: "mail", type: "mail.received", summary: "AWS 账单", group_key: null, group_label: null, thread_key: null, connection: null, actor: null,
-      outcome: "failed", outcome_label: "处理失败", reason, handled_by: null, flow: null, work_item_id: null, decision_id: null, received: Date.now(), raw_available: false }] }
+      outcome: "failed", outcome_label: "处理失败", reason, handled_by: null, flow: { id: "flw_1", name: "分支对不上", kind: "flow" }, work_item_id: null, decision_id: null, received: Date.now(), raw_available: false }] }
     await page.reload(); await page.locator('[data-sig-group="failed"]').waitFor()
     assert.equal(await page.locator('[data-sig-group="failed"]').innerText(), "处理失败\n1")
     await page.locator('[data-sig-row="ev_1"]').click()
@@ -164,6 +166,14 @@ const run = async ({ width, height, scheme }) => {
     await page.locator("[data-sig-reason] [data-clamp-toggle]").click()
     assert.ok(await box.evaluate((el) => el.clientHeight) > cut, "the whole reason opens in place")
     await fits(); await shot("signal-reason")
+    // 处理过程 names each step by the node's title, not its id
+    await page.locator("[data-sig-runs]").click(); await page.locator("[data-step-title]").first().waitFor()
+    assert.deepEqual(await page.locator("[data-run-steps] li [data-step-title]").allInnerTexts(), ["手动", "是不是", "忽略一"])
+    // the flow failed today: on a phone the count is a line under the description, not a pill beside it
+    await page.goto(base + "/test/fixtures/auto.html#/auto/rules"); await page.locator('[data-rule-row="flw_1"]').waitFor()
+    assert.equal(await page.locator(width < 640 ? "[data-flow-failed-line]" : "[data-flow-failed]").isVisible(), true)
+    assert.equal(await page.locator(width < 640 ? "[data-flow-failed]" : "[data-flow-failed-line]").isVisible(), false)
+    await fits(); await shot("flow-failed")
     assert.deepEqual(errors, [])
   } finally { await page.close() }
 }

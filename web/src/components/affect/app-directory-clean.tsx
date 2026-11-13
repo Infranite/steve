@@ -69,6 +69,8 @@ export type AppDirectoryProps = {
   /** A card's button or the card itself was pressed */
   onOpen?: (app: App) => void;
   className?: string;
+  /** Steve: the search, filter and categories; off when there are only a handful of apps to see at a glance */
+  browse?: boolean;
 } & Record<`data-${string}`, string | number | undefined>;
 
 type Status = "all" | "connected" | "available";
@@ -82,7 +84,7 @@ const text = (n: ReactNode) => (typeof n === "string" || typeof n === "number" ?
 const Logo = ({ app }: { app: App }) =>
   app.logo != null && app.logo !== false ? <>{app.logo}</> : <span className="ui-adc__tile-initial">{initial(app.name)}</span>;
 
-export function AppDirectory({ title, subtitle, "aria-label": ariaLabel, apps, categories, labels: L, onOpen, className, ...rest }: AppDirectoryProps) {
+export function AppDirectory({ title, subtitle, "aria-label": ariaLabel, apps, categories, labels: L, onOpen, className, browse = true, ...rest }: AppDirectoryProps) {
   const connectedN = apps.filter((a) => a.connected).length;
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
@@ -158,7 +160,7 @@ export function AppDirectory({ title, subtitle, "aria-label": ariaLabel, apps, c
       <style href="ui-app-directory-clean" precedence="default">
         {css}
       </style>
-      <section className={["ui-adc", className].filter(Boolean).join(" ")} aria-label={title ?? ariaLabel} {...rest}>
+      <section className={["ui-adc", className].filter(Boolean).join(" ")} aria-label={title ?? ariaLabel} data-browse={browse ? undefined : "off"} {...rest}>
         <div className="ui-adc__card">
           {(title || subtitle) && (
             <header className="ui-adc__intro">
@@ -170,7 +172,7 @@ export function AppDirectory({ title, subtitle, "aria-label": ariaLabel, apps, c
             </header>
           )}
 
-          <div className="ui-adc__tools">
+          {browse && <div className="ui-adc__tools">
             <label className="ui-adc__search" htmlFor={searchId}>
               <SearchIcon />
               <input
@@ -228,10 +230,10 @@ export function AppDirectory({ title, subtitle, "aria-label": ariaLabel, apps, c
                 </div>
               )}
             </div>
-          </div>
+          </div>}
 
           <div className="ui-adc__layout">
-            <nav className="ui-adc__nav" aria-label={L.categories}>
+            {browse && <nav className="ui-adc__nav" aria-label={L.categories}>
               {[allCategory, ...categories].map((c) => {
                 const count = apps.filter((a) => inCategory(a, c.id)).length;
                 const current = !q && category === c.id;
@@ -255,16 +257,16 @@ export function AppDirectory({ title, subtitle, "aria-label": ariaLabel, apps, c
                   </button>
                 );
               })}
-            </nav>
+            </nav>}
 
             <div className="ui-adc__morph" ref={morphRef}>
             <div className="ui-adc__main" ref={mainRef}>
-              <h3 className="ui-adc__heading" aria-live="polite">
+              {browse && <h3 className="ui-adc__heading" aria-live="polite">
                 <span className="ui-adc__heading-text" title={heading}>
                   {heading}
                 </span>
                 <span>{formatCount(shown.length)}</span>
-              </h3>
+              </h3>}
               {shown.length === 0 ? (
                 <div className="ui-adc__empty">
                   {/* Only offer to clear when a search or filter hides the apps */}
@@ -561,6 +563,8 @@ const css = /* css */ `
 .ui-adc .ui-adc__menu-item[aria-checked="true"] { font-weight: 500; }
 .ui-adc .ui-adc__menu-item > svg { flex: none; color: var(--ui-adc-accent); }
 
+.ui-adc[data-browse="off"] .ui-adc__layout { grid-template-columns: minmax(0, 1fr); margin-top: 0; }
+.ui-adc[data-browse="off"] .ui-adc__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .ui-adc .ui-adc__layout {
   display: grid;
   grid-template-columns: 184px minmax(0, 1fr);
@@ -721,7 +725,7 @@ const css = /* css */ `
 @container (max-width: 560px) {
   .ui-adc__intro { flex-direction: column; gap: 4px; }
   .ui-adc__meta { margin-top: 0; }
-  .ui-adc__grid { grid-template-columns: minmax(0, 1fr); }
+  .ui-adc__grid, .ui-adc[data-browse="off"] .ui-adc__grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 @keyframes ui-adc-in { from { opacity: 0; transform: translateY(4px); } }

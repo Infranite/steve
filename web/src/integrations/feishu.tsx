@@ -46,14 +46,20 @@ export function PermissionList({ checks }: { checks: PermissionCheck[] | null })
   const t = useT()
   const rows: PermissionCheck[] = checks ?? BOT_PERMS.map(([scope, purpose, level]) => ({ scope, purpose: t(`integrations:feishu.perm.${purpose}`), level, status: "unknown" }))
   const missing = rows.filter((r) => r.status === "missing" && r.level === "required")
+  /* after a check, what is granted folds into one line: what needs doing stays in view */
+  const open = checks ? rows.filter((r) => r.status !== "granted") : rows, granted = checks ? rows.filter((r) => r.status === "granted") : []
+  const item = (r: PermissionCheck) => { const [label, I, c] = STATUS[r.status] ?? STATUS.unknown, l = label(); return (
+    <li key={r.scope} className="flex items-start gap-2.5 px-3.5 py-2.5" data-perm={r.scope} data-perm-status={r.status}>
+      {checks ? <I className={"mt-0.5 size-4 shrink-0 " + (r.status === "missing" && r.level !== "required" ? "text-attention" : c)} aria-label={l} /> : <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-tertiary" aria-hidden />}
+      <div className="min-w-0 flex-1"><div className="type-callout">{r.purpose}</div>
+        <div className="flex min-w-0 flex-wrap gap-x-2 type-footnote text-muted-foreground"><span>{levelLabel(r.level)}{checks ? ` · ${l}` : ""}</span><code className="min-w-0 break-all font-mono text-tertiary" title={t("integrations:feishu.scopeId")}>{r.scope}</code></div></div>
+    </li>) }
   return (
     <div className="flex flex-col gap-1.5" data-permissions={checks ? "checked" : "static"}>
       {checks && missing.length > 0 && <div className="rounded-lg bg-destructive/10 px-3 py-2 type-footnote text-destructive" role="alert">{t("integrations:feishu.missingRequired", { count: missing.length })}</div>}
-      <ul className="flex flex-col divide-y rounded-xl bg-muted/60" aria-label={t("integrations:feishu.permissions")}>{rows.map((r) => { const [label, I, c] = STATUS[r.status] ?? STATUS.unknown, l = label(); return (
-        <li key={r.scope} className="flex items-start gap-2.5 px-3.5 py-2.5" data-perm={r.scope} data-perm-status={r.status}>
-          {checks ? <I className={"mt-0.5 size-4 shrink-0 " + c} aria-label={l} /> : <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-tertiary" aria-hidden />}
-          <div className="min-w-0 flex-1"><div className="type-callout">{r.purpose}</div><div className="type-footnote text-muted-foreground">{levelLabel(r.level)}{checks ? ` · ${l}` : ""}</div><details className="group/disc mt-1 type-footnote text-muted-foreground"><summary className={SUMMARY}><DiscChevron className="size-3" />{t("integrations:feishu.scopeId")}</summary><code className="mt-0.5 block break-all pl-4 font-mono">{r.scope}</code></details></div>
-        </li>) })}</ul>
+      {open.length > 0 && <ul className="flex flex-col divide-y rounded-xl bg-muted/60" aria-label={t("integrations:feishu.permissions")}>{open.map(item)}</ul>}
+      {granted.length > 0 && <Disclosure label={t("integrations:feishu.grantedN", { count: granted.length })} data-perm-granted>
+        <ul className="mt-1.5 flex flex-col divide-y rounded-xl bg-muted/60">{granted.map(item)}</ul></Disclosure>}
       {!checks && <div className="type-footnote text-muted-foreground">{t("integrations:feishu.staticNote")}</div>}
     </div>
   )
@@ -254,7 +260,7 @@ function DeviceDialog({ d, onClose, onFinished }: { d: RDevice; onClose: () => v
 /* The default journey is official registration; manual configuration is a secondary path. */
 type GuideAdapter = IAdapter
 
-export function FeishuGuide({ adapters, bots, selfDone, callbackUrls }: { adapters: GuideAdapter[]; bots: { id: string; name: string; domain?: "feishu" | "lark" }[]; selfDone: boolean; callbackUrls: string[] }) {
+export function FeishuGuide({ adapters, bots, selfDone, callbackUrls, bare }: { adapters: GuideAdapter[]; bots: { id: string; name: string; domain?: "feishu" | "lark" }[]; selfDone: boolean; callbackUrls: string[]; bare?: boolean }) {
   const t = useT()
   /* “授权你本人” only with a side acting as you that pairs with the bot; its buttons are the ways it declares */
   const side = selfSideOf(adapters) as IAdapter | null
@@ -262,15 +268,15 @@ export function FeishuGuide({ adapters, bots, selfDone, callbackUrls }: { adapte
   const selected = bots.some((b) => b.id === app) ? app : bots[0]?.id ?? ""
   return <section className="flex flex-col gap-4" data-feishu-guide>
     {dlg && <FeishuConnectDialog bots={bots} onClose={() => setDlg(false)} side={side} />}
-    <SectionLabel>{bots.length ? t("integrations:feishu.moreApps") : t("integrations:feishu.connectFeishuLark")}</SectionLabel>
+    {!bare && <SectionLabel>{bots.length ? t("integrations:feishu.moreApps") : t("integrations:feishu.connectFeishuLark")}</SectionLabel>}
     <FeishuRegistrationPanel />
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]">
       <div className="min-w-0"><div className="type-headline">{t("integrations:feishu.existingTitle")}</div><div className="mt-0.5 type-callout text-muted-foreground">{t("integrations:feishu.existingSub")}</div></div>
       <Button variant="outline" onClick={() => setDlg(true)} data-feishu-bot>{t("integrations:feishu.useExisting")}</Button>
     </div>
-    {bots.length > 0 && side && <div className="flex flex-col gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]" data-self-optional>
+    {bots.length > 0 && side && !selfDone && <div className="flex flex-col gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]" data-self-optional>
       <div className="type-headline">{t("integrations:feishu.selfOptional")}</div>
-      <p className="type-callout text-muted-foreground">{t("integrations:feishu.selfOptionalNote")}{selfDone && " " + t("integrations:feishu.selfDoneNote")}</p>
+      <p className="type-callout text-muted-foreground">{t("integrations:feishu.selfOptionalNote")}</p>
       <div className="flex flex-wrap items-center gap-2">
         {bots.length > 1 && <Select testId="guide-self-app" value={selected} onChange={setApp} options={bots.map((b) => ({ v: b.id, l: b.name }))} />}
         <SelfButtons app={selected} variant="outline" side={side} />

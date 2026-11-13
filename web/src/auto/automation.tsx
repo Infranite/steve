@@ -139,8 +139,10 @@ function FlowList({ L, signals, sources, onNew }: { L: Load<FlowSummary[]>; sign
           <button type="button" className="min-w-0 flex-1 text-left" onClick={() => go("#/auto/rule/" + f.id)} data-rule-row={f.id}>
             <div className={cn("truncate type-body font-medium", !f.enabled && "text-muted-foreground")}>{f.name}</div>
             <div className="mt-0.5 truncate type-footnote text-muted-foreground">{f.description || trigger(f)}</div>
+            {/* on a phone the failures go under the description: a pill beside it leaves the description a few characters */}
+            {bad > 0 && <div className="mt-0.5 truncate type-footnote text-destructive sm:hidden" data-flow-failed-line>{t("auto:flows.failedToday", { count: bad })}</div>}
           </button>
-          {bad > 0 ? <Pill tone="destructive" data-flow-failed>{t("auto:flows.failedToday", { count: bad })}</Pill>
+          {bad > 0 ? <Pill tone="destructive" className="hidden sm:inline-flex" data-flow-failed>{t("auto:flows.failedToday", { count: bad })}</Pill>
             : <span className="hidden shrink-0 type-footnote tabular-nums text-muted-foreground sm:inline" title={t("auto:flows.runs24", { count: f.runs24 })}>{!f.enabled ? t("auto:disabled") : f.last_run ? t("auto:rule.lastRun", { time: tm(f.last_run) }) : t("auto:flows.neverRan")}</span>}
           <Switch checked={f.enabled} disabled={busy === f.id} onCheckedChange={(v) => void toggle(f, v)} aria-label={t("auto:enableName", { name: f.name })} />
         </div>

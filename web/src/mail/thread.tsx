@@ -135,19 +135,20 @@ function ThreadActions({ t, reload }: { t: Thread; reload: () => Promise<void> }
   const tr = useT()
   const [busy, act] = useBusy()
   const done = async (p: Promise<unknown> | undefined) => { if (await p) { await reload(); await refresh() } }
-  return (
+  /* 处理完了 is what you do with most threads, so it stays in sight; the rest wait in the menu */
+  return (<div className="flex items-center gap-1">
+    {t.state !== "done" && <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void done(act(() => mailApi.patchThread(t.id, "done"), tr("mail:thread.markDoneDone")))} data-thread-done><CheckIcon />{tr("mail:thread.markDone")}</Button>}
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button size="sm" variant="ghost" aria-label={tr("mail:thread.moreActions")} disabled={busy} data-thread-more />}><EllipsisIcon /></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-48">
         {!t.item_id && <DropdownMenuItem onClick={() => void act(() => mailApi.toItem(t.id), tr("mail:thread.toItemDone")).then((r) => r && go("#/items/" + r.item_id))} data-thread-to-item><ListTodoIcon />{tr("mail:thread.toItem")}</DropdownMenuItem>}
         <DropdownMenuItem onClick={() => void act(() => mailApi.toKnowledge(t.id), tr("mail:thread.toKbDone"))} data-thread-to-kb><BookPlusIcon />{tr("mail:thread.toKb")}</DropdownMenuItem>
         <DropdownMenuSeparator />
-        {t.state !== "done" && <DropdownMenuItem onClick={() => void done(act(() => mailApi.patchThread(t.id, "done"), tr("mail:thread.markDoneDone")))} data-thread-done><CheckIcon />{tr("mail:thread.markDone")}</DropdownMenuItem>}
         <DropdownMenuItem onClick={() => void act(() => mailApi.archive(t.id), tr("mail:thread.archived")).then((r) => r && go("#/mail"))} data-thread-archive><ArchiveIcon />{tr("mail:thread.archive")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => void done(act(() => mailApi.patchThread(t.id, t.state === "muted" ? "open" : "muted"), t.state === "muted" ? tr("mail:thread.unmuted") : tr("mail:thread.mutedToast")))} data-thread-mute><BellOffIcon />{t.state === "muted" ? tr("mail:thread.unmute") : tr("mail:thread.mute")}</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-  )
+  </div>)
 }
 
 /** 让邮件 Bot 起草 (with what you want said) or 自己回复 (an empty draft to the last sender) */
