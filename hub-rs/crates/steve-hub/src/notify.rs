@@ -207,6 +207,15 @@ fn visible(r: &dyn Repo, ws: &str, msgs: Vec<Obj>) -> BResult<Vec<Obj>> {
             {
                 m.insert("text".into(), t);
             }
+            /* the first meeting's welcome Steve said in zh-CN, in the reader's language */
+            if m.get("meta").and_then(|x| x.get("onboard")) == Some(&Value::Bool(true))
+                && let Some(t) = m
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .and_then(steve_core::thread::onboard::welcome_shown)
+            {
+                m.insert("text".into(), Value::String(t));
+            }
             m
         })
         .collect())

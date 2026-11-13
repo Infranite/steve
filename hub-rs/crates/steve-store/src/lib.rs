@@ -23,6 +23,7 @@ mod event_payload;
 pub mod maintenance;
 pub mod outbox;
 mod repo;
+pub mod seeded;
 mod tx;
 mod types;
 pub mod workflow_gate;

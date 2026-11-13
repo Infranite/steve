@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::{ApiError, Check};
 use steve_store::base::{self, Viewer};
+use steve_store::seeded;
 use steve_store::{ChangeEvent, Tx, uid};
 
 use crate::ChannelResult;
@@ -254,7 +255,7 @@ pub fn ensure_default(tx: &Tx, ws: &str, now: i64) -> ChannelResult<Option<Perso
             DEFAULT_NAME,
             json!({"seed": DEFAULT_NAME}).to_string(),
             bot,
-            format!("我是 Steve，{owner} 的 AI 助手，帮他接收和分派事情。"),
+            seeded::persona_intro(&owner),
             soul,
             serde_json::to_string(&Reveal::ALL)?,
             now,
@@ -609,6 +610,24 @@ pub struct PersonaOut {
     pub revision: i64,
 }
 
+/// A persona's `field` as shown: still as seeded, in the request's language ([`steve_store::seeded`]).
+fn shown(v: &str, field: &str) -> String {
+    let keys = seeded::PERSONA
+        .iter()
+        .find(|(f, _)| *f == field)
+        .map_or(&[][..], |(_, k)| *k);
+    seeded::shown(v, keys).unwrap_or_else(|| v.to_owned())
+}
+
+/// A persona's `field` as a page sent it: one that is a seed shown in another language is stored as seeded.
+pub(crate) fn sent(v: Option<String>, field: &str) -> Option<String> {
+    let keys = seeded::PERSONA
+        .iter()
+        .find(|(f, _)| *f == field)
+        .map_or(&[][..], |(_, k)| *k);
+    v.map(|v| seeded::stored(&v, keys).unwrap_or(v))
+}
+
 pub fn out(c: &Connection, viewer: &Viewer, p: &PersonaRow) -> ChannelResult<PersonaOut> {
     let owner = owner_name(c, &p.workspace_id)?;
     Ok(PersonaOut {
@@ -616,8 +635,9 @@ pub fn out(c: &Connection, viewer: &Viewer, p: &PersonaRow) -> ChannelResult<Per
         name: p.name.clone(),
         avatar: p.avatar.clone(),
         bot_id: p.bot_id.clone(),
-        intro: p.intro.clone(),
-        soul: p.soul.clone(),
+        // seeded text in the reader's language; the preview is what recipients are sent
+        intro: shown(&p.intro, "intro"),
+        soul: shown(&p.soul, "soul"),
         reveal: p.reveal,
         signature: p.signature.clone(),
         is_default: p.is_default,

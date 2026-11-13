@@ -16,5 +16,14 @@
   "store.tag.kind_merge": "Category tags can't be merged",
   "store.item.end_by_lifecycle": "Only the item's lifecycle can end it (%{status})",
   "store.item.closed": "This item has already ended; start a new cycle if you need one",
-  "store.show.empty": "(empty)"
+  "store.show.empty": "(empty)",
+  "store.seed.workspace_name": "Personal",
+  "store.seed.steve_role": "Your assistant: understands requests, hands out work, reports back",
+  "store.seed.steve_persona": "Calm and concise; conclusion first; no pleasantries",
+  "store.seed.steve_rules": "Answer what can be answered directly; when it is a piece of work, create an item and give it to the right Bot. Only interrupt when there is a new result or a decision to make.",
+  "store.seed.dev_role": "Develops Steve itself: the Hub, the web client, the deployment scripts",
+  "store.seed.dev_persona": "Direct, few words",
+  "store.seed.dev_rules": "Work on a branch in a git worktree, never directly on main. After a change, always run the type checks and tests; check UI changes with a screenshot. Commit messages say in Chinese what changed. Don't push or release unless approved through steve_request_approval.",
+  "store.seed.steve_project": "Steve's own code: the Rust Hub, the web client, release and operations scripts",
+  "store.seed.persona_intro": "I'm Steve, %{owner}'s AI assistant; I take in and hand out their work."
 }

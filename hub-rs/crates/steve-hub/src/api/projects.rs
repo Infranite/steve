@@ -370,6 +370,7 @@ pub async fn patch_one(
         p.insert("name".into(), json!(x));
     }
     if let Some(x) = k.opt_str("description", Str::max(1000)) {
+        let x = steve_store::seeded::stored(&x, steve_store::seeded::PROJECT[0].1).unwrap_or(x);
         p.insert("description".into(), json!(x));
     }
     if let Some(x) = k.opt_bool("worktree") {

@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use steve_modules::outbound::YOLO_ACTOR;
 use steve_modules::outbound::{UNTRUSTED_CLOSE, UNTRUSTED_OPEN, quote_untrusted};
+use steve_store::seeded;
 
 const PRO: [&str; 3] = ["只在必要时", "适中", "积极"];
 const DAY: i64 = 24 * 3_600_000;
@@ -265,9 +266,9 @@ fn undo_patch(u: &Value) -> Map<String, Value> {
 /// The bot that develops Steve itself, as `seed` makes it beside Steve's own source (a `NewBot` as JSON).
 pub(crate) fn dev_bot(project: Option<&str>) -> Value {
     json!({
-        "name": "Steve 开发", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "role": "开发 Steve 自己：Hub、前端、部署脚本", "accept_mode": "inherit", "perm_mode": "auto",
-        "persona": "直接、话少", "default_project": project, "avatar": {"color": "#8c7ae6", "round": 45},
-        "rules": "在 git worktree 的分支上工作，不直接改 main。改完必须跑类型检查和测试；界面改动要截图自查。提交信息用中文说明改了什么。不推送、不发布，除非用 steve_request_approval 得到批准。",
+        "name": "Steve 开发", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "role": seeded::text(seeded::DEV_ROLE), "accept_mode": "inherit", "perm_mode": "auto",
+        "persona": seeded::text(seeded::DEV_PERSONA), "default_project": project, "avatar": {"color": "#8c7ae6", "round": 45},
+        "rules": seeded::text(seeded::DEV_RULES),
     })
 }
 
@@ -284,9 +285,9 @@ impl Core {
             "steve",
             true,
             json!({
-                "name": "Steve", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "role": "你的助手：理解需求、分派、汇报", "accept_mode": "inherit", "perm_mode": "default",
-                "persona": "沉稳、简洁，先说结论；不客套", "avatar": {"color": "#7aa7c7", "round": 70},
-                "rules": "能直接回答的就回答；是一件事就建事项交给合适的 Bot。只在有新结果或需要决定时打扰。",
+                "name": "Steve", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "role": seeded::text(seeded::STEVE_ROLE), "accept_mode": "inherit", "perm_mode": "default",
+                "persona": seeded::text(seeded::STEVE_PERSONA), "avatar": {"color": "#7aa7c7", "round": 70},
+                "rules": seeded::text(seeded::STEVE_RULES),
             }),
             WS,
         )?;
@@ -308,7 +309,7 @@ impl Core {
             steve_project = Some(db.project_create(
                 WS,
                 "Steve",
-                "Steve 自己的代码：Rust Hub、Web 界面、发布与运维脚本",
+                &seeded::text(seeded::STEVE_PROJECT),
                 &repo,
                 "git",
                 true,

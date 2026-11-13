@@ -911,9 +911,18 @@ pub(crate) fn sessions_out(r: &dyn Repo, d: &dyn Domain, ws: &str) -> BResult<Ve
     }
 }
 
+/// Workspaces as the pages show them: a seeded name in the request's language ([`steve_store::seeded`]).
+pub(crate) fn workspaces_out(mut ws: Vec<Obj>) -> Vec<Obj> {
+    for w in &mut ws {
+        steve_store::seeded::show(w, steve_store::seeded::WORKSPACE);
+    }
+    ws
+}
+
 /// `botOut`: the bot plus its workspace ids and its memory count in `ws`.
 pub(crate) fn bot_out(r: &dyn Repo, mut b: Obj, ws: &str) -> BResult<Obj> {
     let id = str_of(&b, "id");
+    steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
     b.insert("workspaces".into(), json!(r.bot_workspaces(&id)?));
     b.insert("memories".into(), json!(r.memories_count(&id, ws)?));
     Ok(b)
@@ -933,6 +942,7 @@ pub(crate) fn bots_out(r: &dyn Repo, ws: &str) -> BResult<(Vec<Obj>, Vec<Value>)
     let mut bots = vec![];
     for mut b in r.bots_list(Some(ws))? {
         let id = str_of(&b, "id");
+        steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
         b.insert("workspaces".into(), json!(bot_ws(r, x.as_ref(), &id)?));
         let n = match &x {
             Some(x) => x.memories.get(&id).copied().unwrap_or(0),

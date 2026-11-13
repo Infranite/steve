@@ -238,3 +238,158 @@ async fn hub_texts_follow_accept_language() {
     assert_eq!(state("en").await, "Runs through the ACP adapter");
     assert_eq!(state("zh-CN").await, "通过 ACP 适配器运行");
 }
+
+/// What the installation seeded (the workspace's name, the main Bot's role, speaking style and rules, the
+/// first meeting's welcome, the default channel persona) reads in the request's language while it is still
+/// as seeded; zh-CN is the stored text; the seed sent back unchanged from an English page stays the seed;
+/// what someone wrote is shown as written in both.
+#[tokio::test(flavor = "multi_thread")]
+async fn seeded_defaults_follow_the_language_until_edited() {
+    let e = start().await;
+    let get = |path: &'static str, lang: &'static str| {
+        let r = e.req(Method::GET, path).header("accept-language", lang);
+        async move {
+            let v: Value = r.send().await.expect("get").json().await.expect("json");
+            v
+        }
+    };
+    let send = |method: Method, path: String, lang: &'static str, body: Value| {
+        let r = e
+            .req(method, &path)
+            .header("accept-language", lang)
+            .json(&body);
+        async move {
+            let r = r.send().await.expect("send");
+            assert!(r.status().is_success(), "{path}: {}", r.status());
+        }
+    };
+    let steve = |s: &Value| {
+        s["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == "steve")
+            .cloned()
+            .unwrap()
+    };
+    let welcome = |s: &Value| {
+        s["thread"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["meta"]["onboard"] == true)
+            .map(|m| m["text"].as_str().unwrap().to_string())
+    };
+
+    // the first meeting began in zh-CN: the welcome is stored in Chinese
+    send(
+        Method::POST,
+        "/api/onboard/start".into(),
+        "zh-CN",
+        json!({}),
+    )
+    .await;
+
+    let zh = get("/api/state", "zh-CN").await;
+    assert_eq!(zh["workspace"]["name"], "个人");
+    assert_eq!(zh["workspaces"][0]["name"], "个人");
+    assert_eq!(steve(&zh)["role"], "你的助手：理解需求、分派、汇报");
+    assert_eq!(steve(&zh)["persona"], "沉稳、简洁，先说结论；不客套");
+    let rules_zh = steve(&zh)["rules"].clone();
+    assert!(welcome(&zh).unwrap().starts_with("你好，我是 Steve。"));
+
+    let en = get("/api/state", "en").await;
+    assert_eq!(en["workspace"]["name"], "Personal");
+    assert_eq!(en["workspaces"][0]["name"], "Personal");
+    assert_eq!(steve(&en)["name"], "Steve");
+    assert_eq!(
+        steve(&en)["role"],
+        "Your assistant: understands requests, hands out work, reports back"
+    );
+    assert_eq!(
+        steve(&en)["persona"],
+        "Calm and concise; conclusion first; no pleasantries"
+    );
+    assert!(steve(&en)["rules"].as_str().unwrap().is_ascii());
+    assert!(welcome(&en).unwrap().starts_with("Hi, I'm Steve."));
+    let me = get("/api/me", "en").await;
+    assert_eq!(me["workspaces"][0]["name"], "Personal");
+
+    // the default persona
+    let personas = get("/api/personas", "en").await;
+    let intro = personas[0]["intro"].as_str().unwrap().to_string();
+    assert!(
+        intro.starts_with("I'm Steve, ") && intro.contains("AI assistant"),
+        "{intro}"
+    );
+    assert_eq!(
+        personas[0]["soul"],
+        "Calm and concise; conclusion first; no pleasantries"
+    );
+    let personas_zh = get("/api/personas", "zh-CN").await;
+    let intro_zh = personas_zh[0]["intro"].as_str().unwrap().to_string();
+    assert!(intro_zh.starts_with("我是 Steve，"), "{intro_zh}");
+    let pid = personas[0]["id"].as_str().unwrap().to_string();
+
+    // the English page saves the whole form back unchanged: the seeds stay the seeds
+    let b = steve(&en);
+    send(
+        Method::PATCH,
+        "/api/bots/steve".into(),
+        "en",
+        json!({"role": b["role"], "persona": b["persona"], "rules": b["rules"], "model": "x"}),
+    )
+    .await;
+    send(
+        Method::PATCH,
+        "/api/workspaces/default".into(),
+        "en",
+        json!({"name": "Personal"}),
+    )
+    .await;
+    send(
+        Method::PATCH,
+        format!("/api/personas/{pid}"),
+        "en",
+        json!({"intro": intro, "soul": personas[0]["soul"]}),
+    )
+    .await;
+    let zh = get("/api/state", "zh-CN").await;
+    assert_eq!(zh["workspace"]["name"], "个人");
+    assert_eq!(steve(&zh)["role"], "你的助手：理解需求、分派、汇报");
+    assert_eq!(steve(&zh)["rules"], rules_zh);
+    let personas_zh = get("/api/personas", "zh-CN").await;
+    assert_eq!(personas_zh[0]["intro"].as_str().unwrap(), intro_zh);
+    assert_eq!(personas_zh[0]["soul"], "沉稳、简洁，先说结论；不客套");
+
+    // what someone wrote is theirs, in either language
+    send(
+        Method::PATCH,
+        "/api/bots/steve".into(),
+        "en",
+        json!({"role": "我的管家", "persona": "Cheerful"}),
+    )
+    .await;
+    send(
+        Method::PATCH,
+        "/api/workspaces/default".into(),
+        "zh-CN",
+        json!({"name": "家里"}),
+    )
+    .await;
+    send(
+        Method::PATCH,
+        format!("/api/personas/{pid}"),
+        "en",
+        json!({"intro": "Hi, I'm Lee's helper."}),
+    )
+    .await;
+    for lang in ["zh-CN", "en"] {
+        let s = get("/api/state", lang).await;
+        assert_eq!(s["workspace"]["name"], "家里", "{lang}");
+        assert_eq!(steve(&s)["role"], "我的管家", "{lang}");
+        assert_eq!(steve(&s)["persona"], "Cheerful", "{lang}");
+        let p = get("/api/personas", lang).await;
+        assert_eq!(p[0]["intro"], "Hi, I'm Lee's helper.", "{lang}");
+    }
+}

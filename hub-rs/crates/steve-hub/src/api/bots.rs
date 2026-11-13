@@ -4,6 +4,7 @@ use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use serde_json::{Value, json};
+use steve_store::seeded;
 
 use super::misc::{SMART, js_num};
 use super::{
@@ -126,6 +127,8 @@ fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError
     );
     put("enabled", c.opt_bool("enabled").map(Value::from));
     c.finish()?;
+    // a seeded text the page showed in its reader's language and sent back unchanged stays the seed
+    seeded::store(&mut p, seeded::BOT);
     Ok(p)
 }
 

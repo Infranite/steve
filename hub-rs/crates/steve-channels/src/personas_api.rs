@@ -57,9 +57,11 @@ async fn detail(Extension(ch): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
 async fn create(
     Extension(ch): Cx,
     who: Caller,
-    Body(n): Body<NewPersona>,
+    Body(mut n): Body<NewPersona>,
 ) -> ApiResult<Json<Value>> {
     let v = ch.modules().viewer(&who)?;
+    n.intro = personas::sent(n.intro, "intro");
+    n.soul = personas::sent(n.soul, "soul");
     let now = ch.now();
     let p = ch
         .store()
@@ -71,9 +73,11 @@ async fn patch(
     Extension(ch): Cx,
     who: Caller,
     Path(id): Path<String>,
-    Body(p): Body<PersonaPatch>,
+    Body(mut p): Body<PersonaPatch>,
 ) -> ApiResult<Json<Value>> {
     let v = ch.modules().viewer(&who)?;
+    p.intro = personas::sent(p.intro, "intro");
+    p.soul = personas::sent(p.soul, "soul");
     let now = ch.now();
     ch.store()
         .transaction(|tx| personas::patch(tx, &v, &id, &p, now))?;

@@ -231,6 +231,32 @@ macro_rules! reword {
     };
 }
 
+/// [`reword()`] the other way round, for seeded zh-CN text a page showed in its reader's language and sent
+/// back unchanged: `text` read against each of `keys` in every language but zh-CN, and the first that
+/// matches filled in zh-CN with the same values, so what is stored stays the seed. `None` when no key
+/// matches in any language (text someone wrote, zh-CN included). Use [`unword!`].
+pub fn unword(text: &str, keys: &[&str], t: impl Fn(&str, &str) -> String) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+    LOCALES.iter().filter(|l| **l != ZH_CN).find_map(|l| {
+        keys.iter().find_map(|k| {
+            let vals = template::read(&t(k, l), text)?;
+            Some(template::fill(&t(k, ZH_CN), &vals))
+        })
+    })
+}
+
+/// [`unword()`] over the calling crate's files: `steve_i18n::unword!(text, KEYS)`, an `Option<String>`.
+#[macro_export]
+macro_rules! unword {
+    ($text:expr, $keys:expr) => {
+        $crate::unword($text, $keys, |k, l| {
+            ::std::string::String::from(rust_i18n::t!(k, locale = l))
+        })
+    };
+}
+
 /// `%{name}` templates read backwards: the values that make a template a given text.
 pub mod template {
     enum Seg<'a> {

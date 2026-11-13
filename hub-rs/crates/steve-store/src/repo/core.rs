@@ -141,8 +141,9 @@ impl Store {
     pub fn ensure_workspace(&self) -> Result<()> {
         self.write(|w| {
             let c = w.c;
-            c.run("INSERT OR IGNORE INTO workspaces (id, name, created) VALUES (?, ?, ?)", params![WS, "个人", now()])?;
-            c.run("UPDATE workspaces SET name = '个人' WHERE id = ? AND name = '默认工作空间'", [WS])?;
+            let name = crate::seeded::text(crate::seeded::WORKSPACE_NAME);
+            c.run("INSERT OR IGNORE INTO workspaces (id, name, created) VALUES (?, ?, ?)", params![WS, name, now()])?;
+            c.run("UPDATE workspaces SET name = ? WHERE id = ? AND name = '默认工作空间'", params![name, WS])?;
             let old: Option<i64> =
                 one(c, "SELECT value FROM counters WHERE workspace_id = ? AND name = 'item'", [WS], |r| r.get(0))?;
             if let Some(old) = old {

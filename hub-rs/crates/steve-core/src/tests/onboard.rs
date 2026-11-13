@@ -162,3 +162,17 @@ async fn the_welcome_is_in_the_language_of_the_request() {
     assert!(m.text.starts_with("Hi, I'm Steve."), "{}", m.text);
     assert_eq!(m.space, MAIN);
 }
+
+#[test]
+fn a_zh_cn_welcome_reads_in_the_language_of_the_reader() {
+    use crate::thread::onboard::welcome_shown;
+    let zh = steve_i18n::t!("core.onboard.welcome");
+    assert_eq!(welcome_shown(&zh), None, "zh-CN stays byte-identical");
+    let en = steve_i18n::with(steve_i18n::EN, || welcome_shown(&zh)).unwrap();
+    assert!(en.starts_with("Hi, I'm Steve."), "{en}");
+    let said = "你好，我是 Steve。我们开始吧。";
+    assert_eq!(
+        steve_i18n::with(steve_i18n::EN, || welcome_shown(said)),
+        None
+    );
+}
