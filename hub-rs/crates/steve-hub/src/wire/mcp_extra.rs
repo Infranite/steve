@@ -189,7 +189,7 @@ fn extra_tools() -> Vec<Value> {
 fn workflow_tool() -> Value {
     json!({
         "name": "steve_workflow",
-        "description": "Read or replan this item's shared work graph. Only the parent item's responsible Bot may change the graph; child Bots can read their own work and upstream deliveries, deliver success through steve_deliver, or report a failure / rejected review with action fail and reason, then end their turn. Plan work, independent review and integration units; dependencies must pass before successors run. Graph changes require the latest expected_revision and a reason. A new graph starts at revision 0. A plan replaces the active specification; preserve existing unit IDs for unchanged work. Cancelling units does not waive required acceptance. Only the user can explicitly switch to single-session acceptance on the item page after pausing; Bot tokens cannot approve it. Do not transfer credentials or permissions between Bots.",
+        "description": "Read or replan this item's shared work graph. Only the parent item's responsible Bot may change the graph; child Bots can read their own work and upstream deliveries, deliver success through steve_deliver, or report a failure / rejected review with action fail and reason, then end their turn. A work graph exists to finish sooner: plan units that can run at the same time (split by independent scope, not by phase), plus an independent review and an integration unit. Dependencies must pass before successors run, and units sharing a resource key never run together, so keep keys fine-grained. Every ready unit runs unless max_parallel limits it; set it only for a real constraint. A plan reply may carry notes on what keeps its units from running at once. Graph changes require the latest expected_revision and a reason. A new graph starts at revision 0. A plan replaces the active specification; preserve existing unit IDs for unchanged work. Cancelling units does not waive required acceptance. Only the user can explicitly switch to single-session acceptance on the item page after pausing; Bot tokens cannot approve it. Do not transfer credentials or permissions between Bots.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -197,7 +197,7 @@ fn workflow_tool() -> Value {
                 "expected_revision": {"type": "integer", "minimum": 0},
                 "reason": {"type": "string", "minLength": 1},
                 "unit_id": {"type": "string"},
-                "max_parallel": {"type": "integer", "minimum": 1},
+                "max_parallel": {"type": "integer", "minimum": 1, "description": "Leave out: every ready unit whose resources are free runs. Set only for a real limit such as a shared device or a rate limit."},
                 "max_attempts": {"type": "integer", "minimum": 1},
                 "units": {
                     "type": "array",

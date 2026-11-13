@@ -126,7 +126,21 @@ impl Core {
                 "单会话验收只能由用户在事项页明确确认，Bot 不能代为批准",
             ));
         }
-        t.workflow_change(item, args, current.bot_id.as_deref().unwrap_or("agent"))
+        // A plan that cannot run anything at once is said back to its author (a hint, never a refusal).
+        let notes = match args["action"].as_str() {
+            Some("plan") => serde_json::from_value::<Vec<UnitSpec>>(args["units"].clone())
+                .map(|specs| plan_notes(&specs, args["max_parallel"].as_u64().map(|n| n as usize)))
+                .unwrap_or_default(),
+            _ => vec![],
+        };
+        let mut out =
+            t.workflow_change(item, args, current.bot_id.as_deref().unwrap_or("agent"))?;
+        if !notes.is_empty()
+            && let Some(o) = out.as_object_mut()
+        {
+            o.insert("notes".into(), json!(notes));
+        }
+        Ok(out)
     }
 }
 
@@ -490,7 +504,9 @@ impl Tx<'_> {
                     .transpose()?
                     .map(|n| usize::try_from(n).map_err(|_| conflict("max_parallel 超出范围")))
                     .transpose()?
-                    .unwrap_or_else(|| graph.as_ref().map_or(2, |g| g.max_parallel));
+                    // Left out, the limit is the graph itself: every ready unit whose resources are free
+                    // runs. Only a real constraint (a shared device, a rate limit) asks for less.
+                    .unwrap_or(specs.len().max(1));
                 let attempts = args
                     .get("max_attempts")
                     .map(|v| {
@@ -1121,4 +1137,71 @@ impl Tx<'_> {
         }
         Ok(true)
     }
+}
+
+/// What keeps a plan from running units at the same time: a graph that is one chain, independent units serialised
+/// by a shared resource key, or a concurrency limit below what the graph allows. Collaboration exists to finish
+/// sooner; a plan without parallel work costs more than doing it in one session.
+pub fn plan_notes(specs: &[UnitSpec], max_parallel: Option<usize>) -> Vec<String> {
+    use std::collections::HashMap;
+    let ids: HashMap<&str, &UnitSpec> = specs.iter().map(|u| (u.id.as_str(), u)).collect();
+    fn level<'a>(
+        u: &'a UnitSpec,
+        ids: &HashMap<&str, &'a UnitSpec>,
+        memo: &mut HashMap<&'a str, usize>,
+        depth: usize,
+    ) -> usize {
+        if let Some(l) = memo.get(u.id.as_str()) {
+            return *l;
+        }
+        let l = 1 + u
+            .depends_on
+            .iter()
+            .filter_map(|d| ids.get(d.as_str()))
+            .map(|d| {
+                if depth > 64 {
+                    0
+                } else {
+                    level(d, ids, memo, depth + 1)
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        memo.insert(u.id.as_str(), l);
+        l
+    }
+    let mut memo = HashMap::new();
+    let levels: Vec<usize> = specs.iter().map(|u| level(u, &ids, &mut memo, 0)).collect();
+    let mut width: HashMap<usize, Vec<&UnitSpec>> = HashMap::new();
+    for (u, l) in specs.iter().zip(&levels) {
+        width.entry(*l).or_default().push(u);
+    }
+    let widest = width.values().map(Vec::len).max().unwrap_or(0);
+    let mut out = vec![];
+    if specs.len() >= 3 && widest <= 1 {
+        out.push(format!(
+            "这张工作图的 {} 个单元只能一个接一个执行，没有任何两个能同时进行：它比在你自己的会话里直接做更慢，也更贵（每个单元都要新开会话重读上下文）。把工作拆成互不依赖、能同时进行的部分（同一部分的调查、设计和实现留在一个单元里），或者在本会话里直接完成，只把独立评审交给评审 Bot。",
+            specs.len()
+        ));
+    }
+    for group in width.values() {
+        for (n, a) in group.iter().enumerate() {
+            for b in &group[n + 1..] {
+                if let Some(r) = a.resources.iter().find(|r| b.resources.contains(r)) {
+                    out.push(format!(
+                        "「{}」和「{}」互不依赖，但声明了同一个资源「{}」，会被排成先后执行。每个单元有自己的工作目录；只有真的会互相冲突时才共用资源键，并且细到模块或路径。",
+                        a.title, b.title, r
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(m) = max_parallel
+        && m < widest
+    {
+        out.push(format!(
+            "max_parallel={m} 让最多 {m} 个单元同时执行，而这张图有 {widest} 个单元可以同时进行。没有真实限制（共用设备、频率限制）时不要填 max_parallel。"
+        ));
+    }
+    out
 }

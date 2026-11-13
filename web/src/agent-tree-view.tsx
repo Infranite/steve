@@ -249,7 +249,10 @@ export function TeamTimeline({ at, selected, onSelect, actions }: { at: AgentTre
   const label = (x: number) => days ? `${monthDayShort(x)} ${hm(x)}` : hm(x)
   const marks = range ? ticks(range) : []
   const steps = rows.filter((r) => r.depth === 0).length
-  const meta = [tree.bot ? t("views:agentTree.coordinator", { name: botName(tree.bot) }) : null, t("views:agentTree.steps", { count: steps }), t("views:agentTree.agents", { count: summary.agents })]
+  /* how long it took against how long its agents worked: the gap is what running at once saved */
+  const worked = rows.reduce((n, r) => n + r.ms, 0)
+  const meta = [tree.bot ? t("views:agentTree.coordinator", { name: botName(tree.bot) }) : null, t("views:agentTree.steps", { count: steps }), t("views:agentTree.agents", { count: summary.agents }),
+    range && worked > 0 ? t("views:agentTree.timeSpan", { wall: longDur(range[1] - range[0]), work: longDur(worked) }) : null]
   const tip = (r: TeamRow, s: Segment) => {
     const cost = at.total(s.item), w = workTime(at.stat(s.item))
     return [r.tries.length && s.attempt ? t("views:agentTree.attempt", { n: s.attempt }) : null, t(`views:agentTree.status.${s.status}`), `${label(s.start)}–${hm(s.end)}`,

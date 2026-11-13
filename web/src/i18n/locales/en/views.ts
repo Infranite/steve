@@ -78,7 +78,7 @@ export default {
     tokens: "{{n}} tokens",
     unpricedPart: "Another {{n}} tokens ran on models without a price and are not in the cost",
     unpricedAll: "These tokens ran on models without a price, so there is no cost; add prices in Settings › Stats",
-    coordinator: "Coordinated by {{name}}", steps_one: "{{count}} step", steps_other: "{{count}} steps", earlierRound: "Earlier round",
+    coordinator: "Coordinated by {{name}}", steps_one: "{{count}} step", steps_other: "{{count}} steps", earlierRound: "Earlier round", timeSpan: "{{wall}} from first to last, {{work}} of agent work",
     passedOn: "Passed on try {{n}}", retried_one: "Tried again once", retried_other: "Tried again {{count}} times", notStarted: "Not started", earlierTries: "Earlier tries", openTry: "Session", worked: "worked {{time}}",
     noFigures: "No usage on record",
     status: { idle: "Idle", proposed: "Proposed", pending: "Queued", waiting: "Waiting", starting: "Starting", running: "Running", unconfirmed: "Unconfirmed", asking: "Needs you", paused: "Paused", blocked: "Blocked", done: "Done", failed: "Failed", stopped: "Stopped" },

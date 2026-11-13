@@ -1040,3 +1040,50 @@ async fn an_old_graph_acceptance_cannot_start_wrapup_hooks_after_a_replan_crash(
     );
     assert_ne!(k.phase(&parent), "closed");
 }
+
+#[test]
+fn a_plan_that_cannot_run_anything_at_once_is_said_back() {
+    let u = |id: &str, deps: &[&str], res: &[&str]| UnitSpec {
+        id: id.into(),
+        title: id.into(),
+        goal: id.into(),
+        bot_id: "dev".into(),
+        kind: "work".into(),
+        depends_on: deps.iter().map(|s| (*s).into()).collect(),
+        resources: res.iter().map(|s| (*s).into()).collect(),
+        required: true,
+    };
+    // ST-27's shape: one chain, nothing at once
+    let chain = [
+        u("evidence", &[], &["a"]),
+        u("design", &["evidence"], &["b"]),
+        u("review", &["design"], &["c"]),
+        u("integrate", &["review"], &["d"]),
+    ];
+    let notes = crate::workflow::plan_notes(&chain, Some(1));
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("一个接一个"), "{notes:?}");
+    // independent units that share one key are serialised; a limit below the width is named
+    let shared = [
+        u("api", &[], &["repo"]),
+        u("web", &[], &["repo"]),
+        u("review", &["api", "web"], &["r"]),
+    ];
+    let notes = crate::workflow::plan_notes(&shared, Some(1));
+    assert!(
+        notes.iter().any(|n| n.contains("同一个资源「repo」")),
+        "{notes:?}"
+    );
+    assert!(
+        notes.iter().any(|n| n.contains("max_parallel=1")),
+        "{notes:?}"
+    );
+    // a graph that runs work at once says nothing
+    let good = [
+        u("api", &[], &["api"]),
+        u("web", &[], &["web"]),
+        u("review", &["api", "web"], &["r"]),
+        u("integrate", &["review"], &["i"]),
+    ];
+    assert!(crate::workflow::plan_notes(&good, None).is_empty());
+}
