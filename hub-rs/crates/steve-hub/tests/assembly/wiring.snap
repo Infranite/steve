@@ -104,6 +104,7 @@ api GET /people/x/holdings
 api GET /personas
 api GET /personas/x
 api GET /plugins
+api GET /plugins/themes
 api GET /runs/x
 api GET /schedules
 api GET /schedules/x

@@ -289,7 +289,7 @@ const ALLOWED: &[Entry] = &[
     e(Spawn, "steve-hub/src/nodes/install.rs", 2, Hub, "ssh-keygen and ssh: the Hub installing a Node on another machine"),
     e(Spawn, "steve-hub/src/plugins/run.rs", 1, Hub, "a connected channel plugin: the Hub's own channel service, never a task harness"),
     e(Dir, "steve-hub/src/plugins/mod.rs", 1, Hub, "the installed plugins under <home>/plugins"),
-    e(Fs, "steve-hub/src/plugins/mod.rs", 7, Hub, "atomic writes, reads and removal of installed plugins and connected instances under <home>/plugins"),
+    e(Fs, "steve-hub/src/plugins/mod.rs", 8, Hub, "atomic writes, reads and removal of installed plugins, their theme manifests and connected instances under <home>/plugins"),
     e(Fs, "steve-hub/src/plugins/install.rs", 14, Hub, "a plugin archive checked against its library's sha256 and unpacked under <home>/plugins"),
     e(Fs, "steve-hub/src/plugins/run.rs", 3, Hub, "a running plugin's own files, data directory and bounded log under <home>/plugins"),
     e(Fs, "steve-hub/src/nodes/install.rs", 7, Hub, "the install's own SSH key, and a local release directory"),

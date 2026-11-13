@@ -14,6 +14,12 @@ pub const STORE_FORMAT: u32 = 1;
 /// The run contract of a channel plugin this Hub speaks ([`super`]).
 pub const CHANNEL_CONTRACT: u32 = 1;
 pub const KIND_CHANNEL: &str = "channel";
+/// A skin for the web client: the archive carries a theme manifest, nothing runs ([`super`]).
+pub const KIND_THEME: &str = "theme";
+/// The theme contract this Hub speaks: `entry` is a theme manifest in the web client's format.
+pub const THEME_CONTRACT: u32 = 1;
+/// The artifact key of an archive that is the same on every machine (a theme is data).
+pub const ANY_TARGET: &str = "any";
 
 pub const MAX_INDEX_BYTES: usize = 1024 * 1024;
 const MAX_PLUGINS: usize = 200;
@@ -261,13 +267,24 @@ pub struct Plugin {
 impl Plugin {
     /// Why this Hub cannot run it, when it cannot: a kind or a contract from a newer Steve.
     pub fn unsupported(&self) -> Option<&'static str> {
-        if self.kind != KIND_CHANNEL {
-            Some("kind")
-        } else if self.contract != CHANNEL_CONTRACT {
-            Some("contract")
-        } else {
-            None
-        }
+        let contract = match self.kind.as_str() {
+            KIND_CHANNEL => CHANNEL_CONTRACT,
+            KIND_THEME => THEME_CONTRACT,
+            _ => return Some("kind"),
+        };
+        (self.contract != contract).then_some("contract")
+    }
+
+    /// Whether it is a process the Hub runs (a channel), not data the web client reads (a theme).
+    pub fn runs(&self) -> bool {
+        self.kind == KIND_CHANNEL
+    }
+
+    /// The archive for a Hub built for `target`: its own, else one for [`ANY_TARGET`].
+    pub fn artifact(&self, target: &str) -> Option<&Artifact> {
+        self.artifacts
+            .get(target)
+            .or_else(|| self.artifacts.get(ANY_TARGET))
     }
 
     pub fn semver(&self) -> semver::Version {
@@ -510,6 +527,27 @@ mod tests {
         let again = twice["plugins"][0].clone();
         twice["plugins"].as_array_mut().unwrap().push(again);
         assert!(parsed(&twice).is_err());
+    }
+
+    #[test]
+    fn a_theme_is_supported_and_its_archive_may_be_for_any_machine() {
+        let mut v = sample();
+        v["plugins"][0]["kind"] = "theme".into();
+        v["plugins"][0]["entry"] = "theme.json".into();
+        v["plugins"][0]["artifacts"] =
+            serde_json::json!({"any": {"url": "ocean.tar.gz", "sha256": "1".repeat(64)}});
+        let p = &parsed(&v).unwrap().plugins[0];
+        assert_eq!(p.unsupported(), None);
+        assert!(!p.runs());
+        assert_eq!(
+            p.artifact("x86_64-unknown-linux-gnu").unwrap().url,
+            "ocean.tar.gz"
+        );
+        v["plugins"][0]["contract"] = 2.into();
+        assert_eq!(
+            parsed(&v).unwrap().plugins[0].unsupported(),
+            Some("contract")
+        );
     }
 
     #[test]
