@@ -3,7 +3,7 @@
 import { ago as fmtAgo } from "@/i18n/format"
 import { useEffect, useState } from "react"
 import { cn } from "cn"
-import { ChevronsUpDownIcon, PencilIcon } from "lucide-react"
+import { ChevronDownIcon, ChevronsUpDownIcon, PencilIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Input } from "@/components/ui/input"
@@ -56,8 +56,11 @@ export function UsedMark({ u, className }: { u?: Used; className?: string }) {
  * A searchable model select. `value` "" is the default (shown as `defaultLabel` when `allowDefault`).
  * Picking calls `onChange` with the id ("" for the default).
  */
-export function ModelPicker({ harness, value, onChange, allowDefault, defaultLabel, testId, className, placeholder, exclude = [] }: {
+export function ModelPicker({ harness, value, onChange, allowDefault, defaultLabel, testId, className, placeholder, exclude = [], field }: {
   harness: string; value: string; onChange: (m: string) => void; allowDefault?: boolean; defaultLabel?: string; testId?: string; className?: string; placeholder?: string; exclude?: string[]
+  /** the trigger as the affectUI Select field (settings-controls SetSelect, wide) beside which it sits; its styles come
+   *  with that Select, so only pass it where a SetSelect is on the same page */
+  field?: boolean
 }) {
   const cat = useCatalog(harness), t = useT()
   const [open, setOpen] = useState(false)
@@ -69,12 +72,22 @@ export function ModelPicker({ harness, value, onChange, allowDefault, defaultLab
   const pick = (m: string) => { onChange(m); setOpen(false); setOther(false); setQ("") }
   const models = (cat?.models ?? []).filter((m) => !exclude.includes(m.id))
   const fams = (cat?.families ?? []).filter((f) => models.some((m) => m.family === f))
+  const shown = value ? (cur?.label && cur.label !== value ? `${cur.label} · ${value}` : value) : allowDefault ? defLabel : placeholder ?? t("shell:model.choose")
   return (
     <Popover open={open} onOpenChange={(o) => { setOpen(o); if (!o) { setOther(false); setQ("") } }}>
-      <PopoverTrigger render={<Button variant="outline" size="sm" role="combobox" aria-expanded={open} className={cn("h-8 w-full min-w-0 justify-between gap-2 rounded-lg px-2.5 font-normal", className)} data-model-picker={testId ?? harness} />}>
-        <span className={cn("min-w-0 truncate text-left", value ? "type-code" : "text-muted-foreground")}>{value ? (cur?.label && cur.label !== value ? `${cur.label} · ${value}` : value) : allowDefault ? defLabel : placeholder ?? t("shell:model.choose")}</span>
-        <ChevronsUpDownIcon className="size-3.5 shrink-0 opacity-50" />
-      </PopoverTrigger>
+      {field ? (
+        <div className={cn("ui-selc", className)} data-size="md" data-open={open || undefined}>
+          <PopoverTrigger render={<button type="button" role="combobox" aria-expanded={open} className="ui-selc__trigger" data-model-picker={testId ?? harness} />}>
+            <span className={cn("ui-selc__value", value && "type-code")} data-empty={value || allowDefault ? undefined : ""}>{shown}</span>
+            <span className="ui-selc__chevron" aria-hidden="true"><ChevronDownIcon className="size-3.5" /></span>
+          </PopoverTrigger>
+        </div>
+      ) : (
+        <PopoverTrigger render={<Button variant="outline" size="sm" role="combobox" aria-expanded={open} className={cn("h-8 w-full min-w-0 justify-between gap-2 rounded-lg px-2.5 font-normal", className)} data-model-picker={testId ?? harness} />}>
+          <span className={cn("min-w-0 truncate text-left", value ? "type-code" : "text-muted-foreground")}>{shown}</span>
+          <ChevronsUpDownIcon className="size-3.5 shrink-0 opacity-50" />
+        </PopoverTrigger>
+      )}
       <PopoverContent align="start" className="w-[min(380px,calc(100vw-24px))] gap-0 rounded-xl p-0" data-model-menu={testId ?? harness}>
         {other ? (
           <div className="flex flex-col gap-2 p-3">

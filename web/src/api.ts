@@ -190,8 +190,9 @@ async function refused(e: unknown): Promise<never> {
 }
 const CUT = {}
 async function req<T>(method: string, path: string, body?: unknown, seen?: (r: Response) => void): Promise<T> {
-  /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever */
-  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined }).catch(refused)
+  /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever; a delete (no body) is
+   * keepalive so one sent as the page goes away, like a forget whose Undo ran out, still reaches the Hub */
+  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined, keepalive: method === "DELETE" }).catch(refused)
   if (r.status === 401) { const j = await r.json().catch(() => ({})); if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j.login ?? null, j.token === true) }
   const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
   if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently

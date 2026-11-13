@@ -80,3 +80,7 @@
 .steve-crumbs[data-quiet] :is(.ui-bcrc__sep, .ui-bcrc__item[data-current]) { opacity: 0; }
 .steve-crumbs[data-quiet] .ui-bcrc__current { animation: none; }
 @media (min-width: 768px) { .steve-crumbs .ui-bcrc__item:first-child .ui-bcrc__icon { display: none; } }
+
+/* Card: an interactive card lifts every control inside it above its stretched title (position: relative), which would
+ * pull a Switch's hidden input into the flow and push the switch off its line; the input keeps its own overlay */
+.ui-crdc[data-interactive] .ui-swc .ui-swc__input.ui-swc__input { position: absolute; }

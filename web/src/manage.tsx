@@ -8,11 +8,10 @@ import { HubData } from "@/backup-settings"
 import { OutboxDead } from "@/outbox-settings"
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, PlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon } from "lucide-react"
+import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, FilePenIcon, ZapIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon, MessageSquareTextIcon, MessageCircleQuestionIcon, ShieldCheckIcon, PackageCheckIcon, RocketIcon, GitMergeIcon, WrenchIcon, PlugIcon, TerminalIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import { Switch } from "@/components/ui/switch"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Spinner } from "@/components/ui/spinner"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
@@ -21,6 +20,12 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Robot, Face, AVATAR_COLORS } from "@/robot"
+import { Card as ACard, CardHeader } from "@/components/affect/card-clean"
+import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
+import { AutonomyChoice } from "@/components/affect/agent-permissions"
+import { SkillGrid, type Skill } from "@/components/affect/agent-skills"
+import { stats } from "@/api/stats"
+import { useStats } from "@/stats/format"
 import {
   st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, finishOnboarding, emit, closedSt,
@@ -29,7 +34,7 @@ import { api, type RKindReview } from "@/api"
 import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Note, Lead, Notice, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
-import { Select, ChoiceCards, ItemRowExport as ItemRow } from "@/view-shared"
+import { Select, ItemRowExport as ItemRow } from "@/view-shared"
 import { showTag } from "@/views"
 import { AskSteve } from "@/config-ui"
 import { VAULT_CAT, VaultSettingsPane } from "@/vault/settings"
@@ -56,6 +61,10 @@ const ACC_KEYS = ["inherit", "manual", "auto"] as const
 const accLabel = (t: T, k: string) => ((ACC_KEYS as readonly string[]).includes(k) ? t(`manage:acc.${k as (typeof ACC_KEYS)[number]}`) : ACC[k] ?? k)
 const PERM_KEYS = ["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const
 const permLabel = (t: T, k: string) => ((PERM_KEYS as readonly string[]).includes(k) ? t(`manage:perm.${k as (typeof PERM_KEYS)[number]}`) : PERM[k] ?? k)
+/** a permission mode in a word or two (the tile's name); its sentence is permLabel */
+const permName = (t: T, k: string) => ((PERM_KEYS as readonly string[]).includes(k) ? t(`manage:form.permName.${k as (typeof PERM_KEYS)[number]}`) : PERM[k] ?? k)
+const PERM_ICON: Record<string, ReactNode> = { plan: <EyeIcon />, default: <HandIcon />, acceptEdits: <FilePenIcon />, auto: <ZapIcon />, bypassPermissions: <ShieldOffIcon /> }
+const ACC_ICON: Record<string, ReactNode> = { inherit: <SlidersHorizontalIcon />, manual: <UserCheckIcon />, auto: <CheckCheckIcon /> }
 /* tag categories are stored as Chinese words (store TAG_CATS); only the label is translated */
 const TAG_CAT_KEYS: Record<string, "all" | "project" | "kind" | "delivery" | "domain" | "client" | "topic"> = { 全部: "all", 项目: "project", 类型: "kind", 交付: "delivery", 领域: "domain", 客户: "client", 主题: "topic" }
 const catLabel = (t: T, c: string) => (TAG_CAT_KEYS[c] ? t(`manage:tagCat.${TAG_CAT_KEYS[c]}`) : c)
@@ -72,26 +81,33 @@ export function BotsView() {
       actions={<Button size="sm" onClick={() => openSheet("newBot")} data-new-bot><PlusIcon />{t("manage:list.newBot")}</Button>}>
       <div className="flex flex-col gap-8">
       {S && <Section label={t("manage:list.main")}>
-        <Panel><Row icon={<BotAvatar k="steve" size={44} />} onClick={() => go("#/bots/steve")} data-bot-row="steve" className="py-3"
-          title={<span className="font-medium">{S.n}</span>} sub={<Meta className="mt-0.5"><span>{S.role}</span><span>{S.h}</span><span>{S.m}</span><span>{t("manage:bot.running", { count: runOf("steve") })}</span></Meta>}><Chevron /></Row></Panel>
+        <BotCard k="steve" size={44} title={S.n} sub={S.role} meta={[S.h, S.m, t("manage:bot.running", { count: runOf("steve") })]} action={<Chevron />} />
       </Section>}
       <Section label={<><span className="hidden sm:inline">{t("manage:list.others", { ws: st.workspace?.name, n: Object.keys(st.bots).length - 1 })}</span><span className="sm:hidden">{t("manage:list.othersShort", { n: Object.keys(st.bots).length - 1 })}</span></>} note={<Trans ns="manage" i18nKey="list.hint" components={{ code: <span className="font-mono" /> }} />}
         right={<Segmented size="sm" value={botFilter} onChange={(v) => { botFilter = v; r() }} options={[["全部", t("manage:list.filterAll")], ["启用", t("manage:list.filterOn")], ["停用", t("manage:list.filterOff")]] as const} />}>
-        {ks.length ? <Panel>{ks.map((k) => { const b = st.bots[k]; return (
-          <div key={k} className="group/bot flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-accent anim-in">
-            <BotAvatar k={k} size={36} className={cn("transition-opacity", EASE, !b.on && "opacity-40 grayscale")} />
-            <button type="button" className="min-w-0 flex-1 text-left" onClick={() => go("#/bots/" + k)} data-bot-row={k}>
-              <div className="truncate type-body"><span className="font-medium">{t("manage:bot.name", { name: b.n })}</span> <span className="text-muted-foreground">· {b.role}</span></div>
-              <Meta className="mt-0.5"><span>{b.h}</span><span>{b.m}</span><span>{t("manage:bot.running", { count: runOf(k) })}</span>{b.project && <span>{t("manage:list.defaultProject", { name: b.ws })}</span>}<span>{t("manage:bot.memories", { count: b.memCount })}</span>{b.workspaces.length > 1 && <span>{t("manage:list.inWorkspaces", { count: b.workspaces.length })}</span>}{!b.on && <span>{t("manage:bot.disabled")}</span>}</Meta>
-            </button>
-            <Switch checked={b.on} onCheckedChange={(v) => void saveBot(k, { on: v }, v ? t("manage:list.enabledToast", { name: b.n }) : t("manage:list.disabledToast", { name: b.n }))} aria-label={t("manage:bot.enableNamed", { name: b.n })} />
-            <BotMenu k={k} />
-          </div>) })}</Panel> : <Empty title={Object.keys(st.bots).length > 1 ? t("manage:list.noMatch") : t("manage:list.onlySteve")} sub={t("manage:list.emptySub")} />}
+        {ks.length ? <ul className="grid gap-3 sm:grid-cols-2" data-bot-cards>{ks.map((k) => { const b = st.bots[k]; return (
+          <BotCard key={k} as="li" k={k} off={!b.on} title={t("manage:bot.name", { name: b.n })} sub={b.role}
+            meta={[b.h, b.m, t("manage:bot.running", { count: runOf(k) }), b.project && t("manage:list.defaultProject", { name: b.ws }), t("manage:bot.memories", { count: b.memCount }), b.workspaces.length > 1 && t("manage:list.inWorkspaces", { count: b.workspaces.length }), !b.on && t("manage:bot.disabled")]}
+            action={<><SetSwitch testId={"bot-on-" + k} checked={b.on} onChange={(v) => void saveBot(k, { on: v }, v ? t("manage:list.enabledToast", { name: b.n }) : t("manage:list.disabledToast", { name: b.n }))} label={t("manage:bot.enableNamed", { name: b.n })} /><BotMenu k={k} /></>} />) })}</ul>
+          : <Empty title={Object.keys(st.bots).length > 1 ? t("manage:list.noMatch") : t("manage:list.onlySteve")} sub={t("manage:list.emptySub")} />}
       </Section>
       {others.length > 0 && <Section label={t("manage:list.elsewhere", { n: others.length })}>
         <Panel>{others.map((b) => <Row key={b.id} title={t("manage:bot.name", { name: b.name })} sub={t("manage:list.inWorkspaces", { count: b.workspaces.length })}><Button size="xs" variant="outline" onClick={() => setBotWorkspaces(b.id, [...b.workspaces, st.workspace!.id])}><PlusIcon />{t("manage:list.joinHere")}</Button></Row>)}</Panel></Section>}
       </div>
     </Page>
+  )
+}
+/** a Bot as affectUI's Card: its avatar, its name as the button that opens it (the whole card is the target), its role,
+ *  and what it runs on underneath; the switch and the menu stay their own buttons above the card's target */
+function BotCard({ k, title, sub, meta, action, off, size = 36, as }: { k: string; title: ReactNode; sub: string; meta: (string | false | null | undefined)[]; action: ReactNode; off?: boolean; size?: number; as?: "li" }) {
+  const t = useT()
+  return (
+    <ACard as={as} interactive className="anim-in" data-bot-card={k} data-off={off || undefined}>
+      <CardHeader icon={<BotAvatar k={k} size={size} className={cn("transition-[opacity,filter]", EASE, off && "opacity-40 grayscale")} />} action={action}
+        title={<button type="button" onClick={() => go("#/bots/" + k)} data-bot-row={k}>{title}</button>}
+        description={<span className="line-clamp-2">{sub || t("manage:detail.noRole")}</span>} />
+      <Meta>{meta.filter(Boolean).map((x, i) => <span key={i}>{x}</span>)}</Meta>
+    </ACard>
   )
 }
 function BotMenu({ k, align = "end" }: { k: string; align?: "end" | "start" }) {
@@ -121,7 +137,7 @@ export function DeleteBotDialog({ k }: { k: string }) {
           <AlertDialogDescription>{t("manage:del.desc", { count: mine.length })}</AlertDialogDescription></AlertDialogHeader>
         <FieldGroup className="gap-4">
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.handTo")}</FieldLabel>
-            <Select align="end" testId="del-to" value={to} onChange={setTo} options={Object.keys(st.bots).filter((x) => x !== k && st.bots[x].on).map((x) => ({ v: x, l: botName(x) }))} /></Field>
+            <SetSelect testId="del-to" label={t("manage:del.handTo")} value={to} onChange={setTo} options={Object.keys(st.bots).filter((x) => x !== k && st.bots[x].on).map((x) => ({ v: x, l: botName(x) }))} /></Field>
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.itsMemories", { count: b.memCount })}</FieldLabel><Segmented size="sm" value={mem} onChange={setMem} options={[["导出", t("manage:del.export")], ["删除", t("common:action.delete")]] as const} /></Field>
         </FieldGroup>
         <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
@@ -149,9 +165,9 @@ export function NewBotDialog() {
     <Dialog open onOpenChange={(o) => !o && closeSheet()}>
       <DialogContent className="gap-4 sm:max-w-[520px]">
         <DialogHeader><DialogTitle className="type-title">{t("manage:list.newBot")}</DialogTitle><DialogDescription className="type-callout">{t("manage:newBot.desc", { ws: st.workspace?.name })}</DialogDescription></DialogHeader>
-        <ChoiceCards value={mode} onChange={setMode} cols={1} options={[{ v: "tpl", t: t("manage:newBot.fromTpl"), d: t("manage:newBot.fromTplSub") }, { v: "desc", t: t("manage:newBot.fromDesc"), d: t("manage:newBot.fromDescSub") }, { v: "blank", t: t("manage:newBot.blank"), d: t("manage:newBot.blankSub") }]} />
+        <AutonomyChoice testId="new-bot" label={t("manage:list.newBot")} value={mode} onChange={setMode} options={[{ value: "tpl", name: t("manage:newBot.fromTpl"), text: t("manage:newBot.fromTplSub"), icon: <LayoutTemplateIcon /> }, { value: "desc", name: t("manage:newBot.fromDesc"), text: t("manage:newBot.fromDescSub"), icon: <SparklesIcon /> }, { value: "blank", name: t("manage:newBot.blank"), text: t("manage:newBot.blankSub"), icon: <FilePlusIcon /> }]} />
         {mode === "tpl" && <Panel className="anim-in">{TEMPLATES.map((id) => { const x = tplText(t, id), h = defaultHarness(); return <Row key={id} title={x.name} sub={`${x.role} · ${runtimeName(h) ?? h}`} onClick={() => setTpl(id)} data-tpl={id}>{tpl === id && <CheckIcon className="size-4 text-blue" />}</Row> })}</Panel>}
-        {mode === "desc" && <Textarea autoFocus className="min-h-24 anim-in" placeholder={t("manage:newBot.descPlaceholder")} value={desc} onChange={(e) => setDesc(e.target.value)} data-bot-desc />}
+        {mode === "desc" && <TextArea autoFocus className="anim-in" minRows={4} maxRows={10} aria-label={t("manage:newBot.fromDesc")} placeholder={t("manage:newBot.descPlaceholder")} value={desc} onChange={(e) => setDesc(e.target.value)} data-bot-desc />}
         <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button disabled={(mode === "desc" && !desc.trim()) || busy} onClick={() => void create()} data-testid="bot-go">{busy ? <Spinner className="size-3.5" /> : mode === "desc" && <SparklesIcon />}{mode === "desc" ? t("manage:newBot.draft") : t("manage:newBot.create")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
@@ -182,7 +198,7 @@ function AvatarPicker({ look, onChange }: { look: { color: string; round: number
           <Strip className="min-w-0"><Segmented size="sm" value={SHAPES.reduce<(typeof SHAPES)[number]>((a, b) => (Math.abs(b[1] - look.round) < Math.abs(a[1] - look.round) ? b : a), SHAPES[0])[0]} onChange={(v) => onChange({ round: SHAPES.find((x) => x[0] === v)![1] })} options={SHAPES.map((x) => [x[0], t(`manage:avatar.${x[0]}`)] as const)} /></Strip>
           <input type="range" min={0} max={100} value={look.round} onChange={(e) => onChange({ round: +e.target.value })} className="w-28 accent-foreground" aria-label={t("manage:avatar.roundness")} data-round /></div>
         <div className="flex flex-wrap items-center gap-2"><span className="w-10 type-footnote text-muted-foreground">{t("manage:avatar.skin")}</span>
-          <Select testId="skin-series" value={series} onChange={(v) => { setSeries(v); if (!v) onChange({ skin: null }) }} options={SERIES.map(([id, n]) => ({ v: id, l: t(`manage:series.${n}`) }))} /></div>
+          <SetSelect testId="skin-series" label={t("manage:avatar.skin")} value={series} onChange={(v) => { setSeries(v); if (!v) onChange({ skin: null }) }} options={SERIES.map(([id, n]) => ({ v: id, l: t(`manage:series.${n}`) }))} /></div>
         {sr[3] > 0 && <div className="flex flex-wrap gap-1.5 sm:pl-12" data-skins>{Array.from({ length: sr[3] }, (_, n) => String(sr[2] + n)).map((sk) => (
           <button key={sk} type="button" onClick={() => onChange({ skin: sk })} aria-pressed={look.skin === sk} data-skin={sk} className={cn("rounded-lg p-0.5 transition-colors", look.skin === sk ? "bg-accent ring-1 ring-border" : "hover:bg-accent")}><Face look={{ color: look.color, round: look.round, skin: sk }} size={30} /></button>))}</div>}
       </div>
@@ -204,7 +220,7 @@ export function BotView({ k }: { k: string }) {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const b = st.bots[k]
-  const [form, setForm] = useState<any>(null), [memTxt, setMemTxt] = useState(""), [editMem, setEditMem] = useState<string | null>(null)
+  const [form, setForm] = useState<any>(null)
   const [prompt, setPrompt] = useState<{ generated: string; custom: string | null } | null>(null), [pdraft, setPdraft] = useState<string | null>(null)
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
   useEffect(() => { if (b && botTab === "记忆" && !b.memLoaded) void loadMemories(k) }, [k, botTab, b?.memLoaded])
@@ -220,63 +236,53 @@ export function BotView({ k }: { k: string }) {
       lead={<Robot k={k} size={56} className="max-sm:size-12!" />}
       title={<span className="block truncate">{b.main ? b.n : t("manage:bot.name", { name: b.n })}</span>}
       sub={<div><div className="mb-1 text-muted-foreground">{b.role || t("manage:detail.noRole")}</div><Meta><span>{b.h}</span><span>{b.m}</span><span>{t("manage:detail.pers", { v: b.pers || t("manage:detail.unset") })}</span><span>{t("manage:detail.pro", { v: proLabel(t, b.pro) })}</span></Meta><RecentStats bot={k} className="mt-0.5 block type-footnote" /></div>}
-      actions={<>{!b.main && <><span className="hidden type-footnote text-muted-foreground sm:inline">{b.on ? t("manage:bot.enabled") : t("manage:bot.disabled")}</span><Switch checked={b.on} onCheckedChange={(v) => void saveBot(k, { on: v }, v ? t("manage:bot.enabled") : t("manage:bot.disabled"))} aria-label={t("manage:bot.enable")} /></>}<BotMenu k={k} /></>}>
+      actions={<>{!b.main && <><span className="hidden type-footnote text-muted-foreground sm:inline">{b.on ? t("manage:bot.enabled") : t("manage:bot.disabled")}</span><SetSwitch testId="bot-on" checked={b.on} onChange={(v) => void saveBot(k, { on: v }, v ? t("manage:bot.enabled") : t("manage:bot.disabled"))} label={t("manage:bot.enable")} /></>}<BotMenu k={k} /></>}>
       <Strip className="mb-8" watch={botTab}><Segmented className="min-w-max [&_[data-slot=tabs-list]]:w-full [&_[data-slot=tabs-trigger]]:flex-1" value={botTab} onChange={(v) => { botTab = v; r() }} options={tabs} /></Strip>
       {botTab === "概览" && (mine.length ? <Panel className="anim-in">{mine.map((i) => <ItemRow key={i.id} i={i} bot={false} />)}</Panel> : <Empty title={t("manage:detail.noRunning")} />)}
       {/* the channels page's list, laid into this page's section and panel */}
       {botTab === "对外身份" && <div className="anim-in"><PersonasSection bot={k} panel /></div>}
       {botTab === "定时与流程" && <BotSchedules k={k} />}
-      {botTab === "能力" && (
-        <div className="flex flex-col gap-8 anim-in" data-caps>
-          <Section label={t("manage:caps.steveTools")}>
-            <Panel>{([["steve_update", "toolUpdate"], ["steve_ask", "toolAsk"], ["steve_request_approval", "toolApproval"], ["steve_deliver", "toolDeliver"], ["steve_publish", "toolPublish"], ["steve_lane_status", "toolLaneStatus"]] as const).map(([c, l]) => <Row key={c} title={t(`manage:caps.${l}`)} sub={<span className="type-code text-muted-foreground">{c}</span>}><CheckIcon className="size-4 text-tertiary" aria-hidden /></Row>)}</Panel></Section>
-          <Section label={t("manage:caps.harnessTools", { harness: b.h })} note={t("manage:caps.later")}>
-            <Panel><Row title={t("manage:caps.builtin")} sub={t("manage:caps.builtinSub", { harness: b.h })} /><Row title={t("manage:caps.perm")} sub={permLabel(t, b.permMode)}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { botTab = "设置"; r() }}>{t("manage:caps.change")}</Button></Row></Panel></Section>
-        </div>
-      )}
+      {botTab === "能力" && <BotCaps k={k} onPerm={() => { botTab = "设置"; r() }} />}
       {botTab === "系统提示词" && (
         <div className="flex flex-col gap-3 anim-in" data-prompt>
           <Segmented size="sm" value={b.prompt != null || pdraft != null ? "自己写" : "自动生成"} onChange={(v) => { if (v === "自己写") setPdraft(b.prompt ?? prompt?.generated ?? ""); else { setPdraft(null); if (b.prompt != null) void saveBot(k, { prompt: null }, t("manage:prompt.revertedToast")) } }} options={[["自动生成", t("manage:prompt.auto")], ["自己写", t("manage:prompt.custom")]] as const} />
           {b.prompt == null && pdraft == null
             ? <><pre className="whitespace-pre-wrap rounded-xl bg-muted/60 px-4 py-3.5 type-code text-foreground/90">{prompt?.generated ?? t("manage:prompt.loading")}</pre><Note className="mt-0">{t("manage:prompt.autoHint")}</Note></>
-            : <><Textarea className="min-h-72 rounded-lg type-code" value={pdraft ?? b.prompt ?? ""} onChange={(e) => setPdraft(e.target.value)} data-prompt-edit />
+            : <><TextArea minRows={14} maxRows={40} inputClassName="type-code font-mono!" aria-label={t("manage:detail.tabPrompt")} value={pdraft ?? b.prompt ?? ""} onChange={(e) => setPdraft(e.target.value)} data-prompt-edit />
               <div className="flex items-center gap-2"><Button size="sm" disabled={pdraft == null || pdraft === b.prompt} onClick={() => { void saveBot(k, { prompt: pdraft ?? "" }); setPdraft(null) }}>{t("common:action.save")}</Button><span className="type-footnote text-muted-foreground">{t("manage:prompt.customHint")}</span></div></>}
         </div>
       )}
-      {botTab === "记忆" && (
-        <div className="flex flex-col gap-3 anim-in" data-mem>
-          <Lead className="px-1">{t("manage:mem.scope", { ws: st.workspace?.name })}</Lead>
-          <div className="flex gap-2"><Input placeholder={t("manage:mem.placeholder")} value={memTxt} onChange={(e) => setMemTxt(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && memTxt.trim()) { addMem(k, memTxt.trim()); setMemTxt("") } }} data-mem-input /><Button variant="outline" disabled={!memTxt.trim()} onClick={() => { addMem(k, memTxt.trim()); setMemTxt("") }}>{t("common:action.add")}</Button></div>
-          {!b.memLoaded ? <Loading className="py-8" /> : <Panel className="mt-1">{b.mem.map(([txt, src, id]) => <Row key={id} title={editMem === id ? <Input autoFocus className="h-8" defaultValue={txt} onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== txt) editMem && editMemFn(k, id, v); setEditMem(null) }} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} /> : txt} sub={src}>
-            <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setEditMem(id)}>{t("common:action.edit")}</Button><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => delMem(k, id)}>{t("common:action.delete")}</Button></Row>)}{!b.mem.length && <Row title={t("manage:mem.empty")} sub={t("manage:mem.emptySub")} />}</Panel>}
-        </div>
-      )}
+      {botTab === "记忆" && <BotMemories k={k} />}
       {botTab === "设置" && (
         <FieldGroup className="gap-8 anim-in">
           <AskSteve key={k} ctx={{ kind: "bot", id: k }} placeholder={t("manage:form.ask", { name: b.main ? b.n : t("manage:bot.name", { name: b.n }) })} />
           <Section label={t("manage:form.identity")}><Card className="flex flex-col gap-5 p-5">
             <F label={t("manage:form.avatar")} hint={t("manage:form.avatarHint")}><AvatarPicker look={{ color: fm.color, round: fm.round, skin: fm.skin }} onChange={(p) => set(p)} /></F>
-            <F label={t("manage:form.name")} htmlFor="bot-name"><Input id="bot-name" value={fm.n} onChange={(e) => set({ n: e.target.value })} /></F>
-            <F label={t("manage:form.role")} hint={t("manage:form.roleHint")}><Input value={fm.role} onChange={(e) => set({ role: e.target.value })} /></F>
+            <F label={t("manage:form.name")} htmlFor="bot-name"><TextField id="bot-name" value={fm.n} onChange={(e) => set({ n: e.target.value })} data-bot-name /></F>
+            <F label={t("manage:form.role")} htmlFor="bot-role" hint={t("manage:form.roleHint")}><TextField id="bot-role" value={fm.role} onChange={(e) => set({ role: e.target.value })} data-bot-role /></F>
           </Card></Section>
           <Section label={t("manage:form.personality")}><Card className="flex flex-col gap-5 p-5">
-            <F label={t("manage:form.voice")} hint={t("manage:form.voiceHint")}><Textarea className="min-h-20" value={fm.pers} onChange={(e) => set({ pers: e.target.value })} /></F>
+            <F label={t("manage:form.voice")} htmlFor="bot-voice" hint={t("manage:form.voiceHint")}><TextArea id="bot-voice" minRows={3} maxRows={10} value={fm.pers} onChange={(e) => set({ pers: e.target.value })} /></F>
             <F label={t("manage:form.pro")} hint={t("manage:form.proHint")}><Strip><Segmented size="sm" className="w-max" value={fm.pro} onChange={(v) => set({ pro: v })} options={PRO.map((v, i) => [v, proLabel(t, i)] as const)} /></Strip></F>
           </Card></Section>
           <Section label={t("manage:form.work")}><Card className="flex flex-col gap-5 p-5">
-            <F label={t("manage:form.rule")} hint={t("manage:form.ruleHint")}><Textarea className="min-h-20" value={fm.rule} onChange={(e) => set({ rule: e.target.value })} /></F>
-            <F label={t("manage:form.acc")}><Strip><Segmented size="sm" className="w-max" value={fm.acc} onChange={(v) => set({ acc: v })} options={Object.entries(ACC).map(([key, v]) => [v, accLabel(t, key)] as const)} /></Strip></F>
+            <F label={t("manage:form.rule")} htmlFor="bot-rule" hint={t("manage:form.ruleHint")}><TextArea id="bot-rule" minRows={3} maxRows={12} value={fm.rule} onChange={(e) => set({ rule: e.target.value })} /></F>
           </Card></Section>
+          {/* affectUI's Agent / Permissions: what it may do without asking, one choice each, said in plain words */}
+          <Section label={t("manage:form.permSection")} data-bot-perms><AutonomyChoice testId="bot-perm" label={t("manage:form.permSection")} value={fm.permMode} onChange={(v) => set({ permMode: v })}
+            options={permModes(fm.harness).map((v) => ({ value: v, name: permName(t, v), text: (PERM_KEYS as readonly string[]).includes(v) ? t(`manage:form.permText.${v as (typeof PERM_KEYS)[number]}`) : permLabel(t, v), icon: PERM_ICON[v] }))}
+            means={<><ShieldAlertIcon aria-hidden />{t("manage:form.permHint")}</>} /></Section>
+          <Section label={t("manage:form.acc")} data-bot-acc><AutonomyChoice testId="bot-acc" label={t("manage:form.acc")} value={fm.acc} onChange={(v) => set({ acc: v })}
+            options={ACC_KEYS.map((key) => ({ value: ACC[key], name: accLabel(t, key), text: t(`manage:form.accText.${key}`), icon: ACC_ICON[key] }))} /></Section>
           <Section label={t("manage:form.run")}><Card className="flex flex-col gap-5 p-5">
             <div className="grid gap-4 sm:grid-cols-2">
-              <F label="Harness"><div className="min-w-0 max-w-full"><Select value={fm.harness} onChange={(v) => set({ harness: v, model: "", reasoningEffort: "" })} options={st.runtimes.map((x) => ({ v: x.id, l: x.ok ? x.name : t("manage:form.unavailable", { name: x.name }) }))} /></div></F>
-              <F label={t("manage:form.model")}><div className="min-w-0 max-w-full [&_[data-slot=select-trigger]]:max-w-full"><ModelPicker harness={fm.harness} value={fm.model ?? ""} allowDefault testId="bot-model" onChange={(m) => set({ model: m })} /></div></F>
-              <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><div className="min-w-0 max-w-full [&_[data-slot=select-trigger]]:max-w-full"><Select value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...harnessEfforts(fm.harness).map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v }))]} /></div></F>
+              <F label="Harness"><SetSelect wide testId="bot-harness" label="Harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "", reasoningEffort: "" })} options={st.runtimes.map((x) => ({ v: x.id, l: x.ok ? x.name : t("manage:form.unavailable", { name: x.name }) }))} /></F>
+              <F label={t("manage:form.model")}><ModelPicker field harness={fm.harness} value={fm.model ?? ""} allowDefault testId="bot-model" onChange={(m) => set({ model: m })} /></F>
+              <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><SetSelect wide testId="bot-effort" label={t("manage:form.effort")} value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...harnessEfforts(fm.harness).map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v }))]} /></F>
             </div>
             {b.main && <SteveJudges harness={fm.harness} model={fm.model ?? ""} />}
-            <F label={t("manage:form.device")} hint={t("manage:form.deviceHint")}><div className="min-w-0 max-w-full [&_[data-slot=select-trigger]]:max-w-full"><Select testId="bot-dev" value="hub" onChange={() => {}} options={st.devices.map((d) => ({ v: d.id, l: d.name }))} /></div></F>
-            <F label={t("manage:form.project")} hint={t("manage:form.projectHint")}><div className="min-w-0 max-w-full [&_[data-slot=select-trigger]]:max-w-full"><Select value={fm.project} onChange={(v) => set({ project: v })} options={[{ v: "none", l: t("manage:form.projectInfer") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} /></div></F>
-            <F label={t("manage:form.perm")} hint={t("manage:form.permHint")}><div className="min-w-0 max-w-full [&_[data-slot=select-trigger]]:max-w-full"><Select value={fm.permMode} onChange={(v) => set({ permMode: v })} options={permModes(fm.harness).map((v) => ({ v, l: permLabel(t, v) }))} /></div></F>
+            <F label={t("manage:form.device")} hint={t("manage:form.deviceHint")}><SetSelect wide testId="bot-dev" label={t("manage:form.device")} value="hub" onChange={() => {}} options={st.devices.map((d) => ({ v: d.id, l: d.name }))} /></F>
+            <F label={t("manage:form.project")} hint={t("manage:form.projectHint")}><SetSelect wide testId="bot-project" label={t("manage:form.project")} value={fm.project} onChange={(v) => set({ project: v })} options={[{ v: "none", l: t("manage:form.projectInfer") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} /></F>
             {!b.main && <F label={t("manage:form.workspaces")} hint={t("manage:form.workspacesHint")}>
               <div className="flex flex-col gap-1.5">{st.workspaces.map((w) => <label key={w.id} className="flex items-center gap-2 type-callout"><Checkbox checked={fm.ws.includes(w.id)} disabled={fm.ws.length === 1 && fm.ws.includes(w.id)} onCheckedChange={(v) => set({ ws: v ? [...fm.ws, w.id] : fm.ws.filter((x: string) => x !== w.id) })} />{w.name}</label>)}</div></F>}
           </Card></Section>
@@ -287,6 +293,42 @@ export function BotView({ k }: { k: string }) {
         </FieldGroup>
       )}
     </Page>
+  )
+}
+const MEM_UNDO_MS = 6000
+/** a Bot's memories in this workspace: affectUI's Memory Panel, as on the knowledge page — added, edited in place and
+ *  forgotten with a few seconds to undo (the Hub deletes it once Undo is gone). Bot memories have no kinds and no pause. */
+function BotMemories({ k }: { k: string }) {
+  const t = useT()
+  const b = st.bots[k]
+  const [gone, setGone] = useState<string[]>([])
+  const timers = useRef(new Map<string, number>())
+  /* leaving the view, or closing or reloading the page, deletes what is still waiting for its Undo */
+  useEffect(() => {
+    const flush = () => { for (const [id, h] of timers.current) { clearTimeout(h); delMem(k, id) } timers.current.clear() }
+    addEventListener("pagehide", flush)
+    return () => { removeEventListener("pagehide", flush); flush() }
+  }, [k])
+  if (!b) return null
+  const general = t("core:affect.memory.general")
+  const memories: Memory[] = b.mem.filter(([, , id]) => !gone.includes(id)).map(([text, source, id]) => ({ id, text, source, category: general, canPause: false }))
+  const forget = (id: string) => {
+    setGone((g) => [...g, id])
+    timers.current.set(id, window.setTimeout(() => { timers.current.delete(id); delMem(k, id) }, MEM_UNDO_MS))
+  }
+  const restore = (id: string) => {
+    const h = timers.current.get(id); if (h) clearTimeout(h)
+    timers.current.delete(id); setGone((g) => g.filter((x) => x !== id))
+  }
+  return (
+    <div className="flex flex-col gap-3 anim-in" data-mem>
+      <Lead className="px-1">{t("manage:mem.scope", { ws: st.workspace?.name })}</Lead>
+      {!b.memLoaded ? <Loading className="py-8" /> :
+        <MemoryPanel className="[--ui-mpc-width:100%]" title={t("manage:detail.tabMemory")} showTitle={false} searchable={false} showSwitch={false} maxHeight={0} undoFor={MEM_UNDO_MS}
+          memories={memories} categories={[general]} onChange={() => {}} addedSource={t("manage:mem.added")}
+          text={{ none: t("manage:mem.emptySub"), newPlaceholder: t("manage:mem.placeholder") }}
+          onAdd={(m) => addMem(k, m.text)} onEdit={(id, text) => { const v = text.trim(); if (v) editMemFn(k, id, v) }} onForget={forget} onRestore={(m) => restore(m.id)} />}
+    </div>
   )
 }
 const editMemFn = (k: string, id: string, t: string) => editMem(k, id, t)
@@ -350,6 +392,43 @@ export function SettingsView() {
 function LanguageRow() {
   const t = useT()
   return <Row title={t("common:settings.language")} sub={t("common:settings.languageSub")} data-language-row><LanguageSwitch /></Row>
+}
+/* Steve's own tools every Bot has (steve-mcp tools.json), with what each is for; other steve_* tools show once used */
+const STEVE_TOOLS = [["steve_update", "toolUpdate", MessageSquareTextIcon], ["steve_ask", "toolAsk", MessageCircleQuestionIcon], ["steve_request_approval", "toolApproval", ShieldCheckIcon], ["steve_deliver", "toolDeliver", PackageCheckIcon], ["steve_publish", "toolPublish", RocketIcon], ["steve_lane_status", "toolLaneStatus", GitMergeIcon]] as const
+/** 能力: what a Bot can call, as the tiles of affectUI's Agent / Skills screen — Steve's tools (always there), tools from
+ *  other MCP servers and the harness's own, each with how often this Bot called it in the last 30 days (GET
+ *  /stats/breakdown?by=tool&bot=). The Hub counts Steve's MCP tools as `mcp:<name>` (dim mcp) and every other tool as
+ *  `tool:<full name>` (dim tool), so another MCP server's tools arrive as `mcp__<server>__<tool>` among the harness's.
+ *  Harness tools are known only once used: Steve has no list of them. */
+const OTHER_MCP = /^mcp__(.+?)__(.+)$/
+function BotCaps({ k, onPerm }: { k: string; onPerm: () => void }) {
+  const t = useT()
+  const b = st.bots[k]
+  const [d] = useStats(() => stats.counts({ range: "30d", bot: k }, "tool"), [k])
+  if (!b) return null
+  const rows = d.s === "ok" ? d.v.rows.filter((x) => x.dim === "tool" || x.dim === "mcp") : []
+  const count = new Map(rows.filter((x) => x.dim === "mcp").map((x) => [x.label, x.count]))
+  const uses = (n: number | undefined) => (d.s !== "ok" ? undefined : n ? t("manage:caps.uses", { count: n }) : t("manage:caps.unused"))
+  const catSteve = t("manage:caps.catSteve"), catMcp = t("manage:caps.catMcp")
+  const known = new Set<string>(STEVE_TOOLS.map(([c]) => c))
+  const byUse = (xs: (Skill & { n: number })[]) => xs.sort((x, y) => y.n - x.n)
+  const steve = byUse([
+    ...STEVE_TOOLS.map(([c, l, I]) => { const used = count.get(c); return { id: c, name: c, description: t(`manage:caps.${l}`), category: catSteve, icon: <I />, tone: "blue", source: catSteve, uses: d.s === "ok" && !used ? `${t("manage:caps.always")} · ${t("manage:caps.unused")}` : uses(used), idle: d.s === "ok" && !used, n: used ?? 0 } }),
+    ...rows.filter((x) => x.dim === "mcp" && !known.has(x.label)).map((x) => ({ id: x.key, name: x.label, description: t("manage:caps.fromSteve"), category: catSteve, icon: <WrenchIcon />, tone: "blue", source: catSteve, uses: uses(x.count), n: x.count })),
+  ])
+  const tools = rows.filter((x) => x.dim === "tool")
+  const mcp = byUse(tools.flatMap((x) => { const m = OTHER_MCP.exec(x.label); return m ? [{ id: x.key, name: m[2], description: t("manage:caps.fromMcp"), category: catMcp, icon: <PlugIcon />, tone: "amber", source: m[1], uses: uses(x.count), n: x.count }] : [] }))
+  const own = byUse(tools.filter((x) => !OTHER_MCP.test(x.label)).map((x) => ({ id: x.key, name: x.label, description: t("manage:caps.fromHarness", { harness: b.h }), category: b.h, icon: <TerminalIcon />, tone: "teal", source: b.h, uses: uses(x.count), n: x.count })))
+  const skills: Skill[] = [...steve, ...mcp, ...own].map(({ n: _n, ...s }) => s)
+  return (
+    <div className="flex flex-col gap-8 anim-in" data-caps>
+      <Section label={t("manage:caps.tools")} note={d.s === "absent" ? t("manage:caps.usageAbsent") : t("manage:caps.usageNote", { harness: b.h })}>
+        {d.s === "loading" ? <Loading className="py-8" /> : <SkillGrid skills={skills} categories={[catSteve, catMcp, b.h]} labels={{ all: t("manage:caps.all"), categories: t("manage:caps.categories"), empty: t("manage:caps.none") }} />}
+      </Section>
+      <Section label={t("manage:caps.perm")} note={t("manage:caps.later")}>
+        <Panel><Row title={permName(t, b.permMode)} sub={permLabel(t, b.permMode)} data-caps-perm={b.permMode}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={onPerm}>{t("manage:caps.change")}</Button></Row></Panel></Section>
+    </div>
+  )
 }
 /** a Bot's schedules, read from 自动化 where they are made and changed */
 function BotSchedules({ k }: { k: string }) {

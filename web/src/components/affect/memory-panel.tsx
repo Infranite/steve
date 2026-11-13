@@ -748,8 +748,8 @@ export function MemoryPanel({
           </div>
         </div>
 
-        {/* Filter row: category chips, or a search field in their place */}
-        <div className="ui-mpc__filters" data-searching={searching ? "" : undefined}>
+        {/* Filter row: category chips, or a search field in their place (Steve: left out when it has nothing to filter by) */}
+        {(searchable || chips.length > 2) && <div className="ui-mpc__filters" data-searching={searching ? "" : undefined}>
           <div
             ref={chipsRef}
             className="ui-mpc__chips"
@@ -821,7 +821,7 @@ export function MemoryPanel({
             <SearchIcon />
           </button>
           </>}
-        </div>
+        </div>}
 
         <div
           ref={listRef}
@@ -965,8 +965,8 @@ export function MemoryPanel({
           </div>
         </div>
 
-        {/* The last row of the card: counts, what you point at, and Undo after forgetting */}
-        <div className="ui-mpc__foot">
+        {/* The last row of the card: counts, what you point at, and Undo after forgetting (Steve: not under an empty list) */}
+        {(list.length > 0 || forgot || editing || adding || action) && <div className="ui-mpc__foot">
           <span className="ui-mpc__caption" aria-live="polite">
             <Swap id={captionKey}>{caption}</Swap>
           </span>
@@ -983,7 +983,7 @@ export function MemoryPanel({
               </button>
             )
           )}
-        </div>
+        </div>}
       </div>
     </div>
   );
