@@ -177,6 +177,8 @@ try {
   assert.equal(await page.locator("[data-upgrade-enable]").count(), 0, "a local build is not told to migrate its keys any more")
   assert.equal(await page.locator('[data-upgrade-guide="local_release"] [data-upgrade-command]').count(), 0, "ordinary installs are not sent to a compiler")
   await page.locator("[data-upgrade-services] summary").click()
+  /* the details open with a height transition (visual system v2): read the commands once they are laid out */
+  await page.waitForFunction(() => [...document.querySelectorAll("[data-upgrade-services] [data-upgrade-command] pre")].every((e) => e.innerText.trim()))
   const commands = await page.locator("[data-upgrade-services] [data-upgrade-command] pre").allInnerTexts()
   assert.deepEqual(commands.map(c => c.trim()), ["status", "doctor"].map(action => `python3 ${home}/current/ops/steve-service.py hub ${action} --home ${home}`))
   assert.match(await page.locator("[data-upgrade-backup]").innerText(), /\/Users\/example\/\.steve\/backups/)

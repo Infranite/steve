@@ -13,7 +13,7 @@ import { t, useT } from "@/i18n"
 export const SOURCE_ICON: Record<string, LucideIcon> = { mail: MailIcon, cal: CalendarIcon, im: MessageSquareIcon, github: GitPullRequestIcon, webhook: SirenIcon, time: ClockIcon, item: ListTodoIcon, manual: HandIcon, notify: BellIcon }
 export const srcIcon = (s: string | null | undefined) => (s && SOURCE_ICON[s]) || RadioIcon
 export const Ico = ({ I, dark }: { I: LucideIcon; dark?: boolean }) => (
-  <span className={cn("flex size-7 shrink-0 items-center justify-center rounded-md", dark ? "bg-foreground text-background" : "bg-muted text-muted-foreground")} aria-hidden><I className="size-4" strokeWidth={1.5} /></span>
+  <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg", dark ? "bg-foreground text-background" : "bg-muted text-muted-foreground")} aria-hidden><I className="size-4" strokeWidth={1.75} /></span>
 )
 
 /** compact select with an accessible name */
@@ -29,8 +29,8 @@ export function Pick<T extends string>({ value, options, onChange, label, testId
 export function Modal({ title, desc, children, footer, wide, onClose }: { title: string; desc?: string; children: ReactNode; footer?: ReactNode; wide?: boolean; onClose: () => void }) {
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className={cn("max-h-[90dvh] gap-4 overflow-y-auto rounded-2xl", wide ? "sm:max-w-[640px]" : "sm:max-w-[480px]")}>
-        <DialogHeader><DialogTitle className="type-headline">{title}</DialogTitle>{desc && <DialogDescription className="type-callout">{desc}</DialogDescription>}</DialogHeader>
+      <DialogContent className={cn("max-h-[90dvh] gap-4 overflow-y-auto", wide ? "sm:max-w-[640px]" : "sm:max-w-[480px]")}>
+        <DialogHeader><DialogTitle className="type-title">{title}</DialogTitle>{desc && <DialogDescription className="type-callout">{desc}</DialogDescription>}</DialogHeader>
         {children}
         {footer && <DialogFooter className="gap-2">{footer}</DialogFooter>}
       </DialogContent>
@@ -40,7 +40,7 @@ export function Modal({ title, desc, children, footer, wide, onClose }: { title:
 
 export function Loading({ title, back }: { title: string; back?: [string, string] }) {
   const t = useT()
-  return <Page title={title} back={back}><div className="flex justify-center py-16" role="status" aria-label={t("auto:loadingAria")}><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  return <Page title={title} back={back}><div className="flex justify-center py-16 anim-in" role="status" aria-label={t("auto:loadingAria")}><Spinner className="size-5 text-muted-foreground" /></div></Page>
 }
 export function Failed({ title, back, msg, retry }: { title: string; back?: [string, string]; msg: string; retry?: () => void }) {
   const t = useT()
@@ -57,7 +57,7 @@ export const ms = (n: number) => msDur(n)
 export const dur = (a: number, b: number | null) => (b ? ms(b - a) : "")
 
 export function Json({ v, className }: { v: unknown; className?: string }) {
-  return <pre className={cn("max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/70 px-3 py-2 font-mono text-[11.5px] leading-[18px] text-foreground/85", className)}>{typeof v === "string" ? v : JSON.stringify(v, null, 2)}</pre>
+  return <pre className={cn("max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/60 px-3 py-2 type-code text-foreground/85", className)}>{typeof v === "string" ? v : JSON.stringify(v, null, 2)}</pre>
 }
 
 /** a run status → [label, StatusDot state]; the label is read in the current language each time */

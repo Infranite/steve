@@ -59,7 +59,7 @@ export default {
     backups_other: "{{count}} fallbacks",
     unwired: "This Hub can't configure models yet. Switch to a newer Hub to change them here.",
     defaultSection: "Default",
-    defaultUses: "Anything without its own setting uses {{name}}'s",
+    defaultUses: "Anything without its own setting uses {{name}}'s configuration",
     effortLine: "Thinking effort: {{effort}}",
     fallbackHint: "the next model is used only if the previous one errors or times out",
     change: "Change",

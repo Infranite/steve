@@ -72,22 +72,22 @@ export function ModelPicker({ harness, value, onChange, allowDefault, defaultLab
   return (
     <Popover open={open} onOpenChange={(o) => { setOpen(o); if (!o) { setOther(false); setQ("") } }}>
       <PopoverTrigger render={<Button variant="outline" size="sm" role="combobox" aria-expanded={open} className={cn("h-8 w-full min-w-0 justify-between gap-2 rounded-lg px-2.5 font-normal", className)} data-model-picker={testId ?? harness} />}>
-        <span className={cn("min-w-0 truncate text-left", value ? "font-mono text-[12.5px]" : "text-muted-foreground")}>{value ? (cur?.label && cur.label !== value ? `${cur.label} · ${value}` : value) : allowDefault ? defLabel : placeholder ?? t("shell:model.choose")}</span>
+        <span className={cn("min-w-0 truncate text-left", value ? "type-code" : "text-muted-foreground")}>{value ? (cur?.label && cur.label !== value ? `${cur.label} · ${value}` : value) : allowDefault ? defLabel : placeholder ?? t("shell:model.choose")}</span>
         <ChevronsUpDownIcon className="size-3.5 shrink-0 opacity-50" />
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-[min(380px,calc(100vw-24px))] gap-0 rounded-2xl p-0" data-model-menu={testId ?? harness}>
+      <PopoverContent align="start" className="w-[min(380px,calc(100vw-24px))] gap-0 rounded-xl p-0" data-model-menu={testId ?? harness}>
         {other ? (
           <div className="flex flex-col gap-2 p-3">
             <div className="type-footnote text-muted-foreground">{t("shell:model.otherHint", { harness: harnessName(harness) })}</div>
             <div className="flex items-center gap-1.5">
-              <Input autoFocus value={free} onChange={(e) => setFree(e.target.value)} placeholder={t("shell:model.id")} aria-label={t("shell:model.id")} className="h-8 font-mono text-[12.5px]" data-model-free
+              <Input autoFocus value={free} onChange={(e) => setFree(e.target.value)} placeholder={t("shell:model.id")} aria-label={t("shell:model.id")} className="h-8 type-code" data-model-free
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing && free.trim()) pick(free.trim()) }} />
               <Button size="sm" disabled={!free.trim()} onClick={() => pick(free.trim())}>{t("shell:model.useThis")}</Button>
             </div>
             <Button size="sm" variant="ghost" className="self-start text-muted-foreground" onClick={() => setOther(false)}>{t("shell:model.backToList")}</Button>
           </div>
         ) : (
-          <Command className="rounded-2xl" defaultValue={cur ? `${cur.id} ${cur.label} ${cur.family}` : value ? undefined : "__default"} filter={(v, search) => (v.toLowerCase().includes(search.toLowerCase()) ? 1 : 0)}>
+          <Command className="rounded-xl" defaultValue={cur ? `${cur.id} ${cur.label} ${cur.family}` : value ? undefined : "__default"} filter={(v, search) => (v.toLowerCase().includes(search.toLowerCase()) ? 1 : 0)}>
             <CommandInput placeholder={t("shell:model.search", { harness: harnessName(harness) })} value={q} onValueChange={setQ} data-model-search />
             <CommandList className="max-h-[min(360px,55vh)]">
               <CommandEmpty>{cat ? t("shell:model.noMatch") : t("shell:model.loading")}</CommandEmpty>
@@ -98,8 +98,8 @@ export function ModelPicker({ harness, value, onChange, allowDefault, defaultLab
                     <CommandItem key={m.id} value={`${m.id} ${m.label} ${f}`} data-checked={m.id === value} onSelect={() => pick(m.id)} data-model-opt={m.id} className="items-start">
                       <span className="flex min-w-0 flex-1 flex-col">
                         <span className="flex min-w-0 items-center gap-1.5">
-                          <span className="truncate font-mono text-[12.5px]">{m.via ? m.id.slice(m.via.length + 1) : m.id}</span>
-                          {m.via && <span className="shrink-0 rounded bg-muted px-1 text-[10.5px] text-muted-foreground">{t("shell:model.via", { via: m.via })}</span>}
+                          <span className="truncate type-code">{m.via ? m.id.slice(m.via.length + 1) : m.id}</span>
+                          {m.via && <span className="shrink-0 inline-flex h-4.5 items-center rounded-md bg-muted px-1.5 type-label leading-none text-muted-foreground">{t("shell:model.via", { via: m.via })}</span>}
                         </span>
                         {(m.note || m.used) && <span className="flex min-w-0 items-center gap-2">{m.used && <UsedMark u={m.used} />}{m.note && <span className="truncate type-footnote text-muted-foreground" title={m.note}>{m.note}</span>}</span>}
                       </span>

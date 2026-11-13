@@ -1,14 +1,15 @@
 /* 保险箱 (accounts-vault.md §4, §8; prototype people.tsx VaultView / VaultItemView): items with masked fields, the use log,
  * grants to Bots; enabling the vault and its one-time recovery code. Secret values appear only through useReveal. */
-import { useCallback, useMemo, useState, type ReactNode } from "react"
-import { ChevronRightIcon, CopyIcon, CreditCardIcon, EyeIcon, EyeOffIcon, FileTextIcon, IdCardIcon, KeyRoundIcon, LinkIcon, LockIcon, PencilIcon, PlusIcon, PrinterIcon, ShieldIcon, TerminalIcon } from "lucide-react"
+import { useCallback, useMemo, useState } from "react"
+import { CopyIcon, CreditCardIcon, EyeIcon, EyeOffIcon, FileTextIcon, IdCardIcon, KeyRoundIcon, LinkIcon, LockIcon, PencilIcon, PlusIcon, PrinterIcon, ShieldIcon, TerminalIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Spinner } from "@/components/ui/spinner"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, Chips, BotAvatar } from "@/ui"
+import { go, Page, Row, Segmented, Meta, Empty, Chips, BotAvatar } from "@/ui"
+import { Panel, Section, Note, Blank, Notice, Pill, Tile, Chevron, Loading, LIFT } from "@/settings-kit"
+import { cn } from "cn"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { st, tm, botName, toast } from "@/store"
@@ -22,11 +23,9 @@ import { t as tr, useT } from "@/i18n"
 import { date } from "@/i18n/format"
 
 const TPL_I: Record<string, any> = { login: KeyRoundIcon, bank_card: CreditCardIcon, api_credential: TerminalIcon, id_document: IdCardIcon, secure_note: FileTextIcon, ssh_key: LockIcon, recovery_codes: ShieldIcon }
-const Ico = ({ I, className }: { I: any; className?: string }) => <span className={"flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground " + (className ?? "")} aria-hidden><I className="size-4" strokeWidth={1.5} /></span>
-const Section = ({ label, right, children }: { label: string; right?: ReactNode; children: ReactNode }) => <section><SectionLabel right={right}>{label}</SectionLabel>{children}</section>
+const Ico = Tile
 /** a section with nothing in it yet: one quiet line, not a page-sized empty state */
-const Quiet = ({ children }: { children: ReactNode }) => <div className="px-1 type-callout text-muted-foreground">{children}</div>
-const Note = ({ children }: { children: ReactNode }) => <div className="mt-2 px-1 type-footnote text-muted-foreground">{children}</div>
+const Quiet = Blank
 const back = (): [string, string] => ["#/accounts", tr("vault:backAccounts")]
 const backVault = (): [string, string] => ["#/vault", tr("vault:title")]
 /** the vault's templates have Chinese names in the API; here the ids map to the prototype's names, in the UI language */
@@ -40,8 +39,8 @@ export function VaultRoute({ id }: { id?: string }) { return id ? <VaultItemView
 function VaultRow({ v }: { v: RItem }) {
   const t = useT()
   return <Row icon={<Ico I={TPL_I[v.template] ?? KeyRoundIcon} />} onClick={() => go("#/vault/" + v.id)} data-vault-row={v.title}
-    title={<span className="inline-flex items-center gap-1.5">{v.title}{v.sensitivity === "high" && <Badge variant="outline" className="font-normal text-muted-foreground">{SENS_LABEL.high}</Badge>}</span>}
-    sub={<Dots><span>{tplName(v.template)}</span><span>{v.vault.name}</span>{v.account && <span>{v.account.display_name}</span>}{v.site && <span>{v.site}</span>}{v.grants.length > 0 && <span>{t("vault:row.grants", { count: v.grants.length })}</span>}<span>{t("vault:row.updated", { time: tm(v.updated) })}</span></Dots>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
+    title={<span className="inline-flex items-center gap-1.5">{v.title}{v.sensitivity === "high" && <Pill tone="attention">{SENS_LABEL.high}</Pill>}</span>}
+    sub={<Dots><span>{tplName(v.template)}</span><span>{v.vault.name}</span>{v.account && <span>{v.account.display_name}</span>}{v.site && <span>{v.site}</span>}{v.grants.length > 0 && <span>{t("vault:row.grants", { count: v.grants.length })}</span>}<span>{t("vault:row.updated", { time: tm(v.updated) })}</span></Dots>}><Chevron /></Row>
 }
 function UseRow({ u, showItem }: { u: RUse; showItem?: boolean }) {
   const t = useT()
@@ -59,9 +58,9 @@ export function RecoveryCode({ code, onDone, title }: { code: string; onDone: ()
   const groups = code.split(/[-\s]+/).filter(Boolean)
   const print = () => { const w = window.open("", "_blank", "width=600,height=400"); if (!w) return; w.document.title = t("vault:recovery.printTitle"); const pre = w.document.createElement("pre"); pre.style.cssText = "font:20px/1.8 ui-monospace,monospace;padding:32px"; pre.textContent = t("vault:recovery.printTitle") + "\n\n" + groups.join("  ") + "\n\n" + date(new Date(), { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" }); w.document.body.appendChild(pre); w.print(); w.close() }
   return (
-    <div className="flex flex-col gap-4 rounded-xl border px-5 py-5" data-recovery>
+    <div className={cn(LIFT, "flex flex-col gap-4 p-5 anim-in")} data-recovery>
       <div><div className="type-headline">{title ?? t("vault:recovery.title")}</div><div className="mt-1 type-callout text-muted-foreground">{t("vault:recovery.body")}</div></div>
-      <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted px-4 py-3 font-mono text-[15px] tracking-wider sm:grid-cols-4" aria-label={t("vault:recovery.label")} data-recovery-code>{groups.map((g, n) => <span key={n} className="select-all">{g}</span>)}</div>
+      <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted/60 px-4 py-3 font-mono type-headline font-medium tracking-wider sm:grid-cols-4" aria-label={t("vault:recovery.label")} data-recovery-code>{groups.map((g, n) => <span key={n} className="select-all">{g}</span>)}</div>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="outline" onClick={() => navigator.clipboard?.writeText(code).then(() => toast(t("vault:recovery.copied")), () => toast(t("vault:clipboardDenied")))}><CopyIcon />{t("common:action.copy")}</Button>
         <Button size="sm" variant="outline" onClick={print}><PrinterIcon />{t("vault:recovery.print")}</Button>
@@ -76,8 +75,8 @@ function EnableVault({ onDone }: { onDone: () => void }) {
   const [code, setCode] = useState<string | null>(null), [busy, act] = useBusy()
   if (code) return <RecoveryCode code={code} onDone={() => { setCode(null); onDone() }} />
   return (
-    <div className="flex flex-col gap-4 rounded-xl border px-5 py-5" data-enable-vault>
-      <div className="flex items-start gap-3"><Ico I={LockIcon} className="size-10 rounded-xl" /><div><div className="type-headline">{t("vault:enable.title")}</div>
+    <div className={cn(LIFT, "flex flex-col gap-4 p-5")} data-enable-vault>
+      <div className="flex items-start gap-3"><Ico I={LockIcon} className="size-10 rounded-xl bg-blue/10 text-blue" /><div><div className="type-headline">{t("vault:enable.title")}</div>
         <div className="mt-1 type-callout text-muted-foreground">{t("vault:enable.body")}</div></div></div>
       <div className="type-callout text-muted-foreground">{t("vault:enable.note")}</div>
       <Button className="self-start" disabled={busy} onClick={() => void act(() => vaultApi.init()).then((r) => r && setCode(r.recovery_code))} data-vault-init>{busy && <Spinner />}{t("vault:enable.title")}</Button>
@@ -86,7 +85,7 @@ function EnableVault({ onDone }: { onDone: () => void }) {
 }
 function KeychainBanner({ s }: { s: RVaultStatus }) {
   const t = useT()
-  return s.initialized && s.keychain !== "ok" ? <div className="mb-6 rounded-xl border border-attention/40 bg-attention/5 px-4 py-3 type-callout" role="alert" data-keychain={s.keychain}>{t("vault:keychainBanner", { state: keyStoreState(s) })}{s.keychain === "missing" && <> · <a className="text-blue hover:underline" href="#/settings/vault">{t("vault:recoverWithCode")}</a></>}</div> : null
+  return s.initialized && s.keychain !== "ok" ? <Notice tone="attention" className="mb-8" role="alert" data-keychain={s.keychain}>{t("vault:keychainBanner", { state: keyStoreState(s) })}{s.keychain === "missing" && <> · <a className="font-medium text-blue hover:underline" href="#/settings/vault">{t("vault:recoverWithCode")}</a></>}</Notice> : null
 }
 
 /* ═════════ 保险箱首页 ═════════ */
@@ -103,7 +102,7 @@ function VaultView() {
     return { status, items, uses }
   }, [], ["vault"])
   if (L.s === "unwired") return <Unwired id="vault" />
-  if (L.s === "loading") return <Page title={t("vault:title")} back={back()}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (L.s === "loading") return <Page title={t("vault:title")} back={back()}><Loading /></Page>
   if (L.s === "error") return <Page title={t("vault:title")} back={back()}><Empty title={L.err} /></Page>
   const { status, items, uses } = L.data
   const sub = t("vault:home.sub")
@@ -121,14 +120,14 @@ function VaultView() {
       <KeychainBanner s={status} />
       <div className="flex flex-col gap-8">
         <div>{tpls.length > 1 && <Chips className="mb-4" value={curTpl} onChange={(v) => { vtpl = v === allTpl ? "" : v; r() }} options={tplOpts} />}
-          {xs.length ? <Group>{xs.map((v) => <VaultRow key={v.id} v={v} />)}</Group> : <Empty title={items.length ? t("vault:home.noMatch") : t("vault:home.noItems")} sub={items.length ? undefined : status.keychain === "ok" ? t("vault:home.noItemsSub") : t("vault:home.noItemsLockedSub")} />}</div>
-        {uses && <Section label={t("vault:home.recentUses")}>{uses.length ? <Group>{uses.map((u) => <UseRow key={u.id} u={u} showItem />)}</Group> : <Quiet>{t("vault:home.noUses")}</Quiet>}</Section>}
-        <Section label={t("vault:home.rules")}><Group>
+          {xs.length ? <Panel>{xs.map((v) => <VaultRow key={v.id} v={v} />)}</Panel> : <Empty title={items.length ? t("vault:home.noMatch") : t("vault:home.noItems")} sub={items.length ? undefined : status.keychain === "ok" ? t("vault:home.noItemsSub") : t("vault:home.noItemsLockedSub")} />}</div>
+        {uses && <Section label={t("vault:home.recentUses")}>{uses.length ? <Panel>{uses.map((u) => <UseRow key={u.id} u={u} showItem />)}</Panel> : <Quiet>{t("vault:home.noUses")}</Quiet>}</Section>}
+        <Section label={t("vault:home.rules")}><Panel>
           <Row title={t("vault:home.ruleBotTitle")} sub={t("vault:home.ruleBotSub")} />
           <Row title={t("vault:home.ruleHighTitle")} sub={t("vault:home.ruleHighSub")} />
-          <Row title={t("vault:home.ruleViewTitle")} sub={status.passkeys ? t("vault:home.ruleViewSub") : t("vault:home.ruleViewSubNoPasskey")} onClick={() => go("#/settings/vault")}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
-          <Row icon={<Ico I={LinkIcon} />} title={<span className="text-muted-foreground">{t("vault:home.externalTitle")}</span>} sub={t("vault:home.externalSub")}><Badge variant="outline" className="font-normal text-muted-foreground">{t("vault:home.reserved")}</Badge></Row>
-        </Group></Section>
+          <Row title={t("vault:home.ruleViewTitle")} sub={status.passkeys ? t("vault:home.ruleViewSub") : t("vault:home.ruleViewSubNoPasskey")} onClick={() => go("#/settings/vault")}><Chevron /></Row>
+          <Row icon={<Ico I={LinkIcon} />} title={<span className="text-muted-foreground">{t("vault:home.externalTitle")}</span>} sub={t("vault:home.externalSub")}><Pill>{t("vault:home.reserved")}</Pill></Row>
+        </Panel></Section>
       </div>
     </Page>
   )
@@ -146,7 +145,7 @@ function VaultItemView({ id }: { id: string }) {
   const used = useCallback(() => void reload(), [reload])
   const R = useReveal(id, used)
   if (L.s === "unwired") return <Unwired id="vault" />
-  if (L.s === "loading") return <Page title={t("vault:title")} back={backVault()}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (L.s === "loading") return <Page title={t("vault:title")} back={backVault()}><Loading /></Page>
   if (L.s === "error") return <Page title={t("vault:title")} back={backVault()}><Empty title={L.status === 404 ? t("vault:item.notFound") : L.err} /></Page>
   const { item: v, uses } = L.data
   const fields = v.fields ?? []
@@ -164,10 +163,10 @@ function VaultItemView({ id }: { id: string }) {
       </AlertDialogContent></AlertDialog>
       {edit && <EditField item={v.id} f={edit} onClose={() => setEdit(null)} onDone={() => { R.hide(edit.id); void reload() }} />}
       <div className="flex flex-col gap-8">
-        <div className="-mt-2 flex items-center gap-3"><Ico I={TPL_I[v.template] ?? KeyRoundIcon} className="size-12 rounded-xl" />
+        <div className="-mt-2 flex items-center gap-3"><Ico I={TPL_I[v.template] ?? KeyRoundIcon} className="size-12 rounded-xl bg-card shadow-[var(--lift)] [&>svg]:size-5" />
           <div className="flex items-center gap-1 type-callout text-muted-foreground">{t("vault:item.sensitivity")}{v.template === "bank_card" ? <span className="px-2 text-foreground" title={t("vault:item.bankCardFixed")}>{SENS_LABEL.high}</span>
             : <Select quiet testId="vault-level" value={v.sensitivity} onChange={(x) => void setSens(x as Sensitivity)} options={(["normal", "sensitive", "high"] as const).map((x) => ({ v: x, l: SENS_LABEL[x] }))} />}</div></div>
-        <Section label={t("vault:item.fields")}>{fields.length ? <Group>{fields.map((fl) => {
+        <Section label={t("vault:item.fields")}>{fields.length ? <Panel>{fields.map((fl) => {
           const s = R.shown[fl.id], masked = fl.secret && !s
           return (
             <Row key={fl.id} title={fl.label} data-field={fl.label}
@@ -178,11 +177,11 @@ function VaultItemView({ id }: { id: string }) {
               <Button variant="ghost" size="icon-xs" aria-label={t("vault:item.copyField", { label: fl.label })} className="text-muted-foreground" disabled={R.busy === fl.id} onClick={() => { if (fl.secret) void R.reveal(fl.id, true); else navigator.clipboard?.writeText(fl.value ?? "").then(() => toast(t("common:action.copied")), () => toast(t("vault:clipboardDenied"))) }} data-copy><CopyIcon /></Button>
               <Button variant="ghost" size="icon-xs" aria-label={t("vault:item.editField", { label: fl.label })} className="text-muted-foreground" onClick={() => setEdit(fl)} data-edit-field><PencilIcon /></Button>
             </Row>)
-        })}</Group> : <Quiet>{t("vault:item.noFields")}</Quiet>}
+        })}</Panel> : <Quiet>{t("vault:item.noFields")}</Quiet>}
           <Note>{t("vault:item.fieldsNote")}</Note></Section>
         <LinkedAccount v={v} onChange={() => void reload()} />
         <Grants v={v} onChange={() => void reload()} />
-        {uses && <Section label={t("vault:item.useLog")}>{uses.length ? <Group>{uses.map((u) => <UseRow key={u.id} u={u} />)}</Group> : <Quiet>{t("vault:item.neverUsed")}</Quiet>}
+        {uses && <Section label={t("vault:item.useLog")}>{uses.length ? <Panel>{uses.map((u) => <UseRow key={u.id} u={u} />)}</Panel> : <Quiet>{t("vault:item.neverUsed")}</Quiet>}
           <Note>{t("vault:item.useLogNote")}</Note></Section>}
       </div>
     </Page>
@@ -198,7 +197,7 @@ function EditField({ item, f, onClose, onDone }: { item: string; f: RField; onCl
     <AlertDialog open onOpenChange={(o) => !o && onClose()}><AlertDialogContent>
       <AlertDialogHeader><AlertDialogTitle>{t("vault:edit.title", { label: f.label })}</AlertDialogTitle><AlertDialogDescription>{f.secret ? t("vault:edit.secretBody") : t("vault:edit.plainBody")}</AlertDialogDescription></AlertDialogHeader>
       <form onSubmit={(e) => { e.preventDefault(); if (!busy) void save() }} autoComplete="off">
-        <Input aria-label={f.label} autoFocus className="rounded-lg font-mono" type={f.secret ? "password" : "text"} autoComplete={f.secret ? "new-password" : "off"} spellCheck={false} value={val} onChange={(e) => setVal(e.target.value)} data-edit-value />
+        <Input aria-label={f.label} autoFocus className="font-mono" type={f.secret ? "password" : "text"} autoComplete={f.secret ? "new-password" : "off"} spellCheck={false} value={val} onChange={(e) => setVal(e.target.value)} data-edit-value />
       </form>
       <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction disabled={busy || (f.secret && !val)} onClick={(e) => { e.preventDefault(); void save() }} data-edit-field-save>{t("common:action.save")}</AlertDialogAction></AlertDialogFooter>
     </AlertDialogContent></AlertDialog>
@@ -213,8 +212,8 @@ function LinkedAccount({ v, onChange }: { v: RItem; onChange: () => void }) {
   return (
     <Section label={t("vault:account.section")} right={opts === null ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={load} data-change-account>{v.account ? t("vault:account.change") : t("vault:account.link")}</Button> : undefined}>
       {opts !== null && <div className="mb-2 flex items-center gap-2"><Select testId="vault-account" value={v.account?.id ?? ""} onChange={(x) => void set(x)} options={[{ v: "", l: t("vault:account.none") }, ...opts.map((a) => ({ v: a.id, l: t("vault:account.option", { name: a.display_name || a.handle, system: a.system.name }) }))]} />{busy && <Spinner />}</div>}
-      <Group>{v.account ? <Row icon={<Ico I={KeyRoundIcon} />} title={v.account.display_name} onClick={() => go("#/accounts/" + v.account!.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
-        : <Row title={t("vault:account.noneTitle")} sub={t("vault:account.noneSub")} />}</Group>
+      <Panel>{v.account ? <Row icon={<Ico I={KeyRoundIcon} />} title={v.account.display_name} onClick={() => go("#/accounts/" + v.account!.id)}><Chevron /></Row>
+        : <Row title={t("vault:account.noneTitle")} sub={t("vault:account.noneSub")} />}</Panel>
     </Section>
   )
 }
@@ -236,8 +235,8 @@ function Grants({ v, onChange }: { v: RItem; onChange: () => void }) {
   const live = v.grants.filter((g) => g.until > Date.now())
   return (
     <Section label={t("vault:grants.section")}>
-      {live.length ? <Group>{live.map((g) => <Row key={g.id} icon={<BotAvatar k={g.bot_id} size={24} />} title={botName(g.bot_id)} sub={t("vault:grants.rowSub", { scope: g.scope_label, time: tm(g.until) })} data-grant={g.bot_id}>
-        <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(() => vaultApi.revokeGrant(g.id), t("vault:grants.revoked")).then((r) => r && onChange())} data-revoke-grant>{t("vault:grants.revoke")}</Button></Row>)}</Group>
+      {live.length ? <Panel>{live.map((g) => <Row key={g.id} icon={<BotAvatar k={g.bot_id} size={24} />} title={botName(g.bot_id)} sub={t("vault:grants.rowSub", { scope: g.scope_label, time: tm(g.until) })} data-grant={g.bot_id}>
+        <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(() => vaultApi.revokeGrant(g.id), t("vault:grants.revoked")).then((r) => r && onChange())} data-revoke-grant>{t("vault:grants.revoke")}</Button></Row>)}</Panel>
         : v.sensitivity === "high" || v.template === "bank_card" ? null : <Quiet>{t("vault:grants.none")}</Quiet>}
       {v.sensitivity === "high" || v.template === "bank_card" ? <Note>{t("vault:grants.highNote")}</Note> :
         bots.length === 0 ? <Note>{t("vault:grants.noBots")}</Note> :

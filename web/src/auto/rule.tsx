@@ -8,7 +8,8 @@ import { Input } from "@/components/ui/input"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { Page, Group, Row, SectionLabel, Segmented, StatusDot, Meta, Empty, Composer, go } from "@/ui"
+import { Page, Row, Segmented, StatusDot, Meta, Empty, Composer, go } from "@/ui"
+import { Panel, SectionLabel, Blank } from "@/settings-kit"
 import { tm, toast } from "@/store"
 import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, sourceLabel, type Flow, type Graph, type Run } from "@/api/flow"
@@ -106,10 +107,10 @@ export function RuleView({ id }: { id: string }) {
       {rename && <RenameDialog f={f} onClose={() => setRename(false)} onSaved={(r) => { L.set(r); setRename(false) }} />}
       {sampleOpen && <Modal title={t("auto:rule.sampleTitle")} desc={t("auto:rule.sampleDesc", { example: '{"summary": "…", "payload": {…}}' })} onClose={() => setSampleOpen(false)}
         footer={<><Button variant="outline" onClick={() => setSampleOpen(false)}>{t("common:action.cancel")}</Button><Button disabled={busy === "dry"} onClick={() => { let o: object | undefined; if (sample.trim()) { try { o = JSON.parse(sample) } catch { toast(t("auto:notJson")); return } } setSampleOpen(false); void dry(o) }} data-sample-go><PlayIcon />{t("auto:rule.dryRun")}</Button></>}>
-        <Textarea aria-label={t("auto:rule.sampleAria")} className="min-h-40 rounded-lg bg-muted/50 font-mono text-[12px]" value={sample} onChange={(e) => setSample(e.target.value)} placeholder={t("auto:rule.samplePlaceholder")} data-sample />
+        <Textarea aria-label={t("auto:rule.sampleAria")} className="min-h-40 type-code" value={sample} onChange={(e) => setSample(e.target.value)} placeholder={t("auto:rule.samplePlaceholder")} data-sample />
       </Modal>}
       {undo && (
-        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border px-4 py-2.5 type-callout anim-in" data-steve-change>
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl bg-blue/10 px-4 py-2.5 type-callout anim-in" data-steve-change>
           <SparklesIcon className="size-4 text-blue" aria-hidden /><span className="min-w-0 flex-1">{t("auto:rule.steveChanged", { note: undo.note })}</span>
           <Button size="sm" variant="ghost" onClick={() => { setWork(undo.g); setUndo(null); setFresh(null); setRev((x) => x + 1); setDirty(JSON.stringify(undo.g) !== JSON.stringify(f.graph)) }}>{t("auto:rule.undo")}</Button>
         </div>
@@ -121,14 +122,14 @@ export function RuleView({ id }: { id: string }) {
             <Segmented size="sm" value={view} onChange={setView} options={[["canvas", t("auto:rule.viewCanvas")], ["code", t("auto:rule.viewCode")]] as const} />
             {trace && <span className="inline-flex flex-wrap items-center gap-1.5 type-footnote text-muted-foreground" data-trace-banner><StatusDot s={trace.run.status === "failed" ? "fail" : "done"} />{t(trace.run.dry_run ? "auto:rule.traceDry" : "auto:rule.traceRun", { count: trace.path.length, label: trace.label })}<button type="button" className="text-blue hover:underline" onClick={() => setTrace(null)}>{t("auto:rule.clear")}</button></span>}
           </div>
-          {warnings.length > 0 && <ul className="flex flex-col gap-1 rounded-xl border px-4 py-2.5 type-footnote" data-branch-warnings>
+          {warnings.length > 0 && <ul className="flex flex-col gap-1.5 rounded-xl bg-attention/10 px-4 py-3 type-callout anim-in" data-branch-warnings>
             {warnings.map((w) => <li key={w.kind + w.node + w.label} className="flex items-start gap-2" data-branch-warning={w.strong ? "strong" : "weak"}>
-              <StatusDot s={w.strong ? "fail" : "wait"} /><button type="button" className={"min-w-0 text-left hover:underline " + (w.strong ? "text-foreground" : "text-muted-foreground")} onClick={() => { setSel(w.node); setView("canvas") }}>
+              <StatusDot s={w.strong ? "fail" : "wait"} className="mt-1.5" /><button type="button" className={"min-w-0 text-left hover:underline " + (w.strong ? "text-foreground" : "text-muted-foreground")} onClick={() => { setSel(w.node); setView("canvas") }}>
                 {t(w.kind === "edge" ? "auto:rule.warnEdge" : "auto:rule.warnBranch", { node: nodeName(w.node), label: w.label })}</button></li>)}
           </ul>}
           {view === "canvas" ? <FlowCanvas g={work} sel={sel} onSel={(x) => { setSel(x); setFresh(null) }} fresh={fresh} trace={trace} />
             : <div className="flex flex-col gap-2" data-code-view>
-                <Textarea aria-label={t("auto:rule.codeAria")} className="min-h-[460px] rounded-xl bg-muted/50 font-mono text-[12px] leading-[19px]" value={toYaml(f.name, f.version, work)} readOnly />
+                <Textarea aria-label={t("auto:rule.codeAria")} className="min-h-[460px] rounded-xl bg-muted/60 type-code" value={toYaml(f.name, f.version, work)} readOnly />
                 <div className="flex items-center gap-2 px-1 type-footnote text-muted-foreground"><span className="flex-1">{t("auto:rule.codeHint")}</span>
                   <Button size="xs" variant="ghost" onClick={() => void navigator.clipboard.writeText(JSON.stringify(work, null, 2)).then(() => toast(t("auto:rule.copiedJson")))}><CopyIcon />{t("auto:rule.copyJson")}</Button></div>
               </div>}
@@ -136,37 +137,37 @@ export function RuleView({ id }: { id: string }) {
           {trace && (
             <section className="anim-in" data-dry-result>
               <SectionLabel right={trace.run.outcome_label ? <span className="font-normal">{trace.run.outcome_label}</span> : undefined}>{trace.run.dry_run ? t("auto:rule.stepsDry") : t("auto:rule.stepsRun")}</SectionLabel>
-              <Group>{(trace.run.steps ?? []).map((s) => { const x = work.nodes.find((y) => y.id === s.node_id); return (
+              <Panel>{(trace.run.steps ?? []).map((s) => { const x = work.nodes.find((y) => y.id === s.node_id); return (
                 <Row key={s.seq} onClick={() => { setSel(s.node_id); setView("canvas") }} data-step={s.node_id}
-                  title={<span><span className="mr-2 font-mono text-[12px] text-muted-foreground">{s.seq}</span>{x?.title ?? s.node_id}{s.branch && <span className="ml-1.5 type-footnote text-muted-foreground">→ {s.branch}</span>}</span>}
+                  title={<span><span className="mr-2 font-mono type-footnote text-muted-foreground">{s.seq}</span>{x?.title ?? s.node_id}{s.branch && <span className="ml-1.5 type-footnote text-muted-foreground">→ {s.branch}</span>}</span>}
                   sub={s.error ? <span className="text-destructive">{s.error}</span> : s.output?.skipped ? String(s.output.skipped) : s.status === "waiting" ? t("auto:runStatus.waiting") : JSON.stringify(s.output ?? null).slice(0, 100)}>
-                  <span className="type-footnote tabular-nums text-muted-foreground">{ms(s.ms)}</span></Row>) })}</Group>
+                  <span className="type-footnote tabular-nums text-muted-foreground">{ms(s.ms)}</span></Row>) })}</Panel>
               {trace.run.error && <div className="mt-2 px-1 type-footnote text-destructive">{trace.run.error}</div>}
             </section>
           )}
           <section>
-            <SectionLabel right={<a href="#/signals" className="font-normal hover:text-foreground">{t("auto:rule.viewInSignals")}</a>}>{t("auto:rule.recentRuns")}</SectionLabel>
-            {runs.data?.length ? <Group>{runs.data.map((r) => (
+            <SectionLabel right={<a href="#/signals" className="font-normal text-blue hover:underline">{t("auto:rule.viewInSignals")}</a>}>{t("auto:rule.recentRuns")}</SectionLabel>
+            {runs.data?.length ? <Panel>{runs.data.map((r) => (
               <Row key={r.id} onClick={() => void openRun(r.id)} controls={r.status === "running" || r.status === "waiting"} data-run-row={r.id}
                 title={<span className="inline-flex items-center gap-1.5"><StatusDot s={RUN_STATUS[r.status]?.[1] ?? "idle"} />{r.outcome_label || RUN_STATUS[r.status]?.[0] || r.status}</span>}
                 sub={[r.dry_run ? t("auto:rule.dryRun") : "", "v" + r.flow_version, r.error ?? "", t("auto:rule.clickSteps")].filter(Boolean).join(" · ")}>
                 {(r.status === "running" || r.status === "waiting") && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={(e) => { e.stopPropagation(); void act("cancel", () => flowApi.cancelRun(r.id), t("auto:rule.runCancelled")).then(() => runs.reload()) }}>{t("common:action.cancel")}</Button>}
-                <span className="type-footnote tabular-nums text-muted-foreground">{tm(r.started)}</span></Row>))}</Group>
-              : <div className="px-1 type-callout text-muted-foreground">{runs.data ? t("auto:noRuns") : t("auto:loading")}</div>}
+                <span className="type-footnote tabular-nums text-muted-foreground">{tm(r.started)}</span></Row>))}</Panel>
+              : <Blank>{runs.data ? t("auto:noRuns") : t("auto:loading")}</Blank>}
           </section>
           <section data-versions>
             <SectionLabel>{t("auto:rule.versions")}</SectionLabel>
-            <Group>{f.versions.map((v) => (
+            <Panel>{f.versions.map((v) => (
               <Row key={v.version} title={v.version === f.version ? `v${v.version} · ${t("auto:rule.current")}` : `v${v.version}`} sub={[tm(v.created), authorLabel(v.author), v.note].filter(Boolean).join(" · ")} data-version={v.version}>
                 {v.version !== f.version && <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={!!busy} onClick={() => void act("rb", () => flowApi.rollback(id, v.version), (r) => t("auto:rule.rolledBack", { from: v.version, to: r.version })).then((r) => { if (r) { setDirty(false); setUndo(null); L.set(r) } })} data-rollback={v.version}>{t("auto:rule.rollback")}</Button>}
-              </Row>))}</Group>
+              </Row>))}</Panel>
           </section>
         </div>
         <aside className="flex flex-col gap-4 lg:sticky lg:top-2 lg:max-h-[calc(100dvh-4rem)] lg:self-start lg:overflow-y-auto lg:border-l lg:pl-6" aria-label={t("auto:rule.nodeSettings")}>
           {n ? <Inspector key={n.id + ":" + rev} g={work} n={n} onChange={edit} onSelect={setSel} flows={flows.data ?? []} sources={sources.data ?? []} step={step} flowId={id} />
-            : <div className="px-1 type-callout text-muted-foreground">{t("auto:rule.pickNode")}</div>}
+            : <Blank>{t("auto:rule.pickNode")}</Blank>}
           {n && trace && !step && <div className="px-1 type-footnote text-muted-foreground">{t(trace.run.dry_run ? "auto:rule.notPassedDry" : "auto:rule.notPassedRun", { name: n.title || kindOf(n.kind)[0] })}</div>}
-          {n?.kind === "trigger" && trace?.run.dry_run && trace.run.steps?.[0] && <div className="px-1"><div className="mb-1 type-footnote text-muted-foreground">{t("auto:rule.eventUsed")}</div><Json v={trace.run.steps[0].input} /></div>}
+          {n?.kind === "trigger" && trace?.run.dry_run && trace.run.steps?.[0] && <div className="px-1"><div className="mb-1.5 type-label text-tertiary">{t("auto:rule.eventUsed")}</div><Json v={trace.run.steps[0].input} /></div>}
           <div className="mt-auto border-t pt-4 type-footnote text-muted-foreground">{t("auto:rule.footer")}</div>
         </aside>
       </div>
@@ -182,8 +183,8 @@ function RenameDialog({ f, onClose, onSaved }: { f: Flow; onClose: () => void; o
     <Modal title={t("auto:rule.rename")} onClose={onClose}
       footer={<><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!ok || busy} onClick={async () => { setBusy(true); try { onSaved(await flowApi.patchFlow(f.id, { name: name.trim(), description: desc.trim() })); toast(t("common:state.saved")) } catch (e) { toast(errText(e)) } finally { setBusy(false) } }}>{t("common:action.save")}</Button></>}>
       <FieldGroup className="gap-4">
-        <Field><FieldLabel htmlFor="flow-name">{t("auto:rule.name")}</FieldLabel><Input id="flow-name" className="rounded-lg" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} /></Field>
-        <Field><FieldLabel htmlFor="flow-desc">{t("auto:rule.description")}</FieldLabel><Textarea id="flow-desc" className="min-h-16 rounded-lg" value={desc} onChange={(e) => setDesc(e.target.value)} /></Field>
+        <Field><FieldLabel htmlFor="flow-name">{t("auto:rule.name")}</FieldLabel><Input id="flow-name" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+        <Field><FieldLabel htmlFor="flow-desc">{t("auto:rule.description")}</FieldLabel><Textarea id="flow-desc" className="min-h-16" value={desc} onChange={(e) => setDesc(e.target.value)} /></Field>
       </FieldGroup>
     </Modal>
   )

@@ -21,16 +21,16 @@ function FlowNode({ data }: NodeProps<Node<D>>) {
   const Icon = n.kind === "trigger" ? srcIcon(n.config?.source) : I
   const sub = n.note || (n.kind === "action" ? actionLabel(n.config?.action) : "")
   return (
-    <div className={cn("relative flex h-[76px] w-[224px] cursor-pointer items-center gap-3 rounded-xl border bg-card px-3 transition-[box-shadow,opacity] duration-150 hover:shadow-md", sel ? "border-blue ring-3 ring-blue/20" : "border-border", fresh && "ring-3 ring-blue/30", ran === "skip" && "opacity-45")} data-rule-node={n.id} data-ran={ran}
+    <div className={cn("relative flex h-[76px] w-[224px] cursor-pointer items-center gap-3 rounded-xl bg-card px-3 shadow-[var(--lift)] transition-[box-shadow,opacity] duration-180 ease-(--ease-out) hover:shadow-[var(--lift-hover)]", sel && "shadow-[0_0_0_1.5px_var(--blue),0_0_0_5px_color-mix(in_srgb,var(--blue)_18%,transparent)]! ", fresh && "ring-3 ring-blue/30", ran === "skip" && "opacity-45")} data-rule-node={n.id} data-ran={ran}
       role="button" tabIndex={0} aria-label={t("auto:canvas.nodeAria", { kind: label, title: n.title })} aria-pressed={sel}>
       <Handle type="target" position={narrow ? Position.Top : Position.Left} className="!size-1.5 !min-h-0 !min-w-0 !border-0 !bg-border" />
-      <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg", n.kind === "trigger" ? "bg-foreground text-background" : "bg-muted text-muted-foreground")}><Icon className="size-4" strokeWidth={1.5} /></span>
+      <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg", n.kind === "trigger" ? "bg-foreground text-background" : "bg-muted text-muted-foreground")}><Icon className="size-4" strokeWidth={1.75} /></span>
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5 type-footnote text-muted-foreground">{label}
-          {n.kind === "bot" && <Badge variant="outline" className="h-4 px-1 text-[10px]">AI</Badge>}
-          {effectful(n) && <Badge variant="outline" className="h-4 px-1 text-[10px]">{t("auto:canvas.needsApproval")}</Badge>}</span>
-        <span className="block truncate text-[13px] font-medium">{n.title || n.id}</span>
-        {sub && <span className="block truncate text-[11.5px] text-muted-foreground">{sub}</span>}
+          {n.kind === "bot" && <Badge variant="secondary" className="h-4 rounded-md px-1 type-label leading-none text-blue bg-blue/10">AI</Badge>}
+          {effectful(n) && <Badge variant="secondary" className="h-4 rounded-md bg-attention/12 px-1 type-label leading-none text-attention">{t("auto:canvas.needsApproval")}</Badge>}</span>
+        <span className="block truncate type-callout font-medium">{n.title || n.id}</span>
+        {sub && <span className="block truncate type-footnote text-muted-foreground">{sub}</span>}
       </span>
       {ran === "ok" && <CheckIcon className="absolute -right-1.5 -top-1.5 size-4 rounded-full bg-success p-0.5 text-white" strokeWidth={3} aria-label={t("auto:canvas.ran")} />}
       {ran === "fail" && <XIcon className="absolute -right-1.5 -top-1.5 size-4 rounded-full bg-destructive p-0.5 text-white" strokeWidth={3} aria-label={t("auto:runStatus.failed")} />}
@@ -69,7 +69,7 @@ export function FlowCanvas({ g, sel, onSel, fresh, trace, height = 460 }: { g: G
     return { x, y, zoom: z }
   }, [w, nodes.length, narrow])
   return (
-    <div ref={box} className="overflow-hidden rounded-xl border bg-canvas-graph" style={{ height }} data-rule-canvas>
+    <div ref={box} className="overflow-hidden rounded-xl bg-canvas-graph shadow-[inset_0_0_0_1px_var(--border)]" style={{ height }} data-rule-canvas>
       {w > 0 && <ReactFlow key={g.nodes.length + ":" + g.edges.length + ":" + (narrow ? "n" : "w")} nodes={nodes} edges={edges} nodeTypes={flowTypes} minZoom={0.3} maxZoom={1.5} defaultViewport={vp}
         nodesConnectable={false} nodesDraggable={false} elementsSelectable={false} proOptions={{ hideAttribution: true }} onNodeClick={(_, n) => onSel(n.id)}
         onKeyDown={(e) => { const id = (e.target as HTMLElement).closest("[data-rule-node]")?.getAttribute("data-rule-node"); if (id && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onSel(id) } }}>

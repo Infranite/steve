@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react"
 import { HubError, modReq } from "@/api"
 import { Button } from "@/components/ui/button"
-import { Group, Row, SectionLabel } from "@/ui"
+import { Row } from "@/ui"
+import { Panel, Section } from "@/settings-kit"
 import { toast } from "@/store"
 import { useT } from "@/i18n"
 import { deadSub, reviveText, type OutboxReport } from "@/outbox"
@@ -26,15 +27,13 @@ export function OutboxDead() {
     } catch (e) { toast(e instanceof Error ? e.message : String(e)) }
     setBusy(null)
   }
-  return <section data-outbox-dead>
-    <SectionLabel>{t("shell:outbox.title")}</SectionLabel>
-    <Group>
+  return <Section data-outbox-dead label={t("shell:outbox.title")} note={t("shell:outbox.note")}>
+    <Panel>
       {r.groups.map((g) => <Row key={g.consumer} data-outbox-group={g.consumer}
-        title={<span className="font-mono text-[13px]">{g.consumer}{g.topic && g.topic !== g.consumer && <span className="ml-1.5 text-muted-foreground">{g.topic}</span>}</span>}
+        title={<span className="type-code">{g.consumer}{g.topic && g.topic !== g.consumer && <span className="ml-1.5 text-muted-foreground">{g.topic}</span>}</span>}
         sub={<span className="break-words">{deadSub(g)}</span>}>
         <Button size="xs" variant="outline" disabled={busy !== null} onClick={() => void revive(g.consumer)} data-outbox-revive={g.consumer}>{busy === g.consumer ? t("shell:outbox.reviving") : t("shell:outbox.revive")}</Button>
       </Row>)}
-    </Group>
-    <p className="mt-2 type-footnote text-muted-foreground">{t("shell:outbox.note")}</p>
-  </section>
+    </Panel>
+  </Section>
 }

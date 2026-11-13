@@ -11,7 +11,7 @@ import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command"
-import { SectionLabel, Segmented } from "@/ui"
+import { Segmented } from "@/ui"
 import { SOURCE_LABEL, type FlowSummary, type GEdge, type GNode, type Graph, type Source, type Step } from "@/api/flow"
 import { Pick, Json, botOptions, srcIcon, ms } from "@/auto/common"
 import { t, useT } from "@/i18n"
@@ -106,7 +106,7 @@ export function toYaml(name: string, version: number, g: Graph) {
 
 /* ───────── inspector ───────── */
 const F = ({ label, children, hint }: { label: string; children: ReactNode; hint?: ReactNode }) => (
-  <label className="flex flex-col gap-1"><span className="type-footnote text-muted-foreground">{label}</span>{children}{hint && <span className="type-footnote text-muted-foreground">{hint}</span>}</label>
+  <label className="flex flex-col gap-1.5"><span className="type-label text-muted-foreground">{label}</span>{children}{hint && <span className="type-footnote text-muted-foreground">{hint}</span>}</label>
 )
 const list = (s: string) => s.split(/[,，、]/).map((x) => x.trim()).filter(Boolean)
 
@@ -125,28 +125,28 @@ export function Inspector({ g, n, onChange, onSelect, flows, sources, step, flow
   const prev = upstream(g, n.id)
   return (
     <div className="flex flex-col gap-4" data-inspector data-kind={n.kind}>
-      <SectionLabel className="mb-0" right={group !== label ? <span className="font-normal">{group}</span> : undefined}>{label}{n.kind === "action" && c.action ? " · " + (actionLabel(c.action) ?? c.action) : ""}</SectionLabel>
+      <div className="flex min-h-6 items-baseline justify-between gap-2"><span className="type-headline">{label}{n.kind === "action" && c.action ? " · " + (actionLabel(c.action) ?? c.action) : ""}</span>{group !== label && <span className="type-footnote text-muted-foreground">{group}</span>}</div>
       <div className="flex flex-col gap-3 px-1">
-        <F label={t("auto:node.name")}><Input className="rounded-lg" value={n.title} onChange={(e) => onChange(patchNode(g, n.id, (x) => { x.title = e.target.value }))} data-node-title /></F>
-        <F label={t("auto:node.note")}><Input className="rounded-lg" value={n.note ?? ""} onChange={(e) => onChange(patchNode(g, n.id, (x) => { x.note = e.target.value }))} /></F>
+        <F label={t("auto:node.name")}><Input  value={n.title} onChange={(e) => onChange(patchNode(g, n.id, (x) => { x.title = e.target.value }))} data-node-title /></F>
+        <F label={t("auto:node.note")}><Input  value={n.note ?? ""} onChange={(e) => onChange(patchNode(g, n.id, (x) => { x.note = e.target.value }))} /></F>
         {n.kind === "trigger" && <TriggerEditor c={c} set={set} sources={sources} />}
         {n.kind === "filter" && <FilterEditor c={c} set={set} />}
         {n.kind === "table" && <TableEditor c={c} set={set} />}
         {n.kind === "script" && <F label={t("auto:node.script")} hint={t("auto:node.scriptHint")}>
-          <Textarea className="min-h-40 rounded-lg bg-muted/50 font-mono text-[12px] leading-[19px]" value={c.code ?? ""} onChange={(e) => set((x) => { x.code = e.target.value })} spellCheck={false} data-script-editor /></F>}
-        {n.kind === "cmd" && <><F label={t("auto:node.command")} hint={t("auto:node.commandHint")}><Input className="rounded-lg font-mono text-[12px]" value={c.command ?? ""} onChange={(e) => set((x) => { x.command = e.target.value })} /></F>
-          <F label={t("auto:node.timeoutS")}><Input type="number" min={1} max={600} className="w-28 rounded-lg" value={c.timeout_s ?? 120} onChange={(e) => set((x) => { x.timeout_s = Number(e.target.value) })} /></F></>}
+          <Textarea className="min-h-40 type-code" value={c.code ?? ""} onChange={(e) => set((x) => { x.code = e.target.value })} spellCheck={false} data-script-editor /></F>}
+        {n.kind === "cmd" && <><F label={t("auto:node.command")} hint={t("auto:node.commandHint")}><Input className="type-code" value={c.command ?? ""} onChange={(e) => set((x) => { x.command = e.target.value })} /></F>
+          <F label={t("auto:node.timeoutS")}><Input type="number" min={1} max={600} className="w-28" value={c.timeout_s ?? 120} onChange={(e) => set((x) => { x.timeout_s = Number(e.target.value) })} /></F></>}
         {n.kind === "http" && <HttpEditor c={c} set={set} />}
         {n.kind === "flow" && <F label={t("auto:node.callFlow")} hint={t("auto:node.callFlowHint")}>
           <Pick label={t("auto:node.callFlow")} value={c.flow_id || "_"} options={[{ v: "_", l: t("auto:node.pickFlow") }, ...flows.filter((f) => f.id !== flowId).map((f) => ({ v: f.id, l: f.name }))]} onChange={(v) => set((x) => { x.flow_id = v === "_" ? "" : v })} className="w-full" /></F>}
         {n.kind === "bot" && <>
           <F label={t("auto:node.handTo")}><Pick label={t("auto:node.handToAria")} value={c.bot_id || "_"} options={[{ v: "_", l: t("auto:node.sourceBot") }, ...botOptions()]} onChange={(v) => set((x) => { if (v === "_") delete x.bot_id; else x.bot_id = v })} className="w-full" /></F>
-          <F label={t("auto:node.instruction")}><Textarea className="min-h-16 rounded-lg" value={c.instruction ?? ""} onChange={(e) => set((x) => { x.instruction = e.target.value })} /></F>
-          <F label={t("auto:node.branchesList")}><Input className="rounded-lg" defaultValue={(c.branches ?? []).join(t("auto:sep.input"))} onBlur={(e) => set((x) => { x.branches = list(e.target.value) })} /></F></>}
+          <F label={t("auto:node.instruction")}><Textarea className="min-h-16" value={c.instruction ?? ""} onChange={(e) => set((x) => { x.instruction = e.target.value })} /></F>
+          <F label={t("auto:node.branchesList")}><Input  defaultValue={(c.branches ?? []).join(t("auto:sep.input"))} onBlur={(e) => set((x) => { x.branches = list(e.target.value) })} /></F></>}
         {n.kind === "wait" && <WaitEditor c={c} set={set} />}
         {n.kind === "approve" && <>
-          <F label={t("auto:node.question")}><Textarea className="min-h-16 rounded-lg" value={c.question ?? ""} onChange={(e) => set((x) => { x.question = e.target.value })} /></F>
-          <F label={t("auto:node.options")} hint={t("auto:node.optionsHint")}><Input className="rounded-lg" defaultValue={(c.options ?? []).join(t("auto:sep.input"))} onBlur={(e) => set((x) => { x.options = list(e.target.value) })} /></F></>}
+          <F label={t("auto:node.question")}><Textarea className="min-h-16" value={c.question ?? ""} onChange={(e) => set((x) => { x.question = e.target.value })} /></F>
+          <F label={t("auto:node.options")} hint={t("auto:node.optionsHint")}><Input  defaultValue={(c.options ?? []).join(t("auto:sep.input"))} onBlur={(e) => set((x) => { x.options = list(e.target.value) })} /></F></>}
         {n.kind === "action" && <ActionEditor c={c} set={set} />}
         {n.kind !== "action" && n.kind !== "trigger" && <div className="type-footnote text-muted-foreground">{t("auto:node.data")}<span className="mr-1 font-mono">event</span>{prev.map((p) => <span key={p.id} className="mr-1 font-mono" title={p.title}>{`steps.${p.id}`}</span>)}</div>}
         {!["action", "trigger", "approve"].includes(n.kind) && <div className="flex items-center justify-between gap-2 type-footnote text-muted-foreground">{t("auto:node.onFail")}
@@ -194,7 +194,7 @@ function EdgeRow({ g, e, labels, onChange }: { g: Graph; e: GEdge; labels: strin
   const setLabel = (v: string) => onChange({ ...g, edges: g.edges.map((x) => (x.from === e.from && x.to === e.to ? { ...x, label: v } : x)) })
   return (
     <div className="flex items-center gap-2">
-      <Input aria-label={t("auto:node.edgeAria", { title: to?.title ?? e.to })} list={lid} className="h-8 w-28 rounded-lg text-[12.5px]" placeholder={t("auto:node.any")} value={e.label ?? ""} onChange={(ev) => setLabel(ev.target.value)} data-edge-label={e.to} />
+      <Input aria-label={t("auto:node.edgeAria", { title: to?.title ?? e.to })} list={lid} className="h-8 w-28 type-callout" placeholder={t("auto:node.any")} value={e.label ?? ""} onChange={(ev) => setLabel(ev.target.value)} data-edge-label={e.to} />
       <datalist id={lid}>{labels.filter(Boolean).map((l) => <option key={l} value={l} />)}</datalist>
       <ArrowRightIcon className="size-3.5 shrink-0 text-tertiary" aria-hidden />
       <span className="min-w-0 flex-1 truncate type-callout">{to?.title ?? e.to}</span>
@@ -210,13 +210,13 @@ function TriggerEditor({ c, set, sources }: Ed & { sources: Source[] }) {
   return (<>
     <F label={t("auto:trigger.source")}><Pick label={t("auto:trigger.source")} value={src} options={Object.entries(SOURCE_LABEL).map(([v, l]) => ({ v, l: <span className="inline-flex items-center gap-1.5">{(() => { const I = srcIcon(v); return <I className="size-3.5" /> })()}{l}</span> }))} onChange={(v) => set((x) => { x.source = v; x.types = [] })} className="w-full" /></F>
     {src === "time" ? <>
-      <F label={t("auto:trigger.cron")}><Input className="rounded-lg font-mono text-[12px]" value={c.cron ?? ""} onChange={(e) => set((x) => { x.cron = e.target.value })} placeholder="0 9 * * 1-5" /></F>
-      <F label={t("auto:trigger.tz")}><Input className="rounded-lg" value={c.tz ?? ""} onChange={(e) => set((x) => { x.tz = e.target.value })} placeholder="Asia/Taipei" /></F>
+      <F label={t("auto:trigger.cron")}><Input className="type-code" value={c.cron ?? ""} onChange={(e) => set((x) => { x.cron = e.target.value })} placeholder="0 9 * * 1-5" /></F>
+      <F label={t("auto:trigger.tz")}><Input  value={c.tz ?? ""} onChange={(e) => set((x) => { x.tz = e.target.value })} placeholder="Asia/Taipei" /></F>
     </> : src !== "manual" && (known.length ? (
       <fieldset className="flex flex-col gap-1.5"><legend className="mb-1 type-footnote text-muted-foreground">{t("auto:trigger.events")}</legend>
         {known.map((y) => <label key={y.key} className="flex items-center justify-between gap-2 type-callout">{y.label}<Switch checked={types.includes(y.key)} onCheckedChange={(v) => set((x) => { x.types = v ? [...types, y.key] : types.filter((k) => k !== y.key) })} aria-label={y.label} /></label>)}
       </fieldset>
-    ) : <F label={t("auto:trigger.types")}><Input className="rounded-lg font-mono text-[12px]" defaultValue={types.join(", ")} onBlur={(e) => set((x) => { x.types = list(e.target.value) })} placeholder={src + ".new"} /></F>)}
+    ) : <F label={t("auto:trigger.types")}><Input className="type-code" defaultValue={types.join(", ")} onBlur={(e) => set((x) => { x.types = list(e.target.value) })} placeholder={src + ".new"} /></F>)}
     {src !== "time" && src !== "manual" && <div className="type-footnote text-muted-foreground"><Trans t={t} i18nKey="auto:trigger.scopeHint" components={{ page: <a className="text-blue hover:underline" href={"#/auto/source/" + (sources.find((s) => s.source === src)?.adapter ?? src)} /> }} /></div>}
   </>)
 }
@@ -228,14 +228,14 @@ function FilterEditor({ c, set }: Ed) {
     <div className="flex flex-col gap-2" data-filter-editor>
       <div className="type-footnote text-muted-foreground">{t("auto:filter.hint")}</div>
       {rules.map((r, i) => (
-        <div key={i} className="flex flex-col gap-1 rounded-lg border p-2">
-          <div className="flex items-center gap-2"><Input aria-label={t("auto:filter.label")} className="h-7 w-24 rounded-md text-[12.5px]" value={r.label} onChange={(e) => set((x) => { x.rules[i].label = e.target.value })} />
+        <div key={i} className="flex flex-col gap-1.5 rounded-lg bg-muted/60 p-2">
+          <div className="flex items-center gap-2"><Input aria-label={t("auto:filter.label")} className="h-7 w-24 type-callout" value={r.label} onChange={(e) => set((x) => { x.rules[i].label = e.target.value })} />
             <span className="flex-1" /><Button size="icon-xs" variant="ghost" aria-label={t("auto:filter.removeRule")} className="text-muted-foreground" onClick={() => set((x) => { x.rules.splice(i, 1) })}><TrashIcon /></Button></div>
-          <Textarea aria-label={t("auto:filter.expr")} className="min-h-12 rounded-md font-mono text-[12px]" placeholder={'event.payload.from matches "noreply"'} value={r.when} onChange={(e) => set((x) => { x.rules[i].when = e.target.value })} />
+          <Textarea aria-label={t("auto:filter.expr")} className="min-h-12 type-code" placeholder={'event.payload.from matches "noreply"'} value={r.when} onChange={(e) => set((x) => { x.rules[i].when = e.target.value })} />
         </div>
       ))}
       <Button size="xs" variant="ghost" className="self-start text-muted-foreground" onClick={() => set((x) => { (x.rules ??= []).push({ label: t("auto:filter.defaultLabel", { n: (x.rules?.length ?? 0) + 1 }), when: "" }) })}><PlusIcon />{t("auto:filter.addRule")}</Button>
-      <F label={t("auto:filter.else")}><Input className="h-8 rounded-lg" value={c.else_label ?? ""} onChange={(e) => set((x) => { x.else_label = e.target.value })} /></F>
+      <F label={t("auto:filter.else")}><Input className="h-8" value={c.else_label ?? ""} onChange={(e) => set((x) => { x.else_label = e.target.value })} /></F>
     </div>
   )
 }
@@ -246,11 +246,11 @@ function TableEditor({ c, set }: Ed) {
   return (
     <div className="flex flex-col gap-2" data-table-editor>
       <div className="flex items-center gap-2 type-footnote text-muted-foreground">{t("auto:table.hit")}<Segmented size="sm" value={c.hit ?? "first"} onChange={(v) => set((x) => { x.hit = v })} options={[["first", t("auto:table.hitFirst")], ["collect", t("auto:table.hitCollect")]] as const} /></div>
-      <F label={t("auto:table.inputs")}><Input className="h-8 rounded-lg font-mono text-[12px]" defaultValue={inputs.join(", ")} onBlur={(e) => set((x) => { const ni = list(e.target.value); x.rows = rows.map((r) => [...ni.map((_, j) => r[j] ?? ""), ...r.slice(inputs.length)]); x.inputs = ni })} /></F>
-      <F label={t("auto:table.outputs")}><Input className="h-8 rounded-lg font-mono text-[12px]" defaultValue={outputs.join(", ")} onBlur={(e) => set((x) => { const no = list(e.target.value); x.rows = rows.map((r) => [...r.slice(0, inputs.length), ...no.map((_, j) => r[inputs.length + j] ?? "")]); x.outputs = no })} /></F>
-      <div className="overflow-x-auto rounded-lg border">
-        <Table className="min-w-[240px] text-[12px]">
-          <TableHeader><TableRow className="hover:bg-transparent">{cols.map((h, j) => <TableHead key={j} className={cn("h-8 px-2 text-[12px]", j >= inputs.length ? "bg-muted/60 text-foreground" : "text-muted-foreground")}>{j >= inputs.length && "→ "}{h}</TableHead>)}<TableHead className="w-6 px-0" /></TableRow></TableHeader>
+      <F label={t("auto:table.inputs")}><Input className="h-8 type-code" defaultValue={inputs.join(", ")} onBlur={(e) => set((x) => { const ni = list(e.target.value); x.rows = rows.map((r) => [...ni.map((_, j) => r[j] ?? ""), ...r.slice(inputs.length)]); x.inputs = ni })} /></F>
+      <F label={t("auto:table.outputs")}><Input className="h-8 type-code" defaultValue={outputs.join(", ")} onBlur={(e) => set((x) => { const no = list(e.target.value); x.rows = rows.map((r) => [...r.slice(0, inputs.length), ...no.map((_, j) => r[inputs.length + j] ?? "")]); x.outputs = no })} /></F>
+      <div className="overflow-x-auto rounded-lg shadow-[inset_0_0_0_1px_var(--border)]">
+        <Table className="min-w-[240px] type-footnote">
+          <TableHeader><TableRow className="hover:bg-transparent">{cols.map((h, j) => <TableHead key={j} className={cn("h-8 px-2 type-label", j >= inputs.length ? "bg-muted/60 text-foreground" : "text-muted-foreground")}>{j >= inputs.length && "→ "}{h}</TableHead>)}<TableHead className="w-6 px-0" /></TableRow></TableHeader>
           <TableBody>{rows.map((row, i) => <TableRow key={i}>{cols.map((_, j) => (
             <TableCell key={j} className={cn("p-0", j >= inputs.length && "bg-muted/30")}><input aria-label={t("auto:table.cellAria", { row: i + 1, col: cols[j] })} value={row[j] ?? ""} placeholder={t("auto:table.any")} onChange={(e) => set((x) => { x.rows[i][j] = e.target.value })} className="w-full min-w-0 bg-transparent px-2 py-1.5 font-mono outline-none placeholder:text-tertiary focus:bg-blue/5" data-cell={`${i}-${j}`} /></TableCell>))}
             <TableCell className="p-0"><Button size="icon-xs" variant="ghost" aria-label={t("auto:table.removeRow", { row: i + 1 })} className="text-muted-foreground" onClick={() => set((x) => { x.rows.splice(i, 1) })}><TrashIcon /></Button></TableCell></TableRow>)}</TableBody>
@@ -267,11 +267,11 @@ function HttpEditor({ c, set }: Ed) {
   return (
     <div className="flex flex-col gap-2" data-http-editor>
       <div className="flex gap-2"><Pick label={t("auto:http.method")} value={c.method ?? "GET"} options={["GET", "POST", "PUT", "PATCH", "DELETE"].map((v) => ({ v, l: v }))} onChange={(v) => set((x) => { x.method = v; if (v !== "GET") x.effect = true })} />
-        <Input aria-label="URL" className="h-8 rounded-lg font-mono text-[12px]" value={c.url ?? ""} onChange={(e) => set((x) => { x.url = e.target.value })} /></div>
-      {(c.method ?? "GET") !== "GET" && <Textarea aria-label={t("auto:http.body")} className="min-h-20 rounded-lg bg-muted/50 font-mono text-[12px]" value={c.body ?? ""} onChange={(e) => set((x) => { x.body = e.target.value })} />}
+        <Input aria-label="URL" className="h-8 type-code" value={c.url ?? ""} onChange={(e) => set((x) => { x.url = e.target.value })} /></div>
+      {(c.method ?? "GET") !== "GET" && <Textarea aria-label={t("auto:http.body")} className="min-h-20 type-code" value={c.body ?? ""} onChange={(e) => set((x) => { x.body = e.target.value })} />}
       <div className="type-footnote text-muted-foreground"><Trans t={t} i18nKey="auto:http.hint" components={{ steps: <span className="font-mono" />, secrets: <span className="font-mono" /> }}
         values={{ steps: `{{steps.<${t("auto:http.stepPart")}>.<${t("auto:http.fieldPart")}>}}`, secrets: `{{secrets.<${t("auto:http.entryPart")}>.<${t("auto:http.fieldPart")}>}}` }} /></div>
-      <label className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 type-callout"><span>{t("auto:http.effect")}<span className="block type-footnote text-muted-foreground">{c.effect ? t("auto:http.effectOn") : t("auto:http.effectOff")}</span></span>
+      <label className="flex items-center justify-between gap-3 rounded-lg bg-muted/60 px-3 py-2.5 type-callout"><span>{t("auto:http.effect")}<span className="block type-footnote text-muted-foreground">{c.effect ? t("auto:http.effectOn") : t("auto:http.effectOff")}</span></span>
         <Switch checked={!!c.effect} disabled={(c.method ?? "GET") !== "GET"} onCheckedChange={(v) => set((x) => { x.effect = v })} aria-label={t("auto:http.effect")} /></label>
     </div>
   )
@@ -283,14 +283,14 @@ function WaitEditor({ c, set }: Ed) {
   return (
     <div className="flex flex-col gap-2" data-wait-editor>
       <Segmented size="sm" value={mode} onChange={(v) => set((x) => { x.mode = v })} options={[["delay", t("auto:wait.delay")], ["event", t("auto:wait.event")], ["until", t("auto:wait.until")]] as const} />
-      {mode === "delay" && <F label={t("auto:wait.howLong")}><Input className="h-8 rounded-lg" value={c.delay ?? ""} onChange={(e) => set((x) => { x.delay = e.target.value })} /></F>}
-      {mode === "until" && <F label={t("auto:wait.untilWhen")}><Input className="h-8 rounded-lg" value={c.until ?? ""} onChange={(e) => set((x) => { x.until = e.target.value })} /></F>}
+      {mode === "delay" && <F label={t("auto:wait.howLong")}><Input className="h-8" value={c.delay ?? ""} onChange={(e) => set((x) => { x.delay = e.target.value })} /></F>}
+      {mode === "until" && <F label={t("auto:wait.untilWhen")}><Input className="h-8" value={c.until ?? ""} onChange={(e) => set((x) => { x.until = e.target.value })} /></F>}
       {mode === "event" && <>
-        <div className="flex gap-2"><F label={t("auto:wait.source")}><Input className="h-8 rounded-lg" value={c.match?.source ?? ""} onChange={(e) => set((x) => { (x.match ??= {}).source = e.target.value })} placeholder="webhook" /></F>
-          <F label={t("auto:wait.type")}><Input className="h-8 rounded-lg" value={c.match?.type ?? ""} onChange={(e) => set((x) => { (x.match ??= {}).type = e.target.value })} /></F></div>
-        <F label={t("auto:wait.when")}><Input className="h-8 rounded-lg font-mono text-[12px]" value={c.match?.when ?? ""} onChange={(e) => set((x) => { (x.match ??= {}).when = e.target.value })} /></F></>}
-      {mode !== "delay" && <div className="flex gap-2"><F label={t("auto:wait.timeout")}><Input className="h-8 rounded-lg" value={c.timeout ?? ""} onChange={(e) => set((x) => { x.timeout = e.target.value })} placeholder="3d" /></F>
-        <F label={t("auto:wait.timeoutLabel")}><Input className="h-8 rounded-lg" value={c.timeout_label ?? ""} onChange={(e) => set((x) => { x.timeout_label = e.target.value })} placeholder={t("auto:wait.timeoutDefault")} /></F></div>}
+        <div className="flex gap-2"><F label={t("auto:wait.source")}><Input className="h-8" value={c.match?.source ?? ""} onChange={(e) => set((x) => { (x.match ??= {}).source = e.target.value })} placeholder="webhook" /></F>
+          <F label={t("auto:wait.type")}><Input className="h-8" value={c.match?.type ?? ""} onChange={(e) => set((x) => { (x.match ??= {}).type = e.target.value })} /></F></div>
+        <F label={t("auto:wait.when")}><Input className="h-8 type-code" value={c.match?.when ?? ""} onChange={(e) => set((x) => { (x.match ??= {}).when = e.target.value })} /></F></>}
+      {mode !== "delay" && <div className="flex gap-2"><F label={t("auto:wait.timeout")}><Input className="h-8" value={c.timeout ?? ""} onChange={(e) => set((x) => { x.timeout = e.target.value })} placeholder="3d" /></F>
+        <F label={t("auto:wait.timeoutLabel")}><Input className="h-8" value={c.timeout_label ?? ""} onChange={(e) => set((x) => { x.timeout_label = e.target.value })} placeholder={t("auto:wait.timeoutDefault")} /></F></div>}
       <div className="type-footnote text-muted-foreground">{t("auto:wait.hint")}</div>
     </div>
   )
@@ -310,8 +310,8 @@ function ActionEditor({ c, set }: Ed) {
       {a === "item.link" && <>
         <F label={t("auto:actionEd.findBy")}><Pick label={t("auto:actionEd.findBy")} value={c.by ?? "thread"} options={[{ v: "thread", l: t("auto:actionEd.byThread") }, { v: "branch", l: t("auto:actionEd.byBranch") }, { v: "ref", l: t("auto:actionEd.byRef") }]} onChange={(v) => set((x) => { x.by = v })} className="w-full" /></F>
         <F label={t("auto:actionEd.notFound")}><Pick label={t("auto:actionEd.notFound")} value={c.fallback ?? "create"} options={[{ v: "create", l: t("auto:actionEd.createNew") }, { v: "none", l: t("auto:actionEd.doNothing") }]} onChange={(v) => set((x) => { x.fallback = v })} className="w-full" /></F></>}
-      {(a === "notify" || a === "digest") && <F label={a === "notify" ? t("auto:actionEd.notifyText") : t("auto:actionEd.digestText")}><Textarea className="min-h-16 rounded-lg" value={c.text ?? ""} onChange={(e) => set((x) => { x.text = e.target.value })} /></F>}
-      {a === "ignore" && <F label={t("auto:actionEd.reason")}><Input className="h-8 rounded-lg" value={c.reason ?? ""} onChange={(e) => set((x) => { x.reason = e.target.value })} /></F>}
+      {(a === "notify" || a === "digest") && <F label={a === "notify" ? t("auto:actionEd.notifyText") : t("auto:actionEd.digestText")}><Textarea className="min-h-16" value={c.text ?? ""} onChange={(e) => set((x) => { x.text = e.target.value })} /></F>}
+      {a === "ignore" && <F label={t("auto:actionEd.reason")}><Input className="h-8" value={c.reason ?? ""} onChange={(e) => set((x) => { x.reason = e.target.value })} /></F>}
       {EFFECT_ACTIONS.includes(a) && <Json v={c} />}
     </div>
   )

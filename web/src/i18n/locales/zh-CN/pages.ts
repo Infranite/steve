@@ -62,7 +62,7 @@ export default {
     backups_other: "备用 {{count}} 个",
     unwired: "这个 Hub 还不能设置模型，换成新版 Hub 后可以在这里改。",
     defaultSection: "默认配置",
-    defaultUses: "没有单独配置的用途都用 {{name}} 的",
+    defaultUses: "没有单独配置的用途都用 {{name}} 的这套配置",
     effortLine: "思考强度：{{effort}}",
     fallbackHint: "前一个模型出错或超时才换下一个",
     change: "修改",

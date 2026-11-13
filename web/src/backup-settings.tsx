@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { HubError, modReq } from "@/api"
-import { Group, Row, SectionLabel } from "@/ui"
+import { Row } from "@/ui"
+import { Panel, Section } from "@/settings-kit"
 import { useT } from "@/i18n"
 import { monthDayTime } from "@/i18n/format"
 import { bytes } from "@/disk"
@@ -19,10 +20,10 @@ export function HubData() {
   }, [])
   if (hidden) return null
   const last = s && lastKey(s)
-  return <section data-hub-data><SectionLabel>{t("manage:data.hub")}</SectionLabel><Group>
-    <Row title={t("manage:data.location")} sub={<span className="font-mono break-all" data-hub-database>{s?.database ?? err ?? "…"}</span>} />
+  return <Section data-hub-data label={t("manage:data.hub")}><Panel>
+    <Row title={t("manage:data.location")} sub={<span className="type-code break-all" data-hub-database>{s?.database ?? err ?? "…"}</span>} />
     {s && <Row title={t("manage:data.backup")} sub={<span data-hub-backup={s.daily ? "daily" : "off"}>{t(`manage:data.${planKey(s)}`, { days: s.keep_days })}</span>} />}
-    {s && <Row title={t("manage:data.backupDir")} sub={<span className="font-mono break-all" data-hub-backup-dir>{s.dir}</span>} />}
+    {s && <Row title={t("manage:data.backupDir")} sub={<span className="type-code break-all" data-hub-backup-dir>{s.dir}</span>} />}
     {s && last && <Row title={t("manage:data.backupLatest")} sub={<span data-hub-backup-last>{t(`manage:data.${last}`, s.last ? { when: monthDayTime(s.last.at), size: bytes(s.last.bytes) } : {})}</span>} />}
-  </Group></section>
+  </Panel></Section>
 }

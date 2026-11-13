@@ -40,6 +40,7 @@ import { ItemStatsRows, SessionStats } from "@/stats/drill"
 import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, permissionQuestion, Chips, closeSheet, useScrollMore, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
 import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
+import { Chevron, Panel, Section, Tile } from "@/settings-kit"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
 import { YoloPill, yoloState } from "@/yolo/switch"
 import { RunState } from "@/yolo/status"
@@ -808,7 +809,7 @@ export const Ico = ({ I }: { I: any }) => <span className="flex size-7 shrink-0 
 function MeRow() {
   const t = useT()
   const on = usePeopleOn()
-  return on ? <Group><Row icon={<Ico I={UserRoundIcon} />} title={t("views:more.me")} sub={t("views:more.meSub")} onClick={() => go("#/contacts/me")} data-more-me><ChevronRightIcon className="size-4 text-tertiary" /></Row></Group> : null
+  return on ? <Panel><Row icon={<Tile I={UserRoundIcon} />} title={t("views:more.me")} sub={t("views:more.meSub")} onClick={() => go("#/contacts/me")} data-more-me><Chevron /></Row></Panel> : null
 }
 export function MoreView() {
   const t = useT()
@@ -822,115 +823,22 @@ export function MoreView() {
     <Page title={t("views:more.title")} max={640}>
       <div className="flex flex-col gap-8">
         <MeRow />
-        <Group><Row icon={<BotAvatar k="steve" size={40} />} title={<span className="type-headline">{st.bots.steve?.n ?? "Steve"}</span>} sub={t("views:more.steveSub")} onClick={() => go("#/bots/steve")}><ChevronRightIcon className="size-4 text-tertiary" /></Row></Group>
-        {groups.map((group) => <section key={group.name}><SectionLabel>{group.name}</SectionLabel><Group>{group.rows.map(([h, title, s, I]) => (
-          <Row key={h} icon={<Ico I={I} />} title={title} sub={s} onClick={() => go("#/" + h)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
-        ))}</Group></section>)}
-        <HubMore />
-        <Group><GitHubMoreRow /></Group>
-        {st.yolo && <Group><Row icon={<Ico I={ZapIcon} />} title={t("views:more.yolo")} sub={{ on: t("views:more.yoloOn"), full: t("views:more.yoloFull"), off: t("views:more.yoloOff"), paused: t("views:more.yoloPaused", { reason: st.yolo.paused?.reason ?? "" }), forced: t("views:more.yoloForced") }[yoloState(st.yolo)!]} onClick={() => openSheet("yolo")} data-more-yolo><ChevronRightIcon className="size-4 text-tertiary" /></Row>
-          <Row title={t("views:more.yoloLog")} sub={t("views:more.yoloLogSub")} onClick={() => go("#/yolo")}><ChevronRightIcon className="size-4 text-tertiary" /></Row></Group>}
-        <Group><Row title={t("views:more.appearance")}><ThemeSwitch labels /></Row></Group>
+        <Panel><Row icon={<BotAvatar k="steve" size={44} />} className="py-3" title={<span className="type-headline">{st.bots.steve?.n ?? "Steve"}</span>} sub={t("views:more.steveSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel>
+        {groups.map((group) => <Section key={group.name} label={group.name}><Panel>{group.rows.map(([h, title, s, I]) => (
+          <Row key={h} icon={<Tile I={I} />} title={title} sub={s} onClick={() => go("#/" + h)}><Chevron /></Row>
+        ))}</Panel></Section>)}
+        <div className="[&>[data-more-hub]>[data-slot=item-group]]:mx-0 [&>[data-more-hub]>[data-slot=item-group]]:w-auto [&>[data-more-hub]>[data-slot=item-group]]:rounded-xl [&>[data-more-hub]>[data-slot=item-group]]:bg-card [&>[data-more-hub]>[data-slot=item-group]]:p-1 [&>[data-more-hub]>[data-slot=item-group]]:shadow-[var(--lift)] [&>[data-more-hub]>div:first-child]:px-1 [&>[data-more-hub]>div:first-child]:text-tertiary [&>[data-more-hub]_[data-slot=item]]:px-3 [&>[data-more-hub]_[data-slot=item-separator]]:mx-3 [&>[data-more-hub]_[data-slot=item-media]>span]:size-8 [&>[data-more-hub]_[data-slot=item-media]>span]:rounded-lg"><HubMore /></div>
+        <Panel><GitHubMoreRow /></Panel>
+        {st.yolo && <Panel><Row icon={<Tile I={ZapIcon} />} title={t("views:more.yolo")} sub={{ on: t("views:more.yoloOn"), full: t("views:more.yoloFull"), off: t("views:more.yoloOff"), paused: t("views:more.yoloPaused", { reason: st.yolo.paused?.reason ?? "" }), forced: t("views:more.yoloForced") }[yoloState(st.yolo)!]} onClick={() => openSheet("yolo")} data-more-yolo><Chevron /></Row>
+          <Row title={t("views:more.yoloLog")} sub={t("views:more.yoloLogSub")} onClick={() => go("#/yolo")}><Chevron /></Row></Panel>}
+        <Panel><Row title={t("views:more.appearance")}><ThemeSwitch labels /></Row></Panel>
       </div>
     </Page>
   )
 }
 
-/* ═════════ 视觉规范 ═════════ */
-function lum(hex: string) {
-  const m = hex.replace("#", ""); const c = [0, 2, 4].map((n) => parseInt(m.slice(n, n + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4))
-  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
-}
-const ratio = (a: string, b: string) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05) }
-function cssHex(v: string) {
-  const el = document.createElement("span"); el.style.color = `var(${v})`; document.body.appendChild(el)
-  const c = getComputedStyle(el).color; el.remove()
-  const m = c.match(/[\d.]+/g)?.map(Number) ?? [0, 0, 0]
-  return "#" + m.slice(0, 3).map((n) => Math.round(n).toString(16).padStart(2, "0")).join("")
-}
-/* translated when the page renders, so a language switch shows at once */
-const ROLES = (): [string, string, string][] => [
-  ["--foreground", tr("views:design.roleForeground"), tr("views:design.roleForegroundUse")], ["--muted-foreground", tr("views:design.roleMuted"), tr("views:design.roleMutedUse")], ["--tertiary", tr("views:design.roleTertiary"), tr("views:design.roleTertiaryUse")],
-  ["--blue", tr("views:design.roleBlue"), tr("views:design.roleBlueUse")], ["--attention", tr("views:design.roleAttention"), tr("views:design.roleAttentionUse")], ["--destructive", tr("views:design.roleDestructive"), tr("views:design.roleDestructiveUse")], ["--success", tr("views:design.roleSuccess"), tr("views:design.roleSuccessUse")],
-]
-const SURF = (): [string, string][] => [["--background", tr("views:design.surfBackground")], ["--sidebar", tr("views:design.surfSidebar")], ["--muted", tr("views:design.surfMuted")], ["--card", tr("views:design.surfCard")], ["--border", tr("views:design.surfBorder")]]
-export function DesignView() {
-  const t = useT()
-  const [, f] = useState(0)
-  useEffect(() => { const tm = setTimeout(() => f((x) => x + 1), 30); return () => clearTimeout(tm) }, [st.ver])
-  const bg = cssHex("--background")
-  const Do = ({ ok: good, children, note }: { ok: boolean; children: ReactNode; note: string }) => (
-    <div className="flex flex-col gap-2"><div className="flex min-h-24 items-center justify-center rounded-xl border bg-card p-4">{children}</div>
-      <div className="flex items-start gap-1.5 type-footnote">{good ? <CheckIcon className="mt-px size-3.5 text-success" /> : <XIcon className="mt-px size-3.5 text-destructive" />}<span className="text-muted-foreground">{note}</span></div></div>
-  )
-  return (
-    <Page title={t("views:design.title")} sub={t("views:design.sub")} max={880} toolbar={<ThemeSwitch labels />}>
-      <div className="flex flex-col gap-12">
-        <section>
-          <SectionLabel>{t("views:design.principles")}</SectionLabel>
-          <div className="grid gap-3 sm:grid-cols-3">
-            {[[t("views:design.p1"), t("views:design.p1Desc")], [t("views:design.p2"), t("views:design.p2Desc")], [t("views:design.p3"), t("views:design.p3Desc")]].map(([title, d]) => (
-              <div key={title} className="rounded-xl border bg-card px-4 py-3.5"><div className="type-headline">{title}</div><div className="mt-1 type-callout text-muted-foreground">{d}</div></div>
-            ))}
-          </div>
-        </section>
-        <section>
-          <SectionLabel>{t("views:design.colors")}</SectionLabel>
-          <Group>{ROLES().map(([v, n, use]) => { const hx = cssHex(v), cr = ratio(hx, bg); return (
-            <div key={v} className="flex items-center gap-3 px-4 py-2.5">
-              <span className="size-7 shrink-0 rounded-full ring-1 ring-inset ring-black/5" style={{ background: `var(${v})` }} />
-              <div className="min-w-0 flex-1"><div className="type-body">{n} <span className="font-mono text-[12px] text-muted-foreground">{v.slice(2)}</span></div><div className="type-footnote text-muted-foreground">{use}</div></div>
-              <span className="font-mono text-[12px] text-muted-foreground">{hx.toUpperCase()}</span>
-              <span className={cn("w-16 text-right font-mono text-[12px] tabular-nums", cr >= 4.5 ? "text-foreground" : "text-muted-foreground")} data-contrast={v}>{cr.toFixed(1)}:1</span>
-            </div>) })}</Group>
-          <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
-            {SURF().map(([v, n]) => <div key={v}><div className="h-16 rounded-xl border" style={{ background: `var(${v})` }} /><div className="mt-1.5 type-footnote"><span className="text-foreground">{n}</span> <span className="font-mono text-muted-foreground">{cssHex(v).toUpperCase()}</span></div></div>)}
-          </div>
-        </section>
-        <section>
-          <SectionLabel>{t("views:design.type")}</SectionLabel>
-          <Group>{([["type-large-title", t("views:design.typeLargeTitle"), t("views:design.typeLargeTitleSample")], ["type-title", t("views:design.typeTitle"), t("views:design.typeTitleSample")], ["type-headline", t("views:design.typeHeadline"), t("views:design.typeHeadlineSample")], ["type-body", t("views:design.typeBody"), t("views:design.typeBodySample")], ["type-callout", t("views:design.typeCallout"), t("views:design.typeCalloutSample")], ["type-footnote", t("views:design.typeFootnote"), t("views:design.typeFootnoteSample")], ["type-code", t("views:design.typeCode"), "let target = state.return_to.unwrap_or(\"/\");"]] as const).map(([c, l, s]) => (
-            <div key={c} className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-baseline sm:gap-6"><span className="w-40 shrink-0 type-footnote text-muted-foreground">{l}</span><span className={cn(c, "min-w-0 truncate")}>{s}</span></div>
-          ))}</Group>
-        </section>
-        <section>
-          <SectionLabel>{t("views:design.status")}</SectionLabel>
-          <div className="flex flex-wrap gap-x-6 gap-y-3 rounded-xl border bg-card px-4 py-4">{["run", "wait", "prop", "pause", "done", "drop"].map((s) => <Status key={s} s={s} className="type-callout" />)}<span className="w-full" />{["run", "wait", "idle", "ended"].map((s) => <Status key={s} s={s} sess className="type-callout" />)}</div>
-        </section>
-        <section>
-          <SectionLabel>{t("views:design.components")}</SectionLabel>
-          <div className="grid gap-6 lg:grid-cols-2">
-            <div className="flex flex-col gap-5 rounded-xl border bg-card p-5">
-              <div className="type-footnote text-muted-foreground">{t("views:design.buttons")}</div>
-              <div className="flex flex-wrap items-center gap-2"><Button>{t("views:design.accept")}</Button><Button variant="outline">{t("views:design.rework")}</Button><Button variant="ghost">{t("common:action.cancel")}</Button><Button variant="destructive">{t("views:design.dropItem")}</Button></div>
-              <div className="type-footnote text-muted-foreground">{t("views:design.controls")}</div>
-              <div className="flex flex-wrap items-center gap-3"><Segmented value="list" onChange={() => {}} options={[["list", t("views:items.viewList")], ["board", t("views:items.viewBoard")], ["graph", t("views:items.viewGraph")]]} /><Switch defaultChecked /><Input className="h-8 w-40 rounded-lg" placeholder={t("views:design.searchItems")} /></div>
-              <div className="type-footnote text-muted-foreground">{t("views:design.composer")}</div>
-              <Composer placeholder={t("views:design.composerPlaceholder")} onSend={() => toast(t("views:design.composerToast"))} />
-            </div>
-            <div className="flex flex-col gap-5 rounded-xl border bg-card p-5">
-              <div className="type-footnote text-muted-foreground">{t("views:design.agent")}</div>
-              <div className="rounded-lg border p-4">{(() => { const k = Object.keys(st.S).find((x) => !st.S[x].ro); return k ? <Transcript k={k} compact tail={3} /> : <span className="type-callout text-muted-foreground">{t("views:design.agentEmpty")}</span> })()}</div>
-            </div>
-          </div>
-        </section>
-        <section>
-          <SectionLabel>{t("views:design.dos")}</SectionLabel>
-          <div className="grid gap-x-4 gap-y-6 sm:grid-cols-2">
-            <Do ok note={t("views:design.doStatus")}><div className="flex gap-4"><Status s="run" className="type-callout" /><Status s="wait" className="type-callout" /><Status s="done" className="type-callout" /></div></Do>
-            <Do ok={false} note={t("views:design.dontStatus")}><div className="flex gap-2">{[[t("views:design.tagRun"), "#0071e3"], [t("views:design.tagWait"), "#ff9500"], [t("views:design.tagDone"), "#28a745"], [t("views:design.tagProp"), "#9a5cff"]].map(([l, c]) => <span key={l} className="rounded-md px-2 py-0.5 text-[12px] font-medium text-white" style={{ background: c }}>{l}</span>)}</div></Do>
-            <Do ok note={t("views:design.doAvatar")}><div className="flex gap-2">{Object.keys(st.bots).slice(0, 5).map((k) => <BotAvatar key={k} k={k} size={32} />)}</div></Do>
-            <Do ok={false} note={t("views:design.dontAvatar")}><div className="flex gap-2">{["#5b8def", "#e0703a", "#2fa36b", "#9a5cff", "#d6a23a"].map((c, n) => <span key={c} className="flex size-8 items-center justify-center rounded-lg text-[13px] font-semibold text-white" style={{ background: c }}>{[...t("views:design.botInitials")][n]}</span>)}</div></Do>
-            <Do ok note={t("views:design.doButtons")}><div className="flex gap-2"><Button variant="ghost">{t("views:design.noReply")}</Button><Button variant="outline">{t("views:design.moreFormal")}</Button><Button>{t("views:design.send")}</Button></div></Do>
-            <Do ok={false} note={t("views:design.dontButtons")}><div className="flex gap-2">{[[t("views:design.noReply"), "#e5352b"], [t("views:design.rewrite"), "#ff9500"], [t("views:design.send"), "#28a745"]].map(([l, c]) => <span key={l} className="rounded-lg px-3 py-1.5 text-[13px] font-medium text-white" style={{ background: c }}>{l}</span>)}</div></Do>
-            <Do ok note={t("views:design.doHint")}><span className="type-footnote text-muted-foreground">{t("views:item.goalHint")}</span></Do>
-            <Do ok={false} note={t("views:design.dontHint")}><span className="rounded-lg bg-[#e8f0fe] px-3 py-2 text-[12.5px] font-medium text-[#1a56db]">{t("views:design.hintBox")}</span></Do>
-          </div>
-        </section>
-      </div>
-    </Page>
-  )
-}
+/* ═════════ 视觉规范: the living specimen lives in design-view.tsx ═════════ */
+export { DesignView } from "@/design-view"
 
 export function ImportDialog() {
   const t = useT()

@@ -2,11 +2,13 @@
  * (prototype AutomationView). Routes: #/auto/rules, #/auto/schedules, #/auto/sources, #/auto/rule/:id, #/auto/source/:adapter */
 import { useEffect, useState } from "react"
 import { Trans } from "react-i18next"
-import { ArrowRightIcon, ChevronRightIcon, PlusIcon } from "lucide-react"
+import { ArrowRightIcon, PlusIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
-import { Page, Group, Row, Segmented, Meta, Empty, StatusDot, SectionLabel, go } from "@/ui"
+import { Page, Row, Segmented, Meta, Empty, StatusDot, go } from "@/ui"
+import { Panel, Section, Chevron, FieldRow, LIFT } from "@/settings-kit"
+import { cn } from "cn"
 import { toast } from "@/store"
 import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, sourceLabel, type FlowSummary, type Load } from "@/api/flow"
@@ -49,11 +51,11 @@ export function AutomationView({ tab }: { tab: Tab }) {
       toolbar={<Segmented value={tab} onChange={(v) => go("#/auto/" + v)} options={[["rules", t("auto:tab.rules")], ["schedules", t("auto:tab.schedules")], ["sources", t("auto:tab.sources")]] as const} />}>
       {dialog === "rule" && <NewRuleDialog onClose={() => setDialog(null)} />}
       {dialog === "schedule" && <NewScheduleDialog onClose={() => setDialog(null)} onSaved={() => void sch.reload()} />}
-      <nav aria-label={t("auto:chain.aria")} className="mb-8 grid grid-cols-2 overflow-hidden rounded-xl border bg-card sm:flex sm:items-stretch" data-auto-chain>
+      <nav aria-label={t("auto:chain.aria")} className={cn(LIFT, "mb-8 grid grid-cols-2 gap-1 p-1 sm:flex sm:items-stretch sm:gap-0")} data-auto-chain>
         {chain.map(([a, b, h], i) => (
-          <a key={h} href={h} className="relative flex min-w-0 flex-1 flex-col px-4 py-3 text-left transition-colors hover:bg-accent max-sm:border-border max-sm:[&:nth-child(even)]:border-l max-sm:[&:nth-child(-n+2)]:border-b">
-            {i > 0 && <ArrowRightIcon className="absolute -left-2 top-1/2 hidden size-4 -translate-y-1/2 rounded-full bg-card text-tertiary sm:block" aria-hidden />}
-            <span className="truncate type-headline">{a}</span><span className="truncate type-footnote text-muted-foreground">{b}</span>
+          <a key={h} href={h} className="relative flex min-w-0 flex-1 flex-col gap-0.5 rounded-lg px-4 py-3 text-left transition-colors hover:bg-accent">
+            {i > 0 && <ArrowRightIcon className="absolute -left-2 top-1/2 hidden size-4 -translate-y-1/2 text-tertiary sm:block" aria-hidden />}
+            <span className="truncate type-headline tabular-nums">{a}</span><span className="truncate type-footnote text-muted-foreground">{b}</span>
           </a>
         ))}
       </nav>
@@ -76,16 +78,16 @@ function FlowList({ L, onNew }: { L: Load<FlowSummary[]>; onNew: () => void }) {
     try { await flowApi.patchFlow(f.id, { enabled: v }); toast(v ? t("auto:flows.enabledToast") : t("auto:flows.disabledToast")); await L.reload() } catch (e) { toast(errText(e)) } finally { setBusy(null) }
   }
   return (
-    <Group>{L.data.map((f) => (
-      <div key={f.id} className="flex items-center gap-3 px-2 py-3">
+    <Panel>{L.data.map((f) => (
+      <div key={f.id} className="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-accent anim-in">
         <Ico I={srcIcon(f.trigger?.source)} />
         <button type="button" className="min-w-0 flex-1 text-left" onClick={() => go("#/auto/rule/" + f.id)} data-rule-row={f.id}>
-          <div className="truncate type-body">{f.name}</div>
+          <div className="truncate type-body font-medium">{f.name}</div>
           <Meta className="mt-0.5"><span>{sourceLabel(f.trigger?.source) || t("auto:flows.noTrigger")}{f.trigger?.types?.length ? " · " + f.trigger.types.join(t("auto:sep.list")) : ""}</span><span>{f.uses_ai ? t("auto:usesAI") : t("auto:noAI")}</span><span>{t("auto:flows.outcomes", { count: f.outcomes })}</span><span>{t("auto:flows.runs24", { count: f.runs24 })}</span>{f.origin_label && <span>{f.origin_label}</span>}</Meta>
         </button>
         <Switch checked={f.enabled} disabled={busy === f.id} onCheckedChange={(v) => void toggle(f, v)} aria-label={t("auto:enableName", { name: f.name })} />
       </div>
-    ))}</Group>
+    ))}</Panel>
   )
 }
 
@@ -96,14 +98,14 @@ function SourceList() {
   if (!L.data) return null
   const xs = L.data.filter((s) => s.source !== "im")
   return (<>
-    {xs.length ? <Group>{xs.map((s) => {
+    {xs.length ? <Panel>{xs.map((s) => {
       const bad = s.connections.filter((c) => c.status !== "ok").length, on = s.types.filter((x) => x.on)
       return (
         <Row key={s.adapter} icon={<Ico I={srcIcon(s.source)} />} onClick={() => go("#/auto/source/" + s.adapter)} data-source-row={s.adapter} title={s.name}
           sub={[s.paused ? t("auto:sources.paused") : "", t("auto:sources.accounts", { count: s.connections.length }), t("auto:sources.eventTypes", { count: on.length }), t("auto:sources.events24", { count: on.reduce((n, x) => n + x.n24, 0) })].filter(Boolean).join(" · ")}>
           {bad ? <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s="wait" />{t("auto:sources.needAttention", { count: bad })}</span> : <span className="type-footnote text-muted-foreground">{s.connections.length ? t("auto:ok") : t("auto:sources.noAccounts")}</span>}
-          <ChevronRightIcon className="size-4 text-tertiary" aria-hidden />
-        </Row>) })}</Group>
+          <Chevron />
+        </Row>) })}</Panel>
       : <Empty title={t("auto:sources.emptyTitle")} sub={t("auto:sources.emptySub")} />}
     <div className="mt-2 px-1 type-footnote text-muted-foreground"><Trans t={t} i18nKey="auto:sources.footer" components={{ integrations: <a href="#/integrations" className="text-blue hover:underline" />, channels: <a href="#/channels" className="text-blue hover:underline" /> }} /></div>
   </>)
@@ -120,11 +122,9 @@ function AllowPrivate() {
     try { const x = await flowApi.setAllowPrivate(v.split(/[\s,\uff0c]+/).filter(Boolean)); setV(x.hosts.join(", ")); toast(t("auto:allowPrivate.saved")) } catch (e) { toast(errText(e)) } finally { setBusy(false) }
   }
   return (
-    <section className="mt-8" data-allow-private>
-      <SectionLabel>{t("auto:allowPrivate.title")}</SectionLabel>
-      <div className="flex gap-2"><Input className="rounded-lg" value={v} placeholder={t("auto:allowPrivate.placeholder")} onChange={(e) => setV(e.target.value)} aria-label={t("auto:allowPrivate.title")} />
-        <Button variant="outline" disabled={busy} onClick={() => void save()} data-allow-private-save>{t("auto:allowPrivate.save")}</Button></div>
-      <p className="mt-1.5 px-1 type-footnote text-muted-foreground">{t("auto:allowPrivate.sub")}</p>
-    </section>
+    <Section className="mt-8" data-allow-private label={t("auto:allowPrivate.title")} note={t("auto:allowPrivate.sub")}>
+      <Panel><FieldRow onSubmit={(e) => { e.preventDefault(); void save() }}><Input value={v} placeholder={t("auto:allowPrivate.placeholder")} onChange={(e) => setV(e.target.value)} aria-label={t("auto:allowPrivate.title")} />
+        <Button size="sm" variant="outline" type="submit" disabled={busy} data-allow-private-save>{t("auto:allowPrivate.save")}</Button></FieldRow></Panel>
+    </Section>
   )
 }
