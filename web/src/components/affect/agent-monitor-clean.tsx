@@ -819,7 +819,8 @@ const css = /* css */ `
 .ui-agmc__steps::-webkit-scrollbar { display: none; }
 .ui-agmc__steps[data-fade-top] { --ui-agmc-fade-top: transparent; }
 .ui-agmc__steps[data-fade-bottom] { --ui-agmc-fade-bottom: transparent; }
-.ui-agmc__steps { position: relative; display: grid; align-content: start; height: calc(var(--ui-agmc-shown, 0) * 26px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; margin: -2px -6px 0; --ui-agmc-fade-top: #000; --ui-agmc-fade-bottom: #000; -webkit-mask-image: linear-gradient(to bottom, var(--ui-agmc-fade-top), #000 14px, #000 calc(100% - 14px), var(--ui-agmc-fade-bottom)); mask-image: linear-gradient(to bottom, var(--ui-agmc-fade-top), #000 14px, #000 calc(100% - 14px), var(--ui-agmc-fade-bottom)); transition: height 420ms var(--ui-agmc-ease); }
+/* Steve: the one column is as wide as the card, never as wide as its longest line, so a long turn ends in an ellipsis */
+.ui-agmc__steps { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; height: calc(var(--ui-agmc-shown, 0) * 26px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; margin: -2px -6px 0; --ui-agmc-fade-top: #000; --ui-agmc-fade-bottom: #000; -webkit-mask-image: linear-gradient(to bottom, var(--ui-agmc-fade-top), #000 14px, #000 calc(100% - 14px), var(--ui-agmc-fade-bottom)); mask-image: linear-gradient(to bottom, var(--ui-agmc-fade-top), #000 14px, #000 calc(100% - 14px), var(--ui-agmc-fade-bottom)); transition: height 420ms var(--ui-agmc-ease); }
 .ui-agmc__step { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 2px); font-size: 12px; cursor: default; transition: opacity 200ms ease, background-color 200ms ease; animation: ui-agmc-drop 460ms var(--ui-agmc-ease) backwards; }
 .ui-agmc__step[data-hot] { background: var(--ui-agmc-lane); }
 .ui-agmc__step { position: relative; cursor: pointer; }
