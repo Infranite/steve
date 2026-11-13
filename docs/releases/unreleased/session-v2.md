@@ -1,0 +1,11 @@
+- A conversation's side panel is redesigned (on a phone it opens as a sheet from the bottom). From the top it shows:
+  - The conversation at work: its harness and model, its state, the estimated cost so far, and each turn as a step on a time strip. Click a turn to see what started it, how long it took, its tool calls, and its tokens and cost.
+  - The context window: how full it is, in the tokens the harness reports. Harnesses report one total, not the system prompt, tools and files separately, so the panel shows that total as a single part.
+  - Consumption: tokens split into input, output and cache reads and writes, with the estimated cost, the cache hit rate and the harness's own figure when that differs.
+  - Time: how old the conversation is, how long it actually worked, its turns with their average and longest, and when it was last active. For an imported transcript, which has no time for each turn, it shows when it was imported and its number of turns.
+  - What it produced: the outputs it delivered to its item (open one to preview it) and the files it changed.
+  - Relations: its item, then what is upstream (a collaboration's lead item, the item it was forked from, prerequisites), what is downstream (collaboration units, items forked from it, items waiting on it) and the item's other conversations. This is a short list that reads well even when there is only one entry. The full graph is one click away.
+  - Knowledge used: grouped by the search that found it, each document listed once with its source, its level and how many of its snippets came along.
+  - Runtime: Bot, harness, model, reasoning effort, device, source and working directory. How to resume the conversation in its harness folds out from here.
+- Harnesses are shown with their marks: Claude Code with the Claude mark, Codex with the OpenAI mark, and any other harness with a terminal mark. The marks appear in the conversation's header, the composer's label, the read-only runtime line, the conversation list and its harness filter and the conversation rows on an item's page. Model names in the context card, the runtime details and the list's model column show their maker's mark.
+- The conversation header now also shows how much of the context is in use (amber from 80%). In the transcript, each finished turn of an item's conversation shows its tokens and estimated cost.
