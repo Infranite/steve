@@ -151,6 +151,7 @@
   "core.draft.bot.perm_mode": "Permissions",
   "core.draft.bot.default_project": "Default project",
   "core.draft.bot.enabled": "Status",
+  "core.draft.bot.prompt": "System prompt",
   "core.draft.project.name": "Name",
   "core.draft.project.description": "Description",
   "core.draft.project.default_bot": "Default bot",

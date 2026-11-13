@@ -481,6 +481,15 @@ async fn system_models_lists_what_each_harness_offers_and_never_the_keys() {
         .await;
     assert_eq!(code, 200, "{v}");
     assert_eq!(v["name"], "Codex");
+    // before any probe Codex offers its declared list, as Claude Code does
+    let ids: Vec<&str> = v["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert_eq!(ids, ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"]);
+    assert_eq!(v["families"], json!(["GPT"]));
     assert_eq!(
         c.call("GET", "/api/system/models?harness=gemini", None, None)
             .await

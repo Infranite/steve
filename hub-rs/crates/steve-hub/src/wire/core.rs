@@ -2013,6 +2013,19 @@ impl Domain for CoreDomain {
                 .to_string(),
             id: target.get("id").and_then(Value::as_str).map(str::to_string),
         };
+        if let (Some(field), "bot", Some(id)) = (
+            target.get("field").and_then(Value::as_str),
+            t.kind.as_str(),
+            t.id.as_deref(),
+        ) {
+            let base = target.get("base").and_then(Value::as_str);
+            return to_obj(
+                self.core
+                    .draft_bot_text(ws, id, field, base, text)
+                    .await
+                    .map_err(cerr)?,
+            );
+        }
         to_obj(self.core.draft(ws, t, text).await.map_err(cerr)?)
     }
     async fn config_apply(&self, id: &str, actor: &str, ws: &str) -> BResult<Obj> {

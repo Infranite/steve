@@ -453,7 +453,9 @@ const BUILTINS: &[Builtin] = &[
             // its rollout file stands in when a turn's report is missing
             usage_input_includes_cache: true,
             usage_fallback: UsageFallback::CodexRollout,
-            fallback_models: vec![],
+            // what a Codex probe lists, so its bots can pick a model before (or without) a probe,
+            // as Claude Code's can
+            fallback_models: strings(&["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"]),
             fallback_efforts: strings(&["low", "medium", "high", "xhigh", "max", "ultra"]),
             model_fallback: false,
             // what Codex calls its quick tier now, then what it called it before

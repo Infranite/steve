@@ -151,6 +151,7 @@
   "core.draft.bot.perm_mode": "权限",
   "core.draft.bot.default_project": "默认项目",
   "core.draft.bot.enabled": "启用状态",
+  "core.draft.bot.prompt": "系统提示词",
   "core.draft.project.name": "名称",
   "core.draft.project.description": "说明",
   "core.draft.project.default_bot": "默认 Bot",

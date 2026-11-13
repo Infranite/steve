@@ -982,10 +982,20 @@ pub async fn config_draft(
     if let Some(mut t) = k.sub("target", false) {
         let kind = t.enum_("kind", &kinds);
         let id = t.opt_str("id", Str::ANY);
+        // a bot's long text (its working rules or its own system prompt) drafted on its own, from
+        // `base`, the text the editor shows
+        let field = t.opt_enum("field", &["rules", "prompt"]);
+        let base = t.opt_str("base", Str::max(40000));
         k.absorb(t);
         target.insert("kind".into(), json!(kind));
         if let Some(id) = id {
             target.insert("id".into(), json!(id));
+        }
+        if let Some(f) = field {
+            target.insert("field".into(), json!(f));
+        }
+        if let Some(b) = base {
+            target.insert("base".into(), json!(b));
         }
     }
     let text = k.str("text", Str::len(1, 4000));
