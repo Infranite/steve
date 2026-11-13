@@ -229,6 +229,7 @@ export default {
     contacts: "联系人",
     knowledge: "知识",
     bots: "Bot",
+    capabilities: "能力",
     auto: "自动化",
     signals: "信号",
     me: "我",

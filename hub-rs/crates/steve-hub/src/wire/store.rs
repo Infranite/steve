@@ -294,7 +294,8 @@ impl Repo for StoreBackend {
                 x.workspaces.entry(r.get(0)?).or_default().push(r.get(1)?);
             }
             let mut st = c.prepare_cached(
-                "SELECT bot_id, id, name, transport, enabled FROM bot_mcp_servers ORDER BY bot_id, name",
+                "SELECT a.bot_id, s.id, s.name, s.transport, a.enabled FROM bot_capabilities a
+                   JOIN mcp_servers s ON s.id = a.entry_id WHERE a.kind = 'mcp' ORDER BY a.bot_id, lower(s.name)",
             )?;
             let mut rows = st.query([])?;
             while let Some(r) = rows.next()? {
@@ -442,7 +443,8 @@ impl Repo for StoreBackend {
     fn bot_mcp_servers(&self, id: &str) -> BResult<Vec<Value>> {
         self.batch(|c| {
             let mut st = c.prepare_cached(
-                "SELECT bot_id, id, name, transport, enabled FROM bot_mcp_servers WHERE bot_id = ? ORDER BY name",
+                "SELECT a.bot_id, s.id, s.name, s.transport, a.enabled FROM bot_capabilities a
+                   JOIN mcp_servers s ON s.id = a.entry_id WHERE a.kind = 'mcp' AND a.bot_id = ? ORDER BY lower(s.name)",
             )?;
             let v = st
                 .query_map([id], mcp_summary)?
@@ -1063,13 +1065,21 @@ mod workflow_summary_tests {
         c.execute("INSERT INTO workflows (item_id, revision, cycle, paused, max_parallel, max_attempts, created, updated) VALUES ('ST-1', 1, 1, 1, 1, 3, 1, 1)", []).unwrap();
         c.execute("INSERT INTO workflow_units (workflow_id, id, position, spec, status, item_id) VALUES ('ST-1', 'review', 0, '{}', 'failed', 'ST-2')", []).unwrap();
         let backend = StoreBackend::new(store).unwrap();
-        let read = || backend.item_extras(s::WS).unwrap().unwrap().remove("ST-1").unwrap();
+        let read = || {
+            backend
+                .item_extras(s::WS)
+                .unwrap()
+                .unwrap()
+                .remove("ST-1")
+                .unwrap()
+        };
         let current = read();
         assert_eq!(current.workflow_paused, Some(true));
         assert_eq!(current.workflow_cycle, Some(1));
         assert_eq!(current.workflow_failed, ["ST-2"]);
 
-        c.execute("UPDATE items SET cycle = 2 WHERE id = 'ST-1'", []).unwrap();
+        c.execute("UPDATE items SET cycle = 2 WHERE id = 'ST-1'", [])
+            .unwrap();
         let previous = read();
         assert_eq!(previous.workflow_cycle, Some(1));
         assert!(previous.workflow_failed.is_empty());

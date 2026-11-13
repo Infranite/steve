@@ -26,7 +26,9 @@ pub fn is_loopback(addr: &SocketAddr) -> bool {
 }
 
 /// Everything under `/mcp` (prefix match, so `/mcpx` too) bypasses the rest of the app: loopback peers
-/// go to the MCP service, anyone else gets an empty 403.
+/// go to the MCP service; from anywhere else only a request with a user's access token
+/// (`Bearer stt_…`, a client outside Steve: [`crate::wire::outside_mcp`]) does, anyone else gets an
+/// empty 403. A Steve session's own token works only from this machine.
 async fn mcp_gate(State(mcp): State<Option<Router>>, req: Request, next: Next) -> Response {
     if !req.uri().path().starts_with("/mcp") {
         return next.run(req).await;
@@ -35,7 +37,13 @@ async fn mcp_gate(State(mcp): State<Option<Router>>, req: Request, next: Next) -
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0);
-    if !peer.as_ref().is_some_and(is_loopback) {
+    let outside = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|t| t.trim().starts_with(steve_store::access::TOKEN_PREFIX));
+    if !outside && !peer.as_ref().is_some_and(is_loopback) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     match mcp {
@@ -233,6 +241,8 @@ pub fn app(
             }
         }))
         .nest("/auth", auth.merge(crate::access::auth_routes(st.clone())))
+        // Steve as an A2A agent: its card (open) and its endpoint (an access token)
+        .merge(crate::a2a_server::routes(st.clone()))
         .route(
             "/internal/release/drain",
             post({

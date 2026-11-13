@@ -224,6 +224,7 @@ export default {
     contacts: "Contacts",
     knowledge: "Knowledge",
     bots: "Bots",
+    capabilities: "Capabilities",
     auto: "Automation",
     signals: "Signals",
     me: "Me",

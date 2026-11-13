@@ -502,6 +502,8 @@ export default {
     knowledgeSub: "记忆、笔记、文档和来源",
     bots: "Bot",
     botsSub: "Steve 调用的能力：新建、编辑、删除",
+    capabilities: "能力",
+    capabilitiesSub: "MCP 服务器、技能和远程 Agent，按 Bot 选用",
     auto: "自动化",
     autoSub: "流程、定时任务和事件源",
     signals: "信号",

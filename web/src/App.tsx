@@ -30,6 +30,7 @@ const GraphDialog = lazyView(() => import("@/views").then((m) => ({ default: m.G
 const LinkDialog = lazyView(() => import("@/views").then((m) => ({ default: m.LinkDialog })))
 const ImportDialog = lazyView(() => import("@/views").then((m) => ({ default: m.ImportDialog })))
 const BotsView = lazyView(() => import("@/manage").then((m) => ({ default: m.BotsView })))
+const CapabilitiesView = lazyView(() => import("@/caps/page").then((m) => ({ default: m.CapabilitiesView })))
 const BotView = lazyView(() => import("@/manage").then((m) => ({ default: m.BotView })))
 const NewBotDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.NewBotDialog })))
 const DeleteBotDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.DeleteBotDialog })))
@@ -170,6 +171,7 @@ export default function App() {
     a === "sessions" ? (b ? <SessionView key={b} k={b} /> : <SessionsView />) :
     a === "settings" ? <SettingsView /> :
     a === "bots" ? (b ? <BotView key={b} k={b} /> : <BotsView />) :
+    a === "capabilities" ? <CapabilitiesView tab={b} /> :
     a === "design" ? (b === "components" ? <DesignShowroom /> : <DesignView />) :
     a.split("?")[0] === "knowledge" ? <KnowledgeView sub={b} id={c} /> :
     a === "devices" ? (b ? <DeviceView key={b} id={b} /> : <DevicesView />) :

@@ -1,5 +1,5 @@
-//! A Bot's own MCP servers (migration 62, `bot_mcp_servers`): what its harness gets in the ACP
-//! `mcpServers` of every session, next to Steve's own tools.
+//! The workspace's MCP servers (migration 65, `mcp_servers`): what the harness of a Bot assigned one
+//! gets in the ACP `mcpServers` of every session, next to Steve's own tools ([`super`]).
 //!
 //! A row never holds a secret value. An env variable or header marked secret is stored by name only
 //! (`{"name","secret":true}`); its value is a field of the server's `credential_item` in the
@@ -43,7 +43,6 @@ pub fn secret_label(transport: &str, name: &str) -> String {
 pub struct Server {
     pub id: String,
     pub workspace_id: String,
-    pub bot_id: String,
     pub name: String,
     pub transport: String,
     pub command: Option<String>,
@@ -52,7 +51,6 @@ pub struct Server {
     pub url: Option<String>,
     pub headers: Vec<Var>,
     pub credential_item: Option<String>,
-    pub enabled: bool,
     pub created: i64,
     pub updated: i64,
 }
@@ -77,7 +75,7 @@ impl Server {
     }
 }
 
-const COLS: &str = "id, workspace_id, bot_id, name, transport, command, args, env, url, headers, credential_item, enabled, created, updated";
+const COLS: &str = "id, workspace_id, name, transport, command, args, env, url, headers, credential_item, created, updated";
 
 fn json_list<T: for<'de> Deserialize<'de>>(s: String) -> Vec<T> {
     serde_json::from_str(&s).unwrap_or_default()
@@ -87,18 +85,16 @@ fn row(r: &Row) -> rusqlite::Result<Server> {
     Ok(Server {
         id: r.get(0)?,
         workspace_id: r.get(1)?,
-        bot_id: r.get(2)?,
-        name: r.get(3)?,
-        transport: r.get(4)?,
-        command: r.get(5)?,
-        args: json_list(r.get(6)?),
-        env: json_list(r.get(7)?),
-        url: r.get(8)?,
-        headers: json_list(r.get(9)?),
-        credential_item: r.get(10)?,
-        enabled: r.get::<_, i64>(11)? != 0,
-        created: r.get(12)?,
-        updated: r.get(13)?,
+        name: r.get(2)?,
+        transport: r.get(3)?,
+        command: r.get(4)?,
+        args: json_list(r.get(5)?),
+        env: json_list(r.get(6)?),
+        url: r.get(7)?,
+        headers: json_list(r.get(8)?),
+        credential_item: r.get(9)?,
+        created: r.get(10)?,
+        updated: r.get(11)?,
     })
 }
 
@@ -115,29 +111,29 @@ fn stored(vars: &[Var]) -> Result<String> {
     Ok(serde_json::to_string(&clean)?)
 }
 
-/// A Bot's servers, by name.
-pub fn list(c: &Connection, bot_id: &str) -> Result<Vec<Server>> {
+/// A workspace's servers, by name.
+pub fn list(c: &Connection, ws: &str) -> Result<Vec<Server>> {
     let mut st = c.prepare_cached(&format!(
-        "SELECT {COLS} FROM bot_mcp_servers WHERE bot_id = ? ORDER BY name"
+        "SELECT {COLS} FROM mcp_servers WHERE workspace_id = ? ORDER BY lower(name)"
     ))?;
-    let v = st.query_map([bot_id], row)?.collect::<Result<_, _>>()?;
+    let v = st.query_map([ws], row)?.collect::<Result<_, _>>()?;
     Ok(v)
 }
 
 pub fn get(c: &Connection, id: &str) -> Result<Option<Server>> {
     Ok(c.query_row(
-        &format!("SELECT {COLS} FROM bot_mcp_servers WHERE id = ?"),
+        &format!("SELECT {COLS} FROM mcp_servers WHERE id = ?"),
         [id],
         row,
     )
     .optional()?)
 }
 
-/// Another server of `bot_id` named `name` (any case), other than `except`.
-pub fn name_taken(c: &Connection, bot_id: &str, name: &str, except: Option<&str>) -> Result<bool> {
+/// Another server of `ws` named `name` (any case), other than `except`.
+pub fn name_taken(c: &Connection, ws: &str, name: &str, except: Option<&str>) -> Result<bool> {
     let n: i64 = c.query_row(
-        "SELECT COUNT(*) FROM bot_mcp_servers WHERE bot_id = ?1 AND lower(name) = lower(?2) AND id <> ?3",
-        params![bot_id, name, except.unwrap_or("")],
+        "SELECT COUNT(*) FROM mcp_servers WHERE workspace_id = ?1 AND lower(name) = lower(?2) AND id <> ?3",
+        params![ws, name, except.unwrap_or("")],
         |r| r.get(0),
     )?;
     Ok(n > 0)
@@ -146,12 +142,11 @@ pub fn name_taken(c: &Connection, bot_id: &str, name: &str, except: Option<&str>
 pub fn insert(c: &Connection, s: &Server) -> Result<()> {
     c.execute(
         &format!(
-            "INSERT INTO bot_mcp_servers ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+            "INSERT INTO mcp_servers ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
         ),
         params![
             s.id,
             s.workspace_id,
-            s.bot_id,
             s.name,
             s.transport,
             s.command,
@@ -160,7 +155,6 @@ pub fn insert(c: &Connection, s: &Server) -> Result<()> {
             s.url,
             stored(&s.headers)?,
             s.credential_item,
-            s.enabled as i64,
             s.created,
             s.updated,
         ],
@@ -168,11 +162,11 @@ pub fn insert(c: &Connection, s: &Server) -> Result<()> {
     Ok(())
 }
 
-/// Writes every field but `id`, `workspace_id`, `bot_id` and `created`.
+/// Writes every field but `id`, `workspace_id` and `created`.
 pub fn update(c: &Connection, s: &Server) -> Result<()> {
     c.execute(
-        "UPDATE bot_mcp_servers SET name = ?2, transport = ?3, command = ?4, args = ?5, env = ?6, url = ?7,
-            headers = ?8, credential_item = ?9, enabled = ?10, updated = ?11 WHERE id = ?1",
+        "UPDATE mcp_servers SET name = ?2, transport = ?3, command = ?4, args = ?5, env = ?6, url = ?7,
+            headers = ?8, credential_item = ?9, updated = ?10 WHERE id = ?1",
         params![
             s.id,
             s.name,
@@ -183,44 +177,38 @@ pub fn update(c: &Connection, s: &Server) -> Result<()> {
             s.url,
             stored(&s.headers)?,
             s.credential_item,
-            s.enabled as i64,
             s.updated,
         ],
     )?;
     Ok(())
 }
 
-pub fn set_enabled(c: &Connection, id: &str, enabled: bool, now: i64) -> Result<bool> {
-    Ok(c.execute(
-        "UPDATE bot_mcp_servers SET enabled = ?2, updated = ?3 WHERE id = ?1",
-        params![id, enabled as i64, now],
-    )? > 0)
-}
-
+/// The server and who used it go.
 pub fn delete(c: &Connection, id: &str) -> Result<bool> {
-    Ok(c.execute("DELETE FROM bot_mcp_servers WHERE id = ?", [id])? > 0)
+    super::remove_entry(c, "mcp", id)?;
+    Ok(c.execute("DELETE FROM mcp_servers WHERE id = ?", [id])? > 0)
 }
 
-/// The enabled servers of the Bot a session works as (none for a session without a Bot).
+/// The servers `bot` is assigned, each with whether it is switched on for it, by name.
+pub fn of_bot(c: &Connection, bot: &str) -> Result<Vec<(Server, bool)>> {
+    let mut out = vec![];
+    for a in super::of_bot(c, bot, "mcp")? {
+        if let Some(s) = get(c, &a.entry_id)? {
+            out.push((s, a.enabled));
+        }
+    }
+    out.sort_by_key(|(s, _)| s.name.to_lowercase());
+    Ok(out)
+}
+
+/// The servers the Bot a session works as has switched on (none for a session without a Bot).
 pub fn enabled_for_session(c: &Connection, session: &str) -> Result<Vec<Server>> {
-    let bot: Option<Option<String>> = c
-        .query_row("SELECT bot_id FROM sessions WHERE id = ?", [session], |r| {
-            r.get(0)
-        })
-        .optional()?;
-    match bot.flatten() {
-        Some(b) => Ok(list(c, &b)?.into_iter().filter(|s| s.enabled).collect()),
+    match super::bot_of_session(c, session)? {
+        Some(b) => Ok(of_bot(c, &b)?
+            .into_iter()
+            .filter(|(_, on)| *on)
+            .map(|(s, _)| s)
+            .collect()),
         None => Ok(vec![]),
     }
-}
-
-/// The Bot a session works as.
-pub fn bot_of_session(c: &Connection, session: &str) -> Result<Option<String>> {
-    Ok(
-        c.query_row("SELECT bot_id FROM sessions WHERE id = ?", [session], |r| {
-            r.get::<_, Option<String>>(0)
-        })
-        .optional()?
-        .flatten(),
-    )
 }

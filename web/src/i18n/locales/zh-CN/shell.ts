@@ -570,6 +570,7 @@ export default {
       channels: "群聊与私聊",
       contacts: "联系人",
       knowledge: "知识",
+      capabilities: "能力",
       accounts: "账号",
       vault: "保险箱",
       devices: "设备",

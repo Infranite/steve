@@ -1,5 +1,5 @@
-//! A Bot's own MCP servers reach its session's harness: the Hub puts the Bot's enabled servers into
-//! `open_session` with secrets as references, a remote Node (over the real link) takes each value
+//! The library's MCP servers a Bot uses reach its session's harness: the Hub puts the servers the
+//! Bot has switched on into `open_session` with secrets as references, a remote Node (over the real link) takes each value
 //! under `mcp:<session>` as the harness opens, and the scripted ACP adapter gets them in
 //! `session/new` next to Steve's own server. Neither the Hub's command ledger nor the Node's
 //! journal ever holds a value; a Node the session is not bound to gets nothing.
@@ -16,7 +16,8 @@ use serde_json::{Value, json};
 use steve_acp::AcpConfig;
 use steve_hub::wire::bot_mcp::McpSecrets;
 use steve_hub::wire::node_secrets::{NodeSecrets, SessionSecrets};
-use steve_modules::bot_mcp::{BotMcp, ServerIn};
+use steve_modules::caps::Capabilities;
+use steve_modules::caps::mcp::ServerIn;
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_node::{LocalNode, NodeConfig, Root};
@@ -105,7 +106,7 @@ async fn a_bots_mcp_servers_reach_session_new_on_a_remote_node() {
         Arc::new(FileKeyStore::open(keys.path()).unwrap()),
     );
     vault.init("default", "u1").unwrap();
-    let svc = BotMcp::new(vault);
+    let svc = Capabilities::new(vault);
     h.store
         .transaction::<_, steve_store::StoreError>(|tx| {
             tx.execute_batch(
@@ -115,33 +116,48 @@ async fn a_bots_mcp_servers_reach_session_new_on_a_remote_node() {
         })
         .unwrap();
     let files = svc
-        .create(
+        .mcp_create(
             "default",
             "u1",
-            "dev",
             server(
                 json!({"name": "files", "transport": "stdio", "command": "npx",
                 "args": ["-y", "files-mcp"],
                 "env": [{"name": "ROOT", "value": "/tmp"},
-                        {"name": "TOKEN", "value": SECRET, "secret": true}]}),
+                        {"name": "TOKEN", "value": SECRET, "secret": true}],
+                "bot": "dev"}),
             ),
         )
         .unwrap();
-    svc.create(
+    svc.mcp_create(
         "default",
         "u1",
-        "dev",
         server(
             json!({"name": "remote", "transport": "http", "url": "https://mcp.example.com/mcp",
-            "headers": [{"name": "X-Team", "value": "core"}]}),
+            "headers": [{"name": "X-Team", "value": "core"}], "bot": "dev"}),
         ),
     )
     .unwrap();
-    svc.create(
+    let off = svc
+        .mcp_create(
+            "default",
+            "u1",
+            server(json!({"name": "off", "transport": "sse", "url": "https://x.example.com/sse"})),
+        )
+        .unwrap();
+    svc.assign(
         "default",
         "u1",
         "dev",
-        server(json!({"name": "off", "transport": "sse", "url": "https://x.example.com/sse", "enabled": false})),
+        "mcp",
+        off["id"].as_str().unwrap(),
+        false,
+    )
+    .unwrap();
+    // in the library but not dev's: not given either
+    svc.mcp_create(
+        "default",
+        "u1",
+        server(json!({"name": "unused", "transport": "http", "url": "https://y.example.com/mcp"})),
     )
     .unwrap();
     let secrets = NodeSecrets::new();

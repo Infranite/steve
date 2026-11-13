@@ -1,41 +1,41 @@
-//! A Bot's own MCP servers: what its harness is given in the ACP `mcpServers` of every session,
-//! next to Steve's own tools, the same way for every harness (migration 62, `steve_store::bot_mcp`).
+//! The library's MCP servers: what the harness of a Bot assigned one gets in the ACP `mcpServers` of
+//! every session, next to Steve's own tools, the same way for every harness (`steve_store::caps::mcp`).
 //!
-//! - `GET /bots/:id/mcp-servers` → `McpServerOut[]`
-//! - `POST /bots/:id/mcp-servers {name, transport: stdio|http|sse, command?, args?, env?, url?,
-//!   headers?, enabled?}` → `McpServerOut`
-//! - `PATCH /bots/:id/mcp-servers/:sid {…any of those}` → `McpServerOut` (`{enabled}` alone switches it)
-//! - `DELETE /bots/:id/mcp-servers/:sid` → `{ok:true}`
+//! - `GET /capabilities/mcp-servers` → `McpServerOut[]` (each with `bots: [{id, enabled}]`)
+//! - `POST /capabilities/mcp-servers {name, transport: stdio|http|sse, command?, args?, env?, url?,
+//!   headers?, bot?}` → `McpServerOut` (`bot`: also assign it to that Bot)
+//! - `PATCH /capabilities/mcp-servers/:id {…any of those}` → `McpServerOut`
+//! - `DELETE /capabilities/mcp-servers/:id` → `{ok:true}` (off every Bot that used it)
 //!
 //! `env` (stdio) and `headers` (http, sse) are `[{name, value?, secret?}]`. A secret's value goes into
 //! the workspace's system vault, one `connection_credential` item per server (fields
 //! `env:<name>` / `header:<name>`), and is never stored with the server, answered, logged or audited;
 //! answers show it as `{name, secret: true}`. Saving a secret again without a value keeps the one
-//! the vault has. The session's Node takes the values when its harness opens ([`BotMcp::secret`]).
+//! the vault has. The session's Node takes the values when its harness opens
+//! ([`Capabilities::mcp_secret`]).
 //!
-//! Every change is audited (`bot_mcp.create|update|enable|disable|delete`, names only) and publishes
-//! the Bot's change event. A change reaches a session the next time its harness opens. The Hub
-//! hands a session's servers to its Node (`steve_hub::wire::bot_mcp`), secrets as [`secret_id`]s.
+//! Every change is audited (`mcp_server.create|update|delete`, names only) and publishes the change
+//! event of every Bot that uses the server. The Hub hands a session's servers to its Node
+//! (`steve_hub::wire::bot_mcp`), secrets as [`secret_id`]s.
 
 use std::sync::LazyLock;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch};
-use axum::{Json, Router};
 use regex::Regex;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::json;
-use steve_store::bot_mcp::{self as repo, Server, Var};
-use steve_store::{ChangeEvent, Tx, base, now, uid};
+use steve_store::caps::mcp::{self as repo, Server, Var};
+use steve_store::{Tx, base, now, uid};
 use zeroize::Zeroizing;
 
-use crate::vault::{Vault, VaultError, VaultResult};
+use super::Capabilities;
+use crate::vault::{VaultError, VaultResult};
 use crate::{ApiError, Body, Caller, Check};
 
-/// Servers per Bot, variables per server, arguments per command.
-const MAX_SERVERS: usize = 32;
+/// Variables per server, arguments per command.
 const MAX_VARS: usize = 64;
 const MAX_ARGS: usize = 64;
 
@@ -73,100 +73,76 @@ pub struct ServerIn {
     pub url: Option<String>,
     #[serde(default)]
     pub headers: Option<Vec<VarIn>>,
+    /// On create: also assign it to this Bot.
     #[serde(default)]
-    pub enabled: Option<bool>,
+    pub bot: Option<String>,
 }
 
-/// The service: the store through the vault, which keeps the secret values.
-#[derive(Clone)]
-pub struct BotMcp {
-    vault: Vault,
-}
-
-pub fn routes<S: Clone + Send + Sync + 'static>(svc: BotMcp) -> Router<S> {
-    Router::new()
-        .route("/bots/{id}/mcp-servers", get(list).post(create))
-        .route("/bots/{id}/mcp-servers/{sid}", patch(update).delete(remove))
-        .with_state(svc)
-}
-
-async fn list(
-    State(s): State<BotMcp>,
-    who: Caller,
-    Path(id): Path<String>,
-) -> VaultResult<Response> {
+pub(super) async fn list_h(State(s): State<Capabilities>, who: Caller) -> VaultResult<Response> {
     let svc = s.clone();
-    let out = s.vault.blocking(move |_| svc.list(&who.ws, &id)).await?;
+    let out = s.vault.blocking(move |_| svc.mcp_list(&who.ws)).await?;
     Ok(Json(out).into_response())
 }
 
-async fn create(
-    State(s): State<BotMcp>,
+pub(super) async fn create_h(
+    State(s): State<Capabilities>,
     who: Caller,
-    Path(id): Path<String>,
     Body(b): Body<ServerIn>,
 ) -> VaultResult<Response> {
     let svc = s.clone();
     let out = s
         .vault
-        .blocking(move |_| svc.create(&who.ws, &who.me, &id, b))
+        .blocking(move |_| svc.mcp_create(&who.ws, &who.me, b))
         .await?;
     Ok(Json(out).into_response())
 }
 
-async fn update(
-    State(s): State<BotMcp>,
+pub(super) async fn update_h(
+    State(s): State<Capabilities>,
     who: Caller,
-    Path((id, sid)): Path<(String, String)>,
+    Path(sid): Path<String>,
     Body(b): Body<ServerIn>,
 ) -> VaultResult<Response> {
     let svc = s.clone();
     let out = s
         .vault
-        .blocking(move |_| svc.update(&who.ws, &who.me, &id, &sid, b))
+        .blocking(move |_| svc.mcp_update(&who.ws, &who.me, &sid, b))
         .await?;
     Ok(Json(out).into_response())
 }
 
-async fn remove(
-    State(s): State<BotMcp>,
+pub(super) async fn remove_h(
+    State(s): State<Capabilities>,
     who: Caller,
-    Path((id, sid)): Path<(String, String)>,
+    Path(sid): Path<String>,
 ) -> VaultResult<Response> {
     let svc = s.clone();
     s.vault
-        .blocking(move |_| svc.delete(&who.ws, &who.me, &id, &sid))
+        .blocking(move |_| svc.mcp_delete(&who.ws, &who.me, &sid))
         .await?;
     Ok(Json(json!({ "ok": true })).into_response())
 }
 
-/// The Bot, if `ws` sees it (its home or one it serves), not deleted.
-fn own_bot(c: &Connection, ws: &str, bot: &str) -> Result<(), ApiError> {
-    let seen: Option<i64> = c
-        .query_row(
-            "SELECT 1 FROM bots b WHERE b.id = ?1 AND b.deleted = 0 AND (b.workspace_id = ?2
-               OR EXISTS (SELECT 1 FROM bot_workspaces w WHERE w.bot_id = b.id AND w.workspace_id = ?2))",
-            [bot, ws],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(ApiError::from)?;
-    seen.map(|_| ()).ok_or_else(|| ApiError::not_found("Bot"))
-}
-
-fn server_of(c: &Connection, bot: &str, sid: &str) -> VaultResult<Server> {
+fn server_of(c: &Connection, ws: &str, sid: &str) -> VaultResult<Server> {
     repo::get(c, sid)?
-        .filter(|s| s.bot_id == bot)
+        .filter(|s| s.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("MCP 服务器").into())
 }
 
 /// What the page sees: a secret by name only.
-fn out(s: &Server) -> serde_json::Value {
+pub(crate) fn out(s: &Server) -> serde_json::Value {
     json!({
-        "id": s.id, "bot_id": s.bot_id, "name": s.name, "transport": s.transport,
+        "id": s.id, "name": s.name, "transport": s.transport,
         "command": s.command, "args": s.args, "env": s.env, "url": s.url, "headers": s.headers,
-        "enabled": s.enabled, "created": s.created, "updated": s.updated,
+        "created": s.created, "updated": s.updated,
     })
+}
+
+/// [`out`] with the Bots that use it.
+fn out_with_users(c: &Connection, s: &Server) -> VaultResult<serde_json::Value> {
+    let mut v = out(s);
+    v["bots"] = super::users(c, "mcp", &s.id)?;
+    Ok(v)
 }
 
 /// The id a secret is taken by on the Node: `<server>#<label>`.
@@ -227,34 +203,25 @@ fn check(s: &Server, vars_in: &[VarIn]) -> Result<(), ApiError> {
     c.done()
 }
 
-impl BotMcp {
-    pub fn new(vault: Vault) -> Self {
-        BotMcp { vault }
-    }
-
-    pub fn list(&self, ws: &str, bot: &str) -> VaultResult<Vec<serde_json::Value>> {
+impl Capabilities {
+    pub fn mcp_list(&self, ws: &str) -> VaultResult<Vec<serde_json::Value>> {
         self.vault.store().reader(|c| {
-            own_bot(c, ws, bot)?;
-            Ok::<_, VaultError>(repo::list(c, bot)?.iter().map(out).collect())
+            repo::list(c, ws)?
+                .iter()
+                .map(|s| out_with_users(c, s))
+                .collect()
         })
     }
 
-    pub fn create(
-        &self,
-        ws: &str,
-        me: &str,
-        bot: &str,
-        b: ServerIn,
-    ) -> VaultResult<serde_json::Value> {
-        let count = self.vault.store().reader(|c| {
-            own_bot(c, ws, bot)?;
-            Ok::<_, VaultError>(repo::list(c, bot)?.len())
-        })?;
+    pub fn mcp_create(&self, ws: &str, me: &str, b: ServerIn) -> VaultResult<serde_json::Value> {
+        let count = self
+            .vault
+            .store()
+            .reader(|c| Ok::<_, VaultError>(repo::list(c, ws)?.len()))?;
         let at = now();
         let blank = Server {
             id: uid("bmcp"),
             workspace_id: ws.into(),
-            bot_id: bot.into(),
             name: String::new(),
             transport: String::new(),
             command: None,
@@ -263,7 +230,6 @@ impl BotMcp {
             url: None,
             headers: vec![],
             credential_item: None,
-            enabled: true,
             created: at,
             updated: at,
         };
@@ -273,88 +239,51 @@ impl BotMcp {
             c.that("transport", b.transport.is_some());
             c.done()?;
         }
-        self.save(me, bot, blank, b, count < MAX_SERVERS, true)
+        self.mcp_save(me, blank, b, count < super::MAX_LIBRARY, true)
     }
 
-    pub fn update(
+    pub fn mcp_update(
         &self,
         ws: &str,
         me: &str,
-        bot: &str,
         sid: &str,
         b: ServerIn,
     ) -> VaultResult<serde_json::Value> {
-        let old = self.vault.store().reader(|c| {
-            own_bot(c, ws, bot)?;
-            server_of(c, bot, sid)
-        })?;
-        // only the switch: no vault work, its own audit verb
-        let only_switch = b.name.is_none()
-            && b.transport.is_none()
-            && b.command.is_none()
-            && b.args.is_none()
-            && b.env.is_none()
-            && b.url.is_none()
-            && b.headers.is_none();
-        if let (true, Some(on)) = (only_switch, b.enabled) {
-            let at = now();
-            return self.vault.store().transaction(|tx| {
-                repo::set_enabled(tx, sid, on, at)?;
-                let verb = if on {
-                    "bot_mcp.enable"
-                } else {
-                    "bot_mcp.disable"
-                };
-                base::audit(
-                    tx,
-                    ws,
-                    me,
-                    verb,
-                    sid,
-                    &json!({"bot": bot, "name": old.name}),
-                )?;
-                tx.publish(ChangeEvent::Bot { id: bot.into() });
-                let s = server_of(tx, bot, sid)?;
-                Ok::<_, VaultError>(out(&s))
-            });
-        }
-        self.save(me, bot, old, b, true, false)
+        let old = self.vault.store().reader(|c| server_of(c, ws, sid))?;
+        self.mcp_save(me, old, b, true, false)
     }
 
-    pub fn delete(&self, ws: &str, me: &str, bot: &str, sid: &str) -> VaultResult<()> {
-        let old = self.vault.store().reader(|c| {
-            own_bot(c, ws, bot)?;
-            server_of(c, bot, sid)
-        })?;
+    pub fn mcp_delete(&self, ws: &str, me: &str, sid: &str) -> VaultResult<()> {
+        let old = self.vault.store().reader(|c| server_of(c, ws, sid))?;
         self.vault.store().transaction(|tx| {
             if let Some(item) = &old.credential_item {
                 self.vault.destroy_item(tx, &old.workspace_id, me, item)?;
             }
+            super::publish_users(tx, "mcp", sid)?;
             repo::delete(tx, sid)?;
             base::audit(
                 tx,
                 ws,
                 me,
-                "bot_mcp.delete",
+                "mcp_server.delete",
                 sid,
-                &json!({"bot": bot, "name": old.name, "transport": old.transport}),
+                &json!({"name": old.name, "transport": old.transport}),
             )?;
-            tx.publish(ChangeEvent::Bot { id: bot.into() });
             Ok::<_, VaultError>(())
         })
     }
 
     /// Merges `b` into `old`, checks it, keeps the secrets in the vault and writes the row, all in
     /// one transaction (a new credential item replaces the old one when the secrets changed).
-    fn save(
+    fn mcp_save(
         &self,
         me: &str,
-        bot: &str,
         old: Server,
         b: ServerIn,
         room: bool,
         fresh: bool,
     ) -> VaultResult<serde_json::Value> {
+        let assign_to = b.bot.clone();
         let mut s = old.clone();
         if let Some(n) = b.name {
             s.name = n.trim().to_string();
@@ -371,9 +300,6 @@ impl BotMcp {
         }
         if b.url.is_some() {
             s.url = b.url.map(|x| x.trim().to_string());
-        }
-        if let Some(e) = b.enabled {
-            s.enabled = e;
         }
         // the variables as given, else the stored ones (a secret's value stays in the vault)
         let given = if stdio { b.env } else { b.headers };
@@ -400,21 +326,20 @@ impl BotMcp {
             s.args = vec![];
             s.env = vec![];
         }
-        let name_ok = self
-            .vault
-            .store()
-            .reader(|c| Ok::<_, VaultError>(!repo::name_taken(c, bot, &s.name, Some(&s.id))?))?;
+        let name_ok = self.vault.store().reader(|c| {
+            Ok::<_, VaultError>(!repo::name_taken(c, &s.workspace_id, &s.name, Some(&s.id))?)
+        })?;
         if !room {
             return Err(ApiError::rule(steve_i18n::t!(
-                "modules.bot_mcp.too_many",
-                max = MAX_SERVERS
+                "modules.caps.library_full",
+                max = super::MAX_LIBRARY
             ))
             .into());
         }
         check(&s, &vars_in)?;
         if !name_ok {
             return Err(ApiError::conflict(steve_i18n::t!(
-                "modules.bot_mcp.name_taken",
+                "modules.caps.mcp_name_taken",
                 name = s.name
             ))
             .into());
@@ -429,7 +354,7 @@ impl BotMcp {
         for (v, l) in vars_in.iter().filter(|v| v.secret).zip(&labels) {
             if v.value.is_none() && !old_labels.contains(l) {
                 return Err(ApiError::rule(steve_i18n::t!(
-                    "modules.bot_mcp.secret_needed",
+                    "modules.caps.secret_needed",
                     name = v.name
                 ))
                 .into());
@@ -478,7 +403,7 @@ impl BotMcp {
                         .map(|(_, x)| x.clone())
                         .ok_or_else(|| {
                             ApiError::rule(steve_i18n::t!(
-                                "modules.bot_mcp.secret_needed",
+                                "modules.caps.secret_needed",
                                 name = v.name
                             ))
                         })?,
@@ -491,7 +416,7 @@ impl BotMcp {
             Some(f) => Some(self.vault.prepare_credential(
                 &s.workspace_id,
                 me,
-                &format!("MCP {} · {bot}", s.name),
+                &format!("MCP {}", s.name),
                 None,
                 f,
             )?),
@@ -513,6 +438,16 @@ impl BotMcp {
                 drop_old(tx)?;
                 s.credential_item = None;
             }
+            // a Bot that uses it must not see two servers of one name
+            for a in steve_store::caps::of_entry(tx, "mcp", &s.id)? {
+                if super::clashes(tx, &a.bot_id, "mcp", &s.id, &s.name)? {
+                    return Err(ApiError::conflict(steve_i18n::t!(
+                        "modules.caps.name_used",
+                        name = s.name
+                    ))
+                    .into());
+                }
+            }
             if fresh {
                 repo::insert(tx, &s)?;
             } else {
@@ -523,38 +458,41 @@ impl BotMcp {
                 &ws,
                 me,
                 if fresh {
-                    "bot_mcp.create"
+                    "mcp_server.create"
                 } else {
-                    "bot_mcp.update"
+                    "mcp_server.update"
                 },
                 &s.id,
-                &json!({"bot": bot, "name": s.name, "transport": s.transport,
-                        "enabled": s.enabled, "secrets": labels}),
+                &json!({"name": s.name, "transport": s.transport, "secrets": labels}),
             )?;
-            tx.publish(ChangeEvent::Bot { id: bot.into() });
-            Ok::<_, VaultError>(())
-        })?;
-        Ok(out(&s))
+            if let (true, Some(bot)) = (fresh, assign_to.as_deref()) {
+                super::assign_in(tx, &ws, me, bot, "mcp", &s.id, true)?;
+            }
+            super::publish_users(tx, "mcp", &s.id)?;
+            out_with_users(tx, &s)
+        })
     }
 
     /// The value the Node of `session` takes for `id` (`<server>#<label>`) as its harness opens: a
-    /// secret of an enabled server of the session's Bot. The caller has checked the session is on
-    /// that Node. Each use is in the vault's use log (once per server and day).
-    pub fn secret(&self, session: &str, id: &str) -> VaultResult<Zeroizing<Vec<u8>>> {
+    /// secret of a server the session's Bot has switched on. The caller has checked the session is
+    /// on that Node. Each use is in the vault's use log (once per server and day).
+    pub fn mcp_secret(&self, session: &str, id: &str) -> VaultResult<Zeroizing<Vec<u8>>> {
         let denied = || VaultError::from(ApiError::not_found("MCP 服务器"));
         let (sid, label) = id.split_once('#').ok_or_else(denied)?;
-        let (s, bot) = self.vault.store().reader(|c| {
-            let bot = repo::bot_of_session(c, session)?;
-            Ok::<_, VaultError>((repo::get(c, sid)?, bot))
+        let (s, on, bot) = self.vault.store().reader(|c| {
+            let bot = steve_store::caps::bot_of_session(c, session)?;
+            let on = match &bot {
+                Some(b) => steve_store::caps::is_enabled(c, b, "mcp", sid)?,
+                None => false,
+            };
+            Ok::<_, VaultError>((repo::get(c, sid)?, on, bot))
         })?;
-        let s = s
-            .filter(|s| s.enabled && Some(&s.bot_id) == bot.as_ref())
-            .ok_or_else(denied)?;
+        let s = s.filter(|_| on).ok_or_else(denied)?;
         if !s.secret_labels().iter().any(|l| l == label) {
             return Err(denied());
         }
         let item = s.credential_item.as_deref().ok_or_else(denied)?;
-        let purpose = format!("MCP {} · {}", s.name, s.bot_id);
+        let purpose = format!("MCP {} · {}", s.name, bot.unwrap_or_default());
         self.vault
             .with_credential(&s.workspace_id, item, &s.id, &purpose, |c| {
                 c.get(label).map(|v| Zeroizing::new(v.expose().to_vec()))

@@ -23,12 +23,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import {
   BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, ChevronsUpDownIcon, ContactRoundIcon, FolderIcon, InboxIcon, KeyRoundIcon, ListTodoIcon, LogOutIcon, MailIcon,
   MessageCircleIcon, MessagesSquareIcon, MonitorIcon, MoonIcon, PanelLeftIcon, PlugIcon, RadioIcon, SearchIcon, ServerIcon, SettingsIcon, SquareTerminalIcon,
-  SunIcon, UserIcon, UserRoundIcon, WorkflowIcon,
-} from "lucide-react"
+  SunIcon, UserIcon, UserRoundIcon, WorkflowIcon, BlocksIcon } from "lucide-react"
 
 type NavGroup = "work" | "connect" | "automate"
 const NAV_GROUPS: NavGroup[] = ["work", "connect", "automate"]
-const NAV: { h: string; l: "chat" | "inbox" | "items" | "projects" | "sessions" | "stats" | "integrations" | "channels" | "mail" | "contacts" | "knowledge" | "bots" | "auto" | "signals"; I: any; group: NavGroup }[] = [
+const NAV: { h: string; l: "chat" | "inbox" | "items" | "projects" | "sessions" | "stats" | "integrations" | "channels" | "mail" | "contacts" | "knowledge" | "bots" | "capabilities" | "auto" | "signals"; I: any; group: NavGroup }[] = [
   { h: "", l: "chat", I: MessageCircleIcon, group: "work" },
   { h: "inbox", l: "inbox", I: InboxIcon, group: "work" },
   { h: "items", l: "items", I: ListTodoIcon, group: "work" },
@@ -41,6 +40,7 @@ const NAV: { h: string; l: "chat" | "inbox" | "items" | "projects" | "sessions" 
   { h: "contacts", l: "contacts", I: ContactRoundIcon, group: "connect" },
   { h: "knowledge", l: "knowledge", I: BookOpenIcon, group: "connect" },
   { h: "bots", l: "bots", I: BotIcon, group: "automate" },
+  { h: "capabilities", l: "capabilities", I: BlocksIcon, group: "automate" },
   { h: "auto", l: "auto", I: WorkflowIcon, group: "automate" },
   { h: "signals", l: "signals", I: RadioIcon, group: "automate" },
 ]
@@ -207,7 +207,7 @@ export function MobileTabs({ route: full }: { route: string }) {
   const route = full.split("?")[0]
   const n = pendingCards().length
   const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }, { h: "more", l: tr("core:nav.mine"), I: UserIcon, dot: !!st.update }]
-  const more = ["more", "projects", "sessions", "stats", "mail", "signals", "settings", "bots", "design", "auto", "plugins", "personas", "contacts", "orgs", "teams", "accounts", "vault", "devices", "knowledge", "github", "yolo", "channels", "integrations"]
+  const more = ["more", "projects", "sessions", "stats", "mail", "signals", "settings", "bots", "capabilities", "design", "auto", "plugins", "personas", "contacts", "orgs", "teams", "accounts", "vault", "devices", "knowledge", "github", "yolo", "channels", "integrations"]
   return (
     <nav aria-label={tr("core:sidebar.tabs")} className="fixed inset-x-0 bottom-0 z-40 flex h-15 border-t border-sidebar-border bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-2xl backdrop-saturate-180 md:hidden" data-mobile-tabs>
       {tabs.map((t) => {

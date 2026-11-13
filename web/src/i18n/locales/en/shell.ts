@@ -593,6 +593,7 @@ export default {
       channels: "Chats",
       contacts: "Contacts",
       knowledge: "Knowledge",
+      capabilities: "Capabilities",
       accounts: "Accounts",
       vault: "Vault",
       devices: "Devices",

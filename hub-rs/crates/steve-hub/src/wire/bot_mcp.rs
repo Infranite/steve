@@ -1,17 +1,19 @@
-//! A Bot's own MCP servers on their way to its sessions' harnesses (`steve_modules::bot_mcp`).
+//! The MCP servers of the library a Bot uses, on their way to its sessions' harnesses
+//! (`steve_modules::caps::mcp`).
 //!
-//! When a session is opened or reopened on a Node ([`super::node_runtime`]), its Bot's enabled
-//! servers go into [`OpenSession::mcp_servers`] as they are then, every secret as a reference
-//! (`<server>#<label>`). The Node takes each value under `mcp:<session>` as its harness opens
-//! ([`super::node_secrets::SessionSecrets`]): only a Node the session is bound to, only a secret of
-//! an enabled server of the session's Bot, decrypted then and kept nowhere. The same path serves the
+//! When a session is opened or reopened on a Node ([`super::node_runtime`]), the servers its Bot is
+//! assigned and has switched on go into [`OpenSession::mcp_servers`] as they are then, every secret
+//! as a reference (`<server>#<label>`). The Node takes each value under `mcp:<session>` as its
+//! harness opens ([`super::node_secrets::SessionSecrets`]): only a Node the session is bound to,
+//! only a secret of a server the session's Bot has switched on, decrypted then and kept nowhere. The same path serves the
 //! Hub's own Node and remote ones, and every harness: the servers are ACP's, not any harness's.
 
 use rusqlite::{Connection, OptionalExtension};
-use steve_modules::bot_mcp::{BotMcp, secret_id};
+use steve_modules::caps::Capabilities;
+use steve_modules::caps::mcp::secret_id;
 use steve_node_api::{McpServer, McpTransport, McpVar};
 use steve_store::Store;
-use steve_store::bot_mcp::{self as repo, Server, Var};
+use steve_store::caps::mcp::{self as repo, Server, Var};
 use zeroize::Zeroizing;
 
 use super::node_secrets::SessionSecrets;
@@ -54,7 +56,7 @@ pub fn node_server(s: &Server) -> McpServer {
     }
 }
 
-/// The servers `session`'s harness is given: its Bot's enabled ones, as they are now.
+/// The servers `session`'s harness is given: the ones its Bot has switched on, as they are now.
 pub fn for_session(c: &Connection, session: &str) -> steve_store::Result<Vec<McpServer>> {
     Ok(repo::enabled_for_session(c, session)?
         .iter()
@@ -65,11 +67,11 @@ pub fn for_session(c: &Connection, session: &str) -> steve_store::Result<Vec<Mcp
 /// The sessions' MCP secrets for the Nodes ([`super::node_secrets::NodeSecrets::set_sessions`]).
 pub struct McpSecrets {
     store: Store,
-    svc: BotMcp,
+    svc: Capabilities,
 }
 
 impl McpSecrets {
-    pub fn new(store: Store, svc: BotMcp) -> std::sync::Arc<McpSecrets> {
+    pub fn new(store: Store, svc: Capabilities) -> std::sync::Arc<McpSecrets> {
         std::sync::Arc::new(McpSecrets { store, svc })
     }
 }
@@ -90,7 +92,7 @@ impl SessionSecrets for McpSecrets {
             .ok()
             .flatten();
         bound?;
-        match self.svc.secret(session, id) {
+        match self.svc.mcp_secret(session, id) {
             Ok(v) => Some(v),
             Err(e) => {
                 tracing::warn!(session, node, "MCP secret not given: {e}");

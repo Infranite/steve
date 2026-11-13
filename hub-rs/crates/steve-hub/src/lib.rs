@@ -6,12 +6,14 @@
 
 steve_i18n::init!();
 
+pub mod a2a_server;
 pub mod access;
 pub mod api;
 pub mod app;
 pub mod avatar;
 pub mod backend;
 pub mod bus;
+pub mod caps_api;
 pub mod catalog;
 pub mod check;
 pub mod config;

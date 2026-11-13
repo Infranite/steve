@@ -1,11 +1,16 @@
-//! A Bot's skills reach its session's Node: the Hub puts the Bot's enabled skills into
-//! `open_session`, as they are when the session binds.
+//! The library's skills a Bot uses reach its session's Node: the Hub puts the ones the Bot has
+//! switched on into `open_session`, as they are when the session binds.
 
 mod node_harness;
 
+use std::sync::Arc;
+
 use node_harness::*;
 use serde_json::{Value, json};
-use steve_modules::bot_skills::{BotSkills, SkillIn};
+use steve_modules::caps::Capabilities;
+use steve_modules::caps::skills::SkillIn;
+use steve_modules::vault::Vault;
+use steve_modules::vault::keystore::FileKeyStore;
 
 fn skill(v: Value) -> SkillIn {
     serde_json::from_value(v).unwrap()
@@ -23,19 +28,32 @@ async fn a_bots_enabled_skills_go_into_open_session() {
             Ok(())
         })
         .unwrap();
-    let svc = BotSkills::new(h.store.clone());
-    svc.create(
+    let keys = tempfile::tempdir().unwrap();
+    let vault = Vault::new(
+        h.store.clone(),
+        Arc::new(FileKeyStore::open(keys.path()).unwrap()),
+    );
+    let svc = Capabilities::new(vault);
+    svc.skill_create(
         "default",
         "u1",
-        "dev",
-        skill(json!({"name": "code-review", "description": "Review a change.", "content": "# Review"})),
+        skill(json!({"name": "code-review", "description": "Review a change.", "content": "# Review", "bot": "dev"})),
     )
     .unwrap();
-    svc.create(
+    let off = svc
+        .skill_create(
+            "default",
+            "u1",
+            skill(json!({"name": "drafts", "description": "Off."})),
+        )
+        .unwrap();
+    svc.assign(
         "default",
         "u1",
         "dev",
-        skill(json!({"name": "drafts", "description": "Off.", "enabled": false})),
+        "skill",
+        off["id"].as_str().unwrap(),
+        false,
     )
     .unwrap();
     h.session("s1");

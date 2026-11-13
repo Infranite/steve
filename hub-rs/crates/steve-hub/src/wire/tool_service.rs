@@ -99,6 +99,23 @@ impl ToolService {
         out
     }
 
+    /// [`Self::catalog`] for session `s`: with the tools of the remote agents its Bot uses.
+    pub async fn session_catalog(&self, s: &steve_store::Session) -> Vec<ToolDescriptor> {
+        let mut out = self.catalog();
+        out.extend(
+            mcp_extra::session_tools(&self.extra, &s.id)
+                .await
+                .into_iter()
+                .map(|t| ToolDescriptor {
+                    read_only: false,
+                    name: t["name"].as_str().unwrap_or_default().to_string(),
+                    description: t["description"].as_str().unwrap_or_default().to_string(),
+                    input_schema: t["inputSchema"].clone(),
+                }),
+        );
+        out
+    }
+
     /// Runs `name` for session `s`: the success text, or the error text the agent reads.
     pub async fn call(
         &self,
