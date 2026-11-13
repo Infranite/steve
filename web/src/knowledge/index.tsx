@@ -148,7 +148,7 @@ const UNDO_MS = 6000
 /** every word the panel shows in Steve (no memory switch, no search of its own: the page has one) */
 type Unshown = "memoryOff" | "off" | "useMemory" | "offNote" | "search" | "closeSearch" | "noneFor"
 /** the rest are per record: none, newMemory, newPlaceholder */
-const panelText = (): Omit<PanelText, Unshown | "none" | "newMemory" | "newPlaceholder"> => ({
+export const panelText = (): Omit<PanelText, Unshown | "none" | "newMemory" | "newPlaceholder"> => ({
   paused: tt("knowledge:mems.stale"), cancel: tt("common:action.cancel"), save: tt("common:action.save"), edit: tt("knowledge:panel.edit"),
   pause: tt("knowledge:panel.pause"), resume: tt("knowledge:panel.resume"), forget: tt("knowledge:panel.forget"), undo: tt("knowledge:panel.undo"),
   editAria: tt("knowledge:panel.editAria"), editOf: (text) => tt("knowledge:panel.editOf", { text }), pauseOf: (text) => tt("knowledge:panel.pauseOf", { text }),

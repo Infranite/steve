@@ -3,7 +3,7 @@
  * from index.css; contrast is computed against the content area. */
 import { useEffect, useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { CheckIcon, ChevronDownIcon, FolderIcon, PlusIcon, RotateCcwIcon, SearchIcon, SparklesIcon, WorkflowIcon, XIcon, BellIcon } from "lucide-react"
+import { CheckIcon, ChevronDownIcon, FolderIcon, PlusIcon, RotateCcwIcon, SearchIcon, SparklesIcon, WorkflowIcon, XIcon, BellIcon, LayoutGridIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
@@ -129,6 +129,11 @@ export function DesignView() {
   return (
     <Page title={t("views:design.title")} sub={t("views:design.sub")} max={1040} toolbar={<ThemeSwitch labels />}>
       <div className="flex flex-col gap-16" data-design>
+        <a href="#/design/components" className={cn(LIFT, "-mb-6 flex items-center gap-4 p-4 transition-[box-shadow,translate] duration-180 ease-(--ease-out) hover:-translate-y-px hover:shadow-[var(--lift-hover)]")} data-design-showroom-link>
+          <Tile I={LayoutGridIcon} />
+          <div className="min-w-0 flex-1"><div className="type-headline">{t("views:showroom.link")}</div><div className="type-callout text-muted-foreground">{t("views:showroom.linkSub")}</div></div>
+          <Chevron />
+        </a>
         <Part id="principles" title={t("views:design.principles")}>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             {([["p1", "01"], ["p2", "02"], ["p3", "03"], ["p4", "04"], ["p5", "05"]] as const).map(([k, no]) => (

@@ -23,6 +23,7 @@ const SessionsView = lazyView(() => import("@/sessions-list").then((m) => ({ def
 const SessionView = lazyView(() => import("@/views").then((m) => ({ default: m.SessionView })))
 const MoreView = lazyView(() => import("@/views").then((m) => ({ default: m.MoreView })))
 const DesignView = lazyView(() => import("@/views").then((m) => ({ default: m.DesignView })))
+const DesignShowroom = lazyView(() => import("@/design-showroom").then((m) => ({ default: m.DesignShowroom })))
 const ForkDialog = lazyView(() => import("@/views").then((m) => ({ default: m.ForkDialog })))
 const NewItemDialog = lazyView(() => import("@/views").then((m) => ({ default: m.NewItemDialog })))
 const GraphDialog = lazyView(() => import("@/views").then((m) => ({ default: m.GraphDialog })))
@@ -229,7 +230,7 @@ export default function App() {
     a === "sessions" ? (b ? <SessionView key={b} k={b} /> : <SessionsView />) :
     a === "settings" ? <SettingsView /> :
     a === "bots" ? (b ? <BotView key={b} k={b} /> : <BotsView />) :
-    a === "design" ? <DesignView /> :
+    a === "design" ? (b === "components" ? <DesignShowroom /> : <DesignView />) :
     a.split("?")[0] === "knowledge" ? <KnowledgeView sub={b} id={c} /> :
     a === "devices" ? (b ? <DeviceView key={b} id={b} /> : <DevicesView />) :
     a.split("?")[0] === "github" ? <GitHubView repo={b?.split("?")[0]} /> :

@@ -76,13 +76,13 @@ const A = (id: WithDetail, risk: AgentAction["risk"]): AgentAction => ({ id, ris
 const B = (id: "propose" | "anyFile" | "pay" | "vault" | "send" | "otherRelease", risk: AgentAction["risk"]): AgentAction => ({ id, risk, label: t(`yolo:dial.action.${id}`) })
 /** What each level hands over, in the Hub's words (judge.rs `Policy::default`, the hard limits and what full access
  *  keeps): safe ones YOLO decides, risky ones only full access lets through, and the locked ones always come to you. */
-const dialActions = (): AgentAction[] => [
+export const dialActions = (): AgentAction[] => [
   A("cmd", "safe"), A("accept", "safe"), A("continue", "safe"), A("ask", "safe"), B("propose", "safe"), A("release", "safe"),
   A("botReply", "safe"), A("aiSend", "safe"), A("anyCmd", "risky"), B("anyFile", "risky"),
   B("pay", "destructive"), B("vault", "destructive"), B("send", "destructive"), B("otherRelease", "destructive"),
 ]
-const LOCKED = ["pay", "vault", "send", "otherRelease"]
-const dialText = (): Partial<DialText> => ({
+export const LOCKED = ["pay", "vault", "send", "otherRelease"]
+export const dialText = (): Partial<DialText> => ({
   levels: levels().map((l) => ({ label: l.m === "off" ? l.title : label(l.m), hint: l.sub })) as DialText["levels"],
   group: t("yolo:switch.modes"), own: t("yolo:dial.own"), ask: t("yolo:dial.ask"), ownEmpty: t("yolo:dial.ownEmpty"), askEmpty: t("yolo:dial.askEmpty"),
   risky: t("yolo:dial.risky"), destructive: t("yolo:dial.destructive"), current: t("yolo:switch.current"), locked: t("yolo:dial.locked"),
