@@ -1,6 +1,5 @@
-import { AgentDetailPanel, hasAgentTree, History, Notices, TeamLanes, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
+import { AgentDetailPanel, hasAgentTree, History, Notices, ROOT_STATUS, TeamSteps, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
 import { itemState, type ItemState } from "@/item-state"
-import type { AgentStatus } from "@/agent-tree"
 import { clip } from "@/thread/topics"
 import { itemDisplayState, itemDisplayStatus } from "@/item-workflow-relation"
 import { laneOf } from "@/item-lanes"
@@ -44,7 +43,7 @@ import { cn } from "cn"
 import { lang, t as tr, useT } from "@/i18n"
 import { dayHeading, hm as clock, nearTime, num } from "@/i18n/format"
 import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PanelRightIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, ServerIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
+import { Fragment, lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 let selecting = false
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
@@ -103,10 +102,12 @@ export function InboxView() {
 }
 
 /* ═════════ 事项 ═════════ */
+/* the 协作 view (Agent Fleet) is a big component: loaded the first time it is opened */
+const ItemsFleet = lazy(() => import("@/items-collab").then((m) => ({ default: m.ItemsFleet })))
 /* view, filter and sort are keys; their labels are translated where they are rendered */
 type ItemsFilt = "all" | "wait" | "run" | "star" | "arch"
 type ItemsSort = "updated" | "due" | "pri" | "no"
-let itemsView: "list" | "board" | "graph" = "list"; let filt: ItemsFilt = "all", q = "", showAll = false, botF = "all", sortBy: ItemsSort = "updated", tagF = "all", kindF = "all", projF = "all"
+let itemsView: "list" | "board" | "graph" | "collab" = "list"; let filt: ItemsFilt = "all", q = "", showAll = false, botF = "all", sortBy: ItemsSort = "updated", tagF = "all", kindF = "all", projF = "all"
 const FILTS: ItemsFilt[] = ["all", "wait", "run", "star", "arch"]
 const filtLabel = (k: ItemsFilt) => tr(({ all: "views:items.filterAll", wait: "views:items.filterWait", run: "views:items.filterRun", star: "views:items.filterStar", arch: "views:items.filterArch" } as const)[k])
 const SORTS: ItemsSort[] = ["updated", "due", "pri", "no"]
@@ -132,7 +133,7 @@ export function ItemsView() {
   if (sortBy === "pri") xs = [...xs].sort((a, b) => PRI_ORDER[a.pri ?? "中"] - PRI_ORDER[b.pri ?? "中"])
   if (sortBy === "no") xs = [...xs].sort((a, b) => +b.id.split("-")[1] - +a.id.split("-")[1])
   const groups: [Item["st"], string][] = [["wait", t("views:items.groupWait")], ["prop", t("views:items.groupProp")], ["run", t("views:items.groupRun")], ["block", t("views:items.groupBlock")], ["pause", t("views:items.groupPause")], ["done", t("views:items.groupDone")], ["fail", t("views:items.groupFail")], ["drop", t("views:items.groupDrop")]]
-  const seg = <Segmented value={itemsView} onChange={(v) => { itemsView = v; selecting = false; selected.clear(); r() }} options={[["list", t("views:items.viewList")], ["board", t("views:items.viewBoard")], ["graph", t("views:items.viewGraph")]] as const} />
+  const seg = <Segmented value={itemsView} onChange={(v) => { itemsView = v; selecting = false; selected.clear(); r() }} options={[["list", t("views:items.viewList")], ["board", t("views:items.viewBoard")], ["graph", t("views:items.viewGraph")], ["collab", t("views:items.viewCollab")]] as const} />
   const pick = selecting ? (id: string) => () => { selected.has(id) ? selected.delete(id) : selected.add(id); r() } : () => undefined
   const ids = [...selected]
   const done = () => { selected.clear(); selecting = false; r() }
@@ -187,6 +188,7 @@ export function ItemsView() {
               </section>) : null })}</div>)
         : <Empty title={arch ? t("views:items.emptyArch") : st.items.length ? t("views:items.emptyFiltered") : t("views:items.emptyNone")} sub={arch ? (st.cfg.archDays === "0" ? t("views:items.archManual") : t("views:items.archAuto", { count: Number(st.cfg.archDays) })) : st.items.length ? undefined : t("views:items.emptyNoneSub")} />)}
       {itemsView === "board" && <ItemsBoard xs={xs} cap={CLOSED_SHOWN} />}
+      {itemsView === "collab" && <Suspense fallback={<div className="flex justify-center py-16"><Spinner className="size-4" /></div>}><ItemsFleet xs={xs} /></Suspense>}
       {itemsView === "graph" && (
         <div className="flex flex-col gap-4">
           <GraphLegend />
@@ -276,10 +278,6 @@ let dtab: "动态" | "产出" = "动态"; let lastItem = ""
 const STATE_TONE: Record<ItemState["tone"], [string, string]> = {
   run: ["text-blue", "bg-blue/12 text-blue"], wait: ["text-attention", "bg-attention/12 text-attention"], pause: ["text-muted-foreground", "bg-muted text-muted-foreground"],
   done: ["text-success", "bg-success/12 text-success"], fail: ["text-destructive", "bg-destructive/12 text-destructive"], neutral: ["text-muted-foreground", "bg-muted text-muted-foreground"],
-}
-const ROOT_STATUS: Record<ItemState["kind"], AgentStatus> = {
-  done: "done", dropped: "stopped", failed: "failed", proposed: "proposed", asking: "asking", unavailable: "blocked",
-  graphPaused: "paused", paused: "paused", blocked: "blocked", working: "running", queued: "idle", idle: "idle",
 }
 const STATE_ICON: Record<ItemState["kind"], typeof CheckIcon> = {
   done: CheckIcon, dropped: BanIcon, failed: CircleAlertIcon, proposed: CircleHelpIcon, asking: CircleHelpIcon,
@@ -587,8 +585,8 @@ export function ItemView({ id }: { id: string }) {
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-3" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
             {i.dependencyWait && !!i.deps?.length && <div className="mt-4"><DependencyWaitPanel key={`${i.id}:${i.dependencyWait.cycle}`} item={i.id} wait={i.dependencyWait} /></div>}
           </section>
-          {/* who works on it: a lane per Bot, its steps as blocks on one time axis */}
-          {tree && <TeamLanes at={at} selected={agent?.key ?? null} onSelect={selectAgent} />}
+          {/* who works on it: a row per step, what it is doing or how it ended, and what to do about it */}
+          {tree && <TeamSteps at={at} selected={agent?.key ?? null} onSelect={selectAgent} />}
           {/* the conversation: what people said and what came back, under day headings; runs of process lines fold to one line */}
           <section className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center justify-between gap-2">

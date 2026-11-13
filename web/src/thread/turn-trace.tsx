@@ -32,6 +32,32 @@ function promptOf(k: string, first: any[]): string | undefined {
   return undefined
 }
 
+/** a turn's steps as spans, from the session's events: thinking and notes until the next step began, a call from the
+ * update that started it to the one that settled it; times are ms from `t0` (also the collaboration's call tree) */
+export function turnSpans(evs: any[], at: number[], items: TrailItem[], t0: number, t1: number | undefined, live: boolean, t: ReturnType<typeof useT>): TraceSpan[] {
+  const rel = (ms: number | undefined) => (ms ? Math.max(0, ms - t0) : 0)
+  return evs.map((e, j): TraceSpan => {
+    const start = rel(at[j]), next = j + 1 < evs.length ? at[j + 1] : t1
+    const last = j === evs.length - 1, it = items[j]
+    if (e[0] === "th" || e[0] === "a") {
+      const running = live && last
+      return { id: "e" + j, kind: "llm", name: t(e[0] === "th" ? "core:trace.think" : "core:trace.note"), detail: clip(String(e[1] ?? ""), 60) || undefined,
+        status: running ? "running" : "done", start, end: running ? undefined : Math.max(start, rel(next) || start), output: clip(String(e[1] ?? ""), 300) || undefined,
+        /* a note is what the model said, not a thinking stretch: the Thinking total counts only thinking, like the steps' header */
+        ...(e[0] === "a" ? { uncounted: true } : {}) }
+    }
+    const s = it?.t === "tool" ? (it as ToolStep) : undefined, c = s?.card
+    const running = live && e[5] === 1, failed = e[8] === 1
+    /* settled: the update that settled it; never settled (a turn cut off) or started and settled in one update: until the next step began */
+    const end = running ? undefined : e[13] && e[13] > at[j] ? rel(e[13]) : Math.max(start, rel(next) || start)
+    /* the detail says what the steps say: Steve's verb and its subject ("读取 workflows.rs", "读事项") */
+    const verb = s ? s.verb[running ? 0 : 1] : "", what = [verb, s?.subj && s.subj !== verb ? s.subj : ""].filter(Boolean).join(" ")
+    return { id: "e" + j, kind: e[9] === "Task" || e[9] === "Agent" ? "subagent" : "tool", name: c?.name || String(e[2] ?? ""), detail: what ? clip(what, 80) : undefined,
+      status: running ? "running" : failed ? "failed" : "done", start, end,
+      input: text(c?.args) && cut(text(c!.args)!, 300), output: failed ? undefined : text(c?.result) && cut(text(c!.result)!, 300), error: failed ? (c?.error ? c.error.slice(0, 300) : t("core:toolCard.failedText")) : undefined }
+  })
+}
+
 export default function TurnTrace({ k, evs, at, items, t0: turnT0, t1, live, cancelled }: {
   k: string; evs: any[]; at: number[]; items: TrailItem[]; t0?: number; t1?: number; live: boolean; cancelled: boolean
 }) {
@@ -43,26 +69,7 @@ export default function TurnTrace({ k, evs, at, items, t0: turnT0, t1, live, can
   const turn = u.s === "ok" && u.v && !live && t1 ? u.v.turns?.find((x) => x.session_id === k && Math.abs(x.started - t0) <= 5000 && x.ended != null && Math.abs(x.ended - t1) <= 5000) : undefined
   const root = useMemo<TraceSpan>(() => {
     const rel = (ms: number | undefined) => (ms ? Math.max(0, ms - t0) : 0)
-    const children = evs.map((e, j): TraceSpan => {
-      const start = rel(at[j]), next = j + 1 < evs.length ? at[j + 1] : t1
-      const last = j === evs.length - 1, it = items[j]
-      if (e[0] === "th" || e[0] === "a") {
-        const running = live && last
-        return { id: "e" + j, kind: "llm", name: t(e[0] === "th" ? "core:trace.think" : "core:trace.note"), detail: clip(String(e[1] ?? ""), 60) || undefined,
-          status: running ? "running" : "done", start, end: running ? undefined : Math.max(start, rel(next) || start), output: clip(String(e[1] ?? ""), 300) || undefined,
-          /* a note is what the model said, not a thinking stretch: the Thinking total counts only thinking, like the steps' header */
-          ...(e[0] === "a" ? { uncounted: true } : {}) }
-      }
-      const s = it?.t === "tool" ? (it as ToolStep) : undefined, c = s?.card
-      const running = live && e[5] === 1, failed = e[8] === 1
-      /* settled: the update that settled it; never settled (a turn cut off) or started and settled in one update: until the next step began */
-      const end = running ? undefined : e[13] && e[13] > at[j] ? rel(e[13]) : Math.max(start, rel(next) || start)
-      /* the detail says what the steps say: Steve's verb and its subject ("读取 workflows.rs", "读事项") */
-      const verb = s ? s.verb[running ? 0 : 1] : "", what = [verb, s?.subj && s.subj !== verb ? s.subj : ""].filter(Boolean).join(" ")
-      return { id: "e" + j, kind: e[9] === "Task" || e[9] === "Agent" ? "subagent" : "tool", name: c?.name || String(e[2] ?? ""), detail: what ? clip(what, 80) : undefined,
-        status: running ? "running" : failed ? "failed" : "done", start, end,
-        input: text(c?.args) && cut(text(c!.args)!, 300), output: failed ? undefined : text(c?.result) && cut(text(c!.result)!, 300), error: failed ? (c?.error ? c.error.slice(0, 300) : t("core:toolCard.failedText")) : undefined }
-    })
+    const children = turnSpans(evs, at, items, t0, t1, live, t)
     const usage = turn?.usage
     return { id: "turn", kind: "agent", name: t("core:trace.turn"), input: promptOf(k, evs[0]), status: live ? "running" : cancelled ? "cancelled" : "done", start: 0,
       end: live ? undefined : Math.max(rel(t1), ...children.map((c) => c.end ?? c.start)),

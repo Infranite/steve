@@ -7,7 +7,15 @@ import { ArrowLeftIcon, FileTextIcon, QuoteIcon, SearchIcon, TerminalIcon } from
 import { Page, ThemeSwitch, Card } from "@/ui"
 import { useT } from "@/i18n"
 import { fmtN, fmtUsd } from "@/stats/format"
-import { AgentLanes, type LaneAgent, type LaneTask } from "@/components/affect/agent-lanes"
+import { ParallelAttempts, type Attempt } from "@/components/affect/parallel-attempts-clean"
+import { stepLabels } from "@/agent-tree-view"
+import { handoffLabels, inspectorLabels } from "@/collab-graph"
+import { fleetLabels } from "@/items-collab"
+import { longDur } from "@/i18n/format"
+import { RunInspector, type RunSpan } from "@/components/affect/run-inspector-clean"
+import { AgentHandoff, type HandoffAgent, type Handoff, type HandoffTask } from "@/components/affect/agent-handoff-clean"
+import { AgentFleet, type FleetAgent } from "@/components/affect/agent-fleet-clean"
+import { Button } from "@/components/ui/button"
 import { AgentInbox, type AgentTask } from "@/components/affect/agent-inbox"
 import { RunningNow, type RunningTask } from "@/components/affect/running-now"
 import { TraceWaterfall, type TraceSpan } from "@/components/affect/trace-waterfall"
@@ -39,18 +47,62 @@ const S = (t: T, k: keyof Copy["s"]) => t(`views:showroom.s.${k}`)
 const T0 = new Date(2026, 10, 13, 14, 0).getTime(), MIN = 60_000, NOW = T0 + 42 * MIN
 const hhmm = (ms: number) => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
 
-const laneAgents = (t: T): LaneAgent[] => [
-  { id: "dev", name: S(t, "botDev"), model: "gpt-6.1-sol" },
-  { id: "review", name: S(t, "botReview"), model: "claude-opus-5" },
-  { id: "docs", name: S(t, "botDocs"), model: "gpt-6.1-mini" },
-]
-const laneTasks = (t: T): LaneTask[] => [
-  { id: "l1", agentId: "dev", title: S(t, "laneSpec"), status: "done", start: T0 + 2 * MIN, end: T0 + 14 * MIN },
-  { id: "l2", agentId: "dev", title: S(t, "laneBuild"), status: "running", start: T0 + 15 * MIN, end: NOW, after: ["l1"] },
-  { id: "l3", agentId: "review", title: S(t, "laneReview1"), status: "done", start: T0 + 14 * MIN, end: T0 + 22 * MIN, after: ["l1"] },
-  { id: "l4", agentId: "review", title: S(t, "laneAsk"), status: "waiting", start: T0 + 30 * MIN, end: NOW },
-  { id: "l5", agentId: "docs", title: S(t, "laneDocs"), status: "blocked", start: T0 + 24 * MIN, end: NOW, after: ["l2"] },
-  { id: "l6", agentId: "docs", title: S(t, "laneShots"), status: "failed", start: T0 + 6 * MIN, end: T0 + 12 * MIN },
+/* the collaboration: the item page's steps (Parallel Attempts without its picking), the full view's call tree and
+ * handoffs, and the items page's 协作 view */
+const stepRows = (t: T): Attempt[] => {
+  const row = (id: string, name: string, bot: string, model: string, status: Attempt["status"], line: string, progress: number, time: string, cost: string, act?: "open" | "decide" | "retry"): Attempt => ({
+    id, name, approach: `${bot} · ${model}`, status, progress, step: line, note: line, figures: [time, cost],
+    icon: <span className="type-label">{bot.slice(0, 1)}</span>,
+    action: act ? <Button size="xs" variant={act === "open" ? "ghost" : "outline"} className={act === "open" ? "text-muted-foreground" : undefined} onClick={noop}>{t(`views:agentTree.act.${act}`)}</Button> : undefined,
+  })
+  return [
+    row("s1", S(t, "stepSpec"), S(t, "botDocs"), "gpt-6.1-mini", "done", `${t("views:agentTree.passedOn", { n: 2 })} · ${S(t, "stepPassed")}`, 1, longDur(12 * MIN), "$0.41", "open"),
+    row("s2", S(t, "stepBuild"), S(t, "botDev"), "gpt-6.1-sol", "running", S(t, "stepDoing"), 0.6, longDur(27 * MIN), "$1.12", "open"),
+    row("s3", S(t, "stepColors"), S(t, "botReview"), "claude-opus-5", "waiting", t("views:agentTree.row.needsYou", { q: S(t, "stepAsk") }), 0.45, longDur(6 * MIN), "$0.22", "decide"),
+    row("s4", S(t, "stepShots"), S(t, "botDocs"), "gpt-6.1-mini", "failed", t("views:agentTree.row.failed", { reason: S(t, "stepFail") }), 0.3, longDur(4 * MIN), "$0.05", "retry"),
+    row("s5", S(t, "stepDocs"), S(t, "botDocs"), "gpt-6.1-mini", "queued", t("views:workflow.waitingFor", { names: S(t, "stepBuild") }), 0, "", ""),
+  ]
+}
+const runSample = (t: T): RunSpan => {
+  const call = (id: string, kind: RunSpan["kind"], name: string, start: number, end: number, extra: Partial<RunSpan> = {}): RunSpan => ({ id, kind, name, status: "done", start, end, ...extra })
+  const agent = (id: string, name: string, model: string, task: string, status: RunSpan["status"], start: number, end: number | undefined, cost: number, tokens: number, children: RunSpan[], extra: Partial<RunSpan> = {}): RunSpan =>
+    ({ id, kind: "agent", name, model, task, status, start, end, cost, tokensIn: tokens, children, time: longDur((end ?? 905_000) - start), ...extra })
+  return agent("root", "Steve", "gpt-6.1-sol", S(t, "st27"), "running", 0, undefined, 0.42, 38_000, [
+    call("r1", "llm", t("core:trace.think"), 0, 4_000), call("r2", "tool", "steve_workflow", 4_000, 6_000),
+    agent("a1", S(t, "botDocs"), "gpt-6.1-mini", S(t, "stepSpec"), "done", 6_000, 726_000, 0.41, 61_000, [
+      call("a1c1", "tool", "Read", 8_000, 9_000), call("a1c2", "llm", t("core:trace.think"), 9_000, 40_000), call("a1c3", "tool", "Write", 40_000, 42_000, { input: "docs/work-area.md" })]),
+    agent("a2", S(t, "botDev"), "gpt-6.1-sol", S(t, "stepBuild"), "running", 730_000, undefined, 1.12, 140_000, [
+      call("a2c1", "tool", "Edit", 732_000, 735_000), call("a2c2", "tool", "Bash", 736_000, 790_000, { input: "pnpm test", status: "failed", error: "2 tests failed" }), call("a2c3", "tool", "Bash", 800_000, 900_000, { input: "pnpm test" })]),
+    agent("a3", S(t, "botReview"), "claude-opus-5", S(t, "stepColors"), "waiting", 740_000, undefined, 0.22, 20_000, [call("a3c1", "llm", t("core:trace.note"), 741_000, 760_000)], { ask: S(t, "stepAsk") }),
+  ])
+}
+const handoffSample = (t: T): { agents: HandoffAgent[]; tasks: HandoffTask[]; handoffs: Handoff[] } => ({
+  agents: [
+    { id: "spec", name: S(t, "botDocs"), model: "gpt-6.1-mini", description: S(t, "stepSpec"), cost: 0.41 },
+    { id: "build", name: S(t, "botDev"), model: "gpt-6.1-sol", description: S(t, "stepBuild"), cost: 1.12 },
+    { id: "review", name: S(t, "botReview"), model: "claude-opus-5", description: S(t, "stepReview"), cost: 0.22 },
+  ],
+  tasks: [
+    { id: "spec", title: S(t, "stepSpec"), status: "done", agent: "spec", note: t("views:agentTree.passedOn", { n: 2 }) },
+    { id: "build", title: S(t, "stepBuild"), status: "working", agent: "build", note: S(t, "stepDoing") },
+    { id: "review", title: S(t, "stepReview"), status: "todo", agent: "review" },
+  ],
+  handoffs: [
+    { id: "spec->build", from: "spec", to: "build", task: S(t, "stepSpec"), items: [{ id: "o1", label: S(t, "outSpec"), kind: "file" }, { id: "o2", label: S(t, "outContract"), kind: "fact" }, { id: "o3", label: S(t, "outNotes"), kind: "note" }] },
+    { id: "spec->review", from: "spec", to: "review", task: S(t, "stepSpec"), items: [{ id: "o4", label: S(t, "outDecision"), kind: "decision" }] },
+    { id: "build->review", from: "build", to: "review", task: S(t, "stepBuild"), items: [{ id: "o5", label: S(t, "outBuild"), kind: "file" }] },
+  ],
+})
+const fleetSample = (t: T): FleetAgent[] => [
+  { id: "ST-27", name: S(t, "st27"), model: `ST-27 · Steve`, task: S(t, "st27Desc"), status: "running", cost: 0.42, time: longDur(6 * MIN), children: [
+    { id: "f1", name: S(t, "botDocs"), model: "gpt-6.1-mini", task: S(t, "stepSpec"), status: "done", cost: 0.41, time: longDur(12 * MIN) },
+    { id: "f2", name: S(t, "botDev"), model: "gpt-6.1-sol", task: S(t, "stepBuild"), status: "running", cost: 1.12, time: longDur(27 * MIN) },
+    { id: "f3", name: S(t, "botReview"), model: "claude-opus-5", task: S(t, "stepColors"), status: "waiting", ask: S(t, "stepAsk"), cost: 0.22, time: longDur(6 * MIN) },
+    { id: "f4", name: S(t, "botDocs"), model: "gpt-6.1-mini", task: S(t, "stepShots"), status: "failed", error: S(t, "stepFail"), cost: 0.05, time: longDur(4 * MIN) },
+  ] },
+  { id: "ST-29", name: S(t, "st29"), model: `ST-29 · Steve`, task: S(t, "st29Desc"), status: "done", cost: 0.3, time: longDur(3 * MIN), children: [
+    { id: "g1", name: S(t, "botDev"), model: "gpt-6.1-sol", task: S(t, "step2"), status: "done", cost: 0.8, time: longDur(15 * MIN) },
+  ] },
 ]
 
 const inboxTasks = (t: T): AgentTask[] => [
@@ -161,7 +213,7 @@ function SampleComposer({ running, text: first = "", queue = [], ctx }: { runnin
   )
 }
 
-const IDS: Id[] = ["agent-lanes", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel", "chat-composer"]
+const IDS: Id[] = ["parallel-attempts", "run-inspector", "agent-handoff", "agent-fleet", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel", "chat-composer"]
 
 export function DesignShowroom() {
   const t = useT()
@@ -221,11 +273,28 @@ export function DesignShowroom() {
             className="rounded-full bg-muted/70 px-2.5 py-1 type-footnote text-muted-foreground hover:bg-accent hover:text-foreground">{t(`views:showroom.c.${id}.name`)}</a>)}
         </nav>
 
-        <Exhibit id="agent-lanes" wide>
-          <State label={L(t, "lanesLive")}>
-            <AgentLanes agents={laneAgents(t)} tasks={laneTasks(t)} range={[T0, T0 + 50 * MIN]} now={NOW} tick={hhmm} selected="l2" onSelect={noop}
-              labels={{ now: t("views:agentTree.lanes.now"), needsYou: t("views:agentTree.lanes.needsYou"), lane: (a) => t("views:agentTree.lanes.laneOf", { name: a.name }) }} />
+        <Exhibit id="parallel-attempts" wide>
+          <State label={L(t, "stepsLive")}>
+            <div data-showroom-steps>
+              <div className="mb-3 flex flex-wrap items-center gap-x-1.5 type-footnote tabular-nums text-muted-foreground">
+                <span className="text-attention">● {t("views:agentTree.dots.needs", { count: 1 })}</span>·<span className="text-destructive">● {t("views:agentTree.dots.failed", { count: 1 })}</span>·<span className="text-blue">● {t("views:agentTree.dots.running", { count: 1 })}</span>·<span>● {t("views:agentTree.dots.done", { count: 1 })}</span>
+              </div>
+              <ParallelAttempts pickable={false} header={null} attempts={stepRows(t)} selected="s2" onSelect={noop}
+                labels={stepLabels(t)} />
+            </div>
           </State>
+        </Exhibit>
+
+        <Exhibit id="run-inspector" wide>
+          <State label={L(t, "inspector")}><Card><RunInspector run={runSample(t)} now={905_000} startedAt={NOW - 905_000} formatCost={fmtUsd} formatTook={longDur} labels={inspectorLabels(t)} /></Card></State>
+        </Exhibit>
+
+        <Exhibit id="agent-handoff" wide>
+          <State label={L(t, "handoff")}><Card><AgentHandoff {...handoffSample(t)} inbound labels={handoffLabels(t)} /></Card></State>
+        </Exhibit>
+
+        <Exhibit id="agent-fleet" wide>
+          <State label={L(t, "fleet")}><Card><AgentFleet agents={fleetSample(t)} defaultOpen="ST-27" now={NOW} formatCost={fmtUsd} title={t("views:items.fleet.title")} onSelect={noop} labels={fleetLabels(t)} /></Card></State>
         </Exhibit>
 
         <Exhibit id="agent-inbox" wide>

@@ -890,6 +890,17 @@ function segsOf(s: Sess, range?: [number, number], skip?: [number, number][]): S
   if (s.st !== "run") turnDone(s.ev.length)
   return segs
 }
+/** a session's work, turn by turn, with the steps Steve shows for it: what the call tree of the collaboration draws
+ * (collab-graph.tsx); the live one is the running session's last, unfinished work */
+export function sessionWork(k: string): { evs: any[]; at: number[]; items: TrailItem[]; t0: number; t1?: number; live: boolean }[] {
+  const s = st.S[k]
+  if (!s?.loaded) return []
+  const segs = segsOf(s), last = segs[segs.length - 1]
+  return segs.filter((g) => g.t === "work").map((g) => {
+    const live = s.st === "run" && g === last && !g.end
+    return { evs: g.evs, at: g.at ?? [], items: trailOf(g.evs, g.at ?? [], g.t1, live), t0: g.t0 || (g.at ?? []).find(Boolean) || 0, t1: g.t1, live }
+  })
+}
 type TP = { k: string; compact?: boolean; tail?: number; range?: [number, number]; skip?: [number, number][] }
 /* the whole app re-renders on every store change: a transcript (hundreds of steps, markdown) only when its own events or status did */
 export function Transcript(p: TP) { const s = st.S[p.k]; return <TranscriptOf {...p} ev={s?.ev} st={s?.st} loaded={s?.loaded} /> }
