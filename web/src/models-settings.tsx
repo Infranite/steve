@@ -17,6 +17,7 @@ import { Row, Segmented, Panel, Section, Card, Blank, Notice, Pill, Chevron, Loa
 import { Select } from "@/view-shared"
 import { Robot } from "@/robot"
 import { ModelPicker, harnessName } from "@/model-picker"
+import { HarnessMark } from "@/components/harness-mark"
 import { editBot } from "@/manage"
 
 /* the label and description are read when the settings list renders, so they follow the UI language */
@@ -144,7 +145,7 @@ export function ModelsSettingsPane() {
       <Section label={t("pages:models.agentsSection")} note={t("pages:models.agentsHint")}>
         <Panel>{v.agents.map((a) => (
           <div key={a.harness} data-agent={a.harness}>
-            <Row title={a.name} sub={a.value ? t("pages:models.agentChanged") : t("pages:models.agentFollowsHub")}>
+            <Row icon={<HarnessMark harness={a.harness} className="size-5" />} title={a.name} sub={a.value ? t("pages:models.agentChanged") : t("pages:models.agentFollowsHub")}>
               <div className="w-[min(240px,52vw)]"><ModelPicker harness={a.harness} value={a.value ?? ""} allowDefault defaultLabel={a.default ? t("pages:models.defaultWith", { model: a.default }) : undefined} testId={`agent-${a.harness}`}
                 onChange={(m) => void save({ agents: { [a.harness]: m || null } }, m ? t("pages:models.agentSet", { name: a.name, model: m }) : t("pages:models.agentReset", { name: a.name }))} /></div>
             </Row>
@@ -240,7 +241,7 @@ function Editor({ p, v, steve, startOwn, onSave, onCancel }: { p: Purpose; v: Vi
             <ChoiceLine c={steve} wrap className="mt-0.5" />
           </div>
         ) : <>
-          <Field id="Harness" label="Harness"><Select className="w-full" value={harness} testId={`harness-${p.key}`} onChange={switchHarness} options={v.harnesses.map((x) => ({ v: x.id, l: x.name }))} /></Field>
+          <Field id="Harness" label="Harness"><Select className="w-full" value={harness} testId={`harness-${p.key}`} onChange={switchHarness} options={v.harnesses.map((x) => ({ v: x.id, l: <span className="inline-flex min-w-0 items-center gap-2"><HarnessMark harness={x.id} /><span className="truncate">{x.name}</span></span> }))} /></Field>
           <Field id="model" label={t("pages:models.editor.model")}><ModelPicker harness={harness} value={primary} allowDefault defaultLabel={inherited} testId={`model-${p.key}`} onChange={setPrimary} /></Field>
           <Field id="effort" label={t("pages:models.editor.effort")}><Select className="w-full" value={effort || "default"} testId={`effort-${p.key}`} onChange={(x) => setEffort(x === "default" ? "" : x)}
             options={[{ v: "default", l: onSteve && steve.effort ? t("pages:models.editor.followDefaultEffort", { effort: effortName(steve.effort) }) : t("pages:models.followModel") }, ...(h?.efforts ?? []).map((e) => ({ v: e.key, l: e.label }))]} /></Field>

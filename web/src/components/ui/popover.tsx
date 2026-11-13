@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { createPortal } from "react-dom"
 import { mergeProps } from "@base-ui/react/merge-props"
 import { useRender } from "@base-ui/react/use-render"
 import { Popover as PopoverPrimitive } from "@/components/affect/popover-clean"
@@ -9,7 +10,9 @@ import { cn } from "cn"
 /* Popover: affectUI's Popover (a card in the top layer beside its trigger; it flips to stay on screen, closes on a press
  * outside, Escape or tabbing away and hands the focus back) behind the Base UI-shaped parts Steve's call sites use:
  *   <Popover open onOpenChange><PopoverTrigger render={<Button … />}>…</PopoverTrigger><PopoverContent align="end">…</PopoverContent></Popover>
- * The card renders where PopoverContent is, beside the trigger in the tree, and sits next to the trigger on screen.
+ * The card sits next to the trigger on screen. In the DOM it is moved out of the trigger's parents (into the dialog or
+ * popover the trigger is in, else <body>): it is a fixed box in the top layer, so a parent's child selectors (a Field's
+ * `*:w-full`, `[&>*]:…`) would otherwise size it against the window – that drew the model menu edge to edge.
  *
  * Stacking: the card is in the browser's top layer, above everything that uses z-index – Base UI's dialogs, menus and
  * selects (z-50) and the toaster. So do not open a Base UI popup (Select, DropdownMenu, Dialog) from inside a Popover:
@@ -70,7 +73,9 @@ function PopoverContent({
 }) {
   const ctx = React.useContext(PopoverCtx)
   if (!ctx) return null
-  return (
+  if (!ctx.open) return null
+  const host = typeof document === "undefined" ? null : ctx.anchor.current?.closest<HTMLElement>('[popover], [role="dialog"], [role="alertdialog"]') ?? document.body
+  const card = (
     <PopoverPrimitive
       {...props}
       open={ctx.open}
@@ -87,6 +92,7 @@ function PopoverContent({
       {children}
     </PopoverPrimitive>
   )
+  return host ? createPortal(card, host) : card
 }
 
 function PopoverHeader({ className, ...props }: React.ComponentProps<"div">) {

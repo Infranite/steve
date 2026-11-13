@@ -690,6 +690,7 @@ export default {
     backToList: "返回列表",
     search: "搜索 {{harness}} 的模型…",
     noMatch: "没有匹配的模型",
+    none: "{{harness}} 还没有报告可用的模型。可以用「其他…」直接填模型 id。",
     loading: "正在读取模型列表…",
     via: "经 {{via}}",
     count_other: "{{count}} 个 · 来自 {{source}}",

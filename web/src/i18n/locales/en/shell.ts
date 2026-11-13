@@ -715,6 +715,7 @@ export default {
     backToList: "Back to list",
     search: "Search {{harness}} models…",
     noMatch: "No matching models",
+    none: "{{harness}} has not reported any models yet. Use Other… to enter a model ID.",
     loading: "Loading models…",
     via: "via {{via}}",
     count_one: "{{count}} · from {{source}}",

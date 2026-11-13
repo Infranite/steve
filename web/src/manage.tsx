@@ -31,10 +31,10 @@ import {
   setSetting, toast, finishOnboarding, emit, closedSt,
 } from "@/store"
 import { api, type RKindReview } from "@/api"
-import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Note, Lead, Notice, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
+import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Notice, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
-import { Select, ItemRowExport as ItemRow } from "@/view-shared"
+import { Select } from "@/view-shared"
 import { showTag } from "@/views"
 import { AskSteve } from "@/config-ui"
 import { AppearanceSection } from "@/appearance-settings"
@@ -47,10 +47,11 @@ import { ModelPicker } from "@/model-picker"
 import { SetSelect, SetSwitch } from "@/settings-controls"
 import { TextField } from "@/components/ui/input"
 import { TextArea } from "@/components/affect/text-area-clean"
-import { RecentStats } from "@/stats/drill"
 import { AboutVersions } from "@/version"
 import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
 import { when } from "@/auto/common"
+import { BotOverview, BotPrompt, RunsOn } from "@/bot-page"
+import { HarnessMark } from "@/components/harness-mark"
 
 /* ═════════ Bot 列表 ═════════ */
 let botFilter: "全部" | "启用" | "停用" = "全部"
@@ -168,7 +169,7 @@ export function NewBotDialog() {
       <DialogContent className="gap-4 sm:max-w-[520px]">
         <DialogHeader><DialogTitle className="type-title">{t("manage:list.newBot")}</DialogTitle><DialogDescription className="type-callout">{t("manage:newBot.desc", { ws: st.workspace?.name })}</DialogDescription></DialogHeader>
         <AutonomyChoice testId="new-bot" label={t("manage:list.newBot")} value={mode} onChange={setMode} options={[{ value: "tpl", name: t("manage:newBot.fromTpl"), text: t("manage:newBot.fromTplSub"), icon: <LayoutTemplateIcon /> }, { value: "desc", name: t("manage:newBot.fromDesc"), text: t("manage:newBot.fromDescSub"), icon: <SparklesIcon /> }, { value: "blank", name: t("manage:newBot.blank"), text: t("manage:newBot.blankSub"), icon: <FilePlusIcon /> }]} />
-        {mode === "tpl" && <Panel className="anim-in">{TEMPLATES.map((id) => { const x = tplText(t, id), h = defaultHarness(); return <Row key={id} title={x.name} sub={`${x.role} · ${runtimeName(h) ?? h}`} onClick={() => setTpl(id)} data-tpl={id}>{tpl === id && <CheckIcon className="size-4 text-blue" />}</Row> })}</Panel>}
+        {mode === "tpl" && <Panel className="anim-in">{TEMPLATES.map((id) => { const x = tplText(t, id), h = defaultHarness(); return <Row key={id} title={x.name} sub={<span className="inline-flex min-w-0 flex-wrap items-center gap-x-1.5"><span>{x.role}</span><span aria-hidden>·</span><span className="inline-flex items-center gap-1"><HarnessMark harness={h} className="size-3.5" />{runtimeName(h) ?? h}</span></span>} onClick={() => setTpl(id)} data-tpl={id}>{tpl === id && <CheckIcon className="size-4 text-blue" />}</Row> })}</Panel>}
         {mode === "desc" && <TextArea autoFocus className="anim-in" minRows={4} maxRows={10} aria-label={t("manage:newBot.fromDesc")} placeholder={t("manage:newBot.descPlaceholder")} value={desc} onChange={(e) => setDesc(e.target.value)} data-bot-desc />}
         <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button disabled={(mode === "desc" && !desc.trim()) || busy} onClick={() => void create()} data-testid="bot-go">{busy ? <Spinner className="size-3.5" /> : mode === "desc" && <SparklesIcon />}{mode === "desc" ? t("manage:newBot.draft") : t("manage:newBot.create")}</Button></DialogFooter>
       </DialogContent>
@@ -223,37 +224,27 @@ export function BotView({ k }: { k: string }) {
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const b = st.bots[k]
   const [form, setForm] = useState<any>(null)
-  const [prompt, setPrompt] = useState<{ generated: string; custom: string | null } | null>(null), [pdraft, setPdraft] = useState<string | null>(null)
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
   useEffect(() => { if (b && botTab === "记忆" && !b.memLoaded) void loadMemories(k) }, [k, botTab, b?.memLoaded])
-  useEffect(() => { if (b && botTab === "系统提示词") api.botPrompt(k).then(setPrompt).catch(() => {}) }, [k, botTab, b?.prompt, b?.memCount])
   if (!b) return <Page title="Bot" back={["#/bots", "Bot"]}><Empty title={t("manage:detail.missing")} sub={t("manage:detail.missingSub")} /></Page>
   const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
   const effort = fm.reasoningEffort ?? b.reasoningEffort ?? ""
   const set = (p: any) => setForm({ ...fm, reasoningEffort: effort, ...p })
-  const mine = st.items.filter((i) => i.b === k && !closedSt(i.st) && !i.arch)
   const tabs = BOT_TABS.map(([v, l]) => [v, t(`manage:detail.${l}`)] as const)
   return (
     <Page back={["#/bots", "Bot"]} max={720} toolbarTop toolbar={<OwnerChip objectType="bot" objectId={k} />}
       lead={<Robot k={k} size={56} className="max-sm:size-12!" />}
       title={<span className="block truncate">{b.main ? b.n : t("manage:bot.name", { name: b.n })}</span>}
-      sub={<div><div className="mb-1 text-muted-foreground">{b.role || t("manage:detail.noRole")}</div><Meta><span>{b.h}</span><span>{b.m}</span><span>{t("manage:detail.pers", { v: b.pers || t("manage:detail.unset") })}</span><span>{t("manage:detail.pro", { v: proLabel(t, b.pro) })}</span></Meta><RecentStats bot={k} className="mt-0.5 block type-footnote" /></div>}
+      sub={<div className="flex flex-col gap-1"><div className="text-muted-foreground">{b.role || t("manage:detail.noRole")}</div><RunsOn k={k} className="type-footnote text-muted-foreground" /></div>}
       actions={<>{!b.main && <><span className="hidden type-footnote text-muted-foreground sm:inline">{b.on ? t("manage:bot.enabled") : t("manage:bot.disabled")}</span><SetSwitch testId="bot-on" checked={b.on} onChange={(v) => void saveBot(k, { on: v }, v ? t("manage:bot.enabled") : t("manage:bot.disabled"))} label={t("manage:bot.enable")} /></>}<BotMenu k={k} /></>}>
       <Strip className="mb-8" watch={botTab}><Segmented full className="min-w-max" value={botTab} onChange={(v) => { botTab = v; r() }} options={tabs} /></Strip>
-      {botTab === "概览" && (mine.length ? <Panel className="anim-in">{mine.map((i) => <ItemRow key={i.id} i={i} bot={false} />)}</Panel> : <Empty title={t("manage:detail.noRunning")} />)}
+      {botTab === "概览" && <BotOverview k={k} go={(v) => { botTab = v; r() }}
+        labels={{ pro: proLabel(t, b.pro), perm: permName(t, b.permMode), acc: accLabel(t, b.acc), effort: b.reasoningEffort ? (isEffortKey(b.reasoningEffort) ? t(`manage:effort.${b.reasoningEffort}`) : b.reasoningEffort) : null, steveTools: STEVE_TOOLS.length }} />}
       {/* the channels page's list, laid into this page's section and panel */}
       {botTab === "对外身份" && <div className="anim-in"><PersonasSection bot={k} panel /></div>}
       {botTab === "定时与流程" && <BotSchedules k={k} />}
       {botTab === "能力" && <BotCaps k={k} onPerm={() => { botTab = "设置"; r() }} />}
-      {botTab === "系统提示词" && (
-        <div className="flex flex-col gap-3 anim-in" data-prompt>
-          <Segmented size="sm" value={b.prompt != null || pdraft != null ? "自己写" : "自动生成"} onChange={(v) => { if (v === "自己写") setPdraft(b.prompt ?? prompt?.generated ?? ""); else { setPdraft(null); if (b.prompt != null) void saveBot(k, { prompt: null }, t("manage:prompt.revertedToast")) } }} options={[["自动生成", t("manage:prompt.auto")], ["自己写", t("manage:prompt.custom")]] as const} />
-          {b.prompt == null && pdraft == null
-            ? <><pre className="whitespace-pre-wrap rounded-xl bg-muted/60 px-4 py-3.5 type-code text-foreground/90">{prompt?.generated ?? t("manage:prompt.loading")}</pre><Note className="mt-0">{t("manage:prompt.autoHint")}</Note></>
-            : <><TextArea minRows={14} maxRows={40} inputClassName="type-code font-mono!" aria-label={t("manage:detail.tabPrompt")} value={pdraft ?? b.prompt ?? ""} onChange={(e) => setPdraft(e.target.value)} data-prompt-edit />
-              <div className="flex items-center gap-2"><Button size="sm" disabled={pdraft == null || pdraft === b.prompt} onClick={() => { void saveBot(k, { prompt: pdraft ?? "" }); setPdraft(null) }}>{t("common:action.save")}</Button><span className="type-footnote text-muted-foreground">{t("manage:prompt.customHint")}</span></div></>}
-        </div>
-      )}
+      {botTab === "系统提示词" && <BotPrompt k={k} />}
       {botTab === "记忆" && <BotMemories k={k} />}
       {botTab === "设置" && (
         <FieldGroup className="gap-8 anim-in">
@@ -278,7 +269,7 @@ export function BotView({ k }: { k: string }) {
             options={ACC_KEYS.map((key) => ({ value: ACC[key], name: accLabel(t, key), text: t(`manage:form.accText.${key}`), icon: ACC_ICON[key] }))} /></Section>
           <Section label={t("manage:form.run")}><Card className="flex flex-col gap-5 p-5">
             <div className="grid gap-4 sm:grid-cols-2">
-              <F label="Harness"><SetSelect wide testId="bot-harness" label="Harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "", reasoningEffort: "" })} options={st.runtimes.map((x) => ({ v: x.id, l: x.ok ? x.name : t("manage:form.unavailable", { name: x.name }) }))} /></F>
+              <F label="Harness"><SetSelect wide testId="bot-harness" label="Harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "", reasoningEffort: "" })} options={st.runtimes.map((x) => ({ v: x.id, l: x.ok ? x.name : t("manage:form.unavailable", { name: x.name }), icon: <HarnessMark harness={x.id} /> }))} /></F>
               <F label={t("manage:form.model")}><ModelPicker field harness={fm.harness} value={fm.model ?? ""} allowDefault testId="bot-model" onChange={(m) => set({ model: m })} /></F>
               <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><SetSelect wide testId="bot-effort" label={t("manage:form.effort")} value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...harnessEfforts(fm.harness).map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v }))]} /></F>
             </div>
