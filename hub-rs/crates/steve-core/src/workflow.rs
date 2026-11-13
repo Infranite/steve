@@ -478,16 +478,12 @@ impl Tx<'_> {
                     if !self.workflow_current(current)? {
                         for unit in &current.units {
                             if self.workflow_busy(unit)? {
-                                return Err(conflict(
-                                    "旧周期仍有执行或子事项未收尾，暂不能开始新周期",
-                                ));
+                                return Err(conflict("旧周期仍有执行或子事项未收尾，暂不能开始新周期"));
                             }
                             if let Some(id) = unit.item_id.as_deref()
                                 && self.item(id)?.phase != "closed"
                             {
-                                return Err(conflict(
-                                    "旧周期仍有执行或子事项未收尾，暂不能开始新周期",
-                                ));
+                                return Err(conflict("旧周期仍有执行或子事项未收尾，暂不能开始新周期"));
                             }
                         }
                     }
