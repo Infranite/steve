@@ -8,7 +8,9 @@ import { stats, type CountRow, type Filter, type Summary, type UsageRow } from "
 import { Segmented } from "@/ui"
 import { Spinner } from "@/components/ui/spinner"
 import { Button } from "@/components/ui/button"
-import { ChartBody, Chart, ChartHead, ChartTable, HBars, Legend, Share, STATE, SERIES } from "@/stats/chart"
+import { ChartBody, Chart, ChartHead, ChartTable, HBars, Legend, OTHER, STATE, SERIES } from "@/stats/chart"
+import { CompactBreakdown } from "@/components/affect/compact-breakdown"
+import { splitParts } from "@/stats/split"
 import { Est, Kpi, kpiRow } from "@/stats/kpi"
 import { Loading, ModeSwitch } from "@/stats/overview"
 import { bucketName, durUnit, fmtMs, fmtN, fmtPct, fmtUsd, isHour, oneDay, zoneName, useStats } from "@/stats/format"
@@ -54,32 +56,54 @@ export function Table({ head, children, label, min = 560, stick = false }: { hea
 type UsageTab = "model" | "bot" | "project" | "purpose"
 const USAGE_TABS = () => [["model", t("stats:usage.tab.model")], ["bot", "Bot"], ["project", t("stats:usage.tab.project")], ["purpose", t("stats:usage.tab.purpose")]] as const
 
-/** 用量明细: one table per dimension, or the item table */
-export function UsageSection({ f, fkey, live, picked }: { f: Filter; fkey: string; live: boolean; picked: string | null }) {
+/** 用量明细: the split of the cost by one dimension (affectUI Compact Breakdown) next to the table of that dimension */
+export function UsageSection({ f, fkey, live, picked, spend, prev }: { f: Filter; fkey: string; live: boolean; picked: string | null; spend: number; prev?: Summary["prev"] }) {
   const t = useT()
   const [tab, setTab] = useState<UsageTab>("model")
   /* a picked day, or a picked hour of the day (ST-43) */
   const day = picked?.slice(0, 10)
   const g: Filter = picked ? { ...f, range: "custom", from: day, to: day, hour: isHour(picked) ? Number(picked.slice(11, 13)) : undefined } : f
+  /* each answer remembers its dimension: until the new tab's rows come, the last tab's are not shown under the new name */
+  const [got] = useStats(() => { const by = tab; return stats.usage(g, by).then((v) => ({ ...v, by })) }, [fkey + picked, tab], live)
+  const d = got.s === "ok" && got.v.by !== tab ? { s: "loading" as const } : got
+  const rows = d.s === "ok" ? d.v.rows.filter((r) => r.total > 0 || r.est > 0 || r.reported > 0 || r.turns > 0 || r.calls > 0) : []
   return (
     <Panel k="usage-table" data-usage>
       <ChartHead k="usage-table" icon={<TableIcon />} title={t("stats:usage.title")} sub={t("stats:usage.meta")} meta={picked ? <span className="text-blue">{t("stats:usage.only", { bucket: bucketName(picked) })}</span> : undefined} right={<Segmented size="sm" value={tab} onChange={setTab} options={USAGE_TABS()} />} />
-      <ChartBody className="px-0 pt-1 pb-2"><UsageTable f={g} by={tab} fkey={fkey + picked} live={live} /></ChartBody>
+      <ChartBody className="px-0 pt-1 pb-2">
+        {d.s === "loading" ? <div className="flex h-24 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
+          : d.s !== "ok" ? <div className="px-5 py-6 type-callout text-muted-foreground" role="alert">{d.s === "error" ? d.msg : t("stats:usage.loadFailed")}</div>
+          : !rows.length ? <div className="px-5 py-6 type-callout text-muted-foreground" data-usage-empty>{t("stats:usage.empty")}</div>
+          : <div className="grid grid-cols-1 gap-y-4 @4xl/stats:grid-cols-[minmax(0,17rem)_minmax(0,1fr)] @4xl/stats:gap-x-2">
+            {/* keyed by the dimension: the bar's order is the glide within one dimension, a new tab starts it fresh */}
+            <UsageSplit key={tab} rows={rows} by={tab} spend={spend} prev={picked ? null : prev ?? null} />
+            <UsageTable rows={rows} by={tab} />
+          </div>}
+      </ChartBody>
     </Panel>
   )
 }
 
-function UsageTable({ f, by, fkey, live }: { f: Filter; by: UsageTab; fkey: string; live: boolean }) {
+/** the parts of the range's estimated cost, at most five (split.ts), beside the table of the same rows */
+function UsageSplit({ rows, by, spend, prev }: { rows: UsageRow[]; by: UsageTab; spend: number; prev: Summary["prev"] }) {
   const t = useT()
-  const [d] = useStats(() => stats.usage(f, by), [fkey, by], live)
-  if (d.s === "loading") return <div className="flex h-24 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
-  if (d.s !== "ok") return <div className="px-5 py-6 type-callout text-muted-foreground" role="alert">{d.s === "error" ? d.msg : t("stats:usage.loadFailed")}</div>
-  const rows = d.v.rows.filter((r) => r.total > 0 || r.est > 0 || r.reported > 0 || r.turns > 0 || r.calls > 0)
-  if (!rows.length) return <div className="px-5 py-6 type-callout text-muted-foreground" data-usage-empty>{t("stats:usage.empty")}</div>
-  const est = rows.reduce((a, r) => a + r.est, 0), tok = rows.reduce((a, r) => a + r.total, 0)
-  const share = (r: UsageRow) => (est > 0 ? r.est / est : tok > 0 ? r.total / tok : 0)
+  const { cost, items } = splitParts(rows, SERIES, { color: OTHER, label: (count) => t("stats:usage.otherN", { count }) }, t("stats:word.unknown"))
+  /* the change of the range's whole estimated spend against the range before, as the cost KPI counts it (only for
+   * cost: the previous range's tokens aren't split the same way); neutral, more spend is neither good nor bad */
+  const before = cost && prev ? prev.spend.est : 0
   return (
-    <Table label={t("stats:usage.title")} min={720} stick head={<tr><th className={th}>{t("stats:col.name")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.input")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.output")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheRead")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheWrite")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.hitRate")}</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:col.cost")}<Est /></span></th><th className={cn(th, "w-24 pl-4")}>{t("stats:col.share")}</th></tr>}>
+    <div className="px-5 @4xl/stats:pr-0" data-usage-split={by} data-usage-split-measure={cost ? "cost" : "tokens"}>
+      <CompactBreakdown bare items={items} title={cost ? t("stats:usage.breakdownCost") : t("stats:usage.breakdownTokens")} totalLabel={cost ? t("stats:usage.totalCost") : t("stats:usage.totalTokens")}
+        format={cost ? (n) => (n === 0 ? "$0" : fmtUsd(n)) : (n) => fmtN(Math.round(n))} delta={before > 0 ? ((spend - before) / before) * 100 : undefined} deltaTone="neutral"
+        footer={cost ? null : <span className="whitespace-normal">{t("stats:usage.noCostYet")}</span>} rowProps={(x) => ({ "data-usage-part": x.key })} />
+    </div>
+  )
+}
+
+function UsageTable({ rows, by }: { rows: UsageRow[]; by: UsageTab }) {
+  const t = useT()
+  return (
+    <Table label={t("stats:usage.title")} min={640} stick head={<tr><th className={th}>{t("stats:col.name")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.input")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.output")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheRead")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheWrite")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.hitRate")}</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:col.cost")}<Est /></span></th></tr>}>
       {rows.map((r) => (
         <tr key={r.key} data-usage-row={r.key}>
           <td className="max-w-56 truncate py-2.5 pr-2" title={r.key}>{r.label}{by === "model" && r.key && !r.priced && <span className="ml-1 type-footnote text-muted-foreground">{t("stats:usage.unpricedTag")}</span>}
@@ -87,7 +111,6 @@ function UsageTable({ f, by, fkey, live }: { f: Filter; by: UsageTab; fkey: stri
           <td className={num}>{fmtN(r.input)}</td><td className={num}>{fmtN(r.output)}</td><td className={num}>{fmtN(r.cache_read)}</td><td className={num}>{fmtN(r.cache_write)}</td>
           <td className={num}>{fmtPct(r.hit_rate)}</td>
           <td className={num}>{r.total === 0 && r.reported > 0 ? <span className="text-muted-foreground" title={t("stats:word.sessionQuoteIsFloor")}>{t("stats:word.quoteFloor", { usd: fmtUsd(r.reported) })}</span> : by === "model" && r.key && !r.priced ? <a href="#/settings/stats" className="text-blue hover:underline" data-unpriced>{t("stats:word.unpriced")}</a> : <span title={[r.price_source ? (r.price_source === "models_dev" ? t("stats:usage.fromMd") : t("stats:usage.fromTable")) : "", r.reported ? t("stats:word.adapterQuote", { usd: fmtUsd(r.reported) }) : ""].filter(Boolean).join(t("stats:usage.titleSep")) || undefined} data-price-source={by === "model" ? r.price_source ?? undefined : undefined}>{fmtUsd(r.est)}</span>}</td>
-          <td className="py-2.5 pl-4"><Share r={share(r)} /></td>
         </tr>
       ))}
     </Table>

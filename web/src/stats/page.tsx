@@ -131,7 +131,7 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
             <UsageKpis s={s} prevName={prevName} bySource={src.s === "ok" ? src.v.rows : undefined} />
             <PriceNote spend={s.spend} />
           </Trend>
-          <UsageSection f={f} fkey={fkey} live={live} picked={picked} />
+          <UsageSection f={f} fkey={fkey} live={live} picked={picked} spend={s.spend.est} prev={s.prev} />
         </Section>
         <QualityHuman s={s} f={f} fkey={fkey} live={live} range={range} prevName={prevName} />
         <AgentSection s={s} f={f} fkey={fkey} live={live} range={range} />

@@ -134,6 +134,14 @@ try {
     for (const k of ["flow", "lead", "usage"]) assert.match(await page.locator(`[data-chart-head="${k}"] [data-chart-meta]`).innerText(), new RegExp(range), k)
     assert.match(await page.locator('[data-chart-head="flow"]').innerText(), new RegExp(`新建 ${sum(created)} 件[\\s\\S]*完成 ${sum(done)} 件[\\s\\S]*件 / 天`))
     assert.equal(await page.locator('[data-chart="group"] [data-bar]').count(), days.length)
+    /* the usage split (Compact Breakdown) holds the same rows as the usage table, ranked by estimated cost, with their shares */
+    const split = page.locator("[data-usage-split]")
+    await split.scrollIntoViewIfNeeded()
+    assert.equal(await split.getAttribute("data-usage-split-measure"), "cost")
+    assert.deepEqual(await split.locator("[data-usage-part]").evaluateAll((els) => els.map((e) => e.getAttribute("data-usage-part"))), ["agent", "gateway"])
+    assert.equal(await page.locator("[data-usage] [data-usage-row]").count(), 2)
+    await page.waitForFunction(() => /\$36\.80/.test(document.querySelector("[data-usage-split] .ui-cb__big")?.textContent ?? ""))
+    assert.match((await split.locator('[data-usage-part="agent"]').innerText()).replace(/\s+/g, " "), /Agent \$18\.40 50%/)
     // the event explorer: a window dragged on the histogram narrows the list, the counts and the label agree, zoom fills the window
     if (width === 1440) {
       const ev = page.locator("[data-events]")
@@ -290,6 +298,55 @@ try {
     await page.close()
   }
 
+  /* an item's drill-down: where the cost went — its own turns and the sub-items it started, in the order they began */
+  for (const theme of ["light", "dark"]) for (const width of [1440, 390]) {
+    const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 1000 }, reducedMotion: "reduce", colorScheme: theme })
+    page.on("pageerror", (e) => errors.push(e.message))
+    const t0 = Date.now() - 5 * H, U = (input, output, est, x = {}) => ({ input, output, cache_read: 0, cache_write: 0, total: input + output, hit_rate: null, est, reported: 0, unpriced_tokens: 0, rough: false, ...x })
+    const turn = (id, at, min, usage, x = {}) => ({ id, session_id: "ses_" + id, started: t0 + at * 60000, ended: t0 + (at + min) * 60000, stop_reason: "end_turn", attempt: 0, transient: false, tools: 3, tool_errors: 0, usage, ...x })
+    const facts = { created: t0, first_turn: t0, first_deliver: null, last_deliver: null, accepted: null, done_at: null, dropped_at: null, lead_ms: null, cycle_ms: null, wait_ms: 0, agent_ms: 60000, turns: 2, delivers: 0, reworks: 0, first_pass: null, fails: 0, stalls: 0, releases: 0, release_fails: 0, decisions: 0, yolo_decided: 0 }
+    const detail = {
+      "ST-1": { item_id: "ST-1", no: 1, title: "重整统计页图表", status: "run", facts, usage: U(3000, 300, 0.5, { unpriced_tokens: 500000, reported: 2.5 }), age_ms: 5 * H, turns: [turn("a", 0, 2, U(1000, 100, 0.2)), turn("b", 30, 3, U(2000, 200, 0.3, { unpriced_tokens: 500000, reported: 2.5 }), { stop_reason: "error", tool_errors: 1 })], marks: [], decisions: [], by_model: [] },
+      "ST-2": { item_id: "ST-2", no: 2, title: "整理发布脚本", status: "done", facts: { ...facts, done_at: t0 + 3 * H }, usage: U(10000, 1000, 1.25), age_ms: 3 * H, turns: [turn("c", 10, 5, U(10000, 1000, 1.25))], marks: [], decisions: [], by_model: [] },
+    }
+    const tree = { nodes: [{ item_id: "ST-1", parent_id: null, depth: 0, tokens: 3300, est: 0.5, reported: 0, agent_ms: 300000, first_turn: t0, done_at: null, dropped_at: null }, { item_id: "ST-2", parent_id: "ST-1", depth: 1, tokens: 11000, est: 1.25, reported: 0, agent_ms: 300000, first_turn: t0 + 10 * 60000, done_at: t0 + 3 * H, dropped_at: null }], truncated: false }
+    await page.route((u) => u.pathname.startsWith("/api/"), (route) => {
+      const u = new URL(route.request().url()), id = decodeURIComponent(u.pathname.split("/").pop())
+      const data = u.pathname.startsWith("/api/stats/tree/") ? tree : u.pathname.startsWith("/api/stats/items/") ? detail[id] : null
+      return data ? route.fulfill({ contentType: "application/json", body: JSON.stringify(data) }) : route.fulfill({ status: 404, contentType: "application/json", body: "{}" })
+    })
+    await page.goto(base + `/test/fixtures/stats.html?view=item&id=ST-1${theme === "dark" ? "&theme=dark" : ""}`)
+    const cw = page.locator("[data-cost-waterfall]")
+    await cw.locator('[data-cost-item="ST-2"]').waitFor()
+    // the total is the item's and its sub-item's, the steps run in the order they began, the sub-item starts folded
+    assert.match(await cw.locator(".ui-cwf__stats").innerText(), /\$1\.75/)
+    assert.match(await cw.innerText(), /1 件子事项/)
+    assert.deepEqual(await cw.locator("[data-turn], [data-cost-item]").evaluateAll((els) => els.filter((e) => !e.closest("[data-hidden]")).map((e) => e.getAttribute("data-turn") ?? e.getAttribute("data-cost-item"))), ["a", "ST-2", "b"])
+    assert.equal(await cw.locator('[data-cost-item="ST-2"]').getAttribute("aria-expanded"), "false")
+    assert.equal(await cw.locator('[data-turn="b"]').getAttribute("data-status"), "failed")
+    // unpriced tokens are marked where the cost shows, not only in the row's muted text: on the turn, and under the total
+    assert.equal(await cw.locator('[data-turn="b"] [data-col="cost"] [data-unpriced-mark]').count(), 1)
+    assert.equal(await cw.locator('[data-turn="a"] [data-unpriced-mark]').count(), 0)
+    assert.match(await cw.locator("[data-unpriced-total]").innerText(), /另有 500K tokens 未定价/)
+    // the most expensive step is a sub-item's turn: named with its sub-item, so it can't be taken for the item's own turn
+    assert.match(await cw.locator(".ui-cwf__top-name").innerText(), /^ST-2 · 回合 \d\d:\d\d$/)
+    // unfolding the sub-item shows its own turn; a turn's details lead to its conversation
+    await cw.locator('[data-cost-item="ST-2"] .ui-cwf__chev').click()
+    assert.equal(await cw.locator('[data-cost-item="ST-2"]').getAttribute("aria-expanded"), "true")
+    await cw.locator('[data-turn="c"]').click()
+    assert.equal(await cw.locator("[data-turn-session]").getAttribute("href"), "#/sessions/ses_c")
+    assert.match((await cw.locator(".ui-cwf__detail").innerText()).replace(/\s+/g, " "), /工具 3 次[\s\S]*\$1\.25/)
+    // the details split what the waterfall's "In" adds up (input with the cache)
+    assert.match(await cw.locator(".ui-cwf__detail").innerText(), /未缓存输入 10K/)
+    // tokens: the same steps measured in tokens
+    await cw.getByRole("tab", { name: "tokens" }).click()
+    assert.equal(await cw.locator(".ui-cwf").getAttribute("data-mode"), "tokens")
+    const wide = await page.evaluate(() => [...document.querySelectorAll("[data-cost-waterfall] *")].filter((e) => e.getBoundingClientRect().right > innerWidth + 1).map((e) => e.className).slice(0, 3))
+    assert.deepEqual(wide, [], "nothing past the right edge")
+    if (shots) await cw.screenshot({ path: `${shots}/stats-cost-${width}-${theme}.png`, animations: "disabled" })
+    await page.close()
+  }
+
   /* paused: the breaker's alert with 恢复 */
   const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 390, height: 844 } })
   await page.route((u) => u.pathname.startsWith("/api/"), (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(route.request().url().includes("summary") ? summary : { buckets: days, series: [], rows: [], total: 0, next: null }) }))
@@ -304,5 +361,5 @@ try {
   if (shots) await page.screenshot({ path: `${shots}/inbox-paused-390.png`, animations: "disabled" })
   await page.close()
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "运行状态 replaces the top bar (counts, 记录, 调整)", "core figures = drill lists", "flow legend = summary; day drill", "status bars = overview", "unit + range on every chart", "model trend folds into 其他", "paused alert with 恢复", "no horizontal overflow", "event explorer: drag a window, list = window, zoom in and out", "今天 by hour: 24 local hours, current marked, future empty, table sums = day totals, hour drill (items + usage)"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "运行状态 replaces the top bar (counts, 记录, 调整)", "core figures = drill lists", "flow legend = summary; day drill", "status bars = overview", "unit + range on every chart", "model trend folds into 其他", "paused alert with 恢复", "no horizontal overflow", "event explorer: drag a window, list = window, zoom in and out", "usage split = usage rows", "item drill: cost waterfall of turns and sub-items", "今天 by hour: 24 local hours, current marked, future empty, table sums = day totals, hour drill (items + usage)"] }))
 } finally { await browser.close() }

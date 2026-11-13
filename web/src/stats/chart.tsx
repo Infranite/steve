@@ -275,8 +275,3 @@ export function HBars({ rows, fmt = String, onPick, picked, label, total, k, vw 
     </div>
   )
 }
-
-/** a thin share bar in a table cell (4px, grey) */
-export function Share({ r }: { r: number }) {
-  return <span className="block h-1 w-full min-w-10 overflow-hidden rounded-full bg-muted" aria-hidden><span className="block h-full rounded-full bg-foreground/35 transition-[width] duration-260 ease-(--ease-out)" style={{ width: `${Math.max(0, Math.min(1, r)) * 100}%` }} /></span>
-}

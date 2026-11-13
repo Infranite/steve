@@ -1,5 +1,6 @@
 /* 统计页夹具（ST-40）：真实的 StatsView，事项和 YOLO 状态直接写进 store，统计接口由浏览器测试拦截。
- * ?theme=dark 切深色，?yolo=paused|off|full 切运行状态，?view=inbox 看待处理页（熔断暂停时顶上那一条）。 */
+ * ?theme=dark 切深色，?yolo=paused|off|full 切运行状态，?view=inbox 看待处理页（熔断暂停时顶上那一条），
+ * ?view=item&id=ST-1 看一件事项的下钻（费用去向）。 */
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
@@ -8,6 +9,7 @@ import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { st, emit, useStore, type Item, type Wait } from "../../src/store"
 import { getSheet } from "../../src/ui"
 import { StatsView } from "../../src/stats/page"
+import { StatsItemView } from "../../src/stats/drill"
 import { InboxView } from "../../src/views"
 
 const q = new URLSearchParams(location.search)
@@ -37,7 +39,7 @@ emit()
 
 function Fixture() {
   useStore()
-  return <TooltipProvider delay={0}><SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}>{q.get("view") === "inbox" ? <InboxView /> : <StatsView />}</main><output hidden data-sheet={getSheet()?.kind ?? ""} data-hash={location.hash} /></SidebarProvider></TooltipProvider>
+  return <TooltipProvider delay={0}><SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}>{q.get("view") === "inbox" ? <InboxView /> : q.get("view") === "item" ? <StatsItemView id={q.get("id") ?? "ST-1"} /> : <StatsView />}</main><output hidden data-sheet={getSheet()?.kind ?? ""} data-hash={location.hash} /></SidebarProvider></TooltipProvider>
 }
 window.addEventListener("hashchange", () => emit())
 createRoot(document.getElementById("root")!).render(<StrictMode><Fixture /></StrictMode>)
