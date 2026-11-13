@@ -143,13 +143,13 @@ export function SessionsView() {
         <div className="flex flex-col gap-8 anim-in">
           {liveRows.length > 0 && (
             <section data-sessions-group="live">
-              <SectionLabel className="mb-1 text-tertiary"><span>{t("views:sessions.groupLive")}<Count n={liveRows.length} /></span></SectionLabel>
+              <SectionLabel className="mb-1"><span>{t("views:sessions.groupLive")}<Count n={liveRows.length} /></span></SectionLabel>
               <Group>{liveRows.map((x) => row(x, x[1].up))}</Group>
             </section>
           )}
           {days.map(([day, g]) => (
             <section key={day} data-sessions-group={day}>
-              <SectionLabel className="mb-1 text-tertiary"><span>{day}<Count n={g.length} /></span></SectionLabel>
+              <SectionLabel className="mb-1"><span>{day}<Count n={g.length} /></span></SectionLabel>
               <Group>{g.map((x) => row(x, x[1].at ? hm(x[1].at) : x[1].up))}</Group>
             </section>
           ))}
