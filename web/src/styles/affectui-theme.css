@@ -84,3 +84,39 @@
 /* Card: an interactive card lifts every control inside it above its stretched title (position: relative), which would
  * pull a Switch's hidden input into the flow and push the switch off its line; the input keeps its own overlay */
 .ui-crdc[data-interactive] .ui-swc .ui-swc__input.ui-swc__input { position: absolute; }
+
+/* ───── Display primitives (components/ui/*: badge, card, empty, skeleton, spinner, kbd, separator, code-block,
+ * avatar): the colors these affectUI components keep as literals, pointed at Steve's tokens so both themes follow ───── */
+/* Badge: the neutral tone in Steve's muted ink, and the "kind" tone (affectUI's purple) in the one accent */
+.ui-bdgc {
+  --ui-bdgc-neutral-fg: var(--muted-foreground);
+  --ui-bdgc-neutral-dot: var(--tertiary);
+  --ui-bdgc-purple-bg: color-mix(in srgb, var(--primary) 12%, transparent);
+  --ui-bdgc-purple-fg: var(--blue);
+}
+/* Skeleton: the muted fill; the sheen a lighter wash of the card in light mode and a faint one of the ink in dark */
+.ui-sklc { --ui-sklc-fill: var(--muted); --ui-sklc-sheen: color-mix(in srgb, var(--card) 70%, transparent); }
+:where(.dark, [data-theme="dark"]) .ui-sklc { --ui-sklc-sheen: color-mix(in srgb, var(--foreground) 5%, transparent); }
+/* Empty State: framed means Steve's inline "nothing here" fill (a muted wash, no line drawn inside a card); the icon
+ * tile on it lifts a step toward the page */
+.ui-estc { --ui-estc-frame: color-mix(in srgb, var(--muted) 60%, transparent); --ui-estc-line: transparent; --ui-estc-icon: var(--muted-foreground); }
+.ui-estc:not([data-bare]) { --ui-estc-tile: color-mix(in srgb, var(--background) 70%, transparent); }
+/* Code Block: Steve's code surface and hover wash; the colorizer in the series hues, which switch with the theme */
+.ui-codec {
+  --ui-codec-bg: var(--code);
+  --ui-codec-wash: var(--accent);
+  --ui-codec-mark: color-mix(in srgb, var(--primary) 8%, transparent);
+  --ui-codec-mark-edge: color-mix(in srgb, var(--primary) 55%, transparent);
+  --ui-codec-com: var(--tertiary);
+  --ui-codec-str: var(--series-2);
+  --ui-codec-kw: var(--series-3);
+  --ui-codec-num: var(--series-4);
+  --ui-codec-lit: var(--series-4);
+  --ui-codec-fn: var(--blue);
+  --ui-codec-key: var(--foreground);
+  --ui-codec-var: var(--blue);
+}
+/* Avatar: the edge and ring in Steve's border and page colors */
+.ui-avtc { --ui-avtc-text: var(--muted-foreground); --ui-avtc-edge: color-mix(in srgb, var(--foreground) 8%, transparent); --ui-avtc-ring: var(--background); --ui-avtc-mark: var(--blue); }
+/* Separator: Steve's hairlines are one pixel (affectUI's 0.5px rounds away to nothing on a 1x screen) */
+.ui-sepc { --ui-sepc-weight: 1px; }

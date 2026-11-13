@@ -20,6 +20,20 @@ export default {
     search: "搜索",
     refresh: "刷新",
   },
+  a11y: {
+    code: "{{name}} 代码",
+    codeUnnamed: "代码",
+    more_other: "还有 {{count}} 位",
+    loading: "载入中",
+  },
+  keyName: {
+    command: "Command 键", control: "Control 键", option: "Option 键", alt: "Alt 键", shift: "Shift 键", return: "回车键", enter: "回车键",
+    escape: "Esc 键", tab: "Tab 键", space: "空格键", delete: "删除键", backspace: "退格键", forwardDelete: "向前删除键",
+    upArrow: "上方向键", downArrow: "下方向键", leftArrow: "左方向键", rightArrow: "右方向键", pageUp: "向上翻页键",
+    pageDown: "向下翻页键", home: "Home 键", end: "End 键", period: "句点", comma: "逗号", slash: "斜杠", backslash: "反斜杠",
+    questionMark: "问号", leftBracket: "左方括号", rightBracket: "右方括号", minus: "减号", plus: "加号",
+    equals: "等号", semicolon: "分号", quote: "引号", backtick: "反引号",
+  },
   state: {
     loading: "加载中…",
     error: "错误",

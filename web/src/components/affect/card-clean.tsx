@@ -90,6 +90,11 @@ export function CardFooter({ className, ...rest }: CardFooterProps) {
 /* ---------- Styles ---------- */
 
 const css = /* css */ `
+/* Steve: in the components layer, so a className from a call site (a Tailwind utility) still wins, as it did with
+   the shadcn primitives these replace. React may put this style first in <head>, before Tailwind's stylesheet, so it
+   names the layers in Tailwind's order itself: the first mention fixes the order. */
+@layer properties, theme, base, components, utilities;
+@layer components {
 /* Colors as variables – override them on .ui-crdc (see Theming in the docs) */
 .ui-crdc {
   --ui-crdc-surface: var(--aui-surface, #ffffff);
@@ -204,5 +209,6 @@ const css = /* css */ `
   --ui-crdc-selected: color-mix(in srgb, var(--ui-crdc-ink) 6%, var(--ui-crdc-surface));
   --ui-crdc-shadow-selected: 0 0 0 0.5px var(--aui-border-strong, rgba(255, 255, 255, 0.2)), 0 1px 2px rgba(0, 0, 0, 0.4);
   --ui-crdc-focus: var(--aui-focus, rgba(77, 141, 255, 0.8));
+}
 }
 `;

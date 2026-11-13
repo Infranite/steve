@@ -11,3 +11,19 @@
 .ui-rnc.steve-rn-side .ui-rnc__trigger > .ui-rnc__part:first-child > .ui-rnc__ring:first-child { margin-right: 8px; }
 .ui-rnc.steve-rn-side .ui-rnc__trigger > .ui-rnc__part:first-child > .ui-rnc__dot:first-child { margin-right: 9px; }
 .ui-rnc.steve-rn-head .ui-rnc__trigger { height: 28px; }
+
+/* Steve's defaults for affectUI display primitives, in the components layer beside affectUI's own styles: more
+ * specific than them, and still under any utility class a call site passes */
+@layer components {
+  /* ui.tsx Card and Panel: affectUI's Card surface holding content in the page's flow and type, as the cards they
+   * replace did (affectUI's card is a 13px flex column) */
+  .ui-crdc.steve-card { display: block; flex-direction: row; gap: 0; font-size: inherit; line-height: inherit; }
+  /* people/avatar.tsx: a contact not yet confirmed is a dashed muted circle, not a color of its own */
+  .ui-avtc.ui-avtc[data-unconfirmed] .ui-avtc__face { background: var(--muted); color: var(--muted-foreground); box-shadow: inset 0 0 0 1px transparent; border: 1px dashed color-mix(in srgb, var(--foreground) 25%, transparent); }
+  /* ui.tsx Empty compact: the smaller tile of a panel's empty state */
+  .ui-estc[data-empty="compact"] .ui-estc__icon { width: 32px; height: 32px; border-radius: var(--radius-lg); }
+  .ui-estc[data-empty="compact"] .ui-estc__icon > svg { width: 16px; height: 16px; }
+  .ui-estc[data-empty="compact"] .ui-estc__icon + .ui-estc__title { margin-top: 12px; }
+  .ui-estc[data-empty="compact"] .ui-estc__action { margin-top: 14px; }
+  .ui-estc .ui-estc__icon { border-radius: var(--radius-xl); }
+}

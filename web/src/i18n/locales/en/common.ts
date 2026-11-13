@@ -19,6 +19,21 @@ export default {
     search: "Search",
     refresh: "Refresh",
   },
+  a11y: {
+    code: "{{name}}, code",
+    codeUnnamed: "Code",
+    more_one: "{{count}} more",
+    more_other: "{{count}} more",
+    loading: "Loading",
+  },
+  keyName: {
+    command: "Command", control: "Control", option: "Option", alt: "Alt", shift: "Shift", return: "Return", enter: "Enter",
+    escape: "Escape", tab: "Tab", space: "Space", delete: "Delete", backspace: "Backspace", forwardDelete: "Forward delete",
+    upArrow: "Up arrow", downArrow: "Down arrow", leftArrow: "Left arrow", rightArrow: "Right arrow", pageUp: "Page up",
+    pageDown: "Page down", home: "Home", end: "End", period: "Period", comma: "Comma", slash: "Slash", backslash: "Backslash",
+    questionMark: "Question mark", leftBracket: "Left bracket", rightBracket: "Right bracket", minus: "Minus", plus: "Plus",
+    equals: "Equals", semicolon: "Semicolon", quote: "Quote", backtick: "Backtick",
+  },
   state: {
     loading: "Loading…",
     error: "Error",

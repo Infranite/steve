@@ -14,13 +14,14 @@ import { Button } from "@/components/ui/button"
 import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-trail"
 import { ThinkingLoader } from "@/components/affect/thinking-loader"
 import { Item as UIItem, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSeparator, ItemTitle } from "@/components/ui/item"
-import { Empty as UIEmpty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
+import { Empty as UIEmpty } from "@/components/ui/empty"
+import { Card as AffectCard } from "@/components/affect/card-clean"
 import { Card as UICard, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Breadcrumb } from "@/components/affect/breadcrumb-clean"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { CodeBlock, CodeBlockContent, CodeBlockLine } from "@/components/ui/code-block"
+import { CodeBlock } from "@/components/ui/code-block"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Spinner } from "@/components/ui/spinner"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -250,21 +251,19 @@ export function Chips<T extends string>({ value, onChange, options, className }:
  *  for a panel or a section on a muted fill instead of a whole page */
 export function Empty({ title, sub, icon, action, compact = false, className, ...rest }: { title: ReactNode; sub?: ReactNode; icon?: ReactNode; action?: ReactNode; compact?: boolean; className?: string } & Record<`data-${string}`, unknown>) {
   return (
-    <UIEmpty className={cn("anim-in", compact ? "gap-3 rounded-xl bg-muted/60 px-4 py-8" : "px-4 py-16 sm:px-12", className)} data-empty={compact ? "compact" : "page"} {...rest}>
-      <EmptyHeader className={cn(compact && "gap-1.5")}>
-        {icon && <EmptyMedia variant="icon" className={cn(compact && "mb-1 size-8 rounded-lg bg-background/70 [&_svg:not([class*='size-'])]:size-4")}>{icon}</EmptyMedia>}
-        <EmptyTitle className={compact ? "type-body font-medium" : "type-headline"}>{title}</EmptyTitle>
-        {sub && <EmptyDescription className={cn(compact ? "type-footnote" : "type-callout", "text-muted-foreground")}>{sub}</EmptyDescription>}
-      </EmptyHeader>
-      {action && <EmptyContent>{action}</EmptyContent>}
-    </UIEmpty>
+    <UIEmpty bare={!compact} icon={icon || null} action={action || null} data-empty={compact ? "compact" : "page"} {...rest}
+      className={cn("anim-in w-full min-w-0 justify-center text-balance", compact ? "rounded-xl px-4 py-8" : "flex-1 px-4 py-16 sm:px-12", className)}
+      title={<span className={compact ? "type-body font-medium" : "type-headline"}>{title}</span>}
+      text={sub ? <span className={compact ? "type-footnote" : "type-callout"}>{sub}</span> : null} />
   )
 }
 
 /* ───────── surfaces (visual system v2): a section is a quiet label over a panel; a panel is one lifted card that
  * holds rows with hairlines only between them; notes, notices and an inline "nothing here" are muted fills, never a
  * box drawn inside a box ───────── */
-/** a lifted surface: the card of visual system v2 (white in light, one step up with a top highlight in dark) */
+/** a lifted surface: the card of visual system v2 (white in light, one step up with a top highlight in dark). Panel and
+ *  Card below are affectUI's Card (steve-card: block flow and the page's own type, see affectui-placement.css); LIFT
+ *  stays for the few surfaces that are not cards (a popover-like strip, a table frame) */
 export const LIFT = "rounded-xl bg-card shadow-[var(--lift)]"
 
 /** rows in a card. The rows keep their own hover wash, inset by the card's 4px so the corners stay concentric
@@ -272,15 +271,15 @@ export const LIFT = "rounded-xl bg-card shadow-[var(--lift)]"
 export function Panel({ children, className, ...rest }: { children: ReactNode; className?: string } & Omit<ComponentProps<"div">, "children">) {
   if (!Children.toArray(children).filter(Boolean).length) return null
   return (
-    <div data-panel className={cn(LIFT, "p-1", className)} {...rest}>
+    <AffectCard data-panel className={cn("steve-card p-1", className)} {...rest}>
       <Group className="mx-0 [&>[data-slot=item-separator]]:mx-3 [&>[data-slot=item]]:px-3 [&>div>[data-slot=item]]:px-3">{children}</Group>
-    </div>
+    </AffectCard>
   )
 }
 
 /** a card for content that is not a list of rows */
 export function Card({ children, className, ...rest }: { children: ReactNode; className?: string } & Omit<ComponentProps<"div">, "children">) {
-  return <div className={cn(LIFT, "p-4", className)} {...rest}>{children}</div>
+  return <AffectCard className={cn("steve-card p-4", className)} {...rest}>{children}</AffectCard>
 }
 
 /** a section: its label (with an optional control on the right), what it holds, and an optional note under it */
@@ -640,11 +639,8 @@ function Detail({ text }: { text: string }) {
   const lines = String(text || "").split("\n").filter(Boolean)
   if (!lines.length) return null
   return (
-    <CodeBlock size="sm" className="mt-1 max-w-160 rounded-lg bg-muted/60 ring-0">
-      <CodeBlockContent className="max-h-80 overflow-auto type-code">
-        {lines.map((l, n) => <CodeBlockLine key={n} variant={l.startsWith("+") ? "added" : l.startsWith("-") ? "removed" : "default"} className={cn(l.startsWith("+") && "bg-success/10 after:text-success", l.startsWith("✓") && "text-success")}>{l.replace(/^[+-] /, "")}</CodeBlockLine>)}
-      </CodeBlockContent>
-    </CodeBlock>
+    <CodeBlock code={lines.map((l) => l.replace(/^[+-] /, "")).join("\n")} copyable={false} maxHeight={320} className="mt-1 max-w-160 rounded-lg"
+      marks={Object.fromEntries(lines.flatMap((l, n): [number, "added" | "removed" | "ok"][] => (l.startsWith("+") ? [[n + 1, "added"]] : l.startsWith("-") ? [[n + 1, "removed"]] : l.startsWith("✓") ? [[n + 1, "ok"]] : [])))} data-tool-detail />
   )
 }
 const DELEGATE = ["Task", "Agent"]

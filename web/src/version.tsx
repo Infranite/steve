@@ -2,10 +2,11 @@ import { HubError, Unauthenticated } from "@/api"
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { readableVersion, updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, checkStale, committedFailure, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
 import { downloadPercent, enableOneClick, installLabel, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
-import { CheckIcon, CircleAlertIcon, CopyIcon, LoaderCircleIcon, RefreshCwIcon, ServerIcon } from "lucide-react"
+import { CheckIcon, CircleAlertIcon, CopyIcon, RefreshCwIcon, ServerIcon } from "lucide-react"
 import { Markdown } from "@/components/markdown"
 import { Button } from "@/components/ui/button"
-import { CodeBlock, CodeBlockContent, CodeBlockCopyButton } from "@/components/ui/code-block"
+import { CodeBlock } from "@/components/ui/code-block"
+import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Row, go, Panel, Section, Card, Notice, Note, Chevron, Tile, LIFT, EASE } from "@/ui"
 import { ChevronRightIcon } from "lucide-react"
@@ -218,10 +219,7 @@ function UpgradeUnavailable({ state, manual }: { state: UpdateState; manual: boo
 
 function Command({ command }: { command: string }) {
   const t = useT()
-  return <CodeBlock size="sm" className="mt-1.5 bg-muted/70 ring-0" data-upgrade-command>
-    <CodeBlockContent wrap className="pe-10! type-code">{command}</CodeBlockContent>
-    <CodeBlockCopyButton value={command} aria-label={t("pages:upgrade.copyCommand")} className="absolute end-1.5 top-1.5 text-muted-foreground" />
-  </CodeBlock>
+  return <CodeBlock code={command} language="bash" compact wrap className="mt-1.5" labels={{ copy: t("pages:upgrade.copyCommand") }} data-upgrade-command />
 }
 
 /** Installations Steve does not switch itself: this machine's commands, what is backed up, how to recover. */
@@ -263,7 +261,7 @@ function UpgradeProgress({ phase, verified, runnerKind }: { phase: string; verif
     {upgradeStages.map((s, n) => {
       const state = n < at ? "done" : n === at ? "current" : "pending"
       return <li key={s.key} className={cn("flex items-center gap-2 type-footnote", state === "pending" && "text-muted-foreground")} data-stage={state}>
-        {state === "done" ? <CheckIcon className="size-3.5 text-success" /> : state === "current" ? <LoaderCircleIcon className="size-3.5 animate-spin text-primary" /> : <span className="size-3.5 flex items-center justify-center"><span className="size-1.5 rounded-full bg-muted-foreground/40" /></span>}
+        {state === "done" ? <CheckIcon className="size-3.5 text-success" /> : state === "current" ? <Spinner className="size-3.5 text-primary" aria-hidden /> : <span className="size-3.5 flex items-center justify-center"><span className="size-1.5 rounded-full bg-muted-foreground/40" /></span>}
         {stageLabel(s.key, runnerKind)}
       </li>
     })}
@@ -297,7 +295,7 @@ function UpgradeActivity({ op, connected }: { op: UpdateOperation; connected: bo
   const measuring = percent !== undefined && !!p.download
   return <div className="space-y-1.5 rounded-lg bg-muted/60 px-3.5 py-3" data-upgrade-activity={p.step}>
     <p className="flex items-center gap-2 font-medium">
-      {active && connected && p.step !== "complete" && <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin" />}
+      {active && connected && p.step !== "complete" && <Spinner className="size-3.5 shrink-0" aria-hidden />}
       {active ? label : t("pages:upgrade.activity.last", { step: label })}
     </p>
     {p.detail && <p className="break-words type-footnote text-muted-foreground">{p.detail}</p>}

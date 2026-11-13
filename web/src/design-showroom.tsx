@@ -4,8 +4,8 @@
 import { useState, type ReactNode } from "react"
 import { cn } from "cn"
 import { ArrowLeftIcon, FileTextIcon, QuoteIcon, SearchIcon, TerminalIcon } from "lucide-react"
-import { Page, ThemeSwitch, Card } from "@/ui"
-import { useT } from "@/i18n"
+import { Page, ThemeSwitch, Card, Empty } from "@/ui"
+import { lang, useT } from "@/i18n"
 import { fmtN, fmtUsd } from "@/stats/format"
 import { ParallelAttempts, type Attempt } from "@/components/affect/parallel-attempts-clean"
 import { stepLabels } from "@/agent-tree-view"
@@ -37,6 +37,15 @@ import { dcLabels } from "@/thread/decide"
 import { dialActions, dialText, LOCKED } from "@/yolo/switch"
 import { panelText } from "@/knowledge/index"
 import { memKind } from "@/api/knowledge"
+import { Badge } from "@/components/ui/badge"
+import { Kbd } from "@/components/ui/kbd"
+import { Spinner } from "@/components/ui/spinner"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Separator } from "@/components/ui/separator"
+import { CodeBlock } from "@/components/ui/code-block"
+import { ContactAvatar } from "@/people/avatar"
+import { AvatarGroup, Avatar } from "@/components/ui/avatar"
+import { NumberTicker } from "@/components/affect/number-ticker"
 
 type T = ReturnType<typeof useT>
 const noop = () => {}
@@ -213,7 +222,7 @@ function SampleComposer({ running, text: first = "", queue = [], ctx }: { runnin
   )
 }
 
-const IDS: Id[] = ["parallel-attempts", "run-inspector", "agent-handoff", "agent-fleet", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel", "chat-composer"]
+const IDS: Id[] = ["parallel-attempts", "run-inspector", "agent-handoff", "agent-fleet", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel", "chat-composer", "display"]
 
 export function DesignShowroom() {
   const t = useT()
@@ -409,6 +418,34 @@ export function DesignShowroom() {
         <Exhibit id="chat-composer">
           <State label={L(t, "ccIdle")}><SampleComposer text={S(t, "ccIdleText")} ctx={0.54} /></State>
           <State label={L(t, "ccRunning")}><SampleComposer running text={S(t, "ccTyped")} queue={[S(t, "ccQ1"), S(t, "ccQ2")]} ctx={0.86} /></State>
+        </Exhibit>
+
+        <Exhibit id="display">
+          <State label={L(t, "dpBadges")}><Card className="flex flex-wrap items-center gap-2">
+            <Badge variant="secondary">{S(t, "dpExternal")}</Badge><Badge tone="info" live>{S(t, "stWorking")}</Badge><Badge tone="success" dot>{S(t, "stDone")}</Badge>
+            <Badge variant="secondary" className="bg-attention/12 text-attention">{S(t, "dpPending")}</Badge><Badge variant="destructive">{S(t, "stFailed")}</Badge><Badge variant="outline">{S(t, "dpDefault")}</Badge><Badge tone="info" count={128} />
+          </Card></State>
+          <State label={L(t, "dpKeys")}><Card className="flex flex-wrap items-center gap-x-4 gap-y-2 type-callout text-muted-foreground">
+            <span className="inline-flex items-center gap-1.5"><Kbd>⏎</Kbd>{t("core:composer.hintSend")}</span><span className="inline-flex items-center gap-1.5"><Kbd>⇧⏎</Kbd>{t("core:composer.hintNewline")}</span><Kbd keys={["mod", "K"]} />
+            <Separator orientation="vertical" /><span className="inline-flex items-center gap-1.5"><Spinner />{S(t, "stWorking")}</span><Spinner className="size-5 text-blue" />
+          </Card></State>
+          <State label={L(t, "dpSkeleton")}><Card className="flex flex-col gap-3">
+            <Skeleton className="h-5 w-40" /><Skeleton className="h-3 w-full" /><Skeleton className="h-3 w-3/4" /><Separator label={S(t, "yesterday")} /><Skeleton className="h-16 w-full rounded-lg" />
+          </Card></State>
+          <State label={L(t, "dpAvatars")}><Card className="flex flex-wrap items-center gap-3">
+            <ContactAvatar name="Mara Lindqvist" size={40} /><ContactAvatar name={S(t, "dpName1")} size={32} /><ContactAvatar name={S(t, "dpName2")} size={28} unconfirmed /><ContactAvatar name="Globex" type="org" size={32} /><ContactAvatar name="Infra" type="team" size={32} />
+            <AvatarGroup size={24} max={3} total={6}><Avatar name="Mara Lindqvist" /><Avatar name={S(t, "dpName1")} /><Avatar name="Tom Okafor" /></AvatarGroup>
+          </Card></State>
+          <State label={L(t, "dpCode")}><div className="flex flex-col gap-3">
+            <CodeBlock code="steve hub restart" language="bash" compact wrap labels={{ copy: t("pages:upgrade.copyCommand") }} />
+            <CodeBlock code={"const lanes = groupBy(tasks, \"agent\")\nconst lanes = tasks\nreturn lanes"} marks={{ 1: "added", 2: "removed" }} copyable={false} />
+            <CodeBlock code={"$ npm test\n✓ 159 passed"} marks={{ 2: "ok" }} copyable={false} />
+          </div></State>
+          <State label={L(t, "dpFigures")}><Card className="grid grid-cols-3 gap-2">
+            {[[S(t, "stWorking"), 3], [S(t, "stDone"), 26], [S(t, "stFailed"), 1]].map(([k, n]) => <div key={k} className="flex flex-col gap-1"><span className="type-footnote text-muted-foreground">{k}</span><span className="type-display tabular-nums"><NumberTicker value={n as number} locale={lang()} /></span></div>)}
+          </Card></State>
+          <State label={L(t, "dpEmptyPage")}><Card className="p-0"><Empty icon={<SearchIcon />} title={S(t, "dpEmptyTitle")} sub={S(t, "dpEmptySub")} /></Card></State>
+          <State label={L(t, "dpEmptyPanel")}><Empty compact icon={<TerminalIcon />} title={S(t, "dpEmptyTitle")} sub={S(t, "dpEmptySub")} /></State>
         </Exhibit>
 
         <a href="#/design" className="inline-flex items-center gap-1.5 self-start type-callout text-blue hover:underline"><ArrowLeftIcon className="size-4" />{t("views:design.title")}</a>

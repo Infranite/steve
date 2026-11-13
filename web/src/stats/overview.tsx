@@ -2,13 +2,14 @@
  * 以及它们共用的下钻明细。“现在”的数字取自事项列表本身，下钻列表用同一个筛选，数字和列表天然一致；
  * “区间”的数字取自统计接口，下钻用 `only=done|created` 取同一批事项（steve-stats views::items）。
  * 单日范围（今天）按小时（ST-43）：点一个小时，下钻用 `hour` 取那个小时里完成或新建的事项，和柱子同一个区间。 */
+import { NumberTicker } from "@/components/affect/number-ticker"
 import { useState, type ReactNode } from "react"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { ArrowDownUpIcon, ChartColumnIcon, ListTodoIcon, TableIcon, XIcon } from "lucide-react"
 import { Panel, PanelFoot, StatStrip } from "@/panel"
 import { Trans } from "react-i18next"
-import { t, useT } from "@/i18n"
+import { lang, t, useT } from "@/i18n"
 import { ago } from "@/i18n/format"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
@@ -49,7 +50,7 @@ function Tile({ k, label, scope, value, foot, def, tone, on, onClick }: { k: str
       <TooltipTrigger render={<button type="button" onClick={onClick} aria-pressed={on} aria-label={t("stats:overview.tileAria", { label, scope })}
         className={cn("relative min-w-0 rounded-lg px-3 py-3 text-left outline-none hover:bg-muted/50 focus-visible:bg-muted/60 active:scale-[0.99]", on && "bg-muted hover:bg-muted")} data-kpi={k} />}>
         <span className="flex items-center gap-1.5 type-footnote text-muted-foreground"><span aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: tone }} />{label}<span className="text-tertiary">· {scope}</span></span>
-        <span className="mt-1.5 block truncate type-display tabular-nums text-foreground">{value}</span>
+        <span className="mt-1.5 block truncate type-display tabular-nums text-foreground">{typeof value === "number" ? <NumberTicker value={value} locale={lang()} live={false} /> : value}</span>
         <span className="block min-h-[18px] truncate type-footnote text-tertiary">{foot}</span>
       </TooltipTrigger>
       <TooltipContent className="max-w-64">{def}</TooltipContent>
