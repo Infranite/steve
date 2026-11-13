@@ -59,8 +59,8 @@ export function YoloPill({ className, short = false }: { className?: string; sho
   const n = s === "on" || s === "full" ? y.counts.decided : 0
   return (
     <button type="button" onClick={() => openSheet("yolo")} aria-label={t("yolo:switch.pillLabel", { label: label(s) })} data-yolo-pill={s}
-      className={cn("inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors hover:bg-muted",
-        s === "off" || s === "forced" ? "text-muted-foreground" : "text-foreground/85", className)}>
+      className={cn("inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2 type-callout hover:bg-accent",
+        s === "off" || s === "forced" ? "text-muted-foreground" : "text-foreground/80", className)}>
       <Dot s={s} /><span className="font-medium">{label(s)}</span>
       {!short && n > 0 && <span className="tabular-nums text-muted-foreground">{t("yolo:switch.pillCount", { count: n })}</span>}
     </button>
@@ -71,14 +71,14 @@ function LevelRow({ m, title, sub, on, current, disabled, pick }: { m: YoloLevel
   const t = useT()
   return (
     <button type="button" role="radio" aria-checked={on} disabled={disabled} onClick={pick} data-yolo-level={m}
-      className={cn("flex min-w-0 w-full items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors disabled:opacity-50",
-        on ? (m === "full" ? "border-attention/60 bg-attention/5" : "border-foreground/25 bg-muted/50") : "border-transparent hover:bg-muted/50")}>
-      <span className={cn("mt-[3px] flex size-4 shrink-0 items-center justify-center rounded-full border", on ? (m === "full" ? "border-attention" : "border-foreground") : "border-border")} aria-hidden>
-        {on && <span className={cn("size-2 rounded-full", m === "full" ? "bg-attention" : "bg-foreground")} />}
+      className={cn("flex min-w-0 w-full items-start gap-3 rounded-xl px-4 py-3 text-left disabled:opacity-50",
+        on ? (m === "full" ? "bg-attention/10 ring-1 ring-attention/40 ring-inset" : "bg-blue/10 ring-1 ring-blue/40 ring-inset") : "hover:bg-accent")}>
+      <span className={cn("mt-[3px] flex size-4 shrink-0 items-center justify-center rounded-full border transition-colors duration-[180ms]", on ? (m === "full" ? "border-attention" : "border-blue") : "border-border")} aria-hidden>
+        {on && <span className={cn("anim-in size-2 rounded-full", m === "full" ? "bg-attention" : "bg-blue")} />}
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex flex-wrap items-center gap-x-2 type-headline">{title}{current && <span className="type-footnote font-normal text-muted-foreground">{t("yolo:switch.current")}</span>}</span>
-        <span className="mt-0.5 block type-footnote text-muted-foreground">{sub}</span>
+        <span className="mt-0.5 block type-callout text-muted-foreground">{sub}</span>
       </span>
     </button>
   )
@@ -105,12 +105,12 @@ export function YoloDialog() {
     <Dialog open onOpenChange={(o) => !o && closeSheet()}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] gap-4 rounded-2xl p-4 [overflow-wrap:anywhere] sm:max-w-[520px] sm:p-6" data-yolo-dialog={s}>
         <DialogHeader className="min-w-0 pr-8">
-          <DialogTitle className="type-headline">{t("yolo:switch.title")}</DialogTitle>
+          <DialogTitle className="type-title">{t("yolo:switch.title")}</DialogTitle>
           <DialogDescription className="type-callout">{t("yolo:switch.desc")}</DialogDescription>
         </DialogHeader>
         <div className="flex min-h-0 min-w-0 flex-col gap-4 overflow-y-auto p-1 *:shrink-0" data-yolo-scroll>
-          {s === "forced" && <div className="rounded-xl bg-muted/60 px-3.5 py-3 type-callout text-muted-foreground" data-yolo-forced>{t("yolo:switch.forced", { reason: y.forced_reason })}</div>}
-          {s === "paused" && <div role="alert" className="flex flex-wrap items-start gap-2.5 rounded-xl border border-destructive/40 px-3.5 py-3 type-callout" data-yolo-paused>
+          {s === "forced" && <div className="rounded-xl bg-muted/60 px-4 py-3 type-callout text-muted-foreground" data-yolo-forced>{t("yolo:switch.forced", { reason: y.forced_reason })}</div>}
+          {s === "paused" && <div role="alert" className="flex flex-wrap items-start gap-2.5 rounded-xl bg-destructive/10 px-4 py-3 type-callout" data-yolo-paused>
             <Dot s="paused" className="mt-[7px]" />
             <div className="min-w-0 flex-1"><div className="font-medium">{label("paused")}</div><div className="mt-0.5 text-muted-foreground">{t("yolo:switch.pausedNote", { reason: y.paused?.reason })}</div></div>
             <Button size="sm" disabled={busy} onClick={() => void run(async () => { await yoloResume(); closeSheet() })} data-yolo-resume>{t("yolo:run.resume")}</Button></div>}
@@ -120,7 +120,7 @@ export function YoloDialog() {
           {(cur === "on" || cur === "full") && !locked && <div className="flex flex-wrap items-center gap-x-1.5 type-footnote text-muted-foreground" data-yolo-on>
             <span><Trans t={t} i18nKey={y.counts.scheduled ? "yolo:switch.countsScheduled" : "yolo:switch.counts"} values={{ decided: y.counts.decided, declined: y.counts.declined, scheduled: y.counts.scheduled }} components={{ b: <b className="font-medium text-foreground" /> }} /></span>
             <span>·</span><button type="button" className="text-blue hover:underline" onClick={() => { closeSheet(); go("#/yolo") }} data-yolo-digest-link>{t("yolo:switch.viewRecord")}</button></div>}
-          {turningOn && <div className="flex min-w-0 shrink-0 flex-col gap-2" data-yolo-preview>
+          {turningOn && <div className="anim-in flex min-w-0 shrink-0 flex-col gap-2" data-yolo-preview>
             {!pv && !err && <div className="flex items-center gap-2 type-footnote text-muted-foreground"><Spinner className="size-3.5" />{t("yolo:switch.previewLoading")}</div>}
             {err && <div className="type-footnote text-destructive">{err}</div>}
             {pv && <>
@@ -131,7 +131,7 @@ export function YoloDialog() {
               {n > 0 && <label className="flex items-start gap-2 type-footnote"><Checkbox checked={all} onCheckedChange={(v) => setAll(!!v)} data-yolo-include-open /><span className="min-w-0">{t("yolo:switch.includeOpen", { count: n })}</span></label>}
             </>}
           </div>}
-          {needsOk && <div className="flex min-w-0 shrink-0 flex-col gap-2 rounded-xl bg-attention/8 px-3.5 py-3" data-yolo-full-confirm>
+          {needsOk && <div className="anim-in flex min-w-0 shrink-0 flex-col gap-2 rounded-xl bg-attention/10 px-4 py-3" data-yolo-full-confirm>
             <div className="type-callout font-medium">{fullGives()}</div>
             <div className="type-footnote text-muted-foreground">{fullKeeps()}</div>
             <label className="mt-1 flex items-start gap-2 type-callout"><Checkbox className="mt-0.5" checked={ok} onCheckedChange={(v) => setOk(!!v)} data-yolo-full-ok /><span className="min-w-0">{t("yolo:switch.fullOk")}</span></label>

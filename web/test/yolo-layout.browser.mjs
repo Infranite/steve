@@ -95,6 +95,8 @@ try {
     await layout(page, "[data-yolo-dialog]", '[data-slot="dialog-footer"]')
     await shot(page, `yolo-${width}-${height}-${scale}x-${locale}-top`)
     const scroll = page.locator("[data-yolo-scroll]")
+    // dialogs open with a short scale-in (visual system v2): measure where the footer rests, not where it passes
+    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity))
     const footerBefore = await page.locator('[data-slot="dialog-footer"]').boundingBox()
     await page.locator("[data-yolo-include-open]").click()
     await page.locator("[data-yolo-full-ok]").click()
@@ -146,6 +148,8 @@ try {
     if (scale === 2) await enlargeText(page, scale, '[data-yolo-scope-confirm]')
     await layout(page, "[data-yolo-scope-confirm]", '[data-slot="alert-dialog-footer"]')
     await shot(page, `yolo-${type}-confirm-${scale}x`)
+    // dialogs open with a short scale-in (visual system v2): measure where the footer rests, not where it passes
+    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity))
     const footerBefore = await page.locator('[data-slot="alert-dialog-footer"]').boundingBox()
     const header = page.locator('[data-slot="alert-dialog-header"]')
     await header.evaluate(el => { el.scrollTop = el.scrollHeight })

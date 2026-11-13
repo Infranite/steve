@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { questionLead } from "../src/yolo/question.ts"
+import { questionLead, splitAsked } from "../src/yolo/question.ts"
 
 const cmd = 'ls /srv/app/node_modules 2>/dev/null | grep -i -e remend -e streamdown; ls /srv/app/web/node_modules 2>/dev/null | head'
 
@@ -17,4 +17,10 @@ test("a question without the command, or without commands, stays whole", () => {
   assert.equal(questionLead("合并 PR #12 并打 tag 发版", ["git push"]), "合并 PR #12 并打 tag 发版")
   assert.equal(questionLead("允许执行：" + cmd, []), "允许执行：" + cmd)
   assert.equal(questionLead(cmd, [cmd]), cmd, "nothing before the command: the question is the command")
+})
+
+test("a tool-call question without recorded commands splits into its lead and the command", () => {
+  assert.deepEqual(splitAsked("允许执行：" + cmd), ["允许执行", cmd])
+  assert.deepEqual(splitAsked("Allow running: ls -la"), ["Allow running", "ls -la"])
+  assert.equal(splitAsked("合并 PR #12 并打 tag 发版"), null)
 })

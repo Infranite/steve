@@ -466,7 +466,7 @@ export default {
     restore: "Restore",
     archive: "Archive",
     askPh: "e.g. hand off to the dev bot by default; add “frontend uses shadcn” to the description",
-    active: "In progress · {{count}}",
+    active: "In progress",
     noActive: "Nothing in progress",
     recentDone: "Recently closed",
     settings: "Settings",

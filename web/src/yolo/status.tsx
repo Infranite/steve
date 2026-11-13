@@ -16,7 +16,7 @@ export function RunState({ className }: { className?: string }) {
   const what = { on: t("yolo:run.on"), full: t("yolo:scope.fullSub"), off: t("yolo:scope.offSub"), paused: y.paused?.reason ?? "", forced: y.forced_reason ?? t("yolo:run.forced") }[s]
   const live = s === "on" || s === "full"
   const n = (v: number, text: string, f: "decided" | "declined" | "all", k: string) => (
-    <button type="button" className="inline-flex items-baseline gap-1 rounded-sm hover:text-foreground" onClick={() => openDigest(f)} data-run-count={k}>
+    <button type="button" className="inline-flex items-baseline gap-1 rounded-md hover:text-foreground" onClick={() => openDigest(f)} data-run-count={k}>
       {text}<span className="font-medium tabular-nums text-foreground">{v}</span>
     </button>
   )

@@ -108,7 +108,7 @@ export default {
     all: "全部",
     emptyTitle: "都处理完了",
     emptySub: "新的决定会出现在这里，也会推送到手机。",
-    snoozed: "稍后提醒 · {{count}}",
+    snoozed: "稍后提醒",
     snoozedAt: "{{type}} · {{when}}提醒",
     handleNow: "现在处理",
     yoloChose: "选了「{{choice}}」",

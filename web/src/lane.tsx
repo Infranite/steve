@@ -75,17 +75,17 @@ export function LaneSection({ project }: { project: string }) {
   useEffect(() => { setLane(null); setErr(null); api.lane(project).then(setLane, (e) => setErr(errMsg(e))) }, [project])
   return (
     <section data-lane>
-      <SectionLabel>{t("shell:lane.title")}</SectionLabel>
+      <SectionLabel className="text-tertiary">{t("shell:lane.title")}</SectionLabel>
       {err ? <Group><Row title={t("shell:lane.unrecognized")} sub={err} /></Group>
         : !lane ? <Group><Row title={<span className="inline-flex items-center gap-2 text-muted-foreground"><Spinner />{t("shell:lane.loading")}</span>} /></Group>
         : <Group>
-          <Row title={<span className="font-mono text-[13px]">{lane.target.upstream}#{lane.target.branch}</span>} data-lane-target
+          <Row title={<span className="type-code">{lane.target.upstream}#{lane.target.branch}</span>} data-lane-target
             sub={<span className="flex flex-col gap-0.5"><span>{t("shell:lane.reads", { reads: lane.reads })}</span>{lane.fetch_error && <span className="flex items-start gap-1 text-attention"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" /><span className="break-all">{t("shell:lane.fetchError", { error: lane.fetch_error })}</span></span>}</span>} />
           <Row title={<span className="inline-flex items-center gap-2">{t("shell:lane.mergeTitle", { value: MERGE[lane.merge.value]?.() ?? lane.merge.value })}<How f={lane.merge} /></span>} sub={<Why f={lane.merge} />} data-lane-merge />
           <Row title={<span className="inline-flex items-center gap-2">{t("shell:lane.checksTitle", { value: lane.checks.value.filter((c) => c.from !== "suggested").length || (lane.checks.how.state === "unknown" ? t("shell:lane.unsure") : t("shell:lane.none")) })}<How f={lane.checks} /></span>} data-lane-checks
             sub={<Why f={lane.checks} extra={<><span>{t("shell:lane.checksNote")}</span>{lane.checks.value.length > 0 && <span className="flex flex-wrap gap-1 py-0.5">{lane.checks.value.map((c) => <Badge key={c.from + c.name} variant="outline" className="h-auto max-w-full justify-start whitespace-normal text-left font-normal text-muted-foreground"><span className="font-mono break-all">{c.name}</span><span className="shrink-0">· {from(c)}</span></Badge>)}</span>}</>} />} />
           <Row title={<span className="inline-flex items-center gap-2">{t("shell:lane.shipTitle", { value: SHIP[lane.ship.value]?.() ?? lane.ship.value })}<How f={lane.ship} /></span>} sub={<Why f={lane.ship} />} data-lane-ship />
-          {lane.numbered.map((n) => <Row key={n.kind + n.path} title={<span><span className="font-mono text-[13px]">{n.path}</span> · {n.evidence}</span>} sub={n.handling} data-lane-numbered={n.kind} />)}
+          {lane.numbered.map((n) => <Row key={n.kind + n.path} title={<span><span className="type-code">{n.path}</span> · {n.evidence}</span>} sub={n.handling} data-lane-numbered={n.kind} />)}
           <Row title={t("shell:lane.days", { count: lane.pace.days })} sub={<Meta><span>{t("shell:lane.landed", { count: lane.pace.landed })}</span><span>{t("shell:lane.releases", { count: lane.pace.releases })}</span><span>{t("shell:lane.authors", { count: lane.pace.authors })}</span></Meta>} data-lane-pace />
         </Group>}
       {lane && (lane.queue

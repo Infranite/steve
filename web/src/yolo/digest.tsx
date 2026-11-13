@@ -1,10 +1,9 @@
 /* The YOLO record (#/yolo, modules/yolo.md §8): what Steve decided for you, by each time YOLO was on, then by item.
  * Each row says what was asked, what YOLO chose (or why it left it to you), and offers the undo it can do now
- * (撤销 / 回滚 / 撤回 / 改答 / 暂停这件). Each time YOLO was on is a panel (panel.tsx): its span, its figures, then a line
+ * (撤销 / 回滚 / 撤回 / 改答 / 暂停这件). Each time YOLO was on is a lifted card: its span, its figures, then a line
  * per decision under its item, a grey glyph for its outcome, the commands it ran folded to one line. #/yolo/<window> opens at that window (the end-of-YOLO notice links here). */
 import { useEffect, useRef, useState } from "react"
 import { CheckIcon, ClockIcon, RotateCcwIcon, XIcon, ZapIcon } from "lucide-react"
-import { Panel, PanelFoot, StatStrip, Tag } from "@/panel"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -12,12 +11,12 @@ import { Spinner } from "@/components/ui/spinner"
 import { NotWired } from "@/api"
 import { yoloApi, type RYoloAction, type RYoloDigest, type RYoloWindow, type UndoKind } from "@/api/yolo"
 import { tm, useHubEvents, yoloUndo } from "@/store"
-import { Chips, Empty, go, ItemNo, Page, permissionQuestion } from "@/ui"
+import { Chips, Empty, go, ItemNo, Meta, Page, permissionQuestion } from "@/ui"
 import { takeDigestStart, YoloPill } from "@/yolo/switch"
 import { choiceText, YoloMark } from "@/yolo/badges"
 import { t as tr, useT } from "@/i18n"
 import { date, longDur, num } from "@/i18n/format"
-import { questionLead } from "@/yolo/question"
+import { questionLead, splitAsked } from "@/yolo/question"
 
 const undoLabel = (k: UndoKind) => tr(`yolo:undo.${k}`)
 const ENDED = new Set(["off", "tripped"])
@@ -46,7 +45,11 @@ function ActionRow({ a, reload }: { a: RYoloAction; reload: () => void }) {
   const t = useT()
   const [re, setRe] = useState<string | null>(null), [busy, setBusy] = useState(false), [open, setOpen] = useState(false)
   const undo = async (text?: string) => { setBusy(true); try { await yoloUndo(a.id, text); setRe(null); reload() } finally { setBusy(false) } }
-  const cmds: string[] = Array.isArray(a.checks?.commands) ? a.checks.commands : []
+  const ran: string[] = Array.isArray(a.checks?.commands) ? a.checks.commands : []
+  /* a tool-call question with no recorded command still carries it after its lead: it goes in the chip too,
+   * so every row reads the same — the ask on its line, the command in its block */
+  const asked = !ran.length && a.subject_type === "tool_call" && a.question ? splitAsked(a.question) : null
+  const cmds = asked ? [asked[1]] : ran
   const checks: { name: string; passed: boolean }[] = Array.isArray(a.checks?.checks) ? a.checks.checks : []
   const what = a.outcome === "decided" ? t("yolo:digest.chose", { choice: choiceText(a.choice, a.subject_type) })
     : a.outcome === "scheduled" ? t("yolo:digest.willChoose", { choice: choiceText(a.choice, a.subject_type) })
@@ -58,20 +61,20 @@ function ActionRow({ a, reload }: { a: RYoloAction; reload: () => void }) {
       <Glyph a={a} />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-start gap-3">
-          <div className="line-clamp-2 min-w-0 flex-1 break-words type-callout" data-yolo-question>{a.question ? permissionQuestion(questionLead(a.question, cmds)) : a.rule}</div>
+          <div className="line-clamp-2 min-w-0 flex-1 break-words type-body" data-yolo-question>{a.question ? permissionQuestion(asked ? asked[0] : questionLead(a.question, cmds)) : a.rule}</div>
           {a.can_undo && re === null && <Button size="xs" variant="ghost" className="-my-0.5 shrink-0 text-muted-foreground" disabled={busy}
             onClick={() => (a.can_undo === "reanswer" ? setRe("") : void undo())} data-yolo-undo={a.can_undo}><RotateCcwIcon />{undoLabel(a.can_undo)}</Button>}
         </div>
-        <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-1.5 type-footnote text-muted-foreground">
-          <span className={cn(a.outcome === "decided" && "text-foreground/80", a.outcome === "failed" && "text-destructive")}>{what}</span>
-          {a.reason && <><span className="text-tertiary">·</span><span className="min-w-0 break-words">{a.reason}</span></>}
-          <span className="text-tertiary">·</span><span className="tabular-nums">{tm(a.done_at ?? a.created)}</span>
-          {a.undone ? <><span className="text-tertiary">·</span><span>{t("yolo:digest.undone")}</span></> : null}
-        </div>
-        {checks.length > 0 && <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11.5px] text-muted-foreground">{checks.map((c, n) => <span key={n}><span className={c.passed ? "text-success" : "text-destructive"}>{c.passed ? "✓" : "✗"}</span> {c.name}</span>)}</div>}
-        {cmds.length > 0 && <button type="button" onClick={() => long && setOpen(!open)} className={cn("mt-1 block w-full rounded-md bg-muted/60 px-2 py-1 text-left font-mono text-[11.5px] text-foreground/75", open ? "whitespace-pre-wrap break-all" : "truncate", !long && "cursor-text")} data-yolo-cmd>{cmd}</button>}
+        <Meta className="mt-0.5">
+          {what && <span className={cn(a.outcome === "decided" && "text-foreground/80", a.outcome === "failed" && "text-destructive")}>{what}</span>}
+          {a.reason && <span className="min-w-0 break-words">{a.reason}</span>}
+          <span className="tabular-nums">{tm(a.done_at ?? a.created)}</span>
+          {a.undone && <span>{t("yolo:digest.undone")}</span>}
+        </Meta>
+        {checks.length > 0 && <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 type-footnote text-muted-foreground">{checks.map((c, n) => <span key={n}><span className={c.passed ? "text-success" : "text-destructive"}>{c.passed ? "✓" : "✗"}</span> {c.name}</span>)}</div>}
+        {cmds.length > 0 && <button type="button" onClick={() => long && setOpen(!open)} className={cn("mt-1.5 block w-full rounded-md bg-muted/60 px-2.5 py-1 text-left type-code text-foreground/80", open ? "whitespace-pre-wrap break-all" : "truncate", !long && "cursor-text")} data-yolo-cmd>{cmd}</button>}
         {re !== null && <form className="mt-1.5 flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); if (re.trim()) void undo(re.trim()) }}>
-          <Input autoFocus value={re} onChange={(e) => setRe(e.target.value)} placeholder={t("yolo:digest.reanswer")} className="h-8 rounded-lg text-[13px]" data-yolo-reanswer />
+          <Input autoFocus value={re} onChange={(e) => setRe(e.target.value)} placeholder={t("yolo:digest.reanswer")} className="h-8 rounded-lg type-callout!" data-yolo-reanswer />
           <Button size="sm" type="submit" disabled={busy || !re.trim()}>{t("yolo:digest.send")}</Button><Button size="sm" variant="ghost" type="button" onClick={() => setRe(null)}>{t("common:action.cancel")}</Button>
         </form>}
       </div>
@@ -88,15 +91,24 @@ function ItemGroup({ g, reload }: { g: RYoloWindow["items"][number]; reload: () 
   const shown = all ? g.actions : g.actions.slice(0, 5)
   const decided = g.actions.filter((a) => a.outcome === "decided" || a.outcome === "scheduled").length
   return (
-    <div className="py-1" data-yolo-item={g.item_id ?? ""}>
-      <div className="flex min-w-0 items-center gap-2 px-5 pt-3 pb-1">
-        {g.item_id ? <a href={"#/items/" + g.item_id} className="flex min-w-0 items-center gap-2 hover:underline"><ItemNo id={g.item_id} /><span className="truncate text-[13.5px] font-medium">{g.title ?? g.item_id}</span></a> : <span className="text-[13.5px] font-medium">{t("yolo:digest.noItem")}</span>}
-        <span className="ml-auto shrink-0 font-mono text-[12px] tabular-nums text-muted-foreground" title={t("yolo:digest.groupTitle", { decided, count: g.actions.length })}>{decided} / {g.actions.length}</span>
+    <div className="pt-3" data-yolo-item={g.item_id ?? ""}>
+      <div className="flex min-w-0 items-center gap-2 px-5 pt-2 pb-0.5">
+        {g.item_id ? <a href={"#/items/" + g.item_id} className="flex min-w-0 items-center gap-2 hover:underline"><ItemNo id={g.item_id} /><span className="truncate type-body font-medium">{g.title ?? g.item_id}</span></a> : <span className="type-body font-medium">{t("yolo:digest.noItem")}</span>}
+        <span className="ml-auto shrink-0 type-footnote tabular-nums text-tertiary" title={t("yolo:digest.groupTitle", { decided, count: g.actions.length })}>{decided} / {g.actions.length}</span>
       </div>
-      <ul className="flex flex-col divide-y divide-border/50 px-5">{shown.map((a) => <ActionRow key={a.id} a={a} reload={reload} />)}</ul>
+      <ul className="flex flex-col divide-y divide-border px-5">{shown.map((a) => <ActionRow key={a.id} a={a} reload={reload} />)}</ul>
       {g.actions.length > shown.length && <button type="button" className="mx-5 mb-2 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setAll(true)} data-yolo-more>{t("yolo:digest.more", { count: g.actions.length - shown.length })}</button>}
     </div>
   )
+}
+
+/** a figure of a window: a quiet label over the number, coloured only when it asks for you */
+function Figure({ k, label, value, sub, wait }: { k: string; label: string; value: string; sub?: string; wait?: boolean }) {
+  return <div className="min-w-0" data-stat={k}>
+    <div className="truncate type-label text-tertiary">{label}</div>
+    <div className={cn("mt-1 truncate type-title tabular-nums", wait ? "text-attention" : "text-foreground")}>{value}</div>
+    {sub && <div className="truncate type-footnote text-muted-foreground">{sub}</div>}
+  </div>
 }
 
 function WindowBlock({ w, open, reload, filter }: { w: RYoloWindow; open: boolean; reload: () => void; filter: Filter }) {
@@ -107,22 +119,29 @@ function WindowBlock({ w, open, reload, filter }: { w: RYoloWindow; open: boolea
   const groups = w.items.map((g) => ({ ...g, actions: g.actions.filter(keep(filter)) })).filter((g) => g.actions.length)
   const share = decided + declined ? decided / (decided + declined) : null
   return (
-    <Panel ref={ref} k="yolo-window" className={cn("scroll-mt-4", open && "ring-2 ring-blue/40")} data-yolo-window={w.id}
-      icon={<ZapIcon />} title={<span className="font-mono tabular-nums">{w.ended ? t("common:time.range", { from: when(w.started), to: when(w.ended) }) : t("yolo:digest.since", { time: when(w.started) })}</span>}
-      sub={w.summary ? t("yolo:digest.summary", { summary: w.summary }) : w.ended ? t("yolo:digest.lasted", { dur: longDur(w.ended - w.started) }) : t("yolo:digest.liveSub")}
-      right={w.ended ? <Tag>{w.ended_why ? endedLabel(w.ended_why) : t("yolo:digest.ended")}</Tag> : <Tag tone="run"><span className="size-1.5 animate-pulse rounded-full bg-current" />{t("yolo:digest.live")}</Tag>}>
-      <div data-yolo-summary>
-        <StatStrip items={[
-          { k: "decided", label: t("yolo:digest.stat.decided"), value: num(decided), sub: share != null ? t("yolo:digest.stat.share", { pct: Math.round(share * 100) }) : undefined },
-          { k: "declined", label: t("yolo:digest.stat.declined"), value: num(declined), tone: w.waiting ? "wait" : undefined, sub: w.waiting ? t("yolo:digest.stat.waiting", { count: w.waiting }) : undefined },
-          { k: "releases", label: t("yolo:digest.stat.releases"), value: num(w.releases) },
-          { k: "cost", label: t("yolo:digest.stat.cost"), value: w.cost != null ? "$" + num(w.cost, { minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false }) : "—" },
-        ]} />
+    <section ref={ref} className={cn("anim-in flex min-w-0 scroll-mt-4 flex-col rounded-xl bg-card pb-2 text-card-foreground shadow-[var(--lift)]", open && "ring-2 ring-blue/40")} data-panel="yolo-window" data-yolo-window={w.id}>
+      <header className="flex flex-wrap items-start gap-x-3 gap-y-2 px-5 pt-4">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground" aria-hidden><ZapIcon className="size-4" strokeWidth={1.75} /></span>
+        <div className="min-w-0 flex-1 basis-40">
+          <h2 className="truncate type-headline tabular-nums">{w.ended ? t("common:time.range", { from: when(w.started), to: when(w.ended) }) : t("yolo:digest.since", { time: when(w.started) })}</h2>
+          <div className="mt-0.5 line-clamp-2 type-footnote text-muted-foreground">{w.summary ? t("yolo:digest.summary", { summary: w.summary }) : w.ended ? t("yolo:digest.lasted", { dur: longDur(w.ended - w.started) }) : t("yolo:digest.liveSub")}</div>
+        </div>
+        {w.ended ? <span className="inline-flex h-6 shrink-0 items-center rounded-full bg-muted px-2.5 type-label text-muted-foreground">{w.ended_why ? endedLabel(w.ended_why) : t("yolo:digest.ended")}</span>
+          : <span className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full bg-blue/10 px-2.5 type-label text-blue"><span className="dot-running size-1.5 rounded-full bg-current" />{t("yolo:digest.live")}</span>}
+      </header>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-4 px-5 pt-5 pb-2 sm:grid-cols-4" data-yolo-summary data-stat-strip>
+        <Figure k="decided" label={t("yolo:digest.stat.decided")} value={num(decided)} sub={share != null ? t("yolo:digest.stat.share", { pct: Math.round(share * 100) }) : undefined} />
+        <Figure k="declined" label={t("yolo:digest.stat.declined")} value={num(declined)} wait={!!w.waiting} sub={w.waiting ? t("yolo:digest.stat.waiting", { count: w.waiting }) : undefined} />
+        <Figure k="releases" label={t("yolo:digest.stat.releases")} value={num(w.releases)} />
+        <Figure k="cost" label={t("yolo:digest.stat.cost")} value={w.cost != null ? "$" + num(w.cost, { minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false }) : "—"} />
       </div>
-      {groups.length === 0 ? <div className="px-5 py-4 type-footnote text-tertiary">{w.items.length ? t("yolo:digest.emptyFilter") : t("yolo:digest.emptyWindow")}</div> :
+      {groups.length === 0 ? <div className="px-5 py-4 type-callout text-tertiary">{w.items.length ? t("yolo:digest.emptyFilter") : t("yolo:digest.emptyWindow")}</div> :
         groups.map((g) => <ItemGroup key={g.item_id ?? "none"} g={g} reload={reload} />)}
-      {w.waiting ? <PanelFoot meta={t("yolo:digest.waitingSub")}><Button size="sm" variant="outline" onClick={() => go("#/inbox")} data-yolo-waiting>{t("yolo:digest.waiting", { count: w.waiting })}</Button></PanelFoot> : null}
-    </Panel>
+      {w.waiting ? <div className="mx-5 mt-2 mb-2 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-attention/10 px-4 py-2.5" data-panel-foot>
+        <div className="min-w-0 flex-1 type-callout text-foreground/80">{t("yolo:digest.waitingSub")}</div>
+        <Button size="sm" variant="outline" onClick={() => go("#/inbox")} data-yolo-waiting>{t("yolo:digest.waiting", { count: w.waiting })}</Button>
+      </div> : null}
+    </section>
   )
 }
 
@@ -137,7 +156,10 @@ export function YoloDigestView({ window }: { window?: string }) {
       toolbar={<><YoloPill /><Chips value={filterLabel(filter)} onChange={(v) => setFilter(FILTERS.find((f) => filterLabel(f) === v) ?? "all")} options={FILTERS.map(filterLabel)} /></>}>
       {err ? <Empty title={err} /> : !d ? <div className="flex justify-center py-12"><Spinner className="size-5 text-muted-foreground" /></div>
         : d.windows.length === 0 ? <Empty title={t("yolo:digest.never")} sub={t("yolo:digest.neverSub")} icon={<YoloMark />} />
-        : <div className="flex flex-col gap-4">{d.windows.map((w) => <WindowBlock key={w.id} w={w} open={w.id === window} reload={() => void load()} filter={filter} />)}</div>}
+        : <>
+          <div className="flex flex-col gap-6">{d.windows.map((w) => <WindowBlock key={w.id} w={w} open={w.id === window} reload={() => void load()} filter={filter} />)}</div>
+          <p className="mt-6 type-footnote text-tertiary" data-yolo-undo-rules>{t("yolo:digest.undoRules")}</p>
+        </>}
     </Page>
   )
 }

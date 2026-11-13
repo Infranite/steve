@@ -1,5 +1,5 @@
 import { api } from "@/api"
-import { AgentDetailPanel, AgentTree, hasAgentTree, History, Notices, TeamPanel, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
+import { AgentDetail, AgentDetailPanel, AgentTree, hasAgentTree, History, Notices, TeamPanel, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
 import { itemState, type ItemState } from "@/item-state"
 import type { AgentStatus } from "@/agent-tree"
 import { clip } from "@/thread/topics"
@@ -20,7 +20,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card"
 import { Input } from "@/components/ui/input"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Progress } from "@/components/ui/progress"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
@@ -39,7 +38,7 @@ import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
 import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, permissionQuestion, Chips, closeSheet, useScrollMore, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
-import { ChoiceCards, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
+import { ChoiceCards, Count, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
 import { Chevron, Panel, Section, Tile } from "@/settings-kit"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
 import { YoloPill, yoloState } from "@/yolo/switch"
@@ -48,7 +47,7 @@ import { cn } from "cn"
 import { lang, t as tr, useT } from "@/i18n"
 import { nearTime, num } from "@/i18n/format"
 import { CircleAlertIcon, CircleDashedIcon, CircleHelpIcon, HourglassIcon, LoaderCircleIcon, ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleCheckIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, ServerIcon, LinkIcon, ListIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UploadIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 let selecting = false
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
@@ -79,17 +78,17 @@ export function InboxView() {
     <Page title={t("views:inbox.title")} sub={p.length ? t("views:inbox.sub", { count: p.length }) : t("views:inbox.subNone")} max={640}
       toolbar={<><YoloPill className="max-sm:hidden" /><YoloPill short className="sm:hidden" /><Segmented value={ibTab} onChange={(v) => { ibTab = v; r() }} options={[["pending", t("views:inbox.tabPending")], ["done", t("views:inbox.tabDone")]] as const} /></>}>
       {ibTab === "pending" && <>
-        {yoloState(st.yolo) === "paused" && <RunState className="mb-6 rounded-lg bg-destructive/5 px-3 py-2" />}
+        {yoloState(st.yolo) === "paused" && <RunState className="mb-6 rounded-xl bg-destructive/10 px-4 py-3" />}
         {p.length > 0 && <Chips className="mb-6" value={typeLabel(typeKeys.includes(ibType) ? ibType : "all")} onChange={(v) => { ibType = typeKeys.find((k) => typeLabel(k) === v) ?? "all"; r() }} options={typeKeys.map(typeLabel)} />}
         {p.length === 0 && !mems && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
-        {mems > 0 && <button type="button" onClick={() => go("#/knowledge?tab=pending")} className="mb-6 flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left type-callout transition-colors hover:bg-accent" data-inbox-mems>
-          <BookOpenIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /><span className="min-w-0 flex-1">{t("views:inbox.mems", { count: mems })}</span><ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" /></button>}
+        {mems > 0 && <button type="button" onClick={() => go("#/knowledge?tab=pending")} className="mb-8 flex w-full items-center gap-3 rounded-xl bg-card px-4 py-3 text-left type-body shadow-[var(--lift)] hover:shadow-[var(--lift-hover)]" data-inbox-mems>
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue/10 text-blue"><BookOpenIcon className="size-4" strokeWidth={1.75} /></span><span className="min-w-0 flex-1">{t("views:inbox.mems", { count: mems })}</span><ChevronRightIcon className="size-4 shrink-0 text-tertiary" /></button>}
         <div className="flex flex-col gap-8">
           {types.map((ty) => {
             const g = xs.filter((c) => c.w.type === ty)
-            return g.length ? <section key={ty}><SectionLabel>{WT[ty]} · {g.length}</SectionLabel><div className="flex flex-col gap-3">{g.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} />)}</div></section> : null
+            return g.length ? <section key={ty} className="anim-in"><SectionLabel className="text-tertiary">{WT[ty]}<Count n={g.length} /></SectionLabel><div className="flex flex-col gap-3">{g.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} />)}</div></section> : null
           })}
-          {sz.length > 0 && <section data-snoozed><SectionLabel>{t("views:inbox.snoozed", { count: sz.length })}</SectionLabel>
+          {sz.length > 0 && <section data-snoozed><SectionLabel className="text-tertiary">{t("views:inbox.snoozed")}<Count n={sz.length} /></SectionLabel>
             <Group>{sz.map((i) => <Row key={i.id} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0">{i.t}</span></span>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: lang() === "zh-CN" ? i.snooze : nearTime(i.snoozeUntil) })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>)}</Group></section>}
         </div>
       </>}
@@ -100,7 +99,7 @@ export function InboxView() {
             : `${WT[d.type]} · ${d.how === "dismissed" ? t("views:inbox.dismissed") : d.how === "expired" ? t("views:inbox.expired", { choice: d.choice }) : t("views:inbox.chose", { choice: d.choice })}${d.via ? ` · ${t("views:inbox.via", { client: d.via })}` : ""} · ${d.tm}${d.undone ? ` · ${t("views:inbox.undone")}` : ""}`} data-done-row={d.id}>
             {d.canUndo && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => undoDecision(n)} data-undo-decision><RotateCcwIcon />{t("views:inbox.undo")}</Button>}
           </Row>))}</Group>
-        <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("views:inbox.doneNote")}</div>
+        <div className="mt-3 type-footnote text-tertiary">{t("views:inbox.doneNote")}</div>
       </> : <Empty title={t("views:inbox.doneEmpty")} />)}
     </Page>
   )
@@ -118,7 +117,7 @@ const sortLabel = (k: ItemsSort) => tr(({ updated: "views:items.sortUpdated", du
 /** finished and dropped items shown before “显示全部”; the rest are a click away */
 const CLOSED_SHOWN = 8
 /** a filter select in the toolbar: compact, and muted until it narrows the list */
-const FILTER = (set: boolean) => cn("h-7 px-2 text-[12.5px] [&>svg]:opacity-60", set ? "text-foreground" : "text-muted-foreground"); const openGroups = new Set<string>()
+const FILTER = (set: boolean) => cn("h-7 px-2 type-callout! [&>svg]:opacity-60", set ? "bg-accent font-medium! text-foreground" : "text-muted-foreground"); const openGroups = new Set<string>()
 /** the list, filtered: the stats page's drill-downs land here (“在事项页查看”) */
 export const showItems = (f: "全部" | "等你" | "进行中", project?: string, bot?: string) => { filt = f === "等你" ? "wait" : f === "进行中" ? "run" : "all"; projF = project ?? "all"; botF = bot ?? "all"; tagF = "all"; kindF = "all"; q = ""; itemsView = "list"; go("#/items") }
 export const showTag = (id: string) => { if (isKind(tag(id))) kindF = id; else tagF = id; filt = "all"; itemsView = "list"; go("#/items") }
@@ -126,27 +125,28 @@ const PRI_ORDER: Record<string, number> = { 高: 0, 中: 1, 低: 2 }
 /** the board: a column per open status. An empty column folds to a narrow rail with its name down the side, and the
  *  columns with cards share the rest (each at least 11rem), so three busy statuses fit a 1066px window beside the
  *  sidebar; when they still don't, the board scrolls sideways in its own area, columns snapping to its edge and the
- *  side with more fading out, and the page itself never scrolls sideways. */
+ *  side with more fading out, and the page itself never scrolls sideways. On a phone a column with cards takes most of
+ *  the width and the board snaps column by column, so a card is never squeezed to a few characters a line. */
 function ItemsBoard({ groups, xs }: { groups: [Item["st"], string][]; xs: Item[] }) {
   const t = useT(), [ref, more] = useScrollMore<HTMLDivElement>("x")
   const cols = groups.map(([s, l]) => [s, l, xs.filter((i) => itemDisplayStatus(i) === s)] as const)
   return (
-    <div ref={ref} className="-mx-1 grid snap-x snap-proximity scroll-px-1 grid-flow-col gap-3 overflow-x-auto px-1 pb-2 data-[more~=end]:mask-r-from-[calc(100%-3rem)] data-[more~=start]:mask-l-from-[calc(100%-3rem)]"
-      style={{ gridTemplateColumns: cols.map(([, , g]) => (g.length ? "minmax(11rem,1fr)" : "2.5rem")).join(" ") }} data-items-board data-more={more}>
+    <div ref={ref} className="-mx-1 grid snap-x snap-mandatory scroll-px-1 grid-flow-col grid-cols-[var(--cols-phone)] gap-3 overflow-x-auto px-1 pb-2 data-[more~=end]:mask-r-from-[calc(100%-3rem)] data-[more~=start]:mask-l-from-[calc(100%-3rem)] sm:snap-proximity sm:grid-cols-[var(--cols)]"
+      style={{ "--cols": cols.map(([, , g]) => (g.length ? "minmax(11rem,1fr)" : "2.5rem")).join(" "), "--cols-phone": cols.map(([, , g]) => (g.length ? "minmax(78vw,1fr)" : "2.5rem")).join(" ") } as CSSProperties} data-items-board data-more={more}>
         {cols.map(([s, l, g]) => !g.length ? (
-        <div key={s} className="flex min-h-72 snap-start flex-col items-center gap-2 rounded-xl bg-muted/60 py-3.5 text-muted-foreground" title={l} data-board-col={s} data-board-empty>
+        <div key={s} className="flex min-h-72 snap-start flex-col items-center gap-2 rounded-xl bg-muted/50 py-3.5 text-tertiary" title={l} data-board-col={s} data-board-empty>
           <StatusDot s={s} /><span className="type-label [writing-mode:vertical-rl]">{l}</span><span className="type-label tabular-nums">0</span>
         </div>) : (
-        <div key={s} className="flex min-h-72 min-w-0 snap-start flex-col gap-2 rounded-xl bg-muted/60 p-2" data-board-col={s}>
-          <div className="flex items-center gap-2 px-2 py-1.5 type-label"><StatusDot s={s} />{l}<span className="tabular-nums text-muted-foreground">{g.length}</span></div>
+        <div key={s} className="flex min-h-72 min-w-0 snap-start flex-col gap-2 rounded-xl bg-muted/50 p-2" data-board-col={s}>
+          <div className="flex items-center gap-2 px-2 pb-1 pt-1.5 type-label text-foreground/80"><StatusDot s={s} />{l}<span className="tabular-nums text-tertiary">{g.length}</span></div>
           {g.map((i) => { const relation = workflowRelation(i, st.items); return (
-            <button key={i.id} type="button" onClick={() => go("#/items/" + i.id)} className="rounded-lg border bg-card p-3 text-left transition-shadow duration-150 hover:shadow-md" data-kanban-card={i.id}>
-              <ItemNo id={i.id} /><div className="mt-0.5 type-callout font-medium">{i.t}</div>
+            <button key={i.id} type="button" onClick={() => go("#/items/" + i.id)} className="rounded-lg bg-card p-3 text-left shadow-[var(--lift)] hover:shadow-[var(--lift-hover)] active:scale-[.99]" data-kanban-card={i.id}>
+              <ItemNo id={i.id} /><div className="mt-1 type-body font-medium leading-5 text-foreground">{i.t}</div>
               {relation && <div className="mt-1 type-footnote font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</div>}
-              {relation?.kind !== "paused" && relation?.kind !== "previous" && <div className="mt-1 line-clamp-2 type-footnote text-muted-foreground">{i.now}</div>}
+              {relation?.kind !== "paused" && relation?.kind !== "previous" && i.now && <div className="mt-1 line-clamp-2 type-callout text-muted-foreground">{i.now}</div>}
               <Tags ids={i.tags} max={2} className="mt-2" />
               {/* the plan bar keeps its own corner so a narrow card never wraps it under a dangling separator */}
-              <div className="mt-2 flex items-center gap-2 type-footnote text-muted-foreground"><Meta className="min-w-0 flex-1"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}</Meta>{i.plan && <PlanBar i={i} />}</div>
+              <div className="mt-3 flex items-center gap-2 type-footnote text-muted-foreground"><Meta className="min-w-0 flex-1"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}</Meta>{i.plan && <PlanBar i={i} />}</div>
             </button>
           ) })}
         </div>))}
@@ -176,7 +176,7 @@ export function ItemsView() {
         <Button size="xs" variant="ghost" className="text-destructive" onClick={() => setConfirmDel(i.id)} data-delete-item={i.id}>{t("common:action.delete")}</Button></div>
     : <ItemRow key={i.id} i={i} pick={pick(i.id)} proj={multiProj} bot={multiBot} />
   return (
-    <Page title={t("views:items.title")} sub={arch ? t("views:items.subArch") : t("views:items.sub", { run: st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length, wait: pending().length })} max={itemsView === "list" ? 880 : 1120}
+    <Page title={t("views:items.title")} sub={arch ? t("views:items.subArch") : t("views:items.sub", { run: st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length, wait: pending().length })} max={1080}
       actions={<>{itemsView === "list" && !arch && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { selecting = !selecting; selected.clear(); r() }} data-select-mode>{selecting ? t("views:items.selectDone") : t("views:items.select")}</Button>}<Button size="sm" onClick={() => openSheet("newItem")} data-new-item><PlusIcon />{t("views:items.newItem")}</Button></>}
       toolbar={<span className="hidden sm:block">{seg}</span>}>
       <AlertDialog open={!!confirmDel} onOpenChange={(o) => !o && setConfirmDel(null)}>
@@ -187,44 +187,46 @@ export function ItemsView() {
       </AlertDialog>
       <div className="mb-4 sm:hidden">{seg}</div>
       {/* the graph draws every item's relations, so the list filters would only look like they apply */}
-      {itemsView !== "graph" && <div className="mb-4 flex flex-wrap items-center gap-1.5 border-b pb-3" data-items-toolbar>
+      {itemsView !== "graph" && <div className="mb-6 flex items-center gap-1 max-sm:-mx-4 max-sm:overflow-x-auto max-sm:px-4 max-sm:[scrollbar-width:none] sm:flex-wrap [&>*]:shrink-0" data-items-toolbar>
         <Chips value={filtLabel(filt)} onChange={(v) => { filt = FILTS.find((k) => filtLabel(k) === v) ?? "all"; done() }} options={FILTS.map(filtLabel)} />
-        <span className="flex-1" />
+        <span className="flex-1 max-sm:hidden" />
         <Select quiet className={FILTER(kindF !== "all")} testId="kind-filter" value={tag(kindF) ? kindF : "all"} onChange={(v) => { kindF = v; r() }} options={[{ v: "all", l: t("views:items.allKinds") }, ...kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))]} />
         <Select quiet className={FILTER(tagF !== "all")} testId="tag-filter" value={tag(tagF) ? tagF : "all"} onChange={(v) => { tagF = v; r() }} options={[{ v: "all", l: t("views:items.allTags") }, ...DOMAIN_CATS.flatMap((c) => st.tags.filter((x) => x.cat === c).map((x) => ({ v: x.id, l: <span>{x.name} <span className="text-muted-foreground">· {c}</span></span> })))]} />
         <Select quiet className={FILTER(projF !== "all")} testId="project-filter" value={st.projects.some((p) => p.id === projF) || projF === "none" ? projF : "all"} onChange={(v) => { projF = v; r() }} options={[{ v: "all", l: t("views:items.allProjects") }, ...st.projects.map((p) => ({ v: p.id, l: p.name })), { v: "none", l: t("views:items.noProject") }]} />
         <Select quiet className={FILTER(botF !== "all")} testId="bot-filter" value={botF} onChange={(v) => { botF = v; r() }} options={[{ v: "all", l: t("views:items.allBots") }, ...Object.keys(st.bots).map((k) => ({ v: k, l: <BotName k={k} /> }))]} />
         {itemsView === "list" && <Select quiet className={FILTER(sortBy !== "updated")} testId="sort" value={sortBy} onChange={(v) => { sortBy = v as ItemsSort; r() }} options={SORTS.map((v) => ({ v, l: sortLabel(v) }))} />}
-        <label className="relative"><SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-tertiary" /><Input className={cn("h-7 rounded-lg pl-8 text-[13px] transition-[width] duration-200", q ? "w-40" : "w-8 cursor-pointer border-transparent bg-transparent placeholder:text-transparent focus:w-40 focus:cursor-text focus:border-border focus:placeholder:text-muted-foreground")} placeholder={t("views:items.search")} aria-label={t("views:items.search")} data-items-search defaultValue={q} onChange={(e) => { q = e.target.value; r() }} /></label>
+        <label className="relative"><SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-tertiary" /><Input className={cn("h-7 rounded-lg pl-8 type-callout! transition-[width,background-color,border-color] duration-[180ms] ease-[var(--ease-out)]", q ? "w-40" : "w-8 cursor-pointer border-transparent bg-transparent placeholder:text-transparent hover:bg-accent focus:w-40 focus:cursor-text focus:border-border focus:bg-transparent focus:placeholder:text-muted-foreground")} placeholder={t("views:items.search")} aria-label={t("views:items.search")} data-items-search defaultValue={q} onChange={(e) => { q = e.target.value; r() }} /></label>
       </div>}
       {selecting && (
-        <div className="sticky top-0 z-10 mb-4 flex flex-wrap items-center gap-2 rounded-xl border bg-background/95 px-3 py-2 backdrop-blur" data-bulk-bar>
-          <span className="type-callout">{t("views:items.selected", { count: ids.length })}</span>
+        <div className="anim-in sticky top-2 z-10 mb-6 flex flex-wrap items-center gap-2 rounded-xl bg-popover/95 px-3 py-2 shadow-md backdrop-blur-xl" data-bulk-bar>
+          <span className="type-callout font-medium tabular-nums">{t("views:items.selected", { count: ids.length })}</span>
           <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { xs.forEach((i) => selected.add(i.id)); r() }}>{t("views:items.selectAll")}</Button>
           <span className="flex-1" />
           {([["pause", t("views:items.bulkPause")], ["run", t("views:items.bulkRun")], ["arch", t("views:items.bulkArch")], ["drop", t("views:items.bulkDrop")]] as const).map(([op, l]) => <Button key={op} size="sm" variant={op === "drop" ? "ghost" : "outline"} className={cn(op === "drop" && "text-destructive")} disabled={!ids.length} onClick={() => { bulk(ids, op); done() }} data-bulk={op}>{l}</Button>)}
         </div>
       )}
+      <div key={itemsView} className="anim-in">
       {itemsView === "list" && (xs.length ? (arch || sortBy !== "updated"
         ? <Group>{xs.map(rowOf)}</Group>
-        : <div className="flex flex-col gap-5">{groups.map(([s, l]) => {
+        : <div className="flex flex-col gap-8">{groups.map(([s, l]) => {
             const g = xs.filter((i) => itemDisplayStatus(i) === s), fold = closedSt(s) && !openGroups.has(s) && g.length > CLOSED_SHOWN + 2
             return g.length ? (
               <section key={s} data-items-group={s}>
-                <SectionLabel className="mb-1 px-0.5" right={fold || openGroups.has(s) ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { openGroups.has(s) ? openGroups.delete(s) : openGroups.add(s); r() }} data-group-more={s}>{fold ? t("views:items.showAll", { count: g.length }) : t("views:items.collapse")}</Button> : undefined}>
-                  <span className="inline-flex items-center gap-2"><StatusDot s={s} />{l}<span className="tabular-nums text-tertiary">{g.length}</span></span>
+                <SectionLabel className="mb-1 text-tertiary" right={fold || openGroups.has(s) ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { openGroups.has(s) ? openGroups.delete(s) : openGroups.add(s); r() }} data-group-more={s}>{fold ? t("views:items.showAll", { count: g.length }) : t("views:items.collapse")}</Button> : undefined}>
+                  <span className="inline-flex items-center gap-2"><StatusDot s={s} />{l}</span><Count n={g.length} />
                 </SectionLabel>
                 <Group>{(fold ? g.slice(0, CLOSED_SHOWN) : g).map(rowOf)}</Group>
               </section>) : null })}</div>)
         : <Empty title={arch ? t("views:items.emptyArch") : st.items.length ? t("views:items.emptyFiltered") : t("views:items.emptyNone")} sub={arch ? (st.cfg.archDays === "0" ? t("views:items.archManual") : t("views:items.archAuto", { count: Number(st.cfg.archDays) })) : st.items.length ? undefined : t("views:items.emptyNoneSub")} />)}
       {itemsView === "board" && <ItemsBoard groups={groups.filter((g) => g[0] !== "drop" && g[0] !== "fail")} xs={xs} />}
       {itemsView === "graph" && (
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-4">
           <GraphLegend />
           <RelationGraph scope="all" hideSimple={!showAll} height={560} onOpen={openNode} />
-          <div className="flex flex-wrap items-center gap-2 type-footnote text-muted-foreground">{showAll ? t("views:items.graphAll") : t("views:items.graphFiltered")}<Button size="xs" variant="outline" onClick={() => { showAll = !showAll; r() }}>{showAll ? t("views:items.graphLinkedOnly") : t("views:items.graphShowAll")}</Button></div>
+          <div className="flex flex-wrap items-center gap-2 type-callout text-muted-foreground">{showAll ? t("views:items.graphAll") : t("views:items.graphFiltered")}<Button size="xs" variant="ghost" className="text-foreground/80" onClick={() => { showAll = !showAll; r() }}>{showAll ? t("views:items.graphLinkedOnly") : t("views:items.graphShowAll")}</Button></div>
         </div>
       )}
+      </div>
     </Page>
   )
 }
@@ -232,7 +234,7 @@ function Modal({ open, title, desc, children, footer, wide }: { open: boolean; t
   return (
     <Dialog open={open} onOpenChange={(o) => !o && closeSheet()}>
       <DialogContent className={cn("gap-4 rounded-2xl", wide ? "sm:max-w-[960px]" : "sm:max-w-[480px]")}>
-        <DialogHeader><DialogTitle className="type-headline">{title}</DialogTitle>{desc && <DialogDescription className="type-callout">{desc}</DialogDescription>}</DialogHeader>
+        <DialogHeader><DialogTitle className="type-headline!">{title}</DialogTitle>{desc && <DialogDescription className="type-callout!">{desc}</DialogDescription>}</DialogHeader>
         {children}
         {footer && <DialogFooter className="gap-2">{footer}</DialogFooter>}
       </DialogContent>
@@ -311,14 +313,15 @@ const ROOT_STATUS: Record<ItemState["kind"], AgentStatus> = {
   done: "done", dropped: "stopped", failed: "failed", proposed: "proposed", asking: "asking", unavailable: "blocked",
   graphPaused: "paused", paused: "paused", blocked: "blocked", working: "running", queued: "idle", idle: "idle",
 }
-const NOW_RING: Record<ItemState["tone"], string> = { run: "border-blue/30", wait: "border-attention/40 bg-attention/[0.03]", pause: "border-border", done: "border-border", fail: "border-destructive/35", neutral: "border-border" }
+/** a collapsible's panel animates its height (Base UI sets --collapsible-panel-height while it opens and closes) */
+const COLLAPSE = "h-[var(--collapsible-panel-height)] overflow-hidden transition-[height] duration-[260ms] ease-[var(--ease-out)] data-[ending-style]:h-0 data-[starting-style]:h-0"
 const STATE_ICON: Record<ItemState["kind"], typeof CheckIcon> = {
   done: CheckIcon, dropped: BanIcon, failed: CircleAlertIcon, proposed: CircleHelpIcon, asking: CircleHelpIcon,
   unavailable: CircleAlertIcon, graphPaused: PauseIcon, paused: PauseIcon, blocked: HourglassIcon, working: LoaderCircleIcon, queued: HourglassIcon, idle: CircleDashedIcon,
 }
-function StateMark({ state }: { state: ItemState }) {
+function StateMark({ state, centered }: { state: ItemState; centered?: boolean }) {
   const I = STATE_ICON[state.kind]
-  return <span className={cn("mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full", STATE_TONE[state.tone][1])} aria-hidden><I className={cn("size-4", state.kind === "working" && "motion-safe:animate-spin")} strokeWidth={2.25} /></span>
+  return <span className={cn(!centered && "mt-0.5", "flex size-7 shrink-0 items-center justify-center rounded-full", STATE_TONE[state.tone][1])} aria-hidden><I className={cn("size-4", state.kind === "working" && "motion-safe:animate-spin")} strokeWidth={2.25} /></span>
 }
 export function StatePill({ state }: { state: ItemState }) {
   const t = useT()
@@ -337,42 +340,48 @@ function foldProcess<T>(rows: T[], quiet: (x: T) => boolean): (T | T[])[] {
 /* a folded run of process lines: how many and the latest one; opens in place */
 function ProcessRun({ count, last, children }: { count: number; last: any[]; children: ReactNode }) {
   const t = useT(), [open, setOpen] = useState(false)
-  return <div data-process-run={count}>
-    <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="flex w-full min-w-0 items-center gap-2 py-1 text-left type-footnote text-muted-foreground hover:text-foreground">
-      <span className="flex size-5 shrink-0 items-center justify-center"><ChevronRightIcon className={cn("size-3.5 transition-transform", open && "rotate-90")} /></span>
+  return <Collapsible open={open} onOpenChange={setOpen} data-process-run={count}>
+    <CollapsibleTrigger className="flex w-full min-w-0 items-center gap-2 py-1 text-left type-footnote text-muted-foreground hover:text-foreground">
+      <span className="flex size-5 shrink-0 items-center justify-center"><ChevronRightIcon className={cn("size-3.5 transition-transform duration-[180ms] ease-[var(--ease-out)]", open && "rotate-90")} /></span>
       <span className="shrink-0">{t("views:itemState.process", { count })}</span>
-      {!open && <span className="min-w-0 truncate text-tertiary">· {clip(String(last[1] ?? ""), 120)}</span>}
-      <span className="ml-auto shrink-0 text-tertiary">{last[2]}</span>
-    </button>
-    {open && <div className="border-l pl-2 ml-2.5">{children}</div>}
-  </div>
+      <span className={cn("min-w-0 truncate text-tertiary transition-opacity duration-[180ms]", open && "opacity-0")}>· {clip(String(last[1] ?? ""), 120)}</span>
+      <span className="ml-auto shrink-0 tabular-nums text-tertiary">{last[2]}</span>
+    </CollapsibleTrigger>
+    <CollapsibleContent className={cn(COLLAPSE, "ml-2.5 border-l pl-2")}>{children}</CollapsibleContent>
+  </Collapsible>
 }
 /* a long goal (a pasted brief) folds to its first lines so the page still opens on what is happening */
-function GoalText({ text, children }: { text: string; children: ReactNode }) {
+function GoalText({ text, children, after }: { text: string; children: ReactNode; after?: ReactNode }) {
   const t = useT()
-  const ref = useRef<HTMLDivElement>(null)
-  const [open, setOpen] = useState(false), [long, setLong] = useState(false)
+  const inner = useRef<HTMLDivElement>(null)
+  /* the text's full height, measured on the text itself so a clamped box still learns when it grows */
+  const [open, setOpen] = useState(false), [full, setFull] = useState(0)
   useEffect(() => { setOpen(false) }, [text])
   useEffect(() => {
-    const el = ref.current
+    const el = inner.current
     if (!el) return
-    const measure = () => setLong(el.scrollHeight > el.clientHeight + 1)
+    const measure = () => setFull(el.scrollHeight)
     measure()
     const ro = new ResizeObserver(measure); ro.observe(el)
     return () => ro.disconnect()
-  }, [text, open])
+  }, [text])
+  const long = full > GOAL_FOLD + 1
   return <>
-    <div ref={ref} className={cn(!open && "max-h-48 overflow-hidden", !open && long && "[mask-image:linear-gradient(to_bottom,black_70%,transparent)]")} data-goal-text>
-      <Markdown text={text} className="type-body text-foreground/80" />
+    {/* opening and closing ease the height between the fold and the measured text, like every other collapse */}
+    <div className={cn("overflow-hidden transition-[max-height] duration-[260ms] ease-[var(--ease-out)]", !open && long && "[mask-image:linear-gradient(to_bottom,black_70%,transparent)]")}
+      style={{ maxHeight: open && full ? full : GOAL_FOLD }} data-goal-text>
+      <div ref={inner}><Markdown text={text} className="type-body text-foreground/80" /></div>
     </div>
-    <div className="mt-1 flex items-center gap-2 type-footnote text-muted-foreground">
+    <div className="mt-2 flex items-center gap-3 type-footnote text-muted-foreground">
       {(long || open) && <button type="button" className="font-medium text-foreground/80 hover:text-foreground" onClick={() => setOpen(!open)} aria-expanded={open} data-goal-more>{open ? t("views:item.goalLess") : t("views:item.goalMore")}</button>}
       {children}
     </div>
+    {after}
   </>
 }
+const GOAL_FOLD = 192
 function Prop({ label, children, top }: { label: string; children: ReactNode; top?: boolean }) {
-  return <><dt className={cn("pt-1.5 type-footnote text-muted-foreground", top && "pt-1")}>{label}</dt><dd className="min-w-0 type-callout">{children}</dd></>
+  return <><dt className={cn("pt-1.5 type-callout text-muted-foreground", top && "pt-1")}>{label}</dt><dd className="min-w-0 type-callout text-foreground">{children}</dd></>
 }
 /* add a tag: search existing ones by name, category or description; create a new one when nothing fits */
 function TagPicker({ i }: { i: Item }) {
@@ -385,8 +394,8 @@ function TagPicker({ i }: { i: Item }) {
     <DropdownMenu onOpenChange={(o) => !o && setQ("")}>
       <DropdownMenuTrigger render={<button type="button" className="self-start type-footnote text-muted-foreground hover:text-foreground" data-add-tag />}>{domain.length ? t("views:item.addMore") : t("views:item.addNone")}</DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-h-80 w-72">
-        <div className="p-1"><Input autoFocus className="h-8 rounded-md text-[13px]" placeholder={t("views:item.tagSearch")} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} data-tag-search /></div>
-        {DOMAIN_CATS.map((c) => { const g = xs.filter((x) => x.cat === c); return g.length ? <div key={c}><div className="px-2 pb-0.5 pt-2 type-footnote text-muted-foreground">{tagCatLabel(c)}</div>
+        <div className="p-1"><Input autoFocus className="h-8 rounded-md type-callout!" placeholder={t("views:item.tagSearch")} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} data-tag-search /></div>
+        {DOMAIN_CATS.map((c) => { const g = xs.filter((x) => x.cat === c); return g.length ? <div key={c}><div className="px-2 pb-1 pt-2 type-label text-tertiary">{tagCatLabel(c)}</div>
           {g.map((x) => <DropdownMenuItem key={x.id} onClick={() => setTags(i.id, [...(i.tags ?? []), x.id])} data-tag-opt={x.name} className="flex-col items-start gap-0"><span className="type-callout">{tagLabel(x)}</span><span className="line-clamp-1 type-footnote text-muted-foreground">{tagDesc(x)}</span></DropdownMenuItem>)}</div> : null })}
         {!xs.length && <div className="px-2 py-2 type-footnote text-muted-foreground">{t("views:item.tagNoMatch")}</div>}
         <DropdownMenuSeparator />
@@ -426,14 +435,14 @@ function Plan({ i }: { i: Item }) {
       {i.rounds.map((r) => { const k = r.steps.filter((x) => x[1] === 1).length; return (
         <Collapsible key={r.n} data-plan-round={r.end}>
           <CollapsibleTrigger className="group/round flex items-center gap-1.5 type-footnote text-muted-foreground hover:text-foreground">
-            <ChevronRightIcon className="size-3.5 transition-transform group-data-[panel-open]/round:rotate-90" />
+            <ChevronRightIcon className="size-3.5 transition-transform duration-[180ms] group-data-[panel-open]/round:rotate-90" />
             <span className={cn(r.end === "replaced" && "line-through decoration-tertiary")}>{t("views:item.round", { n: r.n })}</span>
             <span>· {r.end === "done" ? t("views:item.roundDone", { done: k, total: r.steps.length }) : t("views:item.roundReplaced", { done: k, total: r.steps.length })}</span>
-            <span className="text-tertiary">· {r.at}</span>
+            <span className="tabular-nums text-tertiary">· {r.at}</span>
           </CollapsibleTrigger>
-          <CollapsibleContent className="mt-1.5 pl-5"><PlanSteps steps={r.steps} old={r.end} /></CollapsibleContent>
+          <CollapsibleContent className={COLLAPSE}><div className="pl-5 pt-1.5"><PlanSteps steps={r.steps} old={r.end} /></div></CollapsibleContent>
         </Collapsible>) })}
-      {i.rounds.length > 0 && cur.length > 0 && <div className="mt-1 type-footnote text-muted-foreground">{t("views:item.roundCurrent", { n: i.rounds.length + 1, done: dn, total: cur.length })}</div>}
+      {i.rounds.length > 0 && cur.length > 0 && <div className="mt-1 type-footnote tabular-nums text-muted-foreground">{t("views:item.roundCurrent", { n: i.rounds.length + 1, done: dn, total: cur.length })}</div>}
       {cur.length > 0 && <PlanSteps steps={cur} run={i.st === "run"} />}
     </div>
   )
@@ -486,45 +495,45 @@ export function ItemView({ id }: { id: string }) {
         <DropdownMenuItem onClick={() => { const k = i.ss[i.ss.length - 1]; openSheet("fork", { k, at: Math.max(0, (st.S[k]?.seqs.length ?? 1) - 1) }) }} disabled={!i.ss.length}>{t("views:item.fork")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => { navigator.clipboard?.writeText(location.href).catch(() => {}); toast(t("views:item.linkCopied")) }}><LinkIcon />{t("views:item.copyLink")}</DropdownMenuItem>
         <DropdownMenuSeparator />
+        {!closedSt(i.st) && <DropdownMenuItem variant="destructive" onClick={() => setConfirmDrop(true)} data-quick="drop"><BanIcon />{t("views:item.drop")}</DropdownMenuItem>}
         {closedSt(i.st) && <DropdownMenuItem onClick={() => { archive([i.id], !i.arch); if (!i.arch) return; go("#/items") }} data-archive><ArchiveIcon />{i.arch ? t("views:item.restore") : t("views:item.archive")}</DropdownMenuItem>}
         {i.arch && <DropdownMenuItem variant="destructive" onClick={() => setConfirmDel(true)} data-delete><TrashIcon />{t("views:item.deleteForever")}</DropdownMenuItem>}
       </DropdownMenuContent>
     </DropdownMenu>
   </>
-  /* always-visible quick actions beside the title; labels fold into icons on narrow screens */
+  /* always-visible quick actions beside the title: one outlined (mark done), the pause beside it quiet; dropping the
+   * item is in the ⋯ menu behind a confirmation. Labels fold into icons on narrow screens */
   const over = closedSt(i.st)
   const [pl, PI, pa] = over ? [t("views:item.reopen"), RotateCcwIcon, () => setSt(i.id, "run")] as const
     : i.st === "pause" ? [t("views:item.resume"), PlayIcon, () => setSt(i.id, "run")] as const
     : [t("views:item.pause"), PauseIcon, () => setSt(i.id, "pause")] as const
   const quick = (
     <div className="flex items-center gap-1.5" data-quick-actions>
-      <Button variant="outline" size="sm" className="max-sm:w-8 max-sm:px-0" aria-label={pl} title={pl} disabled={i.st === "prop"} onClick={pa} data-quick="pause"><PI /><span className="max-sm:sr-only">{pl}</span></Button>
+      <Button variant="ghost" size="sm" className="text-muted-foreground max-sm:w-8 max-sm:px-0" aria-label={pl} title={pl} disabled={i.st === "prop"} onClick={pa} data-quick="pause"><PI /><span className="max-sm:sr-only">{pl}</span></Button>
       <Button variant="outline" size="sm" className="max-sm:w-8 max-sm:px-0" aria-label={t("views:item.markDone")} title={t("views:item.markDone")} disabled={over || doneBusy} onClick={() => { setDoneBusy(true); void markDone(i.id).finally(() => setDoneBusy(false)) }} data-quick="done"><CircleCheckIcon /><span className="max-sm:sr-only">{t("views:item.markDone")}</span></Button>
-      <Popover open={confirmDrop} onOpenChange={setConfirmDrop}>
-        <PopoverTrigger render={<Button variant="destructive" size="sm" className="max-sm:w-8 max-sm:px-0" aria-label={t("views:item.drop")} title={t("views:item.drop")} disabled={over} data-quick="drop" />}><BanIcon /><span className="max-sm:sr-only">{t("views:item.drop")}</span></PopoverTrigger>
-        <PopoverContent align="end" className="w-64 gap-3 rounded-2xl p-3" data-drop-popover>
-          <div className="type-callout"><div className="font-medium">{t("views:item.dropTitle", { id: i.id })}</div><div className="mt-0.5 text-muted-foreground">{t("views:item.dropDesc")}</div></div>
-          <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setConfirmDrop(false)}>{t("common:action.cancel")}</Button><Button size="sm" variant="destructive" autoFocus onClick={() => { setSt(i.id, "drop"); setConfirmDrop(false) }} data-drop-confirm>{t("views:item.drop")}</Button></div>
-        </PopoverContent>
-      </Popover>
     </div>
   )
   const tree = hasAgentTree(at)
   const state = rootState!
+  /* the now card with nothing under its headline (finished, say): one centred line in a smaller card */
+  const compact = !i.waits.length && state.move === "none"
+  const centered = compact && !i.workflow && !state.detail && state.kind !== "idle" && !i.rel && !i.dependencyWait
   const goal = <>
           {/* 1 — goal reads as the description of the title */}
           <section data-goal className="-mt-3">
             {editing ? (
               <Field><Textarea className="min-h-24 rounded-lg" value={gtxt} onChange={(e) => setG(e.target.value)} data-goal-input autoFocus />
-                <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => { saveGoal(i.id, gtxt.trim()); setEditing(false) }}>{t("views:item.saveAs", { n: i.goals.length + 1 })}</Button><Button size="sm" variant="ghost" onClick={() => setEditing(false)}>{t("common:action.cancel")}</Button><FieldDescription className="type-footnote">{t("views:item.goalHint")}</FieldDescription></div></Field>
+                <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => { saveGoal(i.id, gtxt.trim()); setEditing(false) }}>{t("views:item.saveAs", { n: i.goals.length + 1 })}</Button><Button size="sm" variant="ghost" onClick={() => setEditing(false)}>{t("common:action.cancel")}</Button><FieldDescription className="type-footnote!">{t("views:item.goalHint")}</FieldDescription></div></Field>
             ) : (
-              <div className="group/goal">
-                <GoalText text={i.goals[i.goals.length - 1]}>
+              /* the earlier versions open under the whole line, not inside it */
+              <Collapsible className="group/goal">
+                <GoalText text={i.goals[i.goals.length - 1]} after={i.goals.length > 1 && <CollapsibleContent className={COLLAPSE}>
+                  <div className="flex flex-col gap-1 pt-2 type-footnote text-muted-foreground" data-goal-history>{i.goals.slice(0, -1).map((g, n) => <div key={n} className="line-clamp-2">{t("views:item.historyRow", { n: n + 1, goal: g })}</div>)}</div></CollapsibleContent>}>
                   <span>{t("views:item.goalVersion", { n: i.goals.length })}</span>
-                  {i.goals.length > 1 && <Collapsible><CollapsibleTrigger className="hover:text-foreground">{t("views:item.history")}</CollapsibleTrigger><CollapsibleContent className="mt-1">{i.goals.slice(0, -1).map((g, n) => <div key={n}>{t("views:item.historyRow", { n: n + 1, goal: g })}</div>)}</CollapsibleContent></Collapsible>}
+                  {i.goals.length > 1 && <CollapsibleTrigger className="hover:text-foreground">{t("views:item.history")}</CollapsibleTrigger>}
                   <button type="button" className="opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/goal:opacity-100 [@media(hover:none)]:opacity-100" data-edit-goal onClick={() => { setG(i.goals[i.goals.length - 1]); setEditing(true) }}>{t("views:item.edit")}</button>
                 </GoalText>
-              </div>
+              </Collapsible>
             )}
           </section>
   </>
@@ -534,32 +543,37 @@ export function ItemView({ id }: { id: string }) {
     if (e[0] === "reply") return <ReplyBlock key={"reply:" + e[1].s + ":" + e[1].from} r={e[1]} />
     const q = e[0] === "me" && queued.byComment.get(n)
     if (q) return (
-      <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">{t("views:item.me")}</span>
+      <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-blue/10 text-blue" title={t("views:item.me")} aria-label={t("views:item.me")}><UserRoundIcon className="size-3" strokeWidth={2.25} /></span>
         <QueuedComment sid={i.qs!} q={q} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} at={e[2]} body={(t) => <div className="type-body"><Markdown text={t} /></div>} /></div>
     )
     /* notes sent from an output show what they mark and open the output there */
     const notes = e[0] === "me" && e[7] != null ? i.anns.filter((x) => x.timeline_id === e[7]) : []
     if (e[0] === "me") return (
-      <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">{t("views:item.me")}</span>
+      <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-blue/10 text-blue" title={t("views:item.me")} aria-label={t("views:item.me")}><UserRoundIcon className="size-3" strokeWidth={2.25} /></span>
         <div className="min-w-0 flex-1">{notes.length ? <div data-comment-notes><div className="type-body">{t("views:item.notes", { count: notes.length })}</div><AnnRefs item={i.id} anns={notes} outs={i.outs} open={(o, ann) => setPreview({ o, focus: ann })} /></div>
-          : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote text-muted-foreground">{e[2]}{e[3] && st.S[e[3]] ? ` · ${t("views:item.deliveredTo", { n: st.S[e[3]].n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
+          : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote tabular-nums text-tertiary">{e[2]}{e[3] && st.S[e[3]] ? ` · ${t("views:item.deliveredTo", { n: st.S[e[3]].n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded-md bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
     )
     const yolo = typeof e[1] === "string" && e[1].startsWith("YOLO")
-    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-yolo-line={yolo ? "" : undefined}><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span>{yolo && <YoloMark />}<span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(yolo ? e[1].replace(/^YOLO[：:]\s*/, "") : String(e[1] ?? ""), 240)}</span><span className="shrink-0 text-tertiary">{e[2]}</span></div>
+    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-yolo-line={yolo ? "" : undefined}><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span>{yolo && <YoloMark />}<span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(yolo ? e[1].replace(/^YOLO[：:]\s*/, "") : String(e[1] ?? ""), 240)}</span><span className="shrink-0 tabular-nums text-tertiary">{e[2]}</span></div>
   }
   return (
-    <Page small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg text-[20px] font-semibold" data-title-input
+    <Page small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg type-title!" data-title-input
         onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== i.t) patchItem(i.id, { t: v }); setTitleEdit(false) }} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setTitleEdit(false) }} />
       : <span className="cursor-text" onDoubleClick={() => setTitleEdit(true)} data-title>{i.t}</span>} back={["#/items", t("views:items.title")]} actions={actions} toolbar={quick} toolbarTop max={1080}
-      footer={<div className="w-full shrink-0 border-t bg-background/85 backdrop-blur-xl"><div className="mx-auto w-full px-4 pb-[76px] pt-3 sm:px-8 md:pb-4" style={{ maxWidth: 1080 + 64 }}><div className="lg:pr-[340px]">
+      footer={<div className="w-full shrink-0 border-t bg-background/85 backdrop-blur-xl"><div className="mx-auto w-full px-4 pb-[76px] pt-3 sm:px-8 md:pb-4" style={{ maxWidth: 1040 + 64 }}><div className="lg:pr-[340px]">
         {i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} />}
         <div className="mb-2 type-footnote font-medium text-foreground/80" data-item-feedback-label>{t("views:item.messageBot")}</div>
         <Composer draftKey={draftKey(st.workspace?.id, "item", i.id)} handle={itemComposer} placeholder={t("views:item.composer", { id: i.id })} testId="item" onSend={(text, files) => supp(i.id, text, target, files)}
           left={<Segmented size="sm" value={targets.includes(target) ? target : "auto"} onChange={setTarget} options={targets.map((x) => [x, targetLabel[x]] as const)} />} />
       </div></div></div>}
-      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><StatePill state={state} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span></Meta>}>
-      {st.yolo && !over && <div className="-mt-3 mb-5"><YoloItemSwitch i={i} /></div>}
+      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><StatePill state={state} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span>{st.yolo && !over && <YoloItemSwitch i={i} />}</Meta>}>
       {debugOpen && <ItemDebugDialog item={i.id} onClose={() => setDebugOpen(false)} />}
+      <AlertDialog open={confirmDrop} onOpenChange={setConfirmDrop}>
+        <AlertDialogContent size="sm" data-drop-popover>
+          <AlertDialogHeader><AlertDialogTitle>{t("views:item.dropTitle", { id: i.id })}</AlertDialogTitle><AlertDialogDescription>{t("views:item.dropDesc")}</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { setSt(i.id, "drop"); setConfirmDrop(false) }} data-drop-confirm>{t("views:item.drop")}</AlertDialogAction></AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <AlertDialog open={confirmDel} onOpenChange={setConfirmDel}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("views:item.deleteTitle", { id: i.id })}</AlertDialogTitle><AlertDialogDescription>{t("views:item.deleteDesc", { count: i.ss.length })}</AlertDialogDescription></AlertDialogHeader>
@@ -568,17 +582,22 @@ export function ItemView({ id }: { id: string }) {
       </AlertDialog>
       <OutDialog item={i.id} outs={i.outs} anns={i.anns} view={preview} setView={setPreview} reviewLabel={t(designReview ? "views:item.reviewDesign" : "views:item.messageBot")}
         onReview={() => { setPreview(null); window.setTimeout(() => { if (designReview) document.querySelector<HTMLTextAreaElement>("[data-design-feedback]")?.focus(); else itemComposer.current?.focus() }, 250) }} />
-      {i.arch && <div className="mb-6 flex items-center gap-3 rounded-xl border px-4 py-2.5 type-callout" data-arch-banner><ArchiveIcon className="size-4 text-muted-foreground" /><span className="flex-1">{t("views:item.archived")}</span><Button size="sm" variant="ghost" onClick={() => archive([i.id], false)}>{t("views:item.restore")}</Button></div>}
-      <AgentDetailPanel at={at} node={agent} onClose={() => selectAgent(null)} />
-      {treeOpen && <Dialog open onOpenChange={(o) => !o && setTreeOpen(false)}><DialogContent className="max-h-[90dvh] w-[calc(100%-2rem)] overflow-y-auto rounded-2xl sm:max-w-[1200px]" data-agent-tree-dialog>
-        <DialogTitle className="sr-only">{t("views:agentTree.title")}</DialogTitle><AgentTree at={at} selected={agent?.key ?? null} onSelect={selectAgent} controls={false} /></DialogContent></Dialog>}
+      {i.arch && <div className="mb-8 flex items-center gap-3 rounded-xl bg-muted/60 px-4 py-2.5 type-callout" data-arch-banner><ArchiveIcon className="size-4 text-muted-foreground" /><span className="flex-1">{t("views:item.archived")}</span><Button size="sm" variant="ghost" onClick={() => archive([i.id], false)}>{t("views:item.restore")}</Button></div>}
+      {!treeOpen && <AgentDetailPanel at={at} node={agent} onClose={() => selectAgent(null)} />}
+      {/* the full tree: a picked agent opens beside it inside the dialog (a panel under the overlay could not be used) */}
+      {treeOpen && <Dialog open onOpenChange={(o) => !o && setTreeOpen(false)}><DialogContent className="max-h-[90dvh] w-[calc(100%-2rem)] overflow-y-auto rounded-2xl sm:max-w-[1200px] [&_[data-agent-header]]:pr-10" data-agent-tree-dialog>
+        <DialogTitle className="sr-only">{t("views:agentTree.title")}</DialogTitle>
+        <div className={cn("grid min-w-0 gap-6", agent && "lg:grid-cols-[minmax(0,1fr)_340px]")}>
+          <AgentTree at={at} selected={agent?.key ?? null} onSelect={selectAgent} controls={false} />
+          {agent && <div key={agent.key} className="anim-in min-w-0 self-start rounded-xl bg-muted/60 p-4 lg:sticky lg:top-0 lg:mt-12" data-agent-panel><AgentDetail at={at} node={agent} onClose={() => selectAgent(null)} /></div>}
+        </div></DialogContent></Dialog>}
       <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="flex min-w-0 flex-col gap-8">
           {goal}
           {/* now: the one state, what keeps it there, and what you can do about it — the only boxed block */}
-          <section className={cn(state.move === "none" ? "rounded-xl border px-4 py-2.5" : "rounded-2xl border p-4", NOW_RING[state.tone])} data-now data-state={state.kind}>
-            <div className="flex flex-wrap items-start gap-x-3 gap-y-3">
-              <StateMark state={state} />
+          <section className={cn("anim-in", i.waits.length ? "" : compact ? "rounded-xl bg-card p-4 shadow-[var(--lift)]" : "rounded-xl bg-card p-5 shadow-[var(--lift)]")} data-now data-state={state.kind}>
+            <div className={cn("flex flex-wrap gap-x-3 gap-y-3", centered ? "items-center" : "items-start")}>
+              <StateMark state={state} centered={centered} />
               <div className="min-w-[min(100%,14rem)] flex-1 basis-0">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                   <h2 className={cn("type-headline", state.kind === "working" && "shimmer shimmer-once")} data-state-title>{t(`views:itemState.${state.kind}`)}</h2>
@@ -592,30 +611,30 @@ export function ItemView({ id }: { id: string }) {
               {i.workflow && <div className="max-sm:basis-full max-sm:pl-10"><WorkflowButtons at={at} /></div>}
             </div>
             {at.dialogs}
-            {i.waits.length > 0 && <div className="mt-4 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
+            {i.waits.length > 0 && <div className="mt-5 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-3" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
             {i.dependencyWait && !!i.deps?.length && <div className="mt-4"><DependencyWaitPanel key={`${i.id}:${i.dependencyWait.cycle}`} item={i.id} wait={i.dependencyWait} /></div>}
           </section>
           {/* the conversation: what people said and what came back; runs of process lines fold to one line */}
           <section className="flex flex-col gap-3">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <Segmented size="sm" value={dtab} onChange={(v) => { dtab = v; r() }} options={[["动态", t("views:item.tabActivity")], ["产出", t("views:item.tabOutputs")]] as const} />
             </div>
             {dtab === "动态" && (
-              <div className="flex flex-col" data-worklog>
+              <div key="activity" className="anim-in flex flex-col" data-worklog>
                 {foldProcess(feed, (x) => x.e[0] === "sys" && !queued.byComment.has(x.n)).map((g) => Array.isArray(g)
                   ? <ProcessRun key={"run:" + g[0].n} count={g.length} last={g[g.length - 1].e}>{g.map(entry)}</ProcessRun>
                   : entry(g))}
               </div>
             )}
-            {dtab === "产出" && <OutList outs={i.outs} anns={i.anns} open={(o) => setPreview({ o })} />}
+            {dtab === "产出" && <div key="outputs" className="anim-in"><OutList outs={i.outs} anns={i.anns} open={(o) => setPreview({ o })} /></div>}
           </section>
         </div>
         <aside className="flex min-w-0 flex-col gap-8" data-item-side>
           {tree && <TeamPanel at={at} selected={agent?.key ?? null} onSelect={selectAgent} onExpand={() => setTreeOpen(true)} />}
           {(i.plan || i.rounds.length > 0 || i.workflow) && <section data-progress>
-            <h3 className="mb-1.5 type-footnote font-medium text-muted-foreground">{t("views:itemState.progress")}</h3>
-            <div className="flex flex-wrap items-center gap-x-1 gap-y-1 type-footnote" data-stage={stageOf(i)}>
+            <h3 className="mb-2 type-label text-tertiary">{t("views:itemState.progress")}</h3>
+            <div className="flex flex-wrap items-center gap-x-1 gap-y-1 type-callout" data-stage={stageOf(i)}>
               {STAGES.slice(2).map((g, n, arr) => { const cur = STAGES.indexOf(stageOf(i) as any), me = STAGES.indexOf(g); return (
                 <span key={g} className="inline-flex items-center gap-1"><span className={cn(me === cur ? "font-medium text-foreground" : me < cur ? "text-muted-foreground" : "text-tertiary")}>{t(STAGE_LABEL[g])}</span>{n < arr.length - 1 && <ChevronRightIcon className="size-3 text-tertiary" />}</span>) })}
             </div>
@@ -623,20 +642,20 @@ export function ItemView({ id }: { id: string }) {
             {i.workflow && <History workflow={i.workflow} />}
           </section>}
           <section data-details>
-            <h3 className="mb-1.5 type-footnote font-medium text-muted-foreground">{t("views:itemState.details")}</h3>
+            <h3 className="mb-2 type-label text-tertiary">{t("views:itemState.details")}</h3>
             <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
             <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} />{B && <div className="type-footnote text-muted-foreground">{B.h} · {B.m}</div>}</Prop>
             <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.filter((k) => st.S[k]).length ? i.ss.filter((k) => st.S[k]).map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
-              <a href={"#/sessions/" + k} className="flex items-center gap-2 hover:underline"><span>#{st.S[k].n}</span><Status s={st.S[k].st} sess /><span className="min-w-0 truncate type-footnote text-muted-foreground">{st.S[k].h}</span><span className="ml-auto type-footnote tabular-nums text-muted-foreground">{st.S[k].ctx ? st.S[k].ctx + "%" : ""}</span></a>
+              <a href={"#/sessions/" + k} className="flex items-center gap-2 hover:underline"><span>#{st.S[k].n}</span><Status s={st.S[k].st} sess /><span className="min-w-0 truncate type-footnote text-muted-foreground">{st.S[k].h}</span><span className="ml-auto type-footnote tabular-nums text-tertiary">{st.S[k].ctx ? st.S[k].ctx + "%" : ""}</span></a>
               <NativeIdLine k={k} label="ID" /></div>) : <span className="text-muted-foreground">{t("common:state.empty")}</span>}</div></Prop>
             <ItemStatsRows id={i.id} render={(u, time, href) => <><Prop label={t("views:item.propUsage")}><a href={href} className="block pt-1 hover:underline" data-item-usage>{u}</a></Prop><Prop label={t("views:item.propTime")}><a href={href} className="block pt-1 hover:underline" data-item-time>{time}</a></Prop></>} />
             <Prop label={t("views:item.propProject")}><Select quiet testId="project" value={i.project ?? "none"} onChange={(v) => patchItem(i.id, { project: v === "none" ? null : v })} options={[{ v: "none", l: t("common:state.none") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} />
               {i.projNext && <div className="type-footnote text-muted-foreground">{t("views:item.projNext")}</div>}</Prop>
             </dl>
             <Collapsible className="mt-3">
-              <CollapsibleTrigger className="group/more flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" data-more-props><ChevronRightIcon className="size-3.5 transition-transform group-data-[panel-open]/more:rotate-90" />{t("views:itemState.moreProps")}</CollapsibleTrigger>
-              <CollapsibleContent className="mt-2.5">
-            <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
+              <CollapsibleTrigger className="group/more flex items-center gap-1 type-callout text-muted-foreground hover:text-foreground" data-more-props><ChevronRightIcon className="size-3.5 transition-transform duration-[180ms] group-data-[panel-open]/more:rotate-90" />{t("views:itemState.moreProps")}</CollapsibleTrigger>
+              <CollapsibleContent className={COLLAPSE}>
+            <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 pt-3 [&_[data-select]]:-ml-2">
             <ItemPeopleProp id={i.id} Prop={Prop} />
             <Prop label={t("views:item.propKind")}><Select quiet testId="kind" value={kindOf(i) ?? ""} onChange={(k) => setKind(i.id, k)} options={kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))} />{kindOf(i) && tag(kindOf(i)!) && <div className="type-footnote text-muted-foreground">{tagDesc(tag(kindOf(i)!)!)}</div>}</Prop>
             <Prop label={t("views:item.propTags")}><div className="flex flex-col gap-1.5 pt-1" data-item-tags>
@@ -648,20 +667,20 @@ export function ItemView({ id }: { id: string }) {
             <Prop label={t("views:item.propDeps")}>
               <div className="flex flex-col gap-1 pt-1" data-deps>
                 {(i.deps || []).filter((d) => st.items.some((x) => x.id === d)).map((d) => { const x = it(d); return (
-                  <div key={d} className="group/dep flex items-center gap-2"><StatusDot s={x.st} /><a href={"#/items/" + d} className="min-w-0 flex-1 truncate hover:underline"><span className="font-mono text-[12px] tabular-nums text-muted-foreground">{d}</span> {x.t}</a>
+                  <div key={d} className="group/dep flex items-center gap-2"><StatusDot s={x.st} /><a href={"#/items/" + d} className="flex min-w-0 flex-1 items-baseline gap-1.5 hover:underline"><ItemNo id={d} /><span className="truncate">{x.t}</span></a>
                     <button type="button" aria-label={t("views:item.removeDep", { id: d })} onClick={() => rmDep(i.id, d)} className="text-tertiary opacity-0 transition-opacity hover:text-foreground group-hover/dep:opacity-100 [@media(hover:none)]:opacity-100"><XIcon className="size-3.5" /></button></div>) })}
                 <DropdownMenu>
                   <DropdownMenuTrigger render={<button type="button" className="self-start type-footnote text-muted-foreground hover:text-foreground" data-add-dep />}>{(i.deps || []).length ? t("views:item.addMore") : t("views:item.addNone")}</DropdownMenuTrigger>
                   <DropdownMenuContent align="start" className="max-h-72 min-w-64">
-                    {st.items.filter((x) => x.id !== i.id && !(i.deps || []).includes(x.id) && x.st !== "drop").map((x) => <DropdownMenuItem key={x.id} onClick={() => addDep(i.id, x.id)} data-dep-opt={x.id}><span className="font-mono text-[12px] text-muted-foreground">{x.id}</span><span className="truncate">{x.t}</span></DropdownMenuItem>)}
+                    {st.items.filter((x) => x.id !== i.id && !(i.deps || []).includes(x.id) && x.st !== "drop").map((x) => <DropdownMenuItem key={x.id} onClick={() => addDep(i.id, x.id)} data-dep-opt={x.id}><ItemNo id={x.id} /><span className="truncate">{x.t}</span></DropdownMenuItem>)}
                   </DropdownMenuContent>
                 </DropdownMenu>
                 {i.st === "block" && <span className="type-footnote text-muted-foreground">{t("views:item.depsLeft", { count: depsOpen(i).length })}</span>}
               </div>
             </Prop>
-            {dependents.length > 0 && <Prop label={t("views:item.propDependents")}><div className="flex flex-col gap-1 pt-1">{dependents.map((x) => <a key={x.id} href={"#/items/" + x.id} className="flex items-center gap-2 hover:underline"><StatusDot s={x.st} /><span className="min-w-0 truncate"><span className="font-mono text-[12px] tabular-nums text-muted-foreground">{x.id}</span> {x.t}</span></a>)}</div></Prop>}
-            {i.cwd && <Prop label={t("views:item.propCwd")}><span className="block break-all pt-1 font-mono text-[12px] text-muted-foreground" data-cwd>{i.cwd.replace(/^\/Users\/[^/]+/, "~")}</span></Prop>}
-            {i.branch && <Prop label={t("views:item.propBranch")}><span className="block break-all pt-1 font-mono text-[12px]" data-branch>{i.branch}</span></Prop>}
+            {dependents.length > 0 && <Prop label={t("views:item.propDependents")}><div className="flex flex-col gap-1 pt-1">{dependents.map((x) => <a key={x.id} href={"#/items/" + x.id} className="flex items-center gap-2 hover:underline"><StatusDot s={x.st} /><span className="flex min-w-0 items-baseline gap-1.5"><ItemNo id={x.id} /><span className="truncate">{x.t}</span></span></a>)}</div></Prop>}
+            {i.cwd && <Prop label={t("views:item.propCwd")}><span className="block break-all pt-1 type-code text-muted-foreground" data-cwd>{i.cwd.replace(/^\/Users\/[^/]+/, "~")}</span></Prop>}
+            {i.branch && <Prop label={t("views:item.propBranch")}><span className="block break-all pt-1 type-code" data-branch>{i.branch}</span></Prop>}
             <Prop label={t("views:item.propSource")}><span className="block pt-1">{i.parent?.item ? <a href={"#/items/" + i.parent.item} className="hover:underline">{t("views:item.forkedFrom", { id: i.parent.item })}</a> : i.src[1] === "chat" ? <a href="#/" className="hover:underline">{t("views:item.fromChat")}</a> : i.src[0]}</span>
               {itemThread(i.id) && <label className="mt-1.5 flex items-center gap-2 pl-0.5 type-footnote text-muted-foreground" data-thread-follow><Switch size="sm" checked={!itemThread(i.id)!.follow} onCheckedChange={(v) => void threadFollow(i.id, !v)} />{t("views:item.noFollow")}</label>}</Prop>
 

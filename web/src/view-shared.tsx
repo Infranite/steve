@@ -4,9 +4,9 @@ import { Field, FieldContent, FieldDescription, FieldLabel, FieldTitle } from "@
 import { Progress } from "@/components/ui/progress"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { SelectContent, SelectItem, SelectTrigger, SelectValue, Select as UISelect } from "@/components/ui/select"
-import { botName, closedSt, closeRel, depsOpen, kindOf, st, WACT, waitLine, type Item } from "@/store"
+import { botName, closedSt, closeRel, depsOpen, isKind, kindOf, st, tag, tagLabel, WACT, waitLine, type Item } from "@/store"
 import { itemDisplayStatus, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
-import { BotAvatar, go, ItemNo, KindTag, Meta, RelNote, StatusDot, Tags } from "@/ui"
+import { BotAvatar, go, ItemNo, Meta, RelNote, StatusDot } from "@/ui"
 import { cn } from "cn"
 import { FolderIcon, GitBranchIcon, StarIcon } from "lucide-react"
 import { type ReactNode } from "react"
@@ -37,6 +37,9 @@ export function Select({ value, options, onChange, align = "start", testId, quie
 
 export const selected = new Set<string>();
 
+/** the count after a section heading's label, one step quieter than the label */
+export const Count = ({ n }: { n: number }) => (n ? <span className="ml-2 font-normal tabular-nums text-tertiary/80">{n}</span> : null)
+
 /** plan progress as a count with a short bar; on a finished item only when steps were left open, which is worth a look */
 export function PlanBar({ i, warn }: { i: Item; warn?: boolean }) {
   const t = useT()
@@ -59,22 +62,24 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
     i.parent && <span key="p" className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap"><GitBranchIcon className="size-3" />{t("shell:item.forked")}</span>,
     !!i.deps?.length && <span key="d" className="shrink-0 whitespace-nowrap">{t("shell:item.deps", { done: i.deps.length - depsOpen(i).length, total: i.deps.length })}</span>,
   ].filter(Boolean)
+  /* a list row carries one tag, its kind, as quiet text (colour stays for status); the rest are in its hover title and
+   * on the item page */
+  const kind = kindOf(i) ? tag(kindOf(i)!) : undefined
+  const others = (i.tags ?? []).map(tag).filter((x) => x && !isKind(x)).map((x) => tagLabel(x!))
   const side = (
     <span className="ml-auto flex shrink-0 items-center gap-2.5 pl-2 type-footnote text-muted-foreground">
-      <Tags ids={i.tags} max={2} className="hidden flex-nowrap sm:inline-flex" />
-      {/* a phone row has room for the category only */}
-      {kindOf(i) && <KindTag id={kindOf(i)!} className="sm:hidden" />}
-      {i.pri === "高" && !closed && <span className="rounded bg-attention/12 px-1.5 text-attention">{t("shell:item.high")}</span>}
+      {kind && <span className="max-w-24 truncate text-tertiary" title={[kind.name, ...others].join(" · ")} data-kind={kind.name}>{kind.name}</span>}
+      {i.pri === "高" && !closed && <span className="inline-flex h-5 items-center rounded-md bg-attention/12 px-1.5 font-medium text-attention">{t("shell:item.high")}</span>}
       {i.due && !closed && <span className={cn("whitespace-nowrap", /今天/.test(i.due) && "text-foreground/80")}>{t("shell:item.due", { due: dueLabel(i.due) })}</span>}
       {proj && i.project && <span className="hidden max-w-28 md:inline-flex"><ProjectChip id={i.project} plain /></span>}
       {(!closed || planOpen) && <PlanBar i={i} warn={closed} />}
       {bot && i.b && <span title={botName(i.b)} className="hidden sm:inline-flex"><BotAvatar k={i.b} size={18} /></span>}
-      <span className="min-w-11 whitespace-nowrap text-right tabular-nums">{i.up}</span>
+      <span className="min-w-11 whitespace-nowrap text-right tabular-nums text-tertiary">{i.up}</span>
     </span>
   )
   return (
     <div role="button" tabIndex={0} onClick={() => (pick ? pick() : go("#/items/" + i.id))} onKeyDown={(e) => e.key === "Enter" && go("#/items/" + i.id)} data-item-row={i.id} data-item-status={itemDisplayStatus(i)} data-dense={closed || undefined}
-      className={cn("group flex cursor-pointer gap-2.5 rounded-lg px-2 transition-colors duration-150 hover:bg-accent", closed ? "items-center py-1.5" : "items-start py-2.5", pick && on && "bg-blue/5")}>
+      className={cn("group flex cursor-pointer gap-2.5 rounded-lg px-2 transition-colors duration-150 hover:bg-accent", closed ? "items-center py-1.5" : "items-start py-2.5", pick && on && "bg-blue/10 hover:bg-blue/10")}>
       {pick ? <Checkbox checked={on} className={cn(!closed && "mt-[3px]")} aria-label={t("shell:item.select", { id: i.id })} data-pick={i.id} /> : <StatusDot s={itemDisplayStatus(i)} className={cn(!closed && "mt-[7px]")} />}
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">

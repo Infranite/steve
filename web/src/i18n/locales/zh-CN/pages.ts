@@ -458,7 +458,7 @@ export default {
     restore: "恢复",
     archive: "归档",
     askPh: "例如：默认交给开发 Bot；说明里加上“前端用 shadcn”",
-    active: "进行中的事项 · {{count}}",
+    active: "进行中的事项",
     noActive: "没有进行中的事项",
     recentDone: "最近结束",
     settings: "设置",

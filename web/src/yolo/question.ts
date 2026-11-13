@@ -9,3 +9,10 @@ export function questionLead(question: string, cmds: string[]): string {
   const lead = question.slice(0, at).replace(/[\s:\uFF1A]+$/, "") /* ASCII or full-width colon */
   return lead || question
 }
+
+/** A tool-call question with no recorded command still carries it after its lead ("<lead>: <command>", either colon). Split there,
+ *  so the row shows the lead on its line and the command in the code block, like the rows that recorded theirs. */
+export function splitAsked(question: string): [string, string] | null {
+  const m = question.match(/^([^:\uFF1A\n]+)[:\uFF1A]\s*(\S[\s\S]*)$/)
+  return m ? [m[1].trim(), m[2]] : null
+}

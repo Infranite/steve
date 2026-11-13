@@ -23,7 +23,7 @@ export const choiceText = (c: string | null | undefined, subject?: string) =>
 
 /** the small grey “⚡ YOLO” in front of what YOLO did */
 export function YoloMark({ className }: { className?: string }) {
-  return <span className={cn("inline-flex shrink-0 items-center gap-0.5 text-[11.5px] font-medium leading-4 text-muted-foreground", className)} data-yolo-mark><ZapIcon className="size-3" strokeWidth={2} aria-hidden />YOLO</span>
+  return <span className={cn("inline-flex shrink-0 items-center gap-0.5 type-label text-muted-foreground", className)} data-yolo-mark><ZapIcon className="size-3" strokeWidth={2} aria-hidden />YOLO</span>
 }
 
 function useTick(on: boolean) {
@@ -109,16 +109,16 @@ function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project
   return (
     <>
       <DropdownMenu>
-        <DropdownMenuTrigger disabled={!!st.yolo?.forced_off} render={<button type="button" className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12.5px] text-foreground/85 transition-colors hover:bg-muted disabled:opacity-50" aria-label={label} data-yolo-scope={type} data-yolo-scope-mode={cur} />}>
+        <DropdownMenuTrigger disabled={!!st.yolo?.forced_off} render={<button type="button" className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2 type-callout text-foreground/80 hover:bg-accent hover:text-foreground disabled:opacity-50" aria-label={label} data-yolo-scope={type} data-yolo-scope-mode={cur} />}>
           {children}<ChevronDownIcon className="size-3.5 text-muted-foreground" />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-[min(20rem,calc(100vw-2rem))] min-w-0 [overflow-wrap:anywhere]">
-          <DropdownMenuGroup><DropdownMenuLabel className="type-footnote text-muted-foreground">{label}</DropdownMenuLabel></DropdownMenuGroup>
+          <DropdownMenuGroup><DropdownMenuLabel className="type-label text-tertiary">{label}</DropdownMenuLabel></DropdownMenuGroup>
           <DropdownMenuSeparator />
           <DropdownMenuRadioGroup value={cur} onValueChange={(v) => pick(v as YoloMode)}>
             {opts.map(([m, title, sub]) => (
               <DropdownMenuRadioItem key={m} value={m} data-yolo-scope-opt={m} className="items-start">
-                <span className="flex min-w-0 flex-col"><span className="text-[13.5px]">{title}</span><span className="type-footnote text-muted-foreground">{sub}</span></span>
+                <span className="flex min-w-0 flex-col gap-0.5"><span className="type-callout font-medium">{title}</span><span className="type-footnote text-muted-foreground">{sub}</span></span>
               </DropdownMenuRadioItem>))}
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
@@ -145,7 +145,7 @@ export function YoloItemSwitch({ i }: { i: Item }) {
   const eff = yoloFor(i)
   const now = eff.state === "forced" ? t("yolo:scope.unavailable") : eff.state === "paused" ? t("yolo:why.paused") : levelText(eff.level)
   return (
-    <div className="flex flex-wrap items-center gap-x-1 type-footnote text-muted-foreground" data-yolo-item={eff.level}>
+    <div className="inline-flex min-w-0 flex-wrap items-center gap-x-1 type-footnote text-muted-foreground" data-yolo-item={eff.level}>
       <span className="pl-0.5">{t("yolo:scope.away")}</span>
       <ScopeMenu type="item" id={i.id} cur={cur} inherit={t("yolo:scope.inheritNow", { level: levelWord() })} label={t("yolo:scope.itemMenu")}>
         <Dot s={eff.state} /><span className="font-medium">{now}</span>

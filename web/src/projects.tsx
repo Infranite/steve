@@ -15,7 +15,7 @@ import { LaneSection } from "@/lane"
 import { RecentStats } from "@/stats/drill"
 import { botName, closedSt, newProject, newWorkspace, patchProject, st, toast } from "@/store"
 import { BotName, closeSheet, Empty, go, Group, Meta, openSheet, Page, Row, SectionLabel } from "@/ui"
-import { ItemRowExport as ItemRow, Select } from "@/view-shared"
+import { Count, ItemRowExport as ItemRow, Select } from "@/view-shared"
 import { YoloProjectSelect } from "@/yolo/badges"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronRightIcon, CornerLeftUpIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
@@ -52,12 +52,12 @@ export function ProjectsView() {
     <Page title={t("pages:projects.title")} sub={t("pages:projects.sub", { space: st.workspace?.name })} max={720}
       actions={<Button size="sm" onClick={() => openSheet("newProject")} data-new-project><PlusIcon />{t("pages:projects.newProject")}</Button>}>
       {ps.length ? <Group>{ps.map((p) => { const I = projectIcon(p.kind); return (
-        <Row key={p.id} icon={<span className="flex size-9 items-center justify-center rounded-lg bg-muted text-muted-foreground"><I className="size-[18px]" strokeWidth={1.5} /></span>} onClick={() => go("#/projects/" + p.id)} data-project-row={p.name}
+        <Row key={p.id} icon={<span className="flex size-9 items-center justify-center rounded-lg bg-muted text-muted-foreground"><I className="size-4.5" strokeWidth={1.5} /></span>} onClick={() => go("#/projects/" + p.id)} data-project-row={p.name}
           title={<span className="type-body font-medium">{p.name}</span>}
           sub={<Meta><span className="font-mono">{home(p.path)}</span><span>{p.kind === "git" ? (p.worktree ? t("pages:projects.gitWorktree") : "git") : t("pages:projects.plainDir")}</span>{p.default_bot && <span>{t("pages:projects.defaultBotIs", { bot: botName(p.default_bot) })}</span>}<span>{t("pages:projects.running", { count: running(p.id) })}</span>{p.release && <span>{t("pages:projects.releasable")}</span>}</Meta>}>
           <ChevronRightIcon className="size-4 text-tertiary" /></Row>) })}</Group>
         : <Empty title={t("pages:projects.empty")} sub={t("pages:projects.emptySub")} />}
-      <div className="mt-3 px-1 type-footnote text-muted-foreground">{t("pages:projects.hint")}</div>
+      <div className="mt-4 type-footnote text-tertiary">{t("pages:projects.hint")}</div>
     </Page>
   )
 }
@@ -75,15 +75,15 @@ export function ProjectView({ id }: { id: string }) {
       actions={<Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { patchProject(p.id, { archived: !p.archived }, p.archived ? t("pages:projects.restored") : t("pages:projects.archived")); if (!p.archived) go("#/projects") }}><ArchiveIcon />{p.archived ? t("pages:projects.restore") : t("pages:projects.archive")}</Button>}>
       <div className="flex flex-col gap-8">
         <AskSteve key={p.id} ctx={{ kind: "project", id: p.id }} placeholder={t("pages:projects.askPh")} />
-        <section><SectionLabel>{t("pages:projects.active", { count: mine.length })}</SectionLabel>{mine.length ? <Group>{mine.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group> : <Empty title={t("pages:projects.noActive")} />}</section>
+        <section><SectionLabel className="text-tertiary">{t("pages:projects.active")}<Count n={mine.length} /></SectionLabel>{mine.length ? <Group>{mine.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group> : <p className="py-2 type-callout text-tertiary" data-proj-none>{t("pages:projects.noActive")}</p>}</section>
         <GitHubLine project={p.id} />
         {p.kind === "git" && <LaneSection project={p.id} />}
-        {done.length > 0 && <section><SectionLabel>{t("pages:projects.recentDone")}</SectionLabel><Group>{done.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group></section>}
-        <section className="flex flex-col gap-4"><SectionLabel className="mb-0">{t("pages:projects.settings")}</SectionLabel>
+        {done.length > 0 && <section><SectionLabel className="text-tertiary">{t("pages:projects.recentDone")}<Count n={done.length} /></SectionLabel><Group>{done.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group></section>}
+        <section className="flex flex-col gap-4"><SectionLabel className="mb-0 text-tertiary">{t("pages:projects.settings")}</SectionLabel>
           <FieldGroup className="gap-4">
-            <Field className="gap-1.5"><FieldLabel className="type-label text-muted-foreground">{t("pages:projects.name")}</FieldLabel><Input className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} /></Field>
-            <Field className="gap-1.5"><FieldLabel className="type-label text-muted-foreground">{t("pages:projects.desc")}</FieldLabel><Textarea className="min-h-20 rounded-lg" value={d} onChange={(e) => setD(e.target.value)} />
-              <FieldDescription className="type-footnote">{t("pages:projects.descHint")}</FieldDescription></Field>
+            <Field className="gap-1.5"><FieldLabel className="type-label! text-tertiary">{t("pages:projects.name")}</FieldLabel><Input className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} /></Field>
+            <Field className="gap-1.5"><FieldLabel className="type-label! text-tertiary">{t("pages:projects.desc")}</FieldLabel><Textarea className="min-h-20 rounded-lg" value={d} onChange={(e) => setD(e.target.value)} />
+              <FieldDescription className="type-footnote!">{t("pages:projects.descHint")}</FieldDescription></Field>
             {dirty && <div className="flex gap-2"><Button size="sm" onClick={() => patchProject(p.id, { name: n.trim() || p.name, description: d.trim() })}>{t("common:action.save")}</Button><Button size="sm" variant="ghost" onClick={() => { setN(p.name); setD(p.description) }}>{t("common:action.cancel")}</Button></div>}
           </FieldGroup>
           <Group>
@@ -130,16 +130,16 @@ function DirBrowser({ path, node, onPick, onSeen }: { path: string; node: string
     <div className="overflow-hidden rounded-lg border border-border" data-dir-browser>
       <div className="flex items-center gap-1 border-b border-border bg-muted/40 py-1 pr-2.5 pl-1">
         <Button type="button" size="icon-xs" variant="ghost" className="shrink-0 text-muted-foreground" disabled={at.parent == null} onClick={() => at.parent != null && go(at.parent)} title={t("pages:projects.browseUp")} data-dir-up><CornerLeftUpIcon /></Button>
-        <div className="flex min-w-0 flex-1 items-center overflow-x-auto whitespace-nowrap font-mono text-[12px] text-muted-foreground">
+        <div className="flex min-w-0 flex-1 items-center overflow-x-auto whitespace-nowrap type-code text-muted-foreground">
           {cs.map((c, i) => <Fragment key={c.path}>{i > (abs ? 1 : 0) && <span className="px-0.5 text-tertiary">/</span>}
-            <button type="button" onClick={() => go(c.path)} className={cn("rounded px-1 py-0.5 hover:bg-accent hover:text-foreground", i === cs.length - 1 && !typed && "text-foreground")}>{c.name}</button></Fragment>)}
+            <button type="button" onClick={() => go(c.path)} className={cn("rounded-md px-1 py-0.5 hover:bg-accent hover:text-foreground", i === cs.length - 1 && !typed && "text-foreground")}>{c.name}</button></Fragment>)}
         </div>
-        {at.git && !typed && <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 type-footnote text-muted-foreground">git</span>}
+        {at.git && !typed && <span className="shrink-0 rounded-md bg-background px-1.5 py-0.5 type-label text-muted-foreground">git</span>}
       </div>
-      <div className="h-44 overflow-y-auto py-1">
+      <div className="h-44 overflow-y-auto p-1">
         {note ? <div className="px-3 py-4 text-center type-footnote text-muted-foreground">{note}</div>
           : shown.map((x) => { const I = x.git ? FolderGit2Icon : FolderIcon; return (
-            <button key={x.path} type="button" onClick={() => go(x.path)} className="flex w-full items-center gap-2 px-2.5 py-1 text-left text-[13px] hover:bg-accent" data-dir={x.name}>
+            <button key={x.path} type="button" onClick={() => go(x.path)} className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left type-callout hover:bg-accent" data-dir={x.name}>
               <I className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /><span className="min-w-0 flex-1 truncate">{x.name}</span>
               {x.git && <span className="type-footnote text-muted-foreground">git</span>}<ChevronRightIcon className="size-3.5 shrink-0 text-tertiary" /></button>) })}
         {at.more && !note && <div className="px-3 py-1.5 type-footnote text-muted-foreground">{t("pages:projects.browseMore", { count: at.dirs.length })}</div>}
@@ -173,7 +173,7 @@ export function NewProjectDialog() {
             <Select align="end" testId="project-node" value="hub" onChange={() => {}} options={nodeOptions} /></div>
             {nodeOptions.length > 1 && <FieldDescription className="type-footnote">{t("pages:projects.nodeHint")}</FieldDescription>}</Field>
           <Field className="gap-1.5"><FieldLabel htmlFor="pj-path">{t("pages:projects.dir")}</FieldLabel>
-            <Input id="pj-path" autoFocus className="rounded-lg font-mono text-[13px]" value={path} onChange={(e) => { setPath(e.target.value); setGit(null) }} placeholder="~/code/my-project" data-project-path />
+            <Input id="pj-path" autoFocus className="rounded-lg type-code" value={path} onChange={(e) => { setPath(e.target.value); setGit(null) }} placeholder="~/code/my-project" data-project-path />
             <DirBrowser path={path} node="hub" onPick={pick} onSeen={setGit} />
             <FieldDescription className="type-footnote">{t("pages:projects.browseHere")}</FieldDescription>
           </Field>

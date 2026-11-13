@@ -118,7 +118,7 @@ export default {
     all: "All",
     emptyTitle: "All caught up",
     emptySub: "New decisions show up here and are pushed to your phone.",
-    snoozed: "Snoozed · {{count}}",
+    snoozed: "Snoozed",
     snoozedAt: "{{type}} · reminder: {{when}}",
     handleNow: "Handle now",
     yoloChose: "chose “{{choice}}”",

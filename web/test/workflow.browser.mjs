@@ -27,6 +27,8 @@ try {
     assert.match(await page.locator('[data-agent-node="unit:integrate"]').innerText(), /等待：独立复核依赖门控与恢复/)
     assert.match(await page.locator("[data-workflow-decisions]").innerText(), /1 张卡等你/)
     await page.locator("[data-workflow-blockers] summary").click()
+    // the details open with a height animation (visual system v2); read them once it has finished
+    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity))
     assert.match(await page.locator("[data-workflow-blockers]").innerText(), /主事项暂不能完成.*独立复核依赖门控与恢复尚未通过/s)
     await page.locator("[data-agent-failed]").click()
     assert.match(await page.locator("[data-agent-failed-list]").innerText(), /独立复核依赖门控与恢复.*刷新恢复后需要补充验证/s)
@@ -66,6 +68,7 @@ try {
     assert.match(await page.locator('[data-agent-node="ST-old"]').innerText(), /第 1 次尝试/)
     assert.match(await page.locator('[data-agent-node="ST-old"] [data-agent-status]').filter({ visible: true }).innerText(), /已停止/)
     await page.locator("[data-workflow-history] summary").click()
+    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity))
     assert.match(await page.locator("[data-workflow-history]").innerText(), /最近 1 条旧尝试，共 2 条/)
     await select("ST-old")
     assert.match(await page.locator("[data-agent-panel]").innerText(), /旧尝试，已归档.*已被返工替代/s)
