@@ -2318,8 +2318,8 @@ async fn a_parked_session_queues_and_goes_once_the_node_is_back() {
 }
 
 /// 断线或重启后不重跑: a Hub that restarts and gets the same permission request again makes no
-/// second card and hands nothing to YOLO again (the new process has nothing armed for it either),
-/// and nothing answers the Node on its own.
+/// second card and hands it to YOLO no more than once (for the card the Node still waits for, once
+/// reconciled: its tool input lived in memory only), and nothing answers the Node on its own.
 #[tokio::test]
 async fn a_replayed_permission_after_a_restart_is_neither_a_new_card_nor_answered() {
     let h = hub();
@@ -2338,14 +2338,17 @@ async fn a_replayed_permission_after_a_restart_is_neither_a_new_card_nor_answere
     let ends = Arc::new(Ends::default());
     let second = NodeRuntime::new(h.store.clone(), h.node.clone(), ends.clone());
     second.start();
+    until("reconciled", || second.is_reconciled()).await;
     Sink(Arc::downgrade(&second))
         .commit(EventBatch { events: replay })
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        ends.3.lock().unwrap().is_empty(),
-        "no card handed to YOLO again"
+    let card: String = h.q("SELECT id FROM decisions WHERE subject_type='tool_call'");
+    assert_eq!(
+        ends.3.lock().unwrap().as_slice(),
+        [card],
+        "offered once for the card still waited for; the replay adds nothing"
     );
     assert_eq!(
         h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call'"),
@@ -3016,6 +3019,87 @@ async fn no_configure_goes_out_under_hold() {
         .collect();
     assert_eq!(order, ["configure_session", "start_turn"]);
     assert_eq!(h.last_mode(), "full_access");
+}
+
+/// What the item page shows: a change made while a turn runs reads as waiting for the turn's end,
+/// with the harness still in the mode it started with, never as in force; once the Node confirmed
+/// the configure, it is applied.
+#[tokio::test]
+async fn a_change_reads_as_applied_only_once_the_node_confirmed_it() {
+    let h = hub();
+    h.bind();
+    let a = h.running("one").await;
+    until("active", || h.phase() == "active").await;
+    let st = || h.rt.mode_state(S).unwrap().expect("a session of this Node");
+    assert_eq!(st().applied.as_deref(), Some("ask"));
+    assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Pending);
+    let s = st();
+    assert_eq!(s.applied.as_deref(), Some("ask"), "not in force yet");
+    assert_eq!(s.desired.as_deref(), Some("full_access"));
+    assert!(s.busy && !s.sending && s.refused.is_none());
+    h.node.finish(&a, build::done()).await.unwrap();
+    until("applied", || h.cfg_states() == ["finished"]).await;
+    h.ready().await;
+    let s = st();
+    assert_eq!(s.applied.as_deref(), Some("full_access"));
+    assert_eq!(s.desired, None);
+    assert!(!s.busy);
+    assert!(h.rt.mode_state("nope").unwrap().is_none());
+}
+
+/// A configure the Node (its owner's ceiling, the harness) refused reads as refused with what it
+/// said, the mode in force unchanged; one that later goes through clears it.
+#[tokio::test]
+async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
+    let h = hub();
+    h.bind();
+    h.ready().await;
+    h.node.script_once(
+        "configure_session",
+        Scripted::Refuse(ApiError::new(
+            ErrorCode::Denied,
+            "this node's owner allows at most permission mode auto here (asked: full_access)",
+        )),
+    );
+    assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
+    until("refused", || h.cfg_states() == ["rejected"]).await;
+    h.ready().await;
+    let s = h.rt.mode_state(S).unwrap().unwrap();
+    assert_eq!(s.applied.as_deref(), Some("ask"));
+    assert_eq!(s.desired, None, "a widening falls back");
+    assert!(
+        s.refused
+            .as_deref()
+            .unwrap()
+            .contains("at most permission mode auto")
+    );
+    assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
+    until("applied", || h.cfg_states() == ["rejected", "finished"]).await;
+    h.ready().await;
+    let s = h.rt.mode_state(S).unwrap().unwrap();
+    assert_eq!(s.applied.as_deref(), Some("full_access"));
+    assert_eq!(s.refused, None);
+}
+
+/// 重连: a card the Node still waits for when the Hub starts again is handed to YOLO again once
+/// reconciled (its tool input lived in memory only): neither a second card nor an answer of its own.
+#[tokio::test]
+async fn a_card_the_node_still_waits_for_is_offered_to_yolo_again_after_a_restart() {
+    let mut h = hub();
+    h.bind();
+    let exec = h.running("hello").await;
+    h.node
+        .ask_permission(perm("p1", exec.clone(), "cargo build"))
+        .await
+        .unwrap();
+    until("card", || h.ends.3.lock().unwrap().len() == 1).await;
+    let d = h.cards()[0].clone();
+    h.restart(Duration::ZERO).await;
+    until("offered again", || h.ends.3.lock().unwrap().len() == 2).await;
+    assert_eq!(h.ends.3.lock().unwrap().as_slice(), [d.clone(), d.clone()]);
+    assert_eq!(h.cards(), std::slice::from_ref(&d), "no second card");
+    assert_eq!(h.status(&d), "open");
+    assert!(!h.methods().contains(&"resolve_permission"));
 }
 
 #[tokio::test]

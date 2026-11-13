@@ -5,9 +5,10 @@
 //! real failure it has to act on. Never judged from the session's last words or its last
 //! system line (an old release notice says nothing about why it is idle now).
 
-use steve_store::{WorkUnit, Workflow};
+use steve_store::{SessionStop, WorkUnit, Workflow};
 
 use crate::cycle::CLOSED;
+use crate::lifecycle::{stop_card, supersede_where};
 use crate::repo::Item;
 use crate::util::js_head;
 use crate::{Result, Tx};
@@ -81,30 +82,42 @@ impl Work {
     }
 }
 
-/// How a session's last turn ended, kept from its turn end for the stall watch (in memory: after a
-/// restart the Hub's own recovery says what became of the turns it cut).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LastStop {
-    pub stop_reason: String,
-    pub error: Option<String>,
+/// Why an idle session is idle, from how its last turn ended (kept in `session_stops`, so the same
+/// after a restart); `true` when you stopped it yourself: it is yours to go on with, Steve does not
+/// continue it. Never from the session's last system line.
+pub(crate) fn stopped(stop: Option<&SessionStop>) -> (String, bool) {
+    match stop {
+        Some(s) if yours(s) => ("你中断了这一回合".into(), true),
+        Some(s) if s.stop_asked.is_some() => {
+            ("你要求停止这一回合，还没有确认它已停下".into(), true)
+        }
+        Some(SessionStop {
+            error: Some(e),
+            stop_reason: Some(_),
+            ..
+        }) if !e.trim().is_empty() => (format!("上一回合出错：{}", js_head(e, 160)), false),
+        Some(SessionStop {
+            stop_reason: Some(_),
+            ..
+        }) => ("上一回合结束后没有交付、提问，也没有后续工作".into(), false),
+        _ => (
+            "会话空闲：没有回合在运行、没有排队输入，也没有交付或提问".into(),
+            false,
+        ),
+    }
 }
 
-impl LastStop {
-    /// Why an idle session is idle, from how its last turn ended; `true` when you stopped it
-    /// yourself (it is yours to go on with, Steve does not continue it).
-    pub(crate) fn cause(stop: Option<&LastStop>) -> (String, bool) {
-        match stop {
-            Some(s) if s.stop_reason == "cancelled" => ("你中断了这一回合".into(), true),
-            Some(LastStop { error: Some(e), .. }) if !e.trim().is_empty() => {
-                (format!("上一回合出错：{}", js_head(e, 160)), false)
-            }
-            Some(_) => ("上一回合结束后没有交付、提问，也没有后续工作".into(), false),
-            None => (
-                "会话空闲：没有回合在运行、没有排队输入，也没有交付或提问".into(),
-                false,
-            ),
-        }
-    }
+/// The last turn was stopped by you: your Stop reached it, or it ended cancelled (the Hub's own
+/// cancels, a pause or a steer, leave nothing idle to judge).
+pub(crate) fn yours(s: &SessionStop) -> bool {
+    s.yours || s.stop_reason.as_deref() == Some("cancelled")
+}
+
+/// Your Stop holds the session: its last turn was stopped by you ([`yours`]), or you asked for a
+/// Stop whose turn end has not come (the backend could not confirm it, or that turn's end is still
+/// on its way). Either way going on is yours, never Steve's or YOLO's.
+pub(crate) fn held(s: &SessionStop) -> bool {
+    s.stop_reason.is_some() && yours(s) || s.stop_asked.is_some()
 }
 
 fn names(xs: &[String]) -> String {
@@ -125,10 +138,16 @@ impl Tx<'_> {
     /// it: they delay turns, they do not explain an item. Its words are written into the item's `now`,
     /// so they are zh-CN whoever asks ([`crate::now_line`] shows them in the reader's language).
     pub(crate) fn work(&self, item: &Item) -> Result<Work> {
-        steve_i18n::stored(|| self.work_in(item))
+        steve_i18n::stored(|| self.work_of(item, true))
     }
 
-    fn work_in(&self, item: &Item) -> Result<Work> {
+    /// [`Tx::work`] for a continue about to be spent: the item's own cards saying it stopped are what
+    /// the continue answers (a turn starting expires them), not something it waits for.
+    pub(crate) fn work_to_continue(&self, item: &Item) -> Result<Work> {
+        steve_i18n::stored(|| self.work_of(item, false))
+    }
+
+    fn work_of(&self, item: &Item, stops: bool) -> Result<Work> {
         if item.status == "pause" {
             return Ok(Work::Paused(steve_i18n::t!("core.now.item_paused")));
         }
@@ -157,27 +176,90 @@ impl Tx<'_> {
                 }));
             }
         }
-        if let Some(d) = self
+        let open: Vec<_> = self
             .db()
             .decisions_of_item(&item.id)?
             .into_iter()
-            .find(|d| d.status == "open")
-        {
-            return Ok(Work::User(steve_i18n::t!(
+            .filter(|d| d.status == "open" && (stops || !stop_card(d)))
+            .collect();
+        let user = |d: &steve_store::Decision| {
+            Work::User(steve_i18n::t!(
                 "core.now.waiting_user",
                 question = js_head(&d.question, 80)
-            )));
+            ))
+        };
+        if let Some(d) = open.iter().find(|d| !stop_card(d)) {
+            return Ok(user(d));
         }
-        if let Some(t) = self.quota_text(&item.id) {
+        if open.is_empty()
+            && let Some(t) = self.quota_text(&item.id)
+        {
             return Ok(Work::Until(t));
         }
+        /* a card saying it stopped is outdated by units at work (one left from before a restart,
+         * or from before these rules): the graph's state stands, and [`Tx::work_tidy`] expires it */
         if let Some(g) = self.db().store().workflows().get(&item.id)?
             && !g.single_session()
             && let Some(w) = self.graph_work(&g)?
+            && (open.is_empty() || w.waiting())
         {
             return Ok(w);
         }
+        if let Some(d) = open.first() {
+            return Ok(user(d));
+        }
         Ok(Work::Idle)
+    }
+
+    /// Cards the work has moved past, on every pass of the stall watch (so also right after a
+    /// restart, when no unit start is going to tell): a parent's stop cards while its units run,
+    /// queue, wait for you or are paused; the leftover questions and stop cards of a unit that failed
+    /// or was cancelled. Cards about an effect nobody knows, a release, an approval or an acceptance
+    /// stay.
+    pub(crate) fn work_tidy(&mut self) -> Result<usize> {
+        let mut n = 0;
+        for g in self.db().store().workflows().all_open()? {
+            if g.single_session() {
+                continue;
+            }
+            if self
+                .db()
+                .item(&g.item_id)?
+                .is_some_and(|i| !i.archived && i.phase == crate::cycle::ACTIVE)
+                && let Some(w) = self.graph_work(&g)?
+                && w.waiting()
+                && let Some(text) = w.text()
+            {
+                let gone = supersede_where(self.db(), &g.item_id, stop_card, text)?;
+                if gone > 0 {
+                    self.db().item_patch(&g.item_id, crate::patch![now: text])?;
+                }
+                n += gone;
+            }
+            for u in &g.units {
+                if let Some(child) = u.item_id.as_deref()
+                    && matches!(u.status.as_str(), "failed" | "cancelled")
+                {
+                    n += self.unit_cards_expire(child, u)?;
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// A unit that failed or was cancelled waits on nobody: its own questions and stop cards go;
+    /// the coordinator retries or replans it.
+    pub(crate) fn unit_cards_expire(&mut self, child: &str, u: &WorkUnit) -> Result<usize> {
+        let why = format!(
+            "工作单元 {} {}，由主事项负责人重试或重规划",
+            u.spec.title,
+            if u.status == "cancelled" {
+                "已取消"
+            } else {
+                "未通过"
+            }
+        );
+        supersede_where(self.db(), child, |d| stop_card(d) || d.kind == "ask", &why)
     }
 
     /// The graph's part: `None` when every unit is through and only the coordinator is left to act.
@@ -204,11 +286,16 @@ impl Tx<'_> {
         }
         let (mut running, mut user, mut queued, mut failed) = (vec![], vec![], vec![], vec![]);
         let mut to_start = false;
-        /* pending units downstream of a failed or cancelled one wait on nothing that will come */
+        /* pending units downstream of a failed or cancelled one, or of one out of attempts (it
+         * never starts again: workflow_drive starts only a unit with attempts left), wait on
+         * nothing that will come */
         let mut held: std::collections::HashSet<&str> = g
             .units
             .iter()
-            .filter(|u| matches!(u.status.as_str(), "failed" | "cancelled"))
+            .filter(|u| {
+                matches!(u.status.as_str(), "failed" | "cancelled")
+                    || u.status == "pending" && u.attempt >= g.max_attempts
+            })
             .map(|u| u.spec.id.as_str())
             .collect();
         loop {
@@ -245,13 +332,13 @@ impl Tx<'_> {
                 continue;
             }
             match u.status.as_str() {
-                "pending" if held.contains(u.spec.id.as_str()) => downstream.push(title),
                 "pending" if u.attempt >= g.max_attempts => {
                     failed.push(steve_i18n::t!(
                         "core.now.unit_out_of_attempts",
                         title = title
                     ));
                 }
+                "pending" if held.contains(u.spec.id.as_str()) => downstream.push(title),
                 "pending" => {
                     to_start = true;
                     queued.push(title);

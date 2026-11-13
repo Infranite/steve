@@ -2,7 +2,8 @@
 //! of what is known about it ([`Facts`]), the user's [`Policy`] and where Steve lives ([`Env`]).
 //!
 //! Order: out of scope → [`Verdict::Off`]; a hard limit ([`super::limits::check`]) → `Decline`; the user
-//! is present → `Wait`; then the table. There are no budgets. Nothing in
+//! is present → `Wait`; then the table, where a tool request under full access is judged by what full
+//! access promises ([`super::full_guard::full`]) instead of the guard. There are no budgets. Nothing in
 //! [`Policy`] reaches the hard limits; widening it only ever turns `Decline` into `Auto` for decisions
 //! that passed them.
 //!
@@ -262,6 +263,10 @@ pub struct Tool {
     /// Processes the session's agent started (its descendants and its process group), looked up when
     /// the request came; `kill <pid>` is allowed for these only.
     pub own_pids: Vec<u32>,
+    /// The item runs with full access (完全放开) while its harness still asked: a request left over
+    /// from the mode it ran in before (the switch lands at the turn's end) or one its executor asks
+    /// in any mode. Judged by what full access promises ([`super::full_guard::full`]), not the guard.
+    pub full: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -339,6 +344,9 @@ pub struct Stall {
     pub own_action: Option<String>,
     /// Steve already continued it on its own (`crate::takeover`) and it still stopped.
     pub steve_tried: bool,
+    /// You stopped its last turn (`session_stops`): going on is yours.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub yours: bool,
 }
 
 /// The model's answer for the user.
@@ -370,6 +378,11 @@ pub struct Ask {
     /// outward word counts, not only going live and mail.
     pub full: bool,
 }
+
+/// The rule of a tool request judged under full access ([`Tool::full`]).
+pub const FULL_RULE: &str = "tool.full";
+/// …and its reason when answered.
+const FULL_REASON: &str = "完全放开：执行器还在请求权限，按完全放开的边界放行";
 
 /// Rebase conflicts handed back before YOLO leaves the next release card to you.
 pub const REBASE_RETURNS: u32 = 3;
@@ -439,6 +452,13 @@ pub struct Facts {
     /// The user was active on it lately.
     pub present: bool,
     pub subject: Subject,
+}
+
+impl Facts {
+    /// A tool request of a session that runs with full access ([`Tool::full`]).
+    pub fn full_tool(&self) -> bool {
+        matches!(&self.subject, Subject::Tool(t) if t.full)
+    }
 }
 
 /// How a decided action can be undone.
@@ -660,6 +680,7 @@ pub fn reason_shown(reason: &str) -> String {
         "工作区内的操作，守卫检查通过" => {
             steve_i18n::t!("core.yolo.reason.tool_worktree")
         }
+        FULL_REASON => steve_i18n::t!("core.yolo.reason.tool_full"),
         "设置里没有让 YOLO 批准动作" => steve_i18n::t!("core.yolo.reason.action_off"),
         "工作区内、可以重做的动作" => steve_i18n::t!("core.yolo.reason.action_local"),
         "设置里没有让 YOLO 批准发布" => steve_i18n::t!("core.yolo.reason.release_off"),
@@ -712,6 +733,9 @@ pub fn reason_shown(reason: &str) -> String {
         }
         "它停下了，没有交付也没有提问" => {
             steve_i18n::t!("core.yolo.reason.continue_stall")
+        }
+        "你自己中断了这一回合，继续与否由你决定" => {
+            steve_i18n::t!("core.yolo.reason.continue_yours")
         }
         "会话出错后自动继续" => steve_i18n::t!("core.yolo.reason.continue_error"),
         "这件事项第二次发布失败" => steve_i18n::t!("core.yolo.reason.continue_release"),
@@ -796,6 +820,16 @@ pub fn judge(f: &Facts, p: &Policy, env: &Env) -> Verdict {
         if NEVER.contains(&choice.as_str()) || choice.starts_with("grant_") || !offered {
             return decline("never", format!("YOLO 不会选「{choice}」"));
         }
+        // the value an answered question is submitted with, whichever rule picked it: no answer
+        // says the user did something in person or takes their step (hard limit 7)
+        if matches!(f.subject, Subject::Ask(_))
+            && let Some(w) = limits::own_action(choice)
+        {
+            return decline(
+                "limit.7",
+                format!("{}需要你本人操作或确认（{w}）", limits::REASON_PREFIX),
+            );
+        }
     }
     v
 }
@@ -808,6 +842,14 @@ fn has(f: &Facts, choice: &str) -> bool {
 
 fn table(f: &Facts, p: &Policy, env: &Env) -> Verdict {
     match &f.subject {
+        Subject::Tool(t) if t.full => match super::full_guard::full(t, env) {
+            Ok(guard::Guard::Allow { option, checks }) => {
+                auto(&option, FULL_RULE, FULL_REASON).checks(checks)
+            }
+            Ok(guard::Guard::Ask(why)) => decline(FULL_RULE, why),
+            // a command the line runs inside another one hits a hard limit
+            Err(l) => decline(&l.rule(), l.reason()),
+        },
         Subject::Tool(t) => {
             if t.cwd.is_none() {
                 return decline(
@@ -961,6 +1003,9 @@ fn stall(s: &Stall, p: &Policy) -> Verdict {
     }
     if s.no_progress >= 3 {
         return decline("continue.stuck", "连续 3 次自动继续没有进展");
+    }
+    if s.yours {
+        return decline("continue.yours", "你自己中断了这一回合，继续与否由你决定");
     }
     if s.steve_tried {
         return decline(
@@ -1230,6 +1275,7 @@ pub fn subject_from_row(
                 project_dir,
                 branch,
                 own_pids: Vec::new(),
+                full: false,
             })
         }
         ("approve", "action") => Subject::Action,

@@ -39,6 +39,9 @@ pub struct FakeState {
     pub pending_permissions: HashSet<String>,
     /// Every answer fails (the backend's store, say).
     pub answer_error: bool,
+    /// The user's stop fails: the backend cannot tell whether it reached the turn (its Node
+    /// unreachable, say). Recorded in `stopped`, nothing is cancelled.
+    pub user_stop_error: bool,
     pub answered: Vec<(String, Option<String>)>,
     pub holding: bool,
     /// `set_mode` calls: (session, mode)
@@ -79,6 +82,8 @@ pub struct FakeState {
     pub node_made: HashSet<String>,
     /// `tidy` calls: (session, keep_branch).
     pub tidies: Vec<(String, bool)>,
+    /// What [`AgentRuntime::mode_state`] says per session (none: it cannot tell).
+    pub mode_states: HashMap<String, crate::runtime::ModeState>,
 }
 
 /// acp.ts in miniature: turns are tracked, prompts queue behind a running turn or the hold, and a test
@@ -244,7 +249,13 @@ impl AgentRuntime for FakeRuntime {
         Ok(stop)
     }
     fn user_stop(&self, sid: &str) -> Result<Stop> {
-        self.st().stopped.push(sid.into());
+        {
+            let mut st = self.st();
+            st.stopped.push(sid.into());
+            if st.user_stop_error {
+                return Err(msg("Node 没有回应，不知道停止是否送达"));
+            }
+        }
         self.cancel(sid)
     }
     fn is_busy(&self, sid: &str) -> bool {
@@ -323,6 +334,22 @@ impl AgentRuntime for FakeRuntime {
         } else {
             Configured::Applied
         })
+    }
+    fn mode_state(&self, sid: &str) -> Option<crate::runtime::ModeState> {
+        self.st().mode_states.get(sid).cloned()
+    }
+    fn mode_name(&self, mode: &str) -> Option<String> {
+        Some(
+            match mode {
+                "plan" => "plan",
+                "default" => "ask",
+                "acceptEdits" => "accept_edits",
+                "auto" => "auto",
+                "bypassPermissions" => "full_access",
+                _ => return None,
+            }
+            .into(),
+        )
     }
     fn is_holding(&self) -> bool {
         self.st().holding
@@ -507,6 +534,21 @@ impl Kit {
     }
     pub fn db(&self) -> &Store {
         self.core.store()
+    }
+    /// A Hub restart: a new core on the same SQLite file opened afresh (nothing kept in memory),
+    /// with the same runtime, gateway and settings.
+    pub fn reopened(&self) -> Core {
+        let raw = steve_store::Store::open(
+            self.dir.path().join("data/steve.sqlite3"),
+            steve_store::NoPublisher,
+        )
+        .unwrap();
+        Core::new(
+            Store::new(raw),
+            self.rt.clone(),
+            self.gw.clone(),
+            self.core.config().clone(),
+        )
     }
     /// One outbox pass with Work's consumers (`work.tidy`), as the Hub's dispatcher does after a commit.
     pub fn pump_outbox(&self) -> steve_store::outbox::Pumped {

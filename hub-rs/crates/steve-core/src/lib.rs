@@ -64,8 +64,8 @@ pub use error::{CoreError, Result};
 pub use gateway::{Fallback, InProcess, LocalAcp, ModelGateway, OneModel, SharedGateway, Tier};
 pub use orchestrator::{CreateItem, Forked, ItemAction, SendNow, SupplementMode};
 pub use runtime::{
-    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, Output, Prompted, Released,
-    Running, Stop, TurnEnd,
+    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, ModeState, Output, Prompted,
+    Released, Running, Stop, TurnEnd,
 };
 
 use repo::Db;
@@ -128,10 +128,6 @@ pub(crate) struct State {
     /// The session's last Steve tool call, with the turn it was made in (`None`: none ran then).
     pending: HashMap<String, (Mark, Option<runtime::Running>)>,
     tokens: HashMap<String, String>,
-    /// The last turn end each session had (its attempt): the same end told again is ignored.
-    ended: HashMap<String, String>,
-    /// How each session's last turn ended, for a stall later on (`work::LastStop`).
-    stops: HashMap<String, work::LastStop>,
     /// Items whose turn failed on a model quota that is back later (`quota`).
     quota_waits: HashMap<String, quota::QuotaWait>,
     releasing: Option<Releasing>,
@@ -262,7 +258,21 @@ impl Core {
     /// false if nothing was running; an error when the backend cannot tell. The user's Stop: a
     /// backend may also retire what holds the session ([`AgentRuntime::user_stop`]).
     pub fn cancel_turn(&self, session_id: &str) -> Result<bool> {
-        Ok(self.0.runtime.user_stop(session_id)? == Stop::Requested)
+        /* your Stop is kept before it goes out (its turn end may come after a restart): how that
+         * turn ends is yours to go on with, never Steve's to continue (`crate::work::stopped`) */
+        let sessions = self.0.store.store().sessions();
+        let asked = self.0.runtime.running(session_id).map(|r| r.attempt);
+        sessions.stop_asked(session_id, Some(asked.as_deref().unwrap_or("")))?;
+        /* only a backend that says the turn was over withdraws your Stop. One that fails to answer
+         * (its Node unreachable, its store failing) leaves the outcome unknown: the turn may still
+         * stop or end, so your Stop stays kept and that end, or the idle session, is yours to go on
+         * with. Steve never weakens a Stop it could not confirm into an ordinary stop it continues;
+         * your next message starts another turn and lifts it (`Tx::on_turn_end`) */
+        let stopped = self.0.runtime.user_stop(session_id)? == Stop::Requested;
+        if !stopped {
+            sessions.stop_asked(session_id, None)?;
+        }
+        Ok(stopped)
     }
     pub fn config(&self) -> &CoreConfig {
         &self.0.config

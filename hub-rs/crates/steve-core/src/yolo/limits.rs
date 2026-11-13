@@ -12,6 +12,10 @@
 //!    device, plug something in), or a claim that they did: a question about it, or an agent that
 //!    stopped waiting for it, stays with the user. Nobody's text, the agent's or the model's, counts
 //!    as the user having done it.
+//!
+//! Under full access (完全放开) a tool request's paths outside the item's own directory, or ones
+//! that cannot be read off the text, are the agent's as the user's own ([`Places::full`]): of 4,
+//! `STEVE_HOME`, port 8440, launchd and other items' branches and worktrees still hold.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
@@ -19,8 +23,9 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Value;
 
+use super::exec::{self, Body, Feed};
 use super::judge::{Disclosure, Env, Facts, Identity, Outbound, OutboundStage, Subject, Tool};
-use super::shell::{self, Argv, Parsed};
+use super::shell::{self, Argv, Parsed, Simple};
 
 pub use steve_modules::outbound::{AI_PREFIX, strip_ai_prefix, with_ai_prefix};
 
@@ -83,18 +88,23 @@ const WHAT_KEYS: &[&str] = &[
     "core.yolo.limit.crates",
     "core.yolo.limit.image",
     "core.yolo.limit.release_target",
+    "core.yolo.limit.curl_glob",
+    "core.yolo.limit.update_ref_stdin",
+    "core.yolo.limit.other_branch_rewrite",
     "core.yolo.limit.payment",
     "core.yolo.limit.outward",
     "core.yolo.limit.waits_for_you",
     "core.yolo.limit.needs_you",
     "core.yolo.limit.outward_ask",
     "core.yolo.limit.steve_home_at",
+    "core.yolo.limit.steve_home_maybe",
     "core.yolo.limit.outside",
     "core.yolo.limit.unknown_target",
     "core.yolo.limit.launchd",
     "core.yolo.limit.curl_method",
     "core.yolo.limit.gh_write",
     "core.yolo.limit.git_c",
+    "core.yolo.limit.git_config_env",
     "core.yolo.limit.git_unknown",
     "core.yolo.limit.git_config",
     "core.yolo.limit.git_elsewhere",
@@ -139,19 +149,49 @@ fn outward_ask(text: &str, full: bool) -> Option<regex::Match<'_>> {
         OUTWARD_ASK.find(text)
     }
 }
-/// Hard limit 7: something the user has to do themselves, or to say they did.
+/// Hard limit 7: something the user has to do themselves, or to say they did. A request (or a claim),
+/// never a bare word: a question about how long a verification code lives, how many digits an OTP
+/// has or which library draws a QR code is an ordinary design question.
 static OWN_ACTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"(?i)本人|亲自|手动(操作|完成|确认|登录|点击|执行|授权|批准|输入|扫码)",
-        r"|扫码|扫一扫|二维码|验证码|动态码|短信码|一次性密码|两步验证|双重验证|二次验证|\b(2fa|mfa|otp)\b",
-        r"|指纹|面容|touch ?id|face ?id|硬件密钥|yubikey|u盾",
+        r"(?i)(你|您|需要|请|麻烦|得|由)[^。？?！!\n]{0,4}(本人|亲自)",
+        r"|(请|你|您|麻烦)[^。？?！!\n]{0,4}手动(操作|完成|确认|登录|点击|执行|授权|批准|输入|扫码)",
+        // scanning a code, asked for
+        r"|(请|你|您|麻烦|帮我|用手机|用微信|用支付宝|打开)[^。？?！!\n]{0,8}(扫码|扫一扫|扫一下)",
+        r"|扫(一下|描)?(这个|下面的?|上面的?|图中的?|页面上的?)(二维码|码)",
+        // a one-time code asked for, to be typed or passed on
+        r"|((请|麻烦|帮我)[^。？?！!\n]{0,6}|你(来|去|再)?)(输入|提供|发|告诉|填|报)[^。？?！!\n]{0,8}(验证码|动态码|短信码|校验码|一次性密码|otp|2fa|mfa)",
+        r"|(把|将)[^。？?！!\n]{0,6}(验证码|动态码|短信码|校验码|一次性密码|otp)[^。？?！!\n]{0,4}(发|告诉|给|报)",
+        r"|(验证码|动态码|短信码|校验码|一次性密码)[^。？?！!\n]{0,6}(发我|发给我|发过来|告诉我|给我|是多少)",
+        // typing it is the step before going on (said as a step of yours, not a report of the flow)
+        r"|(^|[。！？!?\n；;]\s*)(请|麻烦)?(你|您)?(先|再|重新)?(输入|填写|填入|提供)[^。？?！!\n，,]{0,8}(验证码|动态码|短信码|校验码|一次性密码|otp|2fa|mfa)[^。？?！!\n，,]{0,6}(后|之后|以后|然后|再)[^。？?！!\n的]{0,4}(继续|告诉|回复|通知|说一声)",
+        // a passkey, an authenticator or a security key of yours
+        r"|(请|麻烦|你|您)(你|您)?(来|去|再|先)?\s*(用|使用)(你的|您的)?\s*(通行密钥|passkey|安全密钥|硬件密钥|身份验证器|验证器\s*app|authenticator)",
+        r"|(完成|通过|进行)[^。？?！!\n]{0,4}(两步验证|双重验证|二次验证|2fa|mfa)",
+        r"|(用|按|插上|插入|刷|录入)[^。？?！!\n]{0,4}(指纹|面容|touch ?id|face ?id|硬件密钥|yubikey|u盾)",
         r"|插(上|入|好)(手机|设备|硬件|数据线|u盘|网线|电源)|重新插拔",
-        r"|你[^。？?！!\n]{0,8}(在|用|到)(你的)?(手机|电脑|浏览器|设备|app|应用|系统设置|钥匙串|终端)",
+        r"|你[^。？?！!\n]{0,8}(在|用|到)(你的)?(手机|电脑|浏览器|设备|app|应用|系统设置|钥匙串|终端)[^。？?！!\n]{0,10}(登录|确认|授权|批准|扫|点|验证|输入|操作|运行|执行|安装|允许|插)",
         r"|(登录|授权|操作|扫码|确认|安装|批准|验证)(完|好)?(了|后|之后|以后)[^。？?\n]{0,4}(告诉|通知|回复|跟|叫)我",
         r"|(在|用)(手机|设备|手表|平板)(上|里)?[^。？?\n]{0,4}(确认|登录|授权|批准|扫|点|验证|输入)",
+        r"|请(你|您)?(先|再|重新)?(登录|登入)",
+        // a claim that it was done
         r"|(你|用户|本人)[^。？?\n]{0,4}已(经)?[^。？?\n]{0,6}(登录|扫码|确认|授权|批准|操作|验证)",
-        r"|\b(qr ?code|verification code|one-time (code|password)|passkey|in person|yourself)\b",
-        r"|\bon your (phone|device|computer|laptop|browser)\b|\b(sign|log) ?in (manually|yourself)\b",
+        r"|\b(the )?user (has )?(already )?(confirmed|approved|logged in|signed in|scanned|authorized)\b",
+        r"|\balready (logged|signed) ?in\b",
+        // English: signing in asked for, or to be reported done
+        r"|\b(please|you('ll| will)? need to|you have to|you must|can you|could you|would you|kindly|go ahead and)\s+(re-?)?(log ?in|sign ?in|log ?on|sign ?on|authenticate|authori[sz]e)\b",
+        r"|(^|[.!?\n]\s*)(re-?)?(log|sign) (in|on) (to|into|with)\b",
+        r"|\b(log|sign) ?(in|on) (to|into|with)\b[^.?!\n]{0,60}\b(then|and|once|when)\b[^.?!\n]{0,30}\b(reply|tell me|let me know|ping me)\b",
+        r"|\b(once|when|after) you('ve| have|'re| are)?\s+(logged|signed|log|sign) ?(in|on)\b",
+        r"|\b(log|sign) ?in (manually|yourself)\b|\bin person\b",
+        r"|\b(please|you('ll| will)? need to|you must|you have to)\b[^.?!\n]{0,40}\byourself\b",
+        r"|\b(enter|type|send( me)?|give me|provide|share|paste|tell me|read me)\b[^.?!\n]{0,20}\b(verification|one-time|otp|2fa|mfa|sms|security|login|auth|authentication) ?(code|password|pin)\b",
+        r"|\b(enter|type|send( me)?|give me|provide|share|paste|tell me)\b[^.?!\n]{0,20}\b(the |your )?(otp|2fa|mfa)\b",
+        r"|\bscan (the |this |that |a )?(qr ?code|code)\b",
+        r"|\b(enter|type|input|paste)\s+(the|your|this)\s+([\w-]+\s+){0,2}code\b[^.?!\n]{0,40}(\b(sent|received|texted|emailed)\b|\bfrom your\b|\bon your\b|\b(then|and)\s+(reply|continue|tell me|let me know|ping me)\b)",
+        r"|\b(use|tap|touch|insert|present|confirm with|verify with|approve with|sign in with|log in with|authenticate with|unlock with)\s+your\s+(passkey|security key|hardware key|authenticator( app)?|yubikey|fingerprint|face ?id|touch ?id)\b",
+        r"|\b(insert|plug in|touch|tap)\b[^.?!\n]{0,15}\b(yubikey|security key|touch ?id|face ?id)\b",
+        r"|\b(approve|confirm|tap|accept|check|scan|enter|type|sign|log|click|allow|unlock)\b[^.?!\n]{0,40}\bon your (phone|device|computer|laptop|browser|watch)\b",
     ))
     .expect("valid regex")
 });
@@ -211,10 +251,13 @@ pub fn check(f: &Facts, env: &Env) -> Option<Limit> {
 }
 
 fn ask(f: &Facts, a: &super::judge::Ask) -> Option<Limit> {
+    // what would be submitted, too: an Ask card is answered with the model's option when it names
+    // one, whatever its answer text says (`judge::ask`)
     let words = [
         Some(f.question.as_str()),
         Some(a.key.as_str()),
         a.answer.as_ref().map(|x| x.answer.as_str()),
+        a.answer.as_ref().and_then(|x| x.option.as_deref()),
         a.recommended.as_deref(),
     ];
     for t in words.into_iter().flatten() {
@@ -341,6 +384,14 @@ pub(crate) struct Places {
     /// Shared temporary directories (`/tmp`, `/private/tmp`, `$TMPDIR`): files may be created and
     /// written there, not deleted or moved (other agents use them too).
     pub tmp: Vec<PathBuf>,
+    /// The item runs with full access (完全放开): a path outside its own directory, or one that
+    /// cannot be read off the text, is the agent's to change as the user's own, as it would be
+    /// without a prompt. `STEVE_HOME`, port 8440, launchd, other items' branches and worktrees, and
+    /// the other limits still hold.
+    pub full: bool,
+    /// Where `cd -` goes back to, and the directories `pushd` left (`popd` returns to them).
+    pub prev: Option<Option<PathBuf>>,
+    pub stack: Vec<Option<PathBuf>>,
 }
 
 impl Places {
@@ -371,12 +422,28 @@ impl Places {
             home,
             protected,
             tmp,
+            full: false,
+            prev: None,
+            stack: Vec::new(),
         }
     }
 
     /// The canonical path a word names; `None` when it cannot be known here (`$VAR`, `~user`, relative
     /// without a working directory).
     pub fn resolve(&self, w: &str) -> Option<PathBuf> {
+        // `$HOME` and `$STEVE_HOME` are known here; any other variable is not
+        for (var, to) in [
+            ("$HOME", &self.home),
+            ("${HOME}", &self.home),
+            ("$STEVE_HOME", &self.protected[0]),
+            ("${STEVE_HOME}", &self.protected[0]),
+        ] {
+            if let Some(rest) = w.strip_prefix(var)
+                && (rest.is_empty() || rest.starts_with('/'))
+            {
+                return self.resolve(&format!("{}{rest}", to.to_string_lossy()));
+            }
+        }
         if w.contains('$') || w.contains('`') {
             return None;
         }
@@ -392,6 +459,65 @@ impl Places {
             self.base.as_ref()?.join(w)
         };
         Some(canonical(&p))
+    }
+
+    /// `cd`, `pushd` or `popd` (`words` being a simple command): moves what later relative paths
+    /// mean, to nothing known when it cannot be read. True when it was one.
+    pub fn cd(&mut self, words: &[String]) -> bool {
+        let Some(a) = shell::argv(words) else {
+            return false;
+        };
+        if !matches!(a.program.as_str(), "cd" | "pushd" | "popd") {
+            return false;
+        }
+        let to = match (a.program.as_str(), operands(&a.args).first()) {
+            // an empty stack: popd fails and the shell stays where it is
+            ("popd", _) => match self.stack.pop() {
+                Some(d) => d,
+                None => return true,
+            },
+            ("cd", Some(d)) if d.as_str() == "-" => match self.prev.clone() {
+                Some(d) => d,
+                None => return true,
+            },
+            ("pushd", None) => None,
+            (_, None) => Some(self.home.clone()),
+            (_, Some(d)) => self.resolve(d),
+        };
+        if a.program == "pushd" {
+            self.stack.push(self.base.clone());
+        }
+        self.prev = Some(std::mem::replace(&mut self.base, to));
+        true
+    }
+
+    /// A word with a glob or a brace list (`~/.stev?/web`, `~/{x,.steve}`) that may expand to
+    /// Steve's data outside the item's own directory: the directory it starts from is in it, or
+    /// its next part may name the step towards it.
+    pub fn may_glob_steve(&self, w: &str) -> bool {
+        let Some(cut) = w.find(['*', '?', '[', '{']) else {
+            return false;
+        };
+        let slash = w[..cut].rfind('/');
+        let dir = match slash {
+            Some(0) => Some(PathBuf::from("/")),
+            Some(i) => self.resolve(&w[..i]),
+            None => self.base.clone(),
+        };
+        let Some(dir) = dir else {
+            return false;
+        };
+        let start = slash.map_or(0, |i| i + 1);
+        let part = w[start..].split('/').next().unwrap_or("");
+        if self.in_steve(&dir) {
+            return true;
+        }
+        self.protected.iter().any(|s| {
+            s.strip_prefix(&dir)
+                .ok()
+                .and_then(|r| r.components().next())
+                .is_some_and(|c| glob_part(part, &c.as_os_str().to_string_lossy()))
+        })
     }
 
     pub fn inside(&self, p: &Path) -> bool {
@@ -433,10 +559,68 @@ impl Places {
         match self.resolve(w) {
             Some(p) if self.in_steve(&p) => Some(Limit::new(4, format!("碰到 STEVE_HOME：{w}"))),
             Some(p) if self.inside(&p) => None,
+            _ if self.full => None,
             Some(_) => Some(Limit::new(4, format!("改动或删除工作区以外的路径：{w}"))),
             None => Some(Limit::new(4, format!("看不出 {w} 指向哪里"))),
         }
     }
+}
+
+/// Whether one path part `pat` (`*`, `?`, `[…]`; a brace list may be anything) can match `name`.
+/// As the shell globs: a leading dot is matched only by a dot.
+fn glob_part(pat: &str, name: &str) -> bool {
+    if pat.contains('{') {
+        return true;
+    }
+    if name.starts_with('.') && !pat.starts_with('.') {
+        return false;
+    }
+    // the pattern as single-character tokens: a literal, `?`, a bracket class (any one), `*`
+    let mut toks: Vec<Option<char>> = vec![];
+    let mut star = vec![];
+    let cs: Vec<char> = pat.chars().collect();
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            // `**` is one `*`
+            '*' => {
+                if star.last() != Some(&true) {
+                    toks.push(None);
+                    star.push(true);
+                }
+            }
+            '?' => {
+                toks.push(None);
+                star.push(false);
+            }
+            '[' => {
+                i += cs[i..].iter().position(|c| *c == ']').unwrap_or(0);
+                toks.push(None);
+                star.push(false);
+            }
+            c => {
+                toks.push(Some(c));
+                star.push(false);
+            }
+        }
+        i += 1;
+    }
+    let n: Vec<char> = name.chars().collect();
+    // dp[j]: the tokens so far can match the first j characters
+    let mut dp = vec![false; n.len() + 1];
+    dp[0] = true;
+    for (t, is_star) in toks.iter().zip(&star) {
+        let mut next = vec![false; n.len() + 1];
+        for j in 0..=n.len() {
+            next[j] = if *is_star {
+                dp[j] || j > 0 && next[j - 1]
+            } else {
+                j > 0 && dp[j - 1] && t.is_none_or(|c| c == n[j - 1])
+            };
+        }
+        dp = next;
+    }
+    dp[n.len()]
 }
 
 // ── tool calls ──
@@ -550,6 +734,7 @@ pub(crate) fn tool_base(t: &Tool, pl: &Places) -> Option<Option<PathBuf>> {
 
 fn tool(t: &Tool, env: &Env) -> Option<Limit> {
     let mut pl = Places::new(t.cwd.as_deref(), env);
+    pl.full = t.full;
     let kind = tool_kind(t);
     let raw_text = t.raw.to_string();
     if let Some(w) = money(&raw_text) {
@@ -602,7 +787,7 @@ static STEVE_NAMED: LazyLock<Regex> = LazyLock::new(|| {
 /// Relative paths (`.steve/qa` inside the item's own directory) are left to the path checks, which
 /// resolve them.
 fn text_limits(text: &str, pl: &Places) -> Option<Limit> {
-    steve_text(text, pl, true)
+    steve_text(text, pl, !pl.full)
 }
 
 /// [`text_limits`]; `release`: Steve's release script counts too (full access leaves it out: a
@@ -671,56 +856,89 @@ fn parsed(p: &Parsed, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Li
     }
     let mut pl = pl.clone();
     for c in &p.cmds {
-        // `cd` moves what later relative paths mean
-        if let Some(a) = shell::argv(&c.words)
-            && matches!(a.program.as_str(), "cd" | "pushd" | "popd")
-        {
-            pl.base = match (a.program.as_str(), operands(&a.args).first()) {
-                ("popd", _) => None,
-                (_, None) => Some(pl.home.clone()),
-                (_, Some(d)) if d.as_str() == "-" => None,
-                (_, Some(d)) => pl.resolve(d),
-            };
-            continue;
-        }
-        let pl = &pl;
-        for w in &c.writes {
-            if let Some(l) = pl.write_target(w) {
-                return Some(l);
-            }
-        }
-        for w in &c.words {
-            if let Some(rp) = pl.resolve(w)
-                && (w.contains('/') || w.starts_with('.') || w.starts_with('~'))
-                && pl.in_steve(&rp)
-            {
-                return Some(Limit::new(4, format!("碰到 STEVE_HOME：{w}")));
-            }
-        }
-        let Some(a) = shell::argv(&c.words) else {
-            continue;
-        };
-        // a here-document fed to a shell is a script of its own
-        if let Some(body) = &c.stdin
-            && SHELLS.contains(&a.program.as_str())
-        {
-            match shell::parse(body) {
-                Ok(n) => {
-                    if let Some(l) = parsed(&n, pl, branch, depth + 1) {
-                        return Some(l);
-                    }
-                }
-                Err(_) => return Some(Limit::new(4, "喂给 shell 的 here-document 看不清")),
-            }
-        }
-        if let Some(l) = program(&a, c.expands, pl, branch, depth) {
+        // a `cd` into Steve's data, or by a glob that may reach it, is judged like any word
+        if let Some(l) = simple(c, &pl, branch, depth) {
             return Some(l);
         }
-        // quoted arguments that are command lines of their own (`sh -c`, `ssh host '…'`, `-x '…'`)
-        for n in shell::nested(&a.args) {
-            if let Some(l) = parsed(&n, pl, branch, depth + 1) {
-                return Some(l);
+        pl.cd(&c.words);
+    }
+    None
+}
+
+/// The limits one simple command hits where `pl` says it runs: its redirections, the paths it
+/// names, and its program with what that runs as far as this module follows it. Full access judges
+/// every command a line runs with this ([`super::full_guard`]), not only the line's own.
+pub(crate) fn simple(c: &Simple, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
+    for w in &c.writes {
+        if pl.may_glob_steve(w) {
+            return Some(Limit::new(4, format!("可能碰到 STEVE_HOME：{w}")));
+        }
+        if let Some(l) = pl.write_target(w) {
+            return Some(l);
+        }
+    }
+    for w in &c.words {
+        if !(w.contains('/') || w.starts_with('.') || w.starts_with('~')) {
+            continue;
+        }
+        if let Some(rp) = pl.resolve(w)
+            && pl.in_steve(&rp)
+        {
+            return Some(Limit::new(4, format!("碰到 STEVE_HOME：{w}")));
+        }
+        if pl.may_glob_steve(w) {
+            return Some(Limit::new(4, format!("可能碰到 STEVE_HOME：{w}")));
+        }
+    }
+    let a = shell::argv(&c.words)?;
+    // a here-document fed to a shell is a script of its own
+    if let Some(body) = &c.stdin
+        && SHELLS.contains(&a.program.as_str())
+    {
+        match shell::parse(body) {
+            Ok(n) => {
+                if let Some(l) = parsed(&n, pl, branch, depth + 1) {
+                    return Some(l);
+                }
             }
+            Err(_) => return Some(Limit::new(4, "喂给 shell 的 here-document 看不清")),
+        }
+    }
+    if let Some(l) = program(&a, c.expands, pl, branch, depth) {
+        return Some(l);
+    }
+    // quoted arguments that are command lines of their own (`sh -c`, `ssh host '…'`, `-x '…'`)
+    for n in shell::nested(&a.args) {
+        if let Some(l) = parsed(&n, pl, branch, depth + 1) {
+            return Some(l);
+        }
+    }
+    // every command it runs in turn (wrappers, runners, variables), as the execution model reads it
+    let feed = Feed::of(c, &Feed::default());
+    for b in exec::var_bodies(&c.words)
+        .into_iter()
+        .chain(exec::bodies(&a, &feed))
+    {
+        let hit = match b {
+            Body::Line(s, _) | Body::Maybe(s) => shell::parse(&s)
+                .ok()
+                .and_then(|n| parsed(&n, pl, branch, depth + 1)),
+            Body::Argv(words, _) => {
+                if depth >= MAX_DEPTH {
+                    return Some(Limit::new(4, "命令嵌套太深，看不清"));
+                }
+                let c = Simple {
+                    expands: words.iter().any(|w| w.contains('$')),
+                    words,
+                    ..Default::default()
+                };
+                simple(&c, pl, branch, depth + 1)
+            }
+            // not a hard limit's to say: the guard and full access leave it to the user
+            Body::Code(..) | Body::Unseen(_) => None,
+        };
+        if hit.is_some() {
+            return hit;
         }
     }
     None
@@ -838,7 +1056,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
     let push = |what: &str| Some(Limit::new(5, what.to_string()));
     // writes whose target cannot be read off the text
     let unknown_targets = || {
-        if a.xargs || expands {
+        if (a.xargs || expands) && !pl.full {
             Some(Limit::new(
                 4,
                 format!("{p} 的目标来自变量或标准输入，看不出在哪"),
@@ -1028,11 +1246,11 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
             }
             return all_inside(operands(args).into_iter().skip(1).collect());
         }
-        "sed" | "perl" | "ruby" => {
+        "sed" | "gsed" | "perl" | "ruby" => {
             let in_place = args.iter().any(|x| {
                 x.starts_with("-i")
                     || x.starts_with("--in-place")
-                    || (p != "sed" && x.starts_with("-p") && x.contains('i'))
+                    || (!p.ends_with("sed") && x.starts_with("-p") && x.contains('i'))
             });
             if in_place {
                 if let Some(l) = unknown_targets() {
@@ -1040,7 +1258,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
                 }
                 let has_script_opt = args
                     .iter()
-                    .any(|x| x == "-e" || x == "-f" || x == "-E" && p != "sed");
+                    .any(|x| x == "-e" || x == "-f" || x == "-E" && !p.ends_with("sed"));
                 let ops = operands(args);
                 let files: Vec<&String> = if has_script_opt {
                     ops
@@ -1208,6 +1426,8 @@ pub(crate) fn curl_loopback(args: &[String]) -> Option<CurlLine> {
         }
         out.urls.push(x.clone());
     }
+    // without -g, curl expands `[0-9]` and `{a,b}` in a URL: `:844[0-0]` is port 8440
+    let globoff = curl_targets(args).1;
     let local = |u: &str| {
         let rest = u
             .strip_prefix("http://")
@@ -1216,13 +1436,145 @@ pub(crate) fn curl_loopback(args: &[String]) -> Option<CurlLine> {
         if rest.contains('@') || rest.contains('\\') {
             return false;
         }
-        let host = match rest.strip_prefix('[') {
-            Some(r) => r.split(']').next().unwrap_or(""),
-            None => rest.split(['/', ':', '?', '#']).next().unwrap_or(""),
+        let (host, after) = match rest.strip_prefix('[') {
+            Some(r) => r.split_once(']').unwrap_or((r, "")),
+            None => {
+                let end = rest.find(['/', ':', '?', '#']).unwrap_or(rest.len());
+                (&rest[..end], &rest[end..])
+            }
         };
+        if !globoff && host_port_glob(u) {
+            return false;
+        }
+        // a port is digits, nothing else
+        if let Some(port) = after.strip_prefix(':') {
+            let p = port.split(['/', '?', '#']).next().unwrap_or("");
+            if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+        }
         matches!(host, "127.0.0.1" | "localhost" | "::1")
     };
     (!out.urls.is_empty() && out.urls.iter().all(|u| local(u))).then_some(out)
+}
+
+/// curl's URLs (its operands and `--url` values; any word not known to be an option's value)
+/// and whether it globs them (`-g`/`--globoff` turn that off).
+fn curl_targets(args: &[String]) -> (Vec<String>, bool) {
+    // options that take a value, besides the ones `curl_loopback` reads
+    const LONG: &[&str] = &[
+        "request",
+        "header",
+        "data",
+        "data-raw",
+        "data-binary",
+        "data-urlencode",
+        "data-ascii",
+        "json",
+        "user",
+        "user-agent",
+        "referer",
+        "max-time",
+        "connect-timeout",
+        "write-out",
+        "cookie",
+        "cookie-jar",
+        "form",
+        "form-string",
+        "retry",
+        "range",
+        "output",
+        "output-dir",
+        "retry-delay",
+        "retry-max-time",
+        "proxy",
+        "proxy-user",
+        "resolve",
+        "connect-to",
+        "config",
+        "cacert",
+        "capath",
+        "cert",
+        "key",
+        "interface",
+        "dump-header",
+        "upload-file",
+        "url-query",
+        "oauth2-bearer",
+        "limit-rate",
+        "max-filesize",
+        "continue-at",
+        "quote",
+        "unix-socket",
+        "abstract-unix-socket",
+        "netrc-file",
+        "trace",
+        "trace-ascii",
+        "variable",
+        "expand-url",
+        "time-cond",
+        "local-port",
+        "dns-servers",
+        "aws-sigv4",
+        "header-file",
+    ];
+    const SHORT: &str = "XHdFuAemwbroTxKEcDUQYytzCP";
+    let mut urls = vec![];
+    let mut globoff = false;
+    let mut i = 0;
+    while let Some(x) = args.get(i) {
+        i += 1;
+        if let Some(long) = x.strip_prefix("--") {
+            let (name, val) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v.to_string())),
+                None => (long, None),
+            };
+            if name == "globoff" {
+                globoff = true;
+            } else if name == "url" || LONG.contains(&name) {
+                let v = val.or_else(|| {
+                    i += 1;
+                    args.get(i - 1).cloned()
+                });
+                if name == "url" {
+                    urls.extend(v);
+                }
+            }
+            continue;
+        }
+        if let Some(cluster) = x.strip_prefix('-').filter(|c| !c.is_empty()) {
+            for (k, ch) in cluster.char_indices() {
+                if ch == 'g' {
+                    globoff = true;
+                }
+                if SHORT.contains(ch) {
+                    if cluster[k + ch.len_utf8()..].is_empty() {
+                        i += 1;
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        urls.push(x.clone());
+    }
+    (urls, globoff)
+}
+
+/// A glob or brace list in a URL's host or port (`0:844[0-0]`, `{a,b}.x`); an IPv6 address in
+/// brackets is not one.
+fn host_port_glob(u: &str) -> bool {
+    let rest = u.split_once("://").map_or(u, |(_, r)| r);
+    let hp = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hp = hp.rsplit_once('@').map_or(hp, |(_, h)| h);
+    let hp = match hp.strip_prefix('[') {
+        Some(r) => match r.split_once(']') {
+            Some((inside, after)) if inside.contains(':') => after,
+            _ => return true,
+        },
+        None => hp,
+    };
+    hp.contains(['[', '{'])
 }
 
 fn curl(args: &[String]) -> Option<Limit> {
@@ -1230,6 +1582,14 @@ fn curl(args: &[String]) -> Option<Limit> {
     // caught before by the text check
     if curl_loopback(args).is_some() {
         return None;
+    }
+    // a host or port curl expands (`:844[0-0]`, `{a,b}`) hides where it goes, 8440 included
+    let (urls, globoff) = curl_targets(args);
+    if !globoff && urls.iter().any(|u| host_port_glob(u)) {
+        return Some(Limit::new(
+            4,
+            "curl 的网址带通配，看不出会连到哪个主机和端口",
+        ));
     }
     let send = || Some(Limit::new(5, "curl 把数据发出去"));
     let method = |m: &str| {
@@ -1421,10 +1781,32 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
                 dir = args.get(i + 1).map(String::as_str);
                 i += 2;
             }
+            // `--config-env=key=VAR` sets `key` from a variable: its value cannot be read
+            s if s == "--config-env" || s.starts_with("--config-env=") => {
+                let kv = match s.strip_prefix("--config-env=") {
+                    Some(kv) => {
+                        i += 1;
+                        kv
+                    }
+                    None => {
+                        i += 2;
+                        args.get(i - 1).map(String::as_str).unwrap_or("")
+                    }
+                };
+                if risky_git_config(kv) {
+                    return Some(Limit::new(
+                        5,
+                        format!("git --config-env {kv} 可能让 git 运行别的命令或推送"),
+                    ));
+                }
+            }
             "-c" => {
                 let kv = args.get(i + 1).map(String::as_str).unwrap_or("");
                 if risky_git_config(kv) {
-                    return Some(Limit::new(5, format!("git -c {kv} 可能把命令变成推送")));
+                    return Some(Limit::new(
+                        5,
+                        format!("git -c {kv} 可能让 git 运行别的命令或推送"),
+                    ));
                 }
                 i += 2;
             }
@@ -1464,7 +1846,7 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
         "config" => rest
             .iter()
             .find(|k| risky_git_config(k))
-            .map(|k| Limit::new(5, format!("git config {k} 可能把命令变成推送"))),
+            .map(|k| Limit::new(5, format!("git config {k} 可能让 git 运行别的命令或推送"))),
         "submodule" if rest.first().is_some_and(|r| r == "foreach") => sub_argv(
             rest[1..]
                 .iter()
@@ -1476,9 +1858,16 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
             depth,
         ),
         "branch" => {
-            let force_delete = rest.iter().any(|x| x == "-D")
-                || rest.iter().any(|x| x == "-d" || x == "--delete")
-                    && rest.iter().any(|x| x == "-f" || x == "--force");
+            // `-D` or `-d -f`, also clustered (`-qD`, `-df`) or abbreviated (`--del --for`)
+            let has = |short: char, long: &str| {
+                rest.iter().any(|x| {
+                    x.strip_prefix('-')
+                        .filter(|c| !c.starts_with('-'))
+                        .is_some_and(|c| c.contains(short))
+                        || x.len() > 2 && x.starts_with("--") && long.starts_with(x.as_str())
+                })
+            };
+            let force_delete = has('D', "") || has('d', "--delete") && has('f', "--force");
             if force_delete {
                 let targets = operands(rest);
                 let own =
@@ -1493,6 +1882,17 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
             Some("remove" | "move") => Some(Limit::new(4, "git worktree remove/move")),
             _ => None,
         },
+        // writing or deleting another branch's ref directly
+        "update-ref" if rest.iter().any(|x| x == "--stdin") => {
+            Some(Limit::new(4, "git update-ref --stdin 看不出改的是哪个分支"))
+        }
+        "update-ref" => {
+            let own = branch.map(|b| format!("refs/heads/{b}"));
+            operands(rest)
+                .into_iter()
+                .find(|r| r.starts_with("refs/heads/") && own.as_deref() != Some(r.as_str()))
+                .map(|_| Limit::new(4, "改写或删除别的事项的分支"))
+        }
         "clean" | "rm" | "mv" | "restore" | "checkout" | "reset" | "stash" | "switch" | "clone"
         | "init"
             if elsewhere =>
@@ -1504,20 +1904,42 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
     }
 }
 
+/// A git setting that redirects pushes, or names a command git runs later (an editor, a pager,
+/// a diff, filter or merge driver, a hook directory, an included file).
 fn risky_git_config(k: &str) -> bool {
     let k = k.to_lowercase();
+    let key = k.split_once('=').map_or(k.as_str(), |(k, _)| k);
     [
         "alias.",
         "remote.",
         "url.",
         "core.sshcommand",
         "core.hookspath",
+        "core.editor",
+        "core.pager",
+        "core.fsmonitor",
+        "core.askpass",
+        "core.gitproxy",
         "credential.",
         "branch.",
         "push.",
+        "diff.external",
+        "filter.",
+        "sequence.editor",
+        "pager.",
+        "gpg.",
+        "interactive.difffilter",
+        "include.",
+        "includeif.",
+        "uploadpack.packobjectshook",
+        "sendemail.",
     ]
     .iter()
-    .any(|p| k.starts_with(p))
+    .any(|p| key.starts_with(p))
+        || key.starts_with("diff.") && (key.ends_with(".textconv") || key.ends_with(".command"))
+        || key.starts_with("merge.") && key.ends_with(".driver")
+        || key.starts_with("difftool.") && key.ends_with(".cmd")
+        || key.starts_with("mergetool.") && key.ends_with(".cmd")
 }
 
 fn find(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
@@ -1585,6 +2007,14 @@ mod tests {
             "Touches STEVE_HOME: ../Cargo.toml"
         );
         assert_eq!(en("碰到 STEVE_HOME"), "Touches STEVE_HOME");
+        assert_eq!(
+            en("可能碰到 STEVE_HOME：~/.stev?"),
+            "May touch STEVE_HOME: ~/.stev?"
+        );
+        assert_eq!(
+            en("git -c core.fsmonitor=x 可能让 git 运行别的命令或推送"),
+            "git -c core.fsmonitor=x may make git run another command or push"
+        );
         assert_eq!(
             en("cp 的目标来自变量或标准输入，看不出在哪"),
             "The target of cp comes from a variable or standard input; can't tell where it is"
@@ -1680,6 +2110,35 @@ mod tests {
             "用户已经在手机上确认过了",
             "Please sign in yourself, then reply",
             "approve the prompt on your phone",
+            // ST-25 #8: an ordinary request to sign in, and to say when it is done
+            "Please log in to your account, then reply Done.",
+            "Please log in to GitHub and tell me when done.",
+            "Log in to GitHub, then let me know.",
+            "You'll need to sign in to the Apple developer portal first.",
+            "Once you've logged in, I'll continue with the upload.",
+            "请先登录 GitHub，然后回复我",
+            // ST-25 #9: the protection for codes stays, as a request
+            "请输入短信验证码",
+            "你收到的验证码发我一下",
+            "验证码是多少？",
+            "麻烦提供一下 OTP",
+            "用微信扫一扫下面的二维码",
+            "扫一下这个二维码",
+            "Please enter the verification code you received.",
+            "Send me the OTP from your authenticator.",
+            "Scan the QR code with your phone, then reply.",
+            "The user has already confirmed on the phone.",
+            // ST-37 #1: a code to type before going on, a passkey of yours
+            "输入验证码后继续",
+            "收到短信后，输入验证码后告诉我。",
+            "Use your passkey",
+            "Use your passkey to sign in, then reply.",
+            "Please confirm with your security key.",
+            "Enter the code we sent to your phone and continue.",
+            "请用 passkey 完成验证",
+            "你先用通行密钥登录一下",
+            "Please enter the 6-digit code sent to your phone, then reply.",
+            "Once the SMS arrives, enter the code and continue.",
         ] {
             assert!(own_action(t).is_some(), "{t}");
         }
@@ -1689,6 +2148,43 @@ mod tests {
             "测试全部通过，可以交付吗？",
             "Should the login handler return 401 or 403?",
             "我在浏览器里打开了预览，截图已保存",
+            // ST-25 #9: designing codes, OTPs and QR codes is ordinary work
+            "验证码有效期用60秒还是120秒？",
+            "OTP 用 6 位还是 8 位？",
+            "二维码组件用哪个库？",
+            "要不要加验证码输入框？",
+            "用户输入验证码后的校验逻辑放在哪一层？",
+            "你觉得发验证码用哪个短信服务？",
+            "两步验证要不要支持 TOTP？",
+            "扫码登录的回调用 a 还是 b？",
+            "Face ID 登录要不要做？",
+            "Should the verification code expire after 60 or 120 seconds?",
+            "Should we render the QR code on the login page?",
+            "Is a 6-digit OTP enough?",
+            // nor is a report that mentions your phone or browser
+            "The page now renders on your phone too.",
+            "你可以在浏览器里看到预览效果。",
+            "The tool formats the file by itself.",
+            "I fixed the login flow and the tests are done.",
+            "Login to the dashboard is slow; should we cache the session?",
+            "需要扫描所有文件吗？",
+            // ST-37 #1: designing and reporting on codes and passkeys is ordinary work
+            "已实现：用户输入验证码后继续登录，测试通过。",
+            "输入验证码后的校验逻辑放在哪一层？",
+            "验证码输入框做好了，输入后自动提交。",
+            "要不要支持用 passkey 登录？",
+            "你觉得用通行密钥还是短信验证码？",
+            "Users can now sign in with their passkey.",
+            "Should we let users use a passkey instead of a password?",
+            "The enter-the-code screen now validates 6 digits.",
+            "I added passkey support and the tests pass.",
+            "已实现：输入验证码后继续登录，测试通过。",
+            "复现：打开登录页，输入验证码后提交，报 500。",
+            "请问要不要用 passkey 登录？",
+            "请确认是否使用 passkey",
+            "Type the following code into your shell:",
+            "Enter the promo code and click apply.",
+            "Notes\nEnter the source code directory",
         ] {
             assert!(own_action(t).is_none(), "{t}");
         }

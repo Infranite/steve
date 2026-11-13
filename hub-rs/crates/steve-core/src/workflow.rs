@@ -600,6 +600,12 @@ impl Tx<'_> {
         for s in self.db().sessions_of_item(child)? {
             // Freeze the attempt now; cancellation is sent outside the core lock.
             if let Some(turn) = self.rt().running(&s.id) {
+                /* kept with the turn, not in memory: its cancelled end is the pause's also after a
+                 * quick resume and a restart in between (`graph_stop_take`) */
+                self.db()
+                    .store()
+                    .sessions()
+                    .turn_paused(&s.id, &turn.attempt)?;
                 self.st.cancels.push((turn, child.into()));
             }
         }
@@ -717,7 +723,8 @@ impl Tx<'_> {
                 // A crash can land after the graph recorded a failure but before the turn-end
                 // callback closed its child. The failed attempt is durable; finish that item once
                 // its session is no longer running, including failures from older installations.
-                if u.status == "failed"
+                // A cancelled unit's child likewise, once its turn is over.
+                if matches!(u.status.as_str(), "failed" | "cancelled")
                     && let Some(child) = u.item_id.as_deref()
                     && self
                         .db()
@@ -725,13 +732,8 @@ impl Tx<'_> {
                         .is_some_and(|i| i.phase == crate::cycle::ACTIVE)
                     && !self.unit_turn(u)?
                 {
-                    let reason = u
-                        .reason
-                        .as_deref()
-                        .filter(|s| !s.trim().is_empty())
-                        .or_else(|| (!u.summary.trim().is_empty()).then_some(u.summary.as_str()))
-                        .unwrap_or("工作单元未通过");
-                    self.lc_stop(child, FAIL, "workflow", reason, None)?;
+                    let (kind, why) = unit_end(u);
+                    self.lc_stop(child, kind, "workflow", &why, None)?;
                 }
                 if (g.paused
                     || parent.status == "pause"
@@ -1079,8 +1081,59 @@ impl Tx<'_> {
             )?;
             self.lc_invalidate(&parent, "工作单元未通过")?;
             self.db().item_patch(child, patch![now: summary])?;
+            // its questions and stop cards are moot now: the coordinator decides what comes next
+            if let Some((_, failed)) = self.db().store().workflows().by_child(child)? {
+                self.unit_cards_expire(child, &failed)?;
+            }
         }
         self.mark(&s.id, Mark::Delivered);
+        Ok(())
+    }
+
+    /// The end of the session's turn `attempt` (`None`: the backend names none) came: whether the
+    /// graph stopped that very turn (a pause). Every mark of the session goes: an older turn's end
+    /// that is still to come is a stale one, never this session's current turn. The marks are kept
+    /// with the session's turns (`session_turns`), so a restart between the pause, a quick resume
+    /// and the end changes nothing.
+    pub(crate) fn graph_stop_take(&mut self, sid: &str, attempt: Option<&str>) -> Result<bool> {
+        let sessions = self.db().store().sessions();
+        let marks = sessions.turns_paused(sid)?;
+        if marks.is_empty() {
+            return Ok(false);
+        }
+        sessions.turn_unpaused(sid, None)?;
+        Ok(match attempt {
+            Some(a) => {
+                let end = crate::runtime::Running {
+                    session: sid.into(),
+                    attempt: a.into(),
+                };
+                marks.into_iter().any(|m| {
+                    self.rt().same_turn(
+                        &crate::runtime::Running {
+                            session: sid.into(),
+                            attempt: m,
+                        },
+                        &end,
+                    )
+                })
+            }
+            None => true,
+        })
+    }
+
+    /// A stale end of turn `e` came: a pause's mark of that turn goes, the others stay.
+    pub(crate) fn graph_stop_drop(&mut self, e: &crate::runtime::Running) -> Result<()> {
+        let sessions = self.db().store().sessions();
+        for m in sessions.turns_paused(&e.session)? {
+            let t = crate::runtime::Running {
+                session: e.session.clone(),
+                attempt: m,
+            };
+            if self.rt().same_turn(&t, e) {
+                sessions.turn_unpaused(&e.session, Some(&t.attempt))?;
+            }
+        }
         Ok(())
     }
 
@@ -1089,6 +1142,8 @@ impl Tx<'_> {
         let Some(child) = s.item_id.as_deref() else {
             return Ok(false);
         };
+        let paused_here =
+            self.graph_stop_take(&s.id, end.attempt.as_deref())? && end.stop_reason == "cancelled";
         let item = self.item(child)?;
         if !self.workflow_child(&item)? {
             return Ok(false);
@@ -1105,6 +1160,8 @@ impl Tx<'_> {
         } else {
             if unit.status == "running"
                 && !g.paused
+                /* the pause stopped it; resumed meanwhile, the same session goes on (workflow_drive) */
+                && !paused_here
                 && !self
                     .db()
                     .decisions_of_item(child)?
@@ -1123,17 +1180,24 @@ impl Tx<'_> {
             }
             if item.phase != CLOSED
                 && let Some((_, settled)) = self.db().store().workflows().by_child(child)?
-                && settled.status == "failed"
+                && matches!(settled.status.as_str(), "failed" | "cancelled")
             {
-                // Both explicit failure and a turn ending without delivery finish this attempt.
-                // Its evidence remains on the graph; a retry claims a new child.
-                self.lc_stop(child, FAIL, "workflow", &settled.summary, None)?;
+                // Explicit failure, a turn ending without delivery and a cancel all finish this
+                // attempt. Its evidence remains on the graph; a retry claims a new child.
+                let (kind, why) = unit_end(&settled);
+                self.lc_stop(child, kind, "workflow", &why, None)?;
             }
         }
         self.workflow_drive(&parent)?;
-        let latest = self.db().store().workflows().by_child(child)?;
+        /* only the graph's current attempt is news: a retired one keeps its outcome (a failure
+         * stays failed) but the coordinator already decided what came after it */
+        let latest = self.db().store().workflows().get(&parent)?.and_then(|g| {
+            g.units
+                .into_iter()
+                .find(|u| u.item_id.as_deref() == Some(child))
+        });
         if !g.paused
-            && latest.is_some_and(|(_, u)| matches!(u.status.as_str(), "succeeded" | "failed"))
+            && latest.is_some_and(|u| matches!(u.status.as_str(), "succeeded" | "failed"))
             && let Some(coordinator) = self
                 .active_session(&parent)?
                 .filter(|s| s.status != "ended")
@@ -1211,4 +1275,18 @@ pub fn plan_notes(specs: &[UnitSpec], max_parallel: Option<usize>) -> Vec<String
         ));
     }
     out
+}
+
+/// How a failed or cancelled unit's child item ends, and why (its own reason when it gave one).
+fn unit_end(u: &WorkUnit) -> (&'static str, String) {
+    let said = u
+        .reason
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| (!u.summary.trim().is_empty()).then_some(u.summary.as_str()));
+    if u.status == "cancelled" {
+        (CANCEL, said.unwrap_or("工作单元已取消").into())
+    } else {
+        (FAIL, said.unwrap_or("工作单元未通过").into())
+    }
 }

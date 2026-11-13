@@ -23,6 +23,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::{Value, json};
 
+use super::exec::{Body, Feed};
 use super::judge::{Env, Tool};
 use super::limits::{Places, tool_base, tool_command, tool_kind, tool_paths, tool_targets};
 use super::shell::{self, Argv};
@@ -36,7 +37,7 @@ pub enum Guard {
     Ask(String),
 }
 
-fn ask(why: impl Into<String>) -> Guard {
+pub(super) fn ask(why: impl Into<String>) -> Guard {
     Guard::Ask(why.into())
 }
 
@@ -71,9 +72,9 @@ const NEVER: &[&str] = &[
     "csrutil",
     "tccutil",
 ];
-const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "fish", "ksh", "csh", "tcsh"];
+pub(super) const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "fish", "ksh", "csh", "tcsh"];
 /// Programs that only read (their path arguments must be readable places).
-const READERS: &[&str] = &[
+pub(super) const READERS: &[&str] = &[
     "ls",
     "cat",
     "head",
@@ -132,6 +133,8 @@ const READERS: &[&str] = &[
     "env",
     "printenv",
     "fd",
+    // `command -v`/`-V` only looks a command up (`command CMD` runs CMD, read through)
+    "command",
 ];
 /// Programs that write; every path argument must be inside the item's directory.
 const WRITERS: &[&str] = &[
@@ -323,28 +326,30 @@ fn fetch_carries(url: &str) -> Option<String> {
     None
 }
 
-/// The inline code of an interpreter's command line (`python3 -c CODE`, `node -e CODE`, `deno eval
-/// CODE`…), when there is one.
-fn inline_code<'a>(p: &str, args: &'a [String]) -> Option<&'a str> {
-    let flags: &[&str] = match p {
-        "python" | "python3" => &["-c"],
-        "node" | "bun" | "tsx" | "ts-node" => &["-e", "--eval", "-p", "--print"],
-        "ruby" => &["-e"],
-        "perl" => &["-e", "-E"],
-        "deno" => {
-            return (args.first().map(String::as_str) == Some("eval"))
-                .then(|| operands(&args[1..]).first().map(|s| s.as_str()))
-                .flatten();
-        }
-        _ => return None,
-    };
-    let i = args.iter().position(|a| flags.contains(&a.as_str()))?;
-    args.get(i + 1).map(String::as_str)
+/// Why an interpreter's inline code stays with the user: outward words, or a way to run something
+/// else ([`super::exec::code_runs`]); `None` when it has none or is no interpreter.
+fn code_outward(p: &str, args: &[String]) -> Option<String> {
+    let it = super::exec::interpreter(p, args)?;
+    if let Some(why) = it.unseen {
+        return Some(why);
+    }
+    if !it.lines.is_empty() {
+        return Some(format!("{p} 会把命令交给 shell 执行，留给你"));
+    }
+    it.codes
+        .iter()
+        .find_map(|code| match OUTWARD_CODE.find(code) {
+            Some(m) => Some(format!(
+                "内联代码里有对外或执行别的程序的字眼（{}），留给你",
+                m.as_str()
+            )),
+            None => super::exec::code_runs(it.lang, code),
+        })
 }
 
 /// An awk command line read the way awk reads it: the program texts (`-e`/`--source`, or the first
 /// operand) and the operands after them; `None` when the program is in a file (`-f`).
-fn awk_parts(args: &[String]) -> Option<(Vec<&str>, Vec<&String>)> {
+pub(super) fn awk_parts(args: &[String]) -> Option<(Vec<&str>, Vec<&String>)> {
     let mut progs = Vec::new();
     let mut i = 0;
     while let Some(a) = args.get(i) {
@@ -380,47 +385,8 @@ fn awk_parts(args: &[String]) -> Option<(Vec<&str>, Vec<&String>)> {
 
 /// An interpreter that reads its program from standard input (`… | python3`, `… | node -`): no inline
 /// code, no module and no script operand.
-fn program_from_stdin(p: &str, args: &[String]) -> bool {
-    let valued: &[&str] = match p {
-        "python" | "python3" => &["-W", "-X", "-Q"],
-        "node" | "bun" | "tsx" | "ts-node" => &[
-            "-r",
-            "--require",
-            "--import",
-            "-C",
-            "--conditions",
-            "--loader",
-            "--experimental-loader",
-            "--input-type",
-        ],
-        "ruby" => &["-I", "-r", "-C", "-E", "-F"],
-        "perl" => &["-I", "-M", "-m"],
-        "deno" => {
-            let ops = operands(args);
-            return match ops.first().map(|s| s.as_str()) {
-                None | Some("-") => true,
-                Some("run") => ops.get(1).is_none_or(|s| *s == "-"),
-                _ => false,
-            };
-        }
-        _ => return false,
-    };
-    if inline_code(p, args).is_some()
-        || matches!(p, "python" | "python3") && args.iter().any(|a| a == "-m")
-    {
-        return false;
-    }
-    let mut i = 0;
-    while let Some(a) = args.get(i) {
-        match a.as_str() {
-            "-" => return true,
-            "--" => return args.get(i + 1).is_none_or(|s| s == "-"),
-            s if valued.contains(&s) => i += 2,
-            s if s.starts_with('-') => i += 1,
-            _ => return false,
-        }
-    }
-    true
+pub(super) fn program_from_stdin(p: &str, args: &[String]) -> bool {
+    super::exec::interpreter(p, args).is_some_and(|i| i.stdin)
 }
 
 /// Why an awk program is more than a reader: it runs commands (`system()`, a pipe) or writes files.
@@ -525,6 +491,20 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
         if a.sudo {
             return Err("sudo 留给你".into());
         }
+        if let Some(why) = &a.unclear {
+            return Err(format!("{why}，看不出它运行的命令从哪开始"));
+        }
+        // a variable that makes the program run a command (`GIT_EDITOR=true`: judged as that
+        // command) or load code (`LD_PRELOAD`: left to the user)
+        for b in super::exec::var_bodies(&c.words) {
+            match b {
+                Body::Line(l, _) => {
+                    command(&l, &pl, cx)?;
+                }
+                Body::Unseen(why) => return Err(why),
+                _ => {}
+            }
+        }
         // a here-document is text for a reader (`cat <<EOF > file`), not a script for anything else
         if c.stdin.is_some() && !(READERS.contains(&a.program.as_str()) || a.program == "tee") {
             return Err(format!(
@@ -549,7 +529,7 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
     Ok(matched)
 }
 
-fn operands(args: &[String]) -> Vec<&String> {
+pub(super) fn operands(args: &[String]) -> Vec<&String> {
     let mut out = Vec::new();
     let mut opts = true;
     for a in args {
@@ -581,13 +561,42 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
     if a.xargs {
         return Err("xargs 的参数来自标准输入，看不出".into());
     }
-    if let Some(code) = inline_code(p, args)
-        && let Some(m) = OUTWARD_CODE.find(code)
+    if let Some(why) = code_outward(p, args) {
+        return Err(why);
+    }
+    // something it runs that cannot be read (`cargo --config …runner`, `less +!…`)
+    if let Some(Body::Unseen(why)) = super::exec::bodies(a, &Feed::default())
+        .into_iter()
+        .find(|b| matches!(b, Body::Unseen(_)))
     {
-        return Err(format!(
-            "内联代码里有对外或执行别的程序的字眼（{}），留给你",
-            m.as_str()
-        ));
+        return Err(why);
+    }
+    // an option whose value is a command (`fd -x`, `tar --to-command`)
+    if !super::exec::option_bodies(p, args, &Feed::default()).is_empty() {
+        return Err(format!("{p} 的选项会运行别的命令，留给你"));
+    }
+    // a runner's command (`bundle exec X`, `uv run X`) meets the guard as X would
+    if !matches!(p, "npm" | "pnpm" | "yarn")
+        && let Some(bodies) = super::exec::sub_runner(p, args, &Feed::default())
+    {
+        for b in bodies {
+            match b {
+                Body::Argv(words, _) => match shell::argv(&words) {
+                    Some(inner) if !inner.sudo && inner.unclear.is_none() => {
+                        if NEVER.contains(&inner.program.as_str())
+                            || SHELLS.contains(&inner.program.as_str())
+                        {
+                            return Err(format!("{p} 要运行的 {} 留给你", inner.program));
+                        }
+                        simple(&inner, pl, cx)?;
+                    }
+                    Some(_) => return Err(format!("{p} 要运行的命令留给你")),
+                    None => {}
+                },
+                Body::Unseen(why) => return Err(why),
+                _ => return Err(format!("{p} 会把命令交给 shell 执行，留给你")),
+            }
+        }
     }
     let sub = operands(args).first().map(|s| s.as_str()).unwrap_or("");
     let inside_all = |list: Vec<&String>| -> Result<(), String> {
@@ -671,7 +680,12 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
                 Ok(())
             }
         }
-        "git" => git(args, pl, extra),
+        "git" => {
+            if !super::exec::bodies(a, &Feed::default()).is_empty() {
+                return Err("git 会运行命令行里给的别的命令，留给你".into());
+            }
+            git(args, pl, extra)
+        }
         "find" => {
             if args.iter().any(|x| {
                 matches!(
@@ -688,6 +702,9 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
             readable_all(roots)
         }
         "sed" => {
+            if let Some(why) = super::exec::sed_runs(args) {
+                return Err(why);
+            }
             if args
                 .iter()
                 .any(|x| x.starts_with("-i") || x.starts_with("--in-place"))
@@ -783,18 +800,14 @@ fn npx(args: &[String], pl: &Places, cx: &Cx) -> Result<(), String> {
     let a = Argv {
         program: name.to_string(),
         args: ops[1..].to_vec(),
-        sudo: false,
-        xargs: false,
+        ..Default::default()
     };
     if TOOLCHAIN.contains(&name) || READERS.contains(&name) {
         simple(&a, pl, cx)
     } else {
         // a JavaScript build tool: what it is handed inline is still read
-        match inline_code("node", &a.args).and_then(|c| OUTWARD_CODE.find(c)) {
-            Some(m) => Err(format!(
-                "内联代码里有对外或执行别的程序的字眼（{}），留给你",
-                m.as_str()
-            )),
+        match code_outward("node", &a.args) {
+            Some(why) => Err(why),
             None => Ok(()),
         }
     }
@@ -802,7 +815,7 @@ fn npx(args: &[String], pl: &Places, cx: &Cx) -> Result<(), String> {
 
 /// `kill [-SIG] <pid>…`: only processes this session's agent started (looked up when the request
 /// came); never a process group, `-1` or a job.
-fn kill(args: &[String], pids: &[u32]) -> Result<(), String> {
+pub(super) fn kill(args: &[String], pids: &[u32]) -> Result<(), String> {
     let mut targets = Vec::new();
     let mut i = 0;
     let mut opts = true;
@@ -873,6 +886,9 @@ fn git(args: &[String], pl: &Places, extra: &[String]) -> Result<(), String> {
                 i += 2;
             }
             "-c" => return Err("git -c 留给你".into()),
+            s if s.starts_with("--config-env") || s.starts_with("--exec-path") => {
+                return Err(format!("git {s} 留给你"));
+            }
             s if s.starts_with("--git-dir") || s.starts_with("--work-tree") => {
                 return Err("git --git-dir / --work-tree 留给你".into());
             }
@@ -918,9 +934,17 @@ fn git(args: &[String], pl: &Places, extra: &[String]) -> Result<(), String> {
         "reset" => !rest
             .iter()
             .any(|x| matches!(x.as_str(), "--hard" | "--merge" | "--keep")),
-        "branch" => !rest
-            .iter()
-            .any(|x| x == "-D" || x == "-d" || x == "--delete" || x == "-m" || x == "-M"),
+        "branch" => !rest.iter().any(|x| {
+            // `-D`, `-d`, `-m`, `-M`, also clustered (`-qD`) or abbreviated (`--del`)
+            x.strip_prefix('-')
+                .filter(|c| !c.starts_with('-'))
+                .is_some_and(|c| c.contains(['D', 'd', 'm', 'M']))
+                || x.len() > 3
+                    && x.starts_with("--")
+                    && ["--delete", "--move", "--copy"]
+                        .iter()
+                        .any(|l| l.starts_with(x.as_str()))
+        }),
         "rebase" | "merge" => {
             let ops = operands(rest);
             rest.iter()

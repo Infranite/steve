@@ -15,7 +15,9 @@ pub mod breaker;
 pub mod digest;
 pub mod draft;
 pub mod engine;
+pub mod exec;
 pub mod facts;
+pub mod full_guard;
 pub mod guard;
 pub mod judge;
 pub mod ledger;
@@ -32,7 +34,11 @@ mod answer_tests;
 #[cfg(test)]
 mod engine_tests;
 #[cfg(test)]
+mod full_tests;
+#[cfg(test)]
 mod guard_tests;
+#[cfg(test)]
+mod own_action_tests;
 #[cfg(test)]
 mod release_tests;
 #[cfg(test)]

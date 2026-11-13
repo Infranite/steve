@@ -452,4 +452,240 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     assert_eq!(r[0][0], json!("open"), "the card waits for the user: {r:?}");
     assert_ne!(r[0][1], json!("decided"), "{r:?}");
     assert!(!texts(&e, &push).await.contains("perm:selected"));
+
+    // 等待审批时切换: plain YOLO leaves a write outside the worktree to you; switching to full
+    // access while the harness waits answers that very request once (the tool is not run again,
+    // the turn goes on), the page says the harness still runs in its old mode until the turn ends,
+    // and only once the Node confirmed the new mode does it read as applied
+    let waiting = item(
+        &e,
+        "复制 @permexec cp notes.txt /opt/steve-e2e/notes.txt @say mid @sleep 4000 @say after",
+    )
+    .await;
+    let acts = |sid: String| {
+        let db = e.db.clone();
+        move || {
+            rows(
+                &db,
+                "SELECT d.status, a.outcome, a.rule FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
+                  WHERE d.subject_type = 'tool_call' AND d.session_id = ? ORDER BY a.rowid",
+                &[&sid],
+            )
+        }
+    };
+    let waiting_acts = acts(waiting.clone());
+    assert!(
+        until(20, || async { !waiting_acts().is_empty() }).await,
+        "YOLO looked at it"
+    );
+    assert_eq!(
+        waiting_acts()[0][1],
+        json!("declined"),
+        "{:?}",
+        waiting_acts()
+    );
+    let iid = e.session(&waiting).await["item_id"]
+        .as_str()
+        .expect("item")
+        .to_string();
+    let state = || async {
+        let (s, v) = e.call("GET", &format!("/api/yolo/items/{iid}"), None).await;
+        assert_eq!(s, 200, "{v}");
+        v
+    };
+    assert_eq!(state().await["level"], "on");
+    let (s, v) = e
+        .call(
+            "PUT",
+            "/api/yolo",
+            Some(json!({"mode": "full", "confirm": true})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(
+        until(20, || async {
+            texts(&e, &waiting).await.contains("perm:selected:")
+        })
+        .await,
+        "the waiting request was answered: {}",
+        texts(&e, &waiting).await
+    );
+    let r = waiting_acts();
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert_eq!(
+        (r[1][0].clone(), r[1][1].clone(), r[1][2].clone()),
+        (json!("resolved"), json!("decided"), json!("tool.full"))
+    );
+    let cards = rows(
+        &e.db,
+        "SELECT id FROM decisions WHERE subject_type = 'tool_call' AND session_id = ?",
+        &[&waiting],
+    );
+    assert_eq!(cards.len(), 1, "one card, answered once: {cards:?}");
+    let v = state().await;
+    assert_eq!(
+        (v["level"].clone(), v["source"].clone()),
+        (json!("full"), json!("workspace")),
+        "{v}"
+    );
+    let row = &v["sessions"][0];
+    assert_eq!(row["wanted"], "full_access", "{v}");
+    assert_ne!(
+        row["applied"], "full_access",
+        "not in force while the turn runs: {v}"
+    );
+    assert_eq!(row["status"], "after_turn", "{v}");
+    assert_eq!(row["residual"], true, "{v}");
+    assert!(
+        until(30, || async {
+            let v = state().await;
+            v["sessions"][0]["status"] == "applied" && v["sessions"][0]["applied"] == "full_access"
+        })
+        .await,
+        "confirmed by the Node after the turn: {}",
+        state().await
+    );
+    let t = texts(&e, &waiting).await;
+    assert_eq!(
+        t.matches("perm:selected:").count(),
+        1,
+        "the tool was not asked again: {t}"
+    );
+    assert!(t.contains("after"), "{t}");
+
+    // 关 → 完全放开: while YOLO is off a request waits and nothing is recorded; switching to full
+    // access with the default “new cards only” window answers that very request once (it belongs to
+    // the running turn), while one that would stop processes by name inside `find -exec` stays yours
+    let (s, v) = e
+        .call("PUT", "/api/yolo", Some(json!({"mode": "off"})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let off_ok = item(
+        &e,
+        "复制 @permexec cp notes.txt /opt/steve-e2e/off.txt @say after-off",
+    )
+    .await;
+    let off_kill = item(
+        &e,
+        "停掉 @permexec find . -name x.pid -exec killall node ; @say after-kill",
+    )
+    .await;
+    let open_cards = |sid: String| {
+        let db = e.db.clone();
+        move || {
+            rows(
+                &db,
+                "SELECT id FROM decisions WHERE subject_type = 'tool_call' AND status = 'open' AND session_id = ?",
+                &[&sid],
+            )
+        }
+    };
+    let (ok_open, kill_open) = (open_cards(off_ok.clone()), open_cards(off_kill.clone()));
+    assert!(
+        until(20, || async {
+            ok_open().len() == 1 && kill_open().len() == 1
+        })
+        .await,
+        "both requests wait for you"
+    );
+    let (ok_acts, kill_acts) = (acts(off_ok.clone()), acts(off_kill.clone()));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        ok_acts().is_empty() && kill_acts().is_empty(),
+        "off: YOLO records nothing"
+    );
+    let (s, v) = e
+        .call(
+            "PUT",
+            "/api/yolo",
+            Some(json!({"mode": "full", "confirm": true})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(
+        until(20, || async {
+            texts(&e, &off_ok).await.contains("perm:selected:")
+        })
+        .await,
+        "the waiting request was answered and the turn went on: {}",
+        texts(&e, &off_ok).await
+    );
+    let r = ok_acts();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(
+        (r[0][0].clone(), r[0][1].clone(), r[0][2].clone()),
+        (json!("resolved"), json!("decided"), json!("tool.full"))
+    );
+    assert_eq!(
+        texts(&e, &off_ok).await.matches("perm:selected:").count(),
+        1
+    );
+    assert!(
+        until(20, || async { e.session(&off_ok).await["busy"] == false }).await,
+        "the turn went on to its end"
+    );
+    assert!(
+        until(20, || async { !kill_acts().is_empty() }).await,
+        "YOLO looked at the other one"
+    );
+    let r = kill_acts();
+    assert_eq!(
+        (r[0][0].clone(), r[0][1].clone(), r[0][2].clone()),
+        (json!("open"), json!("declined"), json!("tool.full")),
+        "{r:?}"
+    );
+    assert!(!texts(&e, &off_kill).await.contains("perm:selected"));
+
+    // ST-26: a session without a bot runs under full access; turning full access off asks its
+    // harness back to asking (before, no mode was sent and the page read `applied` with an empty
+    // `wanted` while the harness still ran in full access). Nothing reads as applied until the
+    // Node confirmed `ask`.
+    let nobot = item(&e, "笔记 @say nobot @sleep 1500 @say done").await;
+    let c = rusqlite::Connection::open(&e.db).expect("db");
+    c.busy_timeout(Duration::from_secs(5)).expect("timeout");
+    c.execute("UPDATE sessions SET bot_id = NULL WHERE id = ?", [&nobot])
+        .expect("no bot");
+    let iid = e.session(&nobot).await["item_id"]
+        .as_str()
+        .expect("item")
+        .to_string();
+    let row = || async {
+        let (s, v) = e.call("GET", &format!("/api/yolo/items/{iid}"), None).await;
+        assert_eq!(s, 200, "{v}");
+        v["sessions"][0].clone()
+    };
+    assert!(
+        until(30, || async {
+            let r = row().await;
+            r["status"] == "applied" && r["applied"] == "full_access"
+        })
+        .await,
+        "opened under full access: {}",
+        row().await
+    );
+    assert_eq!(row().await["wanted_from"], "full_access");
+    assert!(
+        until(20, || async { e.session(&nobot).await["busy"] == false }).await,
+        "its turn ended"
+    );
+    let (s, v) = e
+        .call("PUT", "/api/yolo", Some(json!({"mode": "off"})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let r = row().await;
+    assert_eq!(r["wanted"], "ask", "never an empty wanted: {r}");
+    assert_eq!(r["wanted_from"], "node_default", "{r}");
+    assert!(
+        !(r["status"] == "applied" && r["applied"] == "full_access"),
+        "not applied while the harness still runs full access: {r}"
+    );
+    assert!(
+        until(30, || async {
+            let r = row().await;
+            r["status"] == "applied" && r["applied"] == "ask"
+        })
+        .await,
+        "the Node confirmed ask: {}",
+        row().await
+    );
 }

@@ -1978,8 +1978,15 @@ impl Tx<'_> {
             attempt: a.clone(),
         });
         if let Some(e) = &end {
-            // the same end told twice (a redelivery): handled once
-            if self.st.ended.get(&e.session) == Some(&e.attempt) {
+            /* the same end told twice (a redelivery, also after a restart): handled once. Kept with
+             * the session's turns, so a replay never judges the turn again nor takes your Stop of it
+             * from you */
+            if !self
+                .db()
+                .store()
+                .sessions()
+                .turn_ended(&e.session, &e.attempt, &t.stop_reason)?
+            {
                 self.diagnostic_session(
                     &e.session,
                     Some(&e.attempt),
@@ -1990,7 +1997,6 @@ impl Tx<'_> {
                 );
                 return Ok(());
             }
-            self.st.ended.insert(e.session.clone(), e.attempt.clone());
         }
         // the end of a turn that is not the one running now came late: that newer turn has its
         // own end, which judges the item; what its tool calls left is kept for it
@@ -2004,6 +2010,8 @@ impl Tx<'_> {
             {
                 self.st.pending.remove(sid);
             }
+            /* a pause's mark of that old turn goes with it: it never stands for the turn now */
+            self.graph_stop_drop(e)?;
             self.diagnostic_session(
                 sid,
                 t.attempt.as_deref(),
@@ -2017,13 +2025,71 @@ impl Tx<'_> {
         let Some(session) = self.db().session(&t.session_id)? else {
             return Ok(());
         };
-        self.st.stops.insert(
-            session.id.clone(),
-            crate::work::LastStop {
-                stop_reason: t.stop_reason.clone(),
-                error: t.error.clone().filter(|e| !e.is_empty()),
-            },
-        );
+        /* how it ended, kept for the stall watch (durably: the same after a restart). A turn you
+         * stopped stays yours until a message starts another: the end of an older turn that comes
+         * late (no message sent since) neither takes that from you nor is judged again */
+        let sessions = self.db().store().sessions();
+        let kept = sessions.stop(&session.id)?;
+        /* your Stop is for the turn it named. The end of another turn uses it up only when that
+         * turn is newer (a message was sent after you asked); with no message since, it is an
+         * older turn's end that came late: it neither takes the Stop nor becomes the last end, the
+         * stopped turn's own end does */
+        let mut asked_yours = false;
+        if let (Some(e), Some(k)) = (&end, &kept)
+            && let Some(asked) = k.stop_asked.as_deref()
+        {
+            let same = asked.is_empty()
+                || self.rt().same_turn(
+                    &Running {
+                        session: session.id.clone(),
+                        attempt: asked.into(),
+                    },
+                    e,
+                );
+            if same {
+                asked_yours = true;
+            } else if let Some(asked_at) = k.asked_seq
+                /* a Stop kept before its moment was (an older build's): not known to be newer */
+                && !self.db().sent_after(&session.id, asked_at)?
+            {
+                self.graph_stop_drop(e)?;
+                self.diagnostic_session(
+                    &session.id,
+                    t.attempt.as_deref(),
+                    "turn.end_evaluated",
+                    "stale_attempt",
+                    true,
+                    Default::default(),
+                );
+                return Ok(());
+            }
+        } else if end.is_none() {
+            asked_yours = kept.as_ref().is_some_and(|k| k.stop_asked.is_some());
+        }
+        if let (Some(e), Some(k)) = (&end, &kept)
+            && k.stop_reason.is_some()
+            && crate::work::yours(k)
+            && k.attempt.as_deref().is_some_and(|a| a != e.attempt)
+            && !self.db().sent_after(&session.id, k.seq.unwrap_or(0))?
+        {
+            self.graph_stop_drop(e)?;
+            self.diagnostic_session(
+                &session.id,
+                t.attempt.as_deref(),
+                "turn.end_evaluated",
+                "stale_attempt",
+                true,
+                Default::default(),
+            );
+            return Ok(());
+        }
+        sessions.stop_ended(
+            &session.id,
+            t.attempt.as_deref(),
+            &t.stop_reason,
+            t.error.as_deref().filter(|e| !e.is_empty()),
+            asked_yours,
+        )?;
         let Some(item_id) = session.item_id.as_deref() else {
             self.st.pending.remove(&session.id);
             return Ok(());
@@ -2223,7 +2289,8 @@ impl Tx<'_> {
                 let last = self.last_agent_text(&session.id)?;
                 if crate::yolo::answer::looks_like_question(&last).is_some()
                     || answered_you
-                    || crate::yolo::limits::own_action(&last).is_some()
+                    || crate::yolo::limits::own_action(&self.db().final_reply(&session.id)?)
+                        .is_some()
                 {
                     format!("{why}；Agent 停下来等你：{}", js_head(&last, 160))
                 } else {

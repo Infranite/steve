@@ -238,10 +238,14 @@ impl Engine {
             key,
             full,
         };
-        let limited = super::limits::money_or_outside_words(question, full).is_some()
-            || a.recommended
-                .as_deref()
-                .is_some_and(|r| super::limits::money_or_outside_words(r, full).is_some());
+        // a hard limit already decides it: no model call (what only you can do included)
+        let limited = [Some(question), a.recommended.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|t| {
+                super::limits::money_or_outside_words(t, full).is_some()
+                    || super::limits::own_action(t).is_some()
+            });
         if consult && !a.repeated && a.count < ASK_PER_ITEM && !limited {
             a.answer = self.model_answer(d, item, question, options, &a, cache_key)?;
         }

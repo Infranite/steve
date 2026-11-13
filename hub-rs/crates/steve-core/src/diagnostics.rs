@@ -15,13 +15,20 @@ impl Core {
             let item = t.item(item_id)?;
             // the same judgement the turn end, the stall watch and Steve's continues make
             let work = t.work(&item)?;
+            // how its session's last turn ended, as the stall watch reads it (your Stop included)
+            let stop = match t.active_session(item_id)? {
+                Some(s) => t.db().store().sessions().stop(&s.id)?,
+                None => None,
+            };
+            let (stopped, yours) = crate::work::stopped(stop.as_ref());
             (
                 steve_store::now(),
                 item.cycle,
                 item.revision,
                 t.lc_view(&item)?,
                 t.dependency_view(item_id)?,
-                json!({"state": work.code(), "why": work.text()}),
+                json!({"state": work.code(), "why": work.text(),
+                    "last_stop": {"why": stopped, "yours": yours}}),
             )
         };
         let lane = self.lane_status_of_item(item_id)?;

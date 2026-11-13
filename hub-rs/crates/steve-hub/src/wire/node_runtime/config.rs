@@ -69,14 +69,19 @@ fn rank(p: PermissionMode) -> u8 {
     }
 }
 
-fn describe(c: &HarnessChoice, p: &ExecutionPolicy) -> String {
-    let mode = match p.permissions {
+/// Steve's name of a permission mode.
+pub(crate) fn mode_str(p: PermissionMode) -> &'static str {
+    match p {
         PermissionMode::Plan => "plan",
         PermissionMode::Ask => "ask",
         PermissionMode::AcceptEdits => "accept_edits",
         PermissionMode::Auto => "auto",
         PermissionMode::FullAccess => "full_access",
-    };
+    }
+}
+
+fn describe(c: &HarnessChoice, p: &ExecutionPolicy) -> String {
+    let mode = mode_str(p.permissions);
     let mut s = format!("权限 {mode}");
     if let Some(m) = &c.model {
         s.push_str(&format!("，模型 {m}"));
@@ -222,6 +227,91 @@ impl NodeRuntime {
             Err(e) => return Err(e.into()),
         };
         Ok(r.and_then(|r| Revision::try_from(r).ok()))
+    }
+
+    /// Where the session's permission mode stands, as far as this Hub knows it: the mode of the
+    /// last open or configure the Node finished with success (the harness confirmed it), the one
+    /// that waits or is on its way, and what the Node or the harness said of a change after it
+    /// that did not take. `None`: no such session on this Node.
+    pub fn mode_state(&self, session: &str) -> Result<Option<steve_core::ModeState>, StoreError> {
+        self.tx(|tx| {
+            let Some((phase, active)): Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=? AND node_id=?",
+                    [session, self.node_id.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            // opens and configures of the session, newest first: (rowid, method, state, success,
+            // request, what the Node said)
+            type Row = (i64, String, String, bool, String, Option<String>);
+            let rows: Vec<Row> = {
+                let mut st = tx.prepare(
+                    "SELECT rowid, method, state, coalesce(json_extract(receipt,'$.success'),0)=1, request,
+                            coalesce(json_extract(receipt,'$.payload.safe_detail'), json_extract(receipt,'$.payload.state.error.safe_detail'))
+                       FROM node_commands WHERE method IN ('open_session','configure_session') AND json_extract(request,'$.body.session')=?
+                      ORDER BY created DESC, rowid DESC",
+                )?;
+                st.query_map([session], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+            };
+            let policy_of = |method: &str, req: &str| -> Result<PermissionMode, StoreError> {
+                Ok(if method == "open_session" {
+                    serde_json::from_str::<Command<OpenSession>>(req)?
+                        .body
+                        .policy
+                        .permissions
+                } else {
+                    serde_json::from_str::<Command<ConfigureSession>>(req)?
+                        .body
+                        .policy
+                        .permissions
+                })
+            };
+            let ok = rows.iter().position(|r| r.2 == "finished" && r.3);
+            let applied = ok
+                .map(|i| policy_of(&rows[i].1, &rows[i].4))
+                .transpose()?;
+            let busy = active.is_some()
+                || tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=? AND state<>'finished')",
+                    [session],
+                    |r| r.get::<_, bool>(0),
+                )?;
+            let mut s = steve_core::ModeState {
+                applied: applied.map(|p| mode_str(p).to_string()),
+                busy,
+                released: phase == "released",
+                ..Default::default()
+            };
+            // only the newest one after the last success says anything more
+            if let Some((_, method, state, _, req, detail)) =
+                rows.first().filter(|_| ok != Some(0))
+            {
+                match state.as_str() {
+                    "rejected" | "finished" => {
+                        s.refused = Some(detail.clone().unwrap_or_else(|| "没有生效".into()));
+                    }
+                    "unknown" => s.unknown = true,
+                    _ => {
+                        s.desired = Some(mode_str(policy_of(method, req)?).to_string());
+                        s.sending = true;
+                    }
+                }
+            }
+            if !s.sending
+                && let Some(d) = desired_in(tx, session)?
+            {
+                // waits for the next idle boundary or open (or a refused narrowing still holds)
+                s.desired = Some(mode_str(d.policy.permissions).to_string());
+            }
+            Ok(Some(s))
+        })
     }
 
     /// Changes the session's harness config. It goes to the Node now if the session is idle,
