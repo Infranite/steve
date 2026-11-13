@@ -2,15 +2,16 @@
  * 上面是事件直方图：在上面拖出一个时间窗口，窗口里的柱子亮起来，窗口上方浮出“时间段 · 多少个事件”和放大、缩小、清除；
  * 按住窗口中间可以左右滑动，拖两边改宽窄，键盘左右键滑动、Shift+左右键改宽、回车放大、Esc 清除。
  * 放大后直方图铺满这个窗口（可以一层层放大，缩小回到上一层）。出过错的时段在柱子上方标一个红框。
- * 下面的列表和数字条只看窗口里的事件，最新的在前。数据来自 GET /stats/events。 */
+ * 下面的列表只看窗口里的事件，最新的在前；各类事件的个数写在上面的类别开关里（stats v2：只一处，不再另有数字条）。
+ * 统计页上它在最下面，默认收起（EventsSection），展开才去取数。数据来自 GET /stats/events。 */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as RPointerEvent } from "react"
 import { cn } from "cn"
-import { RadarIcon, XIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react"
+import { ChevronRightIcon, XIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { stats, type EventKind, type Events, type Filter, type StatEvent } from "@/api/stats"
 import { ST } from "@/store"
 import { go, ItemNo, Segmented } from "@/ui"
-import { Panel, PanelFoot, StatStrip } from "@/panel"
+import { Panel, PanelFoot } from "@/panel"
 import { Loading } from "@/stats/overview"
 import { DECISION, RELEASE, STOP } from "@/stats/drill"
 import { fmtMs, fmtN, tickLabel, timeTicks, useStats } from "@/stats/format"
@@ -52,14 +53,29 @@ export function EventExplorer({ f, fkey, live }: { f: Filter; fkey: string; live
   const q = { lo: span?.[0], hi: span?.[1], a: sel?.[0], b: sel?.[1], kind: kind === "all" ? undefined : kind, buckets: typeof window !== "undefined" && window.innerWidth < 640 ? 48 : 96 }
   const [d] = useStats(() => stats.events(f, q), [fkey, JSON.stringify(q)], live)
   const v = d.s === "ok" && d.v.histogram ? d.v : null
+  /* the count of each kind for the switch: a narrowed answer counts only its kind, so the others keep the figures of the
+     last answer over all kinds in the same window */
+  const wkey = JSON.stringify([q.lo, q.hi, q.a, q.b])
+  const all = useRef<{ k: string; c: Events["counts"] } | null>(null)
+  if (v && kind === "all") all.current = { k: wkey, c: v.counts }
+  const counts = all.current?.k === wkey ? all.current.c : null
+  const n = (k: EventKind) => (counts ? counts[k] : v && kind === k ? v.counts[k] : null)
+  const label = (k: "all" | EventKind) => {
+    const x = k === "all" ? (counts ? counts.turn + counts.decision + counts.mark : null) : n(k)
+    const name = k === "all" ? t("stats:events.all") : k === "turn" ? t("stats:events.turns") : k === "decision" ? t("stats:events.decisions") : t("stats:events.marks")
+    return x == null ? name : t("stats:v2.events.kindN", { name, n: fmtN(x) })
+  }
   /* a Hub without the explorer: no panel */
   if (d.s === "absent") return null
   /* the date goes with the clock time once the span covers more than one day */
   const long = v ? new Date(v.lo).toDateString() !== new Date(v.hi - 1).toDateString() : false
   const zoomIn = (w: Win) => { setZoom([...zoom, w]); setSel(null) }
   return (
-    <Panel k="events" className="@container/events" data-events icon={<RadarIcon />} title={t("stats:events.title")} sub={t("stats:events.sub")}
-      right={<Segmented size="sm" value={kind} onChange={(k) => setKind(k)} options={[["all", t("stats:events.all")], ["turn", t("stats:events.turns")], ["decision", t("stats:events.decisions")], ["mark", t("stats:events.marks")]] as const} />}>
+    <Panel k="events" className="@container/events" data-events>
+      <div className="flex flex-wrap items-center justify-between gap-2 px-5 pt-4" data-events-kinds>
+        <Segmented size="sm" value={kind} onChange={(k) => setKind(k)} label={t("stats:events.title")} options={(["all", "turn", "decision", "mark"] as const).map((k) => [k, label(k)] as const)} />
+        {v && v.counts.bad > 0 && <span className="type-footnote text-destructive" data-events-bad={v.counts.bad}>{t("stats:v2.events.badN", { count: v.counts.bad })}</span>}
+      </div>
       <div className="flex min-h-10 flex-wrap items-center gap-1.5 px-5 pt-1 pb-1" data-events-crumbs>
         <span className="mr-0.5 type-label text-tertiary">{t("stats:events.span")}</span>
         <button type="button" className={cn("rounded-md px-1.5 py-0.5 type-footnote tabular-nums", zoom.length ? "text-muted-foreground hover:bg-muted hover:text-foreground" : "font-medium text-foreground")} onClick={() => { setZoom([]); setSel(null) }}>{t("stats:events.whole")}</button>
@@ -74,14 +90,8 @@ export function EventExplorer({ f, fkey, live }: { f: Filter; fkey: string; live
         {!v ? <Loading h={150} err={d.s === "error" ? d.msg : null} />
           : <Brush v={v} sel={sel} long={long} onSel={setSel} onZoom={zoomIn} canOut={zoom.length > 0} onOut={() => { setZoom(zoom.slice(0, -1)); setSel(null) }} />}
       </div>
-      {v && <StatStrip items={[
-        { k: "turn", label: t("stats:events.turns"), value: fmtN(v.counts.turn) },
-        { k: "decision", label: t("stats:events.decisions"), value: fmtN(v.counts.decision) },
-        { k: "mark", label: t("stats:events.marks"), value: fmtN(v.counts.mark) },
-        { k: "bad", label: t("stats:events.bad"), value: fmtN(v.counts.bad), tone: v.counts.bad ? "bad" : undefined },
-      ]} />}
       {v && <EventList v={v} long={long} />}
-      {v && <PanelFoot meta={<>{v.total > v.rows.length ? t("stats:events.shown", { count: v.total, shown: v.rows.length }) : t("stats:events.all_n", { count: v.total })}{v.capped && <> · {t("stats:events.capped")}</>}</>} />}
+      {v && (v.total > v.rows.length || v.capped) && <PanelFoot meta={<>{v.total > v.rows.length ? t("stats:events.shown", { count: v.total, shown: v.rows.length }) : null}{v.capped && <>{v.total > v.rows.length ? " · " : null}{t("stats:events.capped")}</>}</>} />}
     </Panel>
   )
 }
@@ -255,5 +265,23 @@ function EventList({ v, long }: { v: Events; long: boolean }) {
       })}
       {v.rows.length > shown.length && <div className="px-1 pt-1 pb-1"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setAll(true)} data-events-more>{t("stats:overview.showMore", { count: v.rows.length - shown.length })}</Button></div>}
     </div>
+  )
+}
+
+/** the explorer at the foot of the page, folded until asked for (it loads only then) */
+export function EventsSection({ f, fkey, live }: { f: Filter; fkey: string; live: boolean }) {
+  const t = useT()
+  const [open, setOpen] = useState(false)
+  return (
+    <section className="flex min-w-0 flex-col gap-4" data-section="events" aria-labelledby="stats-h-events">
+      <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="group -mx-2 flex items-center gap-2 self-start rounded-lg px-2 py-1 text-left hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none" data-events-toggle>
+        <ChevronRightIcon className={cn("size-4 text-muted-foreground transition-transform duration-180 ease-(--ease-out)", open && "rotate-90")} />
+        <span className="min-w-0">
+          <span id="stats-h-events" className="block type-title text-foreground">{t("stats:events.title")}</span>
+          <span className="block type-callout text-muted-foreground">{t("stats:v2.events.sub")}</span>
+        </span>
+      </button>
+      {open && <div className="anim-in"><EventExplorer f={f} fkey={fkey} live={live} /></div>}
+    </section>
   )
 }

@@ -1,25 +1,22 @@
-/* 统计页的概览（ST-40）：运行状态（原来顶部的 YOLO 横栏，见 yolo/status.tsx）、四个核心指标、新建与完成的趋势、进行中事项的状态分布，
- * 以及它们共用的下钻明细。“现在”的数字取自事项列表本身，下钻列表用同一个筛选，数字和列表天然一致；
- * “区间”的数字取自统计接口，下钻用 `only=done|created` 取同一批事项（steve-stats views::items）。
+/* 统计页的“现在”（stats v2）：一行细的状态（进行中 · 等你 · 失败或受阻，旁边是 YOLO 运行状态），以及页面共用的下钻明细。
+ * “现在”的数字取自事项列表本身，下钻列表用同一个筛选，数字和列表天然一致；
+ * “区间”的下钻（每天的产出里点一天）用 `only=done|created` 取同一批事项（steve-stats views::items）。
  * 单日范围（今天）按小时（ST-43）：点一个小时，下钻用 `hour` 取那个小时里完成或新建的事项，和柱子同一个区间。 */
-import { NumberTicker } from "@/components/affect/number-ticker"
 import { useState, type ReactNode } from "react"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { cn } from "cn"
-import { ArrowDownUpIcon, ChartColumnIcon, ListTodoIcon, TableIcon, XIcon } from "lucide-react"
-import { Panel, PanelFoot, StatStrip } from "@/panel"
-import { Trans } from "react-i18next"
-import { lang, t, useT } from "@/i18n"
+import { ChartColumnIcon, TableIcon, XIcon } from "lucide-react"
+import { t, useT } from "@/i18n"
 import { ago } from "@/i18n/format"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { st, pendingCards, closedSt, WT, type Item, type Orphan } from "@/store"
 import { go, ItemNo, Segmented, StatusDot } from "@/ui"
-import { stats, type Filter, type Series, type Summary } from "@/api/stats"
-import { Chart, ChartBody, ChartHead, ChartTable, HBars, STATE, type BarRow } from "@/stats/chart"
+import type { Filter } from "@/api/stats"
+import { STATE } from "@/stats/chart"
 import { ItemsTable } from "@/stats/items"
-import { bucketName, delta, fmtRange, isHour, oneDay, zoneName, useStats } from "@/stats/format"
+import { bucketName, isHour } from "@/stats/format"
 
 const link = "font-medium text-foreground/80 underline-offset-2 hover:text-foreground hover:underline"
 
@@ -39,103 +36,36 @@ export function nowSets(f: Filter) {
 export type Drill = "run" | "wait" | "fail" | "done" | `status:${StatusKey}` | `day:${string}`
 type StatusKey = "run" | "wait" | "block" | "pause"
 const GROUPS: Record<StatusKey, Item["st"][]> = { run: ["run"], wait: ["wait", "prop"], block: ["block"], pause: ["pause"] }
-const STATUS: [StatusKey, string][] = [["run", STATE.run], ["wait", STATE.wait], ["block", STATE.idle], ["pause", STATE.idle]]
 const statusLabel = (k: StatusKey) => (k === "run" ? t("stats:overview.status.run") : k === "wait" ? t("stats:overview.status.wait") : k === "block" ? t("stats:overview.status.block") : t("stats:overview.status.pause"))
 const statusEmpty = (k: StatusKey) => (k === "run" ? t("stats:overview.statusEmpty.run") : k === "wait" ? t("stats:overview.statusEmpty.wait") : k === "block" ? t("stats:overview.statusEmpty.block") : t("stats:overview.statusEmpty.pause"))
 
-function Tile({ k, label, scope, value, foot, def, tone, on, onClick }: { k: string; label: string; scope: string; value: ReactNode; foot?: ReactNode; def: string; tone: string; on: boolean; onClick: () => void }) {
+/** “现在”: what runs, waits for you or failed right now (the item list itself, so a count and its list always agree),
+ *  a slim line above the key numbers; each count opens its list. The YOLO run state rides on the same line. */
+export function NowLine({ f, drill, setDrill, children }: { f: Filter; drill: Drill | null; setDrill: (d: Drill | null) => void; children?: ReactNode }) {
   const t = useT()
-  return (
-    <Tooltip>
-      <TooltipTrigger render={<button type="button" onClick={onClick} aria-pressed={on} aria-label={t("stats:overview.tileAria", { label, scope })}
-        className={cn("relative min-w-0 rounded-lg px-3 py-3 text-left outline-none hover:bg-muted/50 focus-visible:bg-muted/60 active:scale-[0.99]", on && "bg-muted hover:bg-muted")} data-kpi={k} />}>
-        <span className="flex items-center gap-1.5 type-footnote text-muted-foreground"><span aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: tone }} />{label}<span className="text-tertiary">· {scope}</span></span>
-        <span className="mt-1.5 block truncate type-display tabular-nums text-foreground">{typeof value === "number" ? <NumberTicker value={value} locale={lang()} live={false} /> : value}</span>
-        <span className="block min-h-[18px] truncate type-footnote text-tertiary">{foot}</span>
+  const now = nowSets(f)
+  const toggle = (d: Drill) => setDrill(drill === d ? null : d)
+  const n = (k: "run" | "wait" | "fail", label: string, v: number, tone: string, def: string) => (
+    <Tooltip key={k}>
+      <TooltipTrigger render={<button type="button" onClick={() => toggle(k)} aria-pressed={drill === k} aria-label={t("stats:overview.tileAria", { label, scope: t("stats:overview.now") })}
+        className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2 type-callout text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:bg-muted", drill === k && "bg-muted text-foreground")} data-kpi={k} />}>
+        <span aria-hidden className={cn("size-2 shrink-0 rounded-full", k === "run" && v > 0 && "dot-running")} style={{ background: v > 0 ? tone : "var(--tertiary)" }} />
+        {label}<span className={cn("font-medium tabular-nums", v > 0 ? "text-foreground" : "text-tertiary")}>{v}</span>
       </TooltipTrigger>
       <TooltipContent className="max-w-64">{def}</TooltipContent>
     </Tooltip>
   )
-}
-
-/** the four figures that matter, each opening its list */
-export function CoreKpis({ s, f, prevName, rangeName, drill, setDrill }: { s: Summary; f: Filter; prevName: string; rangeName: string; drill: Drill | null; setDrill: (d: Drill | null) => void }) {
-  const t = useT()
-  const now = nowSets(f)
-  const toggle = (d: Drill) => setDrill(drill === d ? null : d)
-  const d = delta(s.throughput.done, s.prev?.throughput.done)
   return (
-    <div className="grid grid-cols-2 gap-1 px-2 pt-1 pb-2 @3xl/stats:grid-cols-4" data-core-kpis>
-      <Tile k="run" label={t("stats:overview.run")} scope={t("stats:overview.now")} value={now.run.length} tone={STATE.run} foot={t("stats:overview.runFoot", { count: now.by("run").length + now.by("wait").length + now.by("block").length + now.by("pause").length })}
-        def={t("stats:overview.runDef")} on={drill === "run"} onClick={() => toggle("run")} />
-      <Tile k="wait" label={t("stats:overview.wait")} scope={t("stats:overview.now")} value={now.cards.length} tone={STATE.wait} foot={now.cards.length ? t("stats:overview.waitFoot", { count: new Set(now.cards.map((c) => c.i.id || c.w.decision)).size }) : t("stats:overview.noneWaiting")}
-        def={t("stats:overview.waitDef")} on={drill === "wait"} onClick={() => toggle("wait")} />
-      <Tile k="done" label={t("stats:overview.done")} scope={rangeName} value={s.throughput.done} tone={STATE.done} foot={d ? t("stats:delta.vs", { prev: prevName, delta: d }) : s.prev ? t("stats:overview.prevCount", { prev: prevName, count: s.prev.throughput.done }) : ""}
-        def={t("stats:overview.doneDef")} on={drill === "done"} onClick={() => toggle("done")} />
-      <Tile k="fail" label={t("stats:overview.fail")} scope={t("stats:overview.now")} value={now.fail.length} tone={STATE.fail} foot={now.fail.length ? t("stats:overview.failFoot", { fails: now.fail.filter((i) => i.waits.some((w) => w.type === "fail")).length, blocked: now.fail.filter((i) => i.st === "block").length }) : t("stats:overview.none")}
-        def={t("stats:overview.failDef")} on={drill === "fail"} onClick={() => toggle("fail")} />
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5" data-now>
+      <span className="inline-flex items-center gap-0.5" data-now-counts>
+        <span className="mr-1.5 type-label text-tertiary">{t("stats:overview.now")}</span>
+        {n("run", t("stats:overview.run"), now.run.length, STATE.run, t("stats:overview.runDef"))}
+        {n("wait", t("stats:v2.now.wait"), now.cards.length, STATE.wait, t("stats:overview.waitDef"))}
+        {n("fail", t("stats:overview.fail"), now.fail.length, STATE.fail, t("stats:overview.failDef"))}
+      </span>
+      <span className="flex-1" />
+      {children}
     </div>
-  )
-}
-
-/** the meta line of a chart over the page's range: “件 / 天 · 11月1日 – 11月7日”, or by hour “件 / 小时 · 11月5日 00:00–24:00 · 北京时间” */
-export const rangeMeta = (unit: string, s: Summary, hourly: boolean) =>
-  hourly ? t("stats:overview.metaHourly", { unit, range: fmtRange(s.range.from, s.range.to), zone: zoneName(s.range.tz) }) : t("stats:overview.metaDaily", { unit, range: fmtRange(s.range.from, s.range.to) })
-
-/** 新建与完成, per day (per hour for one day), side by side */
-export function FlowChart({ s, f, fkey, live, drill, setDrill }: { s: Summary; f: Filter; fkey: string; live: boolean; drill: Drill | null; setDrill: (d: Drill | null) => void }) {
-  const t = useT()
-  const hourly = oneDay(f)
-  const [cr] = useStats(() => stats.series(f, "created", "none", hourly), [fkey], live)
-  const [dn] = useStats(() => stats.series(f, "done", "none", hourly), [fkey], live)
-  const [table, setTable] = useState(false)
-  /* null stays null: an hour not yet come is empty, not 0 */
-  const val = (v: number | null | undefined) => (v === null ? null : v ?? 0)
-  const data: Series | null = cr.s === "ok" && dn.s === "ok" ? {
-    ...cr.v,
-    series: [
-      { key: "created", label: t("stats:overview.created"), values: cr.v.buckets.map((_, i) => val(cr.v.series[0]?.values[i])) },
-      { key: "done", label: t("stats:overview.completed"), values: cr.v.buckets.map((b) => { const j = dn.v.buckets.indexOf(b); return j < 0 ? 0 : val(dn.v.series[0]?.values[j]) }) },
-    ],
-  } : null
-  const picked = drill?.startsWith("day:") ? drill.slice(4) : null
-  const pick = (day: string | null) => setDrill(day ? `day:${day}` : null)
-  const err = cr.s === "error" ? cr.msg : dn.s === "error" ? dn.msg : null
-  return (
-    <Panel k="flow" data-flow-chart>
-      <ChartHead k="flow" icon={<ArrowDownUpIcon />} title={t("stats:overview.flow")} sub={t("stats:panel.flowSub")} meta={rangeMeta(t("stats:overview.unitItems"), s, hourly)}
-        legend={[{ label: t("stats:overview.flowCreated", { count: s.throughput.created }), c: STATE.created }, { label: t("stats:overview.flowDone", { count: s.throughput.done }), c: STATE.done }, ...(hourly && data?.current != null ? [{ label: t("stats:overview.flowCurrent"), c: "var(--muted)" }] : [])]}
-        right={<ModeSwitch table={table} set={setTable} />} />
-      <ChartBody>
-        {!data ? <Loading err={err} /> : table ? <ChartTable data={data} fmt={(v) => String(Math.round(v))} picked={picked} onPick={pick} height={200} />
-          : <Chart data={data} kind="group" int fmt={(v) => String(Math.round(v))} colors={[STATE.created, STATE.done]} picked={picked} onPick={pick} label={hourly ? t("stats:overview.flowAriaHourly") : t("stats:overview.flowAriaDaily")} height={200} />}
-        {data && data.series.every((l) => l.values.every((v) => !v)) && <div className="mt-2 type-footnote text-muted-foreground">{t("stats:overview.flowEmpty")}</div>}
-      </ChartBody>
-      <StatStrip items={[
-        { k: "created", label: t("stats:overview.created"), value: s.throughput.created },
-        { k: "done", label: t("stats:overview.completed"), value: s.throughput.done, tone: s.throughput.done ? "ok" : undefined },
-        { k: "net", label: t("stats:panel.net"), value: s.throughput.created - s.throughput.done > 0 ? "+" + (s.throughput.created - s.throughput.done) : s.throughput.created - s.throughput.done },
-      ]} />
-    </Panel>
-  )
-}
-
-/** the open items by status, now */
-export function StatusBars({ f, drill, setDrill }: { f: Filter; drill: Drill | null; setDrill: (d: Drill | null) => void }) {
-  const t = useT()
-  const now = nowSets(f)
-  const rows: BarRow[] = STATUS.map(([k, c]) => ({ key: k, label: statusLabel(k), c, value: now.by(k).length }))
-  const total = rows.reduce((a, r) => a + r.value, 0)
-  const fails = now.fail.filter((i) => i.waits.some((w) => w.type === "fail")).length
-  return (
-    <Panel k="status" className="self-start" data-status-bars>
-      <ChartHead k="status" icon={<ListTodoIcon />} title={t("stats:overview.statusTitle")} sub={t("stats:panel.statusSub")} meta={t("stats:overview.statusMeta", { count: total })} />
-      <ChartBody>
-        {total === 0 ? <div className="py-8 text-center type-callout text-muted-foreground">{t("stats:overview.statusNone")}</div>
-          : <div className="-mx-1.5"><HBars k="status" label={t("stats:overview.statusAria")} rows={rows} total={Math.max(...rows.map((r) => r.value))} picked={drill?.startsWith("status:") ? drill.slice(7) : null} onPick={(k) => setDrill(drill === `status:${k}` ? null : `status:${k}` as Drill)} /></div>}
-      </ChartBody>
-      {fails > 0 && <PanelFoot meta={<Trans t={t} i18nKey="stats:overview.failsNote" count={fails} components={{ link: <button type="button" className={link} onClick={() => setDrill("fail")} /> }} />} />}
-    </Panel>
   )
 }
 

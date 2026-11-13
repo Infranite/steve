@@ -73,7 +73,9 @@ export function fold(d: Series, max = 5): Series {
 }
 
 export type Kind = "stack" | "group" | "line" | "band"
-const H = 220, PAD = { l: 48, r: 12, t: 12, b: 26 }
+/** a second measure drawn as a line over the bars, on its own axis at the right (the daily chart's cost over its items) */
+export type Overlay = { key: string; label: string; values: (number | null)[]; color: string; fmt: (v: number) => string; tipFmt?: (v: number) => string }
+const H = 220, PAD0 = { l: 48, r: 12, t: 12, b: 26 }
 
 /** the top of the axis: 1 / 2 / 2.5 / 5 × 10ⁿ; counts get an even whole number so the middle tick is whole too */
 function niceMax(v: number, int = false): number {
@@ -88,7 +90,7 @@ const bar = (xl: number, w: number, y0: number, h: number, r: number) => {
   return `M${xl},${y0}V${yt + r}Q${xl},${yt} ${xl + r},${yt}H${xl + w - r}Q${xl + w},${yt} ${xl + w},${yt + r}V${y0}Z`
 }
 
-export function Chart({ data, kind, fmt, picked, onPick, label, colors, height = H, int = false, unit = 1, tipFmt, xFmt = bucketTick }: {
+export function Chart({ data, kind, fmt, picked, onPick, label, colors, height = H, int = false, unit = 1, tipFmt, xFmt = bucketTick, overlay }: {
   data: Series; kind: Kind; fmt: (v: number) => string; picked?: string | null; onPick?: (day: string | null) => void; label: string
   /** one colour per series (defaults to the identity order) */
   colors?: string[]; height?: number
@@ -98,6 +100,8 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
   tipFmt?: (v: number) => string
   /** a bucket as the axis writes it (days by default) */
   xFmt?: (bucket: string) => string
+  /** a second measure as a line on a right-hand axis */
+  overlay?: Overlay
 }) {
   const t = useT()
   const box = useRef<HTMLDivElement>(null)
@@ -109,6 +113,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
     const ro = new ResizeObserver(() => setW(el.clientWidth || 640)); ro.observe(el); setW(el.clientWidth || 640)
     return () => ro.disconnect()
   }, [])
+  const PAD = overlay ? { ...PAD0, r: 56 } : PAD0
   const n = data.buckets.length, lines = data.series
   const color = (k: number) => colors?.[k] ?? seriesColor(k, lines[k]?.key)
   const iw = Math.max(1, w - PAD.l - PAD.r), ih = height - PAD.t - PAD.b, slot = iw / Math.max(1, n)
@@ -118,6 +123,8 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
   const y = (v: number) => PAD.t + ih - (v / max) * ih
   const x = (i: number) => PAD.l + slot * i + slot / 2
   const ticks = [0, 0.5, 1].map((k) => k * max)
+  const max2 = overlay ? niceMax(Math.max(0, ...overlay.values.map((v) => v ?? 0))) : 1
+  const y2 = (v: number) => PAD.t + ih - (v / max2) * ih
   const hourly = data.bucket === "hour", cur = hourly ? data.current ?? -1 : -1
   /** an hour after the current one: not yet */
   const future = (i: number) => cur >= 0 && i > cur
@@ -151,6 +158,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
       ) : (
         <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={color(0)} band /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
       ))}
+      {overlay && !future(at) && <div className="mt-1 flex items-center gap-2 type-footnote" data-tip-overlay><Swatch c={overlay.color} line /><span className="min-w-0 flex-1 truncate text-muted-foreground">{overlay.label}</span><span className="font-medium tabular-nums text-foreground">{overlay.values[at] == null ? "—" : (overlay.tipFmt ?? overlay.fmt)(overlay.values[at]!)}</span></div>}
       {kind === "stack" && lines.length > 1 && !future(at) && <div className="mt-1 flex justify-between border-t pt-1 type-footnote"><span className="text-muted-foreground">{t("stats:chart.total")}</span><span className="font-medium tabular-nums">{tf(stackTop[at])}</span></div>}
       {onPick && !future(at) && <div className="mt-1 type-footnote text-tertiary">{data.buckets[at] === picked ? t("stats:chart.clickCancel") : hourly ? t("stats:chart.clickHour") : t("stats:chart.clickDay")}</div>}
     </div>
@@ -172,6 +180,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
             <text x={PAD.l - 10} y={y(v)} dy="0.32em" textAnchor="end" className="fill-tertiary type-footnote tabular-nums">{fmt(v)}</text>
           </g>
         ))}
+        {overlay && [0, 0.5, 1].map((k) => <text key={"r" + k} x={w - PAD.r + 10} y={y2(k * max2)} dy="0.32em" textAnchor="start" className="type-footnote tabular-nums" style={{ fill: overlay.color }} data-axis-right>{overlay.fmt(k * max2)}</text>)}
         {data.buckets.map((d, i) => i % every === 0 && <text key={d} x={x(i)} y={height - 8} textAnchor="middle" className={cn("type-footnote tabular-nums", d === picked || i === cur ? "fill-foreground font-medium" : future(i) ? "fill-tertiary" : "fill-muted-foreground")}>{xFmt(d)}</text>)}
         {at >= 0 && at < n && kind !== "stack" && kind !== "group" && <line x1={x(at)} x2={x(at)} y1={PAD.t} y2={PAD.t + ih} stroke="var(--border)" strokeWidth={1} />}
         {kind === "stack" && data.buckets.map((d, i) => {
@@ -214,6 +223,16 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
             ))}
           </g>
         ))}
+        {overlay && (() => {
+          let d = "", pen = false
+          overlay.values.forEach((v, i) => { if (v == null || future(i)) { pen = false; return } d += (pen ? "L" : "M") + x(i).toFixed(1) + "," + y2(v).toFixed(1); pen = true })
+          return (
+            <g data-overlay={overlay.key} className="pointer-events-none">
+              <path d={d} fill="none" stroke={overlay.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+              {overlay.values.map((v, i) => v != null && !future(i) && <circle key={i} cx={x(i)} cy={y2(v)} r={i === at ? 4.5 : n > 31 ? 0 : 3} fill={overlay.color} stroke="var(--card)" strokeWidth={2} />)}
+            </g>
+          )
+        })()}
       </svg>
       {tip}
     </div>
@@ -221,7 +240,9 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
 }
 
 /** the same numbers as a table (每个图可切“表格”) */
-export function ChartTable({ data, fmt, picked, onPick, xFmt = bucketTick, height }: { data: Series; fmt: (v: number) => string; picked?: string | null; onPick?: (d: string | null) => void; xFmt?: (bucket: string) => string
+export function ChartTable({ data, fmt, fmts, picked, onPick, xFmt = bucketTick, height }: { data: Series; fmt: (v: number) => string; picked?: string | null; onPick?: (d: string | null) => void; xFmt?: (bucket: string) => string
+  /** a format per series, when they measure different things (a count and a cost) */
+  fmts?: ((v: number) => string)[]
   /** the height of the chart it stands in for: the table scrolls inside it, so switching moves nothing around it */
   height?: number }) {
   const t = useT()
@@ -235,7 +256,7 @@ export function ChartTable({ data, fmt, picked, onPick, xFmt = bucketTick, heigh
           return (
             <tr key={d} className={cn("[&+&]:border-t [&+&]:border-border/60", can && "cursor-pointer hover:bg-accent", picked === d && "bg-accent", later && "text-tertiary")} onClick={() => can && onPick(picked === d ? null : d)} data-table-row={d}>
               <td className="py-1.5 pr-3 tabular-nums" title={hourly ? undefined : d}>{hourly ? hourSpan(d) : xFmt(d)}{i === cur && <span className="ml-1 text-tertiary">{t("stats:chart.open")}</span>}</td>
-              {data.series.map((l) => <td key={l.key} className="py-1.5 pl-3 text-right">{later ? t("stats:chart.notCome") : l.values[i] == null ? "—" : fmt(l.values[i]!)}</td>)}
+              {data.series.map((l, k) => <td key={l.key} className="py-1.5 pl-3 text-right">{later ? t("stats:chart.notCome") : l.values[i] == null ? "—" : (fmts?.[k] ?? fmt)(l.values[i]!)}</td>)}
             </tr>)
         })}</tbody>
       </table>
