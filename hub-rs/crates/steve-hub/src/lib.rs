@@ -9,6 +9,7 @@ steve_i18n::init!();
 pub mod access;
 pub mod api;
 pub mod app;
+pub mod avatar;
 pub mod backend;
 pub mod bus;
 pub mod catalog;

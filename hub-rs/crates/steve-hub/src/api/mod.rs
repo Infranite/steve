@@ -2,6 +2,7 @@
 //! Every request runs in one workspace (header `x-steve-ws` or cookie `steve_ws`, checked against membership).
 
 mod annotations;
+mod avatar;
 mod bots;
 pub mod dedupe;
 mod diagnostics;
@@ -503,6 +504,13 @@ pub fn router(st: AppState, modules: Router) -> Router {
             post(files::upload).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route("/files/{id}", get(files::download))
+        // a contact's picture: its own upload limit, like /files
+        .route(
+            "/contacts/{id}/avatar",
+            put(avatar::put)
+                .delete(avatar::delete)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         // conversation
         .route("/thread", post(misc::thread_say))
         .route("/thread/stop", post(misc::thread_stop))

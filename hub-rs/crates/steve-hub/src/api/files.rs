@@ -47,19 +47,36 @@ pub async fn upload(
     Query(q): Query<HashMap<String, String>>,
     req: Request,
 ) -> ApiResult {
+    let (buf, name) = read_upload(&q, req, BODY_LIMIT, too_large).await?;
+    let data_dir = st.cfg.data_dir.clone();
+    st.write(move |r| {
+        let f = att::store(r, &data_dir, &c.ws, &buf, name.as_deref(), &c.me)?;
+        ok(att::file_ref(&f))
+    })
+    .await
+}
+
+/// The bytes of an upload and the name it came with: the raw body (name in `?name=` or `X-File-Name`,
+/// URL-encoded) or multipart field `file`. A body over `limit` is `too_large()`, read and dropped first so
+/// the client gets the answer instead of a reset connection.
+pub(crate) async fn read_upload(
+    q: &HashMap<String, String>,
+    req: Request,
+    limit: usize,
+    too_large: fn() -> ApiError,
+) -> Result<(Vec<u8>, Option<String>), ApiError> {
     let declared = req
         .headers()
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
-    if declared.is_some_and(|n| n > BODY_LIMIT) {
-        // read (and drop) what the client sends so it gets the 413 instead of a reset connection
+    if declared.is_some_and(|n| n > limit) {
         let mut body = req.into_body().into_data_stream();
         use futures::StreamExt;
         let mut seen = 0usize;
         while let Some(Ok(chunk)) = body.next().await {
             seen += chunk.len();
-            if seen > 4 * BODY_LIMIT {
+            if seen > 4 * limit {
                 break;
             }
         }
@@ -77,48 +94,41 @@ pub async fn upload(
             .map(str::to_string)
     });
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, BODY_LIMIT)
+    let bytes = axum::body::to_bytes(body, limit)
         .await
         .map_err(|_| too_large())?;
-    let (buf, name) = if multipart {
-        let req = Request::from_parts(parts, Body::from(bytes));
-        // a malformed form is the client's: axum's own status for it (400, 413), not a 500
-        let mut form = Multipart::from_request(req, &())
+    if !multipart {
+        let name = raw_name.map(|r| att::decode_uri_component(&r).unwrap_or(r));
+        return Ok((bytes.to_vec(), name));
+    }
+    let req = Request::from_parts(parts, Body::from(bytes));
+    // a malformed form is the client's: axum's own status for it (400, 413), not a 500
+    let mut form = Multipart::from_request(req, &())
+        .await
+        .map_err(|e| ApiError::Json(e.status().as_u16(), e.body_text()))?;
+    // parseBody keeps the last value of a repeated field
+    let mut file = None;
+    while let Some(field) = form
+        .next_field()
+        .await
+        .map_err(|e| ApiError::Json(e.status().as_u16(), e.body_text()))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let fname = field.file_name().map(str::to_string);
+        let data = field
+            .bytes()
             .await
             .map_err(|e| ApiError::Json(e.status().as_u16(), e.body_text()))?;
-        // parseBody keeps the last value of a repeated field
-        let mut file = None;
-        while let Some(field) = form
-            .next_field()
-            .await
-            .map_err(|e| ApiError::Json(e.status().as_u16(), e.body_text()))?
-        {
-            if field.name() != Some("file") {
-                continue;
-            }
-            let fname = field.file_name().map(str::to_string);
-            let data = field
-                .bytes()
-                .await
-                .map_err(|e| ApiError::Json(e.status().as_u16(), e.body_text()))?;
-            file = fname.map(|n| (data, n));
-        }
-        let Some((data, n)) = file else {
-            return Err(ApiError::bad_request(steve_i18n::t!(
-                "hub.file.missing_field"
-            )));
-        };
-        (data.to_vec(), Some(n))
-    } else {
-        let name = raw_name.map(|r| att::decode_uri_component(&r).unwrap_or(r));
-        (bytes.to_vec(), name)
+        file = fname.map(|n| (data, n));
+    }
+    let Some((data, n)) = file else {
+        return Err(ApiError::bad_request(steve_i18n::t!(
+            "hub.file.missing_field"
+        )));
     };
-    let data_dir = st.cfg.data_dir.clone();
-    st.write(move |r| {
-        let f = att::store(r, &data_dir, &c.ws, &buf, name.as_deref(), &c.me)?;
-        ok(att::file_ref(&f))
-    })
-    .await
+    Ok((data.to_vec(), Some(n)))
 }
 
 pub async fn download(

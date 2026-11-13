@@ -1336,3 +1336,127 @@ async fn conversation_preferences_and_pagination_are_wired() {
         .await;
     assert_eq!(v["messages"][0]["text"], "keep this history");
 }
+
+impl Client {
+    /// `PUT` raw bytes; the status, the content type and the body.
+    async fn put_bytes(&self, path: &str, body: Vec<u8>) -> (u16, Value) {
+        let r = self
+            .http
+            .put(format!("{}{path}", self.base))
+            .header("cookie", &self.cookie)
+            .header("content-type", "application/octet-stream")
+            .body(body)
+            .send()
+            .await
+            .expect("send");
+        let status = r.status().as_u16();
+        let text = r.text().await.unwrap_or_default();
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        )
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn contact_avatars_are_squared_stored_and_cleared() {
+    use image::{ImageFormat, Rgb, RgbImage};
+    let hub = start().await;
+    let c = Client::login(&hub).await;
+    let (_, me) = c.call("GET", "/api/me/contact", None, None).await;
+    assert_eq!(me["avatar"], json!({}), "{me}");
+
+    let wide = RgbImage::from_fn(900, 300, |x, _| {
+        if (300..600).contains(&x) {
+            Rgb([0, 200, 0])
+        } else {
+            Rgb([200, 0, 0])
+        }
+    });
+    let mut png = Vec::new();
+    wide.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+        .unwrap();
+    let (s, v) = c.put_bytes("/api/contacts/me/avatar", png.clone()).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["is_me"], true);
+    let file = v["avatar"]["file"].as_str().expect("file id").to_string();
+    assert!(file.starts_with("fil"), "{v}");
+
+    // the stored picture is a 256px JPEG of the centre, served like any attachment
+    let r = c
+        .http
+        .get(format!("{}/api/files/{file}", c.base))
+        .header("cookie", &c.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["content-type"], "image/jpeg");
+    let img = image::load_from_memory(&r.bytes().await.unwrap()).unwrap();
+    assert_eq!((img.width(), img.height()), (256, 256));
+    let mid = img.to_rgb8().get_pixel(128, 128).0;
+    assert!(mid[1] > 150 && mid[0] < 80, "the centre: {mid:?}");
+    // never the bytes in the contact's JSON
+    let (_, me) = c.call("GET", "/api/me/contact", None, None).await;
+    assert_eq!(me["avatar"], json!({ "file": file }));
+
+    // other people get one the same way
+    let (_, zs) = c
+        .call(
+            "POST",
+            "/api/contacts",
+            Some(json!({ "name": "张三" })),
+            None,
+        )
+        .await;
+    let zid = zs["id"].as_str().unwrap().to_string();
+    let (s, v) = c
+        .put_bytes(&format!("/api/contacts/{zid}/avatar"), png.clone())
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["avatar"]["file"], json!(file), "same bytes, same file");
+    let (_, list) = c.call("GET", "/api/contacts", None, None).await;
+    let z = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == json!(zid))
+        .unwrap();
+    assert_eq!(z["avatar"]["file"], json!(file), "the list carries it too");
+
+    // only PNG, JPEG and WebP; a broken picture; a contact that is not there; too large
+    let (s, v) = c
+        .put_bytes(
+            "/api/contacts/me/avatar",
+            b"GIF89a\x01\x00\x01\x00".to_vec(),
+        )
+        .await;
+    assert_eq!(s, 415, "{v}");
+    let (s, _) = c
+        .put_bytes("/api/contacts/me/avatar", b"<svg onload=alert(1)>".to_vec())
+        .await;
+    assert_eq!(s, 415);
+    let (s, _) = c
+        .put_bytes("/api/contacts/me/avatar", png[..40].to_vec())
+        .await;
+    assert_eq!(s, 400);
+    let (s, _) = c
+        .put_bytes("/api/contacts/ct_nope/avatar", png.clone())
+        .await;
+    assert_eq!(s, 404);
+    let (s, _) = c
+        .put_bytes("/api/contacts/me/avatar", vec![0x89; 11 * 1024 * 1024])
+        .await;
+    assert_eq!(s, 413);
+
+    // back to initials
+    let (s, v) = c
+        .call("DELETE", "/api/contacts/me/avatar", None, None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["avatar"], json!({}));
+    let (_, z) = c
+        .call("GET", &format!("/api/contacts/{zid}"), None, None)
+        .await;
+    assert_eq!(z["avatar"]["file"], json!(file), "only 我's went");
+}
