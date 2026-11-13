@@ -38,7 +38,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   void (async () => {
     let result = {}
     if (m.method === "initialize") result = { protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: true }, mcpCapabilities: { http: true } }, agentInfo: { name: "offline-streaming-fixture", version: "1" }, authMethods: [] }
-    if (m.method === "session/new" || m.method === "session/load") result = { sessionId, models: { currentModelId: model, availableModels: [] }, modes: { currentModeId: "default", availableModes: [{ id: "plan", name: "Plan" }] } }
+    if (m.method === "session/new" || m.method === "session/load") result = { sessionId, models: { currentModelId: model, availableModels: [] }, modes: { currentModeId: "default", availableModes: [ /* the modes Claude Code and Codex offer: it stands in for both */ { id: "default", name: "Default" }, { id: "plan", name: "Plan" }, { id: "bypassPermissions", name: "Bypass Permissions" }, { id: "read-only", name: "Read only" }, { id: "auto", name: "Auto" }, { id: "agent-full-access", name: "Full access" }] } }
     if (m.method === "session/set_model") { model = m.params.modelId; result = { models: { currentModelId: model } } }
     if (m.method === "session/prompt") result = await prompt(m.params)
     send({ id: m.id, result })
