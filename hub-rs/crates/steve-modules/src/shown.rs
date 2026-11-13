@@ -56,9 +56,9 @@ mod tests {
 
     #[test]
     fn the_external_channel_system_by_language() {
-        let name = |l| steve_i18n::with(l, || system_name("ext_ws", false, "外部渠道"));
-        assert_eq!(name(steve_i18n::EN), "External channel");
-        assert_eq!(name(steve_i18n::ZH_CN), "外部渠道");
+        let name = |l| steve_i18n::with(l, || system_name("ext_ws", false, "其他聊天工具"));
+        assert_eq!(name(steve_i18n::EN), "Other chat app");
+        assert_eq!(name(steve_i18n::ZH_CN), "其他聊天工具");
         // renamed: as stored
         let own = steve_i18n::with(steve_i18n::EN, || system_name("ext_ws", false, "公司渠道"));
         assert_eq!(own, "公司渠道");

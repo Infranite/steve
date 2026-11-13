@@ -310,7 +310,7 @@ export default {
       title: "Signals",
       sub: "Mail, IM, calendar and other outside information, and how bots handled it",
       will: [["Triage", "Each incoming message goes through a flow: needs you, becomes an item, goes into a digest, or is ignored"], ["Corrections", "When something is handled wrong, switch it to \"remind me next time\" or \"ignore next time\" in one click to improve the flow"], ["Originals kept", "Originals are kept for a set period; after that only the outcome and a summary remain"]],
-      now: "First connect outside services (IM, mail, calendar) under Integrations. Nothing shows up here until then.",
+      now: "First connect outside services (IM, mail, calendar) under Connections. Nothing shows up here until then.",
     },
     auto: {
       title: "Automation",
@@ -357,7 +357,7 @@ export default {
       now: "This Hub doesn't have the stats API yet.",
     },
     integrations: {
-      title: "Integrations",
+      title: "Connections",
       sub: "The outside services Steve can connect to, and what each connection can do",
       will: [["Services", "IM, docs, calendar, tasks, mail, code hosting and directory; each one is connected step by step"], ["Capabilities", "Each connection lists what's on, what's missing permissions and what's planned"], ["Identity", "The bot and you are connected and authorized separately"]],
       now: "This Hub doesn't have the integrations module yet.",
@@ -592,8 +592,8 @@ export default {
       stats: "Stats",
       signals: "Signals",
       auto: "Automation",
-      integrations: "Integrations",
-      channels: "Channels",
+      integrations: "Connections",
+      channels: "Chats",
       contacts: "Contacts",
       knowledge: "Knowledge",
       accounts: "Accounts",

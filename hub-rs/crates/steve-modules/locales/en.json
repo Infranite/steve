@@ -160,7 +160,7 @@
   "modules.system.phone": "Phone",
   "modules.system.bank": "Bank card",
   "modules.system.feishu_tenant": "Feishu tenant",
-  "modules.system.ext_ws": "External channel",
+  "modules.system.ext_ws": "Other chat app",
   "modules.stewards.type.account": "Account",
   "modules.stewards.type.connection": "Connection",
   "modules.stewards.type.device": "Device",

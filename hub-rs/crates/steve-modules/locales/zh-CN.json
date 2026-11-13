@@ -160,7 +160,7 @@
   "modules.system.phone": "电话",
   "modules.system.bank": "银行卡",
   "modules.system.feishu_tenant": "飞书租户",
-  "modules.system.ext_ws": "外部渠道",
+  "modules.system.ext_ws": "其他聊天工具",
   "modules.stewards.type.account": "账号",
   "modules.stewards.type.connection": "接入",
   "modules.stewards.type.device": "设备",

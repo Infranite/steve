@@ -150,7 +150,7 @@
   "channels.text.feishu_provider": "飞书 / Lark",
   "channels.text.feishu_app_name": "飞书应用机器人",
   "channels.text.feishu_user_name": "飞书 · 你本人",
-  "channels.text.ext_ws_name": "外部渠道",
+  "channels.text.ext_ws_name": "其他聊天工具",
   "channels.text.planned_docs": "读写云文档和知识库",
   "channels.text.planned_sheets": "电子表格、多维表格",
   "channels.text.planned_calendar": "日程和会议",

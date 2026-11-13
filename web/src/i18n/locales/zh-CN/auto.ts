@@ -491,9 +491,9 @@ export default {
   },
   source: {
     page: "事件源",
-    imMoved: "IM 已经移到“渠道”",
-    imMovedSub: "各个渠道的账号、群、身份和响应规则都在渠道里管理。",
-    toChannels: "去渠道",
+    imMoved: "IM 已经移到“群聊与私聊”",
+    imMovedSub: "各个聊天工具的账号、群、身份和响应规则都在“群聊与私聊”里管理。",
+    toChannels: "去群聊与私聊",
     notFound: "没有这个事件源",
     notFoundSub: "可能是它的插件已经停用。",
     refreshed: "已刷新",

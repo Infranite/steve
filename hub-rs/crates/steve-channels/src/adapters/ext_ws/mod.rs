@@ -30,7 +30,7 @@ pub const ADAPTER: &str = "ext_ws";
 /// The handle system of the people its messages come from (`<realm>:id:<value>`).
 pub const SYSTEM: &str = "ext_ws";
 /// The system's label.
-pub const SYSTEM_LABEL: &str = "外部渠道";
+pub const SYSTEM_LABEL: &str = "其他聊天工具";
 
 /// You, through a channel service: a long connection the Hub keeps open while `msg.receive` is
 /// on; sends, replies in threads, reacts and recalls as you (a service that lacks one of them

@@ -1,0 +1,1 @@
+- The sidebar's 接入 is now 连接 (Connections) and 渠道 is now 群聊与私聊 (Chats): one is where Steve is connected to outside services, the other where Steve talks in groups and DMs. The generic connector for chat apps other than Feishu, formerly 外部渠道 (External channel), is now 其他聊天工具 (Other chat app).

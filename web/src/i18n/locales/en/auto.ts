@@ -72,7 +72,7 @@ export default {
     noAccounts: "No accounts",
     emptyTitle: "No event sources yet",
     emptySub: "Connect accounts like mail, calendar or GitHub and they become event sources.",
-    footer: "Connect external services in <integrations>Integrations</integrations>. Groups and DMs that can send and receive with an identity are managed in <channels>Channels</channels>. Schedules are managed under “Schedules”.",
+    footer: "Connect external services in <integrations>Connections</integrations>. Groups and DMs that can send and receive with an identity are managed in <channels>Chats</channels>. Schedules are managed under “Schedules”.",
   },
   bot: {
     named: "{{name}} bot",
@@ -498,9 +498,9 @@ export default {
   },
   source: {
     page: "Event source",
-    imMoved: "IM has moved to “Channels”",
-    imMovedSub: "Each channel's accounts, groups, identities and reply rules are managed in Channels.",
-    toChannels: "Go to Channels",
+    imMoved: "IM has moved to “Chats”",
+    imMovedSub: "Each channel's accounts, groups, identities and reply rules are managed in Chats.",
+    toChannels: "Go to Chats",
     notFound: "No such event source",
     notFoundSub: "Its plugin may have been turned off.",
     refreshed: "Refreshed",

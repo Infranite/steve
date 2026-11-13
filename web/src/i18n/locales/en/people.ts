@@ -354,7 +354,7 @@ export default {
     noChartSub: "Connect a work IM and turn on “Read directory” to sync departments and reporting lines here.",
     chartNote: "Synced from your work IM's directory; members and reporting lines are read-only. You can add local notes, tags and a linked group.",
     colon: ": ",
-    openScopes: "Grant on the Integrations page",
+    openScopes: "Grant on the Connections page",
   },
   team: {
     title: "Team",

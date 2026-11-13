@@ -4,10 +4,10 @@ export default {
     sep: ", ",
   },
   page: {
-    title: "Integrations",
+    title: "Connections",
     notFound: "No such service",
-    notFoundSub: "Steve doesn't know this one. Go back to Integrations to see what you can connect.",
-    overviewSub: "Outside services Steve can connect to. Channels are just one kind: there are also docs, calendars, tasks, mail, code repositories and directories. Each one lists who Steve works as and what it can do.",
+    notFoundSub: "Steve doesn't know this one. Go back to Connections to see what you can connect.",
+    overviewSub: "Connect Steve to outside services here: chat apps, docs, calendars, tasks, mail, code repositories and directories. Each connection lists who Steve works as and what it can do; once a chat app is connected, its groups and DMs are set up under Chats.",
     noneSub: "Steve supports the services below, but none are connected, so no capabilities are on yet. Pick a service and follow the steps.",
     supportedList: "Supports: {{list}}",
     footNote: "Credentials and tokens are stored encrypted in the vault. Permissions, re-authorization and disconnecting live on each service's page; how groups and DMs are handled lives in Channels.",

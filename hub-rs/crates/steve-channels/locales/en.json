@@ -150,7 +150,7 @@
   "channels.text.feishu_provider": "Feishu / Lark",
   "channels.text.feishu_app_name": "Feishu app bot",
   "channels.text.feishu_user_name": "Feishu · you",
-  "channels.text.ext_ws_name": "External channel",
+  "channels.text.ext_ws_name": "Other chat app",
   "channels.text.planned_docs": "Read and write Docs and Wiki",
   "channels.text.planned_sheets": "Sheets and Base",
   "channels.text.planned_calendar": "Calendar events and meetings",
