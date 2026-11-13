@@ -94,7 +94,7 @@ export const Chevron = () => <ChevronRightIcon className="size-4 shrink-0 text-t
 /** loading, centred where the content will be */
 export const Loading = ({ className }: { className?: string }) => <div className={cn("flex justify-center py-16", className)}><Spinner className="size-5 text-muted-foreground" /></div>
 
-/** the motion of things that open in place: 180ms on the system's ease-out (a chevron turning with its panel) */
+/** the motion of things that open in place: 180ms on the system's ease-(--ease-out) (a chevron turning with its panel) */
 export const EASE = "duration-180 ease-(--ease-out)"
 
 /** what opens under a row or a toggle: its height eases open and shut (the content is mounted only while open or
@@ -102,7 +102,7 @@ export const EASE = "duration-180 ease-(--ease-out)"
 export function Reveal({ open, children, className, ...rest }: { open: boolean; children: ReactNode; className?: string } & Omit<ComponentProps<typeof CollapsibleContent>, "children" | "className">) {
   return (
     <Collapsible open={open}>
-      <CollapsibleContent className={cn("-mx-1 h-(--collapsible-panel-height) overflow-hidden px-1 transition-[height,opacity] duration-220 ease-(--ease-out) data-ending-style:h-0 data-ending-style:opacity-0 data-starting-style:h-0 data-starting-style:opacity-0", className)} {...rest}>
+      <CollapsibleContent className={cn("-mx-1 px-1 transition-[height,opacity] data-ending-style:opacity-0 data-starting-style:opacity-0", className)} {...rest}>
         {children}
       </CollapsibleContent>
     </Collapsible>

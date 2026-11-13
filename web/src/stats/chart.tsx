@@ -144,7 +144,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
     else if (e.key === "Escape") setHover(null)
   }
   const tip: ReactNode = at >= 0 && at < n && (
-    <div role="status" className="pointer-events-none absolute top-1 z-10 min-w-36 max-w-60 rounded-lg bg-popover px-3 py-2 text-popover-foreground shadow-md transition-[left] duration-[120ms] ease-[var(--ease-out)]"
+    <div role="status" className="pointer-events-none absolute top-1 z-10 min-w-36 max-w-60 rounded-lg bg-popover px-3 py-2 text-popover-foreground shadow-md transition-[left] duration-120 ease-(--ease-out)"
       style={{ left: Math.min(Math.max(0, x(at) + 12), Math.max(0, w - 200)) }} data-chart-tip>
       <div className="type-label text-muted-foreground">{bucketName(data.buckets[at])}</div>
       {at === cur && <div className="mt-0.5 type-footnote text-tertiary" data-tip-current>{t("stats:chart.openUntil", { time: hhmm(Date.now()) })}</div>}
@@ -179,7 +179,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
         {kind === "stack" && data.buckets.map((d, i) => {
           let base = 0
           return (
-            <g key={d} data-bar={d} opacity={dim(i)} className="transition-opacity duration-[120ms]">
+            <g key={d} data-bar={d} opacity={dim(i)} className="transition-opacity duration-120">
               {lines.map((l, k) => {
                 const v = l.values[i] ?? 0
                 if (v <= 0) return null
@@ -192,7 +192,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
           )
         })}
         {kind === "group" && data.buckets.map((d, i) => (
-          <g key={d} data-bar={d} opacity={dim(i)} className="transition-opacity duration-[120ms]">
+          <g key={d} data-bar={d} opacity={dim(i)} className="transition-opacity duration-120">
             {lines.map((l, k) => {
               const v = l.values[i] ?? 0
               if (v <= 0) return null
@@ -262,7 +262,7 @@ export function HBars({ rows, fmt = String, onPick, picked, label, total, k, vw 
         const body = <>
           <span className={cn(lw, "shrink-0 truncate text-left type-callout text-foreground/90")} title={r.title}>{r.label}</span>
           <span className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted" aria-hidden>
-            {r.value > 0 && <span className="absolute inset-y-0 left-0 rounded-full transition-[width] duration-[260ms] ease-[var(--ease-out)]" style={{ width: `${Math.max(1.5, (r.value / max) * 100)}%`, background: r.c }} />}
+            {r.value > 0 && <span className="absolute inset-y-0 left-0 rounded-full transition-[width] duration-260 ease-(--ease-out)" style={{ width: `${Math.max(1.5, (r.value / max) * 100)}%`, background: r.c }} />}
           </span>
           <span className={cn(vw, "shrink-0 text-right")}>
             <span className="block type-callout font-medium tabular-nums">{fmt(r.value)}</span>
@@ -280,5 +280,5 @@ export function HBars({ rows, fmt = String, onPick, picked, label, total, k, vw 
 
 /** a thin share bar in a table cell (4px, grey) */
 export function Share({ r }: { r: number }) {
-  return <span className="block h-1 w-full min-w-10 overflow-hidden rounded-full bg-muted" aria-hidden><span className="block h-full rounded-full bg-foreground/35 transition-[width] duration-[260ms] ease-[var(--ease-out)]" style={{ width: `${Math.max(0, Math.min(1, r)) * 100}%` }} /></span>
+  return <span className="block h-1 w-full min-w-10 overflow-hidden rounded-full bg-muted" aria-hidden><span className="block h-full rounded-full bg-foreground/35 transition-[width] duration-260 ease-(--ease-out)" style={{ width: `${Math.max(0, Math.min(1, r)) * 100}%` }} /></span>
 }

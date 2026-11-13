@@ -4,7 +4,7 @@
 import { useState } from "react"
 import { ExternalLinkIcon, LockIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { Chevron, DISC_TRIGGER, PANEL } from "@/integrations/kit"
+import { Chevron, DISC_TRIGGER } from "@/integrations/kit"
 import { cn } from "cn"
 import { Input } from "@/components/ui/input"
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
@@ -62,7 +62,7 @@ export function ImapFields({ fields, vals, setVals }: { fields: RFieldDef[]; val
           <Chevron />{t("mail:connect.serverSettings")}
           {!open && v("imap_host") && <span className="ml-1 truncate font-mono type-footnote">{v("imap_host")}:{v("imap_port")} · {v("smtp_host")}:{v("smtp_port")}</span>}
         </CollapsibleTrigger>
-        <CollapsibleContent className={PANEL}><div className="grid grid-cols-1 gap-4 p-px pt-3 sm:grid-cols-[1fr_96px_120px]" data-imap-server>
+        <CollapsibleContent><div className="grid grid-cols-1 gap-4 p-px pt-3 sm:grid-cols-[1fr_96px_120px]" data-imap-server>
           {server.filter((k) => k.startsWith("imap")).map((k) => input(k))}
           {server.filter((k) => k.startsWith("smtp")).map((k) => input(k))}
           <div className="sm:col-span-3">{input("username")}</div>

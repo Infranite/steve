@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { HubError, modReq } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
+import { Spinner } from "@/components/ui/spinner"
 import { ItemNo, Row } from "@/ui"
 import { Panel, Section, Note, Blank } from "@/settings-kit"
 import { toast } from "@/store"
@@ -45,12 +46,12 @@ export function WorkspaceDisk() {
   }
   const used = r?.free != null && r.total ? 100 - (r.free / r.total) * 100 : null
   return <Section data-workspace-disk label={t("shell:disk.title")} right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy || !r} onClick={reclaim} data-disk-reclaim>{busy ? t("shell:disk.reclaiming") : t("shell:disk.reclaim")}</Button>}>
-    {!r && !err && <Blank className="animate-pulse" data-disk-loading>{t("shell:disk.measuring")}</Blank>}
+    {!r && !err && <Blank className="flex items-center gap-2" data-disk-loading><Spinner className="size-3.5" />{t("shell:disk.measuring")}</Blank>}
     {err && <Blank>{t("shell:disk.measureFailed", { error: err })}<Button size="xs" variant="ghost" className="ml-2" onClick={() => void load()}>{t("common:action.retry")}</Button></Blank>}
     {r && d && <div className="flex flex-col gap-3 anim-in">
       <Panel>
         <Row title={t("shell:disk.disk")} sub={<span data-disk-pressure={r.pressure ?? "unknown"}>{pressureText(r)}</span>}>
-          {used !== null && <Progress value={used} aria-label={t("shell:disk.used")} className={cn("w-16 sm:w-24 [&_[data-slot=progress-track]]:h-1.5", r.pressure === "floor" ? "[&_[data-slot=progress-indicator]]:bg-destructive" : "[&_[data-slot=progress-indicator]]:bg-foreground/60", "[&_[data-slot=progress-indicator]]:transition-[width] [&_[data-slot=progress-indicator]]:duration-240 [&_[data-slot=progress-indicator]]:ease-(--ease-out)")} />}
+          {used !== null && <Progress value={used} aria-label={t("shell:disk.used")} className={cn("w-16 sm:w-24 [&_[data-slot=progress-track]]:h-1.5", r.pressure === "floor" ? "[&_[data-slot=progress-indicator]]:bg-destructive" : "[&_[data-slot=progress-indicator]]:bg-foreground/60", "[&_[data-slot=progress-indicator]]:transition-[width] [&_[data-slot=progress-indicator]]:duration-260 [&_[data-slot=progress-indicator]]:ease-(--ease-out)")} />}
         </Row>
         <Row title={t("shell:disk.worktrees")} sub={d.reclaimable > 0 ? t("shell:disk.worktreesSubNext", { count: d.rows.length, cache: bytes(d.cache), next: bytes(d.reclaimable) }) : t("shell:disk.worktreesSub", { count: d.rows.length, cache: bytes(d.cache) })}>
           <span className="type-callout tabular-nums text-muted-foreground" data-disk-total>{bytes(d.total)}</span>

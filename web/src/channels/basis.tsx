@@ -16,7 +16,7 @@ export function BasisView({ b }: { b: B | null }) {
     <Collapsible>
       <CollapsibleTrigger className="mt-1 inline-flex items-center gap-1 rounded-md type-footnote text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" data-basis>
         <ShieldCheckIcon className="size-3.5" aria-hidden />{summary}</CollapsibleTrigger>
-      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-out data-ending-style:h-0 data-starting-style:h-0" data-basis-body><div className="pt-2"><div className="flex flex-col gap-1.5 rounded-lg bg-background/70 px-3 py-2.5">
+      <CollapsibleContent data-basis-body><div className="pt-2"><div className="flex flex-col gap-1.5 rounded-lg bg-background/70 px-3 py-2.5">
         {b.entries.map((x, n) => { const [out, dot] = OUT_LABEL[x.out] ?? [x.out, "idle"]; return (
           <div key={n} className="flex items-start gap-2 type-footnote"><StatusDot s={dot} className="mt-1" />
             <div className="min-w-0 flex-1"><div className="break-words text-foreground">{x.used}</div><div className="text-muted-foreground">{x.source_label} · {x.effective !== x.level ? t("channels:basis.levelChanged", { level: LEVEL[x.effective]?.[0] ?? x.effective, from: LEVEL[x.level]?.[0] ?? x.level }) : LEVEL[x.effective]?.[0] ?? x.effective} · {out}</div></div></div>) })}

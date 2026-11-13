@@ -265,10 +265,10 @@ function DeliveryBlock({ d, open: open0 = false }: { d: NonNullable<ItemCardStat
   return (
     <div className="flex min-w-0 flex-col gap-1" data-card-delivery>
       <div className="type-label text-tertiary">{t("thread:card.delivery")}</div>
-      <div ref={box} className={cn("min-h-0 min-w-0 break-words transition-[height] duration-[260ms] ease-[var(--ease-out)]", !full && "line-clamp-2", "overflow-hidden", FLAT)}>
+      <div ref={box} className={cn("min-h-0 min-w-0 break-words transition-[height] duration-260 ease-(--ease-out)", !full && "line-clamp-2", "overflow-hidden", FLAT)}>
         <Markdown text={text} className="type-callout" /></div>
       {more && <button type="button" className="flex items-center gap-0.5 self-start type-callout text-muted-foreground hover:text-foreground" onClick={toggle} aria-expanded={open} data-card-expand>
-        {open ? t("thread:card.collapse") : t("thread:card.expand")}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-[260ms] ease-[var(--ease-out)]", open && "rotate-180")} /></button>}
+        {open ? t("thread:card.collapse") : t("thread:card.expand")}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-260 ease-(--ease-out)", open && "rotate-180")} /></button>}
     </div>
   )
 }

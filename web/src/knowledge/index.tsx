@@ -7,7 +7,7 @@ import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } fr
 import { cn } from "cn"
 import { FilePlusIcon, FolderPlusIcon, MoreHorizontalIcon, PlusIcon, RefreshCwIcon, SearchIcon, TrashIcon, UploadIcon, XIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { Chevron, DISC_TRIGGER, PANEL } from "@/integrations/kit"
+import { Chevron, DISC_TRIGGER } from "@/integrations/kit"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -83,7 +83,7 @@ function SearchBox({ onQuery }: { onQuery: (q: string) => void }) {
   const [v, setV] = useState(query), timer = useRef<number>(0)
   const set = (x: string) => { setV(x); clearTimeout(timer.current); timer.current = window.setTimeout(() => onQuery(x.trim()), 250) }
   return (
-    <div role="search" className="flex items-center gap-2.5 px-3.5 rounded-xl bg-card shadow-[var(--lift)] transition-[box-shadow] duration-[180ms] focus-within:shadow-[var(--lift-hover)] focus-within:ring-[3px] focus-within:ring-ring/25">
+    <div role="search" className="flex items-center gap-2.5 px-3.5 rounded-xl bg-card shadow-[var(--lift)] transition-[box-shadow] duration-180 focus-within:shadow-[var(--lift-hover)] focus-within:ring-[3px] focus-within:ring-ring/25">
       <SearchIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} />
       <input type="search" aria-label={t("knowledge:search.aria")} value={v} onChange={(e) => set(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { clearTimeout(timer.current); onQuery(v.trim()) } }}
         placeholder={t("knowledge:search.placeholder")} maxLength={200} className="h-11 min-w-0 flex-1 bg-transparent type-body outline-none placeholder:text-tertiary [&::-webkit-search-cancel-button]:hidden" data-kb-search />
@@ -167,7 +167,7 @@ function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: strin
   const groups = new Map<string, Mem[]>(); for (const m of shown) { const g = aboutKey(m); groups.set(g, [...(groups.get(g) ?? []), m]) }
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center gap-2 py-1.5 pl-3.5 pr-1.5 rounded-xl bg-card shadow-[var(--lift)] transition-[box-shadow] duration-[180ms] focus-within:shadow-[var(--lift-hover)] focus-within:ring-[3px] focus-within:ring-ring/25">
+      <div className="flex items-center gap-2 py-1.5 pl-3.5 pr-1.5 rounded-xl bg-card shadow-[var(--lift)] transition-[box-shadow] duration-180 focus-within:shadow-[var(--lift-hover)] focus-within:ring-[3px] focus-within:ring-ring/25">
         <input aria-label={t(`knowledge:record.${k}.addAria`)} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void add() }} maxLength={2000}
           placeholder={t(`knowledge:record.${k}.hint`)} className="h-8 min-w-0 flex-1 bg-transparent type-body outline-none placeholder:text-tertiary" data-mem-input />
         <Button size="sm" disabled={!v.trim() || busy} onClick={() => void add()} data-mem-add>{busy ? <Spinner className="size-3.5" /> : <PlusIcon />}{t("knowledge:mems.add")}</Button>
@@ -185,7 +185,7 @@ function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: strin
                   <VisSel v={m.visibility} on={(x) => void patch(m, { visibility: x })} testId={"mem-vis-" + m.id} className={META_SELECT} />
                 </Meta>}>
                 {/* with a pointer that hovers, delete shows on the row it would remove */}
-                <Button variant="ghost" size="icon-xs" aria-label={t("knowledge:mems.deleteAria", { text: m.text })} className="text-muted-foreground transition-opacity duration-[120ms] [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/mem:opacity-100 [@media(hover:hover)]:group-focus-within/mem:opacity-100 [@media(hover:hover)]:focus-visible:opacity-100" onClick={() => void remove(m)} data-mem-del><XIcon /></Button>
+                <Button variant="ghost" size="icon-xs" aria-label={t("knowledge:mems.deleteAria", { text: m.text })} className="text-muted-foreground transition-opacity duration-120 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/mem:opacity-100 [@media(hover:hover)]:group-focus-within/mem:opacity-100 [@media(hover:hover)]:focus-visible:opacity-100" onClick={() => void remove(m)} data-mem-del><XIcon /></Button>
               </Row>))}</Group>
           </section>))}
       <div className="-mt-3 type-footnote text-muted-foreground">{t("knowledge:mems.footer", { note: t(`knowledge:record.${k}.note`) })}</div>
@@ -405,7 +405,7 @@ function ExpiredCandidates({ onRestored }: { onRestored: () => void }) {
   return (
     <Collapsible open={open} onOpenChange={setOpen} render={<section />} className="mt-6" data-cand-expired>
       <CollapsibleTrigger className={DISC_TRIGGER + " type-footnote"} data-cand-expired-toggle><Chevron className="size-3" />{t("knowledge:cand.expired", { count: xs.length })}</CollapsibleTrigger>
-      <CollapsibleContent className={PANEL}><Group className="pt-2">{xs.map((c) => (
+      <CollapsibleContent><Group className="pt-2">{xs.map((c) => (
         <Row key={c.mem.id} data-cand-expired-row={c.mem.id} className={STACK} title={c.mem.text}
           sub={<span className="flex flex-col gap-0.5"><span>{t("knowledge:cand.source", { kind: memKind(c.mem.kind), source: c.origin_label || c.mem.source_label })}</span>{c.evidence && <span className="break-words">{t("knowledge:cand.evidence", { evidence: c.evidence })}</span>}</span>}>
           <Button size="xs" variant="outline" disabled={busy} onClick={() => void restore(c.mem.id)} data-cand-restore>{t("knowledge:cand.restore")}</Button>

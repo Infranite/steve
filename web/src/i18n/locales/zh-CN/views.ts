@@ -580,7 +580,7 @@ export default {
     emptySub: "流程决定收到某类事件时怎么处理：过滤、查表、交给 Bot 判断、等你批准、执行动作。",
     emptyAction: "新建流程",
     motion: "动效",
-    motionNote: "颜色 120ms（悬停、按下）· 浮层 160ms（菜单、提示）· 箭头与卡片抬起 180ms · 展开、进入与进度 220–240ms · 对话框与换页 240ms。都用 ease-out；减少动态时全部关闭。",
+    motionNote: "三档：120ms 颜色与按下 · 180ms 浮层、切换、箭头、进入与换页 · 260ms 对话框、侧滑面板、展开收起与进度。都用 ease-out；减少动态时全部关闭。",
     easeOut: "ease-out · 进入、展开",
     easeInOut: "ease-in-out · 移动、切换",
     motionEnter: "进入",

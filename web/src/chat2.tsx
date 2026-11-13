@@ -80,7 +80,7 @@ export function StepsBlock({ m }: { m: Msg }) {
   return (
     <Collapsible open={open} onOpenChange={setOpen} id={"steps-" + m.id} className="max-w-full self-start px-1" data-steps={m.id}>
       <CollapsibleTrigger className="group/work flex max-w-full min-w-0 items-center gap-1.5 rounded-lg py-0.5 text-left type-callout text-muted-foreground hover:text-foreground" data-steps-toggle>
-        <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-tertiary transition-transform duration-200 ease-(--ease-out) group-hover/work:text-muted-foreground group-aria-expanded/work:rotate-0" />
+        <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-tertiary transition-transform duration-180 ease-(--ease-out) group-hover/work:text-muted-foreground group-aria-expanded/work:rotate-0" />
         <span className="shrink-0 text-foreground/85">{s.research ? t("shell:chat.researched") : t("shell:chat.thinking")}</span>
         {took != null && !s.research && <span className="shrink-0 tabular-nums text-tertiary">{secs(took)}</span>}
         <span className="min-w-0 truncate">· {stepsSummary(s)}</span>
@@ -124,7 +124,6 @@ export function NoticeLine({ m, onOpen }: { m: Msg; onOpen: () => void }) {
 /** one width for every panel beside the conversation (rail, history, a session's info): switching them never moves the column */
 export const PANEL_W = "w-[320px]"
 /** a Collapsible's content that eases its height open and shut (the base component does not yet) */
-export const FOLD = "h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-[var(--ease-out)] data-ending-style:h-0 data-starting-style:h-0"
 /** a panel beside the conversation that slides open and shut: its width eases between 0 and PANEL_W, the content keeps its
  * width and stays mounted until the close has finished. `test` names the open panel only (closed, it is gone for tests). */
 export function SidePanel({ open, children, className, test }: { open: boolean; children: ReactNode; className?: string; test: Record<string, string> }) {
@@ -141,8 +140,8 @@ export function SidePanel({ open, children, className, test }: { open: boolean; 
   }, [open])
   if (!mounted) return null
   return (
-    <div className={cn("flex shrink-0 justify-end overflow-hidden transition-[width] duration-[260ms] ease-[var(--ease-out)]", shown && open ? PANEL_W : "w-0")} inert={!open || undefined} data-side-panel>
-      <aside className={cn("flex shrink-0 flex-col overflow-hidden border-l border-sidebar-border bg-sidebar transition-opacity duration-[260ms] ease-[var(--ease-out)]", PANEL_W, shown && open ? "opacity-100" : "opacity-60", className)} {...(open ? test : {})}>{children}</aside>
+    <div className={cn("flex shrink-0 justify-end overflow-hidden transition-[width] duration-260 ease-(--ease-out)", shown && open ? PANEL_W : "w-0")} inert={!open || undefined} data-side-panel>
+      <aside className={cn("flex shrink-0 flex-col overflow-hidden border-l border-sidebar-border bg-sidebar transition-opacity duration-260 ease-(--ease-out)", PANEL_W, shown && open ? "opacity-100" : "opacity-60", className)} {...(open ? test : {})}>{children}</aside>
     </div>
   )
 }
@@ -179,8 +178,8 @@ function similar(xs: RNotice[]): [RNotice, RNotice[]][] {
 function Similar({ n, more, notice }: { n: RNotice; more: RNotice[]; notice: (n: RNotice) => ReactNode }) {
   const t = useT(), [open, setOpen] = useState(false)
   return <>{notice(n)}{more.length > 0 && <Collapsible open={open} onOpenChange={setOpen}>
-    <CollapsibleContent className={FOLD}>{more.map(notice)}</CollapsibleContent>
-    <button type="button" className="mb-1 ml-6 flex items-center gap-1 self-start type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)} aria-expanded={open} data-notice-similar={more.length}>{open ? t("shell:chat.similarHide") : t("shell:chat.similarMore", { count: more.length })}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-[260ms] ease-[var(--ease-out)]", open && "rotate-180")} /></button>
+    <CollapsibleContent>{more.map(notice)}</CollapsibleContent>
+    <button type="button" className="mb-1 ml-6 flex items-center gap-1 self-start type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOpen(!open)} aria-expanded={open} data-notice-similar={more.length}>{open ? t("shell:chat.similarHide") : t("shell:chat.similarMore", { count: more.length })}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-260 ease-(--ease-out)", open && "rotate-180")} /></button>
   </Collapsible>}</>
 }
 
@@ -262,8 +261,8 @@ function RailBody() {
         {pinned.map(notice)}{similar(fresh).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}{similar(seen.slice(0, base)).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}
         {/* the read ones fold like the similar ones: the same chevron under the text, the height easing open */}
         {seen.length > base && <Collapsible open={older} onOpenChange={setOlder}>
-          <CollapsibleContent className={FOLD}>{similar(seen.slice(base, 50)).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}</CollapsibleContent>
-          <button type="button" className="mt-1 ml-6 flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(!older)} aria-expanded={older} data-older>{older ? t("shell:chat.hideRead") : t("shell:chat.olderRead", { count: seen.length - base })}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-[260ms] ease-[var(--ease-out)]", older && "rotate-180")} /></button>
+          <CollapsibleContent>{similar(seen.slice(base, 50)).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}</CollapsibleContent>
+          <button type="button" className="mt-1 ml-6 flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(!older)} aria-expanded={older} data-older>{older ? t("shell:chat.hideRead") : t("shell:chat.olderRead", { count: seen.length - base })}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-260 ease-(--ease-out)", older && "rotate-180")} /></button>
         </Collapsible>}
       </section>
       {run.length > 0 && <section data-rail-run><SectionLabel>{t("shell:chat.runningHead", { count: run.length })}</SectionLabel>

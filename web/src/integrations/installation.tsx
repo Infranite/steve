@@ -323,7 +323,7 @@ function Tech({ inst, p }: { inst: IInstallation; p: IProvider }) {
   return (
     <Collapsible className="min-w-0 flex-1">
       <CollapsibleTrigger className="rounded-md type-footnote text-muted-foreground hover:text-foreground" data-tech-toggle>{t("integrations:inst.tech")}</CollapsibleTrigger>
-      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-out data-ending-style:h-0 data-starting-style:h-0" data-tech><div className="pt-2 flex flex-col gap-2 type-footnote text-muted-foreground">
+      <CollapsibleContent data-tech><div className="pt-2 flex flex-col gap-2 type-footnote text-muted-foreground">
         {inst.identities.map(({ kind, connection: c }) => { const a = appOf(c), u = userOf(c); return (
           <dl key={c.id} className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
             <dt>{kind === "steve" ? t("integrations:inst.botConn") : t("integrations:inst.yourConn")}</dt><dd className="break-all font-mono">{c.id} · {c.adapter}</dd>

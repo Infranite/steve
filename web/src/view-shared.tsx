@@ -79,7 +79,7 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
   )
   return (
     <div role="button" tabIndex={0} onClick={() => (pick ? pick() : go("#/items/" + i.id))} onKeyDown={(e) => e.key === "Enter" && go("#/items/" + i.id)} data-item-row={i.id} data-item-status={itemDisplayStatus(i)} data-dense={closed || undefined}
-      className={cn("group flex cursor-pointer gap-2.5 rounded-lg px-2 transition-colors duration-150 hover:bg-accent", closed ? "items-center py-1.5" : "items-start py-2.5", pick && on && "bg-blue/10 hover:bg-blue/10")}>
+      className={cn("group flex cursor-pointer gap-2.5 rounded-lg px-2 transition-colors duration-120 hover:bg-accent", closed ? "items-center py-1.5" : "items-start py-2.5", pick && on && "bg-blue/10 hover:bg-blue/10")}>
       {pick ? <Checkbox checked={on} className={cn(!closed && "mt-[3px]")} aria-label={t("shell:item.select", { id: i.id })} data-pick={i.id} /> : <StatusDot s={itemDisplayStatus(i)} className={cn(!closed && "mt-[7px]")} />}
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">

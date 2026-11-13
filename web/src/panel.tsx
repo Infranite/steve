@@ -103,7 +103,7 @@ export function Meter({ value, tone, className }: { value: number | null | undef
   const v = Math.max(0, Math.min(1, value ?? 0))
   return (
     <span className={cn("block h-1 w-full overflow-hidden rounded-full bg-muted", className)} aria-hidden>
-      <span className={cn("block h-full rounded-full transition-[width] duration-[260ms] ease-[var(--ease-out)]", tone === "bad" ? "bg-destructive" : tone === "wait" ? "bg-attention" : tone === "ok" ? "bg-success" : tone === "run" ? "bg-blue" : "bg-foreground/70")} style={{ width: `${v * 100}%` }} />
+      <span className={cn("block h-full rounded-full transition-[width] duration-260 ease-(--ease-out)", tone === "bad" ? "bg-destructive" : tone === "wait" ? "bg-attention" : tone === "ok" ? "bg-success" : tone === "run" ? "bg-blue" : "bg-foreground/70")} style={{ width: `${v * 100}%` }} />
     </span>
   )
 }

@@ -6,7 +6,6 @@
 import { useEffect, useState, type ReactNode } from "react"
 import { ChevronDownIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldQuestionIcon, Undo2Icon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { PANEL } from "@/integrations/kit"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -51,9 +50,9 @@ function Basis({ b, onCheck, busy }: { b: Draft["basis"]; onCheck?: () => void; 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="type-footnote" data-basis={v}>
       <CollapsibleTrigger className={cn("group/disc inline-flex items-center gap-1 rounded-md", cls, spans.length && "hover:text-foreground")} disabled={!spans.length}>
-        <I className="size-3.5" aria-hidden />{label}{spans.length > 0 && <ChevronDownIcon className="size-3.5 transition-transform duration-[180ms] ease-out group-aria-expanded/disc:rotate-180" aria-hidden />}</CollapsibleTrigger>
+        <I className="size-3.5" aria-hidden />{label}{spans.length > 0 && <ChevronDownIcon className="size-3.5 transition-transform duration-180 ease-(--ease-out) group-aria-expanded/disc:rotate-180" aria-hidden />}</CollapsibleTrigger>
       {v === "unchecked" && onCheck && <Button size="xs" variant="ghost" className="ml-1.5 text-muted-foreground" disabled={busy} onClick={onCheck} data-draft-check>{t("mail:draft.check")}</Button>}
-      <CollapsibleContent className={PANEL}><ul className="flex flex-col gap-1 pl-5 pt-1.5">{spans.map((s, n) => <li key={n} className="list-disc"><mark className="rounded-md bg-attention/15 px-0.5 text-foreground">{s.text}</mark>{s.why && <span className="text-muted-foreground"> · {s.why}</span>}</li>)}</ul></CollapsibleContent>
+      <CollapsibleContent><ul className="flex flex-col gap-1 pl-5 pt-1.5">{spans.map((s, n) => <li key={n} className="list-disc"><mark className="rounded-md bg-attention/15 px-0.5 text-foreground">{s.text}</mark>{s.why && <span className="text-muted-foreground"> · {s.why}</span>}</li>)}</ul></CollapsibleContent>
     </Collapsible>
   )
 }

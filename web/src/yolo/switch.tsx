@@ -73,7 +73,7 @@ function LevelRow({ m, title, sub, on, current, disabled, pick }: { m: YoloLevel
     <button type="button" role="radio" aria-checked={on} disabled={disabled} onClick={pick} data-yolo-level={m}
       className={cn("flex min-w-0 w-full items-start gap-3 rounded-xl px-4 py-3 text-left disabled:opacity-50",
         on ? (m === "full" ? "bg-attention/10 ring-1 ring-attention/40 ring-inset" : "bg-blue/10 ring-1 ring-blue/40 ring-inset") : "hover:bg-accent")}>
-      <span className={cn("mt-[3px] flex size-4 shrink-0 items-center justify-center rounded-full border transition-colors duration-[180ms]", on ? (m === "full" ? "border-attention" : "border-blue") : "border-border")} aria-hidden>
+      <span className={cn("mt-[3px] flex size-4 shrink-0 items-center justify-center rounded-full border transition-colors duration-180", on ? (m === "full" ? "border-attention" : "border-blue") : "border-border")} aria-hidden>
         {on && <span className={cn("anim-in size-2 rounded-full", m === "full" ? "bg-attention" : "bg-blue")} />}
       </span>
       <span className="min-w-0 flex-1">

@@ -123,7 +123,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
         {/* the system's segmented control in look (the same well, thumb and slide), built from buttons with aria-pressed:
           * the filter is not a tab panel. As wide as the search on a phone */}
         <div role="group" className="relative isolate grid h-8 w-full grid-cols-3 rounded-lg bg-muted p-[3px] sm:w-fit" aria-label={t("thread:conv.stateLabel")} data-conv-state={state}>
-          <span aria-hidden className="absolute inset-y-[3px] left-[3px] -z-10 w-[calc((100%-6px)/3)] rounded-md bg-card shadow-[var(--lift)] transition-transform duration-[180ms] ease-[var(--ease-out)] dark:bg-accent" style={{ transform: `translateX(${["open", "closed", "all"].indexOf(state) * 100}%)` }} />
+          <span aria-hidden className="absolute inset-y-[3px] left-[3px] -z-10 w-[calc((100%-6px)/3)] rounded-md bg-card shadow-[var(--lift)] transition-transform duration-180 ease-(--ease-out) dark:bg-accent" style={{ transform: `translateX(${["open", "closed", "all"].indexOf(state) * 100}%)` }} />
           {(["open", "closed", "all"] as const).map((key) => <button type="button" key={key} aria-pressed={state === key} onClick={() => setState(key)} className={cn("h-full min-w-20 rounded-md px-3 type-callout font-medium", state === key ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>{t(`thread:conv.state.${key}`)}</button>)}
         </div>
         {updates && <Button size="sm" variant="secondary" className="w-fit justify-self-start anim-in" onClick={() => load()}>{t("thread:conv.updated")}</Button>}

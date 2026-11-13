@@ -28,7 +28,7 @@ export function Cites({ cites }: { cites?: Cite[] }) {
       <CollapsibleTrigger className="inline-flex items-center gap-1 rounded-md type-footnote text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" data-cites-toggle>
         <BookOpenIcon className="size-3.5" strokeWidth={1.75} />{t("knowledge:parts.cites", { count: cites.length })}
       </CollapsibleTrigger>
-      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-out data-ending-style:h-0 data-starting-style:h-0" data-cites-body><div className="pt-2"><div className="flex max-w-[min(520px,88vw)] flex-col gap-0.5 rounded-lg bg-muted/60 px-1.5 py-1.5">
+      <CollapsibleContent data-cites-body><div className="pt-2"><div className="flex max-w-[min(520px,88vw)] flex-col gap-0.5 rounded-lg bg-muted/60 px-1.5 py-1.5">
         {cites.map((c) => (
           <button key={c.n} type="button" disabled={!c.href} onClick={() => c.href && go(c.href)} className="flex items-start gap-2 rounded-md px-1.5 py-1 text-left type-footnote enabled:hover:bg-background/70" data-cite={c.n}>
             <StatusDot s={LEVEL_DOT[c.level] ?? "idle"} className="mt-1" />

@@ -54,7 +54,7 @@ export function Schedules({ L, onNew }: { L: Load<Schedule[]>; onNew: () => void
           <Button size="xs" variant="ghost" className="hidden text-muted-foreground sm:inline-flex" disabled={busy === "run" + s.id} onClick={() => void act("run" + s.id, () => flowApi.runSchedule(s.id), t("auto:schedule.started", { name: s.name }))} data-run-now-row={s.id}><PlayIcon />{t("auto:schedule.runNow")}</Button>
           <Switch checked={s.enabled} disabled={busy === "on" + s.id} onCheckedChange={(v) => void act("on" + s.id, () => flowApi.patchSchedule(s.id, { enabled: v }), v ? t("auto:enabled") : t("auto:schedule.disabledToast"))} aria-label={t("auto:enableName", { name: s.name })} />
         </div>
-        <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-220 ease-(--ease-out) data-ending-style:h-0 data-starting-style:h-0">
+        <CollapsibleContent>
           {open === s.id && <ScheduleDetail s={s} busy={busy} onRun={() => void act("run" + s.id, () => flowApi.runSchedule(s.id), t("auto:schedule.started", { name: s.name }))} onEdit={() => setEdit(s)} onDelete={() => setDel(s)} />}
         </CollapsibleContent>
       </Collapsible>

@@ -57,7 +57,7 @@ function Choices({ value, onChange, allowKeep, offered }: { value: Choice; onCha
   return (
     <RadioGroup value={value} onValueChange={(v) => onChange(v as Choice)} className="gap-2" aria-label={t("integrations:cleanup.history")}>
       {opts.map((o) => (
-        <label key={o} className={"flex cursor-pointer items-start gap-2.5 rounded-lg px-3 py-2.5 transition-[background-color,box-shadow] duration-[180ms] ease-out " + (value === o ? "bg-primary/8 ring-1 ring-primary/40" : "bg-muted/60 hover:bg-accent")} data-cleanup-choice={o}>
+        <label key={o} className={"flex cursor-pointer items-start gap-2.5 rounded-lg px-3 py-2.5 transition-[background-color,box-shadow] duration-180 ease-(--ease-out) " + (value === o ? "bg-primary/8 ring-1 ring-primary/40" : "bg-muted/60 hover:bg-accent")} data-cleanup-choice={o}>
           <RadioGroupItem value={o} disabled={o !== "keep" && !offered} className="mt-0.5" />
           <span className="min-w-0"><span className={"type-body " + (o === "all" ? "text-destructive" : "")}>{LEVEL_TEXT[o][0]}</span><span className="block type-footnote text-muted-foreground">{LEVEL_TEXT[o][1]}</span></span>
         </label>))}

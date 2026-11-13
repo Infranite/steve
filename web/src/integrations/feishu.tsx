@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Chevron, Disclosure, DISC_TRIGGER, PANEL, SUMMARY } from "@/integrations/kit"
+import { Chevron, Disclosure, DISC_TRIGGER, SUMMARY } from "@/integrations/kit"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { go, SectionLabel } from "@/ui"
@@ -125,7 +125,7 @@ export function FeishuConnectDialog({ bots, onClose, initial = "bot", side }: { 
             <Select align="end" testId="acc-persona" value={persona} onChange={setPersona} options={personas.map((p) => ({ v: p.id, l: p.name }))} /></Field>}
         </FieldGroup>
         <Collapsible><CollapsibleTrigger className={DISC_TRIGGER} data-console-steps><Chevron />{t("integrations:feishu.consoleSteps")}</CollapsibleTrigger>
-          <CollapsibleContent className={PANEL}><div className="pt-3 flex flex-col gap-3">
+          <CollapsibleContent><div className="pt-3 flex flex-col gap-3">
             <ol className="list-decimal pl-5 type-callout text-muted-foreground">{consoleSteps().map((s) => <li key={s}>{s}</li>)}</ol>
             <PermissionList checks={null} />
             <div className="type-footnote text-muted-foreground">{t("integrations:feishu.userPermsLine", { perms: userPerms() })}</div>
@@ -190,7 +190,7 @@ export function SelfButtons({ app, disabled, variant = "default", label, scopes,
     {choose && <Modal title={t("integrations:feishu.chooseTitle")} desc={t("integrations:feishu.chooseDesc")} onClose={() => setChoose(false)} w={460}
       footer={<><Button variant="outline" disabled={busy} onClick={() => setChoose(false)}>{t("integrations:feishu.notNow")}</Button><Button disabled={busy} onClick={() => void start([...USER_READ_SCOPES, ...(sendAsMe ? ["im:message.send_as_user"] : [])])}>{busy && <Spinner />}{t("integrations:feishu.continueOfficial")}</Button></>}>
       <div className="type-callout">{t("integrations:feishu.readNote")}</div>
-      <label className="flex cursor-pointer items-start gap-3 rounded-lg bg-muted/60 p-3 type-callout transition-colors duration-[180ms] hover:bg-accent"><Checkbox className="mt-0.5" checked={sendAsMe} onCheckedChange={(v) => setSendAsMe(!!v)} /><span>{t("integrations:feishu.sendAsMe")}<span className="mt-1 block type-footnote text-muted-foreground">{t("integrations:feishu.sendAsMeNote")}</span></span></label>
+      <label className="flex cursor-pointer items-start gap-3 rounded-lg bg-muted/60 p-3 type-callout transition-colors duration-180 hover:bg-accent"><Checkbox className="mt-0.5" checked={sendAsMe} onCheckedChange={(v) => setSendAsMe(!!v)} /><span>{t("integrations:feishu.sendAsMe")}<span className="mt-1 block type-footnote text-muted-foreground">{t("integrations:feishu.sendAsMeNote")}</span></span></label>
     </Modal>}
     {device && showDevice && <DeviceDialog d={device} onClose={() => setShowDevice(false)} onFinished={() => { setDevice(null); setShowDevice(false) }} />}
     {form && side && <ConnectDialog adapter={asAdapter(side, "feishu")} onClose={() => setForm(false)} />}
@@ -278,7 +278,7 @@ export function FeishuGuide({ adapters, bots, selfDone, callbackUrls }: { adapte
       </div>
     </div>}
     <Collapsible><CollapsibleTrigger className={DISC_TRIGGER + " text-left"}><Chevron />{t("integrations:feishu.advancedOAuth")}</CollapsibleTrigger>
-      <CollapsibleContent className={PANEL}><div className="pt-3 flex flex-col gap-2 type-footnote text-muted-foreground">
+      <CollapsibleContent><div className="pt-3 flex flex-col gap-2 type-footnote text-muted-foreground">
         <p>{t("integrations:feishu.oauthNoUrl")}</p>
         {callbackUrls.length ? <>
           <p>{t("integrations:feishu.callbackUrls")}</p>

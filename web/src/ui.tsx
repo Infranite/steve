@@ -773,7 +773,7 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
         {(ms > 0 || live) && <span className="shrink-0 tabular-nums text-muted-foreground" data-work-clock>{live ? clock(ms) : fmtDur(ms)}</span>}
         {stats.length > 0 && <span className="min-w-0 truncate text-muted-foreground">· {stats.join(" · ")}</span>}
       </CollapsibleTrigger>
-      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-260 ease-(--ease-out) data-ending-style:h-0 data-starting-style:h-0">
+      <CollapsibleContent>
         <div className="mt-1 flex flex-col">
           <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled ? { s: "cancel", label: t("core:transcript.interrupted") } : { s: "end", label: t("core:trail.finished") }} />
         </div>
@@ -1013,7 +1013,7 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
         </button>
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>
       </div>
-      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-260 ease-(--ease-out) data-ending-style:h-0 data-starting-style:h-0">
+      <CollapsibleContent>
         <div className="mb-2 ml-2.5 mt-1 border-l pl-4.5"><Transcript k={k} compact={!live} tail={4} skip={skip?.length ? skip : undefined} /></div>
       </CollapsibleContent>
     </Collapsible>
@@ -1046,7 +1046,7 @@ export function ReplyBlock({ r }: { r: Reply }) {
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + r.s)} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>
       </div>
       <Collapsible open={open} onOpenChange={setOpen}>
-        <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-260 ease-(--ease-out) data-ending-style:h-0 data-starting-style:h-0">
+        <CollapsibleContent>
           <div className="pb-2 pt-1"><Transcript k={r.s} compact={!r.live} range={[r.from, r.to]} /></div>
         </CollapsibleContent>
       </Collapsible>

@@ -114,7 +114,7 @@ function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s
   return (
     <div className="@container/stats flex flex-col gap-8" data-stats>
       <Panel k="overview" data-overview icon={<GaugeIcon />} title={t("stats:panel.overview")} sub={t("stats:panel.overviewSub", { name: rangeName, range })}
-        right={live ? <Tag tone="ok" data-live><span className="size-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none" />{t("stats:panel.live")}</Tag> : <Tag>{t("stats:panel.past")}</Tag>}>
+        right={live ? <Tag tone="ok" data-live><span className="size-1.5 dot-running rounded-full bg-current" />{t("stats:panel.live")}</Tag> : <Tag>{t("stats:panel.past")}</Tag>}>
         <CoreKpis s={s} f={f} prevName={prevName} rangeName={rangeName} drill={drill} setDrill={setDrill} />
         {drill && <DrillPanel key={drill} d={drill} f={f} fkey={fkey} live={live} rangeName={rangeName} close={() => setDrill(null)} />}
         <RunState className="px-5 py-3.5" />

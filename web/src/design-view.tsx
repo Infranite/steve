@@ -86,7 +86,7 @@ function MotionSamples() {
           {[t("views:design.enterRow1"), t("views:design.enterRow2"), t("views:design.enterRow3")].map((x, i) => (
             <div key={x} className="anim-in flex items-center gap-3 rounded-lg bg-muted/60 px-3 py-2 type-callout" style={{ animationDelay: `${i * 50}ms` }}><span className="size-1.5 rounded-full bg-blue" />{x}</div>))}
         </div>
-        <Cap token=".anim-in · 220ms ease-out" />
+        <Cap token=".anim-in · 180ms ease-(--ease-out)" />
       </Card>
       <Card className="flex flex-col gap-3" data-motion="expand">
         <span className="type-headline">{t("views:design.motionExpand")}</span>
@@ -96,15 +96,15 @@ function MotionSamples() {
           </summary>
           <div className="px-3 pb-3 type-callout text-muted-foreground">{t("views:design.motionExpandBody")}</div>
         </details>
-        <Cap token="details · interpolate-size · 220ms" />
+        <Cap token="details · interpolate-size · 260ms" />
       </Card>
       <Card className="flex flex-col gap-3" data-motion="progress">
         <div className="flex items-center justify-between"><span className="type-headline">{t("views:design.motionProgress")}</span><Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setWide((x) => !x)} data-motion-toggle>{t("views:design.toggle")}</Button></div>
         <div className="flex items-center gap-3">
-          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-blue transition-[width] duration-240 ease-(--ease-out)" style={{ width: wide ? "82%" : "34%" }} /></div>
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-blue transition-[width] duration-260 ease-(--ease-out)" style={{ width: wide ? "82%" : "34%" }} /></div>
           <span className="w-10 text-right type-callout tabular-nums text-muted-foreground">{wide ? 82 : 34}%</span>
         </div>
-        <Cap token="transition-[width] · 240ms ease-out" />
+        <Cap token="transition-[width] · 260ms ease-(--ease-out)" />
       </Card>
       <div className={cn(LIFT, "flex cursor-default flex-col gap-3 p-4 transition-[box-shadow,translate] duration-180 ease-(--ease-out) hover:-translate-y-px hover:shadow-[var(--lift-hover)]")} data-motion="hover">
         <span className="type-headline">{t("views:design.motionHover")}</span>

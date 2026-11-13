@@ -23,10 +23,9 @@ export function ConnectPrompt({ icon, title, sub, action, children, className, .
 }
 
 /** the height transition every in-place disclosure on these pages uses */
-export const PANEL = "h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-out data-ending-style:h-0 data-starting-style:h-0"
 /** a chevron that turns when its trigger (aria-expanded) or details (open) opens */
 export const Chevron = ({ className }: { className?: string }) => (
-  <ChevronRightIcon aria-hidden className={cn("size-3.5 shrink-0 transition-transform duration-[180ms] ease-out group-aria-expanded/disc:rotate-90 group-open/disc:rotate-90", className)} />
+  <ChevronRightIcon aria-hidden className={cn("size-3.5 shrink-0 transition-transform duration-180 ease-(--ease-out) group-aria-expanded/disc:rotate-90 group-open/disc:rotate-90", className)} />
 )
 /** a disclosure trigger reads as one, not as a link: muted text with a turning chevron */
 export const DISC_TRIGGER = "group/disc inline-flex items-center gap-1 rounded-md type-callout text-muted-foreground outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
@@ -38,7 +37,7 @@ export function Disclosure({ label, children, open, onOpenChange, defaultOpen, c
   return (
     <Collapsible open={open} onOpenChange={onOpenChange ? (o) => onOpenChange(o) : undefined} defaultOpen={defaultOpen} className={className} {...rest}>
       <CollapsibleTrigger className={cn(DISC_TRIGGER, triggerClassName)}><Chevron />{label}</CollapsibleTrigger>
-      <CollapsibleContent className={PANEL}>{children}</CollapsibleContent>
+      <CollapsibleContent>{children}</CollapsibleContent>
     </Collapsible>
   )
 }

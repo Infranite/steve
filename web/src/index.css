@@ -50,6 +50,7 @@
   --sidebar-ring: #3e63dd;
   --canvas-graph: #f9f9fb;
   --code: #f6f6f8; /* code block surface */
+  --raised: #ffffff; /* a surface one step above a sunken fill (the selected segment) */
   /* elevation: a layer above the page */
   --lift: 0 1px 2px rgb(16 24 40 / 0.04), 0 0 0 1px rgb(16 24 40 / 0.035);
   --lift-hover: 0 2px 8px -2px rgb(16 24 40 / 0.08), 0 0 0 1px rgb(16 24 40 / 0.05);
@@ -96,6 +97,7 @@
   --sidebar-ring: #5472e4;
   --canvas-graph: #0e0e10;
   --code: #161719;
+  --raised: #2b2d31;
   --lift: inset 0 1px 0 rgb(255 255 255 / 0.035), 0 0 0 1px rgb(255 255 255 / 0.055);
   --lift-hover: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 0 0 1px rgb(255 255 255 / 0.09);
   --sh-xs: 0 1px 2px rgb(0 0 0 / 0.3);
@@ -197,6 +199,8 @@
   h1, h2, h3 { text-wrap: balance; }
 }
 
+/* motion scale: 120ms colour and press · 180ms popovers, toggles, chevrons, entrances and page changes · 260ms dialogs,
+ * sheets, expand and collapse; all on --ease-out. */
 /* running dot — the only looping animation in the product */
 @keyframes steve-breathe { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.82); } }
 .dot-running { animation: steve-breathe 1.6s ease-in-out infinite; }
@@ -214,25 +218,22 @@
 /* entrance: short, no blur, no bounce */
 @keyframes steve-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @keyframes steve-fade { from { opacity: 0; } to { opacity: 1; } }
-.anim-in { animation: steve-in 220ms var(--ease-out) both; }
-.anim-page { animation: steve-in 240ms var(--ease-out) both; }
+.anim-in { animation: steve-in 180ms var(--ease-out) both; }
+.anim-page { animation: steve-in 180ms var(--ease-out) both; }
 /* route changes: the content area cross-fades and rises a little; the sidebar stays (view transitions) */
-::view-transition-old(page) { animation: 140ms var(--ease-in-out) both steve-out; }
-::view-transition-new(page) { animation: 240ms var(--ease-out) both steve-in; }
+::view-transition-old(page) { animation: 120ms var(--ease-in-out) both steve-out; }
+::view-transition-new(page) { animation: 180ms var(--ease-out) both steve-in; }
 ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
 @keyframes steve-out { to { opacity: 0; } }
 /* floating layers open from where they were asked for, quickly */
 [data-slot$="-content"][data-open], [data-slot="popover-content"], [data-slot="dropdown-menu-content"], [data-slot="select-content"], [data-slot="tooltip-content"] {
-  animation-duration: 160ms !important; animation-timing-function: var(--ease-out) !important;
+  animation-duration: 180ms !important; animation-timing-function: var(--ease-out) !important;
 }
-[data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="sheet-content"] { animation-duration: 240ms !important; transition-duration: 240ms !important; transition-timing-function: var(--ease-out) !important; }
+[data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="sheet-content"] { animation-duration: 260ms !important; transition-duration: 260ms !important; transition-timing-function: var(--ease-out) !important; }
 /* things that open and close in place animate their height (Chrome 129+; elsewhere they just open) */
 :root { interpolate-size: allow-keywords; }
-details::details-content { transition: height 220ms var(--ease-out), content-visibility 220ms allow-discrete; height: 0; overflow: clip; }
+details::details-content { transition: height 260ms var(--ease-out), content-visibility 260ms allow-discrete; height: 0; overflow: clip; }
 details[open]::details-content { height: auto; }
-/* a Collapsible opens and closes its height (Base UI measures it into --collapsible-panel-height) */
-[data-slot="collapsible-content"] { overflow: hidden; height: var(--collapsible-panel-height); transition: height 220ms var(--ease-out); }
-[data-slot="collapsible-content"]:is([data-starting-style], [data-ending-style]) { height: 0; }
 
 /* Markdown in messages and cards — sized to the type scale, not a document */
 .md { overflow-wrap: anywhere; }

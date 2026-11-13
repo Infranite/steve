@@ -44,7 +44,7 @@ function Drill({ d }: { d: ItemDetail }) {
   return (
     <div className="flex flex-col gap-4" data-drill>
       <Panel k="report" className="@container" icon={<ChartGanttIcon />} title={t("stats:drill.report")} sub={t("stats:drill.reportSub", { created: time(f.created) })}
-        right={open ? <Tag tone="run"><span className="size-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none" />{t("stats:word.running")}</Tag> : f.done_at ? <Tag tone="ok">{t("stats:drill.doneMark")}</Tag> : <Tag>{t("stats:drill.dropMark")}</Tag>}>
+        right={open ? <Tag tone="run"><span className="size-1.5 dot-running rounded-full bg-current" />{t("stats:word.running")}</Tag> : f.done_at ? <Tag tone="ok">{t("stats:drill.doneMark")}</Tag> : <Tag>{t("stats:drill.dropMark")}</Tag>}>
         <Timeline d={d} />
         <div className={kpiRow(6)}>
           <Kpi k="tokens" label="tokens" value={fmtN(u.total)} foot={u.hit_rate != null ? t("stats:drill.hit", { pct: fmtPct(u.hit_rate) }) : ""} def={t("stats:drill.tokensDef")} />
@@ -127,7 +127,7 @@ function Timeline({ d }: { d: ItemDetail }) {
           </g>)}
           <g>{turns.map((tn) => {
             const a = x(tn.started), b = x(tn.ended ?? now), bad = tn.stop_reason === "error" || tn.transient
-            return <rect key={tn.id} x={a} y={Y.turns - 6} width={Math.max(3, b - a)} height={12} rx={4} className={cn("cursor-default transition-[fill] duration-[120ms]", bad ? "fill-destructive/80" : tn.ended ? "fill-blue/70 hover:fill-blue" : "fill-blue")}
+            return <rect key={tn.id} x={a} y={Y.turns - 6} width={Math.max(3, b - a)} height={12} rx={4} className={cn("cursor-default transition-[fill] duration-120", bad ? "fill-destructive/80" : tn.ended ? "fill-blue/70 hover:fill-blue" : "fill-blue")}
               onMouseEnter={() => show(tn.started, Y.turns, t("stats:drill.turnTip", { time: time(tn.started), dur: tn.ended ? fmtMs(tn.ended - tn.started) : t("stats:word.running"), tokens: fmtN(tn.usage.total), tools: tn.tools }))} />
           })}</g>
           <g>{decs.map((c) => {

@@ -30,7 +30,7 @@ export function PermissionRecord({ title, decision, id }: { title: string; decis
       </CollapsibleTrigger>
       <span className={cn("shrink-0 type-footnote", status.pending ? "font-medium text-attention" : "text-muted-foreground")}>{status.label}</span>
     </div>
-    <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-260 ease-(--ease-out) data-ending-style:h-0 data-starting-style:h-0">
+    <CollapsibleContent>
       <div className="px-3.5 pb-3">
         <PermissionDetails title={title} input={decision?.draft} className="-mx-3.5 rounded-none bg-transparent" />
         {status.pending && id && <a href="#/inbox" className="mt-2 inline-flex min-h-8 items-center type-callout font-medium text-blue hover:underline">{t("misc:permission.goInbox")}</a>}

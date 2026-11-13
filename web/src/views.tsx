@@ -115,7 +115,7 @@ const sortLabel = (k: ItemsSort) => tr(({ updated: "views:items.sortUpdated", du
 /** finished and dropped items shown before “显示全部”; the rest are a click away */
 const CLOSED_SHOWN = 8
 /** a filter select in the toolbar: compact, and muted until it narrows the list */
-const FILTER = (set: boolean) => cn("h-7 px-2 type-callout! [&>svg]:opacity-60", set ? "bg-accent font-medium! text-foreground" : "text-muted-foreground"); const openGroups = new Set<string>()
+const FILTER = (set: boolean) => cn("h-7 px-2 type-callout [&>svg]:opacity-60", set ? "bg-accent font-medium! text-foreground" : "text-muted-foreground"); const openGroups = new Set<string>()
 /** the list, filtered: the stats page's drill-downs land here (“在事项页查看”) */
 export const showItems = (f: "全部" | "等你" | "进行中", project?: string, bot?: string) => { filt = f === "等你" ? "wait" : f === "进行中" ? "run" : "all"; projF = project ?? "all"; botF = bot ?? "all"; tagF = "all"; kindF = "all"; q = ""; itemsView = "list"; go("#/items") }
 export const showTag = (id: string) => { if (isKind(tag(id))) kindF = id; else tagF = id; filt = "all"; itemsView = "list"; go("#/items") }
@@ -193,7 +193,7 @@ export function ItemsView() {
         <Select quiet className={FILTER(projF !== "all")} testId="project-filter" value={st.projects.some((p) => p.id === projF) || projF === "none" ? projF : "all"} onChange={(v) => { projF = v; r() }} options={[{ v: "all", l: t("views:items.allProjects") }, ...st.projects.map((p) => ({ v: p.id, l: p.name })), { v: "none", l: t("views:items.noProject") }]} />
         <Select quiet className={FILTER(botF !== "all")} testId="bot-filter" value={botF} onChange={(v) => { botF = v; r() }} options={[{ v: "all", l: t("views:items.allBots") }, ...Object.keys(st.bots).map((k) => ({ v: k, l: <BotName k={k} /> }))]} />
         {itemsView === "list" && <Select quiet className={FILTER(sortBy !== "updated")} testId="sort" value={sortBy} onChange={(v) => { sortBy = v as ItemsSort; r() }} options={SORTS.map((v) => ({ v, l: sortLabel(v) }))} />}
-        <label className="relative"><SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-tertiary" /><Input className={cn("h-7 rounded-lg pl-8 type-callout! transition-[width,background-color,border-color] duration-[180ms] ease-[var(--ease-out)]", q ? "w-40" : "w-8 cursor-pointer border-transparent bg-transparent placeholder:text-transparent hover:bg-accent focus:w-40 focus:cursor-text focus:border-border focus:bg-transparent focus:placeholder:text-muted-foreground")} placeholder={t("views:items.search")} aria-label={t("views:items.search")} data-items-search defaultValue={q} onChange={(e) => { q = e.target.value; r() }} /></label>
+        <label className="relative"><SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-tertiary" /><Input className={cn("h-7 rounded-lg pl-8 type-callout transition-[width,background-color,border-color] duration-180 ease-(--ease-out)", q ? "w-40" : "w-8 cursor-pointer border-transparent bg-transparent placeholder:text-transparent hover:bg-accent focus:w-40 focus:cursor-text focus:border-border focus:bg-transparent focus:placeholder:text-muted-foreground")} placeholder={t("views:items.search")} aria-label={t("views:items.search")} data-items-search defaultValue={q} onChange={(e) => { q = e.target.value; r() }} /></label>
       </div>}
       {selecting && (
         <div className="anim-in sticky top-2 z-10 mb-6 flex flex-wrap items-center gap-2 rounded-xl bg-popover/95 px-3 py-2 shadow-md backdrop-blur-xl" data-bulk-bar>
@@ -232,7 +232,7 @@ function Modal({ open, title, desc, children, footer, wide }: { open: boolean; t
   return (
     <Dialog open={open} onOpenChange={(o) => !o && closeSheet()}>
       <DialogContent className={cn("gap-4 rounded-2xl", wide ? "sm:max-w-[960px]" : "sm:max-w-[480px]")}>
-        <DialogHeader><DialogTitle className="type-headline!">{title}</DialogTitle>{desc && <DialogDescription className="type-callout!">{desc}</DialogDescription>}</DialogHeader>
+        <DialogHeader><DialogTitle className="type-headline">{title}</DialogTitle>{desc && <DialogDescription className="type-callout">{desc}</DialogDescription>}</DialogHeader>
         {children}
         {footer && <DialogFooter className="gap-2">{footer}</DialogFooter>}
       </DialogContent>
@@ -311,8 +311,6 @@ const ROOT_STATUS: Record<ItemState["kind"], AgentStatus> = {
   done: "done", dropped: "stopped", failed: "failed", proposed: "proposed", asking: "asking", unavailable: "blocked",
   graphPaused: "paused", paused: "paused", blocked: "blocked", working: "running", queued: "idle", idle: "idle",
 }
-/** a collapsible's panel animates its height (Base UI sets --collapsible-panel-height while it opens and closes) */
-const COLLAPSE = "h-[var(--collapsible-panel-height)] overflow-hidden transition-[height] duration-[260ms] ease-[var(--ease-out)] data-[ending-style]:h-0 data-[starting-style]:h-0"
 const STATE_ICON: Record<ItemState["kind"], typeof CheckIcon> = {
   done: CheckIcon, dropped: BanIcon, failed: CircleAlertIcon, proposed: CircleHelpIcon, asking: CircleHelpIcon,
   unavailable: CircleAlertIcon, graphPaused: PauseIcon, paused: PauseIcon, blocked: HourglassIcon, working: LoaderCircleIcon, queued: HourglassIcon, idle: CircleDashedIcon,
@@ -354,12 +352,12 @@ function ProcessRun({ count, last, children }: { count: number; last: any[]; chi
   const t = useT(), [open, setOpen] = useState(false)
   return <Collapsible open={open} onOpenChange={setOpen} data-process-run={count}>
     <CollapsibleTrigger className="flex w-full min-w-0 items-center gap-2 py-1 text-left type-footnote text-muted-foreground hover:text-foreground">
-      <span className="flex size-5 shrink-0 items-center justify-center"><ChevronRightIcon className={cn("size-3.5 transition-transform duration-[180ms] ease-[var(--ease-out)]", open && "rotate-90")} /></span>
+      <span className="flex size-5 shrink-0 items-center justify-center"><ChevronRightIcon className={cn("size-3.5 transition-transform duration-180 ease-(--ease-out)", open && "rotate-90")} /></span>
       <span className="shrink-0">{t("views:itemState.process", { count })}</span>
-      <span className={cn("min-w-0 truncate text-tertiary transition-opacity duration-[180ms]", open && "opacity-0")}>· {clip(String(last[1] ?? ""), 120)}</span>
+      <span className={cn("min-w-0 truncate text-tertiary transition-opacity duration-180", open && "opacity-0")}>· {clip(String(last[1] ?? ""), 120)}</span>
       <span className="ml-auto shrink-0 tabular-nums text-tertiary">{when(last)}</span>
     </CollapsibleTrigger>
-    <CollapsibleContent className={cn(COLLAPSE, "ml-2.5 border-l pl-2")}>{children}</CollapsibleContent>
+    <CollapsibleContent className="ml-2.5 border-l pl-2">{children}</CollapsibleContent>
   </Collapsible>
 }
 /* a long goal (a pasted brief) folds to its first lines so the page still opens on what is happening */
@@ -380,7 +378,7 @@ function GoalText({ text, children, after }: { text: string; children: ReactNode
   const long = full > GOAL_FOLD + 1
   return <>
     {/* opening and closing ease the height between the fold and the measured text, like every other collapse */}
-    <div className={cn("overflow-hidden transition-[max-height] duration-[260ms] ease-[var(--ease-out)]", !open && long && "[mask-image:linear-gradient(to_bottom,black_70%,transparent)]")}
+    <div className={cn("overflow-hidden transition-[max-height] duration-260 ease-(--ease-out)", !open && long && "[mask-image:linear-gradient(to_bottom,black_70%,transparent)]")}
       style={{ maxHeight: open && full ? full : GOAL_FOLD }} data-goal-text>
       <div ref={inner}><Markdown text={text} className="type-body text-foreground/80" /></div>
     </div>
@@ -406,7 +404,7 @@ function TagPicker({ i }: { i: Item }) {
     <DropdownMenu onOpenChange={(o) => !o && setQ("")}>
       <DropdownMenuTrigger render={<button type="button" className="self-start type-footnote text-muted-foreground hover:text-foreground" data-add-tag />}>{domain.length ? t("views:item.addMore") : t("views:item.addNone")}</DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-h-80 w-72">
-        <div className="p-1"><Input autoFocus className="h-8 rounded-md type-callout!" placeholder={t("views:item.tagSearch")} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} data-tag-search /></div>
+        <div className="p-1"><Input autoFocus className="h-8 rounded-md type-callout" placeholder={t("views:item.tagSearch")} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} data-tag-search /></div>
         {DOMAIN_CATS.map((c) => { const g = xs.filter((x) => x.cat === c); return g.length ? <div key={c}><div className="px-2 pb-1 pt-2 type-label text-tertiary">{tagCatLabel(c)}</div>
           {g.map((x) => <DropdownMenuItem key={x.id} onClick={() => setTags(i.id, [...(i.tags ?? []), x.id])} data-tag-opt={x.name} className="flex-col items-start gap-0"><span className="type-callout">{tagLabel(x)}</span><span className="line-clamp-1 type-footnote text-muted-foreground">{tagDesc(x)}</span></DropdownMenuItem>)}</div> : null })}
         {!xs.length && <div className="px-2 py-2 type-footnote text-muted-foreground">{t("views:item.tagNoMatch")}</div>}
@@ -447,12 +445,12 @@ function Plan({ i }: { i: Item }) {
       {i.rounds.map((r) => { const k = r.steps.filter((x) => x[1] === 1).length; return (
         <Collapsible key={r.n} data-plan-round={r.end}>
           <CollapsibleTrigger className="group/round flex items-center gap-1.5 type-footnote text-muted-foreground hover:text-foreground">
-            <ChevronRightIcon className="size-3.5 transition-transform duration-[180ms] group-data-[panel-open]/round:rotate-90" />
+            <ChevronRightIcon className="size-3.5 transition-transform duration-180 group-data-[panel-open]/round:rotate-90" />
             <span className={cn(r.end === "replaced" && "line-through decoration-tertiary")}>{t("views:item.round", { n: r.n })}</span>
             <span>· {r.end === "done" ? t("views:item.roundDone", { done: k, total: r.steps.length }) : t("views:item.roundReplaced", { done: k, total: r.steps.length })}</span>
             <span className="tabular-nums text-tertiary">· {r.at}</span>
           </CollapsibleTrigger>
-          <CollapsibleContent className={COLLAPSE}><div className="pl-5 pt-1.5"><PlanSteps steps={r.steps} old={r.end} /></div></CollapsibleContent>
+          <CollapsibleContent><div className="pl-5 pt-1.5"><PlanSteps steps={r.steps} old={r.end} /></div></CollapsibleContent>
         </Collapsible>) })}
       {i.rounds.length > 0 && cur.length > 0 && <div className="mt-1 type-footnote tabular-nums text-muted-foreground">{t("views:item.roundCurrent", { n: i.rounds.length + 1, done: dn, total: cur.length })}</div>}
       {cur.length > 0 && <PlanSteps steps={cur} run={i.st === "run"} />}
@@ -534,11 +532,11 @@ export function ItemView({ id }: { id: string }) {
           <section data-goal className="-mt-3">
             {editing ? (
               <Field><Textarea className="min-h-24 rounded-lg" value={gtxt} onChange={(e) => setG(e.target.value)} data-goal-input autoFocus />
-                <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => { saveGoal(i.id, gtxt.trim()); setEditing(false) }}>{t("views:item.saveAs", { n: i.goals.length + 1 })}</Button><Button size="sm" variant="ghost" onClick={() => setEditing(false)}>{t("common:action.cancel")}</Button><FieldDescription className="type-footnote!">{t("views:item.goalHint")}</FieldDescription></div></Field>
+                <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => { saveGoal(i.id, gtxt.trim()); setEditing(false) }}>{t("views:item.saveAs", { n: i.goals.length + 1 })}</Button><Button size="sm" variant="ghost" onClick={() => setEditing(false)}>{t("common:action.cancel")}</Button><FieldDescription className="type-footnote">{t("views:item.goalHint")}</FieldDescription></div></Field>
             ) : (
               /* the earlier versions open under the whole line, not inside it */
               <Collapsible className="group/goal">
-                <GoalText text={i.goals[i.goals.length - 1]} after={i.goals.length > 1 && <CollapsibleContent className={COLLAPSE}>
+                <GoalText text={i.goals[i.goals.length - 1]} after={i.goals.length > 1 && <CollapsibleContent>
                   <div className="flex flex-col gap-1 pt-2 type-footnote text-muted-foreground" data-goal-history>{i.goals.slice(0, -1).map((g, n) => <div key={n} className="line-clamp-2">{t("views:item.historyRow", { n: n + 1, goal: g })}</div>)}</div></CollapsibleContent>}>
                   <span>{t("views:item.goalVersion", { n: i.goals.length })}</span>
                   {i.goals.length > 1 && <CollapsibleTrigger className="hover:text-foreground">{t("views:item.history")}</CollapsibleTrigger>}
@@ -568,7 +566,7 @@ export function ItemView({ id }: { id: string }) {
     return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-yolo-line={yolo ? "" : undefined}><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span>{yolo && <YoloMark />}<span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(yolo ? e[1].replace(/^YOLO[：:]\s*/, "") : String(e[1] ?? ""), 240)}</span><span className="shrink-0 tabular-nums text-tertiary">{when(e)}</span></div>
   }
   return (
-    <Page small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg type-title!" data-title-input
+    <Page small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg type-title" data-title-input
         onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== i.t) patchItem(i.id, { t: v }); setTitleEdit(false) }} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setTitleEdit(false) }} />
       : <span className="cursor-text" onDoubleClick={() => setTitleEdit(true)} data-title>{i.t}</span>} back={["#/items", t("views:items.title")]} actions={actions} toolbar={quick} toolbarTop max={1080}
       footer={<div className="w-full shrink-0 border-t bg-background/85 backdrop-blur-xl"><div className="mx-auto w-full px-4 pb-[76px] pt-3 sm:px-8 md:pb-4" style={{ maxWidth: 1040 + 64 }}><div className="lg:pr-[340px]">
@@ -661,8 +659,8 @@ export function ItemView({ id }: { id: string }) {
               {i.projNext && <div className="type-footnote text-muted-foreground">{t("views:item.projNext")}</div>}</Prop>
             </dl>
             <Collapsible className="mt-3">
-              <CollapsibleTrigger className="group/more flex items-center gap-1 type-callout text-muted-foreground hover:text-foreground" data-more-props><ChevronRightIcon className="size-3.5 transition-transform duration-[180ms] group-data-[panel-open]/more:rotate-90" />{t("views:itemState.moreProps")}</CollapsibleTrigger>
-              <CollapsibleContent className={COLLAPSE}>
+              <CollapsibleTrigger className="group/more flex items-center gap-1 type-callout text-muted-foreground hover:text-foreground" data-more-props><ChevronRightIcon className="size-3.5 transition-transform duration-180 group-data-[panel-open]/more:rotate-90" />{t("views:itemState.moreProps")}</CollapsibleTrigger>
+              <CollapsibleContent>
             <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 pt-3 [&_[data-select]]:-ml-2">
             <ItemPeopleProp id={i.id} Prop={Prop} />
             <Prop label={t("views:item.propKind")}><Select quiet testId="kind" value={kindOf(i) ?? ""} onChange={(k) => setKind(i.id, k)} options={kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))} />{kindOf(i) && tag(kindOf(i)!) && <div className="type-footnote text-muted-foreground">{tagDesc(tag(kindOf(i)!)!)}</div>}</Prop>

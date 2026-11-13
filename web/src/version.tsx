@@ -304,7 +304,7 @@ function UpgradeActivity({ op, connected }: { op: UpdateOperation; connected: bo
     {p.detail && <p className="break-words type-footnote text-muted-foreground">{p.detail}</p>}
     {measuring && <>
       <div role="progressbar" aria-label={t("pages:upgrade.activity.downloadProgress")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} className="h-1.5 overflow-hidden rounded-full bg-muted" data-upgrade-download>
-        <div className="h-full rounded-full bg-primary transition-[width] duration-240 ease-(--ease-out)" style={{ width: `${percent}%` }} />
+        <div className="h-full rounded-full bg-primary transition-[width] duration-260 ease-(--ease-out)" style={{ width: `${percent}%` }} />
       </div>
       <p className="type-footnote tabular-nums">{byteSize(p.download!.received_bytes)} / {byteSize(p.download!.total_bytes)} · {percent}%</p>
     </>}

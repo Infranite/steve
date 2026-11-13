@@ -16,7 +16,7 @@ function NodeCard({ data }: NodeProps<Node<{ n: GNode; focus: boolean; select: (
   const label = n.k === "item" ? ST[n.st]?.[0] : n.k === "sess" ? SS[n.st]?.[0] : n.k === "work" ? t(`shell:graph.workStatus.${n.st}` as any) : ""
   const Icon = n.k === "item" ? FileTextIcon : n.k === "work" ? GitBranchIcon : n.k === "missing" ? CircleHelpIcon : TerminalIcon
   return (
-    <div tabIndex={0} role="button" aria-label={n.title} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select() } }} className={`flex h-[64px] w-[232px] cursor-pointer items-center gap-3 rounded-xl bg-card px-3 transition-shadow duration-[180ms] focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-blue/30 ${focus ? "shadow-[var(--lift)] ring-2 ring-blue" : "shadow-[var(--lift)] hover:shadow-[var(--lift-hover)]"}`}>
+    <div tabIndex={0} role="button" aria-label={n.title} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select() } }} className={`flex h-[64px] w-[232px] cursor-pointer items-center gap-3 rounded-xl bg-card px-3 transition-shadow duration-180 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-blue/30 ${focus ? "shadow-[var(--lift)] ring-2 ring-blue" : "shadow-[var(--lift)] hover:shadow-[var(--lift-hover)]"}`}>
       <Handle type="target" position={Position.Top} className="!size-1.5 !min-h-0 !min-w-0 !border-0 !bg-border" />
       <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
         <Icon className="size-4" strokeWidth={1.5} />

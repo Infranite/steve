@@ -595,7 +595,7 @@ export default {
     emptySub: "A flow decides what happens to a kind of event: filter, look up, let a bot judge, wait for your approval, act.",
     emptyAction: "New flow",
     motion: "Motion",
-    motionNote: "Color 120ms (hover, press) · floating layers 160ms (menus, tooltips) · chevrons and card lift 180ms · expanding, entering and progress 220–240ms · dialogs and page changes 240ms. All ease-out; reduced motion turns it off.",
+    motionNote: "Three steps: 120ms colour and press · 180ms floating layers, toggles, chevrons, entrances and page changes · 260ms dialogs, sheets, expand and collapse, and progress. All ease-out; reduced motion turns it off.",
     easeOut: "ease-out · entering, expanding",
     easeInOut: "ease-in-out · moving, switching",
     motionEnter: "Enter",

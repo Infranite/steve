@@ -199,7 +199,7 @@ function Brush({ v, sel, long, onSel, onZoom, canOut, onOut }: { v: Events; sel:
         {counts.map((c, i) => {
           const hh = scale(c), lit = win ? inWin(i) : hover === i
           return <rect key={i} x={i * slot + (slot - bw) / 2} y={base - hh} width={bw} height={hh} rx={Math.min(2, bw / 2)}
-            fill={lit ? "var(--primary)" : "var(--muted-foreground)"} opacity={win ? (lit ? 0.9 : 0.22) : lit ? 0.9 : 0.4} className="transition-[opacity,fill] duration-[120ms]" data-bucket={i} />
+            fill={lit ? "var(--primary)" : "var(--muted-foreground)"} opacity={win ? (lit ? 0.9 : 0.22) : lit ? 0.9 : 0.4} className="transition-[opacity,fill] duration-120" data-bucket={i} />
         })}
         {h.bad.map((b, i) => b > 0 && (
           <g key={"bad" + i} data-bad={i}>
@@ -243,7 +243,7 @@ function EventList({ v, long }: { v: Events; long: boolean }) {
           <button key={e.kind + e.id} type="button" onClick={open} className="grid w-full grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)] items-center gap-x-4 rounded-lg px-3 py-2 text-left hover:bg-muted/60 @3xl/events:grid-cols-[7.5rem_minmax(0,14rem)_minmax(0,1fr)_auto]" data-event={e.kind} data-event-bad={e.bad || undefined}>
             <span className="font-mono type-footnote tabular-nums text-muted-foreground">{at(e.ts, long, true)}</span>
             <span className="flex min-w-0 items-center gap-2 type-callout">
-              <span aria-hidden className={cn("size-2 shrink-0 rounded-full", e.open && "animate-pulse motion-reduce:animate-none")} style={{ background: e.bad ? "var(--destructive)" : KIND_COLOR[e.kind] }} />
+              <span aria-hidden className={cn("size-2 shrink-0 rounded-full", e.open && "dot-running")} style={{ background: e.bad ? "var(--destructive)" : KIND_COLOR[e.kind] }} />
               <span className={cn("truncate", e.bad && "text-destructive")}>{eventLabel(e)}</span>
             </span>
             <span className="col-span-2 flex min-w-0 items-center gap-2 pl-[8.5rem] @3xl/events:col-span-1 @3xl/events:pl-0">

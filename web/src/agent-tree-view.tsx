@@ -276,7 +276,7 @@ export function TeamTimeline({ at, selected, onSelect, actions }: { at: AgentTre
         const word = n.status === "done" ? null : t(`views:agentTree.status.${n.status}`)
         return <li key={n.key}>
           <button type="button" onClick={() => onSelect(on ? null : n.key)} aria-pressed={on} data-agent-node={n.key} data-agent-kind={n.kind} data-agent-status={n.status} data-agent-tries={r.tries.length || undefined}
-            className={cn(ROW, "group rounded-lg px-2 py-2 text-left transition-colors duration-[120ms] hover:bg-accent/60", on && "bg-accent")}>
+            className={cn(ROW, "group rounded-lg px-2 py-2 text-left transition-colors duration-120 hover:bg-accent/60", on && "bg-accent")}>
             <span className="flex min-w-0 items-start gap-2.5" style={{ paddingLeft: r.depth * 16 }}>
               <I className={cn("mt-[3px] size-3.5 shrink-0", STATUS_INK[n.status], isActive(n.status) && "motion-safe:animate-spin")} strokeWidth={2.25} aria-label={t(`views:agentTree.status.${n.status}`)} />
               <span className="min-w-0">
@@ -319,7 +319,7 @@ export function Notices({ at, inline = false }: { at: AgentTreeState; inline?: b
     {at.old && <N mark="workflow-prior-cycle">{t("views:workflow.priorCycle")}</N>}
     {w.paused && !at.old && !at.single && !at.unavailable && <N>{t("views:workflow.pauseHint")}</N>}
     {w.blockers.length > 0 && <details className={cn("group", inline ? "" : "mb-3 rounded-xl bg-muted/60 px-4 py-2.5")} data-workflow-blockers>
-      <summary className="flex cursor-pointer list-none items-center gap-1.5 type-callout"><ChevronRightIcon className="size-3.5 transition-transform duration-[180ms] group-open:rotate-90" />{t("views:workflow.blockers")} · {w.blockers.length}</summary>
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 type-callout"><ChevronRightIcon className="size-3.5 transition-transform duration-180 group-open:rotate-90" />{t("views:workflow.blockers")} · {w.blockers.length}</summary>
       <ul className="mt-1.5 list-disc space-y-1 pl-6 type-callout text-muted-foreground">{w.blockers.map((text, n) => <li key={n} className="break-words">{text}</li>)}</ul>
     </details>}
   </>
@@ -330,7 +330,7 @@ export function History({ workflow }: { workflow: Workflow }) {
   const older = (workflow.history_attempts_total ?? 0) - (workflow.history_attempts?.length ?? 0)
   if (!workflow.history.length && older <= 0) return null
   return <details className="group mt-4" data-workflow-history>
-    <summary className="flex cursor-pointer list-none items-center gap-1.5 type-footnote text-muted-foreground hover:text-foreground"><ChevronRightIcon className="size-3.5 transition-transform duration-[180ms] group-open:rotate-90" />{t("views:workflow.history", { count: workflow.history_total ?? workflow.history.length })}</summary>
+    <summary className="flex cursor-pointer list-none items-center gap-1.5 type-footnote text-muted-foreground hover:text-foreground"><ChevronRightIcon className="size-3.5 transition-transform duration-180 group-open:rotate-90" />{t("views:workflow.history", { count: workflow.history_total ?? workflow.history.length })}</summary>
     {older > 0 && <p className="mt-2 type-footnote text-muted-foreground">{t("views:workflow.historyAttemptsShown", { shown: workflow.history_attempts?.length ?? 0, total: workflow.history_attempts_total })}</p>}
     <ol className="mt-2 ml-1.5 space-y-2 border-l pl-3 type-footnote">{workflow.history.slice().reverse().map((entry, n) => <li key={n} className="break-words"><span className="text-muted-foreground">{t("views:workflow.revision", { n: entry.revision })} · </span>{entry.reason}</li>)}</ol>
   </details>
@@ -415,7 +415,7 @@ export function AgentDetailPanel({ at, node, onClose }: { at: AgentTreeState; no
     return () => removeEventListener("keydown", esc)
   }, [node, wide, onClose])
   if (!node) return null
-  if (wide) return <aside className="fixed top-16 right-4 bottom-4 z-30 w-[380px] overflow-y-auto rounded-2xl bg-popover p-5 text-popover-foreground shadow-xl motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-right-4 motion-safe:duration-[260ms] motion-safe:ease-[var(--ease-out)]" aria-label={node.title} data-agent-panel>
+  if (wide) return <aside className="fixed top-16 right-4 bottom-4 z-30 w-[380px] overflow-y-auto rounded-2xl bg-popover p-5 text-popover-foreground shadow-xl motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-right-4 motion-safe:duration-260 motion-safe:ease-(--ease-out)" aria-label={node.title} data-agent-panel>
     <AgentDetail at={at} node={node} onClose={onClose} /></aside>
   return <Sheet open onOpenChange={(open) => !open && onClose()}>
     <SheetContent side="bottom" className="max-h-[85dvh] overflow-y-auto rounded-t-2xl p-4 pb-[max(1rem,env(safe-area-inset-bottom))]" showCloseButton={false} data-agent-panel>

@@ -83,10 +83,10 @@ export function SignalsView() {
           return (
             <Collapsible key={gk} open={open} onOpenChange={(o) => { o ? openGroups.add(gk) : openGroups.delete(gk); r() }}>
               <CollapsibleTrigger className="group/sg mb-2 flex w-full items-center gap-1.5 text-left" data-sig-group={gk}>
-                <ChevronRightIcon className="size-3.5 text-muted-foreground transition-transform duration-[180ms] ease-out group-aria-expanded/sg:rotate-90" aria-hidden />
+                <ChevronRightIcon className="size-3.5 text-muted-foreground transition-transform duration-180 ease-(--ease-out) group-aria-expanded/sg:rotate-90" aria-hidden />
                 <span className="type-label text-muted-foreground group-hover/sg:text-foreground">{gl}</span><span className="type-footnote text-muted-foreground">{t("misc:signals.groupMeta", { signals: t("misc:signals.count", { count: xs.length }), groups: t("misc:signals.groups", { count: byG.length }) })}</span>
               </CollapsibleTrigger>
-              <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-out data-ending-style:h-0 data-starting-style:h-0">
+              <CollapsibleContent>
                 <Group>{byG.map((g) => <SignalRow key={rowKey(g[0])} g={g} open={row === rowKey(g[0])} onOpen={(o) => setRow(o ? rowKey(g[0]) : null)} reload={() => void L.reload()} />)}</Group>
               </CollapsibleContent>
             </Collapsible>
@@ -115,7 +115,7 @@ function SignalRow({ g, open, onOpen, reload }: { g: Signal[]; open: boolean; on
         <span className="hidden items-center gap-1.5 type-footnote text-muted-foreground sm:inline-flex"><StatusDot s={dotOf(s0.outcome)} />{s0.outcome_label}</span>
         <span className="w-16 shrink-0 text-right type-footnote tabular-nums text-muted-foreground">{tm(s0.received)}</span>
       </CollapsibleTrigger>
-      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-[260ms] ease-out data-ending-style:h-0 data-starting-style:h-0" data-sig-detail={s0.id}>
+      <CollapsibleContent data-sig-detail={s0.id}>
         <SignalDetailBox g={g} reload={reload} />
       </CollapsibleContent>
     </Collapsible>

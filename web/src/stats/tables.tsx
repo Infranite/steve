@@ -131,7 +131,7 @@ export function TimeSection({ s, f, fkey, live, range }: { s: Summary; f: Filter
             <div data-time-split>
               {all > 0 ? <>
                 <div className="flex h-2 gap-0.5 overflow-hidden rounded-full" role="img" aria-label={parts.map(([l, v]) => t("stats:time.splitPart", { label: l, pct: fmtPct(v / all) })).join(t("stats:word.commaSep"))}>
-                  {parts.map(([l, v, c]) => v > 0 && <span key={l} className="first:rounded-l-full last:rounded-r-full transition-[width] duration-[260ms] ease-[var(--ease-out)]" style={{ width: `${(v / all) * 100}%`, background: c }} />)}
+                  {parts.map(([l, v, c]) => v > 0 && <span key={l} className="first:rounded-l-full last:rounded-r-full transition-[width] duration-260 ease-(--ease-out)" style={{ width: `${(v / all) * 100}%`, background: c }} />)}
                 </div>
                 <Legend className="mt-2.5" items={parts.map(([l, v, c]) => ({ label: t("stats:time.splitLegend", { label: l, pct: fmtPct(v / all), dur: fmtMs(v) }), c }))} />
               </> : <div className="type-callout text-muted-foreground">{t("stats:time.splitEmpty")}</div>}
@@ -227,7 +227,7 @@ export function AgentSection({ s, f, fkey, live, range }: { s: Summary; f: Filte
           <PanelSection k="tool-names">
             <details className="group/names">
               <summary className="-ml-1.5 inline-flex cursor-pointer list-none items-center gap-1 rounded-md px-1.5 py-0.5 type-callout text-muted-foreground transition-colors hover:bg-muted hover:text-foreground [&::-webkit-details-marker]:hidden" data-tool-names>
-                <ChevronRightIcon className="size-3.5 transition-transform duration-[180ms] ease-[var(--ease-out)] group-open/names:rotate-90" />{t("stats:agent.toolNames", { count: names.length })}
+                <ChevronRightIcon className="size-3.5 transition-transform duration-180 ease-(--ease-out) group-open/names:rotate-90" />{t("stats:agent.toolNames", { count: names.length })}
               </summary>
               <div className="-mx-1.5 mt-2 grid grid-cols-1 gap-x-10 @3xl/stats:grid-cols-2">{[names.slice(0, Math.ceil(names.length / 2)), names.slice(Math.ceil(names.length / 2))].map((half, i) => half.length > 0 &&
                 <HBars key={i} k="tool-names" lw="w-32 sm:w-48" label={t("stats:agent.toolNames", { count: names.length })} fmt={fmtN} total={names[0]?.count} rows={half.map((r) => ({ key: r.key, label: <span className="type-code">{r.label}</span>, title: r.label, value: r.count, c: NEUTRAL }))} />)}</div>
