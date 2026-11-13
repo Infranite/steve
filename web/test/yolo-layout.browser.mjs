@@ -133,6 +133,16 @@ try {
       assert.ok(await page.locator('[data-yolo-apply="full"]').isDisabled(), "changing selection resets acknowledgement")
     } else {
       assert.ok(await page.locator('[data-yolo-level="full"]').isDisabled())
+      // forced off or paused: Steve handles nothing, so the dial shows 关 and lists nothing as handled for you
+      assert.equal(await page.locator('[data-yolo-level="off"]').getAttribute("aria-checked"), "true", `${state}: the dial shows off`)
+      assert.equal(await page.locator(".ui-adl__row:not([data-asks])").count(), 0, `${state}: no action is listed as handled`)
+      assert.ok(await page.locator(".ui-adl__row[data-asks]").count() > 0, `${state}: the actions are listed as asking you`)
+      if (state === "paused") {
+        // the stored mode (on) is said, not shown as handled; it can still be changed to off
+        await page.locator('[data-yolo-stored="on"]').waitFor()
+        await page.locator("[data-yolo-stored-off]").click()
+        await page.locator('[data-yolo-apply="off"]').waitFor()
+      } else assert.equal(await page.locator("[data-yolo-stored]").count(), 0, "nothing stored to mention when the mode is off")
     }
     await layout(page, "[data-yolo-dialog]", '[data-slot="dialog-footer"]')
     await page.locator('[data-slot="dialog-footer"] button').first().click()

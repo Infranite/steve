@@ -17,17 +17,30 @@ const candidates = [
   { mem: mem('c2', 'fact', '事项页排队列表把每条都按评论渲染；遇到“评论排版很丑”，先确认那段是不是任务说明。', { status: 'candidate', source_label: 'ST-16 交付时' }), origin: 'item', origin_label: 'ST-16 交付时', evidence: '排队列表把每一条都当用户评论，按 Markdown 整段平铺出来', supersedes: null, decision_id: 'd2', record: '知识条目', why: '再有类似排版反馈时先判断原因，避免误改渲染', scope: '排查事项页评论排版问题' },
 ]
 const expired = [{ mem: mem('x1', 'rule', '周报每周五下午发给团队。', { status: 'stale', source_label: '10-01 的对话' }), origin_label: '10-01 的对话', evidence: '以后周报周五下午发', expired: 1 }]
-const added = [], restored = []
+const added = [], restored = [], patched = [], deleted = []
 const run = async ({ width, height, scheme, locale = "zh-CN" }) => {
   const page = await browser.newPage({ locale, viewport: { width, height }, colorScheme: scheme, reducedMotion: 'reduce' })
   page.setDefaultTimeout(10000)
   const errors = []; page.on('pageerror', (e) => errors.push(e.message))
+  // A request sent while the page unloads (keepalive) never reaches page.route, so the page records its keepalive
+  // requests itself, in sessionStorage, which survives the reload; they are answered here and never go to a Hub.
+  await page.addInitScript(() => {
+    const f = window.fetch
+    window.fetch = (u, o) => {
+      if (!o?.keepalive) return f(u, o)
+      sessionStorage.setItem('kb-leave', JSON.stringify([...JSON.parse(sessionStorage.getItem('kb-leave') || '[]'), [o.method, String(u)]]))
+      return Promise.resolve(new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } }))
+    }
+  })
+  const leaveDeletes = () => page.evaluate(() => { const x = JSON.parse(sessionStorage.getItem('kb-leave') || '[]'); sessionStorage.removeItem('kb-leave'); return x.map(([m, u]) => m + ' ' + new URL(u, location.href).pathname) })
   await page.route('**/*', async (route) => {
     const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (!u.pathname.startsWith('/api/')) return route.continue()
     const method = route.request().method()
     let data = []
     if (u.pathname === '/api/kb/mems' && method === 'POST') { const b = route.request().postDataJSON(); added.push(b); data = mem('n' + added.length, b.kind, b.text) }
     else if (u.pathname === '/api/kb/mems') data = mems
+    else if (u.pathname.startsWith('/api/mems/') && method === 'PATCH') { const id = decodeURIComponent(u.pathname.slice(10)); const b = route.request().postDataJSON(); patched.push([id, b]); data = { ...mems.find((m) => m.id === id), ...b } }
+    else if (u.pathname.startsWith('/api/mems/') && method === 'DELETE') { deleted.push(decodeURIComponent(u.pathname.slice(10))); data = { ok: true } }
     else if (u.pathname === '/api/kb/candidates') data = candidates
     else if (u.pathname === '/api/kb/candidates/expired') data = restored.length ? [] : expired
     else if (u.pathname.endsWith('/restore') && method === 'POST') { restored.push(u.pathname); data = { ok: true } }
@@ -47,10 +60,29 @@ const run = async ({ width, height, scheme, locale = "zh-CN" }) => {
     assert.equal(await page.locator('[data-mem="m3"]').count(), 0)
     await page.getByText('一次性要求留在那件事的记录里', { exact: false }).waitFor()
     await fits(); await shot('kb-long-term')
+    // the memory panel: reword in place, mark stale, delete with a moment to undo
+    await page.locator('[data-mem="m1"]').hover(); await page.locator('[data-mem="m1"] [data-mem-edit]').click()
+    await page.locator('[data-mem="m1"] [data-mem-edit-text]').fill('主会话收到需求时直接给出方案。'); await page.locator('[data-mem="m1"] [data-mem-edit-text]').press('Enter')
+    await page.waitForFunction(() => document.querySelector('[data-mem="m1"]')?.textContent?.startsWith('主会话收到需求时直接给出方案。'))
+    await page.locator('[data-mem="m2"]').hover(); await page.locator('[data-mem="m2"] [data-mem-pause]').click()
+    await page.waitForFunction(() => document.querySelector('[data-mem="m2"]')?.hasAttribute('data-paused'))
+    assert.deepEqual(patched.splice(0), [['m1', { text: '主会话收到需求时直接给出方案。' }], ['m2', { status: 'stale' }]])
+    await page.locator('[data-mem="m1"]').hover(); await page.locator('[data-mem="m1"] [data-mem-del]').click()
+    await page.waitForFunction(() => !document.querySelector('[data-mem="m1"]'))
+    await page.getByRole('button', { name: '撤销' }).click()
+    await page.locator('[data-mem="m1"]').waitFor()
+    assert.deepEqual(deleted, [], 'undo keeps it on the Hub')
+    // deleted for good once undo has passed, or when the tab closes
+    await page.locator('[data-mem="m2"]').hover(); await page.locator('[data-mem="m2"] [data-mem-del]').click()
+    await page.waitForFunction(() => !document.querySelector('[data-mem="m2"]'))
+    assert.deepEqual(deleted, [])
     // 知识条目: facts only; what you add there is a fact
     await page.locator('[data-seg="知识条目"]').click()
     await page.locator('[data-kb-tab="知识条目"] [data-mem="m3"]').waitFor()
     assert.equal(await page.locator('[data-mem]').count(), 1)
+    await page.waitForFunction(() => document.querySelector('[data-kb-tab]')?.getAttribute('data-kb-tab') === '知识条目')
+    assert.deepEqual(deleted.splice(0), ['m2'], 'leaving the tab deletes what was forgotten')
+    await page.locator('[data-mem-new]').click()
     await page.locator('[data-mem-input]').fill('Acme 的合同每年 3 月续签'); await page.locator('[data-mem-add]').click()
     await page.waitForFunction(() => !document.querySelector('[data-mem-input]')?.value)
     assert.equal(added.at(-1)?.kind, 'fact')
@@ -75,6 +107,23 @@ const run = async ({ width, height, scheme, locale = "zh-CN" }) => {
     await page.getByText('没有找到').waitFor()
     assert.equal(await page.locator('[data-kb-keywords-only]').count(), 1)
     await fits(); await shot('kb-search-keywords-only')
+    // the app hidden during the undo window: the delete goes out at once, and Undo writes the memory back
+    await page.locator('[data-seg="长期记忆"]').click(); await page.locator('[data-kb-tab="长期记忆"] [data-mem="m1"]').waitFor()
+    await page.locator('[data-mem="m1"]').hover(); await page.locator('[data-mem="m1"] [data-mem-del]').click()
+    await page.waitForFunction(() => !document.querySelector('[data-mem="m1"]'))
+    await page.evaluate(() => { Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true }); document.dispatchEvent(new Event('visibilitychange')) })
+    assert.deepEqual(await leaveDeletes(), ['DELETE /api/mems/m1'], 'hiding the app deletes what was forgotten')
+    await page.evaluate(() => { delete document.visibilityState })
+    const before = added.length
+    await page.getByRole('button', { name: '撤销' }).click()
+    for (let n = 0; added.length === before && n < 50; n++) await page.waitForTimeout(100)
+    assert.deepEqual(added.slice(before).map((b) => [b.text, b.kind]), [[mems[0].text, mems[0].kind]], 'undo after an early delete writes it back')
+    // a reload during the undo window still deletes it on the Hub
+    await page.locator('[data-mem="m2"]').hover(); await page.locator('[data-mem="m2"] [data-mem-del]').click()
+    await page.waitForFunction(() => !document.querySelector('[data-mem="m2"]'))
+    await page.reload(); await page.locator('[data-kb-tab]').waitFor()
+    assert.deepEqual(await leaveDeletes(), ['DELETE /api/mems/m2'], 'reloading within the undo window deletes it')
+    assert.deepEqual(deleted, [], 'and only once')
     // the link from 待处理 opens 待确认 directly
     await page.goto(base + '/test/fixtures/knowledge.html?via=link#/knowledge?tab=pending'); await page.locator('[data-kb-tab="待确认"] [data-candidate="c1"]').waitFor()
     // the 待处理 card: the question names the record; an old decision still reads
