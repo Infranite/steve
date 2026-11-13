@@ -217,24 +217,26 @@ function AddRepoDialog({ ov, init, onClose, onDone }: { ov: GhOverview; init: { 
   )
 }
 
-/* ── 项目页的 “GitHub” 一行 ── */
-export function GitHubLine({ project }: { project: string }) {
-  const t = useT()
+/* ── 项目页的 GitHub：概览里一行“关联的仓库”，设置里一行关联或接入 ── */
+/** what GitHub knows of a project: its linked repository and a suggested one; `null` while unread or on a Hub without
+ *  the GitHub module (the project page then leaves GitHub out) */
+export function useProjectGitHub(project: string) {
   const [ov, setOv] = useState<GhOverview | null>(null)
-  useEffect(() => { gh.overview().then(setOv, () => setOv(null)) }, [project])
-  if (!ov) return null // no GitHub module on this Hub (or not readable): the project page stays as it was
-  const r = ov.repos.find((x) => x.project?.id === project), s = ov.suggestions.find((x) => x.project_id === project)
-  return (
-    <section data-gh-line><SectionLabel>GitHub</SectionLabel>
-      <Group>{r
-        ? <Row icon={<GhIcon />} onClick={() => go("#/github/" + r.id)} title={r.full_name} sub={<Meta><Health r={r} /><span>{t("github:shared.openPrs", { count: r.open_prs })}</span></Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
-        : s ? <Row icon={<GhIcon />} title={<span><Trans t={t} i18nKey="github:line.suggestTitle" values={{ repo: s.full_name }} components={{ mono: <span className="font-medium" /> }} /></span>} sub={t("github:shared.linkHint")}>
-            <Button size="sm" variant="outline" onClick={() => void gh.link({ connection_id: s.connection_id, gh_id: s.gh_id, project_id: project }).then((x) => { toast(t("github:shared.linked", { name: x.full_name })); setOv({ ...ov, repos: [...ov.repos, x], suggestions: ov.suggestions.filter((y) => y !== s) }) }, (e) => toast(errMsg(e)))} data-gh-line-suggest>{t("github:shared.link")}</Button></Row>
-        : <Row icon={<GhIcon />} title={t("github:shared.noRepo")} sub={ov.connections.length ? t("github:line.linkedSub") : t("github:line.connectFirst")}>
-            <Button size="sm" variant="outline" onClick={() => go(ov.connections.length ? "#/github?link=" + encodeURIComponent(project) : "#/github")} data-gh-line-link>{ov.connections.length ? t("github:line.linkRepo") : t("github:shared.connectGithub")}</Button></Row>}
-      </Group>
-    </section>
-  )
+  useEffect(() => { let live = true; gh.overview().then((v) => live && setOv(v), () => live && setOv(null)); return () => { live = false } }, [project])
+  return [ov, setOv] as const
+}
+export const projectRepo = (ov: GhOverview, project: string) => ov.repos.find((x) => x.project?.id === project)
+
+/** the settings row: the linked repository, the suggested one to link, or the way to link one */
+export function GitHubLine({ project, ov, onOv }: { project: string; ov: GhOverview; onOv: (v: GhOverview) => void }) {
+  const t = useT()
+  const r = projectRepo(ov, project), s = ov.suggestions.find((x) => x.project_id === project)
+  return r
+    ? <Row icon={<GhIcon />} onClick={() => go("#/github/" + r.id)} title={r.full_name} sub={<Meta><Health r={r} /><span>{t("github:shared.openPrs", { count: r.open_prs })}</span></Meta>} data-gh-line><ChevronRightIcon className="size-4 text-tertiary" /></Row>
+    : s ? <Row icon={<GhIcon />} title={<span><Trans t={t} i18nKey="github:line.suggestTitle" values={{ repo: s.full_name }} components={{ mono: <span className="font-medium" /> }} /></span>} sub={t("github:shared.linkHint")} data-gh-line>
+        <Button size="sm" variant="outline" onClick={() => void gh.link({ connection_id: s.connection_id, gh_id: s.gh_id, project_id: project }).then((x) => { toast(t("github:shared.linked", { name: x.full_name })); onOv({ ...ov, repos: [...ov.repos, x], suggestions: ov.suggestions.filter((y) => y !== s) }) }, (e) => toast(errMsg(e)))} data-gh-line-suggest>{t("github:shared.link")}</Button></Row>
+    : <Row icon={<GhIcon />} title={t("github:shared.noRepo")} sub={ov.connections.length ? t("github:line.linkedSub") : t("github:line.connectFirst")} data-gh-line>
+        <Button size="sm" variant="outline" onClick={() => go(ov.connections.length ? "#/github?link=" + encodeURIComponent(project) : "#/github")} data-gh-line-link>{ov.connections.length ? t("github:line.linkRepo") : t("github:shared.connectGithub")}</Button></Row>
 }
 
 /* “我的”列表里的入口（GitHub 不占主导航） */

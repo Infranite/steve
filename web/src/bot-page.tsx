@@ -7,7 +7,7 @@
  *    shown as a before/after diff, and saved with the Bot update API only when you confirm. */
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { ArrowUpIcon, CheckIcon, ChevronRightIcon, SparklesIcon } from "lucide-react"
+import { ArrowUpIcon, CheckIcon, SparklesIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { TextArea } from "@/components/affect/text-area-clean"
@@ -17,7 +17,7 @@ import { api } from "@/api"
 import { stats } from "@/api/stats"
 import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
 import { st, closedSt, saveBot, toast, type Item } from "@/store"
-import { Section, Panel, Card, Note, Segmented, Loading } from "@/ui"
+import { Section, Panel, Card, Note, Segmented, Loading, Fact, Figure } from "@/ui"
 import { ItemRowExport as ItemRow } from "@/view-shared"
 import { foldedDiff, diffCounts } from "@/lib/line-diff"
 
@@ -25,19 +25,6 @@ export type BotTab = "概览" | "设置" | "对外身份" | "能力" | "系统�
 /** how many Steve tools every Bot has (manage.tsx's STEVE_TOOLS) */
 export type BotLabels = { pro: string; perm: string; acc: string; effort: string | null; steveTools: number }
 
-/** a fact about the Bot: its label, its value, and the tab where it is changed */
-function Fact({ label, children, onClick, testId }: { label: string; children: ReactNode; onClick: () => void; testId: string }) {
-  return (
-    <button type="button" onClick={onClick} data-bot-fact={testId}
-      className="group/fact flex w-full min-w-0 items-start gap-3 rounded-lg px-3 py-2.5 text-left transition-colors duration-120 ease-(--ease-out) hover:bg-accent active:bg-accent/70 max-sm:flex-col max-sm:gap-0.5">
-      <span className="w-28 shrink-0 pt-px type-callout text-muted-foreground">{label}</span>
-      <span className="flex min-w-0 flex-1 items-start gap-2 self-stretch">
-        <span className="min-w-0 flex-1 type-body text-foreground">{children}</span>
-        <ChevronRightIcon className="mt-1 size-4 shrink-0 text-tertiary opacity-60 transition-opacity group-hover/fact:opacity-100 max-sm:hidden" aria-hidden />
-      </span>
-    </button>
-  )
-}
 /** the harness and model a Bot runs on, each with its mark */
 export function RunsOn({ k, className, effort }: { k: string; className?: string; effort?: string | null }) {
   const t = useT()
@@ -49,16 +36,6 @@ export function RunsOn({ k, className, effort }: { k: string; className?: string
       <span className="inline-flex min-w-0 items-center gap-1.5"><ModelMark model={b.model} />{b.model ? <span className="truncate type-code">{b.model}</span> : <span className="text-muted-foreground">{t("manage:ov.defaultModel")}</span>}</span>
       {effort && <span className="text-muted-foreground">{t("manage:ov.effort", { v: effort })}</span>}
     </span>
-  )
-}
-/** one figure of the last 30 days */
-function Figure({ label, value, sub, testId }: { label: string; value: string; sub?: string; testId: string }) {
-  return (
-    <div className="flex min-w-0 flex-col gap-1 px-4 py-3" data-bot-figure={testId}>
-      <span className="type-footnote text-muted-foreground">{label}</span>
-      <span className={cn("type-title tabular-nums", value === "—" && "text-tertiary")}>{value}</span>
-      {sub && <span className="truncate type-footnote text-tertiary">{sub}</span>}
-    </div>
   )
 }
 const RECENT = 6

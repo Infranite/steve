@@ -90,6 +90,9 @@ export type Events = {
 /** the span (`lo`/`hi`, ms; the filter's range when absent), the window the list covers (`a`/`b`), a kind */
 export type EventQuery = { lo?: number; hi?: number; a?: number; b?: number; kind?: EventKind; item?: string; buckets?: number }
 
+/** the filter the statistics page opens with next time, set by a page that links into it (a project's "在统计里看") */
+export const statsSeed: { next: Filter | null } = { next: null }
+
 export const stats = {
   summary: (x: Filter) => req<Summary>("GET", "/stats/summary" + f(x)),
   /** `hourly`: per local hour (only for a one-day range) */

@@ -13,6 +13,10 @@ try {
     // no Hub behind the fixture: its own calls are stubbed in the page
     await page.route(u => u.pathname.startsWith("/api/"), route => route.fulfill({ status: 503, json: { error: "fixture" } }))
     await page.goto(base + "/test/fixtures/project-done.html")
+    // a setting, so on the settings tab, not on the overview
+    await page.locator("[data-proj-overview]").waitFor()
+    assert.equal(await page.locator("[data-proj-done]").count(), 0)
+    await page.locator('[data-seg="settings"]').click()
     const row = page.locator("[data-proj-done]")
     await row.waitFor()
     assert.match(await row.innerText(), /验收后在本机发布上线才结束/)

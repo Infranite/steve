@@ -169,15 +169,3 @@ export function SessionStats({ id, ctx }: { id: string; /** the context in use, 
     </span></>
   )
 }
-
-/** 项目页 / Bot 页的一行：“最近 30 天：完成 6 · 中位前置 3 小时 · 估 $24” */
-export function RecentStats({ project, bot, className }: { project?: string; bot?: string; className?: string }) {
-  const t = useT()
-  const [d] = useStats(() => stats.summary({ range: "30d", project, bot }), [project, bot])
-  if (d.s !== "ok") return null
-  const s = d.v
-  const parts = bot
-    ? [t("stats:drill.recentTurns", { n: fmtN(s.agents.turns) }), t("stats:drill.recentFirstPass", { pct: fmtPct(s.quality.first_pass) }), t("stats:word.estShort", { usd: fmtUsd(s.spend.est) })]
-    : [t("stats:drill.recentDone", { n: s.throughput.done }), t("stats:drill.recentLead", { dur: fmtMs(s.time.lead.p50) }), t("stats:word.estShort", { usd: fmtUsd(s.spend.est) })]
-  return <a href="#/stats" className={cn("type-footnote text-muted-foreground hover:underline", className)} data-recent-stats>{t("stats:drill.recent", { parts: parts.join(" · ") })}</a>
-}

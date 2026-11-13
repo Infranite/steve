@@ -14,7 +14,7 @@ import { st } from "@/store"
 import { Page, Segmented, Empty } from "@/ui"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
-import { stats, type Filter, type RangeKind, type Summary } from "@/api/stats"
+import { stats, statsSeed, type Filter, type RangeKind, type Summary } from "@/api/stats"
 import { KeyNumbers } from "@/stats/kpi"
 import { Section } from "@/stats/tables"
 import { DrillPanel, NowLine, type Drill } from "@/stats/overview"
@@ -67,7 +67,7 @@ function CustomRange({ f, set }: { f: Filter; set: (f: Filter) => void }) {
 
 export function StatsView() {
   const t = useT()
-  const [f, setF0] = useState<Filter>(saved)
+  const [f, setF0] = useState<Filter>(() => { if (statsSeed.next) { saved = statsSeed.next; statsSeed.next = null } return saved })
   const setF = (x: Filter) => { saved = x; setF0(x) }
   const [drill, setDrill] = useState<Drill | null>(null)
   /* the page follows live changes only while its range includes today */

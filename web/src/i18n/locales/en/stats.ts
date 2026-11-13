@@ -376,11 +376,6 @@ export default {
     sessionLine_other: "This conversation {{est}} · {{count}} turns",
     sessionLineNoEst_one: "This conversation {{count}} turn",
     sessionLineNoEst_other: "This conversation {{count}} turns",
-    recentTurns: "Turns {{n}}",
-    recentFirstPass: "First pass {{pct}}",
-    recentDone: "Done {{n}}",
-    recentLead: "Median lead {{dur}}",
-    recent: "Last 30 days: {{parts}}",
   },
   /* the event explorer (stats/events.tsx) */
   events: {

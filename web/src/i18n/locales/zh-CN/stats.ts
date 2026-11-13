@@ -365,11 +365,6 @@ export default {
     sessionTitleHit: "本会话 {{tokens}} tokens，缓存命中 {{pct}}；费用是估算",
     sessionLine_other: "本会话 {{est}} · {{count}} 回合",
     sessionLineNoEst_other: "本会话 {{count}} 回合",
-    recentTurns: "回合 {{n}}",
-    recentFirstPass: "首次通过 {{pct}}",
-    recentDone: "完成 {{n}}",
-    recentLead: "中位前置 {{dur}}",
-    recent: "最近 30 天：{{parts}}",
   },
   /* the event explorer (stats/events.tsx) */
   events: {

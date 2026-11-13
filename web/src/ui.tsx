@@ -259,6 +259,32 @@ export function Panel({ children, className, ...rest }: { children: ReactNode; c
   )
 }
 
+/** a fact: its label, its value, and (when it can be changed) where it is changed; without `onClick` it is only read */
+export function Fact({ label, children, onClick, testId }: { label: string; children: ReactNode; onClick?: () => void; testId: string }) {
+  const row = "flex w-full min-w-0 items-start gap-3 rounded-lg px-3 py-2.5 text-left max-sm:flex-col max-sm:gap-0.5"
+  const body = (<>
+    <span className="w-28 shrink-0 pt-px type-callout text-muted-foreground">{label}</span>
+    <span className="flex min-w-0 flex-1 items-start gap-2 self-stretch">
+      <span className="min-w-0 flex-1 type-body text-foreground">{children}</span>
+      {onClick && <ChevronRightIcon className="mt-1 size-4 shrink-0 text-tertiary opacity-60 transition-opacity group-hover/fact:opacity-100 max-sm:hidden" aria-hidden />}
+    </span>
+  </>)
+  if (!onClick) return <div className={row} data-fact={testId}>{body}</div>
+  return (
+    <button type="button" onClick={onClick} data-fact={testId}
+      className={cn("group/fact transition-colors duration-120 ease-(--ease-out) hover:bg-accent active:bg-accent/70", row)}>{body}</button>
+  )
+}
+/** one figure of a recent period */
+export function Figure({ label, value, sub, testId }: { label: string; value: string; sub?: string; testId: string }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1 px-4 py-3" data-figure={testId}>
+      <span className="type-footnote text-muted-foreground">{label}</span>
+      <span className={cn("type-title tabular-nums", value === "—" && "text-tertiary")}>{value}</span>
+      {sub && <span className="truncate type-footnote text-tertiary">{sub}</span>}
+    </div>
+  )
+}
 /** a card for content that is not a list of rows */
 export function Card({ children, className, ...rest }: { children: ReactNode; className?: string } & Omit<ComponentProps<"div">, "children">) {
   return <AffectCard className={cn("steve-card p-4", className)} {...rest}>{children}</AffectCard>

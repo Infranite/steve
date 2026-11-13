@@ -1,63 +1,129 @@
-/* 项目页的「合并通道」：Steve 认出的这个仓库怎么合并、托管方要求什么检查、怎么发布、哪些文件每次都会撞，以及近 7 天的节奏，每一项都写明依据；"没找到"和"查不到"分开写。下面是通道本身：在途和合批中的批次、"立即合并发布"、合批窗口和上限 */
-import { api, type RLane, type RLaneFact, type RLaneMember, type RLaneState, type RLaneUnit } from "@/api"
-import { Badge } from "@/components/ui/badge"
+/* 项目页里合并通道的几块，projects.tsx 决定它们排在哪里：
+ *  - useLane：读一次 GET /projects/:id/lane（Steve 认出的这个仓库怎么合并、要什么检查、怎么发布、哪些文件每次都会撞、近 7 天的节奏）
+ *  - MERGE / SHIP / How / Unknown：合并方式和发布方式的说法，概览的"仓库与交付"卡片用它们，一行一项
+ *  - LaneNow：在途和合批中的批次和"立即合并发布"；没有批次时什么都不显示（合并队列开着时是它的在途部分）
+ *  - LaneConventions：折叠的"仓库约定"：检查、每次都会撞的文件、每项是怎么认出来的；每样只列一次
+ *  - LaneSettings：合批窗口和上限（合并队列开着时是它的各项设置），在设置页
+ * "没找到，按默认"和"查不到"分开写，查不到时写明原因。 */
+import { api, type RLane, type RLaneFact, type RLaneMember, type RLaneUnit } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Spinner } from "@/components/ui/spinner"
 import { toast } from "@/store"
 import { errMsg } from "@/github/index"
-import { Group, Meta, Row, SectionLabel } from "@/ui"
-import { TriangleAlertIcon } from "lucide-react"
-import { type ReactNode, useEffect, useState } from "react"
+import { Disclosure, Fact, Meta, Panel, Pill, Row, Section } from "@/ui"
+import { useEffect, useState } from "react"
 import { t, useT } from "@/i18n"
-import { QueueSection } from "@/merge-queue"
+import { QueueNow, QueueSettings } from "@/merge-queue"
 
 /* labels are functions so they follow a language change */
-const MERGE: Record<string, () => string> = { host_queue: () => t("shell:lane.merge.hostQueue"), host_pr: () => t("shell:lane.merge.hostPr"), push: () => t("shell:lane.merge.push") }
-const SHIP: Record<string, () => string> = { tag: () => t("shell:lane.ship.tag"), script: () => t("shell:lane.ship.script"), merge: () => t("shell:lane.ship.merge") }
+export const MERGE: Record<string, () => string> = { host_queue: () => t("shell:lane.merge.hostQueue"), host_pr: () => t("shell:lane.merge.hostPr"), push: () => t("shell:lane.merge.push") }
+export const SHIP: Record<string, () => string> = { tag: () => t("shell:lane.ship.tag"), script: () => t("shell:lane.ship.script"), merge: () => t("shell:lane.ship.merge") }
 const FROM: Record<string, () => string> = { required: () => t("shell:lane.from.required"), suggested: () => t("shell:lane.from.suggested") }
 const EVENT: Record<string, () => string> = { pull_request: () => "PR", pull_request_target: () => "PR", merge_group: () => t("shell:lane.event.mergeGroup") }
 const from = (c: { from: string; on?: string[] }) => c.from === "workflow" ? t("shell:lane.runsOn", { events: [...new Set((c.on ?? []).map((e) => EVENT[e]?.() ?? e))].join(t("shell:list.sep")) }) : FROM[c.from]?.()
 
-function How({ f }: { f: RLaneFact<unknown> }) {
-  const t = useT()
-  if (f.how.state === "unknown") return <Badge variant="outline" className="font-normal text-attention">{t("shell:lane.unknown")}</Badge>
-  if (f.how.state === "default") return <Badge variant="outline" className="font-normal text-muted-foreground">{t("shell:lane.default")}</Badge>
-  return null
+export type LaneLoad = { s: "loading" } | { s: "error"; msg: string } | { s: "ok"; v: RLane }
+/** the lane of a git project (`on` false: not a git project, nothing is read) */
+export function useLane(project: string, on: boolean) {
+  const [l, setL] = useState<LaneLoad>({ s: "loading" })
+  useEffect(() => {
+    if (!on) return
+    let live = true
+    setL({ s: "loading" })
+    api.lane(project).then((v) => live && setL({ s: "ok", v }), (e) => live && setL({ s: "error", msg: errMsg(e) }))
+    return () => { live = false }
+  }, [project, on])
+  return [l, (v: RLane) => setL({ s: "ok", v })] as const
 }
 
-function Why({ f, extra }: { f: RLaneFact<unknown>; extra?: ReactNode }) {
-  const lines = [...(f.how.state === "unknown" ? [f.how.why] : []), ...f.evidence]
-  return <span className="flex flex-col gap-0.5">{extra}{lines.map((l, i) => <span key={i}>{l}</span>)}</span>
+/** a fact Steve fell back on or could not read: a small tag beside its value */
+export function How({ f }: { f: RLaneFact<unknown> }) {
+  const t = useT()
+  if (f.how.state === "unknown") return <Pill tone="attention">{t("shell:lane.unknown")}</Pill>
+  if (f.how.state === "default") return <Pill>{t("shell:lane.default")}</Pill>
+  return null
+}
+/** why a fact could not be read, under its value */
+export function Unknown({ f }: { f: RLaneFact<unknown> }) {
+  return f.how.state === "unknown" ? <span className="mt-0.5 block type-footnote text-attention">{f.how.why}</span> : null
 }
 
 const names = (ms: RLaneMember[]) => ms.map((m) => m.label).join(t("shell:list.sep"))
 const clock = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
 const unitState = (u: RLaneUnit) => u.merged ? t("shell:lane.batch.releasing") : u.approved ? t("shell:lane.batch.merging") : t("shell:lane.batch.waiting")
+const carried = (u: RLaneUnit) => [names(u.members), u.deferred.length ? t("shell:lane.batch.carries", { names: names(u.deferred) }) : ""].filter(Boolean).join(" · ")
 
-/* the lane itself: the unit in flight, the batch collecting (with "merge and release now"), and your limits */
-function Batches({ project, lane, onLane }: { project: string; lane: RLaneState | null; onLane: (l: RLaneState | null) => void }) {
+/** what is being merged now: the unit in flight and the batch collecting (with "merge and release now"); nothing when idle */
+export function LaneNow({ project, lane, onLane }: { project: string; lane: RLane; onLane: (l: RLane) => void }) {
   const t = useT()
-  const minutes = (ms: number | null | undefined) => (ms == null ? "" : String(Math.round(ms / 60_000)))
-  const [win, setWin] = useState(minutes(lane?.set.window_ms)), [max, setMax] = useState(lane?.set.max_members == null ? "" : String(lane.set.max_members)), [busy, setBusy] = useState(false)
-  useEffect(() => { setWin(minutes(lane?.set.window_ms)); setMax(lane?.set.max_members == null ? "" : String(lane.set.max_members)) }, [lane?.set.window_ms, lane?.set.max_members])
-  const run = async (f: () => Promise<void>) => { setBusy(true); try { await f() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) } }
-  const now = () => run(async () => { const r = await api.laneNow(project); onLane(r.lane); toast(r.closed ? t("shell:lane.batch.nowDone") : t("shell:lane.batch.nowNothing")) })
-  const save = () => run(async () => {
-    const num = (v: string) => (v.trim() === "" ? null : Number(v))
-    const r = await api.lanePolicy(project, { window_min: num(win), max_members: num(max) }); onLane(r.lane); toast(t("common:state.saved"))
-  })
-  const d = lane?.defaults ?? { window_ms: 2 * 3_600_000, max_members: 10 }
-  const r = lane?.running, c = lane?.collecting
+  const [busy, setBusy] = useState(false)
+  if (lane.queue) return <QueueNow project={project} queue={lane.queue} onQueue={(q) => onLane({ ...lane, queue: q })} />
+  const r = lane.lane?.running, c = lane.lane?.collecting
+  if (!r && !c) return null
+  const now = async () => {
+    setBusy(true)
+    try { const x = await api.laneNow(project); onLane({ ...lane, lane: x.lane }); toast(x.closed ? t("shell:lane.batch.nowDone") : t("shell:lane.batch.nowNothing")) } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+  }
   return (
-    <Group>
-      {r && <Row title={t("shell:lane.batch.unit", { no: r.no, state: unitState(r) })} sub={[names(r.members), r.deferred.length ? t("shell:lane.batch.carries", { names: names(r.deferred) }) : ""].filter(Boolean).join(" · ")} data-lane-running />}
-      {c && <Row title={c.closed ? t("shell:lane.batch.closed", { no: c.no }) : t("shell:lane.batch.collecting", { no: c.no, time: clock(c.closes_at) })} data-lane-collecting
-        sub={[names(c.members), c.deferred.length ? t("shell:lane.batch.carries", { names: names(c.deferred) }) : ""].filter(Boolean).join(" · ")}>
+    <Panel data-lane-batches>
+      {r && <Row title={t("shell:lane.batch.unit", { no: r.no, state: unitState(r) })} sub={carried(r)} data-lane-running />}
+      {c && <Row title={c.closed ? t("shell:lane.batch.closed", { no: c.no }) : t("shell:lane.batch.collecting", { no: c.no, time: clock(c.closes_at) })} sub={carried(c)} data-lane-collecting>
         {!c.closed && <Button size="sm" variant="outline" disabled={busy} onClick={() => void now()} data-lane-now>{t("shell:lane.batch.now")}</Button>}
       </Row>}
-      {!r && !c && <Row title={t("shell:lane.batch.idle")} data-lane-idle />}
-      <Row title={t("shell:lane.batch.limits")} sub={t("shell:lane.batch.limitsSub", { minutes: Math.round(d.window_ms / 60_000), count: d.max_members })} data-lane-limits>
+    </Panel>
+  )
+}
+
+/** what Steve found in the repository, folded: the checks, the files every change collides on, and where each fact came from */
+export function LaneConventions({ lane }: { lane: RLane }) {
+  const t = useT()
+  const checks = lane.checks.value
+  const sources: [string, string, string[]][] = [
+    ["merge", t("shell:lane.conv.merge"), lane.merge.evidence],
+    ["ship", t("shell:lane.conv.ship"), lane.ship.evidence],
+    ["reads", t("shell:lane.conv.reads"), [lane.reads]],
+  ]
+  return (
+    <Disclosure data-lane-conventions className="px-1"
+      label={<Meta inline one className="type-callout text-inherit"><span>{t("shell:lane.conv.title")}</span><span>{t("shell:lane.conv.checks", { count: checks.length })}</span><span>{t("shell:lane.conv.files", { count: lane.numbered.length })}</span></Meta>}>
+      <div className="-mx-1 flex flex-col gap-6 pt-4">
+        <Section label={t("shell:lane.conv.checksLabel")} right={<How f={lane.checks} />} note={t("shell:lane.checksNote")}>
+          <Panel data-lane-checks>
+            {lane.checks.how.state === "unknown" && <Row title={t("shell:lane.unknown")} sub={lane.checks.how.why} />}
+            {checks.map((c) => <Row key={c.from + c.name} className="min-h-10 py-2" title={<span className="font-mono text-[13px] break-all">{c.name}</span>} data-lane-check={c.from}><span className="type-footnote whitespace-nowrap text-muted-foreground">{from(c)}</span></Row>)}
+            {!checks.length && lane.checks.how.state !== "unknown" && <Row title={t("shell:lane.conv.noChecks")} />}
+          </Panel>
+        </Section>
+        {lane.numbered.length > 0 && <Section label={t("shell:lane.conv.filesLabel")}>
+          <Panel>{lane.numbered.map((n) => <Row key={n.kind + n.path} data-lane-numbered={n.kind}
+            title={<span className="font-mono text-[13px] break-all">{n.path}</span>} sub={<Meta><span>{n.evidence}</span><span className="whitespace-normal">{n.handling}</span></Meta>} />)}</Panel>
+        </Section>}
+        <Section label={t("shell:lane.conv.how")}>
+          <Panel>{sources.filter(([, , xs]) => xs.length).map(([k, label, xs]) => (
+            <Fact key={k} label={label} testId={"lane-" + k}><span className="flex flex-col gap-0.5 type-callout text-muted-foreground">{xs.map((x, i) => <span key={i} className="break-words">{x}</span>)}</span></Fact>))}</Panel>
+        </Section>
+      </div>
+    </Disclosure>
+  )
+}
+
+/** your limits on the lane (window and size of a batch), or the merge queue's settings while it is on */
+export function LaneSettings({ project, lane, onLane }: { project: string; lane: RLane; onLane: (l: RLane) => void }) {
+  const t = useT()
+  const l = lane.lane
+  const minutes = (ms: number | null | undefined) => (ms == null ? "" : String(Math.round(ms / 60_000)))
+  const [win, setWin] = useState(minutes(l?.set.window_ms)), [max, setMax] = useState(l?.set.max_members == null ? "" : String(l.set.max_members)), [busy, setBusy] = useState(false)
+  useEffect(() => { setWin(minutes(l?.set.window_ms)); setMax(l?.set.max_members == null ? "" : String(l.set.max_members)) }, [l?.set.window_ms, l?.set.max_members])
+  if (lane.queue) return <QueueSettings project={project} queue={lane.queue} onQueue={(q) => onLane({ ...lane, queue: q })} />
+  const save = async () => {
+    const num = (v: string) => (v.trim() === "" ? null : Number(v))
+    setBusy(true)
+    try { const r = await api.lanePolicy(project, { window_min: num(win), max_members: num(max) }); onLane({ ...lane, lane: r.lane }); toast(t("common:state.saved")) } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+  }
+  const d = l?.defaults ?? { window_ms: 2 * 3_600_000, max_members: 10 }
+  return (
+    <Panel>
+      <Row className="max-sm:flex-wrap max-sm:[&>[data-slot=item-actions]]:basis-full max-sm:[&>[data-slot=item-actions]]:justify-end" title={t("shell:lane.batch.limits")} sub={t("shell:lane.batch.limitsSub", { minutes: Math.round(d.window_ms / 60_000), count: d.max_members })} data-lane-limits>
         <span className="flex items-center gap-1.5">
           <Input className="h-8 w-16 text-right tabular-nums" inputMode="numeric" value={win} placeholder={String(Math.round(d.window_ms / 60_000))} onChange={(e) => setWin(e.target.value)} aria-label={t("shell:lane.batch.window")} data-lane-window />
           <span className="text-muted-foreground type-footnote">{t("shell:lane.batch.minutes")}</span>
@@ -66,31 +132,6 @@ function Batches({ project, lane, onLane }: { project: string; lane: RLaneState 
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void save()} data-lane-save>{t("common:action.save")}</Button>
         </span>
       </Row>
-    </Group>
-  )
-}
-
-export function LaneSection({ project }: { project: string }) {
-  const [lane, setLane] = useState<RLane | null>(null), [err, setErr] = useState<string | null>(null), t = useT()
-  useEffect(() => { setLane(null); setErr(null); api.lane(project).then(setLane, (e) => setErr(errMsg(e))) }, [project])
-  return (
-    <section data-lane>
-      <SectionLabel>{t("shell:lane.title")}</SectionLabel>
-      {err ? <Group><Row title={t("shell:lane.unrecognized")} sub={err} /></Group>
-        : !lane ? <Group><Row title={<span className="inline-flex items-center gap-2 text-muted-foreground"><Spinner />{t("shell:lane.loading")}</span>} /></Group>
-        : <Group>
-          <Row title={<span className="type-code">{lane.target.upstream}#{lane.target.branch}</span>} data-lane-target
-            sub={<span className="flex flex-col gap-0.5"><span>{t("shell:lane.reads", { reads: lane.reads })}</span>{lane.fetch_error && <span className="flex items-start gap-1 text-attention"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" /><span className="break-all">{t("shell:lane.fetchError", { error: lane.fetch_error })}</span></span>}</span>} />
-          <Row title={<span className="inline-flex items-center gap-2">{t("shell:lane.mergeTitle", { value: MERGE[lane.merge.value]?.() ?? lane.merge.value })}<How f={lane.merge} /></span>} sub={<Why f={lane.merge} />} data-lane-merge />
-          <Row title={<span className="inline-flex items-center gap-2">{t("shell:lane.checksTitle", { value: lane.checks.value.filter((c) => c.from !== "suggested").length || (lane.checks.how.state === "unknown" ? t("shell:lane.unsure") : t("shell:lane.none")) })}<How f={lane.checks} /></span>} data-lane-checks
-            sub={<Why f={lane.checks} extra={<><span>{t("shell:lane.checksNote")}</span>{lane.checks.value.length > 0 && <span className="flex flex-wrap gap-1 py-0.5">{lane.checks.value.map((c) => <Badge key={c.from + c.name} variant="outline" className="h-auto max-w-full justify-start whitespace-normal text-left font-normal text-muted-foreground"><span className="font-mono break-all">{c.name}</span><span className="shrink-0">· {from(c)}</span></Badge>)}</span>}</>} />} />
-          <Row title={<span className="inline-flex items-center gap-2">{t("shell:lane.shipTitle", { value: SHIP[lane.ship.value]?.() ?? lane.ship.value })}<How f={lane.ship} /></span>} sub={<Why f={lane.ship} />} data-lane-ship />
-          {lane.numbered.map((n) => <Row key={n.kind + n.path} title={<span><span className="type-code">{n.path}</span> · {n.evidence}</span>} sub={n.handling} data-lane-numbered={n.kind} />)}
-          <Row title={t("shell:lane.days", { count: lane.pace.days })} sub={<Meta><span>{t("shell:lane.landed", { count: lane.pace.landed })}</span><span>{t("shell:lane.releases", { count: lane.pace.releases })}</span><span>{t("shell:lane.authors", { count: lane.pace.authors })}</span></Meta>} data-lane-pace />
-        </Group>}
-      {lane && (lane.queue
-        ? <div className="mt-3"><QueueSection project={project} queue={lane.queue} onQueue={(q) => setLane({ ...lane, queue: q })} /></div>
-        : <div className="mt-3" data-lane-batches><Batches project={project} lane={lane.lane} onLane={(l) => setLane({ ...lane, lane: l })} /></div>)}
-    </section>
+    </Panel>
   )
 }
