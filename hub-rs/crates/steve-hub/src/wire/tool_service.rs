@@ -25,6 +25,7 @@ const READ_ONLY: &[&str] = &[
     "steve_event_get",
     "steve_knowledge_search",
     "steve_knowledge_get",
+    steve_knowledge::steward::LIST,
     "steve_contacts_search",
     "steve_contact_get",
     "steve_im_read",

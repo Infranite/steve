@@ -87,5 +87,13 @@
   "knowledge.builtin.bot_mems": "Bot memories",
   "knowledge.chat.day": "Conversation on %{day}",
   "knowledge.record.memory": "Long-term memory",
-  "knowledge.record.entry": "Knowledge entry"
+  "knowledge.record.entry": "Knowledge entry",
+  "knowledge.use.session": "An agent session",
+  "knowledge.use.session_of": "A session of %{item}",
+  "knowledge.use.chat": "An answer in the main conversation",
+  "knowledge.use.search": "Your search for “%{q}”",
+  "knowledge.use.draft": "An email draft",
+  "knowledge.use.flow": "An automation run",
+  "knowledge.change.not_undoable": "This change was already undone, or has nothing to undo",
+  "knowledge.change.answered": "This conflict was already answered"
 }

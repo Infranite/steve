@@ -128,6 +128,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/062.sql"),
     // 63: a Bot's skills (`bot_skills`), written where its harness reads them when a session opens.
     include_str!("../migrations/063.sql"),
+    // 64: what agents changed in the memories (`mem_changes`) and merges (`mem_supersedes`).
+    include_str!("../migrations/064.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

@@ -456,8 +456,8 @@ pub fn update_note(
 
 // ---- memories
 
-/// `Mem`, with `source_type` and the name of every `about` object (like
-/// `Doc.about`; an unknown object has an empty name). A fixed stored `source_label`
+/// `Mem`, with `source_type`, the name of every `about` object (like `Doc.about`; an unknown object
+/// has an empty name) and `origin`: where it came from, with a link ([`crate::provenance::origin`]). A fixed stored `source_label`
 /// (“你写的”) comes in the request's language.
 pub fn mem_json(c: &Connection, m: &Mem) -> Value {
     let about: Vec<Value> = m
@@ -468,10 +468,12 @@ pub fn mem_json(c: &Connection, m: &Mem) -> Value {
             json!({"type": a.kind, "id": a.id, "name": name})
         })
         .collect();
+    let origin = crate::provenance::origin(c, m).unwrap_or(Value::Null);
     json!({
         "id": m.id, "kind": m.kind, "text": m.text, "source_type": m.source_type,
         "source_label": crate::sources::label_shown(&m.source_label), "level": m.level, "status": m.status,
-        "visibility": m.visibility, "about": about, "created": m.created,
+        "visibility": m.visibility, "about": about, "created": m.created, "updated": m.updated,
+        "origin": origin,
     })
 }
 
@@ -500,7 +502,15 @@ pub fn list_mems(m: &Modules, who: &Caller, p: MemsParams) -> ApiResult<Value> {
             }
             _ => mems::all(c, &viewer, &f)?,
         };
-        let shown: Vec<Value> = list.iter().map(|x| mem_json(c, x)).collect();
+        let used = crate::provenance::use_counts(c, &who.ws, "mem")?;
+        let shown: Vec<Value> = list
+            .iter()
+            .map(|x| {
+                let mut v = mem_json(c, x);
+                crate::provenance::add_used(&mut v, &used);
+                v
+            })
+            .collect();
         Ok::<_, StoreError>((list, shown))
     })?;
     let q =

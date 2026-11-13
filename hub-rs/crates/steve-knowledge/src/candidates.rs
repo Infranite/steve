@@ -352,12 +352,13 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
                 },
             )?;
             sync::sync_mem(tx, &mem.id, now)?;
-            let supersedes = candidate_row(tx, &mem.id)?.and_then(|r| r.3);
-            if let Some(old) = supersedes
-                && let Some(o) = mems::get(tx, &old)?
-                && o.workspace_id == ws
-                && o.status == "confirmed"
-            {
+            for old in replaced(tx, &mem.id)? {
+                let Some(o) = mems::get(tx, &old)? else {
+                    continue;
+                };
+                if o.workspace_id != ws || o.status != "confirmed" {
+                    continue;
+                }
                 mems::patch(
                     tx,
                     &o.id,
@@ -380,6 +381,8 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
         "no" => {
             tx.prepare_cached("DELETE FROM mem_candidates WHERE mem_id = ?")?
                 .execute([&mem.id])?;
+            tx.prepare_cached("DELETE FROM mem_supersedes WHERE mem_id = ?")?
+                .execute([&mem.id])?;
             mems::delete(tx, &mem.id)?;
             sync::sync_mem(tx, &mem.id, now)?;
             base::audit(tx, ws, actor, "mm.reject", &mem.id, &json!({}))?;
@@ -387,6 +390,25 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
         _ => return Err(ApiError::invalid("choice")),
     }
     Ok(())
+}
+
+/// The confirmed memories a candidate replaces once confirmed: its `supersedes`, and every memory a
+/// merge names (`mem_supersedes`).
+fn replaced(c: &Connection, id: &str) -> ApiResult<Vec<String>> {
+    let mut out: Vec<String> = candidate_row(c, id)?
+        .and_then(|r| r.3)
+        .into_iter()
+        .collect();
+    let more: Vec<String> = c
+        .prepare_cached("SELECT old_id FROM mem_supersedes WHERE mem_id = ? ORDER BY rowid")?
+        .query_map([id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for x in more {
+        if !out.contains(&x) {
+            out.push(x);
+        }
+    }
+    Ok(out)
 }
 
 /// The `DecisionHandler` of `subject_type = "mem"` (moved here from contacts P4). Register it
@@ -423,9 +445,10 @@ impl DecisionHandler for MemDecisions {
             },
         )?;
         sync::sync_mem(tx, &mem.id, now)?;
-        if let Some(old) = candidate_row(tx, &mem.id)?.and_then(|r| r.3)
-            && mems::get(tx, &old)?.is_some_and(|o| o.status == "stale")
-        {
+        for old in replaced(tx, &mem.id)? {
+            if !mems::get(tx, &old)?.is_some_and(|o| o.status == "stale") {
+                continue;
+            }
             mems::patch(
                 tx,
                 &old,

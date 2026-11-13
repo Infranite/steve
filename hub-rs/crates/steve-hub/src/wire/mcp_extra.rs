@@ -173,7 +173,7 @@ fn extra_tools() -> Vec<Value> {
     v.push(super::diagnostics::tool());
     v.extend(super::item_mcp::tools());
     v.push(workflow_tool());
-    v.extend(steve_knowledge::tools::tools().iter().cloned());
+    v.extend(steve_knowledge::tools::all_tools().iter().cloned());
     v.push(steve_knowledge::candidates::remember_tool());
     v.extend(steve_modules::vault::mcp::tools().iter().cloned());
     v.extend(steve_github::mcp::tools().iter().cloned());

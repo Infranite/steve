@@ -68,9 +68,20 @@ pub fn tools() -> &'static [Value] {
     &TOOLS
 }
 
+static ALL_TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
+    let mut v = TOOLS.clone();
+    v.extend(crate::steward::tools());
+    v
+});
+
+/// [`tools`] and the memory upkeep tools ([`crate::steward`]): what the MCP endpoint lists.
+pub fn all_tools() -> &'static [Value] {
+    &ALL_TOOLS
+}
+
 /// Is `name` one of this module's tools?
 pub fn handles(name: &str) -> bool {
-    name == SEARCH || name == READ
+    name == SEARCH || name == READ || crate::steward::handles(name)
 }
 
 /// Runs one tool. `Ok` is the result text, `Err` the `isError` text (steve-mcp's convention).
@@ -114,6 +125,7 @@ pub fn call_sync(
             let from = args.get("from").and_then(Value::as_f64).unwrap_or(0.0);
             read(m, cx, str_arg(args, "id"), from).map_err(|e| e.to_string())
         }),
+        n if crate::steward::handles(n) => crate::steward::call(m, cx, n, args),
         _ => return Err(format!("MCP error -32602: Tool {name} not found")),
     };
     if let Err(e) = &r {

@@ -50,3 +50,8 @@ pub use context::{KnowledgeContext, chat_context, session_context};
 
 // K5: conversational configuration.
 pub mod drafts;
+
+// Provenance, subjects and the memory upkeep tools (knowledge page, knowledge steward).
+pub mod provenance;
+pub mod steward;
+pub mod subjects;
