@@ -6,7 +6,8 @@ import { MailIcon, PaperclipIcon, PlusIcon } from "lucide-react"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
-import { Page, Group, Segmented, Chips, Empty, ItemNo, StatusDot, go, SearchField, ConnectPrompt } from "@/ui"
+import { Page, Group, Segmented, Empty, ItemNo, StatusDot, go, SearchField, ConnectPrompt } from "@/ui"
+import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { tm } from "@/store"
 import { ContactAvatar } from "@/people/avatar"
@@ -57,12 +58,10 @@ function Threads({ accounts }: { accounts: MailAccount[] }) {
   const unread = accounts.reduce((n, a) => n + a.unread, 0)
   return (
     <Page title={tr("mail:shared.title")} sub={unread ? tr("mail:shared.unread", { count: unread }) : undefined} max={820}
-      toolbar={<SearchField size="sm" type="search" className="w-56" aria-label={tr("mail:list.searchAria")} placeholder={tr("mail:list.searchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} data-mail-search />}>
-      <div className="mb-4 flex flex-col gap-3">
-        {accounts.length > 1 && <Chips value={account ? labels[accounts.findIndex((a) => a.connection_id === account)] : ALL} options={[ALL, ...labels]}
-          onChange={(l) => setAccount(l === ALL ? "" : accounts[labels.indexOf(l)]?.connection_id ?? "")} className="flex-wrap" />}
-        <div className="-mx-1 overflow-x-auto px-1"><Segmented value={view} onChange={setView} options={VIEWS} /></div>
-      </div>
+      toolbar={<div className="flex w-full min-w-0 items-center gap-2 sm:w-auto sm:justify-end">
+        {accounts.length > 1 && <Select testId="mail-account" value={account || "__all"} onChange={(v) => setAccount(v === "__all" ? "" : v)} options={[{ v: "__all", l: ALL }, ...accounts.map((a, n) => ({ v: a.connection_id, l: a.unread ? tr("mail:list.accountUnread", { name: labels[n], count: a.unread }) : labels[n] }))]} />}
+        <SearchField size="sm" type="search" className="min-w-0 flex-1 sm:w-56 sm:flex-none" aria-label={tr("mail:list.searchAria")} placeholder={tr("mail:list.searchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} data-mail-search /></div>}>
+      <div className="-mx-1 mb-4 overflow-x-auto px-1"><Segmented value={view} onChange={setView} options={VIEWS} /></div>
       {T.s === "loading" ? <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
         : T.s === "error" ? <Empty title={T.err} />
         : !T.data.length ? <Empty title={qq ? tr("mail:list.noMatch") : tr(`mail:list.empty.${view}`)} />
@@ -89,8 +88,9 @@ function ThreadRow({ t, showAccount }: { t: ThreadBrief; showAccount: boolean })
         <span className={cn("mt-0.5 block truncate type-callout", t.unread > 0 ? "font-medium text-foreground" : "text-foreground/85")}>{t.unread > 0 && <span className="mr-1.5 inline-block size-2 rounded-full bg-blue align-middle" aria-label={tr("mail:list.unread")} />}{t.subject || tr("mail:shared.noSubject")}</span>
         <span className="block truncate type-callout text-muted-foreground">{t.snippet}</span>
         {(t.signal || t.item_id || t.draft || showAccount) && <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 type-footnote text-muted-foreground">
-          {t.signal && <span className="inline-flex items-center gap-1.5" data-thread-signal><StatusDot s={/等你|需要/.test(t.signal.outcome_label) ? "wait" : "idle"} />{t.signal.outcome_label}</span>}
-          {t.draft && <span className="inline-flex items-center gap-1.5" data-thread-draft-status={t.draft.status}><StatusDot s={DRAFT_STATUS[t.draft.status]?.[1] ?? "idle"} />{tr("mail:list.draftStatus", { status: DRAFT_STATUS[t.draft.status]?.[0] ?? t.draft.status })}</span>}
+          {/* a draft waiting for you is the next step, so it comes first; the signal says why the mail is here */}
+          {t.draft && <span className={cn("inline-flex items-center gap-1.5", t.draft.status === "pending" && "font-medium text-foreground")} data-thread-draft-status={t.draft.status}><StatusDot s={DRAFT_STATUS[t.draft.status]?.[1] ?? "idle"} />{tr("mail:list.draftStatus", { status: DRAFT_STATUS[t.draft.status]?.[0] ?? t.draft.status })}</span>}
+          {t.signal && <span className="inline-flex items-center gap-1.5" data-thread-signal>{!t.draft && <StatusDot s={/等你|需要/.test(t.signal.outcome_label) ? "wait" : "idle"} />}{t.signal.outcome_label}</span>}
           {t.item_id && <ItemNo id={t.item_id} />}
           {showAccount && <span className="truncate">{t.connection.address}</span>}
         </span>}

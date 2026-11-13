@@ -134,7 +134,8 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
     <div className="flex flex-col gap-4 py-1" data-identity={kind} data-identity-state="on" data-conn={c.id}>
       <div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5"><span className="type-headline">{title}</span>
-          <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span></div>
+          {/* the card's header says the state; an identity repeats it only when it differs */}
+          {(c.status !== "ok" || c.installed === false) && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span>}</div>
         <Line className="mt-1">{what}</Line>
       </div>
       {c.installed === false && <Blocked data-blocked="not_installed">{t("api:notInstalledNote")}</Blocked>}

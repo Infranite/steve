@@ -7,18 +7,18 @@ import { BanIcon, ChevronRightIcon, RefreshCwIcon, XIcon } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
-import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, StatusDot } from "@/ui"
+import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, StatusDot, Notice, Note, Pill, Blank } from "@/ui"
+import { Clamp } from "@/auto/common"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { tm, toast } from "@/store"
 import { useLoad, useBusy } from "@/accounts/load"
 import { accountsApi, CONN_STATUS } from "@/api/accounts"
 import { channelsApi, TRIGGER_ALL_DMS, TRIGGER_EVERYWHERE, attentionOf, isDm, spaceTitle, type ChannelAccount, type Rule, type Space, type Trigger } from "@/api/channels"
-import { AttentionTag, Name, SpaceAvatar, kindLine } from "@/channels/space-bits"
+import { Name, SpaceAvatar, doingLine, kindLine } from "@/channels/space-bits"
 import { Rules, ruleText, ruleOk } from "@/channels/rules"
 import { PersonaAvatar } from "@/channels/basis"
 import { PermissionList, SelfButtons } from "@/integrations/feishu"
@@ -26,7 +26,6 @@ import { integrationsApi, type IAdapter } from "@/api/integrations"
 import { receiveNote, selfSidesFor } from "@/integrations/sides"
 import { useT } from "@/i18n"
 
-const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-3 type-footnote text-muted-foreground">{children}</div>
 const TRIGGER_WORD = /^\/[A-Za-z0-9_]{1,20}$/
 /** the undo windows an account can choose (seconds; the Hub takes 0–60) */
 const SEND_DELAYS = [0, 3, 5, 10, 20, 30, 60]
@@ -55,49 +54,49 @@ export function AccountView({ id }: { id: string }) {
   const [st, dot] = CONN_STATUS[c.status] ?? [c.status, "idle"]
   const patch = async (b: Parameters<typeof channelsApi.patchAccount>[1], ok: string) => { const r = await act(() => channelsApi.patchAccount(c.id, b), ok); if (r) await L.reload(); return !!r }
   const rulesNow = rules ?? a.rules
+  const recv = (() => { const n = receiveNote(a.receive); return n ? t(`channels:account.${n}`) : "" })()
+  const bad = c.status !== "ok"
+  const test = () => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(t(r.status === "ok" ? "channels:account.testOk" : "channels:account.testFailed")); void L.reload() } })
   return (
-    <Page title={a.name} back={back} max={700} sub={<Meta><span>{a.provider.name}</span><span>{t(me ? "channels:word.you" : "channels:word.bot")}</span><span className="font-mono">{a.account.handle}</span></Meta>}
-      actions={<Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => go("#/accounts/" + a.account.id)} data-open-account>{t("channels:account.accountAuth")}</Button>}>
+    <Page title={a.name} back={back} max={700}
+      sub={<Meta><span>{a.provider.name}</span><span>{t(me ? "channels:word.you" : "channels:word.bot")}</span>{!bad && <span className="inline-flex items-center gap-1" data-conn-state><StatusDot s={dot} />{[st, recv].filter(Boolean).join(t("channels:account.sep"))}</span>}</Meta>}
+      actions={<div className="flex items-center gap-1"><Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={test} data-conn-test aria-label={t("channels:account.test")}><RefreshCwIcon /><span className="max-sm:hidden">{t("channels:account.test")}</span></Button>
+        <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => go("#/accounts/" + a.account.id)} data-open-account>{t("channels:account.accountAuth")}</Button></div>}>
       <div className="flex flex-col gap-8" data-channel-account={c.id}>
-        <section><SectionLabel>{t("channels:account.status")}</SectionLabel>
-          <Group><Row title={<span className="inline-flex items-center gap-2"><StatusDot s={dot} />{st}</span>} data-conn-state
-            sub={[c.health.last_ok ? t("channels:account.lastOk", { time: tm(c.health.last_ok) }) : "", c.status !== "ok" && c.health.last_error ? c.health.last_error : "", (() => { const n = receiveNote(a.receive); return n ? t(`channels:account.${n}`) : "" })()].filter(Boolean).join(" · ")}>
-            <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(t(r.status === "ok" ? "channels:account.testOk" : "channels:account.testFailed")); void L.reload() } })} data-conn-test><RefreshCwIcon />{t("channels:account.test")}</Button></Row>
-            {(c.status === "reauth" || c.status === "error") && <Row title={t("channels:account.reauth")} sub={t("channels:account.reauthSub")} onClick={() => go(`#/accounts/${a.account.id}/reauth`)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>}
-          </Group></section>
-        <section><SectionLabel>{t("channels:account.asWhom")}</SectionLabel>
-          <Group>{me
-            ? <Row icon={<PersonaAvatar bot={null} size={32} />} title={t("channels:word.you")} sub={t("channels:account.selfSub")} />
-            : <Row icon={<PersonaAvatar bot={a.personaBot} size={32} />} title={<span>{t("channels:account.defaultPersona", { name: a.persona?.name ?? "—" })}</span>} sub={t("channels:account.defaultPersonaSub")} onClick={!a.editable && a.persona ? () => go("#/channels/personas/" + a.persona!.id) : undefined}>
-              {a.editable ? <Select align="end" testId="acc-default-persona" value={a.persona?.id ?? ""} onChange={(v) => void patch({ persona_id: v }, t("channels:account.personaChanged"))} options={personas.map((p) => ({ v: p.id, l: p.name }))} />
-                : a.persona && <ChevronRightIcon className="size-4 text-tertiary" aria-label={t("channels:word.editPersona")} />}</Row>}
-          </Group>
-          {!me && !a.editable && <Note>{t("channels:account.personaReadonly")}</Note>}</section>
+        {bad && <Notice tone={c.status === "reauth" ? "attention" : "destructive"} data-conn-state
+          action={(c.status === "reauth" || c.status === "error") && <Button size="sm" variant="outline" onClick={() => go(`#/accounts/${a.account.id}/reauth`)}>{t("channels:account.reauth")}</Button>}>
+          <div className="font-medium">{t("channels:account.badTitle", { status: st })}</div>
+          <div className="type-footnote text-muted-foreground">{[c.health.last_error ? <Clamp key="e" text={c.health.last_error} lines={2} /> : null, c.health.last_ok ? t("channels:account.lastOk", { time: tm(c.health.last_ok) }) : ""].filter(Boolean).map((x, n) => <div key={n}>{x}</div>)}</div>
+        </Notice>}
+        <section><SectionLabel>{t("channels:account.spacesLabel", { n: a.spaces.length })}</SectionLabel>
+          {a.spaces.length ? <Group>{a.spaces.map((s) => (
+            <Row key={s.id} icon={<SpaceAvatar s={s} size={28} />} onClick={() => go("#/channels/space/" + s.id)} data-space-row={spaceTitle(s)}
+              title={<span className="flex min-w-0 items-center gap-1.5"><Name className={cn(attentionOf(s) !== "realtime" && "text-muted-foreground")}>{spaceTitle(s)}</Name>{s.has_external && <Pill className="font-normal">{t("channels:word.external")}</Pill>}{!s.configured && <Pill tone="attention">{t("channels:word.new")}</Pill>}</span>}
+              sub={<span className="block truncate">{[doingLine(s, a), s.duty].filter(Boolean).join(" · ")}</span>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
+            : <Blank>{t(me ? "channels:account.noSessions" : "channels:account.noGroups")}</Blank>}
+        </section>
         <section><SectionLabel>{t("channels:account.defaultRules")}</SectionLabel>
+          {!me && <Group className="mb-2"><Row icon={<PersonaAvatar bot={a.personaBot} size={32} />} title={t("channels:account.defaultPersona", { name: a.persona?.name ?? "—" })} sub={a.editable ? t("channels:account.defaultPersonaSub") : t("channels:account.personaReadonly")} onClick={!a.editable && a.persona ? () => go("#/channels/personas/" + a.persona!.id) : undefined}>
+              {a.editable ? <Select align="end" testId="acc-default-persona" value={a.persona?.id ?? ""} onChange={(v) => void patch({ persona_id: v }, t("channels:account.personaChanged"))} options={personas.map((p) => ({ v: p.id, l: p.name }))} />
+                : a.persona && <ChevronRightIcon className="size-4 text-tertiary" aria-label={t("channels:word.editPersona")} />}</Row></Group>}
+          {me && <div className="mb-2 type-footnote text-muted-foreground">{t("channels:account.selfSub")}</div>}
           {a.editable && rulesNow ? <>
             <Rules rules={rulesNow} self={me} onChange={setRules} note={t("channels:account.rulesNote")} />
             {rules && <div className="mt-2 flex gap-2"><Button size="sm" disabled={busy || !rules.every(ruleOk)} onClick={() => void patch({ rules }, t("channels:word.rulesSaved")).then((ok) => ok && setRules(null))} data-acc-rules-save>{t("channels:word.saveRules")}</Button><Button size="sm" variant="ghost" onClick={() => setRules(null)}>{t("channels:word.revert")}</Button></div>}
-          </> : a.rules ? <><Group>{a.rules.map((r, n) => <Row key={n} title={ruleText(r, me)} />)}</Group><Note>{a.editable ? "" : t("channels:account.rulesReadonly")}</Note></>
-            : <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground">{t("channels:account.rulesUnknown")}</div>}</section>
-        {a.editable && a.sendDelay && <section><SectionLabel>{t("channels:account.sendDelay")}</SectionLabel>
-          <Group><Row title={t("channels:account.sendDelayTitle")} sub={t("channels:account.sendDelaySub")}>
+          </> : a.rules ? <><Group>{a.rules.map((r, n) => <Row key={n} title={ruleText(r, me)} />)}</Group>{!a.editable && <Note>{t("channels:account.rulesReadonly")}</Note>}</>
+            : <Blank>{t("channels:account.rulesUnknown")}</Blank>}
+          {a.editable && a.sendDelay && <Group className="mt-2"><Row title={t("channels:account.sendDelayTitle")} sub={t("channels:account.sendDelaySub")}>
             <Select align="end" testId="acc-send-delay" value={a.sendDelay.set === null ? "default" : String(a.sendDelay.set)}
               onChange={(v) => void patch({ send_delay_s: v === "default" ? null : Number(v) }, t("channels:account.sendDelaySaved"))}
-              options={[{ v: "default", l: t("channels:account.sendDelayDefault", { n: a.sendDelay.def }) }, ...SEND_DELAYS.map((n) => ({ v: String(n), l: t("channels:account.sendDelaySeconds", { n }) }))]} /></Row></Group></section>}
+              options={[{ v: "default", l: t("channels:account.sendDelayDefault", { n: a.sendDelay.def }) }, ...SEND_DELAYS.map((n) => ({ v: String(n), l: t("channels:account.sendDelaySeconds", { n }) }))]} /></Row></Group>}
+        </section>
         {me && <TriggerSection a={a} onSave={(x) => patch({ trigger: x }, t("channels:account.triggerSaved"))} busy={busy} />}
         {side && <section><SectionLabel>{t("channels:word.you")}</SectionLabel>
           {self.length ? <Group>{self.map((s) => <Row key={s.id} icon={<PersonaAvatar bot={null} size={28} />} title={t("channels:account.selfAuthorized")} sub={t("channels:account.selfAuthorizedSub", { status: CONN_STATUS[s.status]?.[0] ?? s.status })} onClick={() => go("#/channels/acc/" + s.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
             : <div className="flex flex-col gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]" data-self-auth>
               <div className="type-callout text-muted-foreground">{t("channels:account.selfAuthHint")}</div>
               <div className="flex flex-wrap justify-end gap-2"><SelfButtons app={c.id} side={side} /></div></div>}</section>}
-        {!me && <section><SectionLabel>{t("channels:account.permissions")}</SectionLabel>{a.permissions ? <PermissionList checks={a.permissions} /> : <div className="rounded-xl bg-muted/60 px-4 py-3 type-callout text-muted-foreground" data-permissions="none">{t("channels:account.permissionsNone")}</div>}</section>}
-        <section><SectionLabel>{t("channels:account.spacesLabel", { n: a.spaces.length })}</SectionLabel>
-          {a.spaces.length ? <Group>{a.spaces.map((s) => (
-            <Row key={s.id} icon={<SpaceAvatar s={s} size={28} />} onClick={() => go("#/channels/space/" + s.id)} data-space-row={spaceTitle(s)}
-              title={<span className="flex min-w-0 items-center gap-1.5"><Name>{spaceTitle(s)}</Name><span className="shrink-0 type-footnote text-muted-foreground">{kindLine(s)}</span><AttentionTag a={attentionOf(s)} />{s.has_external && <Badge variant="secondary" className="shrink-0 text-muted-foreground">{t("channels:word.external")}</Badge>}{s.muted && <span className="shrink-0 type-footnote text-muted-foreground">{t("channels:word.recordOnly")}</span>}{!s.configured && <Badge variant="secondary" className="shrink-0 bg-attention/12 text-attention">{t("channels:word.new")}</Badge>}</span>}
-              sub={<span className="block truncate">{t(s.persona && !s.persona.inherited ? "channels:account.spaceSubOwn" : "channels:account.spaceSub", { who: me ? t("channels:word.you") : s.persona?.name ?? "—", duty: s.duty ? s.duty : t("channels:account.noDuty") })}</span>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
-            : <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground">{t(me ? "channels:account.noSessions" : "channels:account.noGroups")}</div>}
-        </section>
+        {!me && <section><SectionLabel>{t("channels:account.permissions")}</SectionLabel>{a.permissions ? <PermissionList checks={a.permissions} /> : <Blank data-permissions="none">{t("channels:account.permissionsNone")}</Blank>}</section>}
       </div>
     </Page>
   )
@@ -133,10 +132,11 @@ function TriggerSection({ a, onSave, busy }: { a: ChannelAccount; onSave: (t: Pa
     <section data-trigger><SectionLabel>{t("channels:trigger.label")}</SectionLabel>
       <Group>
         <Row title={t("channels:trigger.enable")} sub={t("channels:trigger.enableSub")}><Switch aria-label={t("channels:trigger.enable")} checked={tr.on} disabled={busy} onCheckedChange={(v) => void onSave({ on: v })} data-trigger-on /></Row>
-        <Row title={t("channels:trigger.words")} sub={t("channels:trigger.wordsSub")}>
+        {/* off: the switch alone; the words, where and the mark only matter once it is on */}
+        {tr.on && <Row title={t("channels:trigger.words")} sub={t("channels:trigger.wordsSub")}>
           <span className="flex flex-wrap items-center justify-end gap-1">{tr.words.map((w) => <span key={w} className="inline-flex h-6 items-center gap-1 rounded-full bg-muted pl-2.5 pr-1 type-footnote font-mono">{w}<button type="button" aria-label={t("channels:trigger.removeWord", { word: w })} disabled={busy} onClick={() => void onSave({ words: tr.words.filter((x) => x !== w) })} className="flex size-4 items-center justify-center rounded-full hover:bg-background"><XIcon className="size-3" /></button></span>)}
-            <Input aria-label={t("channels:trigger.addAria")} className="h-7 w-24 rounded-full md:type-footnote" placeholder={t("channels:trigger.addPlaceholder")} value={word} onChange={(e) => setWord(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && word.trim()) { e.preventDefault(); add() } }} data-trigger-word /></span></Row>
-        <div className="flex min-w-0 flex-col gap-2 px-2 py-2.5" data-trigger-scope={scope}>
+            <Input aria-label={t("channels:trigger.addAria")} className="h-7 w-24 rounded-full md:type-footnote" placeholder={t("channels:trigger.addPlaceholder")} value={word} onChange={(e) => setWord(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && word.trim()) { e.preventDefault(); add() } }} data-trigger-word /></span></Row>}
+        {tr.on && <div className="flex min-w-0 flex-col gap-2 px-2 py-2.5" data-trigger-scope={scope}>
           <div className="type-body">{t("channels:trigger.where")}</div>
           <Segmented full className="w-full" size="sm" value={scope} onChange={setScope} options={[["all", t("channels:trigger.scopeAll")], ["dms", t("channels:trigger.scopeDms")], ["some", t("channels:trigger.scopeSome")]] as const} />
           {scope === "some" && <div className="flex min-w-0 flex-wrap items-center gap-1" data-trigger-chosen>
@@ -151,10 +151,10 @@ function TriggerSection({ a, onSave, busy }: { a: ChannelAccount; onSave: (t: Pa
           <div className="type-footnote text-muted-foreground">{scope === "all" ? t("channels:trigger.hintAll", { word: word0 }) : t(scope === "dms" ? "channels:trigger.hintDms" : "channels:trigger.hintSome")}</div>
           {blockedHere.length > 0 && <div className="flex items-start gap-1.5 rounded-lg bg-attention/10 px-3 py-2 type-footnote anim-in" data-trigger-blocked>
             <BanIcon className="mt-px size-3.5 shrink-0 text-attention" aria-hidden /><span className="min-w-0">{blockedHere.length === 1 ? t("channels:trigger.blockedOne", { n: 1, name: spaceTitle(blockedHere[0]), word: word0 }) : t("channels:trigger.blockedMany", { count: blockedHere.length, word: word0 })}</span></div>}
-        </div>
-        <Row title={t("channels:trigger.mark")} sub={t("channels:trigger.markSub")}><Switch aria-label={t("channels:trigger.markAria")} checked={tr.mark} disabled={busy} onCheckedChange={(v) => void onSave({ mark: v })} /></Row>
+        </div>}
+        {tr.on && <Row title={t("channels:trigger.mark")} sub={t("channels:trigger.markSub")}><Switch aria-label={t("channels:trigger.markAria")} checked={tr.mark} disabled={busy} onCheckedChange={(v) => void onSave({ mark: v })} /></Row>}
       </Group>
-      <Note>{t("channels:trigger.note")}</Note>
+      {tr.on && <Note>{t("channels:trigger.note")}</Note>}
       {picking && <ScopePicker spaces={spaces} chosen={chosen} onClose={() => setPicking(false)} onSave={async (ids) => { const ok = await onSave({ where: ids.length ? ids : [TRIGGER_EVERYWHERE] }); if (ok) { setPicking(false); setSome(ids.length > 0) } }} busy={busy} />}
     </section>
   )

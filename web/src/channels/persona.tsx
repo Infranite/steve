@@ -10,7 +10,7 @@ import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { go, Page, Group, Row, SectionLabel, Empty, BotAvatar, Panel, Chevron } from "@/ui"
+import { go, Page, Group, Row, SectionLabel, Empty, BotAvatar, Panel, Chevron, Blank } from "@/ui"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { st, botName } from "@/store"
@@ -97,7 +97,13 @@ function PersonaView({ id }: { id: string }) {
         <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={busy} onClick={async () => { const r = await act(() => channelsApi.deletePersona(p.id)); if (r) go("#/channels/personas") }} data-del-confirm>{t("common:action.delete")}</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent></AlertDialog>
       <div className="flex flex-col gap-8">
-        <div className="-mt-2 flex items-center gap-4"><PersonaAvatar bot={p.bot_id} size={64} /><div className="min-w-0"><div className="type-body">{form.intro || t("channels:persona.noIntro")}</div><div className="mt-0.5 type-footnote text-muted-foreground">{t("channels:persona.platformNote")}</div><OwnerChip objectType="persona" objectId={p.id} className="mt-1.5" /></div></div>
+        {/* the intro is the first field below; the head says where this face shows up, which is what a change affects */}
+        <div className="-mt-2 flex items-center gap-4"><PersonaAvatar bot={p.bot_id} size={56} /><div className="min-w-0"><div className="type-body" data-persona-used>{usedText(p)}</div><div className="mt-0.5 type-footnote text-muted-foreground">{t("channels:persona.platformNote")}</div><OwnerChip objectType="persona" objectId={p.id} className="mt-1.5" /></div></div>
+        <section><SectionLabel>{t("channels:persona.usedIn")}</SectionLabel>
+          {accN + p.used_by.spaces.length ? <Group>
+            {p.used_by.accounts.map((a) => <Row key={a.account_id} title={a.name} sub={t("channels:persona.usedAccount")} onClick={() => go("#/channels/acc/" + a.account_id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
+            {p.used_by.spaces.map((s) => <Row key={s.id} title={s.name} sub={t(s.own ? "channels:persona.usedOwn" : "channels:persona.usedFollow")} onClick={() => go("#/channels/space/" + s.id)} data-used-space={s.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
+          </Group> : <Blank>{t("channels:persona.noUseLine")}</Blank>}</section>
         <form className="contents" onSubmit={(e) => { e.preventDefault(); if (changed && ok && !busy) void save() }}>
           <FieldGroup className="gap-5">
             <F label={t("channels:persona.name")} n={form.name.length} max={20}><Input className="rounded-lg" value={form.name} maxLength={20} onChange={(e) => setForm({ ...form, name: e.target.value })} aria-invalid={!form.name.trim()} data-persona-name /></F>
@@ -112,11 +118,7 @@ function PersonaView({ id }: { id: string }) {
           <Group>{RV.map((k) => { const l = t(`channels:persona.rv.${k}`); return <Row key={k} title={l} sub={t(`channels:persona.rv.${k}Sub`)}><Switch aria-label={t("channels:persona.revealAria", { what: l })} checked={reveal[k]} disabled={busy} onCheckedChange={(v) => void setRv(k, v)} data-reveal-key={k} /></Row> })}</Group>
           <div className="mt-3 rounded-xl bg-muted/60 px-4 py-3" aria-live="polite"><div className="type-footnote text-muted-foreground">{t("channels:persona.askWho")}</div><div className="mt-1 type-body" data-intro-preview>{preview}</div></div>
           <div className="mt-3 type-footnote text-muted-foreground">{t("channels:persona.revealNote")}</div></section>
-        <section><SectionLabel>{t("channels:persona.usedIn")}</SectionLabel>
-          {accN + p.used_by.spaces.length ? <Group>
-            {p.used_by.accounts.map((a) => <Row key={a.account_id} title={a.name} sub={t("channels:persona.usedAccount")} onClick={() => go("#/channels/acc/" + a.account_id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
-            {p.used_by.spaces.map((s) => <Row key={s.id} title={s.name} sub={t(s.own ? "channels:persona.usedOwn" : "channels:persona.usedFollow")} onClick={() => go("#/channels/space/" + s.id)} data-used-space={s.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
-          </Group> : <Empty title={t("channels:persona.noUseTitle")} sub={t("channels:persona.noUseSub")} />}</section>
+
       </div>
     </Page>
   )

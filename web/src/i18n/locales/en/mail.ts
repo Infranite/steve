@@ -81,6 +81,8 @@ export default {
     onboardingBody: "Once connected, Steve triages incoming mail: what needs your reply is listed, the mail bot drafts a reply, and nothing goes out until you review it and press Send. Notifications go into reports and stay out of your way.",
     connect: "Connect mailbox",
     all: "All",
+    accountUnread_one: "{{name}} · {{count}} unread",
+    accountUnread_other: "{{name}} · {{count}} unread",
     searchAria: "Search mail",
     searchPlaceholder: "Search subject or sender",
     noMatch: "No matching mail",

@@ -178,6 +178,14 @@ function SignalDetailBox({ g, reload }: { g: Signal[]; reload: () => void }) {
 /** the runs that handled a signal, each step with its branch and output */
 export function RunSteps({ runs }: { runs: SignalDetail["runs"] }) {
   const t = useT()
+  /* steps name their node by id (t, f, b…); the flow's graph has the titles you gave them */
+  const [titles, setTitles] = useState<Record<string, Record<string, string>>>({})
+  const ids = [...new Set(runs.map((r) => r.flow_id))].join(",")
+  useEffect(() => {
+    let live = true
+    for (const id of ids ? ids.split(",") : []) flowApi.flow(id).then((f) => live && setTitles((x) => ({ ...x, [id]: Object.fromEntries(f.graph.nodes.map((n) => [n.id, n.title])) })), () => {})
+    return () => { live = false }
+  }, [ids])
   if (!runs.length) return <div className="mt-1.5 type-footnote">{t("misc:signals.noRuns")}</div>
   return (
     <div className="mt-1.5 flex flex-col gap-3" data-run-steps>
@@ -185,7 +193,7 @@ export function RunSteps({ runs }: { runs: SignalDetail["runs"] }) {
         <div key={run.id} className="rounded-lg bg-muted/60 px-3 py-2.5">
           <div className="mb-1 flex items-center gap-1.5 type-footnote"><StatusDot s={RUN_STATUS[run.status]?.[1] ?? "idle"} /><span className="text-foreground">{RUN_STATUS[run.status]?.[0] ?? run.status}</span><span>· v{run.flow_version}</span>{run.outcome_label && <span>· {run.outcome_label}</span>}<a className="ml-auto hover:text-foreground" href={"#/auto/rule/" + run.flow_id + "?run=" + run.id}>{t("misc:signals.viewInFlow")}</a></div>
           <ol className="flex flex-col gap-0.5">{(run.steps ?? []).map((s) => (
-            <li key={s.seq} className="flex items-baseline gap-2 type-footnote"><span className="w-4 shrink-0 text-right font-mono tabular-nums text-tertiary">{s.seq}</span><span className="font-mono text-foreground">{s.node_id}</span>
+            <li key={s.seq} className="flex items-baseline gap-2 type-footnote"><span className="w-4 shrink-0 text-right font-mono tabular-nums text-tertiary">{s.seq}</span>{titles[run.flow_id]?.[s.node_id] ? <span className="max-w-[45%] shrink-0 truncate text-foreground" title={s.node_id} data-step-title>{titles[run.flow_id][s.node_id]}</span> : <span className="font-mono text-foreground">{s.node_id}</span>}
               <span className="min-w-0 flex-1 truncate">{s.error ? <Clamp text={s.error} lines={1} className="whitespace-normal text-destructive" /> : s.branch ? "→ " + s.branch : s.status === "skipped" ? t("misc:signals.skipped") : s.status === "waiting" ? t("misc:signals.waiting") : ""}</span><span className="shrink-0 tabular-nums">{ms(s.ms)}</span></li>))}</ol>
         </div>
       ))}
