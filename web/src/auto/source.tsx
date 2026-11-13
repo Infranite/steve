@@ -5,11 +5,11 @@ import { PlusIcon, RefreshCwIcon, WorkflowIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
-import { Page, Row, Empty, StatusDot, BotAvatar, go, Panel, SectionLabel, Blank, Chevron } from "@/ui"
+import { Page, Row, Empty, StatusDot, BotAvatar, go, Panel, SectionLabel, Blank, Chevron, Tile } from "@/ui"
 import { tm, toast, botName } from "@/store"
 import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, type ScopeMode, type SourcePatch } from "@/api/flow"
-import { Ico, Pick, Loading, Failed, botOptions, mainBot } from "@/auto/common"
+import { Pick, Loading, Failed, botOptions, mainBot } from "@/auto/common"
 import { NewRuleDialog } from "@/auto/new-rule"
 import { t as tr, useT } from "@/i18n"
 
@@ -52,7 +52,7 @@ export function SourceView({ adapter }: { adapter: string }) {
           <Panel>
             {s.connections.map((c) => <Row key={c.id} title={c.name} sub={c.last_sync ? t("auto:source.syncedAt", { time: tm(c.last_sync) }) : t("auto:source.notSynced")} data-source-conn={c.id}>
               <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={c.status === "ok" ? "done" : "wait"} />{c.status === "ok" ? t("auto:ok") : t("auto:source.reauth")}</span></Row>)}
-            <Row icon={<Ico I={PlusIcon} />} title={<span className="text-blue">{t("auto:source.addAccount")}</span>} sub={t("auto:source.addAccountSub")} onClick={() => go("#/accounts")} data-add-account />
+            <Row icon={<Tile I={PlusIcon} />} title={<span className="text-blue">{t("auto:source.addAccount")}</span>} sub={t("auto:source.addAccountSub")} onClick={() => go("#/accounts")} data-add-account />
           </Panel>
         </section>
         {s.connections.length > 0 && <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void refresh()}><RefreshCwIcon />{t("common:action.refresh")}</Button>}>{t("auto:source.scopes")}</SectionLabel>
@@ -68,7 +68,7 @@ export function SourceView({ adapter }: { adapter: string }) {
           {!s.connections.length && <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("auto:source.addFirst")}</div>}
         </section>
         <section><SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setNewRule(true)}><PlusIcon />{t("auto:newFlow")}</Button>}>{t("auto:source.handling")}</SectionLabel>
-          {mine.length ? <Panel>{mine.map((f) => <Row key={f.id} icon={<Ico I={WorkflowIcon} />} title={f.name} sub={f.description || f.origin_label} onClick={() => go("#/auto/rule/" + f.id)}><span className="type-footnote text-muted-foreground">{f.enabled ? t("auto:source.on") : t("auto:source.off")}</span><Chevron /></Row>)}</Panel>
+          {mine.length ? <Panel>{mine.map((f) => <Row key={f.id} icon={<Tile I={WorkflowIcon} />} title={f.name} sub={f.description || f.origin_label} onClick={() => go("#/auto/rule/" + f.id)}><span className="type-footnote text-muted-foreground">{f.enabled ? t("auto:source.on") : t("auto:source.off")}</span><Chevron /></Row>)}</Panel>
             : <Blank>{t("auto:source.noFlows")}</Blank>}
         </section>
         <section><SectionLabel right={<a href="#/signals" className="font-normal text-blue hover:underline">{t("auto:source.allSignals")}</a>}>{t("auto:source.recent")}</SectionLabel>

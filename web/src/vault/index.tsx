@@ -22,7 +22,6 @@ import { t as tr, useT } from "@/i18n"
 import { date } from "@/i18n/format"
 
 const TPL_I: Record<string, any> = { login: KeyRoundIcon, bank_card: CreditCardIcon, api_credential: TerminalIcon, id_document: IdCardIcon, secure_note: FileTextIcon, ssh_key: LockIcon, recovery_codes: ShieldIcon }
-const Ico = Tile
 /** a section with nothing in it yet: one quiet line, not a page-sized empty state */
 const Quiet = Blank
 const back = (): [string, string] => ["#/accounts", tr("vault:backAccounts")]
@@ -37,14 +36,14 @@ export function VaultRoute({ id }: { id?: string }) { return id ? <VaultItemView
 
 function VaultRow({ v }: { v: RItem }) {
   const t = useT()
-  return <Row icon={<Ico I={TPL_I[v.template] ?? KeyRoundIcon} />} onClick={() => go("#/vault/" + v.id)} data-vault-row={v.title}
+  return <Row icon={<Tile I={TPL_I[v.template] ?? KeyRoundIcon} />} onClick={() => go("#/vault/" + v.id)} data-vault-row={v.title}
     title={<span className="inline-flex items-center gap-1.5">{v.title}{v.sensitivity === "high" && <Pill tone="attention">{SENS_LABEL.high}</Pill>}</span>}
     sub={<Meta inline><span>{tplName(v.template)}</span><span>{v.vault.name}</span>{v.account && <span>{v.account.display_name}</span>}{v.site && <span>{v.site}</span>}{v.grants.length > 0 && <span>{t("vault:row.grants", { count: v.grants.length })}</span>}<span>{t("vault:row.updated", { time: tm(v.updated) })}</span></Meta>}><Chevron /></Row>
 }
 function UseRow({ u, showItem }: { u: RUse; showItem?: boolean }) {
   const t = useT()
   const bot = u.actor.type === "bot" ? u.actor.id : u.actor.type === "steve" ? "steve" : null
-  return <Row icon={bot ? <BotAvatar k={bot} size={24} /> : <Ico I={u.mode === "copy" ? CopyIcon : EyeIcon} className="size-6! rounded-full!" />} onClick={showItem ? () => go("#/vault/" + u.item_id) : undefined} data-use-row={u.id}
+  return <Row icon={bot ? <BotAvatar k={bot} size={24} /> : <Tile I={u.mode === "copy" ? CopyIcon : EyeIcon} className="size-6! rounded-full!" />} onClick={showItem ? () => go("#/vault/" + u.item_id) : undefined} data-use-row={u.id}
     title={u.actor.type === "me" ? (u.mode === "copy" ? t("vault:use.meCopied") : t("vault:use.meViewed")) : `${u.actor.name} · ${u.purpose}`}
     sub={<Meta inline>{showItem && <span>{u.item_title}</span>}<span>{MODE_LABEL[u.mode] ?? u.mode}</span>{u.status !== "ok" && <span>{USE_STATUS[u.status] ?? u.status}</span>}{u.work_item_id && <span className="font-mono">{u.work_item_id}</span>}</Meta>}>
     <span className="type-footnote text-muted-foreground">{tm(u.created)}</span></Row>
@@ -75,7 +74,7 @@ function EnableVault({ onDone }: { onDone: () => void }) {
   if (code) return <RecoveryCode code={code} onDone={() => { setCode(null); onDone() }} />
   return (
     <div className={cn(LIFT, "flex flex-col gap-4 p-5")} data-enable-vault>
-      <div className="flex items-start gap-3"><Ico I={LockIcon} className="size-10 rounded-xl bg-blue/10 text-blue" /><div><div className="type-headline">{t("vault:enable.title")}</div>
+      <div className="flex items-start gap-3"><Tile I={LockIcon} className="size-10 rounded-xl bg-blue/10 text-blue" /><div><div className="type-headline">{t("vault:enable.title")}</div>
         <div className="mt-1 type-callout text-muted-foreground">{t("vault:enable.body")}</div></div></div>
       <div className="type-callout text-muted-foreground">{t("vault:enable.note")}</div>
       <Button className="self-start" disabled={busy} onClick={() => void act(() => vaultApi.init()).then((r) => r && setCode(r.recovery_code))} data-vault-init>{busy && <Spinner />}{t("vault:enable.title")}</Button>
@@ -125,7 +124,7 @@ function VaultView() {
           <Row title={t("vault:home.ruleBotTitle")} sub={t("vault:home.ruleBotSub")} />
           <Row title={t("vault:home.ruleHighTitle")} sub={t("vault:home.ruleHighSub")} />
           <Row title={t("vault:home.ruleViewTitle")} sub={status.passkeys ? t("vault:home.ruleViewSub") : t("vault:home.ruleViewSubNoPasskey")} onClick={() => go("#/settings/vault")}><Chevron /></Row>
-          <Row icon={<Ico I={LinkIcon} />} title={<span className="text-muted-foreground">{t("vault:home.externalTitle")}</span>} sub={t("vault:home.externalSub")}><Pill>{t("vault:home.reserved")}</Pill></Row>
+          <Row icon={<Tile I={LinkIcon} />} title={<span className="text-muted-foreground">{t("vault:home.externalTitle")}</span>} sub={t("vault:home.externalSub")}><Pill>{t("vault:home.reserved")}</Pill></Row>
         </Panel></Section>
       </div>
     </Page>
@@ -162,7 +161,7 @@ function VaultItemView({ id }: { id: string }) {
       </AlertDialogContent></AlertDialog>
       {edit && <EditField item={v.id} f={edit} onClose={() => setEdit(null)} onDone={() => { R.hide(edit.id); void reload() }} />}
       <div className="flex flex-col gap-8">
-        <div className="-mt-2 flex items-center gap-3"><Ico I={TPL_I[v.template] ?? KeyRoundIcon} className="size-12 rounded-xl bg-card shadow-[var(--lift)] [&>svg]:size-5" />
+        <div className="-mt-2 flex items-center gap-3"><Tile I={TPL_I[v.template] ?? KeyRoundIcon} className="size-12 rounded-xl bg-card shadow-[var(--lift)] [&>svg]:size-5" />
           <div className="flex items-center gap-1 type-callout text-muted-foreground">{t("vault:item.sensitivity")}{v.template === "bank_card" ? <span className="px-2 text-foreground" title={t("vault:item.bankCardFixed")}>{SENS_LABEL.high}</span>
             : <Select quiet testId="vault-level" value={v.sensitivity} onChange={(x) => void setSens(x as Sensitivity)} options={(["normal", "sensitive", "high"] as const).map((x) => ({ v: x, l: SENS_LABEL[x] }))} />}</div></div>
         <Section label={t("vault:item.fields")}>{fields.length ? <Panel>{fields.map((fl) => {
@@ -211,7 +210,7 @@ function LinkedAccount({ v, onChange }: { v: RItem; onChange: () => void }) {
   return (
     <Section label={t("vault:account.section")} right={opts === null ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={load} data-change-account>{v.account ? t("vault:account.change") : t("vault:account.link")}</Button> : undefined}>
       {opts !== null && <div className="mb-2 flex items-center gap-2"><Select testId="vault-account" value={v.account?.id ?? ""} onChange={(x) => void set(x)} options={[{ v: "", l: t("vault:account.none") }, ...opts.map((a) => ({ v: a.id, l: t("vault:account.option", { name: a.display_name || a.handle, system: a.system.name }) }))]} />{busy && <Spinner />}</div>}
-      <Panel>{v.account ? <Row icon={<Ico I={KeyRoundIcon} />} title={v.account.display_name} onClick={() => go("#/accounts/" + v.account!.id)}><Chevron /></Row>
+      <Panel>{v.account ? <Row icon={<Tile I={KeyRoundIcon} />} title={v.account.display_name} onClick={() => go("#/accounts/" + v.account!.id)}><Chevron /></Row>
         : <Row title={t("vault:account.noneTitle")} sub={t("vault:account.noneSub")} />}</Panel>
     </Section>
   )

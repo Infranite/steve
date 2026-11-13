@@ -275,9 +275,9 @@ export function Chips<T extends string>({ value, onChange, options, className }:
 }
 /** `action`: what to do about it, inside the empty state rather than a page-height below it. `compact`: the same, sized
  *  for a panel or a section on a muted fill instead of a whole page */
-export function Empty({ title, sub, icon, action, compact = false, className }: { title: string; sub?: ReactNode; icon?: ReactNode; action?: ReactNode; compact?: boolean; className?: string }) {
+export function Empty({ title, sub, icon, action, compact = false, className, ...rest }: { title: ReactNode; sub?: ReactNode; icon?: ReactNode; action?: ReactNode; compact?: boolean; className?: string } & Record<`data-${string}`, unknown>) {
   return (
-    <UIEmpty className={cn("anim-in", compact ? "gap-3 rounded-xl bg-muted/60 px-4 py-8" : "px-4 py-16 sm:px-12", className)} data-empty={compact ? "compact" : "page"}>
+    <UIEmpty className={cn("anim-in", compact ? "gap-3 rounded-xl bg-muted/60 px-4 py-8" : "px-4 py-16 sm:px-12", className)} data-empty={compact ? "compact" : "page"} {...rest}>
       <EmptyHeader className={cn(compact && "gap-1.5")}>
         {icon && <EmptyMedia variant="icon" className={cn(compact && "mb-1 size-8 rounded-lg bg-background/70 [&_svg:not([class*='size-'])]:size-4")}>{icon}</EmptyMedia>}
         <EmptyTitle className={compact ? "type-body font-medium" : "type-headline"}>{title}</EmptyTitle>
@@ -465,7 +465,9 @@ export function PanelHead({ title, onClose, closeLabel, closeTest, children, cla
 }
 
 /* ───────── page frame: large title that collapses into the bar on scroll ───────── */
-export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, children, footer, max = 760, bar, noTitle = false, scrollRef, small = false }: {
+export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, children, footer, max = 760, bar, noTitle = false, scrollRef, small = false, lead }: {
+  /** beside the title and its description (an avatar, a large icon): only in the title block, never in the bar */
+  lead?: ReactNode
   /** pin the toolbar to the title line instead of the bottom of the title block */
   toolbarTop?: boolean
   small?: boolean; title: ReactNode; sub?: ReactNode; back?: [string, string]; actions?: ReactNode; toolbar?: ReactNode; children: ReactNode; footer?: ReactNode; max?: number; bar?: ReactNode; noTitle?: boolean; scrollRef?: React.RefObject<HTMLDivElement | null>
@@ -498,7 +500,7 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
           {/* the title block keeps 20rem before the toolbar beside it wraps below, so a phone never squeezes the description */}
           {!noTitle && (
             <div className="flex flex-wrap items-end gap-x-4 gap-y-3 pb-8 pt-3">
-              <div className="min-w-[min(100%,20rem)] flex-1"><h1 className={cn(small ? "type-title" : "type-display", "text-foreground")}>{title}</h1>{sub && <div className="mt-1.5 type-callout text-muted-foreground">{sub}</div>}</div>
+              <div className={cn("min-w-[min(100%,20rem)] flex-1", lead != null && "flex items-center gap-3 sm:gap-4")}>{lead != null && <div className="shrink-0" data-page-lead>{lead}</div>}<div className="min-w-0 flex-1"><h1 className={cn(small ? "type-title" : "type-display", "text-foreground")}>{title}</h1>{sub && <div className="mt-1.5 type-callout text-muted-foreground">{sub}</div>}</div></div>
               {toolbar && <div className={cn("flex flex-wrap items-center gap-2", toolbarTop && "self-start")}>{toolbar}</div>}
             </div>
           )}
@@ -535,6 +537,19 @@ const NAV: { h: string; l: "chat" | "inbox" | "items" | "projects" | "sessions" 
 ]
 /** which ends of a scroll area have more beyond them ("start", "end", both or neither), for `data-more` and a fade
  *  on that edge, so content that runs on reads as scrolled rather than cut off */
+/** what a hand-drawn floating layer shows: the value while there is one, then the last one for `ms` more with `leaving`
+ *  set, so the layer can play its exit (.anim-float[data-leaving]) before it unmounts */
+export function useLinger<T>(value: T | null | undefined | false, ms = 120): [T | null, boolean] {
+  const last = useRef<T | null>(null), [, bump] = useState(0)
+  const on = value != null && value !== false
+  if (on) last.current = value as T
+  useEffect(() => {
+    if (on) return
+    const h = setTimeout(() => { last.current = null; bump((n) => n + 1) }, ms)
+    return () => clearTimeout(h)
+  }, [on, ms])
+  return [on ? (value as T) : last.current, !on && last.current != null]
+}
 export function useScrollMore<T extends HTMLElement>(axis: "x" | "y") {
   const ref = useRef<T>(null), [more, setMore] = useState<string | undefined>()
   useEffect(() => {
@@ -783,18 +798,19 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
   const marked = markText(v, atKind, menu && [menu.start, menu.end])
   useLayoutEffect(() => { if (mirror.current && ta.current) mirror.current.scrollTop = ta.current.scrollTop })
   const head = menu?.kind === "#" ? <><HashIcon className="size-3.5" />{tr("core:composer.headItem")}</> : menu?.kind === "@" ? <><AtSignIcon className="size-3.5" />{tr("core:composer.headMention")}</> : <><SlashIcon className="size-3.5" />{tr("core:composer.headCommand")}</>
+  const [floating, leaving] = useLinger(menu && opts.length > 0 && { kind: menu.kind, opts, groups: menu.kind === "@" && men.opts ? men.groups(opts) : [{ head, xs: opts }] })
   return (
     <div className="relative" data-dropzone
       onDragEnter={(e) => { if (isFileDrag(e)) { e.preventDefault(); setDrag((n) => n + 1) } }}
       onDragOver={(e) => { if (isFileDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy" } }}
       onDragLeave={(e) => { if (isFileDrag(e)) setDrag((n) => Math.max(0, n - 1)) }}
       onDrop={(e) => { if (isFileDrag(e)) { e.preventDefault(); setDrag(0); takeFiles(e.dataTransfer.files) } }}>
-      {menu && opts.length > 0 && (
-        <Command shouldFilter={false} value={opts[sel]?.id} className="absolute inset-x-2 bottom-full z-30 mb-2 h-auto max-w-md rounded-xl shadow-lg ring-1 ring-foreground/6 anim-in dark:bg-popover dark:shadow-[0_16px_40px_-8px_rgb(0_0_0/0.6)] dark:ring-white/10" data-ref-menu={menu.kind}>
+      {floating && (
+        <Command shouldFilter={false} value={floating.opts[sel]?.id} className="absolute inset-x-2 bottom-full z-30 mb-2 h-auto max-w-md origin-bottom-left rounded-xl bg-popover shadow-lg anim-float" data-ref-menu={leaving ? undefined : floating.kind} data-leaving={leaving || undefined} aria-hidden={leaving || undefined}>
           <CommandList>
-            {(menu.kind === "@" && men.opts ? men.groups(opts) : [{ head, xs: opts }]).filter((g) => g.xs.length).map((g, k) => (
+            {floating.groups.filter((g) => g.xs.length).map((g, k) => (
             <CommandGroup key={k} heading={<span className="inline-flex items-center gap-1.5">{g.head}</span>}>
-              {g.xs.map((o) => { const n = opts.indexOf(o); return (
+              {g.xs.map((o) => { const n = floating.opts.indexOf(o); return (
                 <CommandItem key={o.id} value={o.id} onMouseDown={(e) => { e.preventDefault(); insert(o) }} onSelect={() => insert(o)} onMouseEnter={() => setSel(n)} data-ref-opt={o.id} className="gap-2.5 rounded-lg">{o.label}</CommandItem>
               ) })}
             </CommandGroup>))}

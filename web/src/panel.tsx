@@ -43,7 +43,8 @@ export function Panel({ icon, title, sub, right, children, className, k, ...rest
           {right && <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">{right}</div>}
         </header>
       )}
-      <div className="flex flex-1 flex-col [&>*+*]:border-t [&>*+*]:border-border/70">{children}</div>
+      {/* sections are set apart by space, not rules */}
+      <div className="flex flex-1 flex-col">{children}</div>
     </section>
   )
 }
@@ -73,7 +74,7 @@ export function StatStrip({ items, cols, className }: { items: (Stat | null | fa
     <div className={cn(STRIP, n >= 4 ? "grid-cols-2 sm:grid-cols-4" : n === 3 ? "grid-cols-3" : n === 2 ? "grid-cols-2" : "grid-cols-1", className)} data-stat-strip>
       {xs.map((s, i) => (
         <div key={s.k ?? i} title={s.title} className={STAT_CELL} data-stat={s.k}>
-          <div className="truncate type-footnote text-muted-foreground">{s.label}</div>
+          <div className="truncate type-label text-tertiary">{s.label}</div>
           <div className={cn(STAT_VALUE, s.tone ? VALUE[s.tone] : "text-foreground")}>{s.value}</div>
           {s.sub != null && <div className="line-clamp-2 type-footnote text-tertiary">{s.sub}</div>}
         </div>

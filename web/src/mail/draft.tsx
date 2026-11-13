@@ -107,7 +107,7 @@ function Fields({ x, readOnly }: { x: ReturnType<typeof useDraft>; readOnly: boo
       <div className="flex items-baseline gap-2 type-callout"><span className="w-12 shrink-0 text-muted-foreground">{t("mail:draft.subject")}</span><span className="min-w-0 break-words">{d.subject}</span></div>
       {readOnly
         ? <div className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/60 px-3.5 py-2.5 type-body" data-draft-body-ro>{d.body}</div>
-        : <Textarea aria-label={t("mail:draft.body")} className="min-h-40 rounded-lg md:type-body!" value={x.body} onChange={(e) => x.setBody(e.target.value)} maxLength={100_000} data-draft-body />}
+        : <Textarea aria-label={t("mail:draft.body")} className="min-h-40 rounded-lg md:type-body" value={x.body} onChange={(e) => x.setBody(e.target.value)} maxLength={100_000} data-draft-body />}
       {x.dirty && !readOnly && <div className="type-footnote text-muted-foreground">{t("mail:draft.edited")}</div>}
       {d.files.length > 0 && <Files files={d.files} />}
       <Basis b={d.basis} busy={x.busy} onCheck={!readOnly && EDITABLE.has(d.status) ? () => void x.check() : undefined} />

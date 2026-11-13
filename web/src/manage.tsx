@@ -40,7 +40,7 @@ import { ModelPicker } from "@/model-picker"
 import { RecentStats } from "@/stats/drill"
 import { AboutVersions } from "@/version"
 import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
-import { Ico as AutoIco, when } from "@/auto/common"
+import { when } from "@/auto/common"
 
 /* ═════════ Bot 列表 ═════════ */
 let botFilter: "全部" | "启用" | "停用" = "全部"
@@ -189,7 +189,7 @@ function AvatarPicker({ look, onChange }: { look: { color: string; round: number
 
 /* ═════════ Bot 详情 ═════════ */
 function F({ label, children, hint, htmlFor }: { label: string; children: ReactNode; hint?: string; htmlFor?: string }) {
-  return <Field className="gap-1.5"><FieldLabel htmlFor={htmlFor} className="type-label! text-muted-foreground">{label}</FieldLabel>{children}{hint && <FieldDescription className="type-footnote!">{hint}</FieldDescription>}</Field>
+  return <Field className="gap-1.5"><FieldLabel htmlFor={htmlFor} className="type-label text-muted-foreground">{label}</FieldLabel>{children}{hint && <FieldDescription className="type-footnote">{hint}</FieldDescription>}</Field>
 }
 export let botTab: "概览" | "设置" | "对外身份" | "能力" | "系统提示词" | "定时与流程" | "记忆" = "概览"; let lastBot = ""
 /** open a bot's 设置 tab */
@@ -214,17 +214,14 @@ export function BotView({ k }: { k: string }) {
   const tabs = BOT_TABS.map(([v, l]) => [v, t(`manage:detail.${l}`)] as const)
   return (
     <Page back={["#/bots", "Bot"]} max={720} toolbarTop toolbar={<OwnerChip objectType="bot" objectId={k} />}
-      title={<span className="flex items-center gap-3 in-data-[slot=breadcrumb-page]:contents sm:gap-4">
-        <Robot k={k} size={56} className="shrink-0 in-data-[slot=breadcrumb-page]:hidden max-sm:size-12!" />
-        <span className="min-w-0"><span className="block truncate">{b.main ? b.n : t("manage:bot.name", { name: b.n })}</span>
-          <span className="mt-0.5 block type-callout font-normal text-muted-foreground in-data-[slot=breadcrumb-page]:hidden">{b.role || t("manage:detail.noRole")}</span></span>
-      </span>}
-      sub={<div className="pl-15 sm:pl-18"><Meta><span>{b.h}</span><span>{b.m}</span><span>{t("manage:detail.pers", { v: b.pers || t("manage:detail.unset") })}</span><span>{t("manage:detail.pro", { v: proLabel(t, b.pro) })}</span></Meta><RecentStats bot={k} className="mt-0.5 block type-footnote" /></div>}
+      lead={<Robot k={k} size={56} className="max-sm:size-12!" />}
+      title={<span className="block truncate">{b.main ? b.n : t("manage:bot.name", { name: b.n })}</span>}
+      sub={<div><div className="mb-1 text-muted-foreground">{b.role || t("manage:detail.noRole")}</div><Meta><span>{b.h}</span><span>{b.m}</span><span>{t("manage:detail.pers", { v: b.pers || t("manage:detail.unset") })}</span><span>{t("manage:detail.pro", { v: proLabel(t, b.pro) })}</span></Meta><RecentStats bot={k} className="mt-0.5 block type-footnote" /></div>}
       actions={<>{!b.main && <><span className="hidden type-footnote text-muted-foreground sm:inline">{b.on ? t("manage:bot.enabled") : t("manage:bot.disabled")}</span><Switch checked={b.on} onCheckedChange={(v) => void saveBot(k, { on: v }, v ? t("manage:bot.enabled") : t("manage:bot.disabled"))} aria-label={t("manage:bot.enable")} /></>}<BotMenu k={k} /></>}>
       <Strip className="mb-8" watch={botTab}><Segmented className="min-w-max [&_[data-slot=tabs-list]]:w-full [&_[data-slot=tabs-trigger]]:flex-1" value={botTab} onChange={(v) => { botTab = v; r() }} options={tabs} /></Strip>
       {botTab === "概览" && (mine.length ? <Panel className="anim-in">{mine.map((i) => <ItemRow key={i.id} i={i} bot={false} />)}</Panel> : <Empty title={t("manage:detail.noRunning")} />)}
       {/* the channels page's list, laid into this page's section and panel */}
-      {botTab === "对外身份" && <div className="anim-in [&_[data-personas]>div:first-child]:px-1 [&_[data-personas]>div:first-child]:text-tertiary [&_[data-personas]>[data-slot=item-group]]:mx-0 [&_[data-personas]>[data-slot=item-group]]:rounded-xl [&_[data-personas]>[data-slot=item-group]]:bg-card [&_[data-personas]>[data-slot=item-group]]:p-1 [&_[data-personas]>[data-slot=item-group]]:shadow-[var(--lift)] [&_[data-personas]_[data-slot=item]]:px-3 [&_[data-personas]_[data-slot=item-separator]]:mx-3"><PersonasSection bot={k} /></div>}
+      {botTab === "对外身份" && <div className="anim-in"><PersonasSection bot={k} panel /></div>}
       {botTab === "定时与流程" && <BotSchedules k={k} />}
       {botTab === "能力" && (
         <div className="flex flex-col gap-8 anim-in" data-caps>
@@ -359,7 +356,7 @@ function BotSchedules({ k }: { k: string }) {
   if (!L.data) return <Loading />
   const mine = L.data.filter((s) => s.bot === k)
   return <Section data-bot-schedules className="anim-in" note={t("manage:detail.scheduleNote")} right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/auto/schedules")} data-bot-schedules-open>{t("manage:detail.scheduleOpen")}</Button>} label={t("manage:detail.scheduleCount", { n: mine.length })}>
-    {mine.length ? <Panel>{mine.map((s) => <Row key={s.id} icon={<AutoIco I={ClockIcon} />} title={s.name} onClick={() => go("#/auto/schedules")} data-bot-schedule={s.id}
+    {mine.length ? <Panel>{mine.map((s) => <Row key={s.id} icon={<Tile I={ClockIcon} />} title={s.name} onClick={() => go("#/auto/schedules")} data-bot-schedule={s.id}
       sub={<Meta><span>{s.describe}</span><span>{s.enabled ? (s.next_at ? t("auto:schedule.next", { time: when(s.next_at) }) : t("auto:schedule.onPlan")) : t("auto:disabled")}</span></Meta>}><Chevron /></Row>)}</Panel>
       : <Blank>{t("manage:detail.scheduleNone")}</Blank>}
   </Section>

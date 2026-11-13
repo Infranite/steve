@@ -124,8 +124,8 @@ export function NoteView({ id }: { id: string }) {
         <section className="flex flex-col gap-3" aria-label={t("knowledge:doc.body")}>
           <div className="flex flex-wrap items-center justify-between gap-2"><Segmented size="sm" value={mode} onChange={setMode} options={[["edit", t("knowledge:doc.modeEdit")], ["preview", t("knowledge:doc.modePreview")], ["chunks", t("knowledge:doc.modeChunks")]] as const} /><span className="type-footnote text-muted-foreground">{t("knowledge:doc.saveHint")}</span></div>
           {mode === "edit" && <>
-            <Input aria-label={t("knowledge:newNote.titleLabel")} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} className="h-10 md:type-headline!" data-note-title />
-            <Textarea aria-label={t("knowledge:doc.body")} value={body} onChange={(e) => setBody(e.target.value)} className="min-h-[360px] font-mono md:type-code!" placeholder={t("knowledge:doc.bodyPlaceholder")} data-note-body />
+            <Input aria-label={t("knowledge:newNote.titleLabel")} maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} className="h-10 md:type-headline" data-note-title />
+            <Textarea aria-label={t("knowledge:doc.body")} value={body} onChange={(e) => setBody(e.target.value)} className="min-h-[360px] font-mono md:type-code" placeholder={t("knowledge:doc.bodyPlaceholder")} data-note-body />
           </>}
           {mode === "preview" && <div className="min-h-40 rounded-xl bg-card px-5 py-4 type-body shadow-[var(--lift)] anim-in">{body.trim() ? <Markdown text={body} /> : <span className="text-muted-foreground">{t("knowledge:doc.noBody")}</span>}</div>}
           {mode === "chunks" && <Chunks d={d} />}

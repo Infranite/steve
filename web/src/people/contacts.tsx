@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { go, Page, Group, Row, Segmented, SectionLabel, Empty, Chips, Tags, Meta } from "@/ui"
+import { go, Page, Group, Row, Segmented, SectionLabel, Empty, Chips, Tags, Meta, SearchField } from "@/ui"
 import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
 import { myContactId, nameOf, people, type ContactBrief } from "@/api/people"
@@ -43,7 +43,7 @@ function Contacts() {
       <div key={tab} className="anim-in" data-contacts-tab={tab}>
       {tab === "contacts" && <>
         <div className="mb-5 flex flex-wrap items-center gap-2"><Chips value={filterLabel(rel)} onChange={(v) => { const f = FILTER_KEYS.find((k) => filterLabel(k) === v) ?? "all"; crel = f; setRel(f) }} options={FILTER_KEYS.map(filterLabel)} className="flex-wrap" /><span className="flex-1" />
-          <Input className="h-8 w-full rounded-lg sm:w-60 md:type-callout!" aria-label={t("people:shared.searchContacts")} placeholder={t("people:shared.searchContactsPh")} value={q} onChange={(e) => { cq = e.target.value; setQ(e.target.value) }} data-contact-search /></div>
+          <SearchField size="sm" className="w-full sm:w-60" aria-label={t("people:shared.searchContacts")} placeholder={t("people:shared.searchContactsPh")} value={q} onChange={(e) => { cq = e.target.value; setQ(e.target.value) }} data-contact-search /></div>
         <ContactList q={dq} f={FILTERS[rel] ?? {}} />
         {!dq && rel === "all" && <UnownedSection />}
       </>}

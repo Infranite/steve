@@ -6,12 +6,12 @@ import { ArrowRightIcon, PlusIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
-import { Page, Row, Segmented, Meta, Empty, StatusDot, go, Panel, Section, Chevron, FieldRow, LIFT } from "@/ui"
+import { Page, Row, Segmented, Meta, Empty, StatusDot, go, Panel, Section, Chevron, FieldRow, LIFT, Tile } from "@/ui"
 import { cn } from "cn"
 import { toast } from "@/store"
 import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, sourceLabel, type FlowSummary, type Load } from "@/api/flow"
-import { Ico, srcIcon, Failed } from "@/auto/common"
+import { srcIcon, Failed } from "@/auto/common"
 import { NewRuleDialog } from "@/auto/new-rule"
 import { Schedules, NewScheduleDialog } from "@/auto/schedules"
 import { RuleView } from "@/auto/rule"
@@ -79,7 +79,7 @@ function FlowList({ L, onNew }: { L: Load<FlowSummary[]>; onNew: () => void }) {
   return (
     <Panel>{L.data.map((f) => (
       <div key={f.id} className="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-accent anim-in">
-        <Ico I={srcIcon(f.trigger?.source)} />
+        <Tile I={srcIcon(f.trigger?.source)} />
         <button type="button" className="min-w-0 flex-1 text-left" onClick={() => go("#/auto/rule/" + f.id)} data-rule-row={f.id}>
           <div className="truncate type-body font-medium">{f.name}</div>
           <Meta className="mt-0.5"><span>{sourceLabel(f.trigger?.source) || t("auto:flows.noTrigger")}{f.trigger?.types?.length ? " · " + f.trigger.types.join(t("auto:sep.list")) : ""}</span><span>{f.uses_ai ? t("auto:usesAI") : t("auto:noAI")}</span><span>{t("auto:flows.outcomes", { count: f.outcomes })}</span><span>{t("auto:flows.runs24", { count: f.runs24 })}</span>{f.origin_label && <span>{f.origin_label}</span>}</Meta>
@@ -100,7 +100,7 @@ function SourceList() {
     {xs.length ? <Panel>{xs.map((s) => {
       const bad = s.connections.filter((c) => c.status !== "ok").length, on = s.types.filter((x) => x.on)
       return (
-        <Row key={s.adapter} icon={<Ico I={srcIcon(s.source)} />} onClick={() => go("#/auto/source/" + s.adapter)} data-source-row={s.adapter} title={s.name}
+        <Row key={s.adapter} icon={<Tile I={srcIcon(s.source)} />} onClick={() => go("#/auto/source/" + s.adapter)} data-source-row={s.adapter} title={s.name}
           sub={[s.paused ? t("auto:sources.paused") : "", t("auto:sources.accounts", { count: s.connections.length }), t("auto:sources.eventTypes", { count: on.length }), t("auto:sources.events24", { count: on.reduce((n, x) => n + x.n24, 0) })].filter(Boolean).join(" · ")}>
           {bad ? <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s="wait" />{t("auto:sources.needAttention", { count: bad })}</span> : <span className="type-footnote text-muted-foreground">{s.connections.length ? t("auto:ok") : t("auto:sources.noAccounts")}</span>}
           <Chevron />

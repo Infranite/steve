@@ -12,9 +12,6 @@ import { t, useT } from "@/i18n"
 
 export const SOURCE_ICON: Record<string, LucideIcon> = { mail: MailIcon, cal: CalendarIcon, im: MessageSquareIcon, github: GitPullRequestIcon, webhook: SirenIcon, time: ClockIcon, item: ListTodoIcon, manual: HandIcon, notify: BellIcon }
 export const srcIcon = (s: string | null | undefined) => (s && SOURCE_ICON[s]) || RadioIcon
-export const Ico = ({ I, dark }: { I: LucideIcon; dark?: boolean }) => (
-  <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg", dark ? "bg-foreground text-background" : "bg-muted text-muted-foreground")} aria-hidden><I className="size-4" strokeWidth={1.75} /></span>
-)
 
 /** compact select with an accessible name */
 export function Pick<T extends string>({ value, options, onChange, label, testId, className, disabled }: { value: T; options: readonly { v: T; l: ReactNode }[]; onChange: (v: T) => void; label: string; testId?: string; className?: string; disabled?: boolean }) {

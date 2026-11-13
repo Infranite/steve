@@ -2,6 +2,7 @@
  * Uses production controls with intercepted APIs. No live workspace or permissions are changed. */
 import assert from "node:assert/strict"
 import { mkdir } from "node:fs/promises"
+import { settle } from "./settle.mjs"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5194"
@@ -96,7 +97,7 @@ try {
     await shot(page, `yolo-${width}-${height}-${scale}x-${locale}-top`)
     const scroll = page.locator("[data-yolo-scroll]")
     // dialogs open with a short scale-in (visual system v2): measure where the footer rests, not where it passes
-    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity))
+    await settle(page)
     const footerBefore = await page.locator('[data-slot="dialog-footer"]').boundingBox()
     await page.locator("[data-yolo-include-open]").click()
     await page.locator("[data-yolo-full-ok]").click()
@@ -154,7 +155,7 @@ try {
     await layout(page, "[data-yolo-scope-confirm]", '[data-slot="alert-dialog-footer"]')
     await shot(page, `yolo-${type}-confirm-${scale}x`)
     // dialogs open with a short scale-in (visual system v2): measure where the footer rests, not where it passes
-    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity))
+    await settle(page)
     const footerBefore = await page.locator('[data-slot="alert-dialog-footer"]').boundingBox()
     const header = page.locator('[data-slot="alert-dialog-header"]')
     await header.evaluate(el => { el.scrollTop = el.scrollHeight })

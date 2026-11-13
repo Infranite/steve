@@ -12,7 +12,7 @@ import { api, modReq } from "@/api"
 import { HubChooser, useHubAddress } from "@/hub-ui"
 import { encodeQr, qrSvgPath } from "@/qr"
 import { toast } from "@/store"
-import { closeSheet, Row, Panel, Section, Card, Notice, Pill, Loading, Tile, Chevron, FieldRow, LIFT } from "@/ui"
+import { closeSheet, Row, Panel, Section, Card, Notice, Pill, Loading, Tile, Chevron, FieldRow } from "@/ui"
 import { cn } from "cn"
 
 export const ACCESS_CAT = Object.defineProperties(["access", "", KeyRoundIcon, ""], {
@@ -299,11 +299,7 @@ export function AccessSettingsPane() {
     </Panel></Section>
 
     <Section data-hub-switcher label={t("pages:access.hubs")} note={t("pages:access.hubsSub")}>
-      {/* the shared chooser, laid into this page's panel: its list as rows with hairlines between them, and the
-        * address, the name and 连接 on one line under them */}
-      <div className={cn(LIFT, "p-1 [&_[data-hub-chooser]]:gap-0 [&_[data-hub-list]]:rounded-none [&_[data-hub-list]]:border-0 [&_[data-hub-row]]:mx-2 [&_[data-hub-row]]:border-border [&_[data-hub-row]]:px-0 [&_[data-hub-row]:last-child]:border-b [&_[data-add-hub]]:grid [&_[data-add-hub]]:gap-2 [&_[data-add-hub]]:px-3 [&_[data-add-hub]]:py-3 sm:[&_[data-add-hub]]:grid-cols-[minmax(0,3fr)_minmax(0,2fr)_auto] [&_[data-add-hub]>div:not(:has(button))]:col-span-full [&_[data-add-hub]_[data-slot=input]]:h-8 [&_[data-add-hub-submit]]:h-8 [&_[data-add-hub-submit]]:flex-none [&_[data-add-hub-submit]]:px-3")}>
-        <HubChooser manage />
-      </div>
+      <HubChooser manage bare />
     </Section>
 
     <Section data-pair-device-section label={t("pages:access.pairTitle")} note={showPair ? undefined : t("pages:access.pairSub")}>

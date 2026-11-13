@@ -220,6 +220,11 @@
 @keyframes steve-fade { from { opacity: 0; } to { opacity: 1; } }
 .anim-in { animation: steve-in 180ms var(--ease-out) both; }
 .anim-page { animation: steve-in 180ms var(--ease-out) both; }
+/* a floating layer drawn by hand (the composer's # @ / menu, a suggestion list): it rises in like the others and,
+ * kept mounted for a moment by useLinger, fades back out instead of vanishing */
+@keyframes steve-float-out { to { opacity: 0; transform: translateY(2px) scale(0.98); } }
+.anim-float { animation: steve-in 180ms var(--ease-out) both; }
+.anim-float[data-leaving] { animation: steve-float-out 120ms var(--ease-in-out) both; pointer-events: none; }
 /* route changes: the content area cross-fades and rises a little; the sidebar stays (view transitions) */
 ::view-transition-old(page) { animation: 120ms var(--ease-in-out) both steve-out; }
 ::view-transition-new(page) { animation: 180ms var(--ease-out) both steve-in; }
@@ -234,6 +239,15 @@
 :root { interpolate-size: allow-keywords; }
 details::details-content { transition: height 260ms var(--ease-out), content-visibility 260ms allow-discrete; height: 0; overflow: clip; }
 details[open]::details-content { height: auto; }
+
+/* a toast (sonner) is a compact floating card centred over the content: the popover surface with the floating
+ * layers' edge in either theme. Unlayered and more specific than sonner's own [data-sonner-toast][data-styled] rules. */
+[data-sonner-toaster] [data-sonner-toast].steve-toast {
+  left: 0; right: 0; margin-inline: auto; width: fit-content; max-width: calc(100vw - 2rem);
+  justify-content: center; gap: 8px; border: 0; border-radius: 12px; padding: 10px 14px;
+  background: var(--popover); color: var(--popover-foreground); box-shadow: var(--sh-lg);
+  font-size: 13px; line-height: 20px; font-weight: 500;
+}
 
 /* Markdown in messages and cards — sized to the type scale, not a document */
 .md { overflow-wrap: anywhere; }

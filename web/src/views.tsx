@@ -794,7 +794,6 @@ export function SessionView({ k }: { k: string }) {
 
 /* ═════════ 设置 / Bot ═════════ */
 export const PLUGIN_ICON: Record<string, any> = { mail: MailIcon, calendar: CalendarIcon, message: MessageSquareIcon, git: GitPullRequestIcon, shield: LockIcon, list: ListIcon, zap: ZapIcon }
-export const Ico = ({ I }: { I: any }) => <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"><I className="size-4" strokeWidth={1.5} /></span>
 /** 我: the user's own contact (称呼、时区、语言); only where the Hub has the contacts module */
 function MeRow() {
   const t = useT()
@@ -817,7 +816,7 @@ export function MoreView() {
         {groups.map((group) => <Section key={group.name} label={group.name}><Panel>{group.rows.map(([h, title, s, I]) => (
           <Row key={h} icon={<Tile I={I} />} title={title} sub={s} onClick={() => go("#/" + h)}><Chevron /></Row>
         ))}</Panel></Section>)}
-        <div className="[&>[data-more-hub]>[data-slot=item-group]]:mx-0 [&>[data-more-hub]>[data-slot=item-group]]:w-auto [&>[data-more-hub]>[data-slot=item-group]]:rounded-xl [&>[data-more-hub]>[data-slot=item-group]]:bg-card [&>[data-more-hub]>[data-slot=item-group]]:p-1 [&>[data-more-hub]>[data-slot=item-group]]:shadow-[var(--lift)] [&>[data-more-hub]>div:first-child]:px-1 [&>[data-more-hub]>div:first-child]:text-tertiary [&>[data-more-hub]_[data-slot=item]]:px-3 [&>[data-more-hub]_[data-slot=item-separator]]:mx-3 [&>[data-more-hub]_[data-slot=item-media]>span]:size-8 [&>[data-more-hub]_[data-slot=item-media]>span]:rounded-lg"><HubMore /></div>
+        <HubMore />
         <Panel><GitHubMoreRow /></Panel>
         {st.yolo && <Panel><Row icon={<Tile I={ZapIcon} />} title={t("views:more.yolo")} sub={{ on: t("views:more.yoloOn"), full: t("views:more.yoloFull"), off: t("views:more.yoloOff"), paused: t("views:more.yoloPaused", { reason: st.yolo.paused?.reason ?? "" }), forced: t("views:more.yoloForced") }[yoloState(st.yolo)!]} onClick={() => openSheet("yolo")} data-more-yolo><Chevron /></Row>
           <Row title={t("views:more.yoloLog")} sub={t("views:more.yoloLogSub")} onClick={() => go("#/yolo")}><Chevron /></Row></Panel>}

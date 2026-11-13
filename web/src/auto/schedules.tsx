@@ -8,11 +8,11 @@ import { Textarea } from "@/components/ui/textarea"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { Meta, Empty, StatusDot, BotAvatar, go, Panel } from "@/ui"
+import { Meta, Empty, StatusDot, BotAvatar, go, Panel, Tile } from "@/ui"
 import { st, botName, toast } from "@/store"
 import { flowApi, errText, type Load, type Parsed, type Schedule, type ScheduleBody, type ScheduleMode, type ScheduleRun } from "@/api/flow"
 import { HubError } from "@/api"
-import { Ico, Modal, Pick, Failed, when, botOptions, mainBot, RUN_STATUS } from "@/auto/common"
+import { Modal, Pick, Failed, when, botOptions, mainBot, RUN_STATUS } from "@/auto/common"
 import { t, useT } from "@/i18n"
 import { num } from "@/i18n/format"
 
@@ -43,7 +43,7 @@ export function Schedules({ L, onNew }: { L: Load<Schedule[]>; onNew: () => void
     : <Panel>{L.data.map((s) => (
       <Collapsible key={s.id} open={open === s.id} onOpenChange={(o) => setOpen(o ? s.id : null)}>
         <div className="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-accent">
-          <Ico I={ClockIcon} />
+          <Tile I={ClockIcon} />
           <CollapsibleTrigger className="min-w-0 flex-1 text-left" data-schedule-row={s.id}>
             <div className="truncate type-body font-medium">{s.name}</div>
             <Meta className="mt-0.5"><span>{s.describe}</span><span>{s.enabled ? (s.next_at ? t("auto:schedule.next", { time: when(s.next_at) }) : t("auto:schedule.onPlan")) : t("auto:disabled")}</span>

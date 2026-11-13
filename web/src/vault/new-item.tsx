@@ -52,7 +52,7 @@ export function NewVaultDialog({ account, onClose }: { account?: { id: string; d
             <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("vault:newItem.sensitivity")}</FieldLabel>
               {T?.id === "bank_card" ? <span className="type-callout text-muted-foreground">{SENS_LABEL.high}</span>
                 : <Select testId="nv-sens" value={level} onChange={(v) => setSens(v as Sensitivity)} options={(["normal", "sensitive", "high"] as const).map((x) => ({ v: x, l: SENS_LABEL[x] }))} />}</Field>
-            <FieldDescription className="type-footnote!">{level === "high" ? t("vault:newItem.highNote") : t("vault:newItem.defaultNote")}</FieldDescription>
+            <FieldDescription className="type-footnote">{level === "high" ? t("vault:newItem.highNote") : t("vault:newItem.defaultNote")}</FieldDescription>
           </FieldGroup>
           <button type="submit" hidden />
         </form>}

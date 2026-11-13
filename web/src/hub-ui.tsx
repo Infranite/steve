@@ -2,7 +2,7 @@
  * field (on the no-Hub, signed-out and cannot-connect screens, in a dialog, and in 设置 · 访问与客户端), the answer
  * to a pairing link, and the offer of the Hubs another page sent along. The list itself is `hubDirectory()`. */
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { CheckIcon, CircleAlertIcon, ChevronRightIcon, ChevronsUpDownIcon, KeyRoundIcon, PlusIcon, QrCodeIcon, ServerIcon, ServerOffIcon } from "lucide-react"
+import { CheckIcon, CircleAlertIcon, ChevronsUpDownIcon, KeyRoundIcon, PlusIcon, QrCodeIcon, ServerIcon, ServerOffIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -13,7 +13,7 @@ import { cn } from "cn"
 import { answerOffer, appPairLink, claimPair, currentHub, dropPairRequest, hubDirectory, HubError, hubsOffer, nativeBridge, onArrival, pairAddresses, pairPlan, pairRequest, type HubEntry } from "@/hub"
 import { t as tr, useT } from "@/i18n"
 import { st, toast } from "@/store"
-import { closeSheet, go, Group, openSheet, Row, SectionLabel } from "@/ui"
+import { closeSheet, go, openSheet, Row, Section, Panel, Tile, Chevron, LIFT } from "@/ui"
 
 /** why a Hub could not be used, in the page's words */
 export const hubErrorText = (e: unknown): string =>
@@ -104,22 +104,21 @@ export function HubSwitcher() {
 export function HubMore() {
   const t = useT(), { hubs } = useHubs()
   const cur = hubs?.find((h) => h.current)
-  /* the tile the other rows of 我的 have (views.tsx `Ico`) */
-  const ico = (I: typeof ServerIcon) => <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"><I className="size-4" strokeWidth={1.5} /></span>
-  const more = <ChevronRightIcon className="size-4 text-tertiary" />
   return (
-    <section data-more-hub><SectionLabel>Hub</SectionLabel><Group>
-      <Row icon={ico(ServerIcon)} title={cur?.name ?? t("shell:hub.rowHubs")} sub={cur ? [hubSub(cur), t("shell:hub.rowHubs")].filter(Boolean).join(" · ") : undefined} onClick={() => openSheet("hubs")} data-more-hubs>{more}</Row>
-      <Row icon={ico(QrCodeIcon)} title={t("shell:hub.rowPair")} sub={t("shell:hub.rowPairSub")} onClick={() => openSheet("pairClient")} data-more-pair>{more}</Row>
-      <Row icon={ico(KeyRoundIcon)} title={t("shell:hub.rowAccess")} sub={t("shell:hub.rowAccessSub")} onClick={() => go("#/settings/access")} data-more-access>{more}</Row>
-    </Group></section>
+    <Section label="Hub" data-more-hub><Panel>
+      <Row icon={<Tile I={ServerIcon} />} title={cur?.name ?? t("shell:hub.rowHubs")} sub={cur ? [hubSub(cur), t("shell:hub.rowHubs")].filter(Boolean).join(" · ") : undefined} onClick={() => openSheet("hubs")} data-more-hubs><Chevron /></Row>
+      <Row icon={<Tile I={QrCodeIcon} />} title={t("shell:hub.rowPair")} sub={t("shell:hub.rowPairSub")} onClick={() => openSheet("pairClient")} data-more-pair><Chevron /></Row>
+      <Row icon={<Tile I={KeyRoundIcon} />} title={t("shell:hub.rowAccess")} sub={t("shell:hub.rowAccessSub")} onClick={() => go("#/settings/access")} data-more-access><Chevron /></Row>
+    </Panel></Section>
   )
 }
 
 /** The list of Hubs and the field that adds one (an address, or a pairing link). `manage`: with the name field and
  * "移除". `down`: the Hub in use did not answer, so it is offered again like the others, and a page that no Hub
  * served does not list its own address. */
-export function HubChooser({ manage = false, down = false, focus = false, className }: { manage?: boolean; down?: boolean; focus?: boolean; className?: string }) {
+/** `bare`: laid into a page as one lifted panel: the list as rows with hairlines between them, and the address, the
+ *  name and 连接 on one line under them */
+export function HubChooser({ manage = false, down = false, focus = false, bare = false, className }: { manage?: boolean; down?: boolean; focus?: boolean; bare?: boolean; className?: string }) {
   const t = useT(), { dir, hubs, error, reload } = useHubs()
   const [busy, setBusy] = useState("")
   /* what went wrong, and where it is said: under the list for one of its rows, under the field for an address typed */
@@ -136,13 +135,13 @@ export function HubChooser({ manage = false, down = false, focus = false, classN
   }
   const shown = (hubs ?? []).filter((h) => !(down && !dir.native && h.current && h.address === location.origin))
   return (
-    <div className={cn("flex w-full flex-col gap-3 text-left", className)} data-hub-chooser>
+    <div className={cn("flex w-full flex-col text-left", bare ? cn(LIFT, "p-1") : "gap-3", className)} data-hub-chooser>
       {hubs === null ? <Spinner className="size-4 self-center text-muted-foreground" /> : shown.length > 0 && (
-        <div className="flex flex-col overflow-hidden rounded-xl bg-card p-1 shadow-[var(--lift)]" role="list" data-hub-list>
+        <div className={cn("flex flex-col overflow-hidden", !bare && "rounded-xl bg-card p-1 shadow-[var(--lift)]")} role="list" data-hub-list>
           {shown.map((h) => {
             const here = h.current && !down
             return (
-              <div key={h.id} role="listitem" className="flex items-center gap-1 anim-in [&+&]:border-t [&+&]:border-border/70" data-hub-row={h.address}>
+              <div key={h.id} role="listitem" className={cn("flex items-center gap-1 anim-in [&+&]:border-t [&+&]:border-border/70", bare && "mx-2 border-border last:border-b")} data-hub-row={h.address}>
                 <button type="button" disabled={here || !!busy} onClick={() => void act(h.id, () => dir.switchTo(h))}
                   className={cn("flex min-w-0 flex-1 items-center gap-3 rounded-lg px-2.5 py-2 text-left", !here && "cursor-pointer hover:bg-accent")} data-hub-go={h.address}>
                   <ServerIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
@@ -160,12 +159,12 @@ export function HubChooser({ manage = false, down = false, focus = false, classN
       )}
       {error && <div className="type-callout text-destructive" role="alert">{error}</div>}
       {err && errAt === "list" && <div className="-mt-1 type-callout text-destructive" role="alert" data-hub-error>{err}</div>}
-      <form onSubmit={(e) => { e.preventDefault(); if (input.trim()) void act("add", () => dir.add(input, name)) }} className="flex w-full flex-col gap-2" data-add-hub>
+      <form onSubmit={(e) => { e.preventDefault(); if (input.trim()) void act("add", () => dir.add(input, name)) }} className={cn("w-full gap-2", bare ? "grid px-3 py-3 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)_auto] [&>div:not(:has(button))]:col-span-full [&_[data-slot=input]]:h-8" : "flex flex-col")} data-add-hub>
         <Input value={input} onChange={(e) => setInput(e.target.value)} placeholder={t("shell:hub.addPlaceholder")} autoFocus={focus} inputMode="url" autoCapitalize="off" autoCorrect="off" spellCheck={false} data-add-hub-url />
         {manage && <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("shell:hub.namePlaceholder")} data-add-hub-name />}
         {err && errAt === "add" && <div className="type-callout text-destructive" role="alert" data-hub-error>{err}</div>}
         <div className="flex gap-2">
-          <Button type="submit" className="flex-1" disabled={!!busy || !input.trim()} data-add-hub-submit>{busy === "add" ? <Spinner className="size-4" /> : t("shell:hub.connect")}</Button>
+          <Button type="submit" className={bare ? "flex-none px-3" : "flex-1"} disabled={!!busy || !input.trim()} data-add-hub-submit>{busy === "add" ? <Spinner className="size-4" /> : t("shell:hub.connect")}</Button>
           {dir.scan && <Button type="button" variant="outline" disabled={!!busy} onClick={() => void act("scan", dir.scan!)} data-hub-scan><QrCodeIcon className="size-4" />{t("shell:hub.scan")}</Button>}
         </div>
         <div className="type-footnote text-tertiary">{t("shell:hub.addHint")}</div>

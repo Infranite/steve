@@ -22,7 +22,6 @@ import { num } from "@/i18n/format"
 
 const SYS_I: Record<string, any> = { comm: MailIcon, code: CodeIcon, cloud: CloudIcon, finance: CreditCardIcon, calendar: CalendarIcon }
 const iconOf = (a: { system: { id: string; kind: string } }) => a.system.id === "phone" ? PhoneIcon : /feishu|slack/.test(a.system.id) ? MessageSquareIcon : SYS_I[a.system.kind] ?? KeyRoundIcon
-export const Ico = Tile
 const Loading = ({ title, back }: { title: string; back?: [string, string] }) => <Page title={title} back={back}><Spin /></Page>
 const Failed = ({ title, err, back }: { title: string; err: string; back?: [string, string] }) => <Page title={title} back={back}><Empty title={err} /></Page>
 
@@ -30,7 +29,7 @@ export function AcctRow({ a, showOwner }: { a: RAccount; showOwner?: boolean }) 
   const t = useT()
   const c = a.connection
   return (
-    <Row icon={<Ico I={iconOf(a)} />} onClick={() => go("#/accounts/" + a.id)} data-acct-row={a.handle}
+    <Row icon={<Tile I={iconOf(a)} />} onClick={() => go("#/accounts/" + a.id)} data-acct-row={a.handle}
       title={<span className="inline-flex flex-wrap items-center gap-1.5">{a.display_name || a.handle}<span className="type-footnote text-muted-foreground">{a.system.name} · {kindLabel(a.kind)}</span>{!a.verified && <Pill tone="attention">{t("accounts:row.unverified")}</Pill>}</span>}
       sub={<Meta inline>{a.handle !== a.display_name && <span className="font-mono">{a.handle}</span>}{showOwner && !a.party.is_me && <span>{a.party.name}</span>}
         {c ? <span>{c.caps.length ? t("accounts:row.connectedCaps", { caps: c.caps.map(capLabel).join(t("accounts:listSep")) }) : t("accounts:row.connected")}</span> : <span>{t("accounts:row.source", { source: a.source_label || a.source })}</span>}
@@ -89,7 +88,7 @@ function AccountsView() {
       {dlg?.k === "connect" && <ConnectDialog adapter={dlg.a} onClose={() => setDlg(null)} />}
       <div className="flex flex-col gap-8">
         <Section label={t("accounts:page.connectedSection", { n: num(conn.length) })}><BySystem xs={conn} empty={t("accounts:page.connectedEmpty")} /></Section>
-        <Panel><Row icon={<Ico I={PlugIcon} />} title={t("accounts:page.integrations")} sub={t("accounts:page.integrationsSub")} onClick={() => go("#/integrations")} data-goto-integrations><Chevron /></Row></Panel>
+        <Panel><Row icon={<Tile I={PlugIcon} />} title={t("accounts:page.integrations")} sub={t("accounts:page.integrationsSub")} onClick={() => go("#/integrations")} data-goto-integrations><Chevron /></Row></Panel>
         <Section label={t("accounts:page.companySection", { n: num(company.length) })}><BySystem xs={company} empty={t("accounts:page.companyEmpty")} />
           <Note>{t("accounts:page.companyNote")}</Note></Section>
         <Section label={t("accounts:page.otherSection", { n: num(rest.length) })}><BySystem xs={rest} empty={t("accounts:page.otherEmpty")} />
@@ -155,7 +154,7 @@ function AccountDetail({ id }: { id: string }) {
         {mine && <Section label={t("accounts:detail.connection")}>{c ? <Connection c={c} adapter={adapter} label={a.display_name || a.handle} onChange={L.reload} />
           : <Blank>{a.system.kind === "finance" ? t("accounts:detail.notConnectedFinance") : t("accounts:detail.notConnected")}</Blank>}</Section>}
         {mine && <Section label={t("accounts:detail.vaultSection", { n: num(a.vault_items.length) })} right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setNewItem(true)} data-new-vault-for-account><PlusIcon />{t("accounts:detail.newVaultItem")}</Button>}>
-          {a.vault_items.length ? <Panel>{a.vault_items.map((v) => <Row key={v.id} icon={<Ico I={KeyRoundIcon} />} title={v.title} onClick={() => go("#/vault/" + v.id)} data-vault-row={v.title}><Chevron /></Row>)}</Panel>
+          {a.vault_items.length ? <Panel>{a.vault_items.map((v) => <Row key={v.id} icon={<Tile I={KeyRoundIcon} />} title={v.title} onClick={() => go("#/vault/" + v.id)} data-vault-row={v.title}><Chevron /></Row>)}</Panel>
             : <Empty title={t("accounts:detail.vaultEmpty")} sub={t("accounts:detail.vaultEmptySub")} />}</Section>}
       </div>
     </Page>

@@ -1,5 +1,6 @@
 // Vite fixture only. Every API request is intercepted; no Hub, account or model is used.
 import assert from "node:assert/strict"
+import { settle } from "./settle.mjs"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5189"
@@ -9,7 +10,6 @@ const coverage = { retention_days: 7, earliest_cursor: 1, latest_cursor: 3, inst
 const event = (id, cursor, extra = {}) => ({ event_id: id, cursor, at: at - cursor * 1000, kind: "dependency.resume", reason_code: "open_dependency", severity: "info", session_id: "session-one", attempt_id: "attempt-one", details: { dependency: "ST-100" }, ...extra })
 const first = event("event-3", 3), earlier = event("event-2", 2)
 const complete = (events, rest = {}) => ({ events, next_cursor: null, has_more: false, coverage, gaps: [], truncated: false, ...rest })
-const settle = (page) => page.evaluate(() => Promise.allSettled(document.getAnimations().filter((a) => a.effect?.getTiming().iterations !== Infinity).map((a) => a.finished)))
 
 async function setup(page, { owner = true, lang = "zh-CN" } = {}) {
   const requests = [], mutations = []

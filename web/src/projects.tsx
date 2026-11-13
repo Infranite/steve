@@ -81,9 +81,9 @@ export function ProjectView({ id }: { id: string }) {
         {done.length > 0 && <section><SectionLabel>{t("pages:projects.recentDone")}<Count n={done.length} /></SectionLabel><Group>{done.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group></section>}
         <section className="flex flex-col gap-4"><SectionLabel className="mb-0">{t("pages:projects.settings")}</SectionLabel>
           <FieldGroup className="gap-4">
-            <Field className="gap-1.5"><FieldLabel className="type-label! text-tertiary">{t("pages:projects.name")}</FieldLabel><Input className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} /></Field>
-            <Field className="gap-1.5"><FieldLabel className="type-label! text-tertiary">{t("pages:projects.desc")}</FieldLabel><Textarea className="min-h-20 rounded-lg" value={d} onChange={(e) => setD(e.target.value)} />
-              <FieldDescription className="type-footnote!">{t("pages:projects.descHint")}</FieldDescription></Field>
+            <Field className="gap-1.5"><FieldLabel className="type-label text-tertiary">{t("pages:projects.name")}</FieldLabel><Input className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} /></Field>
+            <Field className="gap-1.5"><FieldLabel className="type-label text-tertiary">{t("pages:projects.desc")}</FieldLabel><Textarea className="min-h-20 rounded-lg" value={d} onChange={(e) => setD(e.target.value)} />
+              <FieldDescription className="type-footnote">{t("pages:projects.descHint")}</FieldDescription></Field>
             {dirty && <div className="flex gap-2"><Button size="sm" onClick={() => patchProject(p.id, { name: n.trim() || p.name, description: d.trim() })}>{t("common:action.save")}</Button><Button size="sm" variant="ghost" onClick={() => { setN(p.name); setD(p.description) }}>{t("common:action.cancel")}</Button></div>}
           </FieldGroup>
           <Group>

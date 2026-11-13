@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Spinner } from "@/components/ui/spinner"
 import { tm, toast, type Out } from "@/store"
-import { Segmented } from "@/ui"
+import { Segmented, Empty } from "@/ui"
 import { cn } from "cn"
 import { OfficeView } from "@/office"
 import { ChevronLeftIcon, ChevronRightIcon, CopyIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FileTextIcon, FolderIcon, GalleryVerticalIcon, GitBranchIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react"
@@ -25,7 +25,7 @@ function Note({ children }: { children: ReactNode }) {
 }
 function Missing({ reason }: { reason: string }) {
   const t = useT()
-  return <div className="flex flex-col items-center gap-1.5 py-14 text-center" data-out-missing><FileIcon className="mb-1 size-6 text-tertiary" strokeWidth={1.5} /><div className="type-headline">{t("pages:outputs.cantView")}</div><div className="max-w-md type-callout text-muted-foreground">{reason}</div></div>
+  return <Empty compact icon={<FileIcon />} title={t("pages:outputs.cantView")} sub={reason} data-out-missing />
 }
 function Plain({ text }: { text: string }) {
   return <pre className="max-h-[60vh] overflow-auto rounded-xl bg-muted/60 px-4 py-3 type-code whitespace-pre-wrap break-words" data-out-plain>{text}</pre>

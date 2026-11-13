@@ -15,7 +15,7 @@ function CollapsibleTrigger({ ...props }: CollapsiblePrimitive.Trigger.Props) {
 
 /** the panel eases its height open and shut (Base UI measures it into --collapsible-panel-height): 260ms, the
  *  system's expand duration */
-export const COLLAPSE = "h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-260 ease-(--ease-out) data-ending-style:h-0 data-starting-style:h-0"
+export const COLLAPSE = ""
 
 function CollapsibleContent({ className, ...props }: CollapsiblePrimitive.Panel.Props) {
   return (

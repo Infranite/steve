@@ -1,5 +1,6 @@
 // Vite fixture: exercises dependency display and revision-bearing actions without a live provider.
 import assert from "node:assert/strict"
+import { settle } from "./settle.mjs"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5189"
@@ -29,7 +30,7 @@ try {
     assert.match(await page.locator("[data-workflow-decisions]").innerText(), /1 张卡等你/)
     await page.locator("[data-workflow-blockers] summary").click()
     // the details open with a height animation (visual system v2); read them once it has finished
-    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity))
+    await settle(page)
     assert.match(await page.locator("[data-workflow-blockers]").innerText(), /为什么还不能完成.*独立复核依赖门控与恢复尚未通过/s)
     await page.locator("[data-agent-failed]").click()
     assert.match(await page.locator("[data-agent-failed-list]").innerText(), /独立复核依赖门控与恢复.*刷新恢复后需要补充验证/s)
@@ -69,7 +70,7 @@ try {
     assert.equal(await page.locator('[data-agent-node="unit:api"]').getAttribute("data-agent-tries"), "1", "it folds into its step's row")
     assert.equal(await page.locator('[data-agent-node="unit:api"] [data-agent-bar="stopped"]').count(), 1, "as a hatched span on the same bar")
     await page.locator("[data-workflow-history] summary").click()
-    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity))
+    await settle(page)
     assert.match(await page.locator("[data-workflow-history]").innerText(), /最近 1 条旧尝试，共 2 条/)
     await select("unit:api")
     assert.match(await page.locator("[data-agent-panel] [data-agent-tries]").innerText(), /已停止.*第 1 次尝试.*已被返工替代/s, "the step's detail lists its earlier tries")

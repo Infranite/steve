@@ -4,7 +4,7 @@ import { useEffect, useState } from "react"
 import { PlusIcon, XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Group } from "@/ui"
+import { Group, useLinger } from "@/ui"
 import { Select } from "@/view-shared"
 import { people, type PartyOption } from "@/api/people"
 import type { Act, Rule, When } from "@/api/channels"
@@ -56,7 +56,7 @@ function Words({ words, onChange }: { words: string[]; onChange: (w: string[]) =
     <span className="flex flex-wrap items-center gap-1">{words.map((w) => (
       <span key={w} className="inline-flex h-6 items-center gap-1 rounded-full bg-muted pl-2.5 pr-1 type-footnote">{w}
         <button type="button" aria-label={t("channels:rules.removeWord", { word: w })} onClick={() => onChange(words.filter((x) => x !== w))} className="flex size-4 items-center justify-center rounded-full hover:bg-background"><XIcon className="size-3" /></button></span>))}
-      <Input aria-label={t("channels:rules.addWordAria")} className="h-7 w-28 rounded-full md:type-footnote!" placeholder={t("channels:rules.addWord")} maxLength={40} value={text} onChange={(e) => setText(e.target.value)}
+      <Input aria-label={t("channels:rules.addWordAria")} className="h-7 w-28 rounded-full md:type-footnote" placeholder={t("channels:rules.addWord")} maxLength={40} value={text} onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add() } }} onBlur={add} data-rule-word /></span>
   )
 }
@@ -76,12 +76,13 @@ function Members({ w, onChange }: { w: Extract<When, { kind: "member" }>; onChan
     if (p.type === "team") { if (!w.teams.includes(p.id)) onChange({ ...w, teams: [...w.teams, p.id] }) }
     else if (!w.parties.includes(p.id)) onChange({ ...w, parties: [...w.parties, p.id] })
   }
+  const [shown, leaving] = useLinger(xs.length > 0 && xs)
   return (
     <span className="relative flex flex-wrap items-center gap-1">{ids.map(([k, id]) => (
       <span key={id} className="inline-flex h-6 items-center gap-1 rounded-full bg-muted pl-2.5 pr-1 type-footnote">{names[id] ?? id}
         <button type="button" aria-label={t("common:action.remove")} onClick={() => onChange(k === "p" ? { ...w, parties: w.parties.filter((x) => x !== id) } : { ...w, teams: w.teams.filter((x) => x !== id) })} className="flex size-4 items-center justify-center rounded-full hover:bg-background"><XIcon className="size-3" /></button></span>))}
-      <Input aria-label={t("channels:rules.searchAria")} className="h-7 w-36 rounded-full md:type-footnote!" placeholder={t("channels:rules.search")} value={q} onChange={(e) => setQ(e.target.value)} />
-      {xs.length > 0 && <span role="listbox" className="absolute left-0 top-8 z-20 flex max-h-56 w-64 flex-col overflow-auto rounded-xl bg-popover p-1 shadow-lg ring-1 ring-foreground/10 anim-in">{xs.slice(0, 8).map((p) => (
+      <Input aria-label={t("channels:rules.searchAria")} className="h-7 w-36 rounded-full md:type-footnote" placeholder={t("channels:rules.search")} value={q} onChange={(e) => setQ(e.target.value)} />
+      {shown && <span role="listbox" data-leaving={leaving || undefined} className="absolute left-0 top-8 z-20 flex max-h-56 w-64 origin-top-left flex-col overflow-auto rounded-xl bg-popover p-1 shadow-lg anim-float">{shown.slice(0, 8).map((p) => (
         <button key={p.id} type="button" role="option" aria-selected={false} className="rounded-md px-2 py-1.5 text-left type-callout hover:bg-accent" onClick={() => pick(p)}>{p.name}<span className="ml-1.5 type-footnote text-muted-foreground">{p.type === "team" ? t("channels:rules.team") : p.sub}</span></button>))}</span>}
     </span>
   )
@@ -90,7 +91,7 @@ function Members({ w, onChange }: { w: Extract<When, { kind: "member" }>; onChan
 function Params({ w, onChange }: { w: When; onChange: (w: When) => void }) {
   const t = useT()
   if (w.kind === "keyword") return <Words words={w.words} onChange={(words) => onChange({ ...w, words })} />
-  if (w.kind === "intent") return <Input aria-label={t("channels:rules.intentAria")} className="h-8 w-full rounded-lg sm:w-80 md:type-callout!" maxLength={200} placeholder={t("channels:rules.intentPlaceholder")} value={w.text} onChange={(e) => onChange({ ...w, text: e.target.value })} data-rule-intent />
+  if (w.kind === "intent") return <Input aria-label={t("channels:rules.intentAria")} className="h-8 w-full rounded-lg sm:w-80 md:type-callout" maxLength={200} placeholder={t("channels:rules.intentPlaceholder")} value={w.text} onChange={(e) => onChange({ ...w, text: e.target.value })} data-rule-intent />
   if (w.kind === "member") return <Members w={w} onChange={onChange} />
   if (w.kind === "hours") return (
     <span className="flex flex-wrap items-center gap-2 type-footnote text-muted-foreground">

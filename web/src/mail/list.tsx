@@ -2,12 +2,11 @@
  * and a search box over `GET /mail/threads`. No mailbox yet → the onboarding card; a Hub without the mail module (or
  * without the thread list) → the Unwired placeholder. */
 import { useEffect, useMemo, useState } from "react"
-import { MailIcon, PaperclipIcon, SearchIcon, PlusIcon } from "lucide-react"
+import { MailIcon, PaperclipIcon, PlusIcon } from "lucide-react"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
-import { Page, Group, Segmented, Chips, Empty, ItemNo, StatusDot, go } from "@/ui"
+import { Page, Group, Segmented, Chips, Empty, ItemNo, StatusDot, go, SearchField } from "@/ui"
 import { ConnectPrompt } from "@/integrations/kit"
 import { Unwired } from "@/unwired"
 import { tm } from "@/store"
@@ -59,8 +58,7 @@ function Threads({ accounts }: { accounts: MailAccount[] }) {
   const unread = accounts.reduce((n, a) => n + a.unread, 0)
   return (
     <Page title={tr("mail:shared.title")} sub={unread ? tr("mail:shared.unread", { count: unread }) : undefined} max={820}
-      toolbar={<div className="relative"><SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
-        <Input type="search" aria-label={tr("mail:list.searchAria")} placeholder={tr("mail:list.searchPlaceholder")} className="h-8 w-56 rounded-lg pl-8" value={q} onChange={(e) => setQ(e.target.value)} data-mail-search /></div>}>
+      toolbar={<SearchField size="sm" type="search" className="w-56" aria-label={tr("mail:list.searchAria")} placeholder={tr("mail:list.searchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} data-mail-search />}>
       <div className="mb-4 flex flex-col gap-3">
         {accounts.length > 1 && <Chips value={account ? labels[accounts.findIndex((a) => a.connection_id === account)] : ALL} options={[ALL, ...labels]}
           onChange={(l) => setAccount(l === ALL ? "" : accounts[labels.indexOf(l)]?.connection_id ?? "")} className="flex-wrap" />}

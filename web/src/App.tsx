@@ -80,9 +80,7 @@ const PARTY_HREF: Record<PartyOption["type"], string> = { contact: "#/contacts/"
 const PARTY_ICON: Record<PartyOption["type"], any> = { contact: ContactRoundIcon, org: Building2Icon, team: UsersRoundIcon }
 
 /* ⌘K's look: the query is the sheet's header, one hairline under it, groups as quiet labels, the highlighted row a soft wash */
-const PALETTE = "rounded-2xl p-0 [&_[data-slot=command-input-wrapper]]:border-b [&_[data-slot=command-input-wrapper]]:border-border/70 [&_[data-slot=command-input-wrapper]]:p-1.5 [&_[data-slot=input-group]]:h-11! [&_[data-slot=input-group]]:border-0! [&_[data-slot=input-group]]:bg-transparent! [&_[data-slot=input-group]]:ring-0! [&_[data-slot=command-input]]:type-body [&_[cmdk-group-heading]]:type-label [&_[cmdk-group-heading]]:text-muted-foreground [&_[data-slot=command-item]]:h-9 [&_[data-slot=command-item]]:rounded-lg [&_[data-slot=command-item]]:type-body [&_[data-slot=command-shortcut]]:type-footnote [&_[data-slot=command-empty]]:type-callout [&_[data-slot=command-empty]]:text-muted-foreground"
-/* a toast is a compact floating card, centred over the content: the popover surface with its own edge in either theme */
-const TOAST = "!inset-x-0 !mx-auto !w-fit !max-w-[calc(100vw-2rem)] !justify-center !gap-2 !rounded-xl !border-0 !bg-popover !px-3.5 !py-2.5 !text-popover-foreground !shadow-[0_8px_24px_-6px_rgb(16_24_40/0.16),0_0_0_1px_rgb(16_24_40/0.07)] dark:!shadow-[0_12px_32px_-6px_rgb(0_0_0/0.65),inset_0_1px_0_rgb(255_255_255/0.06),0_0_0_1px_rgb(255_255_255/0.1)] type-callout !font-medium"
+const PALETTE = "rounded-2xl p-0 [&_[data-slot=command-item]]:h-9 [&_[data-slot=command-item]]:type-body"
 /* ⌘K — jump to any page, item, project or session; quick actions */
 function CommandMenu({ open }: { open: boolean }) {
   const [q, setQ] = useState(""), t = useT()
@@ -96,7 +94,7 @@ function CommandMenu({ open }: { open: boolean }) {
   return (
     <CommandDialog open={open} onOpenChange={(o) => !o && closeSheet()} title={t("common:action.search")} description={t("shell:cmd.description")} className="top-[22%] shadow-xl sm:max-w-xl">
       <Command className={PALETTE} filter={(v, q) => (v.toLowerCase().includes(q.trim().toLowerCase()) ? 1 : 0)}>
-      <CommandInput placeholder={t("shell:cmd.placeholder")} value={q} onValueChange={setQ} data-command-input />
+      <CommandInput header placeholder={t("shell:cmd.placeholder")} value={q} onValueChange={setQ} data-command-input />
       <CommandList className="max-h-105 px-1 pb-1">
         <CommandEmpty>{t("shell:cmd.empty")}</CommandEmpty>
         <CommandGroup heading={t("shell:cmd.actions")}>
@@ -270,7 +268,7 @@ export default function App() {
         {sh?.kind === "newWorkspace" && <NewWorkspaceDialog />}
         {sh?.kind === "yolo" && <YoloDialog />}
         <CommandMenu open={sh?.kind === "command"} />
-        <Toaster visibleToasts={1} theme={resolvedTheme()} position="bottom-center" offset={124} mobileOffset={76} toastOptions={{ className: TOAST }} />
+        <Toaster visibleToasts={1} theme={resolvedTheme()} position="bottom-center" offset={124} mobileOffset={76} toastOptions={{ className: "steve-toast" }} />
       </SidebarProvider>
     </TooltipProvider>
   )

@@ -15,7 +15,7 @@ import { historyState, jumpToMsg, loadOlder, mainThread, searchThread, useHistor
 import { snippet, topicsOf, type Topic } from "@/thread/topics"
 import { lang, t as tr, useT } from "@/i18n"
 import { date, hm } from "@/i18n/format"
-import { SearchField, SidePanel, PanelHead } from "@/ui"
+import { SearchField, SidePanel, PanelHead, Empty } from "@/ui"
 
 const DAY = 86400_000
 export function dayLabel(ts: number) {
@@ -82,13 +82,13 @@ function HistoryBody() {
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-3" data-history-list>
         {hits ? <>
           {local && <div className="px-4 pt-2 type-footnote text-tertiary">{t("thread:history.localOnly")}</div>}
-          {!hits.length && !busy && <div className="px-4 py-12 text-center type-callout text-muted-foreground" data-history-empty>{t("thread:history.notFound", { q: q.trim() })}</div>}
+          {!hits.length && !busy && <Empty compact className="mx-4 mt-3" title={t("thread:history.notFound", { q: q.trim() })} data-history-empty />}
           {byDay(hits, (m) => m.created ?? 0).map(([day, ms]) => <section key={day}><div className="px-4 pb-1.5 pt-4 type-label text-tertiary">{day}</div>
             {ms.map((m) => <Hit key={m.id} m={m} q={q.trim()} on={at === m.id} onClick={() => open(m.id!, m.created)} />)}</section>)}
         </> : <>
           {byDay(topics, (x) => x.at).map(([day, ts]) => <section key={day}><div className="px-4 pb-1.5 pt-4 type-label text-tertiary">{day}</div>
             {ts.map((x) => <TopicRow key={x.id} t={x} on={at === x.id} onClick={() => open(x.id, x.at)} />)}</section>)}
-          {!topics.length && <div className="px-4 py-12 text-center type-callout text-muted-foreground">{t("thread:history.empty")}</div>}
+          {!topics.length && <Empty compact className="mx-4 mt-3" title={t("thread:history.empty")} />}
         </>}
       </div>
       <div className="flex shrink-0 items-center gap-1 border-t border-sidebar-border px-2 py-1.5">

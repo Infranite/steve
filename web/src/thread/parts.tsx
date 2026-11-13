@@ -12,7 +12,7 @@ import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
 import { STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
-import { ItemRef, DecisionCard, ItemNo, AlertClose, go } from "@/ui"
+import { ItemRef, DecisionCard, ItemNo, AlertClose, go, Pill } from "@/ui"
 import { jumpToMsg, threadMsg } from "@/thread/history"
 import { Trans } from "react-i18next"
 import { flushSync } from "react-dom"
@@ -221,7 +221,6 @@ export function cardLook(i: Item, c?: ItemCardState): Look {
   return { label: tr("thread:card.status.running"), dot: "run", tone: "run" }
 }
 /* tinted status pills: the status token at a low wash, the token itself as text */
-const TONE: Record<Look["tone"], string> = { run: "bg-blue/12 text-blue", wait: "bg-attention/12 text-attention", fail: "bg-destructive/12 text-destructive", done: "bg-success/12 text-success", quiet: "bg-muted text-muted-foreground" }
 
 /* inside a card, Markdown headings are text: a summary that starts with "## …" never outranks the card's own title */
 const FLAT = "[&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-0! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium!"
@@ -315,7 +314,7 @@ export function ItemCard({ c, inText = false }: { c: ItemCardState; inText?: boo
           <span className="truncate type-headline">{i.t}</span>
           <span className="truncate type-callout text-muted-foreground"><span className="font-mono type-footnote tabular-nums">{i.id}</span> · {botName(i.b)}{look.tone === "run" && i.now ? " · " + i.now : ""}</span>
         </span>
-        <span className={cn("mt-0.5 inline-flex max-w-[45%] shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 type-label", TONE[look.tone])} data-card-status>{look.tone === "done" && c.released ? <RocketIcon className="size-3.5 shrink-0" /> : look.tone === "run" ? <span className="dot-running size-1.5 shrink-0 rounded-full bg-current" aria-hidden /> : null}{look.label}{look.version && <span className="hidden min-w-0 max-w-32 truncate font-mono font-normal sm:inline">{look.version}</span>}</span>
+        <Pill tone={look.tone} className="mt-0.5 h-auto max-w-[45%] py-0.5 leading-4" data-card-status>{look.tone === "done" && c.released ? <RocketIcon className="size-3.5 shrink-0" /> : look.tone === "run" ? <span className="dot-running size-1.5 shrink-0 rounded-full bg-current" aria-hidden /> : null}{look.label}{look.version && <span className="hidden min-w-0 max-w-32 truncate font-mono font-normal sm:inline">{look.version}</span>}</Pill>
       </button>
       {d && !inText && <DeliveryBlock key={d.decision ?? d.text} d={d} open={!!d.full} />}
       {reply && <div className="flex min-w-0 flex-col gap-1 rounded-lg bg-muted/60 px-3 py-2.5" data-card-reply>

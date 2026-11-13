@@ -1,10 +1,9 @@
 /* 信号: external events and what the flows did with them (signals-automation.md §9, prototype SignalsView) */
 import { useEffect, useMemo, useRef, useState } from "react"
-import { ArrowRightIcon, ChevronRightIcon, FileIcon, ListTreeIcon, SearchIcon, WorkflowIcon } from "lucide-react"
-import { Input } from "@/components/ui/input"
+import { ArrowRightIcon, ChevronRightIcon, FileIcon, ListTreeIcon, WorkflowIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { Page, Group, Segmented, Chips, StatusDot, Empty, go } from "@/ui"
+import { Page, Group, Segmented, Chips, StatusDot, Empty, go, SearchField } from "@/ui"
 import { st, tm, toast, botName } from "@/store"
 import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, sourceLabel, SOURCE_LABEL, type Signal, type SignalDetail } from "@/api/flow"
@@ -64,8 +63,7 @@ export function SignalsView() {
     <Page title={t("misc:signals.title")} sub={t("misc:signals.sub")} max={760}
       toolbar={<Segmented value={mode} onChange={(v) => { mode = v; r() }} options={[["outcome", t("misc:signals.byOutcome")], ["source", t("misc:signals.bySource")]] as const} />}>
       <div className="mb-6 flex flex-wrap items-center gap-2">
-        <label className="relative min-w-0 basis-full sm:basis-0 sm:flex-1"><span className="sr-only">{t("misc:signals.search")}</span><SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-tertiary" aria-hidden />
-          <Input className="h-9 rounded-lg pl-9 md:type-callout!" placeholder={t("misc:signals.searchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} data-sig-search /></label>
+        <SearchField className="basis-full sm:basis-0 sm:flex-1" aria-label={t("misc:signals.search")} placeholder={t("misc:signals.searchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} data-sig-search />
         {/* Chips shows its values, so they are the labels here and map back to the range */}
         <Chips value={rangeLabel(range)} onChange={(v) => { range = v === rangeLabel("today") ? "today" : "7d"; r() }} options={[rangeLabel("today"), rangeLabel("7d")]} />
       </div>

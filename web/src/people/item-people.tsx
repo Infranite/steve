@@ -33,7 +33,7 @@ export function ItemPeople({ id }: { id: string }) {
       <DropdownMenu open={open} onOpenChange={(o) => { setOpen(o); if (!o) setQ("") }}>
         <DropdownMenuTrigger render={<button type="button" className="self-start type-footnote text-muted-foreground hover:text-foreground" data-add-person />}>{xs.length ? t("people:itemPeople.add") : t("people:itemPeople.noneAdd")}</DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="max-h-80 min-w-60">
-          <div className="p-1" onKeyDown={(e) => e.stopPropagation()}><Input autoFocus className="h-8 rounded-lg md:type-callout!" aria-label={t("people:itemPeople.searchAria")} placeholder={t("people:itemPeople.searchPh")} value={q} onChange={(e) => setQ(e.target.value)} data-person-search /></div>
+          <div className="p-1" onKeyDown={(e) => e.stopPropagation()}><Input autoFocus className="h-8 rounded-lg md:type-callout" aria-label={t("people:itemPeople.searchAria")} placeholder={t("people:itemPeople.searchPh")} value={q} onChange={(e) => setQ(e.target.value)} data-person-search /></div>
           {!opts.data ? <div className="px-2 py-1.5 type-footnote text-muted-foreground">{t("people:shared.loading")}</div> : !cands.length ? <div className="px-2 py-1.5 type-footnote text-muted-foreground">{t("people:shared.noMatch")}</div>
             : cands.map((p) => <DropdownMenuItem key={p.id} onClick={() => void act(people.addItemPerson(id, p.id), t("people:itemPeople.linked", { name: p.name }))} data-person-opt={p.name}><ContactAvatar name={p.name} type={p.type} size={18} />{p.name}<span className="ml-auto max-w-32 truncate type-footnote text-muted-foreground">{p.sub}</span></DropdownMenuItem>)}
         </DropdownMenuContent>

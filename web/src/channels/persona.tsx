@@ -10,7 +10,7 @@ import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { go, Page, Group, Row, SectionLabel, Empty, BotAvatar } from "@/ui"
+import { go, Page, Group, Row, SectionLabel, Empty, BotAvatar, Panel, Chevron } from "@/ui"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { st, botName } from "@/store"
@@ -26,8 +26,9 @@ const usedText = (p: Persona) => {
   return a + s ? [a ? t("channels:persona.usedAccounts", { count: a }) : "", s ? t("channels:persona.usedSpaces", { count: s }) : ""].filter(Boolean).join(" · ") : t("channels:persona.usedNone")
 }
 
-/** the list, all of them or one Bot's (the Bot page's 对外身份 tab) */
-export function PersonasSection({ bot }: { bot?: string }) {
+/** the list, all of them or one Bot's (the Bot page's 对外身份 tab). `panel`: the rows in a lifted Panel, as the
+ *  configuration pages lay them out */
+export function PersonasSection({ bot, panel = false }: { bot?: string; panel?: boolean }) {
   const t = useT()
   const L = useLoad(() => channelsApi.personas(), [], ["persona", "space", "channel"])
   const [busy, act] = useBusy()
@@ -39,13 +40,14 @@ export function PersonasSection({ bot }: { bot?: string }) {
     const p = await act(() => channelsApi.newPersona({ ...newPersonaDefaults(), bot_id: bot ?? "steve" }))
     if (p) go("#/channels/personas/" + p.id)
   }
+  const List = panel ? Panel : Group
   return (
     <section data-personas>
       <SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void create()} data-new-persona><PlusIcon />{t("channels:persona.create")}</Button>}>{t("channels:persona.listLabel", { n: xs.length })}</SectionLabel>
-      {xs.length ? <Group>{xs.map((p) => (
+      {xs.length ? <List>{xs.map((p) => (
         <Row key={p.id} icon={<PersonaAvatar bot={p.bot_id} size={32} />} onClick={() => go("#/channels/personas/" + p.id)} data-persona-row={p.name}
           title={<span className="inline-flex items-center gap-1.5">{p.name}{p.is_default && <span className="type-footnote text-muted-foreground">{t("channels:persona.isDefault")}</span>}</span>}
-          sub={t("channels:persona.rowSub", { bot: botName(p.bot_id), used: usedText(p) })}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
+          sub={t("channels:persona.rowSub", { bot: botName(p.bot_id), used: usedText(p) })}><Chevron /></Row>))}</List>
         : <Empty title={t("channels:persona.emptyTitle")} sub={t("channels:persona.emptySub")} />}
       <div className="mt-3 type-footnote text-muted-foreground">{t("channels:persona.explain")}</div>
     </section>
