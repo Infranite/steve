@@ -174,7 +174,7 @@ try {
     await page.waitForFunction(() => document.querySelector("[data-where-split]")?.getAttribute("data-where-split") === "model" && document.querySelector('[data-where-part="opus"]'))
     await page.locator('[data-where] [data-seg="time"]').click()
     await page.waitForFunction(() => document.querySelector("[data-where-split]")?.getAttribute("data-where-measure") === "time")
-    assert.match(await split.locator(".ui-cbc__big").innerText(), /小时|天/)
+    await page.waitForFunction(() => /小时|天/.test(document.querySelector("[data-where-split] .ui-cbc__big")?.textContent ?? ""))
     await page.locator('[data-where] [data-seg="cost"]').click()
     // the most expensive items, each opening where its cost went
     const top = page.locator("[data-top-item]")
