@@ -401,6 +401,23 @@ const css = /* css */ `
 .ui-pac__fig { font-size: 12px; line-height: 18px; color: var(--ui-pac-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ui-pac[data-steps] .ui-pac__meta:empty::before, .ui-pac__fig:empty::before { content: "\\200b"; }
 .ui-pac__act { display: flex; justify-content: flex-end; align-items: center; min-width: 0; }
+/* Steve: steps read as one quiet list, not a stack of cards – no panel or shadow per row, a hover wash instead; a thin
+ * bar only where something is still moving (running, waiting, failed), none on a finished step; the row's action shows
+ * when you point at it (always on touch screens) */
+.ui-pac[data-steps] .ui-pac__panel { gap: 0; }
+.ui-pac[data-steps] .ui-pac__row { background: transparent; box-shadow: none; border-radius: var(--aui-radius, 8px); padding: 8px 10px; grid-template-columns: 24px minmax(0, 1fr) minmax(72px, 18%) minmax(60px, auto) 56px; animation: none; }
+.ui-pac[data-steps] .ui-pac__row[data-clickable]:hover { box-shadow: none; background: var(--aui-subtle); }
+.ui-pac[data-steps] .ui-pac__row[data-selected], .ui-pac[data-steps] .ui-pac__row[data-selected]:hover { box-shadow: none; background: var(--aui-subtle); }
+.ui-pac[data-steps] .ui-pac__icon { width: 24px; height: 24px; background: transparent; box-shadow: none; }
+.ui-pac[data-steps] .ui-pac__lane { height: 4px; border-radius: 2px; }
+.ui-pac[data-steps] .ui-pac__fill { border-radius: 2px; box-shadow: none; }
+.ui-pac[data-steps] .ui-pac__row[data-status="done"] .ui-pac__lane { visibility: hidden; }
+.ui-pac[data-steps] .ui-pac__name { font-size: 13px; }
+@media (hover: hover) {
+  .ui-pac[data-steps] .ui-pac__act { opacity: 0; transition: opacity 120ms ease; }
+  .ui-pac[data-steps] .ui-pac__row:hover .ui-pac__act, .ui-pac[data-steps] .ui-pac__row:focus-within .ui-pac__act, .ui-pac[data-steps] .ui-pac__row[data-selected] .ui-pac__act { opacity: 1; }
+  .ui-pac[data-steps] .ui-pac__row:not([data-status="done"]) .ui-pac__act { opacity: 1; }
+}
 .ui-pac [data-status="waiting"] { --k-bg: var(--ui-pac-waiting-bg); --k-edge: var(--ui-pac-waiting-edge); --k-ink: var(--ui-pac-waiting-ink); }
 .ui-pac [data-status="queued"], .ui-pac [data-status="stopped"] { --k-bg: var(--ui-pac-fill); --k-edge: transparent; --k-ink: var(--ui-pac-muted); }
 .ui-pac__row[data-status="waiting"] .ui-pac__line { color: var(--ui-pac-waiting-ink); }
