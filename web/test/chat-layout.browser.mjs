@@ -101,6 +101,9 @@ try {
     await page.locator('[data-item-card="ST-47"]').waitFor()
     await page.waitForTimeout(400)
     if (shots) await page.screenshot({ path: `${shots}/chat-rich-${width}-${theme}.png`, animations: "disabled" })
+    // Steve's name heads a run of his messages once; a quote of the message right above is left out.
+    assert.equal(await page.locator('[data-msg="offer"] [data-chat-author]').count(), 1)
+    assert.equal(await page.locator('[data-msg="upd"] [data-chat-author]').count(), 0)
     assert.ok(await page.locator("[data-notice-line]").evaluate(el => el.scrollWidth <= el.clientWidth), "a long link in a notice wraps")
     for (const sel of ["[data-chat-scroll]", ...(width === 1440 ? ['[data-rail="aside"]'] : [])]) {
       const pane = page.locator(sel)
@@ -113,7 +116,7 @@ try {
     if (width === 390) {
       await page.locator("[data-rail-toggle]").click()
       await page.locator('[data-rail="sheet"]').waitFor()
-      assert.ok(await page.getByRole("heading", { name: "通知和摘要" }).count())
+      assert.ok(await page.getByRole("heading", { name: "事项和通知" }).count())
       await page.keyboard.press("Escape")
     } else {
       await page.locator("[data-rail-toggle]").click()
@@ -128,5 +131,5 @@ try {
     await page.close()
   }
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "keyboard actions", "steps disclosure", "draft reload", "slash menu", "steady header", "long Markdown overflow", "follow new messages at the bottom", "no sideways scroll", "rail/sheet", "thinking and stop", "empty conversation"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "keyboard actions", "steps disclosure", "draft reload", "slash menu", "steady header", "long Markdown overflow", "follow new messages at the bottom", "no sideways scroll", "rail/sheet", "thinking and stop", "empty conversation", "one name per run of replies"] }))
 } finally { await browser.close() }

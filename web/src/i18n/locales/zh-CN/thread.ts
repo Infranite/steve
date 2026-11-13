@@ -55,7 +55,6 @@ export default {
       meet: "正在保存",
     },
     slow: "还在读…",
-    stop: "停",
   },
   offer: {
     folded: "之前提议过：{{title}}",
@@ -104,6 +103,7 @@ export default {
       blocked: "等前置事项",
       paused: "已暂停",
       releasing: "正在发布",
+      queued: "排队中",
       running: "进行中",
     },
     delivery: "交付摘要",

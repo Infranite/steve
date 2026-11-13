@@ -17,10 +17,27 @@ export function ProposalCard({ p, inChat = false }: { p: any; inChat?: boolean }
   const [busy, setBusy] = useState(false), t = useT()
   const done = p.state === "applied", dropped = p.state === "dropped"
   const run = async (f: () => Promise<void>) => { setBusy(true); try { await f() } finally { setBusy(false) } }
+  const [open, setOpen] = useState(false)
+  /* settled in the conversation: one line (what it changed, how it ended), the full card on demand */
+  if (inChat && (done || dropped) && !open) {
+    const first = p.changes[0], more = p.changes.length - 1
+    return (
+      <div className="flex w-[min(520px,88vw)] min-w-0 items-center gap-2 rounded-lg bg-muted/50 py-1 pl-3 pr-1 type-callout" data-proposal={p.state} data-proposal-line>
+        {done ? <CheckIcon className="size-3.5 shrink-0 text-success" /> : <SparklesIcon className="size-3.5 shrink-0 text-tertiary" />}
+        <button type="button" onClick={() => setOpen(true)} className={cn("flex min-h-7 min-w-0 flex-1 items-baseline gap-1.5 text-left hover:text-foreground", dropped ? "text-muted-foreground" : "text-foreground/85")} aria-expanded={false} data-proposal-open>
+          <span className="shrink-0">{p.title}</span>
+          {first && <span className="min-w-0 truncate text-muted-foreground">· {first.label} → {first.to}{more > 0 ? " " + t("shell:config.more", { count: more }) : ""}</span>}
+        </button>
+        <span className="shrink-0 type-footnote text-tertiary">{done ? t("shell:config.applied") : t("shell:config.dropped")}</span>
+        {done && <Button size="xs" variant="ghost" className="shrink-0 text-muted-foreground" disabled={busy} onClick={() => run(p.undo)} data-undo>{t("shell:config.undo")}</Button>}
+      </div>
+    )
+  }
   return (
     <Card size="sm" className={cn("gap-0 py-0", inChat ? "w-[min(520px,88vw)]" : "", dropped && "opacity-60")} data-proposal={p.state}>
       <div className="flex items-center gap-2 px-4 pb-1.5 pt-3 type-footnote text-muted-foreground"><SparklesIcon className="size-3.5" />{t("shell:config.drafted", { title: p.title })}
-        {inChat && <button type="button" onClick={() => go(p.href)} className="ml-auto hover:text-foreground">{t("shell:config.openSettings")}</button>}</div>
+        {inChat && <span className="ml-auto flex gap-3"><button type="button" onClick={() => go(p.href)} className="hover:text-foreground">{t("shell:config.openSettings")}</button>
+          {open && <button type="button" onClick={() => setOpen(false)} className="hover:text-foreground" data-proposal-close>{t("thread:card.collapse")}</button>}</span>}</div>
       <div className="flex flex-col px-4 pb-3">{p.changes.map((c: any, n: number) => (
         <div key={n} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 border-t py-2 first:border-t-0 type-callout" data-change={c.label}>
           <span className="w-full type-footnote text-muted-foreground sm:w-40 sm:shrink-0">{c.label}</span>

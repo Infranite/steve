@@ -1,0 +1,12 @@
+- The conversation with Steve reads with less repetition. His name and the time now head a run of his replies once, not every message in it. The "↳ you said …" line is left out when the quoted message is the one right above. The folded thinking line shows its gist only when the reply does not already open with the same words, and longer thinking times are given in whole seconds.
+- An item's report no longer appears twice, once as a long message and again on the item's card. The report sits on the card, two lines long, with "Show more" for the rest. The "see the latest" link to an item's card appears once per answer, not under every message that mentions the item.
+- An item card's status matches what the item is doing. An item whose message is queued reads "Queued" instead of "In progress", and the line under the title shows the current activity only while the item is working. When the card asks you something, the question no longer repeats the card's own status badge.
+- Config changes Steve drafted that you already applied or discarded fold to one line, with what they changed and how they ended. Click the line to see the whole card. Undo stays on the line of an applied change.
+- "While you were away" lists only what failed and what got done since you last looked. What waits on you is answered right on the page, in the thread or in the card above the composer, so it is no longer listed a third time. When nothing failed or finished, the summary does not appear.
+- The Items panel beside the conversation starts with what waits on you, then what runs for you, then notifications and recent deliveries. The "Recent thinking" list is gone, because Steve's thinking is in the thread under each reply.
+- A research run under way is stopped with the composer's Stop button (or Esc). The second, smaller Stop beside the run's clock is gone.
+- An empty conversation now says what Steve does with what you tell him, instead of showing a blank page.
+- History names a stretch where only Steve spoke, such as a delivered item's card, after that item ("ST-2 …") instead of its first words or a bare item number, and the item number is not repeated under the title.
+- A failure line in the conversation puts its links on their own line ("Go to ST-94 · All notifications").
+- In a decision card, headings in a delivery draft read as plain text, so they never look bigger than the question.
+- On phones, the copy, quote and reroute buttons show under the latest message only. Tap any other message to show its own buttons.

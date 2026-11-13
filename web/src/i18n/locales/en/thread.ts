@@ -60,7 +60,6 @@ export default {
       meet: "Saving",
     },
     slow: "still reading…",
-    stop: "Stop",
   },
   offer: {
     folded: "Suggested earlier: {{title}}",
@@ -106,6 +105,7 @@ export default {
       blocked: "Waiting on another item",
       paused: "Paused",
       releasing: "Releasing",
+      queued: "Queued",
       running: "In progress",
     },
     delivery: "Delivery summary",

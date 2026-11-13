@@ -28,8 +28,10 @@ const rich: Msg[] = [...short,
   { id: "offer", k: "steve", t: "路径 `hub-rs/crates/steve-store/migrations/../../../web/src/components/ui/message-scroller.tsx` 里没有用到。", created: now - 20000, offer: { title: "把对话页里没用到的消息滚动组件和它的样式一起删掉，顺便整理滚动条", state: "open" } as any },
 ]
 /* quoting the long reply: the quote line shows its words, not its Markdown */
+/* (a quote of the message right above is not shown: one message sits between them) */
+const between: Msg = { id: "between", k: "me", created: now + 500, t: "我先看看" }
 const quoted: Msg = { id: "quoted", k: "me", created: now + 1000, replyTo: "long", t: "好" }
-st.thread = location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long, quoted] : location.search.includes("rich") ? rich : short
+st.thread = location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long, between, quoted] : location.search.includes("rich") ? rich : short
 st.notices = []
 let replies = 0
 window.addEventListener("fixture-reply", () => { replies++; st.thread = [...st.thread, { id: "reply-" + replies, k: "steve", created: Date.now(), t: "新到的一条回复。\n\n- 第一点\n- 第二点\n- 第三点" }]; emit() })

@@ -2,10 +2,9 @@
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
 import { useEffect, useState, type ReactNode } from "react"
-import { clip } from "@/thread/topics"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { cn } from "cn"
-import { ArchiveIcon, BrainIcon, ChevronDownIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
+import { ArchiveIcon, ChevronDownIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Trail, type TrailItem } from "@/components/work-trail"
 import { toolClass } from "@/thread/tools"
@@ -25,7 +24,11 @@ import { reducedMotion } from "@/lib/motion"
 const KIND: Record<string, () => string> = { chat: () => t("shell:chat.kind.answer"), answer: () => t("shell:chat.kind.answer"), research: () => t("shell:chat.kind.research"), item: () => t("shell:chat.kind.item"), suggest: () => t("shell:chat.kind.suggest"), ask: () => t("shell:chat.kind.ask"), supplement: () => t("shell:chat.kind.supplement"), status: () => t("shell:chat.kind.status"), config: () => t("shell:chat.kind.config"), reroute: () => t("shell:chat.kind.reroute") }
 const kindLabel = (k: string) => KIND[k]?.() ?? k
 const TOOL: Record<string, [() => string, any]> = { create_item: [() => t("shell:chat.tool.createItem"), ListPlusIcon], draft_config: [() => t("shell:chat.tool.draftConfig"), SlidersHorizontalIcon], supplement: [() => t("shell:chat.tool.supplement"), SendIcon], digest: [() => t("shell:chat.tool.digest"), MegaphoneIcon] }
-const secs = (ms?: number) => (ms == null ? "" : ms < 1000 ? t("shell:chat.ms", { n: ms }) : t("common:time.secondsN", { n: (ms / 1000).toFixed(1) }))
+/* a tenth of a second only matters under ten */
+const secs = (ms?: number) => (ms == null ? "" : ms < 1000 ? t("shell:chat.ms", { n: ms }) : t("common:time.secondsN", { n: ms < 10_000 ? (ms / 1000).toFixed(1) : Math.round(ms / 1000) }))
+/* the folded line's gist, unless the reply itself starts by saying it */
+const plainStart = (x: string) => x.replace(/[*_`#>\s"\u201c\u201d\u300c\u300d]/g, "")
+const echoes = (gist: string, text?: string) => { const g = plainStart(gist).slice(0, 24); return !!text && g.length > 0 && plainStart(text).startsWith(g) }
 const firstSentence = (t: string) => t.split(/(?<=[。！？.!?])\s*/)[0]?.slice(0, 80) ?? ""
 const RESEARCH_ERROR: Record<string, () => string> = {
   permission_denied: () => t("shell:chat.researchError.permissionDenied"),
@@ -44,9 +47,6 @@ export function stepsSummary(s: Steps): string {
   if (r) return `${kindLabel(r.kind)}${r.kind === "item" ? " · " + botName(r.picked ?? r.bot) : ""}`
   const tool = s.tools[0]; return tool ? TOOL[tool.name]?.[0]() ?? tool.name : ""
 }
-/* the rail names what a piece of thinking was about: research's own summary is how it went ("没有用工具 · 51 秒"),
- * so it takes the start of its answer instead */
-const railThought = (m: Msg) => m.steps?.research && m.t ? clip(m.t, 60) : stepsSummary(m.steps!)
 const OPEN_EV = "steve-open-steps"
 /** scroll the conversation to a message's steps and unfold them */
 export function openSteps(id: string) { window.dispatchEvent(new CustomEvent(OPEN_EV, { detail: id })) }
@@ -78,13 +78,14 @@ export function StepsBlock({ m }: { m: Msg }) {
       detail: <>{desc && (item ? <button type="button" className="min-w-0 truncate text-foreground/85 hover:text-foreground hover:underline" onClick={(e) => { e.stopPropagation(); go("#/items/" + item) }}>{desc}</button> : <span className="min-w-0 truncate text-foreground/85">{desc}</span>)}{extra}</> })
   })
   const took = s.research?.ms ?? s.ms
+  const summary = stepsSummary(s), gist = !s.research && echoes(summary, m.t) ? "" : summary
   return (
     <Collapsible open={open} onOpenChange={setOpen} id={"steps-" + m.id} className="max-w-full self-start px-1" data-steps={m.id}>
       <CollapsibleTrigger className="group/work flex max-w-full min-w-0 items-center gap-1.5 rounded-lg py-0.5 text-left type-callout text-muted-foreground hover:text-foreground" data-steps-toggle>
         <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-tertiary transition-transform duration-180 ease-(--ease-out) group-hover/work:text-muted-foreground group-aria-expanded/work:rotate-0" />
         <span className="shrink-0 text-foreground/85">{s.research ? t("shell:chat.researched") : t("shell:chat.thinking")}</span>
         {took != null && !s.research && <span className="shrink-0 tabular-nums text-tertiary">{secs(took)}</span>}
-        <span className="min-w-0 truncate">· {stepsSummary(s)}</span>
+        {gist && <span className="min-w-0 truncate">· {gist}</span>}
       </CollapsibleTrigger>
       <CollapsibleContent><Trail className="pt-1" items={items} live={false} end={s.tools.length ? { s: s.research?.stopped && s.research.stopped !== "budget" ? "cancel" : "end", label: s.research?.stopped ? t(`thread:research.stopped.${s.research.stopped}`) : t("core:trail.finished") } : undefined} /></CollapsibleContent>
     </Collapsible>
@@ -112,8 +113,8 @@ export function NoticeLine({ m, onOpen }: { m: Msg; onOpen: () => void }) {
   return (
     <div className="flex max-w-[88%] items-start gap-2.5 self-start px-1 type-callout anim-in" data-notice-line={m.notice?.ref ?? m.id}>
       <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" strokeWidth={1.75} />
-      <div className="min-w-0 flex-1 wrap-anywhere"><span className="text-foreground">{m.t}</span>
-        <span className="ml-2 inline-flex gap-3 type-footnote text-muted-foreground">{m.item && <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + m.item)}>{t("shell:chat.goItem", { item: m.item })}</button>}<button type="button" className="hover:text-foreground hover:underline" onClick={onOpen}>{t("shell:chat.notices")}</button></span></div>
+      <div className="min-w-0 flex-1 wrap-anywhere"><span className="block text-foreground">{m.t}</span>
+        <span className="mt-1 flex flex-wrap gap-x-3 type-footnote text-muted-foreground">{m.item && <button type="button" className="hover:text-foreground hover:underline" onClick={() => go("#/items/" + m.item)}>{t("shell:chat.goItem", { item: m.item })}</button>}<button type="button" className="hover:text-foreground hover:underline" onClick={onOpen}>{t("shell:chat.allNotices")}</button></span></div>
       <Tooltip>
         <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("shell:chat.dismissNotice")} className="-my-0.5 shrink-0 text-muted-foreground" onClick={() => dismissNotice(m.notice?.ref ?? m.id!)} data-notice-dismiss />}><XIcon /></TooltipTrigger>
         <TooltipContent>{t("shell:chat.dismissNoticeHint")}</TooltipContent>
@@ -203,7 +204,6 @@ function RailBody() {
   useEffect(() => { if (!unread.length) return; const h = setTimeout(readNotices, 2500); return () => clearTimeout(h) }, [unread.length])
   const run = st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch), cards = pendingCards()
   const delivered = st.items.filter((i) => i.st === "done" && !i.arch && Date.now() - i.updated < 7 * DAY).sort((a, b) => b.updated - a.updated).slice(0, 5)
-  const thoughts = st.thread.filter((m) => m.k === "steve" && m.steps && (m.steps.route || m.steps.tools.length)).slice(-5).reverse()
   const waiting = (n: RNotice) => !!n.item_id && !!st.items.find((i) => i.id === n.item_id)?.wait
   /* failures stay on top until they are read and their item no longer waits on you, or until they are closed */
   const pinned = st.notices.filter((n) => n.level === "fail" && !n.closed && (n.created > st.noticeSeen || waiting(n)))
@@ -224,12 +224,12 @@ function RailBody() {
   }
   return (
     <div className="flex flex-col gap-7" data-rail-body>
-      {/* the bar above the conversation already says what Steve is doing: the rail starts with what waits on you */}
+      {/* what waits on you, then what runs for you, then what happened; Steve's own thinking stays in the thread */}
       {cards.length > 0 && <section data-rail-wait><SectionLabel>{t("shell:chat.waitingHead", { count: cards.length })}</SectionLabel>
         {cards.slice(0, 5).map(({ i, w }) => <Line key={w.decision} onClick={() => go(i.id ? "#/inbox" : "#/sessions/" + w.session)} test={"wait-" + w.decision}><StatusDot s="wait" />{i.id && <ItemNo id={i.id} />}<span className="min-w-0 flex-1 truncate type-callout">{i.id ? i.t : t("shell:chat.sessionTitle", { title: i.t })}</span><span className="shrink-0 type-footnote text-tertiary">{w.subject === "tool_call" ? t("shell:chat.permission") : WT[w.type]}</span></Line>)}
         {cards.length > 5 && <Line onClick={() => go("#/inbox")}><span className="type-footnote text-muted-foreground">{t("shell:chat.moreWaiting", { count: cards.length - 5 })}</span></Line>}</section>}
-      {thoughts.length > 0 && <section data-rail-thoughts><SectionLabel>{t("shell:chat.thoughtsHead")}</SectionLabel>
-        {thoughts.map((m) => <Line key={m.id} onClick={() => openSteps(m.id!)} test={"thought-" + m.id}><BrainIcon className="size-4 shrink-0 text-tertiary" strokeWidth={1.5} /><span className="min-w-0 flex-1 truncate type-callout text-foreground/85" title={stepsSummary(m.steps!)}>{railThought(m)}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{tm(m.created)}</span></Line>)}</section>}
+      {run.length > 0 && <section data-rail-run><SectionLabel>{t("shell:chat.runningHead", { count: run.length })}</SectionLabel>
+        {run.slice(0, 5).map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"run-" + i.id}><StatusDot s="run" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>{i.rel?.tone === "fail" && <span className="shrink-0 type-footnote text-destructive" data-rel="fail">{i.rel.outcome === "not_released" ? t("shell:chat.notReleased") : t("shell:chat.releaseFailed")}</span>}</Line>)}</section>}
       <section data-rail-notices><SectionLabel>{unread.length ? t("shell:chat.noticesUnread", { count: unread.length }) : t("shell:chat.notices")}</SectionLabel>
         {!st.notices.length && <div className="type-callout text-tertiary">{t("shell:chat.noticesEmpty")}</div>}
         {pinned.map(notice)}{similar(fresh).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}{similar(seen.slice(0, base)).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}
@@ -239,8 +239,6 @@ function RailBody() {
           <button type="button" className="mt-1 ml-6 flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(!older)} aria-expanded={older} data-older>{older ? t("shell:chat.hideRead") : t("shell:chat.olderRead", { count: seen.length - base })}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-260 ease-(--ease-out)", older && "rotate-180")} /></button>
         </Collapsible>}
       </section>
-      {run.length > 0 && <section data-rail-run><SectionLabel>{t("shell:chat.runningHead", { count: run.length })}</SectionLabel>
-        {run.slice(0, 5).map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"run-" + i.id}><StatusDot s="run" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>{i.rel?.tone === "fail" && <span className="shrink-0 type-footnote text-destructive" data-rel="fail">{i.rel.outcome === "not_released" ? t("shell:chat.notReleased") : t("shell:chat.releaseFailed")}</span>}</Line>)}</section>}
       {delivered.length > 0 && <section data-rail-done><SectionLabel>{t("shell:chat.recentDone")}</SectionLabel>
         {delivered.map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"done-" + i.id}><CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{i.up}</span></Line>)}</section>}
     </div>
