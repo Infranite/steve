@@ -114,7 +114,7 @@ export default {
     generic: "Something went wrong",
   },
   area: {
-    channel: "Channels",
+    channel: "Chat",
     sendAsYou: "Send as you",
     docs: "Docs/knowledge base",
     sheets: "Sheets/Base",

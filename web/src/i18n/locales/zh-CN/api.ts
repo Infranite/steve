@@ -121,7 +121,7 @@ export default {
   },
   /* integrations (api/integrations.ts) */
   area: {
-    channel: "渠道",
+    channel: "聊天",
     sendAsYou: "以你的名义发送",
     docs: "文档/知识库",
     sheets: "表格/多维表格",
