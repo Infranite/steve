@@ -584,3 +584,51 @@ Sampling budgets are configurable with `STEVE_DISK_OBSERVE_ENTRIES` (default `10
 Records stay in the Node journal. `STEVE_DISK_OBSERVE_ROWS` defaults to `1024`; `STEVE_DISK_OBSERVE_KEEP_MS` to `604800000` (seven days). Enqueuing new records removes expired or oldest completed statistics as needed. In-flight records are not evicted; a full queue increments a skipped counter. Values must be positive, representable integers. Invalid settings warn and disable observations without refusing Node startup. The Node host API offers paged readback; no Web or MCP endpoint is added.
 
 Optional statistics failures are isolated from turn-state commits when SQLite can roll back the statistics savepoint. A failure that aborts the outer journal transaction still fails the operation; a successful run is never claimed after a lost business commit. Readback paginates current rows by insertion sequence, with a separate snapshot for each page. Pending records change in place and retained rows may expire between calls, so callers must restart from zero to refresh final states. It is not a completion event stream, and these records are not historical p90 inputs.
+
+## Appearance and themes
+
+Settings → Appearance chooses, per device, light or dark, an accent (Indigo, Blue, Violet, Green, Orange, Rose,
+Graphite), the neutrals (Slate, Gray, Sand), the text font (Geist, System, PingFang first), the monospace font
+(Geist Mono, System mono) and the corner radius (Compact, Standard, Rounded). The choice is kept in the browser's
+`localStorage` under `steve-appearance` (light/dark under `steve-theme`); nothing is stored on the Hub, so the
+"tell Steve" box on that page, which drafts Hub settings, does not change it.
+
+Every choice is a theme manifest, and the built-in ones are written the same way (`web/src/themes/builtin.ts`). A
+manifest overrides a whitelist of the design tokens in `web/src/index.css`, separately for light and dark:
+
+```json
+{
+  "id": "plugin.ocean",
+  "name": { "zh-CN": "海洋", "en": "Ocean" },
+  "kind": "accent",
+  "tokens": {
+    "light": { "primary": "#0b5e8a", "primary-foreground": "#ffffff", "ring": "#0b5e8a", "blue": "#0b5e8a" },
+    "dark": { "primary": "#0b5e8a", "primary-foreground": "#ffffff", "ring": "#2a86c4", "blue": "#5fb0e6" }
+  }
+}
+```
+
+- `id`: lowercase letters, digits, `.`, `_` and `-`, at most 64; a built-in id cannot be replaced.
+- `name`: a string, or the name per language (`zh-CN`, `en`); the interface uses the one for its language.
+- `kind` says where the theme appears and what it may set:
+  - `accent`: `primary`, `primary-foreground`, `ring`, `blue` (links, selection, work in progress), `chart-1`, `sidebar-ring`.
+  - `neutral`: `background`, `foreground`, `card`, `popover`, `secondary`, `muted`, `muted-foreground`, `accent` (the
+    hover wash), `border`, `input`, `tertiary`, the `*-foreground` partners, `chart-2`…`chart-4`, `series-other`,
+    the `sidebar*` tokens, `canvas-graph`, `code`, `raised`, and the shadows `lift`, `lift-hover`, `highlight`,
+    `sh-xs`…`sh-xl`.
+  - `sans` with `fonts.sans`, `mono` with `fonts.mono`: a font-family list of installed or bundled fonts (no URLs).
+  - `radius` with `radius`: a scale from 0 to 2 on the corner radii (1 is Standard: 6, 8, 12, 16 px).
+  - `full`: a skin, laid over the other choices; it may set every token above, the status colors (`destructive`,
+    `attention`, `success`, `danger-icon`, `chart-5`, `series-1`…`series-5`), `fonts` and `radius`.
+- Token names are written without `--`. A color is `#hex`, `rgb()`, `hsl()`, `oklch()`, `oklab()`, `lab()`, `lch()`,
+  `transparent`, or `var(--token)` naming another whitelisted color token (Graphite uses `var(--foreground)` so it
+  follows the neutral). A shadow is a `box-shadow` list of such colors.
+
+Only the light text on `primary` and the `blue` text on the page and cards need WCAG AA (4.5:1); the built-ins are
+tested for it on every neutral in both modes (`web/test/themes.test.mjs`).
+
+Themes from elsewhere, such as a future theme plugin, are added in the web client with `registerTheme(manifest)` from
+`web/src/themes` (also `window.steveThemes.registerTheme` for a script that is not bundled with the client). It
+returns `{ ok: true }` or `{ ok: false, errors }`: a manifest with an unknown field or token, a token its kind may not
+set, or a value outside the syntax above is refused as a whole and nothing on screen changes. A registered theme
+appears among the choices of its kind; a stored choice whose theme is not registered shows the default until it is.

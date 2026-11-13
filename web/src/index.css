@@ -111,11 +111,25 @@
   --sh-xl: 0 32px 72px -12px rgb(0 0 0 / 0.7), inset 0 1px 0 rgb(255 255 255 / 0.06), 0 0 0 1px rgb(255 255 255 / 0.09);
 }
 
-@theme inline {
+/* fonts and radii are variables the utilities read (not inlined), so an appearance choice (web/src/themes) can change
+ * them on <html> */
+@theme {
   /* Geist for Latin, the system's CJK face for Chinese (per glyph), Geist Mono for code, ids and figures in tables */
   --font-sans: "Geist Variable", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
   --font-heading: "Geist Variable", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
   --font-mono: "Geist Mono Variable", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  /* radius: 6 small controls and badges · 8 buttons and inputs · 12 cards and panels · 16 dialogs and sheets · pill.
+   * lg and xl both land on the card radius so the many places that picked one or the other agree */
+  --radius-sm: 6px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-3xl: 18px;
+  --radius-4xl: 9999px;
+}
+
+@theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -150,15 +164,6 @@
   --color-sidebar-ring: var(--sidebar-ring);
   --color-canvas-graph: var(--canvas-graph);
   --color-code: var(--code);
-  /* radius: 6 small controls and badges · 8 buttons and inputs · 12 cards and panels · 16 dialogs and sheets · pill.
-   * lg and xl both land on the card radius so the many places that picked one or the other agree */
-  --radius-sm: 6px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 12px;
-  --radius-2xl: 16px;
-  --radius-3xl: 18px;
-  --radius-4xl: 9999px;
   /* motion: fast 120 (hover, press) · base 180 (popovers, toggles) · slow 260 (dialogs, sheets, expand) */
   --ease-apple: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);

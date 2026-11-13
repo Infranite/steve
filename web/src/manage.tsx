@@ -37,6 +37,7 @@ import { OwnerChip } from "@/people/owner-chip"
 import { Select, ItemRowExport as ItemRow } from "@/view-shared"
 import { showTag } from "@/views"
 import { AskSteve } from "@/config-ui"
+import { AppearanceSection } from "@/appearance-settings"
 import { VAULT_CAT, VaultSettingsPane } from "@/vault/settings"
 import { STATS_CAT, StatsSettingsPane } from "@/stats/prices"
 import { AUDIT_CAT, AuditSettingsPane } from "@/audit-settings"
@@ -483,7 +484,8 @@ function Pane({ id }: { id: string }) {
       <LanguageRow />
       <Row title={t("manage:look.fontSize")}><Segmented size="sm" value={c.fontSize} onChange={(v) => setSetting({ fontSize: v })} options={[["标准", t("manage:look.fontNormal")], ["大", t("manage:look.fontLarge")]]} /></Row>
       <Row title={t("manage:look.reduceMotion")} sub={t("manage:look.reduceMotionSub")}><SetSwitch testId="reduce-motion" label={t("manage:look.reduceMotion")} checked={c.reduceMotion === "开"} onChange={(v) => setSetting({ reduceMotion: v ? "开" : "关" })} /></Row>
-    </Panel></Section></div>
+    </Panel></Section>
+    <AppearanceSection /></div>
   if (id === "data") return <div className="flex flex-col gap-8">
     <HubData />
     <WorkspaceDisk />

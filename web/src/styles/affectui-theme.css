@@ -120,3 +120,6 @@
 .ui-avtc { --ui-avtc-text: var(--muted-foreground); --ui-avtc-edge: color-mix(in srgb, var(--foreground) 8%, transparent); --ui-avtc-ring: var(--background); --ui-avtc-mark: var(--blue); }
 /* Separator: Steve's hairlines are one pixel (affectUI's 0.5px rounds away to nothing on a 1x screen) */
 .ui-sepc { --ui-sepc-weight: 1px; }
+/* Parallel Attempts: the running step's text in dark mode is a literal light blue; it takes the accent's blue so an
+ * appearance choice (web/src/themes) reaches it */
+:where(.dark, [data-theme="dark"]) .ui-pac.ui-pac { --ui-pac-running-ink: var(--blue); }

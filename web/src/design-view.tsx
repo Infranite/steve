@@ -13,6 +13,8 @@ import { BotAvatar, Chips, Composer, Empty, KindTag, Page, Row, Segmented, Statu
 import { Select } from "@/view-shared"
 import { st, toast, kindTags, isKind } from "@/store"
 import { useT } from "@/i18n"
+import { chosen, useAppearance } from "@/themes"
+import { appearanceLabel, nameOf } from "@/appearance-settings"
 
 /* ───────── colour read-back ───────── */
 function lum(hex: string) {
@@ -117,8 +119,9 @@ function MotionSamples() {
 export function DesignView() {
   const t = useT()
   const [, f] = useState(0)
-  /* the colours are read from the live CSS: read them again once the theme class has switched */
-  useEffect(() => { const tm = setTimeout(() => f((x) => x + 1), 30); return () => clearTimeout(tm) }, [st.ver])
+  const look = useAppearance()
+  /* the colours are read from the live CSS: read them again once the theme class or the appearance has switched */
+  useEffect(() => { const tm = setTimeout(() => f((x) => x + 1), 30); return () => clearTimeout(tm) }, [st.ver, look.version])
   const [seg, setSeg] = useState("list"), [chip, setChip] = useState(t("views:design.chipAll")), [on, setOn] = useState(true), [check, setCheck] = useState(true), [sel, setSel] = useState("chat")
   const bg = cssHex("--background")
   const kinds = kindTags().slice(0, 4), others = st.tags.filter((x) => !isKind(x)).slice(0, 3).map((x) => x.id)
@@ -150,13 +153,22 @@ export function DesignView() {
             </div>
           ))}</Panel>
           <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2 px-1">
-            <span className="type-callout">Geist <span className="font-medium">Medium</span> <span className="font-semibold">Semibold</span></span>
-            <span className="font-mono type-callout">Geist Mono 0123456789</span>
+            <span className="type-callout" data-design-font>{nameOf(t, chosen("sans")!)} <span className="font-medium">Medium</span> <span className="font-semibold">Semibold</span></span>
+            <span className="font-mono type-callout">{nameOf(t, chosen("mono")!)} 0123456789</span>
             <span className="type-callout tabular-nums text-muted-foreground">tabular-nums 1,284 · 96.0% · $17.23</span>
           </div>
         </Part>
 
-        <Part id="colors" title={t("views:design.colors")} note={t("views:design.colorsNote")}>
+        <Part id="colors" title={t("views:design.colors")} note={t("views:design.colorsNote", { theme: appearanceLabel(t) })}>
+          <Section label={t("views:design.accentTokens")}>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" data-design-accent>
+              {(["--primary", "--ring", "--blue"] as const).map((v) => { const hx = cssHex(v), on = v === "--primary" ? cssHex("--primary-foreground") : bg, cr = ratio(hx, on); return (
+                <div key={v} className="flex items-center gap-3" data-swatch={v}>
+                  <span className="flex size-12 shrink-0 items-center justify-center rounded-xl type-headline" style={{ background: `var(${v})`, color: v === "--primary" ? "var(--primary-foreground)" : "transparent" }} aria-hidden>Aa</span>
+                  <Cap token={v}>{hx.toUpperCase()} · <span data-contrast={v}>{v === "--primary" ? t("views:design.onPrimary", { ratio: cr.toFixed(1) }) : `${cr.toFixed(1)}:1`}</span></Cap>
+                </div>) })}
+            </div>
+          </Section>
           <Section label={t("views:design.neutrals")}>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
               {SURF(t).map(([v, n]) => <div key={v} data-swatch={v}><div className="h-16 rounded-xl shadow-[inset_0_0_0_1px_rgb(0_0_0/0.06)] dark:shadow-[inset_0_0_0_1px_rgb(255_255_255/0.06)]" style={{ background: `var(${v})` }} />
@@ -183,7 +195,7 @@ export function DesignView() {
 
         <Part id="shape" title={t("views:design.shape")} note={t("views:design.shapeNote")}>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-            {([["rounded-md", "6", t("views:design.radius6")], ["rounded-lg", "8", t("views:design.radius8")], ["rounded-xl", "12", t("views:design.radius12")], ["rounded-2xl", "16", t("views:design.radius16")], ["rounded-full", "∞", t("views:design.radiusFull")]] as const).map(([c, px, use]) => (
+            {([["rounded-md", "--radius-md", t("views:design.radius6")], ["rounded-lg", "--radius-lg", t("views:design.radius8")], ["rounded-xl", "--radius-xl", t("views:design.radius12")], ["rounded-2xl", "--radius-2xl", t("views:design.radius16")], ["rounded-full", "", t("views:design.radiusFull")]] as const).map(([c, v, use]) => [c, v ? getComputedStyle(document.documentElement).getPropertyValue(v).trim().replace("px", "") : "∞", use] as const).map(([c, px, use]) => (
               <div key={c} className="flex flex-col gap-2"><div className="flex h-20 items-center justify-center rounded-xl bg-muted/60"><div className={cn("size-12 border-2 border-blue/70 bg-blue/10", c)} /></div><Cap token={`${c} · ${px}`}>{use}</Cap></div>
             ))}
           </div>

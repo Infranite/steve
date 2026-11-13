@@ -32,6 +32,7 @@ import { PermissionRecord } from "@/components/permission"
 import { permissionDecision, useStore } from "@/store"
 import { st, emit, briefHead, ST, SS, WT, tagCatLabel, tagLabel, tagDesc, botName, decide, tag, isKind, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
+import "@/themes" /* the appearance chosen on this device, on <html> before the first paint */
 import { RunningNowPill } from "@/running-pill"
 import { Files } from "@/attach"
 import { MemConfirm, memAsk } from "@/knowledge/parts"
