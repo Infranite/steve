@@ -25,9 +25,9 @@ import { buildAgentTree, workTime, findNode, isActive, isOver, rollup, summarize
 type Action = "pause" | "resume" | "retry" | "cancel" | "single_session"
 
 /** the tree of `root`, its figures, and the work graph's actions (one revision-checked change at a time) */
-export function useAgentTree(root: string, workflow?: Workflow | null) {
+export function useAgentTree(root: string, workflow?: Workflow | null, rootStatus?: AgentStatus) {
   const t = useT()
-  const tree = buildAgentTree(root, st.items as TreeItem[], workflow)
+  const tree = buildAgentTree(root, st.items as TreeItem[], workflow, 8, rootStatus)
   const summary = tree ? summarize(tree) : null
   // the figures are kept with the root they belong to: another item's never show while this one's load
   const [loaded, setLoaded] = useState<{ root: string; nodes: TreeStat[] }>({ root: "", nodes: [] })
@@ -119,13 +119,21 @@ function collect(n: AgentNode, out: AgentNode[] = []): AgentNode[] { out.push(n)
 export const hasAgentTree = (at: AgentTreeState) => at.shown
 
 const TONE: Record<AgentStatus, string> = {
+  idle: "bg-muted text-muted-foreground",
   running: "bg-blue/10 text-blue", unconfirmed: "bg-blue/8 text-blue/80", starting: "bg-blue/8 text-blue/80",
   asking: "bg-attention/12 text-attention", blocked: "bg-attention/12 text-attention",
   done: "bg-success/10 text-success", failed: "bg-destructive/10 text-destructive",
   waiting: "bg-muted text-muted-foreground", pending: "bg-muted text-muted-foreground", paused: "bg-muted text-muted-foreground",
   stopped: "bg-muted text-muted-foreground", proposed: "bg-muted text-muted-foreground",
 }
+const STATUS_INK: Record<AgentStatus, string> = {
+  idle: "text-muted-foreground",
+  running: "text-blue", unconfirmed: "text-blue/80", starting: "text-blue/80", asking: "text-attention", blocked: "text-attention",
+  done: "text-success", failed: "text-destructive", waiting: "text-muted-foreground", pending: "text-tertiary", paused: "text-muted-foreground",
+  stopped: "text-tertiary", proposed: "text-muted-foreground",
+}
 const ICON: Record<AgentStatus, typeof CheckIcon> = {
+  idle: CircleDashedIcon,
   running: LoaderCircleIcon, unconfirmed: LoaderCircleIcon, starting: LoaderCircleIcon, asking: MessageCircleQuestionIcon, blocked: TriangleAlertIcon,
   done: CheckIcon, failed: TriangleAlertIcon, waiting: HourglassIcon, pending: CircleDashedIcon, paused: CirclePauseIcon, stopped: SquareIcon, proposed: CircleDashedIcon,
 }
@@ -263,75 +271,132 @@ function Canvas({ at, selected, onSelect }: { at: AgentTreeState; selected: stri
 }
 
 /** the header line, notices, the tree and the graph's change history */
-export function AgentTree({ at, selected, onSelect }: { at: AgentTreeState; selected: string | null; onSelect: (k: string | null) => void }) {
+/** the workflow's own controls: pause or resume the graph, and, while paused, switch to single-session acceptance */
+export function WorkflowButtons({ at }: { at: AgentTreeState }) {
+  const t = useT(), workflow = at.workflow
+  if (!workflow || at.single || at.old) return null
+  return <div className="flex items-center gap-1">
+    <Button size="sm" variant="outline" disabled={at.busy || workflow.paused && (at.unavailable || at.old)} onClick={() => void at.change(workflow.paused ? "resume" : "pause")} data-workflow-toggle>
+      {workflow.paused ? <PlayIcon /> : <PauseIcon />}{workflow.paused ? t("views:workflow.resume") : t("views:workflow.pause")}</Button>
+    {workflow.paused && <DropdownMenu>
+      <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-agent-more />}><MoreHorizontalIcon /></DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-44"><DropdownMenuItem disabled={at.busy} onClick={at.askSingle} data-workflow-single>{t("views:workflow.single")}</DropdownMenuItem></DropdownMenuContent>
+    </DropdownMenu>}
+  </div>
+}
+
+/** current failures (with retry) and cards waiting for you under this item, as two small pills */
+export function TreePills({ at, onSelect }: { at: AgentTreeState; onSelect: (k: string) => void }) {
+  const t = useT(), { summary, workflow } = at
+  if (!summary) return null
+  const canAct = !!workflow && !at.single
+  return <>
+    {summary.failed.length > 0 && <Popover>
+      <PopoverTrigger render={<button type="button" className="inline-flex items-center gap-1 rounded-md bg-destructive/10 px-1.5 py-0.5 type-footnote font-medium text-destructive hover:bg-destructive/15" data-agent-failed />}>
+        {t("views:agentTree.failed", { count: summary.failed.length })}<ChevronDownIcon className="size-3" /></PopoverTrigger>
+      <PopoverContent align="end" className="w-80 gap-3 rounded-2xl p-3" data-agent-failed-list>
+        {summary.failed.map((n) => <div key={n.key} className="flex flex-col gap-1.5">
+          <div className="flex items-start gap-2 type-callout"><TriangleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" /><div className="min-w-0"><div className="break-words font-medium">{n.title}</div>{n.reason && <div className="mt-0.5 break-words type-footnote text-muted-foreground">{n.reason}</div>}</div></div>
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="ghost" onClick={() => onSelect(n.key)}>{t("views:agentTree.details")}</Button>
+            {canAct && n.unit && <Button size="sm" disabled={at.busy || at.unavailable || at.old || n.unit.attempt >= workflow!.max_attempts} onClick={() => void at.change("retry", n.unit!.id)} data-workflow-retry={n.unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
+          </div>
+        </div>)}
+      </PopoverContent>
+    </Popover>}
+    {summary.asking.length > 0 && <Popover>
+      <PopoverTrigger render={<button type="button" className="inline-flex items-center gap-1 rounded-md bg-attention/12 px-1.5 py-0.5 type-footnote font-medium text-attention hover:bg-attention/18" data-workflow-decisions />}>
+        {t("views:agentTree.askingAll", { count: summary.asking.reduce((s, n) => s + n.decisions, 0) })}<ChevronDownIcon className="size-3" /></PopoverTrigger>
+      <PopoverContent align="end" className="w-72 gap-1 rounded-2xl p-2">
+        {summary.asking.map((n) => <a key={n.key} href={`#/items/${encodeURIComponent(n.item!)}`} className="rounded-lg px-2 py-1.5 type-callout hover:bg-accent">{n.title} · {t("views:workflow.handleDecision")}</a>)}
+      </PopoverContent>
+    </Popover>}
+  </>
+}
+
+/** the header line, notices, the tree and the graph's change history; `controls` off when the item page shows
+ * the notices and buttons itself (the full tree opened from its side column) */
+export function AgentTree({ at, selected, onSelect, controls = true }: { at: AgentTreeState; selected: string | null; onSelect: (k: string | null) => void; controls?: boolean }) {
   const t = useT()
   const { tree, summary, workflow } = at
   if (!tree || !summary) return null
   const total = at.total(tree.item)
-  const canAct = !!workflow && !at.single
   return <section className="min-w-0" data-agent-tree data-workflow={workflow ? "" : undefined}>
     <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2" data-agent-header>
       <h2 className="flex items-center gap-2 type-headline"><NetworkIcon className="size-4" />{t("views:agentTree.title")}</h2>
       <span className="flex-1" />
       <span className="type-footnote tabular-nums text-muted-foreground" data-agent-count>{t("views:agentTree.agents", { count: summary.agents })}</span>
       {summary.active > 0 && <span className="type-footnote tabular-nums text-blue">{t("views:agentTree.active", { count: summary.active })}</span>}
-      {summary.failed.length > 0 && <Popover>
-        <PopoverTrigger render={<button type="button" className="inline-flex items-center gap-1 rounded-md bg-destructive/10 px-1.5 py-0.5 type-footnote font-medium text-destructive hover:bg-destructive/15" data-agent-failed />}>
-          {t("views:agentTree.failed", { count: summary.failed.length })}<ChevronDownIcon className="size-3" /></PopoverTrigger>
-        <PopoverContent align="end" className="w-80 gap-3 rounded-2xl p-3" data-agent-failed-list>
-          {summary.failed.map((n) => <div key={n.key} className="flex flex-col gap-1.5">
-            <div className="flex items-start gap-2 type-callout"><TriangleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" /><div className="min-w-0"><div className="break-words font-medium">{n.title}</div>{n.reason && <div className="mt-0.5 break-words type-footnote text-muted-foreground">{n.reason}</div>}</div></div>
-            <div className="flex justify-end gap-2">
-              <Button size="sm" variant="ghost" onClick={() => onSelect(n.key)}>{t("views:agentTree.details")}</Button>
-              {canAct && n.unit && <Button size="sm" disabled={at.busy || at.unavailable || at.old || n.unit.attempt >= workflow!.max_attempts} onClick={() => void at.change("retry", n.unit!.id)} data-workflow-retry={n.unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
-            </div>
-          </div>)}
-        </PopoverContent>
-      </Popover>}
-      {summary.asking.length > 0 && <Popover>
-        <PopoverTrigger render={<button type="button" className="inline-flex items-center gap-1 rounded-md bg-attention/12 px-1.5 py-0.5 type-footnote font-medium text-attention hover:bg-attention/18" data-workflow-decisions />}>
-          {t("views:agentTree.askingAll", { count: summary.asking.reduce((s, n) => s + n.decisions, 0) })}<ChevronDownIcon className="size-3" /></PopoverTrigger>
-        <PopoverContent align="end" className="w-72 gap-1 rounded-2xl p-2">
-          {summary.asking.map((n) => <a key={n.key} href={`#/items/${encodeURIComponent(n.item!)}`} className="rounded-lg px-2 py-1.5 type-callout hover:bg-accent">{n.title} · {t("views:workflow.handleDecision")}</a>)}
-        </PopoverContent>
-      </Popover>}
+      <TreePills at={at} onSelect={onSelect} />
       {total?.known && (() => { const c = costOf(total, t); return <span className="type-footnote tabular-nums text-foreground" title={c.hint} data-agent-total>{t("views:agentTree.cost", { usd: c.text })}</span> })()}
-      {canAct && <div className="flex items-center gap-1">
-        <Button size="sm" variant="outline" disabled={at.busy || workflow!.paused && (at.unavailable || at.old)} onClick={() => void at.change(workflow!.paused ? "resume" : "pause")} data-workflow-toggle>
-          {workflow!.paused ? <PlayIcon /> : <PauseIcon />}{workflow!.paused ? t("views:workflow.resume") : t("views:workflow.pause")}</Button>
-        {workflow!.paused && <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-agent-more />}><MoreHorizontalIcon /></DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-44"><DropdownMenuItem disabled={at.busy} onClick={at.askSingle} data-workflow-single>{t("views:workflow.single")}</DropdownMenuItem></DropdownMenuContent>
-        </DropdownMenu>}
-      </div>}
+      {controls && <WorkflowButtons at={at} />}
     </div>
-    {at.dialogs}
-    <Notices at={at} />
+    {controls && at.dialogs}
+    {controls && <Notices at={at} />}
     <Canvas at={at} selected={selected} onSelect={(k) => onSelect(k === selected ? null : k)} />
     {workflow && <History workflow={workflow} />}
+  </section>
+}
+
+/** the item page's side column: everyone working on it, one row each, in the tree's order; a running agent's row
+ * moves, the rest is quiet. The full tree opens from here. */
+export function TeamPanel({ at, selected, onSelect, onExpand }: { at: AgentTreeState; selected: string | null; onSelect: (k: string | null) => void; onExpand: () => void }) {
+  const t = useT()
+  const { tree, summary } = at
+  if (!tree || !summary) return null
+  const total = at.total(tree.item), c = total?.known ? costOf(total, t) : null
+  const row = (n: AgentNode, depth: number): ReactNode => {
+    const I = ICON[n.status], f = figures(at, n, t), on = selected === n.key
+    return <li key={n.key}>
+      <button type="button" onClick={() => onSelect(on ? null : n.key)} aria-pressed={on} data-agent-node={n.key} data-agent-kind={n.kind}
+        className={cn("group flex w-full min-w-0 items-start gap-2 rounded-lg py-1.5 pr-1.5 text-left transition-colors hover:bg-accent", on && "bg-accent", n.kind === "attempt" && "opacity-55 hover:opacity-100")}
+        style={{ paddingLeft: 6 + depth * 14 }}>
+        <I className={cn("mt-0.5 size-3.5 shrink-0", STATUS_INK[n.status], isActive(n.status) && "motion-safe:animate-spin")} strokeWidth={2.25} aria-label={t(`views:agentTree.status.${n.status}`)} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate type-footnote text-foreground">{n.unit && n.unit.kind !== "work" && <span className="mr-1 text-muted-foreground">{t(`views:workflow.${n.unit.kind}`)} ·</span>}{n.title}</span>
+          <span className="block truncate text-[11.5px] leading-4 text-muted-foreground" title={f.hint}>{[n.bot ? botName(n.bot) : null, n.kind === "attempt" ? t("views:agentTree.attempt", { n: n.attempt }) : null, f.text].filter(Boolean).join(" · ")}</span>
+        </span>
+        {n.decisions > 0 && <span className="mt-0.5 shrink-0 rounded bg-attention/12 px-1 text-[11px] font-medium text-attention">{n.decisions}</span>}
+      </button>
+      {n.children.length > 0 && <ul>{n.children.map((k) => row(k, depth + 1))}</ul>}
+    </li>
+  }
+  return <section className="min-w-0" data-agent-team>
+    <div className="mb-1.5 flex items-center gap-2">
+      <h3 className="type-footnote font-medium text-muted-foreground">{t("views:agentTree.team")}</h3>
+      <span className="type-footnote tabular-nums text-muted-foreground">{t("views:agentTree.agents", { count: summary.agents })}{summary.active > 0 && <span className="text-blue"> · {t("views:agentTree.active", { count: summary.active })}</span>}</span>
+      <span className="flex-1" />
+      <Button variant="ghost" size="xs" className="text-muted-foreground" onClick={onExpand} data-agent-expand>{t("views:agentTree.showTree")}</Button>
+    </div>
+    {(summary.failed.length > 0 || summary.asking.length > 0) && <div className="mb-1.5 flex flex-wrap gap-1.5"><TreePills at={at} onSelect={(k) => onSelect(k)} /></div>}
+    <ul className="-mx-1.5" data-agent-rows>{tree.children.map((n) => row(n, 0))}</ul>
+    {c && <p className="mt-1.5 type-footnote tabular-nums text-muted-foreground" title={c.hint} data-agent-total>{t("views:agentTree.totalWithChildren", { usd: c.text })}</p>}
   </section>
 }
 
 function Notice({ mark, children }: { mark?: string; children: ReactNode }) {
   return <p role="status" className="mb-3 break-words rounded-xl border px-3 py-2 type-callout text-muted-foreground" {...(mark ? { [`data-${mark}`]: "" } : {})}>{children}</p>
 }
-function Notices({ at }: { at: AgentTreeState }) {
+/** what the work graph's state means and what keeps the parent from finishing; `inline` inside the item page's
+ * "now" card (plain lines under its headline, which already names the state) instead of boxes of their own */
+export function Notices({ at, inline = false }: { at: AgentTreeState; inline?: boolean }) {
   const t = useT(), w = at.workflow
   if (!w) return null
+  const N = inline ? ({ mark, children }: { mark?: string; children: ReactNode }) => <p className="break-words type-callout text-muted-foreground" {...(mark ? { [`data-${mark}`]: "" } : {})}>{children}</p> : Notice
   return <>
-    {at.error && <p role="alert" className="mb-3 break-words type-callout text-destructive">{at.error}</p>}
-    {at.single && <Notice mark="workflow-single-mode">{t("views:workflow.singleHint")}</Notice>}
-    {at.unavailable && !at.single && <Notice mark="workflow-unavailable">{t("views:workflow.unavailable")}</Notice>}
-    {at.old && <Notice mark="workflow-prior-cycle">{t("views:workflow.priorCycle")}</Notice>}
-    {w.paused && !at.old && !at.single && !at.unavailable && <Notice>{t("views:workflow.pauseHint")}</Notice>}
-    {w.blockers.length > 0 && <details className="group mb-3 rounded-xl border px-3 py-2" data-workflow-blockers>
+    {at.error && <p role="alert" className={cn("break-words type-callout text-destructive", !inline && "mb-3")}>{at.error}</p>}
+    {at.single && <N mark="workflow-single-mode">{t("views:workflow.singleHint")}</N>}
+    {at.unavailable && !at.single && !(inline && at.old) && <N mark="workflow-unavailable">{t("views:workflow.unavailable")}</N>}
+    {at.old && <N mark="workflow-prior-cycle">{t("views:workflow.priorCycle")}</N>}
+    {w.paused && !at.old && !at.single && !at.unavailable && <N>{t("views:workflow.pauseHint")}</N>}
+    {w.blockers.length > 0 && <details className={cn("group", inline ? "" : "mb-3 rounded-xl border px-3 py-2")} data-workflow-blockers>
       <summary className="flex cursor-pointer list-none items-center gap-1.5 type-callout"><ChevronRightIcon className="size-3.5 transition-transform group-open:rotate-90" />{t("views:workflow.blockers")} · {w.blockers.length}</summary>
       <ul className="mt-1.5 list-disc space-y-1 pl-6 type-footnote text-muted-foreground">{w.blockers.map((text, n) => <li key={n} className="break-words">{text}</li>)}</ul>
     </details>}
   </>
 }
 
-function History({ workflow }: { workflow: Workflow }) {
+export function History({ workflow }: { workflow: Workflow }) {
   const t = useT()
   const older = (workflow.history_attempts_total ?? 0) - (workflow.history_attempts?.length ?? 0)
   if (!workflow.history.length && older <= 0) return null

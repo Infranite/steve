@@ -31,6 +31,17 @@ export default {
     active: "当前回合结束后进入等待。", fallback: "本次已改为提醒开始：{{reason}}",
     savedAutomatic: "已登记 · 前置完成后自动继续", savedNotify: "已登记 · 前置完成后提醒开始",
   },
+  /* an item's one state (item-state.ts): the headline of its page */
+  itemState: {
+    done: "已完成", dropped: "已放弃", failed: "失败结束", proposed: "等你决定要不要做", asking: "等你决定",
+    replan: "上一轮协作已结束，等重新规划", unavailable: "协作暂时无法执行", graphPaused: "协作已暂停", paused: "已暂停",
+    blocked: "等前置事项完成", working: "正在做", queued: "你的消息在排队", idle: "没有在运行",
+    you: "该你了", agents: "交给 agent",
+    replanHint: "在下面告诉它下一步做什么，它会按当前目标重新规划；上一轮的成果都还在。",
+    idleHint: "它停下了，没有在运行，也没有问你。需要继续就在下面说一声。",
+    progress: "进度", details: "详情", moreProps: "更多属性",
+    process_other: "过程记录 {{count}} 条",
+  },
   /* the item page's agent tree: who started whom */
   agentTree: {
     title: "协作",
@@ -58,8 +69,11 @@ export default {
     tokens: "{{n}} tokens",
     unpricedPart: "另有 {{n}} tokens 跑在没有价格的模型上，没算进费用",
     unpricedAll: "这些 tokens 跑在没有价格的模型上，算不出费用；可在设置 › 统计里补价格",
+    team: "团队",
+    showTree: "全图",
+    totalWithChildren: "合计 {{usd}}，含子任务",
     noFigures: "没有用量记录",
-    status: { proposed: "提议", pending: "待调度", waiting: "等待前置", starting: "启动中", running: "运行中", unconfirmed: "待确认", asking: "等你", paused: "已暂停", blocked: "受阻", done: "完成", failed: "失败", stopped: "已停止" },
+    status: { idle: "空闲", proposed: "提议", pending: "待调度", waiting: "等待前置", starting: "启动中", running: "运行中", unconfirmed: "待确认", asking: "等你", paused: "已暂停", blocked: "受阻", done: "完成", failed: "失败", stopped: "已停止" },
   },
   workflow: {
     handleDecision: "去处理",

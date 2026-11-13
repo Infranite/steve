@@ -953,6 +953,8 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
 
 /* a session as a block inside the item's work log */
 const expanded = new Set<string>(), collapsedLive = new Set<string>()
+/** a reply as one line of plain text: the Markdown marks of its first lines dropped */
+const plainLine = (md: string) => md.replace(/```[\s\S]*?```/g, " ").replace(/[`*_>#|]/g, "").replace(/\s+/g, " ").trim()
 export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOpen?: boolean; /** comments' replies the feed shows on their own */ replies?: Reply[] }) {
   const t = useT()
   const [, f] = useState(0)
@@ -971,7 +973,7 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
         <button type="button" onClick={toggle} className="flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-expanded={open}>
           <span className="shrink-0 type-callout font-medium">{t("core:session.no", { n: s.n })}</span>
           <Status s={s.st} sess />
-          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${st.devices.find((d) => d.id === s.device)?.name ?? "Hub"} · ${s.h} · ${s.m} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : lastA ? lastA[1] : s.starting ? t("core:transcript.startingShort") : s.st === "run" ? t("core:runBar.run") : ""}</span>
+          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${st.devices.find((d) => d.id === s.device)?.name ?? "Hub"} · ${s.h} · ${s.m} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : lastA ? plainLine(String(lastA[1])) : s.starting ? t("core:transcript.startingShort") : s.st === "run" ? t("core:runBar.run") : ""}</span>
           <span className="ml-auto shrink-0 type-footnote text-muted-foreground">{t(open ? "core:session.collapse" : "core:session.expand")}</span>
         </button>
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>

@@ -14,7 +14,7 @@ export type TreeStat = {
   item_id: string; parent_id: string | null; depth: number; tokens: number; est: number; unpriced_tokens?: number; reported: number
   agent_ms: number | null; first_turn: number | null; done_at: number | null; dropped_at: number | null
 }
-export type AgentStatus = "proposed" | "pending" | "waiting" | "starting" | "running" | "unconfirmed" | "asking" | "paused" | "blocked" | "done" | "failed" | "stopped"
+export type AgentStatus = "idle" | "proposed" | "pending" | "waiting" | "starting" | "running" | "unconfirmed" | "asking" | "paused" | "blocked" | "done" | "failed" | "stopped"
 export type AgentKind = "root" | "unit" | "attempt" | "fork"
 export type AgentNode = {
   /** unique in the tree: `unit:<id>` for a work graph's current unit (kept when its item appears or changes on
@@ -68,7 +68,8 @@ const SNAPSHOT_STATUS: Record<string, AgentStatus> = { succeeded: "done", failed
 /** `root` and everything started from it that the client knows: the current units of its work graph (an earlier
  * cycle's graph is history, not current work, but still who started whom), each unit's earlier attempts right
  * before it, and items forked from any node. Archived forks are left out; archived attempts are not. */
-export function buildAgentTree(rootId: string, items: TreeItem[], workflow?: Workflow | null, depth = 8): AgentNode | null {
+/** `rootStatus`: the item page's own state for the root (item-state.ts), so the tree and the page agree */
+export function buildAgentTree(rootId: string, items: TreeItem[], workflow?: Workflow | null, depth = 8, rootStatus?: AgentStatus): AgentNode | null {
   const byId = new Map(items.map((i) => [i.id, i]))
   const root = byId.get(rootId)
   if (!root) return null
@@ -107,6 +108,7 @@ export function buildAgentTree(rootId: string, items: TreeItem[], workflow?: Wor
   }
   children.push(...forks(rootId, 0))
   const node = itemNode(root, "root", 0)
+  if (rootStatus) node.status = rootStatus
   // a coordinator whose current graph is paused is paused, whatever its own lifecycle says (as on the items list)
   if (workflow?.paused && workflow.current_cycle !== false && node.status === "running") node.status = "paused"
   return { ...node, children }

@@ -24,7 +24,9 @@ try {
     await page.goto(base + "/test/fixtures/item-feed.html" + (dark ? "?dark" : ""))
     await page.locator('[data-session-block="s2"]').waitFor()
     await page.locator('[data-reply="s2"]').nth(1).waitFor()
-    const feed = await page.locator('[data-session-block]').first().locator("xpath=..").evaluate((el) => [...el.children].map((x) => {
+    // runs of process lines are folded; open them and read their lines where they stand
+    for (const run of await page.locator("[data-process-run] > button").all()) await run.click()
+    const feed = await page.locator('[data-session-block]').first().locator("xpath=..").evaluate((el) => [...el.children].flatMap((x) => x.matches("[data-process-run]") ? [...x.lastElementChild.children] : [x]).map((x) => {
       if (x.matches("[data-session-block]")) return x.querySelector("button span")?.textContent ?? ""
       if (x.matches("[data-reply]")) return "回复:" + (x.textContent.match(/会话 #\d/)?.[0] ?? "")
       if (x.matches("[data-comment]")) return "我:" + (x.querySelector(".type-body")?.textContent ?? "")

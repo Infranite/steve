@@ -1,5 +1,8 @@
 import { api } from "@/api"
-import { AgentDetailPanel, AgentTree, hasAgentTree, useAgentTree, useSelectedNode } from "@/agent-tree-view"
+import { AgentDetailPanel, AgentTree, hasAgentTree, History, Notices, TeamPanel, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
+import { itemState, type ItemState } from "@/item-state"
+import type { AgentStatus } from "@/agent-tree"
+import { clip } from "@/thread/topics"
 import { itemDisplayStatus, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
@@ -43,7 +46,7 @@ import { RunState } from "@/yolo/status"
 import { cn } from "cn"
 import { lang, t as tr, useT } from "@/i18n"
 import { nearTime, num } from "@/i18n/format"
-import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleCheckIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, ServerIcon, LinkIcon, ListIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UploadIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
+import { CircleAlertIcon, CircleDashedIcon, CircleHelpIcon, HourglassIcon, LoaderCircleIcon, ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleCheckIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, KeyRoundIcon, ServerIcon, LinkIcon, ListIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UploadIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
 import { useEffect, useRef, useState, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 let selecting = false
@@ -297,9 +300,52 @@ export function LinkDialog({ k }: { k: string }) {
 }
 /* ═════════ 事项详情 ═════════ */
 /* tab values stay the original words: they are the data-seg hooks the browser tests click; labels are translated */
-let dtab: "动态" | "产出" = "动态"; let lastItem = ""; let feedMode: "key" | "all" = "all"
-/* system lines worth keeping in the “重要” view; the rest (建立、来自信号…) is shown only in “全部” */
-const KEY_SYS = /派生|交付|目标更新|前置|开新会话|交接|自动开始|暂停|放弃|继续|关联|发布|rebase|冲突|失败|回到 /
+let dtab: "动态" | "产出" = "动态"; let lastItem = ""
+/* the item page's state: its mark and pill take the state's tone; the "now" card's border too */
+const STATE_TONE: Record<ItemState["tone"], [string, string]> = {
+  run: ["text-blue", "bg-blue/10 text-blue"], wait: ["text-attention", "bg-attention/12 text-attention"], pause: ["text-muted-foreground", "bg-muted text-muted-foreground"],
+  done: ["text-success", "bg-success/10 text-success"], fail: ["text-destructive", "bg-destructive/10 text-destructive"], neutral: ["text-muted-foreground", "bg-muted text-muted-foreground"],
+}
+const ROOT_STATUS: Record<ItemState["kind"], AgentStatus> = {
+  done: "done", dropped: "stopped", failed: "failed", proposed: "proposed", asking: "asking", replan: "paused", unavailable: "blocked",
+  graphPaused: "paused", paused: "paused", blocked: "blocked", working: "running", queued: "starting", idle: "idle",
+}
+const NOW_RING: Record<ItemState["tone"], string> = { run: "border-blue/30", wait: "border-attention/40 bg-attention/[0.03]", pause: "border-border", done: "border-border", fail: "border-destructive/35", neutral: "border-border" }
+const STATE_ICON: Record<ItemState["kind"], typeof CheckIcon> = {
+  done: CheckIcon, dropped: BanIcon, failed: CircleAlertIcon, proposed: CircleHelpIcon, asking: CircleHelpIcon, replan: RotateCcwIcon,
+  unavailable: CircleAlertIcon, graphPaused: PauseIcon, paused: PauseIcon, blocked: HourglassIcon, working: LoaderCircleIcon, queued: HourglassIcon, idle: CircleDashedIcon,
+}
+function StateMark({ state }: { state: ItemState }) {
+  const I = STATE_ICON[state.kind]
+  return <span className={cn("mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full", STATE_TONE[state.tone][1])} aria-hidden><I className={cn("size-4", state.kind === "working" && "motion-safe:animate-spin")} strokeWidth={2.25} /></span>
+}
+export function StatePill({ state }: { state: ItemState }) {
+  const t = useT()
+  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap type-footnote", STATE_TONE[state.tone][0])} data-status={state.kind}><span className="size-1.5 rounded-full bg-current" />{t(`views:itemState.${state.kind}`)}</span>
+}
+/** runs of `quiet` rows (three or more in a row) as arrays, to be folded; everything else as it is */
+function foldProcess<T>(rows: T[], quiet: (x: T) => boolean): (T | T[])[] {
+  const out: (T | T[])[] = []
+  for (let n = 0; n < rows.length;) {
+    let m = n
+    while (m < rows.length && quiet(rows[m])) m++
+    if (m - n >= 3) { out.push(rows.slice(n, m)); n = m } else { out.push(rows[n]); n++ }
+  }
+  return out
+}
+/* a folded run of process lines: how many and the latest one; opens in place */
+function ProcessRun({ count, last, children }: { count: number; last: any[]; children: ReactNode }) {
+  const t = useT(), [open, setOpen] = useState(false)
+  return <div data-process-run={count}>
+    <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="flex w-full min-w-0 items-center gap-2 py-1 text-left type-footnote text-muted-foreground hover:text-foreground">
+      <span className="flex size-5 shrink-0 items-center justify-center"><ChevronRightIcon className={cn("size-3.5 transition-transform", open && "rotate-90")} /></span>
+      <span className="shrink-0">{t("views:itemState.process", { count })}</span>
+      {!open && <span className="min-w-0 truncate text-tertiary">· {clip(String(last[1] ?? ""), 120)}</span>}
+      <span className="ml-auto shrink-0 text-tertiary">{last[2]}</span>
+    </button>
+    {open && <div className="border-l pl-2 ml-2.5">{children}</div>}
+  </div>
+}
 /* a long goal (a pasted brief) folds to its first lines so the page still opens on what is happening */
 function GoalText({ text, children }: { text: string; children: ReactNode }) {
   const t = useT()
@@ -400,7 +446,7 @@ export function ItemView({ id }: { id: string }) {
   const [doneBusy, setDoneBusy] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
   const itemComposer = useRef<ComposerHandle | null>(null)
-  const [older, setOlder] = useState(false), [titleEdit, setTitleEdit] = useState(false), [preview, setPreview] = useState<OutOpen | null>(null)
+  const [titleEdit, setTitleEdit] = useState(false), [preview, setPreview] = useState<OutOpen | null>(null)
   if (lastItem !== id) { lastItem = id; dtab = "动态" }
   useEffect(() => { void loadItem(id, true) }, [id])
   useEffect(() => { setDebugOpen(false) }, [id])
@@ -410,8 +456,11 @@ export function ItemView({ id }: { id: string }) {
   useEffect(() => { if (latest) void loadEvents(latest) }, [latest])
   /* the collaboration area: the tree of everything this item started; a selected agent's detail replaces the
    * properties in the side column (a sheet on narrow pages) */
-  const at = useAgentTree(id, i?.workflow)
+  /* the one state the page states: what is happening and whose move it is (item-state.ts); the tree's root takes it */
+  const rootState = i ? itemState(i, i.workflow, i.ss.some((k) => st.S[k]?.st === "run")) : null
+  const at = useAgentTree(id, i?.workflow, rootState ? ROOT_STATUS[rootState.kind] : undefined)
   const [agent, selectAgent] = useSelectedNode(at)
+  const [treeOpen, setTreeOpen] = useState(false)
   if (!i) return <Page title={t("views:item.title")} back={["#/items", t("views:items.title")]}><Empty title={t("views:item.notFound")} sub={t("views:item.notFoundSub")} /></Page>
   const designReview = i.waits.find((w) => w.subject === "design_implementation")
   const dependents = st.items.filter((x) => i.dependents.includes(x.id) || (x.deps || []).includes(i.id))
@@ -422,10 +471,8 @@ export function ItemView({ id }: { id: string }) {
   const queued = queuedComments(i.tl, i.qs, i.q, "补充信息：")
   const qSess = st.S[i.qs ?? ""] ?? null
   const qNote = a ? queueNote(qSess) : t("views:item.queueNewSession")
-  /* activity feed: filter, then fold everything but the latest four entries (a queued comment is never folded) */
-  const feed = i.tl.map((e, n) => ({ e, n })).filter(({ e }) => feedMode === "all" || e[0] !== "sys" || KEY_SYS.test(e[1]))
-  const firstQueued = feed.findIndex(({ n }) => queued.byComment.has(n))
-  const KEEP = 4, hidden = feedMode === "key" && !older ? Math.max(0, Math.min(feed.length - KEEP, firstQueued < 0 ? Infinity : firstQueued)) : 0
+  /* activity: everything, in order; runs of process lines fold where they are shown */
+  const feed = i.tl.map((e, n) => ({ e, n }))
   const actions = <>
     <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("views:item.star")} data-star onClick={() => star(i.id)} className="text-muted-foreground" />}><StarIcon className={cn(i.star && "fill-current text-foreground")} /></TooltipTrigger><TooltipContent>{i.star ? t("views:item.unstar") : t("views:item.star")}</TooltipContent></Tooltip>
     <DropdownMenu>
@@ -462,7 +509,8 @@ export function ItemView({ id }: { id: string }) {
     </div>
   )
   const tree = hasAgentTree(at)
-  const top = <>
+  const state = rootState!
+  const goal = <>
           {/* 1 — goal reads as the description of the title */}
           <section data-goal className="-mt-3">
             {editing ? (
@@ -478,8 +526,6 @@ export function ItemView({ id }: { id: string }) {
               </div>
             )}
           </section>
-          {/* 2 — what needs you is the only boxed element on the page */}
-          {i.waits.length > 0 && <section className="flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</section>}
   </>
   const replies: Reply[] = i.tl.flatMap((e) => e[0] === "reply" && e[1] ? [e[1]] : [])
   const entry = ({ e, n }: { e: any[]; n: number }) => {
@@ -498,19 +544,19 @@ export function ItemView({ id }: { id: string }) {
           : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote text-muted-foreground">{e[2]}{e[3] && st.S[e[3]] ? ` · ${t("views:item.deliveredTo", { n: st.S[e[3]].n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
     )
     const yolo = typeof e[1] === "string" && e[1].startsWith("YOLO")
-    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-yolo-line={yolo ? "" : undefined}><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span>{yolo && <YoloMark />}<span className="min-w-0 truncate">{yolo ? e[1].replace(/^YOLO[：:]\s*/, "") : e[1]}</span><span className="shrink-0 text-tertiary">{e[2]}</span></div>
+    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-yolo-line={yolo ? "" : undefined}><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span>{yolo && <YoloMark />}<span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(yolo ? e[1].replace(/^YOLO[：:]\s*/, "") : String(e[1] ?? ""), 240)}</span><span className="shrink-0 text-tertiary">{e[2]}</span></div>
   }
   return (
     <Page small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg text-[20px] font-semibold" data-title-input
         onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== i.t) patchItem(i.id, { t: v }); setTitleEdit(false) }} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setTitleEdit(false) }} />
       : <span className="cursor-text" onDoubleClick={() => setTitleEdit(true)} data-title>{i.t}</span>} back={["#/items", t("views:items.title")]} actions={actions} toolbar={quick} toolbarTop max={1080}
-      footer={<div className="w-full shrink-0 border-t bg-background/85 backdrop-blur-xl"><div className="mx-auto w-full px-4 pb-[76px] pt-3 sm:px-8 md:pb-4" style={{ maxWidth: 1080 + 64 }}><div className="lg:pr-[296px]">
+      footer={<div className="w-full shrink-0 border-t bg-background/85 backdrop-blur-xl"><div className="mx-auto w-full px-4 pb-[76px] pt-3 sm:px-8 md:pb-4" style={{ maxWidth: 1080 + 64 }}><div className="lg:pr-[340px]">
         {i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} />}
         <div className="mb-2 type-footnote font-medium text-foreground/80" data-item-feedback-label>{t("views:item.messageBot")}</div>
         <Composer draftKey={draftKey(st.workspace?.id, "item", i.id)} handle={itemComposer} placeholder={t("views:item.composer", { id: i.id })} testId="item" onSend={(text, files) => supp(i.id, text, target, files)}
           left={<Segmented size="sm" value={targets.includes(target) ? target : "auto"} onChange={setTarget} options={targets.map((x) => [x, targetLabel[x]] as const)} />} />
       </div></div></div>}
-      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><Status s={itemDisplayStatus(i)} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span></Meta>}>
+      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><StatePill state={state} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span></Meta>}>
       {st.yolo && !over && <div className="-mt-3 mb-5"><YoloItemSwitch i={i} /></div>}
       {debugOpen && <ItemDebugDialog item={i.id} onClose={() => setDebugOpen(false)} />}
       <AlertDialog open={confirmDel} onOpenChange={setConfirmDel}>
@@ -522,43 +568,74 @@ export function ItemView({ id }: { id: string }) {
       <OutDialog item={i.id} outs={i.outs} anns={i.anns} view={preview} setView={setPreview} reviewLabel={t(designReview ? "views:item.reviewDesign" : "views:item.messageBot")}
         onReview={() => { setPreview(null); window.setTimeout(() => { if (designReview) document.querySelector<HTMLTextAreaElement>("[data-design-feedback]")?.focus(); else itemComposer.current?.focus() }, 250) }} />
       {i.arch && <div className="mb-6 flex items-center gap-3 rounded-xl border px-4 py-2.5 type-callout" data-arch-banner><ArchiveIcon className="size-4 text-muted-foreground" /><span className="flex-1">{t("views:item.archived")}</span><Button size="sm" variant="ghost" onClick={() => archive([i.id], false)}>{t("views:item.restore")}</Button></div>}
-      {/* an item that started others leads with its collaboration, across the page: a tree needs the width */}
-      {tree && <div className="mb-12 flex flex-col gap-10">{top}<AgentTree at={at} selected={agent?.key ?? null} onSelect={selectAgent} /></div>}
       <AgentDetailPanel at={at} node={agent} onClose={() => selectAgent(null)} />
-      <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_248px]">
-        <div className="flex min-w-0 flex-col gap-10">
-          {!tree && top}
-          <section data-now>
-            <div className="mb-1.5 flex flex-wrap items-center gap-x-1 gap-y-1 type-footnote" data-stage={stageOf(i)}>
-              {STAGES.slice(2).map((g, n, arr) => { const cur = STAGES.indexOf(stageOf(i) as any), me = STAGES.indexOf(g); return (
-                <span key={g} className="inline-flex items-center gap-1"><span className={cn(me === cur ? "font-medium text-foreground" : me < cur ? "text-muted-foreground" : "text-tertiary")}>{t(STAGE_LABEL[g])}</span>{n < arr.length - 1 && <ChevronRightIcon className="size-3 text-tertiary" />}</span>) })}
+      {treeOpen && <Dialog open onOpenChange={(o) => !o && setTreeOpen(false)}><DialogContent className="max-h-[90dvh] w-[calc(100%-2rem)] overflow-y-auto rounded-2xl sm:max-w-[1200px]" data-agent-tree-dialog>
+        <DialogTitle className="sr-only">{t("views:agentTree.title")}</DialogTitle><AgentTree at={at} selected={agent?.key ?? null} onSelect={selectAgent} controls={false} /></DialogContent></Dialog>}
+      <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div className="flex min-w-0 flex-col gap-8">
+          {goal}
+          {/* now: the one state, what keeps it there, and what you can do about it — the only boxed block */}
+          <section className={cn(state.move === "none" ? "rounded-xl border px-4 py-2.5" : "rounded-2xl border p-4", NOW_RING[state.tone])} data-now data-state={state.kind}>
+            <div className="flex flex-wrap items-start gap-x-3 gap-y-3">
+              <StateMark state={state} />
+              <div className="min-w-[min(100%,14rem)] flex-1 basis-0">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                  <h2 className={cn("type-headline", state.kind === "working" && "shimmer shimmer-once")} data-state-title>{t(`views:itemState.${state.kind}`)}</h2>
+                  {state.move !== "none" && <span className="type-footnote text-muted-foreground">{t(`views:itemState.${state.move}`)}</span>}
+                </div>
+                {state.detail && !i.workflow && <p className="mt-1 line-clamp-3 break-words type-callout text-muted-foreground">{clip(state.detail, 360)}</p>}
+                {state.kind === "working" && i.workflow && state.detail && <p className="mt-1 line-clamp-2 break-words type-callout text-muted-foreground">{clip(state.detail, 240)}</p>}
+                {state.kind === "idle" && !i.workflow && <p className="mt-1 type-callout text-muted-foreground">{t("views:itemState.idleHint")}</p>}
+                {i.workflow && <div className="mt-1.5 flex flex-col gap-2"><Notices at={at} inline /></div>}
+              </div>
+              {i.workflow && <div className="max-sm:basis-full max-sm:pl-10"><WorkflowButtons at={at} /></div>}
             </div>
-            <div className="flex items-center gap-2"><StatusDot s={itemDisplayStatus(i)} /><span className={cn("type-headline", itemDisplayStatus(i) === "run" && "shimmer shimmer-once")}>{i.now}</span></div>
-            {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-2" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
-            {(i.plan || i.rounds.length > 0) && <Plan i={i} />}
+            {at.dialogs}
+            {i.waits.length > 0 && <div className="mt-4 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
+            {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-3" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
+            {i.dependencyWait && !!i.deps?.length && <div className="mt-4"><DependencyWaitPanel key={`${i.id}:${i.dependencyWait.cycle}`} item={i.id} wait={i.dependencyWait} /></div>}
           </section>
-          {i.dependencyWait && !!i.deps?.length && <DependencyWaitPanel key={`${i.id}:${i.dependencyWait.cycle}`} item={i.id} wait={i.dependencyWait} /> }
-          {/* 3 — activity, newest at the bottom, older entries folded */}
+          {/* the conversation: what people said and what came back; runs of process lines fold to one line */}
           <section className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
               <Segmented size="sm" value={dtab} onChange={(v) => { dtab = v; r() }} options={[["动态", t("views:item.tabActivity")], ["产出", t("views:item.tabOutputs")]] as const} />
-              {dtab === "动态" && <Chips value={feedMode === "key" ? t("views:item.feedKey") : t("views:item.feedAll")} onChange={(v) => { feedMode = v === t("views:item.feedKey") ? "key" : "all"; setOlder(false); r() }} options={[t("views:item.feedKey"), t("views:item.feedAll")]} />}
             </div>
             {dtab === "动态" && (
               <div className="flex flex-col" data-worklog>
-                {hidden > 0 && <button type="button" onClick={() => setOlder(true)} className="mb-1 flex items-center gap-2 self-start py-1 type-footnote text-muted-foreground hover:text-foreground" data-older><ChevronDownIcon className="size-3.5" />{t("views:item.older", { count: hidden })}</button>}
-                {feed.slice(hidden).map(entry)}
+                {foldProcess(feed, (x) => x.e[0] === "sys" && !queued.byComment.has(x.n)).map((g) => Array.isArray(g)
+                  ? <ProcessRun key={"run:" + g[0].n} count={g.length} last={g[g.length - 1].e}>{g.map(entry)}</ProcessRun>
+                  : entry(g))}
               </div>
             )}
             {dtab === "产出" && <OutList outs={i.outs} anns={i.anns} open={(o) => setPreview({ o })} />}
           </section>
         </div>
-        {/* properties: one aligned label column, controls stay quiet until hovered */}
-        <aside className="flex flex-col gap-8">
-          {/* the label column fits the longest label (English runs wider than 64px); quiet selects pull their padding
-            * into the gap so every value starts on the same edge */}
-          <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
+        <aside className="flex min-w-0 flex-col gap-8" data-item-side>
+          {tree && <TeamPanel at={at} selected={agent?.key ?? null} onSelect={selectAgent} onExpand={() => setTreeOpen(true)} />}
+          {(i.plan || i.rounds.length > 0 || i.workflow) && <section data-progress>
+            <h3 className="mb-1.5 type-footnote font-medium text-muted-foreground">{t("views:itemState.progress")}</h3>
+            <div className="flex flex-wrap items-center gap-x-1 gap-y-1 type-footnote" data-stage={stageOf(i)}>
+              {STAGES.slice(2).map((g, n, arr) => { const cur = STAGES.indexOf(stageOf(i) as any), me = STAGES.indexOf(g); return (
+                <span key={g} className="inline-flex items-center gap-1"><span className={cn(me === cur ? "font-medium text-foreground" : me < cur ? "text-muted-foreground" : "text-tertiary")}>{t(STAGE_LABEL[g])}</span>{n < arr.length - 1 && <ChevronRightIcon className="size-3 text-tertiary" />}</span>) })}
+            </div>
+            {(i.plan || i.rounds.length > 0) && <Plan i={i} />}
+            {i.workflow && <History workflow={i.workflow} />}
+          </section>}
+          <section data-details>
+            <h3 className="mb-1.5 type-footnote font-medium text-muted-foreground">{t("views:itemState.details")}</h3>
+            <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
             <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} />{B && <div className="type-footnote text-muted-foreground">{B.h} · {B.m}</div>}</Prop>
+            <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.filter((k) => st.S[k]).length ? i.ss.filter((k) => st.S[k]).map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
+              <a href={"#/sessions/" + k} className="flex items-center gap-2 hover:underline"><span>#{st.S[k].n}</span><Status s={st.S[k].st} sess /><span className="min-w-0 truncate type-footnote text-muted-foreground">{st.S[k].h}</span><span className="ml-auto type-footnote tabular-nums text-muted-foreground">{st.S[k].ctx ? st.S[k].ctx + "%" : ""}</span></a>
+              <NativeIdLine k={k} label="ID" /></div>) : <span className="text-muted-foreground">{t("common:state.empty")}</span>}</div></Prop>
+            <ItemStatsRows id={i.id} render={(u, time, href) => <><Prop label={t("views:item.propUsage")}><a href={href} className="block pt-1 hover:underline" data-item-usage>{u}</a></Prop><Prop label={t("views:item.propTime")}><a href={href} className="block pt-1 hover:underline" data-item-time>{time}</a></Prop></>} />
+            <Prop label={t("views:item.propProject")}><Select quiet testId="project" value={i.project ?? "none"} onChange={(v) => patchItem(i.id, { project: v === "none" ? null : v })} options={[{ v: "none", l: t("common:state.none") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} />
+              {i.projNext && <div className="type-footnote text-muted-foreground">{t("views:item.projNext")}</div>}</Prop>
+            </dl>
+            <Collapsible className="mt-3">
+              <CollapsibleTrigger className="group/more flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" data-more-props><ChevronRightIcon className="size-3.5 transition-transform group-data-[panel-open]/more:rotate-90" />{t("views:itemState.moreProps")}</CollapsibleTrigger>
+              <CollapsibleContent className="mt-2.5">
+            <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
             <ItemPeopleProp id={i.id} Prop={Prop} />
             <Prop label={t("views:item.propKind")}><Select quiet testId="kind" value={kindOf(i) ?? ""} onChange={(k) => setKind(i.id, k)} options={kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))} />{kindOf(i) && tag(kindOf(i)!) && <div className="type-footnote text-muted-foreground">{tagDesc(tag(kindOf(i)!)!)}</div>}</Prop>
             <Prop label={t("views:item.propTags")}><div className="flex flex-col gap-1.5 pt-1" data-item-tags>
@@ -582,17 +659,15 @@ export function ItemView({ id }: { id: string }) {
               </div>
             </Prop>
             {dependents.length > 0 && <Prop label={t("views:item.propDependents")}><div className="flex flex-col gap-1 pt-1">{dependents.map((x) => <a key={x.id} href={"#/items/" + x.id} className="flex items-center gap-2 hover:underline"><StatusDot s={x.st} /><span className="min-w-0 truncate"><span className="font-mono text-[12px] tabular-nums text-muted-foreground">{x.id}</span> {x.t}</span></a>)}</div></Prop>}
-            <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.filter((k) => st.S[k]).length ? i.ss.filter((k) => st.S[k]).map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
-              <a href={"#/sessions/" + k} className="flex items-center gap-2 hover:underline"><span>#{st.S[k].n}</span><Status s={st.S[k].st} sess /><span className="min-w-0 truncate type-footnote text-muted-foreground">{st.S[k].h}</span><span className="ml-auto type-footnote tabular-nums text-muted-foreground">{st.S[k].ctx ? st.S[k].ctx + "%" : ""}</span></a>
-              <NativeIdLine k={k} label="ID" /></div>) : <span className="text-muted-foreground">{t("common:state.empty")}</span>}</div></Prop>
-            <ItemStatsRows id={i.id} render={(u, time, href) => <><Prop label={t("views:item.propUsage")}><a href={href} className="block pt-1 hover:underline" data-item-usage>{u}</a></Prop><Prop label={t("views:item.propTime")}><a href={href} className="block pt-1 hover:underline" data-item-time>{time}</a></Prop></>} />
-            <Prop label={t("views:item.propProject")}><Select quiet testId="project" value={i.project ?? "none"} onChange={(v) => patchItem(i.id, { project: v === "none" ? null : v })} options={[{ v: "none", l: t("common:state.none") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} />
-              {i.projNext && <div className="type-footnote text-muted-foreground">{t("views:item.projNext")}</div>}</Prop>
             {i.cwd && <Prop label={t("views:item.propCwd")}><span className="block break-all pt-1 font-mono text-[12px] text-muted-foreground" data-cwd>{i.cwd.replace(/^\/Users\/[^/]+/, "~")}</span></Prop>}
             {i.branch && <Prop label={t("views:item.propBranch")}><span className="block break-all pt-1 font-mono text-[12px]" data-branch>{i.branch}</span></Prop>}
             <Prop label={t("views:item.propSource")}><span className="block pt-1">{i.parent?.item ? <a href={"#/items/" + i.parent.item} className="hover:underline">{t("views:item.forkedFrom", { id: i.parent.item })}</a> : i.src[1] === "chat" ? <a href="#/" className="hover:underline">{t("views:item.fromChat")}</a> : i.src[0]}</span>
               {itemThread(i.id) && <label className="mt-1.5 flex items-center gap-2 pl-0.5 type-footnote text-muted-foreground" data-thread-follow><Switch size="sm" checked={!itemThread(i.id)!.follow} onCheckedChange={(v) => void threadFollow(i.id, !v)} />{t("views:item.noFollow")}</label>}</Prop>
-          </dl>
+
+            </dl>
+              </CollapsibleContent>
+            </Collapsible>
+          </section>
         </aside>
       </div>
     </Page>

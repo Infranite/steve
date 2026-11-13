@@ -124,7 +124,7 @@ const ALLOW = {
   "decision-notes.ts": [["不发布", "：", "批准", "拒绝", "。补充：", "。原因：", "添加标签", "移除标签", "稍后提醒", "暂停", "放弃", "归档", "恢复", "撤销了决定", "同意开始", "不需要", "批准发布", "回答", "返工"], "parses and rebuilds the Hub's decision timeline text"],
   "devices.tsx": [["暂停接活", "正常", "执行节点"], `device status and the Hub's runner role: ${HUB}`],
   "store.ts": [["高", "中", "低", "你", "开始会话", "分流", "规划", "收尾", "交付与验收", "发布", "正在开始", "刚开始", "定义", "执行", "不", "排队", "插话", "删除", "导出", "项目", "类型", "交付", "领域", "客户", "主题", "交接", "依赖", "派生", "等前置事项完成后自动开始"], `priorities, tag categories, stage and edge ids, timeline text and a legacy wait label matched for translation: ${HUB}`],
-  "views.tsx": [["接收", "分流", "定义", "规划", "准备", "执行", "交付与验收", "收尾", "高", "中", "低", "无", "今天", "明天", "周五", "下周一", "全部", "等你", "进行中", "动态", "产出", "派生", "交付", "目标更新", "前置", "开新会话", "交接", "自动开始", "暂停", "放弃", "继续", "关联", "发布", "冲突", "失败", "回到", "补充信息：", "（附件）", "：", "插话", "排队", "本机"], `stage, priority and due values (labels via t()), tab ids, timeline keywords, queued-comment prefix: ${HUB}`],
+  "views.tsx": [["接收", "分流", "定义", "规划", "准备", "执行", "交付与验收", "收尾", "高", "中", "低", "无", "今天", "明天", "周五", "下周一", "全部", "等你", "进行中", "动态", "产出", "补充信息：", "（附件）", "：", "插话", "排队", "本机"], `stage, priority and due values (labels via t()), tab ids, timeline keywords, queued-comment prefix: ${HUB}`],
   "view-shared.tsx": [["高", "今天", "无", "明天", "周五", "下周一"], `priority and due values (labels via t()): ${HUB}`],
   "stats/overview.tsx": [["全部", "等你", "进行中"], "filter ids passed to views.showItems"],
   "knowledge/index.tsx": [["搜索", "长期记忆", "知识条目", "笔记与文档", "来源", "待确认"], "tab ids (labels via t()); 长期记忆/知识条目 are the Hub's record names"],
