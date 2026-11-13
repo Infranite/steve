@@ -75,9 +75,9 @@ export function HubSwitcher() {
   return (
     <SidebarMenuItem>
       <DropdownMenu>
-        <DropdownMenuTrigger render={<SidebarMenuButton tooltip={t("shell:hub.tooltip", { name })} className="text-muted-foreground" data-hub-switch />}>
-          <ServerIcon className="size-4! shrink-0" strokeWidth={1.5} />
-          <span className="min-w-0 flex-1 truncate text-foreground/85">{name}</span><ChevronsUpDownIcon className="size-3.5! opacity-60" />
+        <DropdownMenuTrigger render={<SidebarMenuButton tooltip={t("shell:hub.tooltip", { name })} className="h-[30px] gap-2 rounded-lg px-1.5! type-callout text-muted-foreground hover:text-foreground" data-hub-switch />}>
+          <ServerIcon className="size-4! shrink-0 text-tertiary" strokeWidth={1.75} />
+          <span className="min-w-0 flex-1 truncate">{name}</span><ChevronsUpDownIcon className="size-3.5! text-tertiary" />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-60">
           {/* a label must sit inside a group: outside one, Base UI throws and blanks the page */}

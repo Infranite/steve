@@ -2,7 +2,7 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { st, useStore } from "../../src/store"
-import { Sidebar } from "../../src/ui"
+import { Sidebar } from "../../src/shell"
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 /* the Hub runs another build than this page: both are named at the bottom of the sidebar (ST-21) */
 st.ready = true

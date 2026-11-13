@@ -245,6 +245,14 @@ export default {
     versions: "客户端 {{web}} · 服务端 {{hub}}",
     versionUnknown: "…",
     hubUpdate: "新版本 {{version}} 可升级 · 查看",
+    search: "搜索…",
+    collapse: "收起侧栏",
+    expand: "展开侧栏",
+    /* the signed-in user at the bottom of the sidebar, before /me answers; and their role under the name */
+    account: "账户",
+    role: { owner: "负责人", maintainer: "维护人", user: "使用人" },
+    breadcrumb: "所在位置",
+    tabs: "主导航",
   },
   /* the composer's slash commands: the zh-CN name is also the token the Hub reads ("/汇报") */
   cmd: {

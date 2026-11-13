@@ -10,7 +10,6 @@ import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { draftKey } from "@/composer-draft"
 import { ProposalCard } from "@/config-ui"
@@ -289,7 +288,6 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   return (
     <div className="flex h-full min-h-0 overflow-hidden text-foreground" data-chat-page><div className="relative flex min-w-0 flex-1 flex-col">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b border-border/70 px-3 sm:px-5" data-chat-header>
-        <SidebarTrigger className="hidden shrink-0 text-muted-foreground md:inline-flex" />
         <Hero />
         <div className="flex-1" />
         {!conv && <HistoryToggle />}

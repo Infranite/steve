@@ -239,6 +239,13 @@ export default {
     versions: "Frontend {{web}} · Backend {{hub}}",
     versionUnknown: "…",
     hubUpdate: "Steve {{version}} is available · View",
+    search: "Search…",
+    collapse: "Collapse sidebar",
+    expand: "Expand sidebar",
+    account: "Account",
+    role: { owner: "Owner", maintainer: "Maintainer", user: "User" },
+    breadcrumb: "Breadcrumb",
+    tabs: "Main navigation",
   },
   cmd: {
     newItem: "New item",

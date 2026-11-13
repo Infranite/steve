@@ -4,7 +4,10 @@
 /* the running-status pill: in the sidebar a full-width row like the YOLO pill above it; in a phone's page header a
  * compact one */
 .ui-rnc.steve-rn-side { display: block; }
-.ui-rnc.steve-rn-side .ui-rnc__trigger { width: 100%; height: 32px; padding: 0 8px 0 10px; border-radius: var(--aui-radius-sm, 8px); background: transparent; box-shadow: none; font-size: 13px; }
+/* a sidebar row (shell.tsx): 30px, the ring centred under the nav icons and the words where their names start */
+.ui-rnc.steve-rn-side .ui-rnc__trigger { width: 100%; height: 30px; padding: 0 8px 0 10px; border-radius: var(--radius-lg); background: transparent; box-shadow: none; font-size: 13px; }
 .ui-rnc.steve-rn-side .ui-rnc__trigger:hover, .ui-rnc.steve-rn-side[data-open] .ui-rnc__trigger { background: var(--ui-rnc-hover); }
 .ui-rnc.steve-rn-side .ui-rnc__trigger > .ui-rnc__chev { margin-left: auto; }
+.ui-rnc.steve-rn-side .ui-rnc__trigger > .ui-rnc__part:first-child > .ui-rnc__ring:first-child { margin-right: 8px; }
+.ui-rnc.steve-rn-side .ui-rnc__trigger > .ui-rnc__part:first-child > .ui-rnc__dot:first-child { margin-right: 9px; }
 .ui-rnc.steve-rn-head .ui-rnc__trigger { height: 28px; }

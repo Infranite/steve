@@ -2,7 +2,8 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { SidebarInset, SidebarProvider } from "../../src/components/ui/sidebar"
 import { st, useStore, type Item, type Bot, type Wait } from "../../src/store"
-import { Page, Sidebar } from "../../src/ui"
+import { Page } from "../../src/ui"
+import { Sidebar } from "../../src/shell"
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 /* the running-status pill in the sidebar and, on a phone, in the page header: an item that works, one that asks, one
  * paused (it resumes from the pill), one whose graph is paused (it resumes on its page), one done (not in the pill).

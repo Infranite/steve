@@ -8,27 +8,22 @@ import { clockDur } from "@/i18n/format"
 import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
 import { itemDisplayStatus } from "@/item-workflow-relation"
-import { BookOpenIcon, ChartNoAxesColumnIcon,
-  ArrowUpIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon,
-  MessageCircleIcon, MoonIcon, PencilIcon, RadioIcon, SearchIcon, SettingsIcon, SquareTerminalIcon,
-  SunIcon, TerminalIcon, ArrowUpRightIcon, UserIcon, UserRoundIcon, ContactRoundIcon, KeyRoundIcon, UsersRoundIcon, ServerIcon, CornerDownRightIcon, MonitorIcon, WorkflowIcon, HashIcon, BotIcon, AtSignIcon, SlashIcon, XIcon, SquareIcon, FolderIcon,
-  MailIcon,
-  CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
+import { ArrowUpIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon,
+  MoonIcon, PencilIcon, SearchIcon, SquareTerminalIcon,
+  SunIcon, TerminalIcon, ArrowUpRightIcon, UsersRoundIcon, CornerDownRightIcon, MonitorIcon, HashIcon, AtSignIcon, SlashIcon, XIcon, SquareIcon, CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
-  PlugIcon, MessagesSquareIcon,
-} from "lucide-react"
+  } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-trail"
 import { ThinkingLoader } from "@/components/affect/thinking-loader"
 import { Item as UIItem, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSeparator, ItemTitle } from "@/components/ui/item"
 import { Empty as UIEmpty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Card as UICard, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
+import { Breadcrumb } from "@/components/affect/breadcrumb-clean"
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Kbd } from "@/components/ui/kbd"
-import { Sidebar as UISidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarGroupContent, SidebarHeader, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarRail, SidebarTrigger } from "@/components/ui/sidebar"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group"
 import { CodeBlock, CodeBlockContent, CodeBlockLine } from "@/components/ui/code-block"
@@ -37,14 +32,10 @@ import { Spinner } from "@/components/ui/spinner"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Markdown } from "@/components/markdown"
 import { PermissionRecord } from "@/components/permission"
-import { LOADED_WEB_VERSION, permissionDecision, useStore } from "@/store"
-import { shortVersion } from "@/updates"
-import { st, emit, briefHead, pendingCards, ST, SS, WT, tagCatLabel, tagLabel, tagDesc, botName, decide, tag, isKind, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
+import { permissionDecision, useStore } from "@/store"
+import { st, emit, briefHead, ST, SS, WT, tagCatLabel, tagLabel, tagDesc, botName, decide, tag, isKind, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
-import { YoloPill } from "@/yolo/switch"
 import { RunningNowPill } from "@/running-pill"
-import { WorkspaceSwitcher } from "@/workspace-switcher"
-import { HubSwitcher } from "@/hub-ui"
 import { useUploads, PendingList, AttachButton, Files } from "@/attach"
 import type { RFile } from "@/api"
 import { MemConfirm, memAsk } from "@/knowledge/parts"
@@ -55,7 +46,6 @@ import { CardTools, InlineDecision, isToolCall, mapDecision, ToolApproval } from
 import { useMentions } from "@/people/mention"
 import { clearSentDraft, draftToSend, readDraft, saveDraft } from "@/composer-draft"
 import { isPeopleDecision, PeopleDecisionBody } from "@/people/pending"
-import { usePeopleOn } from "@/api/people"
 
 /* ───────── routing ───────── */
 /* a route change cross-fades the content area (view-transition-name: page) while the sidebar stays; without view
@@ -86,15 +76,6 @@ export function ThemeSwitch({ className, labels = false }: { className?: string;
   const o = (v: ThemePref, I: any, l: string) => [v, <span key={v} className="inline-flex items-center gap-1.5"><I className="size-3.5" />{labels && l}</span>, l] as const
   return <Segmented className={className} value={themePref} onChange={(v) => setTheme(v as ThemePref)} iconOnly={!labels} size="sm"
     options={[o("light", SunIcon, t("core:theme.light")), o("dark", MoonIcon, t("core:theme.dark")), o("system", MonitorIcon, t("core:theme.system"))]} />
-}
-/** the theme as one quiet button that steps light → dark → system; its tooltip names the current one */
-function ThemeCycle({ className }: { className?: string }) {
-  const t = useT()
-  const order: ThemePref[] = ["light", "dark", "system"], I = themePref === "light" ? SunIcon : themePref === "dark" ? MoonIcon : MonitorIcon
-  const label = `${t("core:sidebar.appearance")} · ${t(`core:theme.${themePref}`)}`
-  return <Tooltip><TooltipTrigger render={<button type="button" aria-label={label} data-theme-cycle={themePref} onClick={() => setTheme(order[(order.indexOf(themePref) + 1) % order.length])} />}
-    className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors duration-120 ease-(--ease-out) hover:bg-sidebar-accent hover:text-foreground", className)}>
-    <I className="size-4" strokeWidth={1.75} /></TooltipTrigger><TooltipContent side="top">{label}</TooltipContent></Tooltip>
 }
 /** the UI language, remembered on this device; each name is written in its own language */
 export function LanguageSwitch({ className }: { className?: string }) {
@@ -508,21 +489,19 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
   toolbarTop?: boolean
   small?: boolean; title: ReactNode; sub?: ReactNode; back?: [string, string]; actions?: ReactNode; toolbar?: ReactNode; children: ReactNode; footer?: ReactNode; max?: number; bar?: ReactNode; noTitle?: boolean; scrollRef?: React.RefObject<HTMLDivElement | null>
 }) {
+  const t = useT()
   const [scrolled, setScrolled] = useState(false)
   const own = useRef<HTMLDivElement>(null)
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className={cn("relative z-10 flex h-12 shrink-0 items-center gap-2 px-3 transition-[border-color,background-color] duration-180 sm:px-5", scrolled || noTitle ? "border-b bg-background/80 backdrop-blur-xl" : "border-b border-transparent")}>
-        <SidebarTrigger className="-ml-1 hidden text-muted-foreground md:inline-flex" />
+      {/* the page's bar (App Shell Flat): the way back up as a breadcrumb, whose last crumb (this page) comes in once the
+        * large title has scrolled away; a hairline under it then. The sidebar's own button folds the sidebar */}
+      <header className={cn("relative z-10 flex h-12 shrink-0 items-center gap-2 px-3 transition-[border-color,background-color] duration-180 sm:px-5", scrolled || noTitle ? "border-b bg-background/80 backdrop-blur-xl" : "border-b border-transparent")} data-page-bar>
         {back ? (
           /* beside a custom bar the way back keeps its width and the bar truncates; it used to slide under the bar */
-          <Breadcrumb className={bar ? "shrink-0" : "min-w-0"}>
-            <BreadcrumbList className="flex-nowrap">
-              <BreadcrumbItem className="shrink-0"><BreadcrumbLink href={back[0]} className="inline-flex items-center gap-0.5 whitespace-nowrap" data-back><ChevronLeftIcon className="size-4 md:hidden" />{back[1]}</BreadcrumbLink></BreadcrumbItem>
-              {!bar && <><BreadcrumbSeparator className={cn("transition-opacity", scrolled || noTitle ? "opacity-100" : "opacity-0")} />
-                <BreadcrumbItem className="min-w-0"><BreadcrumbPage className={cn("truncate font-medium transition-opacity", scrolled || noTitle ? "opacity-100" : "opacity-0")}>{title}</BreadcrumbPage></BreadcrumbItem></>}
-            </BreadcrumbList>
-          </Breadcrumb>
+          <Breadcrumb aria-label={t("core:sidebar.breadcrumb")} separator="chevron" currentLast={!bar && !!textOf(title)} data-quiet={scrolled || noTitle ? undefined : ""}
+            className={cn("steve-crumbs type-callout", bar ? "shrink-0" : "min-w-0")}
+            items={[{ label: back[1], href: back[0], icon: <ChevronLeftIcon className="size-4" />, data: { "data-back": "" } }, ...(!bar && textOf(title) ? [{ label: textOf(title) }] : [])]} />
         ) : null}
         {bar ?? (!back && <span className={cn("min-w-0 truncate type-headline transition-opacity duration-180", scrolled || noTitle ? "opacity-100" : "opacity-0")}>{title}</span>)}
         <span className="flex-1" />
@@ -550,31 +529,18 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
     </div>
   )
 }
+/** the words of a title that may be markup (an item's number and name in spans): what a breadcrumb names it by */
+export function textOf(n: ReactNode): string {
+  if (n == null || typeof n === "boolean") return ""
+  if (typeof n === "string" || typeof n === "number") return String(n)
+  if (Array.isArray(n)) return n.map(textOf).filter(Boolean).join(" ")
+  const el = n as { props?: { children?: ReactNode } }
+  return el.props ? textOf(el.props.children).replace(/\s+/g, " ").trim() : ""
+}
 /** the page widths: reading (conversation-like and settings pages), standard, wide (stats, an item with its side column) */
 const READING = 760
 const frameOf = (max: number) => (max > 1080 ? 1280 : 1040)
 
-/* ───────── shell ───────── */
-type NavGroup = "work" | "connect" | "automate"
-const NAV_GROUPS: NavGroup[] = ["work", "connect", "automate"]
-const NAV: { h: string; l: "chat" | "inbox" | "items" | "projects" | "sessions" | "stats" | "integrations" | "channels" | "mail" | "contacts" | "knowledge" | "bots" | "auto" | "signals"; I: any; group: NavGroup }[] = [
-  { h: "", l: "chat", I: MessageCircleIcon, group: "work" },
-  { h: "inbox", l: "inbox", I: InboxIcon, group: "work" },
-  { h: "items", l: "items", I: ListTodoIcon, group: "work" },
-  { h: "projects", l: "projects", I: FolderIcon, group: "work" },
-  { h: "sessions", l: "sessions", I: SquareTerminalIcon, group: "work" },
-  { h: "stats", l: "stats", I: ChartNoAxesColumnIcon, group: "work" },
-  { h: "integrations", l: "integrations", I: PlugIcon, group: "connect" },
-  { h: "channels", l: "channels", I: MessagesSquareIcon, group: "connect" },
-  { h: "mail", l: "mail", I: MailIcon, group: "connect" },
-  { h: "contacts", l: "contacts", I: ContactRoundIcon, group: "connect" },
-  { h: "knowledge", l: "knowledge", I: BookOpenIcon, group: "connect" },
-  { h: "bots", l: "bots", I: BotIcon, group: "automate" },
-  { h: "auto", l: "auto", I: WorkflowIcon, group: "automate" },
-  { h: "signals", l: "signals", I: RadioIcon, group: "automate" },
-]
-/** which ends of a scroll area have more beyond them ("start", "end", both or neither), for `data-more` and a fade
- *  on that edge, so content that runs on reads as scrolled rather than cut off */
 /** what a hand-drawn floating layer shows: the value while there is one, then the last one for `ms` more with `leaving`
  *  set, so the layer can play its exit (.anim-float[data-leaving]) before it unmounts */
 export function useLinger<T>(value: T | null | undefined | false, ms = 120): [T | null, boolean] {
@@ -588,6 +554,8 @@ export function useLinger<T>(value: T | null | undefined | false, ms = 120): [T 
   }, [on, ms])
   return [on ? (value as T) : last.current, !on && last.current != null]
 }
+/** which ends of a scroll area have more beyond them ("start", "end", both or neither), for `data-more` and a fade
+ *  on that edge, so content that runs on reads as scrolled rather than cut off */
 export function useScrollMore<T extends HTMLElement>(axis: "x" | "y") {
   const ref = useRef<T>(null), [more, setMore] = useState<string | undefined>()
   useEffect(() => {
@@ -604,114 +572,6 @@ export function useScrollMore<T extends HTMLElement>(axis: "x" | "y") {
   }, [axis])
   return [ref, more] as const
 }
-export function Sidebar({ route: full }: { route: string }) {
-  const t = useT()
-  const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
-  const S = st.bots.steve ?? Object.values(st.bots)[0], n = pendingCards().length
-  const people = usePeopleOn(), meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
-  /* what is in progress is the running-status pill's, under the header; the inbox keeps its count of open cards */
-  const cnt: Record<string, number> = { inbox: n }
-  const [nav, more] = useScrollMore<HTMLDivElement>("y")
-  /* the page you are on stays in view when the groups scroll */
-  useEffect(() => {
-    const el = nav.current, on = el?.querySelector('[aria-current="page"]')
-    if (!el || !on) return
-    const b = el.getBoundingClientRect(), r = on.getBoundingClientRect(), fade = 32
-    if (r.top < b.top + fade || r.bottom > b.bottom - fade) el.scrollTop += r.top - b.top - (b.height - r.height) / 2
-  }, [route])
-  const item = (h: string, l: string, I: any, on: boolean) => (
-    <SidebarMenuItem key={h}>
-      <SidebarMenuButton isActive={on} tooltip={l} render={<a href={"#/" + h} data-nav={h || "chat"} aria-current={on ? "page" : undefined} />} className="type-callout text-foreground/75 hover:text-foreground data-active:font-medium data-active:text-foreground data-active:[&>svg]:text-primary">
-        <I className="size-4! text-muted-foreground transition-colors" strokeWidth={1.75} /><span>{l}</span>
-      </SidebarMenuButton>
-      {!!cnt[h] && (h === "inbox"
-        ? <SidebarMenuBadge className="h-4.5 min-w-4.5 rounded-full bg-attention px-1.5 type-label font-semibold tabular-nums text-white! peer-hover/menu-button:text-white!">{cnt[h]}</SidebarMenuBadge>
-        : <SidebarMenuBadge className="type-footnote tabular-nums text-muted-foreground">{cnt[h]}</SidebarMenuBadge>)}
-    </SidebarMenuItem>
-  )
-  const foot = (h: string, l: string, I: any, on: boolean) => (
-    <Tooltip key={h}><TooltipTrigger render={<a href={"#/" + h} data-nav={h} aria-current={on ? "page" : undefined} aria-label={l} />}
-      className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors duration-120 ease-(--ease-out) hover:bg-sidebar-accent hover:text-foreground", on && "bg-sidebar-accent text-primary hover:text-primary")}>
-      <I className="size-4" strokeWidth={1.75} /></TooltipTrigger><TooltipContent side="top">{l}</TooltipContent></Tooltip>
-  )
-  return (
-    <UISidebar collapsible="icon" className="border-r border-sidebar-border [&_[data-slot=sidebar-inner]]:backdrop-blur-2xl">
-      <SidebarHeader className="pt-3">
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton size="lg" tooltip={S?.n} render={<a href="#/bots/steve" />}>
-              <BotAvatar k="steve" size={28} className="size-7!" />
-              <span className="min-w-0"><span className="block truncate type-headline">{S?.n}</span><span className="block type-footnote text-muted-foreground">{t("core:sidebar.assistant")}</span></span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-          <WorkspaceSwitcher /><HubSwitcher />
-          {st.yolo && <SidebarMenuItem className="group-data-[collapsible=icon]:hidden" data-sidebar-yolo><YoloPill className="h-8 w-full rounded-lg px-2.5" /></SidebarMenuItem>}
-          <SidebarMenuItem className="group-data-[collapsible=icon]:hidden" data-sidebar-running><RunningNowPill className="steve-rn-side" /></SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton tooltip={t("core:sidebar.searchTip")} onClick={() => openSheet("command")} className="text-muted-foreground" data-open-command>
-              <SearchIcon className="size-4!" strokeWidth={1.5} /><span className="flex-1">{t("common:action.search")}</span><Kbd className="group-data-[collapsible=icon]:hidden">⌘K</Kbd>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
-      </SidebarHeader>
-      {/* a short window gives the groups less room than they need: they scroll between header and footer. The edge
-       *  with more beyond it fades and the footer keeps a hairline, so the lower groups read as scrolled, not cut off */}
-      <SidebarContent ref={nav} className="[scrollbar-width:thin]! data-[more~=end]:mask-b-from-[calc(100%-2rem)] data-[more~=start]:mask-t-from-[calc(100%-2rem)]" data-sidebar-nav data-more={more}>
-        {NAV_GROUPS.map((group) => <SidebarGroup key={group} className="py-1">
-          <SidebarGroupLabel className="h-7 type-label text-muted-foreground">{t(`core:navGroup.${group}`)}</SidebarGroupLabel>
-          <SidebarGroupContent><SidebarMenu>{NAV.filter((x) => x.group === group).map((x) => item(x.h, t(`core:nav.${x.l}`), x.I, (route === x.h && !(x.h === "contacts" && meOn)) || (x.h === "contacts" && (route === "orgs" || route === "teams"))))}</SidebarMenu></SidebarGroupContent>
-        </SidebarGroup>)}
-      </SidebarContent>
-      {/* the footer is one row of places (me, devices, accounts, settings) beside the theme, and the versions under it:
-       *  short, so the nav groups above keep their room on a laptop screen */}
-      <SidebarFooter className="gap-1 border-t border-sidebar-border">
-        <div className="flex items-center gap-0.5 group-data-[collapsible=icon]:flex-col">
-          {people && foot("contacts/me", t("core:nav.me"), UserRoundIcon, meOn)}
-          {foot("devices", t("core:nav.devices"), ServerIcon, route === "devices")}
-          {foot("accounts", t("core:nav.accounts"), KeyRoundIcon, route === "accounts" || route === "vault")}
-          {foot("settings", t("core:nav.settings"), SettingsIcon, route === "settings" || route === "plugins")}
-          <span className="flex-1 group-data-[collapsible=icon]:hidden" />
-          <ThemeCycle className="group-data-[collapsible=icon]:hidden" />
-        </div>
-        {/* ST-21: this page's frontend and the Hub's backend; the full numbers are in 设置 · 关于 */}
-        <a href="#/settings/about" title={t("core:sidebar.versions", { web: LOADED_WEB_VERSION, hub: st.version || t("pages:version.fetching") })} className="block truncate rounded-lg px-2 py-0.5 type-footnote tabular-nums text-muted-foreground hover:bg-sidebar-accent hover:text-foreground group-data-[collapsible=icon]:hidden" data-sidebar-versions>{t("core:sidebar.versions", { web: shortVersion(LOADED_WEB_VERSION), hub: st.version ? shortVersion(st.version) : t("core:sidebar.versionUnknown") })}</a>
-        <HubUpdateNotice />
-        {!!st.webVersion && st.webVersion !== LOADED_WEB_VERSION && <a href="#/settings/about" className="block rounded-lg px-2 py-1 type-footnote text-primary hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-web-update>{t("core:sidebar.webUpdate")}</a>}
-      </SidebarFooter>
-      <SidebarRail />
-    </UISidebar>
-  )
-}
-/** A newer Steve release the Hub found on its own: leads to Settings · 关于, where it is installed. */
-export function HubUpdateNotice() {
-  const t = useT()
-  if (!st.update) return null
-  return <a href="#/settings/about" className="flex items-center gap-2 rounded-lg px-2 py-1 type-footnote text-primary hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-hub-update={st.update.version}>
-    <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-hidden />{t("core:sidebar.hubUpdate", { version: st.update.version })}
-  </a>
-}
-export function MobileTabs({ route: full }: { route: string }) {
-  const tr = useT()
-  const route = full.split("?")[0]
-  const n = pendingCards().length
-  const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }, { h: "more", l: tr("core:nav.mine"), I: UserIcon, dot: !!st.update }]
-  const more = ["more", "projects", "sessions", "stats", "mail", "signals", "settings", "bots", "design", "auto", "plugins", "personas", "contacts", "orgs", "teams", "accounts", "vault", "devices", "knowledge", "github", "yolo"]
-  return (
-    <nav className="fixed inset-x-0 bottom-0 z-40 flex h-15 bg-background/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-1px_0_var(--border)] backdrop-blur-2xl backdrop-saturate-180 md:hidden">
-      {tabs.map((t) => {
-        const on = route === t.h || (t.h === "more" && more.includes(route))
-        return (
-          <a key={t.h} href={"#/" + t.h} data-tab={t.h || "chat"} className={cn("relative flex flex-1 flex-col items-center justify-center gap-0.5 type-label transition-[color,transform] duration-120 active:scale-95", on ? "text-primary" : "text-muted-foreground")}>
-            <t.I className="size-5.5" strokeWidth={on ? 1.9 : 1.5} />{t.l}
-            {t.b ? <span className="absolute left-1/2 top-1.5 ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-attention px-1 type-label leading-none font-semibold tabular-nums text-white ring-2 ring-background">{t.b}</span> : null}
-            {"dot" in t && t.dot ? <span className="absolute left-1/2 top-2 ml-2.5 size-2 rounded-full bg-attention ring-2 ring-background" data-tab-update-dot /> : null}
-          </a>
-        )
-      })}
-    </nav>
-  )
-}
-
 /* ───────── modal state ───────── */
 type SheetState = { kind: string; payload?: any } | null
 let sheet: SheetState = null

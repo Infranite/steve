@@ -14,7 +14,8 @@ import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer
 import { CommandPalette } from "@/command-palette"
 import { st, useStore, start } from "@/store"
 import { useT } from "@/i18n"
-import { useRoute, Sidebar, MobileTabs, getSheet, resolvedTheme, openSheet } from "@/ui"
+import { useRoute, getSheet, resolvedTheme, openSheet } from "@/ui"
+import { Sidebar, MobileTabs } from "@/shell"
 const InboxView = lazyView(() => import("@/views").then((m) => ({ default: m.InboxView })))
 const ItemsView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemsView })))
 const ItemView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemView })))

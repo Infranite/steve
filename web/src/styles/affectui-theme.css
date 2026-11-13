@@ -70,3 +70,13 @@
 .dark {
   --aui-primary-hover: color-mix(in oklch, var(--primary), white 8%);
 }
+
+/* Breadcrumb in a page's bar (ui.tsx Page): the way back is a link in the body text, the page's own name comes in
+ * once the large title has scrolled away (data-quiet until then). The ‹ before the way back is a phone's; beside the
+ * sidebar the trail reads on its own. */
+.steve-crumbs.ui-bcrc { --ui-bcrc-muted: var(--muted-foreground); font-size: inherit; line-height: inherit; }
+.steve-crumbs .ui-bcrc__item:first-child .ui-bcrc__link { gap: 2px; }
+.steve-crumbs :is(.ui-bcrc__sep, .ui-bcrc__item[data-current]) { transition: opacity 180ms var(--ease-out); }
+.steve-crumbs[data-quiet] :is(.ui-bcrc__sep, .ui-bcrc__item[data-current]) { opacity: 0; }
+.steve-crumbs[data-quiet] .ui-bcrc__current { animation: none; }
+@media (min-width: 768px) { .steve-crumbs .ui-bcrc__item:first-child .ui-bcrc__icon { display: none; } }

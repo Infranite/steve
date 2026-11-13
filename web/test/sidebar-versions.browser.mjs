@@ -64,6 +64,30 @@ try {
       .catch(() => assert.fail("the scrolled groups show there is more above"))
     await page.close()
   }
+  {
+    // App Shell: the account at the bottom holds the places that were icons there; the head's button folds the sidebar
+    const { page } = await open({ locale: "zh-CN" })
+    const account = page.locator("[data-account]")
+    assert.equal((await account.innerText()).trim(), "账户", "before /me answers the row says 账户")
+    await account.click()
+    const menu = page.locator("[data-account-menu]")
+    await menu.waitFor()
+    assert.deepEqual(await menu.locator("[role=menuitem]").evaluateAll((xs) => xs.map((x) => x.dataset.nav ?? (x.hasAttribute("data-account-sign-out") ? "sign-out" : ""))), ["devices", "accounts", "settings", "sign-out"])
+    await menu.locator('[data-nav="settings"]').click()
+    await page.waitForFunction(() => location.hash === "#/settings")
+    await menu.waitFor({ state: "detached" })
+    const side = page.locator("[data-slot=sidebar]")
+    assert.equal(await side.getAttribute("data-state"), "expanded")
+    await page.locator("[data-sidebar-toggle]").click()
+    await page.waitForFunction(() => document.querySelector("[data-slot=sidebar]")?.getAttribute("data-state") === "collapsed")
+    // in the rail the button lies over Steve's mark until the head is hovered, then brings the sidebar back
+    await page.locator("[data-sidebar-head]").hover()
+    await page.locator("[data-sidebar-toggle]").click()
+    await page.waitForFunction(() => document.querySelector("[data-slot=sidebar]")?.getAttribute("data-state") === "expanded")
+    await page.keyboard.press("ControlOrMeta+b")
+    await page.waitForFunction(() => document.querySelector("[data-slot=sidebar]")?.getAttribute("data-state") === "collapsed")
+    await page.close()
+  }
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["light/dark", "frontend by commit, backend by version", "links to 设置 · 关于", "en", "backend not known yet", "every entry reachable at 1066×700/900"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["light/dark", "frontend by commit, backend by version", "links to 设置 · 关于", "en", "backend not known yet", "every entry reachable at 1066×700/900", "account menu places", "fold to the rail and back, ⌘B"] }))
 } finally { await browser.close() }
