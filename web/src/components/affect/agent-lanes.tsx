@@ -9,8 +9,11 @@ import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type Re
  * beside the page and decides cards on their items), and every word comes from the caller, so it follows i18n.
  *   · done blocks are quiet, a running one reaches "now" and shimmers, a failed one is red, a stopped one hatched
  *   · a block whose agent waits for a person is amber and carries a small flag after its title
- *   · a block is never narrower than a 24 px target: a run of seconds takes that much room, on a row of its own
- *     if it would cover another, and one at the window's end moves left to stay inside it
+ *   · a block is never narrower than a 24 px target: a run of seconds takes that much room; a block that would cover
+ *     the one before it only because of that room moves right next to it instead of opening a row, so a lane holds
+ *     another row only for work that really ran at once; one at the window's end moves left to stay inside it
+ *   · a backdrop block (the coordinator's whole span) lies under its lane's other blocks and takes no row of its own
+ *   · a block too short for its title shows it beside itself where the row has room, else in the tooltip
  *   · an earlier try of a step is dimmed on its lane; a hand-off draws a thin curve from one block to the next
  * The styles are injected below, so no extra files are needed.
  */
@@ -42,6 +45,8 @@ export type LaneTask = {
   /** The task began before (or runs past) the window: that edge is cut, not rounded */
   cutStart?: boolean
   cutEnd?: boolean
+  /** Lies under the lane's other blocks (e.g. the coordinator's whole span) instead of taking a row */
+  backdrop?: boolean
   /** The native tooltip: what it was and what it took */
   tip?: string
   /** Read by assistive technology instead of the title */
@@ -85,31 +90,42 @@ const initials = (name: string) =>
   name.split(/\s+/).map((w) => Array.from(w).find((c) => /[\p{L}\p{N}]/u.test(c))).filter(Boolean).join("").slice(0, 2).toUpperCase()
 
 type Box = { start: number; end: number }
-/** Where each block is drawn: at least `min` long (the smallest block in time), and inside the window */
-function boxes(tasks: LaneTask[], from: number, to: number, min: number) {
-  const out = new Map<string, Box>()
-  for (const t of tasks) {
-    const start = Math.max(from, Math.min(t.start, to - min))
-    out.set(t.id, { start, end: Math.min(to, Math.max(t.end, start + min)) })
-  }
-  return out
-}
+/** How far (in smallest blocks) a block may move right to sit next to the one before it instead of opening a row */
+const NUDGE = 4
 
-/** Each agent's blocks spread over as few rows as keep them from overlapping as drawn (with their smallest width);
- * one that starts within `tol` of where the last ended (a hand-off) stays on its row */
-function pack(tasks: LaneTask[], box: Map<string, Box>, tol: number) {
+/** One agent's blocks: where each is drawn (at least `min` long, inside the window) and on which row. A block goes on
+ * the first row whose last block ends (as drawn) before it starts, give or take `tol` (a hand-off). If none, a row
+ * whose last block ended before this one began in time takes it, moved right to just after that block – it only
+ * covered it because of the smallest width. Only work that really ran at once opens another row. A backdrop block
+ * lies under the others on the first row. */
+function pack(tasks: LaneTask[], from: number, to: number, min: number, tol: number) {
+  const box = new Map<string, Box>()
   const row = new Map<string, number>()
-  const ends: number[] = []
-  const at = (t: LaneTask) => box.get(t.id)!
-  for (const t of [...tasks].sort((a, b) => at(a).start - at(b).start || at(a).end - at(b).end)) {
-    const b = at(t)
-    let r = ends.findIndex((e) => e - tol <= b.start)
-    if (r < 0) { r = ends.length; ends.push(0) }
-    ends[r] = b.end
+  const ends: number[] = [], until: number[] = []
+  for (const t of [...tasks].sort((a, b) => a.start - b.start || a.end - b.end)) {
+    const w = Math.max(min, Math.min(t.end, to) - Math.max(t.start, from))
+    const at = Math.max(from, Math.min(t.start, to - w))
+    if (t.backdrop) { box.set(t.id, { start: at, end: Math.min(to, at + w) }); row.set(t.id, 0); continue }
+    let r = ends.findIndex((e) => e - tol <= at), start = at
+    if (r < 0) {
+      r = ends.findIndex((e, i) => until[i] <= t.start + tol && e - at <= NUDGE * min && e + w <= to + tol)
+      if (r >= 0) start = Math.min(ends[r], to - w)
+    }
+    if (r < 0) { r = ends.length; ends.push(from); until.push(from) }
+    ends[r] = start + w
+    until[r] = Math.max(until[r], t.end)
+    box.set(t.id, { start, end: start + w })
     row.set(t.id, r)
   }
-  return { row, rows: Math.max(1, ends.length) }
+  return { box, row, rows: Math.max(1, ends.length) }
 }
+
+/** About how wide a text is at the blocks' 12px: CJK characters take a full em, the rest a little over half */
+const textWidth = (s: string) => Array.from(s).reduce((w, c) => w + (c.charCodeAt(0) > 0x2e80 ? 12 : 6.8), 0)
+/** A block's title beside it: after the block, or before it, with the room it may take (px) */
+type Aside = { side: "after" | "before"; room: number }
+/** The smallest room worth a title beside a block */
+const ASIDE_MIN = 40
 
 const HandIcon = () => (
   <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true">
@@ -140,14 +156,43 @@ export function AgentLanes({ agents, tasks, range, now, tick, labels, selected, 
   const head = narrow ? HEAD : 0
   const px = span / Math.max(size.track || 600, 1)
 
-  // Where each block is drawn, rows per agent, and where each lane starts
+  // Where each block is drawn, rows per agent, where each lane starts, and which titles go beside their blocks
   const layout = useMemo(() => {
-    const box = boxes(tasks, from, to, MIN_PX * px)
-    const lanes = agents.map((a) => ({ agent: a, ...pack(tasks.filter((t) => t.agentId === a.id), box, 2 * px) }))
+    const box = new Map<string, Box>()
+    const lanes = agents.map((a) => {
+      const p = pack(tasks.filter((t) => t.agentId === a.id), from, to, MIN_PX * px, 2 * px)
+      p.box.forEach((b, id) => box.set(id, b))
+      return { agent: a, row: p.row, rows: p.rows }
+    })
     let top = 0
     const tops = new Map<string, number>()
     for (const l of lanes) { tops.set(l.agent.id, top); top += laneHeight(l.rows, head) }
-    return { box, lanes, tops, height: top }
+    // A title that doesn't fit its block goes into the free room beside it on its row, when that shows more of it;
+    // each gap serves one title. An earlier try leaves it to the latest try of the same step.
+    const aside = new Map<string, Aside>()
+    const len = (ms: number) => ms / px
+    for (const l of lanes) {
+      const mine = tasks.filter((t) => t.agentId === l.agent.id && !t.backdrop)
+      for (let r = 0; r < l.rows; r++) {
+        const on = mine.filter((t) => l.row.get(t.id) === r).sort((a, b) => box.get(a.id)!.start - box.get(b.id)!.start)
+        let taken = false
+        on.forEach((t, i) => {
+          const b = box.get(t.id)!, prev = on[i - 1], next = on[i + 1]
+          const inner = len(b.end - b.start) - 16, need = textWidth(t.title) + (t.status === "waiting" ? 64 : 0)
+          const after = len((next ? box.get(next.id)!.start : to) - b.end) - 10
+          const before = taken ? 0 : len(b.start - (prev ? box.get(prev.id)!.end : from)) - 10
+          taken = false
+          if (inner >= need || (t.earlier && mine.some((o) => o !== t && o.title === t.title && o.start > t.start))) return
+          const side = after >= ASIDE_MIN && (after >= need || after >= before) ? "after" : before >= ASIDE_MIN ? "before" : null
+          if (!side) return
+          const room = Math.min(side === "after" ? after : before, need + 4)
+          if (room <= inner + 24) return
+          aside.set(t.id, { side, room })
+          taken = side === "after"
+        })
+      }
+    }
+    return { box, lanes, tops, height: top, aside }
   }, [agents, tasks, from, to, px, head])
   const boxOf = (t: LaneTask) => layout.box.get(t.id) ?? t
   const yOf = (t: LaneTask) => (layout.tops.get(t.agentId) ?? 0) + head + PAD + (layout.lanes.find((l) => l.agent.id === t.agentId)?.row.get(t.id) ?? 0) * SUB + SUB / 2
@@ -235,18 +280,26 @@ export function AgentLanes({ agents, tasks, range, now, tick, labels, selected, 
                 <ul key={a.id} className="ui-alc__lane" style={{ top: layout.tops.get(a.id), height: laneHeight(rows, head) }} aria-label={labels.lane(a)}>
                   {narrow && <li className="ui-alc__lane-name" aria-hidden="true"><span dir="auto">{a.name}</span></li>}
                   {tasks.filter((t) => t.agentId === a.id).map((t) => {
-                    const b = boxOf(t), left = x(b.start), width = Math.max(0, x(b.end) - left)
-                    return (
-                      <li key={t.id} className="ui-alc__slot" data-status={t.status} style={{ left: `${left}%`, width: `${width}%`, top: head + PAD + (row.get(t.id) ?? 0) * SUB + 4 }}>
+                    const b = boxOf(t), left = x(b.start), width = Math.max(0, x(b.end) - left), side = layout.aside.get(t.id)
+                    const top = head + PAD + (row.get(t.id) ?? 0) * SUB + 4
+                    return [
+                      <li key={t.id} className="ui-alc__slot" data-status={t.status} data-backdrop={t.backdrop ? "" : undefined} style={{ left: `${left}%`, width: `${width}%`, top }}>
                         <button type="button" className="ui-alc__block" data-status={t.status} title={t.tip ?? t.title} aria-label={t.label ?? t.title}
                           aria-pressed={onSelect ? selected === t.id : undefined} data-selected={selected === t.id ? "" : undefined}
                           data-earlier={t.earlier ? "" : undefined} data-cut-start={t.cutStart ? "" : undefined} data-cut-end={t.cutEnd ? "" : undefined}
-                          onClick={() => onSelect?.(t)} {...t.attrs}>
+                          data-aside={side ? "" : undefined} onClick={() => onSelect?.(t)} {...t.attrs}>
                           <span className="ui-alc__label" dir="auto">{t.title}</span>
                           {t.status === "waiting" && <span className="ui-alc__flag" aria-hidden="true"><HandIcon />{labels.needsYou}</span>}
                         </button>
-                      </li>
-                    )
+                      </li>,
+                      side && (
+                        <li key={`${t.id}:aside`} className="ui-alc__aside" data-side={side.side} data-status={t.status} data-earlier={t.earlier ? "" : undefined} aria-hidden="true"
+                          style={{ top, maxWidth: side.room, ...(side.side === "after" ? { left: `calc(${x(b.end)}% + 6px)` } : { right: `calc(${100 - left}% + 6px)` }) }}>
+                          <span className="ui-alc__aside-text" dir="auto">{t.title}</span>
+                          {t.status === "waiting" && <span className="ui-alc__flag"><HandIcon />{labels.needsYou}</span>}
+                        </li>
+                      ),
+                    ]
                   })}
                 </ul>
               ))}
@@ -366,6 +419,21 @@ const css = /* css */ `
 /* Needs you: a small flag at the block's end, after its title (which gives way to it) */
 .ui-alc__flag { display: inline-flex; flex: none; align-items: center; gap: 3px; margin-left: auto; margin-right: -4px; padding: 0 5px; border-radius: 4px; background: var(--aui-surface, #fff); box-shadow: var(--ui-alc-shadow); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-alc-warn-fg); white-space: nowrap; pointer-events: none; animation: ui-alc-pulse 1600ms ease-in-out infinite; }
 .ui-alc__slot:has(.ui-alc__block[data-status="waiting"]) { z-index: 2; }
+/* A backdrop lies under its lane's other blocks */
+.ui-alc__slot { z-index: 1; }
+.ui-alc__slot[data-backdrop] { z-index: 0; }
+/* A title that went beside its block: the block keeps it for assistive technology and drops it from view */
+.ui-alc__block[data-aside] .ui-alc__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ui-alc__aside { position: absolute; z-index: 1; display: flex; align-items: center; gap: 6px; height: ${SUB - 8}px; min-width: 0; font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-alc-text); white-space: nowrap; pointer-events: none; }
+.ui-alc__aside[data-side="before"] { justify-content: flex-end; }
+.ui-alc__aside-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ui-alc__aside .ui-alc__flag { margin: 0; }
+.ui-alc__aside:is([data-status="waiting"], [data-status="blocked"]) { color: var(--ui-alc-warn-fg); }
+.ui-alc__aside[data-status="failed"] { color: var(--ui-alc-danger-fg); }
+.ui-alc__aside:is([data-status="running"], [data-status="starting"]) { color: var(--ui-alc-run-fg); }
+.ui-alc__aside:is([data-status="stopped"], [data-status="paused"]) { color: var(--ui-alc-muted); }
+.ui-alc__aside[data-earlier] { opacity: 0.6; }
+.ui-alc__aside[data-earlier] .ui-alc__aside-text { text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); }
 /* Narrow cards: the agent's name over its lane, staying in view while the track scrolls */
 .ui-alc__lane-name { position: sticky; left: 0; display: block; width: max-content; max-width: 100%; height: ${HEAD}px; padding: 3px 0 0 2px; font-size: 11px; font-weight: 500; line-height: 13px; color: var(--ui-alc-muted); white-space: nowrap; pointer-events: none; }
 .ui-alc__lane-name > span { display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }

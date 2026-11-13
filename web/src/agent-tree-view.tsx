@@ -256,7 +256,7 @@ export function TeamLanes({ at, selected, onSelect, actions }: { at: AgentTreeSt
     const status = !s.earlier && !s.coordinator && n.decisions > 0 && !isOver(s.status) ? "waiting" : LANE[s.status]
     return {
       id: s.key, agentId: laneId(s.bot), title: s.coordinator ? t("views:agentTree.lanes.coordinating") : n.title, status, start: s.start, end: s.end, after: s.after,
-      earlier: s.earlier, cutStart: s.cutStart, cutEnd: s.cutEnd, tip: tip(s, tries), label: `${s.bot ? botName(s.bot) : t("views:agentTree.noBot")}: ${tip(s, tries)}`,
+      earlier: s.earlier, backdrop: s.coordinator && !s.earlier, cutStart: s.cutStart, cutEnd: s.cutEnd, tip: tip(s, tries), label: `${s.bot ? botName(s.bot) : t("views:agentTree.noBot")}: ${tip(s, tries)}`,
       attrs: s.earlier ? { "data-agent-try": s.key, "data-agent-try-of": s.select, "data-agent-bar": s.status, "data-agent-status": s.status }
         : { "data-agent-node": s.key, "data-coord": s.coordinator ? "" : undefined, "data-agent-kind": n.kind, "data-agent-status": n.status, "data-agent-bar": s.status, "data-agent-tries": tries || triesOf(s.key) || undefined, "data-agent-from": n.kind === "fork" ? lanes.parent.get(n.key) : undefined },
     }
