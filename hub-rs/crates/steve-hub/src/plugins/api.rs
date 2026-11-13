@@ -3,6 +3,7 @@
 //! | Route | Who | What |
 //! |---|---|---|
 //! | `GET /plugins` | anyone signed in | libraries, their plugins, what is installed, the caller's own connections |
+//! | `GET /plugins/themes` | anyone signed in | the manifests of the installed theme plugins |
 //! | `POST /plugins/stores` `{address}` | owner | add a library (its index is read first) |
 //! | `POST /plugins/stores/{store}/refresh` | owner | read its index again |
 //! | `DELETE /plugins/stores/{store}` | owner | remove a library nothing is installed from |
@@ -39,6 +40,7 @@ impl IntoResponse for Refused {
 pub fn routes(plugins: Plugins, conns: Connections) -> Router<Modules> {
     Router::new()
         .route("/plugins", get(list))
+        .route("/plugins/themes", get(themes))
         .route("/plugins/stores", post(add_store))
         .route("/plugins/stores/{store}", delete(remove_store))
         .route("/plugins/stores/{store}/refresh", post(refresh))
@@ -72,6 +74,12 @@ async fn list(
 ) -> Result<Json<Value>, Refused> {
     p.list(&who, is_owner(&cx))
         .map(Json)
+        .map_err(|e| Refused::Rule(500, format!("{e:#}")))
+}
+
+async fn themes(Extension(p): Extension<Plugins>, _who: Caller) -> Result<Json<Value>, Refused> {
+    p.themes()
+        .map(|t| Json(json!({"themes": t})))
         .map_err(|e| Refused::Rule(500, format!("{e:#}")))
 }
 

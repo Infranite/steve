@@ -1021,7 +1021,8 @@ async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
     h.set_size(script.len() as u64);
     h.set_mode(0o755);
     h.set_cksum();
-    tar.append_data(&mut h, "bin/echo", &script[..]).expect("tar");
+    tar.append_data(&mut h, "bin/echo", &script[..])
+        .expect("tar");
     let archive = tar.into_inner().expect("tar").finish().expect("gz");
     std::fs::write(lib.join("echo.tar.gz"), &archive).expect("archive");
     let mut artifacts = serde_json::Map::new();
@@ -1029,11 +1030,32 @@ async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
         target,
         json!({"url": "echo.tar.gz", "sha256": hex::encode(sha2::Sha256::digest(&archive))}),
     );
+    // a theme plugin beside it: a manifest for any machine
+    let manifest = json!({"id": "ocean", "name": "Ocean", "kind": "accent", "tokens": {"light": {"primary": "#0b6bc0"}}});
+    let theme = {
+        let bytes = manifest.to_string();
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut h = tar::Header::new_gnu();
+        h.set_size(bytes.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar.append_data(&mut h, "theme.json", bytes.as_bytes())
+            .expect("tar");
+        tar.into_inner().expect("tar").finish().expect("gz")
+    };
+    std::fs::write(lib.join("ocean.tar.gz"), &theme).expect("archive");
     let index = json!({"store": 1, "name": "Test library", "plugins": [{
         "id": "echo", "name": "Echo", "summary": "Says it back", "kind": "channel",
         "version": "0.1.0", "contract": 1, "entry": "bin/echo",
         "config": [{"key": "address", "label": "Address"}, {"key": "token", "label": "Token", "secret": true}],
         "artifacts": artifacts,
+    }, {
+        "id": "ocean", "name": "Ocean", "summary": "A blue accent", "kind": "theme",
+        "version": "1.0.0", "contract": 1, "entry": "theme.json",
+        "artifacts": {"any": {"url": "ocean.tar.gz", "sha256": hex::encode(sha2::Sha256::digest(&theme))}},
     }]});
     std::fs::write(lib.join("steve-store.json"), index.to_string()).expect("index");
 
@@ -1042,13 +1064,23 @@ async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
         .await;
     assert_eq!((s, &v["id"]), (200, &json!("library")), "{v}");
     let (s, v) = e
-        .call("POST", "/api/plugins/installed/library/echo/connect", Some(json!({"config": {}})))
+        .call(
+            "POST",
+            "/api/plugins/installed/library/echo/connect",
+            Some(json!({"config": {}})),
+        )
         .await;
     assert_eq!(s, 404, "not installed yet: {v}");
-    let (s, v) = e.call("POST", "/api/plugins/installed/library/echo", None).await;
+    let (s, v) = e
+        .call("POST", "/api/plugins/installed/library/echo", None)
+        .await;
     assert_eq!((s, &v["version"]), (200, &json!("0.1.0")), "{v}");
     let (s, v) = e
-        .call("POST", "/api/plugins/installed/library/echo/connect", Some(json!({"config": {"address": "x"}})))
+        .call(
+            "POST",
+            "/api/plugins/installed/library/echo/connect",
+            Some(json!({"config": {"address": "x"}})),
+        )
         .await;
     assert_eq!(s, 400, "a required setting is missing: {v}");
 
@@ -1084,19 +1116,29 @@ async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
             panic!("the plugin never said where it listens");
         })
     };
-    let (s, v) = e.call("POST", connect, Some(json!({"config": config}))).await;
+    let (s, v) = e
+        .call("POST", connect, Some(json!({"config": config})))
+        .await;
     assert_eq!(s, 200, "{v}");
     let (dir, fake) = service.await.expect("service");
     let connection = v["connection"].as_str().expect("connection").to_string();
-    assert_eq!(v["instance"], dir.file_name().and_then(|n| n.to_str()).expect("id"));
+    assert_eq!(
+        v["instance"],
+        dir.file_name().and_then(|n| n.to_str()).expect("id")
+    );
     // the plugin got the settings as entered, in a file only the Hub's user reads
     let got: Value =
-        serde_json::from_slice(&std::fs::read(dir.join("data/config.txt")).expect("config")).expect("json");
+        serde_json::from_slice(&std::fs::read(dir.join("data/config.txt")).expect("config"))
+            .expect("json");
     assert_eq!(got, config);
     {
         use std::os::unix::fs::PermissionsExt;
         for f in ["config.json", "token"] {
-            let mode = std::fs::metadata(dir.join(f)).expect(f).permissions().mode() & 0o777;
+            let mode = std::fs::metadata(dir.join(f))
+                .expect(f)
+                .permissions()
+                .mode()
+                & 0o777;
             assert_eq!(mode, 0o600, "{f}");
         }
     }
@@ -1110,14 +1152,28 @@ async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
     assert_eq!(made["adapter"], "ext_ws", "{made}");
     assert!(!fake.calls("hello").is_empty());
     let (_, v) = e.call("GET", "/api/plugins", None).await;
-    let echo = &v["stores"].as_array().expect("stores").iter().find(|s| s["id"] == "library").expect("library")["plugins"][0];
+    let echo = &v["stores"]
+        .as_array()
+        .expect("stores")
+        .iter()
+        .find(|s| s["id"] == "library")
+        .expect("library")["plugins"][0];
     assert_eq!(echo["installed"]["version"], "0.1.0", "{echo}");
-    assert_eq!(echo["connections"][0]["connection"], connection.as_str(), "{echo}");
-    assert_eq!(echo["connections"][0]["status"]["state"], "running", "{echo}");
+    assert_eq!(
+        echo["connections"][0]["connection"],
+        connection.as_str(),
+        "{echo}"
+    );
+    assert_eq!(
+        echo["connections"][0]["status"]["state"], "running",
+        "{echo}"
+    );
     assert!(!v.to_string().contains("gateway-secret"), "{v}");
 
     // in use: it stays installed
-    let (s, v) = e.call("DELETE", "/api/plugins/installed/library/echo", None).await;
+    let (s, v) = e
+        .call("DELETE", "/api/plugins/installed/library/echo", None)
+        .await;
     assert_eq!(s, 409, "{v}");
     // disconnecting is all it takes to stop the plugin and remove what it kept
     let (s, v) = e
@@ -1131,7 +1187,29 @@ async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(!dir.exists(), "the instance is removed with its connection");
-    let (s, v) = e.call("DELETE", "/api/plugins/installed/library/echo", None).await;
+    let (s, v) = e
+        .call("DELETE", "/api/plugins/installed/library/echo", None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    // a theme is installed for the web client to read; there is nothing to connect
+    let (s, v) = e
+        .call("POST", "/api/plugins/installed/library/ocean", None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/plugins/installed/library/ocean/connect",
+            Some(json!({"config": {}})),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    let (s, v) = e.call("GET", "/api/plugins/themes", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["themes"][0]["manifest"], manifest, "{v}");
+    let (s, v) = e
+        .call("DELETE", "/api/plugins/installed/library/ocean", None)
+        .await;
     assert_eq!(s, 200, "{v}");
     // libraries and installing are the instance owner's
     e.sql("UPDATE users SET role = 'member'", &[]);
@@ -1141,4 +1219,3 @@ async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
     assert_eq!((s, &v["owner"]), (200, &json!(false)), "{v}");
     assert!(v["stores"][0].get("address").is_none(), "{v}");
 }
-

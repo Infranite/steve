@@ -280,5 +280,6 @@
   "hub.plugins.not_installed": "This plugin is not installed",
   "hub.plugins.plugin_in_use": "This plugin is still connected; disconnect its accounts first",
   "hub.plugins.settings_wrong": "Check these settings: %{fields}",
+  "hub.plugins.not_connectable": "This plugin is not something to connect; it is used where it belongs (a theme in Appearance)",
   "hub.plugins.not_started": "The plugin did not start: %{detail}"
 }

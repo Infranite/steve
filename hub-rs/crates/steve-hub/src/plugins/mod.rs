@@ -1,6 +1,7 @@
-//! Plugins: programs that are not part of Steve, installed from a plugin library and run beside
-//! the Hub as processes of their own. A plugin never links into the Hub; it is reached through one
-//! of Steve's documented contracts, so one that crashes or is removed leaves the Hub as it was.
+//! Plugins: what is not part of Steve, installed from a plugin library: programs run beside the Hub
+//! as processes of their own (channels), or data the web client reads (themes). A plugin never
+//! links into the Hub; it is reached through one of Steve's documented contracts, so one that
+//! crashes or is removed leaves the Hub as it was.
 //!
 //! # A plugin library
 //!
@@ -77,6 +78,15 @@
 //! a pause that grows to a minute; while it is down its connection is as any external channel
 //! whose service is unreachable. To stop it the Hub closes its standard input and sends `SIGTERM`.
 //! Disconnecting the connection (in Accounts) removes the instance and its data.
+//!
+//! # A theme plugin (`kind: "theme"`, contract 1)
+//!
+//! A skin for the web client. Nothing runs: `entry` is a theme manifest (a JSON object of at most
+//! 64 KiB, the format of `web/src/themes/manifest.ts`) in the archive, and its artifact is usually
+//! keyed `any`, the key an archive for every machine has. Installing it is installing it for
+//! everyone on the Hub: the web client reads the installed manifests (`GET /plugins/themes`),
+//! checks each one and registers it, and the theme is then a choice in Settings → Appearance on
+//! every device. A theme plugin has no settings and is not connected.
 //!
 //! # On disk
 //!
@@ -428,7 +438,7 @@ impl Plugins {
         if p.unsupported().is_some() {
             return Err(Refused::rule(steve_i18n::t!("hub.plugins.needs_newer")));
         }
-        let artifact = p.artifacts.get(self.target()).ok_or_else(|| {
+        let artifact = p.artifact(self.target()).ok_or_else(|| {
             Refused::rule(steve_i18n::t!(
                 "hub.plugins.no_build",
                 target = self.target()
@@ -444,6 +454,8 @@ impl Plugins {
             &dir,
             &p.version,
             &p.entry,
+            p.runs(),
+            if p.runs() { no_check } else { check_theme },
         )
         .await?;
         let done = Installed {
@@ -566,6 +578,9 @@ impl Plugins {
         let done = self
             .installed(store, plugin)
             .ok_or_else(|| Refused::NotFound(steve_i18n::t!("hub.plugins.not_installed")))?;
+        if !done.plugin.runs() {
+            return Err(Refused::rule(steve_i18n::t!("hub.plugins.not_connectable")));
+        }
         let values = Self::check_values(&done.plugin.config, values)?;
         let token = format!(
             "{}{}",
@@ -677,6 +692,32 @@ impl Plugins {
         }
     }
 
+    /// `GET /plugins/themes`: the manifest of every installed theme plugin, as its archive carries
+    /// it. The web client checks and registers each one; the Hub only knows it is a JSON object.
+    pub fn themes(&self) -> Result<Vec<Value>> {
+        let mut out = Vec::new();
+        for s in subdirs(&self.0.dir.join("installed")) {
+            for d in self.installed_in(&s) {
+                if d.plugin.kind != index::KIND_THEME {
+                    continue;
+                }
+                let file = self
+                    .plugin_dir(&s, &d.plugin.id)
+                    .join(&d.plugin.version)
+                    .join(&d.plugin.entry);
+                let manifest = read_theme(&file).unwrap_or_else(|e| {
+                    tracing::warn!(store = %s, plugin = %d.plugin.id, "theme not read: {e:#}");
+                    Value::Null
+                });
+                out.push(json!({
+                    "store": s, "plugin": d.plugin.id, "name": d.plugin.name,
+                    "version": d.plugin.version, "manifest": manifest,
+                }));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn status(&self, instance: &str) -> Status {
         self.0.runner.status(instance)
     }
@@ -708,7 +749,7 @@ impl Plugins {
                     "version": p.version, "homepage": p.homepage, "config": p.config,
                     "listed": listed,
                     "unsupported": p.unsupported(),
-                    "available": p.artifacts.contains_key(self.target()),
+                    "available": p.artifact(self.target()).is_some(),
                     "installed": done.map(|d| json!({"version": d.plugin.version, "installed": d.installed, "config": d.plugin.config})),
                     "update": done.is_some_and(|d| listed && p.semver() > d.plugin.semver()),
                     "connections": mine,
@@ -740,6 +781,34 @@ impl Plugins {
         }
         Ok(json!({"target": self.target(), "owner": owner, "stores": stores}))
     }
+}
+
+/// The largest theme manifest a theme plugin carries.
+const MAX_THEME_BYTES: u64 = 64 * 1024;
+
+/// A theme manifest as the Hub reads it: a JSON object of at most 64 KiB with a string `id`. What
+/// it may set is the web client's to check (`web/src/themes/manifest.ts`).
+fn read_theme(file: &Path) -> Result<Value> {
+    let size = std::fs::metadata(file)
+        .with_context(|| file.display().to_string())?
+        .len();
+    if size > MAX_THEME_BYTES {
+        anyhow::bail!("the theme manifest is larger than 64 KiB")
+    }
+    let v: Value =
+        serde_json::from_slice(&std::fs::read(file)?).context("the theme manifest is not JSON")?;
+    if !v.get("id").is_some_and(Value::is_string) {
+        anyhow::bail!("the theme manifest is not an object with an id")
+    }
+    Ok(v)
+}
+
+fn no_check(_: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn check_theme(file: &Path) -> Result<()> {
+    read_theme(file).map(|_| ())
 }
 
 fn connection_exists(modules: &Modules, id: &str) -> Result<bool, steve_store::StoreError> {

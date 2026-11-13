@@ -207,3 +207,54 @@ fn settings_are_the_ones_the_plugin_asks_for() {
         ));
     }
 }
+
+#[tokio::test]
+async fn a_theme_plugin_is_installed_for_the_web_client_and_never_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("themes");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = json!({"id": "ocean", "name": {"en": "Ocean"}, "kind": "accent",
+        "tokens": {"light": {"primary": "#0b6bc0"}, "dark": {"primary": "#4aa3f0"}}});
+    let good = install::tests::archive(
+        &dir.join("ocean.tar.gz"),
+        &[("theme.json", 0o644, manifest.to_string().as_bytes())],
+    );
+    let bad = install::tests::archive(&dir.join("bad.tar.gz"), &[("theme.json", 0o644, b"[1]")]);
+    let theme = |id: &str, url: &str, sha: &str| {
+        json!({"id": id, "name": "Ocean", "summary": "A blue accent", "kind": "theme",
+            "version": "1.0.0", "contract": 1, "entry": "theme.json",
+            "artifacts": {"any": {"url": url, "sha256": sha}}})
+    };
+    let index = json!({"store": 1, "name": "Themes", "plugins": [
+        theme("ocean", "ocean.tar.gz", &good), theme("broken", "bad.tar.gz", &bad)]});
+    std::fs::write(dir.join(index::INDEX_FILE), index.to_string()).unwrap();
+    let p = Plugins::new(&home.path().join("steve"), Some("off".into())).unwrap();
+    p.add_store(dir.to_str().unwrap()).await.unwrap();
+
+    // an archive for any machine fits this one
+    let v = p.list(&who(), true).unwrap();
+    assert_eq!(v["stores"][0]["plugins"][0]["available"], true, "{v}");
+    assert!(p.themes().unwrap().is_empty());
+
+    p.install("themes", "ocean").await.unwrap();
+    let file = home
+        .path()
+        .join("steve/plugins/installed/themes/ocean/1.0.0/theme.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "a theme is not made executable");
+    }
+    let themes = p.themes().unwrap();
+    assert_eq!(themes.len(), 1);
+    assert_eq!(
+        (&themes[0]["plugin"], &themes[0]["manifest"]),
+        (&json!("ocean"), &manifest)
+    );
+
+    // a manifest that is not an object with an id is not installed
+    let e = p.install("themes", "broken").await.unwrap_err();
+    assert!(matches!(e, Refused::Rule(400, _)), "{e:?}");
+    assert!(p.installed("themes", "broken").is_none());
+}

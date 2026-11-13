@@ -173,8 +173,9 @@ fn unpack(archive: &Path, dest: &Path) -> Result<()> {
 }
 
 /// Installs the archive at `at` as `<plugin_dir>/<version>`: downloaded beside it, checked against
-/// `sha256`, unpacked, and moved into place only when `entry` is an executable file in it. An
-/// earlier directory of the same version is replaced; other versions are left for the caller.
+/// `sha256`, unpacked, and moved into place only when `entry` is a file in it (made executable when
+/// `executable`; otherwise checked by `check`). An earlier directory of the same version is
+/// replaced; other versions are left for the caller.
 pub async fn install(
     client: &reqwest::Client,
     at: &Location,
@@ -182,6 +183,8 @@ pub async fn install(
     plugin_dir: &Path,
     version: &str,
     entry: &str,
+    executable: bool,
+    check: fn(&Path) -> Result<()>,
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(plugin_dir)?;
     let tmp = plugin_dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
@@ -202,8 +205,9 @@ pub async fn install(
         if !meta.is_file() {
             bail!("{entry} in the archive is not a file")
         }
+        check(&exe)?;
         #[cfg(unix)]
-        {
+        if executable {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))?;
         }
@@ -251,19 +255,30 @@ pub(crate) mod tests {
         let c = client().unwrap();
         let at = Location::File(src);
 
-        let wrong = install(&c, &at, &"0".repeat(64), &plugin_dir, "1.0.0", "bin/run").await;
+        let ok = |_: &Path| Ok(());
+        let wrong = install(
+            &c,
+            &at,
+            &"0".repeat(64),
+            &plugin_dir,
+            "1.0.0",
+            "bin/run",
+            true,
+            ok,
+        )
+        .await;
         assert!(
             wrong
                 .unwrap_err()
                 .to_string()
                 .contains("not the one the index names")
         );
-        let missing = install(&c, &at, &sha, &plugin_dir, "1.0.0", "bin/other").await;
+        let missing = install(&c, &at, &sha, &plugin_dir, "1.0.0", "bin/other", true, ok).await;
         assert!(missing.unwrap_err().to_string().contains("no bin/other"));
         // nothing is left behind by a refused install
         assert_eq!(std::fs::read_dir(&plugin_dir).unwrap().count(), 0);
 
-        let dest = install(&c, &at, &sha, &plugin_dir, "1.0.0", "bin/run")
+        let dest = install(&c, &at, &sha, &plugin_dir, "1.0.0", "bin/run", true, ok)
             .await
             .unwrap();
         assert_eq!(dest, plugin_dir.join("1.0.0"));
@@ -281,9 +296,14 @@ pub(crate) mod tests {
             assert_eq!((mode("bin/run"), mode("README")), (0o755, 0o644));
         }
         // the same version again replaces it
-        install(&c, &at, &sha, &plugin_dir, "1.0.0", "bin/run")
+        install(&c, &at, &sha, &plugin_dir, "1.0.0", "bin/run", true, ok)
             .await
             .unwrap();
+        // a file the plugin's kind refuses is not installed
+        let refuse = |_: &Path| -> Result<()> { bail!("not a manifest") };
+        let e = install(&c, &at, &sha, &plugin_dir, "2.0.0", "README", false, refuse).await;
+        assert!(e.unwrap_err().to_string().contains("not a manifest"));
+        assert!(!plugin_dir.join("2.0.0").exists());
     }
 
     #[test]
