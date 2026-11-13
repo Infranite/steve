@@ -120,7 +120,7 @@ const ALLOW = {
   "chat-view.tsx": [["（附件）", "汇报"], `attachment-only placeholder and the /汇报 command: ${HUB}`],
   "queue.tsx": [["（附件）"], `attachment-only placeholder: ${HUB}`],
   "thread/topics.ts": [["（附件）"], `attachment-only placeholder: ${HUB}`],
-  "ui.tsx": [["新事项", "新项目", "汇报", "新", "（附件）", "未确认", "允许执行", "：", "交付"], `slash command names, tag category, attachment placeholder, contact kind, permission question prefix: ${HUB}`],
+  "ui.tsx": [["新事项", "新项目", "汇报", "新", "（附件）", "未确认", "交付"], `slash command names, tag category, attachment placeholder, contact kind: ${HUB}`],
   "permission-question.ts": [["允许执行", "："], `permission question prefix: ${HUB}`],
   "decision-notes.ts": [["不发布", "：", "批准", "拒绝", "。补充：", "。原因：", "添加标签", "移除标签", "稍后提醒", "暂停", "放弃", "归档", "恢复", "撤销了决定", "同意开始", "不需要", "批准发布", "回答", "返工"], "parses and rebuilds the Hub's decision timeline text"],
   "devices.tsx": [["暂停接活", "正常", "执行节点"], `device status and the Hub's runner role: ${HUB}`],
