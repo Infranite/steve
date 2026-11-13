@@ -24,14 +24,17 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { draftKey, newClientId } from "@/composer-draft"
 import { GitHubMoreRow } from "@/github/index"
 import { HubMore } from "@/hub-ui"
-import { SessionKnowledge } from "@/knowledge/parts"
 import { lazyView } from "@/lazy"
+import { HarnessMark } from "@/components/harness-mark"
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { SessionPanel } from "@/session/panel"
 import { ItemsBoard } from "@/item-board"
 import { AnnRefs } from "@/annotate"
 import { OutDialog, OutList, type OutOpen } from "@/item-outputs"
 import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
-import { NativeIdLine, ResumeCard } from "@/resume"
+import { NativeIdLine } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
 import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, permissionQuestion, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle, Chevron, Panel, Section, Tile, PANEL_W } from "@/ui"
@@ -620,7 +623,7 @@ export function ItemView({ id }: { id: string }) {
             <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
             <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} />{B && <div className="type-footnote text-muted-foreground">{B.h} · {B.m}</div>}</Prop>
             <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.filter((k) => st.S[k]).length ? i.ss.filter((k) => st.S[k]).map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
-              <a href={"#/sessions/" + k} className="flex items-center gap-2 hover:underline"><span>#{st.S[k].n}</span><Status s={st.S[k].st} sess /><span className="min-w-0 truncate type-footnote text-muted-foreground">{st.S[k].h}</span><span className="ml-auto type-footnote tabular-nums text-tertiary">{st.S[k].ctx ? st.S[k].ctx + "%" : ""}</span></a>
+              <a href={"#/sessions/" + k} className="flex items-center gap-2 hover:underline"><HarnessMark harness={st.S[k].harness ?? st.S[k].h} title={st.S[k].h} className="size-3.5" /><span>#{st.S[k].n}</span><Status s={st.S[k].st} sess /><span className="min-w-0 truncate type-footnote text-muted-foreground">{st.S[k].h}</span><span className="ml-auto type-footnote tabular-nums text-tertiary">{st.S[k].ctx ? st.S[k].ctx + "%" : ""}</span></a>
               <NativeIdLine k={k} label="ID" /></div>) : <span className="text-muted-foreground">{t("common:state.empty")}</span>}</div></Prop>
             <ItemStatsRows id={i.id} render={(u, time, href) => <><Prop label={t("views:item.propUsage")}><a href={href} className="block pt-1 hover:underline" data-item-usage>{u}</a></Prop><Prop label={t("views:item.propTime")}><a href={href} className="block pt-1 hover:underline" data-item-time>{time}</a></Prop></>} />
             <Prop label={t("views:item.propProject")}><Select quiet testId="project" value={i.project ?? "none"} onChange={(v) => patchItem(i.id, { project: v === "none" ? null : v })} options={[{ v: "none", l: t("common:state.none") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} />
@@ -673,14 +676,16 @@ export function SessionView({ k }: { k: string }) {
   const [renaming, setRenaming] = useState(false)
   const [infoOpen, setInfoOpen] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
+  const phone = useIsMobile()
   const composer = useRef<ComposerHandle | null>(null)
   const s = st.S[k]
   const scroller = useRef<HTMLDivElement>(null)
   useEffect(() => { void loadEvents(k) }, [k])
-  useEffect(() => { setDebugOpen(false) }, [k])
+  useEffect(() => { setDebugOpen(false); setInfoOpen(false) }, [k])
   useEffect(() => { scroller.current?.scrollTo({ top: 1e9 }) }, [s?.ev.length, k])
   if (!s) return <Page title={t("views:session.title")} back={["#/sessions", t("views:sessions.title")]}><Empty title={t("views:session.notFound")} /></Page>
   const i = s.item ? it(s.item) : null, run = s.st === "run"
+  const mark = <HarnessMark harness={s.harness ?? s.h} title={s.h} />
   const exportMd = () => {
     const md = `# ${s.title}\n\n` + s.ev.map((e) => e[0] === "u" ? t("views:session.exportYou") + e[1] : e[0] === "hi" ? "> " + e[1] : e[0] === "a" ? e[1] : e[0] === "tool" ? "- " + e[2] + " " + e[3] : e[0] === "sys" ? "_" + e[1] + "_" : "").filter(Boolean).join("\n\n")
     const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([md], { type: "text/markdown" })); a.download = `${s.title.slice(0, 40)}.md`; a.click(); toast(t("views:session.exported"))
@@ -697,36 +702,22 @@ export function SessionView({ k }: { k: string }) {
       </DropdownMenuContent>
     </DropdownMenu>
   )
-  const panel = (
-    <div className="flex flex-col gap-8">
-      {i ? (
-        <div><SectionLabel>{t("views:session.item")}</SectionLabel>
-          <button type="button" onClick={() => go("#/items/" + i.id)} className="-mx-2 w-[calc(100%+16px)] rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-accent"><div className="type-callout font-medium"><span className="mr-1.5 font-mono type-footnote font-normal text-muted-foreground">{i.id}</span>{i.t}</div><Status s={itemDisplayStatus(i)} className="mt-1" /></button>
-          <div className="mt-1 px-1 type-callout text-muted-foreground"><ProjectChip id={i.project} /></div></div>
-      ) : (
-        <div><SectionLabel>{t("views:session.unlinked")}</SectionLabel><div className="flex flex-wrap gap-2">{!s.ro && <Button size="sm" variant="outline" onClick={() => openSheet("link", { k })} data-link>{t("views:session.link")}</Button>}<Button size="sm" variant="outline" onClick={() => openSheet("fork", { k, at: Math.max(0, s.ev.length - 1) })}>{t("views:session.toItem")}</Button></div></div>
-      )}
-      <div><SectionLabel right={<Button variant="ghost" size="xs" className="text-muted-foreground" onClick={() => openSheet("graph", { k })}>{t("views:session.zoom")}</Button>}>{t("views:session.near")}</SectionLabel>
-        <RelationGraph key={k} focus={k} scope="near" height={260} minimal onOpen={openNode} /></div>
-      <SessionKnowledge id={k} />
-      <div data-session-resume><SectionLabel>{t("views:session.resume")}</SectionLabel><ResumeCard k={k} /></div>
-      <div><SectionLabel>{t("views:session.info")}</SectionLabel><div className="flex flex-col gap-1.5 px-1 type-callout text-muted-foreground"><BotName k={s.b} className="font-medium text-foreground" /><span>{hm(s)}</span><span>{t("views:session.effort", { v: s.reasoningEffort ?? t("views:session.effortInherit") })}</span><a href={"#/devices/" + s.device} className="hover:text-foreground">{t("views:session.runsOn", { device: st.devices.find((d) => d.id === s.device)?.name ?? "Hub" })}</a><span>{t("views:session.source", { src: s.src })}</span><span>{t("views:session.durCtx", { dur: s.dur, ctx: s.contextKnown ? `${s.ctx}%` : t("views:session.unreported") })}</span></div></div>
-    </div>
-  )
+  const device = st.devices.find((d) => d.id === s.device)?.name ?? "Hub"
   return (
     <div className="flex h-full min-h-0">
       <div className="min-w-0 flex-1">
         <Page noTitle title={t("views:session.numbered", { n: s.n })} back={i ? ["#/items/" + i.id, t("views:items.title")] : ["#/sessions", t("views:sessions.title")]} max={720} scrollRef={scroller}
-          bar={<div className="flex min-w-0 items-center gap-2"><span className="truncate type-headline">{s.n ? t("views:session.numberedBar", { n: s.n }) : ""}{renaming ? <Input autoFocus defaultValue={s.title} className="inline-flex h-7 w-56 rounded-md" data-rename-input onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.title) sessPatch(k, { title: v }, t("views:session.renamed")); setRenaming(false) }} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} /> : s.title}</span><Status s={s.st} sess pill className="hidden sm:inline-flex" />{i && <ProjectChip id={i.project} className="hidden shrink-0 type-footnote text-muted-foreground sm:inline-flex" />}</div>}
-          actions={<>{!s.ro && <SessionStats id={k} />}<Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)}>{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
+          bar={<div className="flex min-w-0 items-center gap-2" data-session-bar><span className="hidden shrink-0 sm:inline-flex" data-session-mark={s.harness ?? ""}>{mark}</span><span className="truncate type-headline">{s.n ? t("views:session.numberedBar", { n: s.n }) : ""}{renaming ? <Input autoFocus defaultValue={s.title} className="inline-flex h-7 w-56 rounded-md" data-rename-input onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.title) sessPatch(k, { title: v }, t("views:session.renamed")); setRenaming(false) }} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} /> : s.title}</span><Status s={s.st} sess pill className="hidden sm:inline-flex" />{i && <ProjectChip id={i.project} className="hidden shrink-0 type-footnote text-muted-foreground sm:inline-flex" />}</div>}
+          actions={<>{!s.ro && <SessionStats id={k} ctx={s.contextKnown ? s.ctx : undefined} />}<Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)} data-session-info-wide><PanelRightIcon />{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
           footer={
             /* on the page's own frame and reading width: the composer and the transcript share one left edge */
             <div className="mx-auto w-full max-w-[1104px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div className="max-w-[760px]">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-tertiary" data-session-runtime>
                 {/* harness and model: the composer's label says them (the read-only note has none, so here it does) */}
-                {s.ro && <span className="break-all">{hm(s)}</span>}
+                {s.ro && <span className="inline-flex min-w-0 items-center gap-1.5 break-all text-muted-foreground" data-runtime-harness><HarnessMark harness={s.harness ?? s.h} className="size-3.5" />{hm(s)}</span>}
                 <NativeIdLine k={k} label={t("views:session.nativeId")} className="w-auto" />
                 <span>{t("views:session.effortLabel")} <span className="text-muted-foreground">{s.reasoningEffort ?? t("views:session.effortInherit")}</span></span>
+                <a href={"#/devices/" + s.device} className="hidden hover:text-foreground sm:inline" data-runtime-device>{t("views:session.runsOn", { device })}</a>
                 {/* a reported context is the composer's ring; that nothing is reported is said here */}
                 {!s.ro && !s.contextKnown && <span data-session-ctx-unreported>{t("views:session.ctxLabel")} <span className="text-muted-foreground">{t("views:session.unreported")}</span></span>}
               </div>
@@ -736,7 +727,7 @@ export function SessionView({ k }: { k: string }) {
                   <LockIcon className="size-4 text-muted-foreground" /><span className="min-w-0 flex-1 type-callout text-muted-foreground">{t("views:session.readOnlyNote", { src: s.src.startsWith("本机 ") ? t("views:session.srcLocal", { h: s.src.slice(3) }) : s.src })}</span>
                   <Button size="sm" variant="outline" onClick={() => openSheet("fork", { k, at: Math.max(0, s.ev.length - 1) })}>{t("views:session.toItem")}</Button>
                 </div>
-              ) : <Composer key={k} draftKey={draftKey(st.workspace?.id, "session", k)} handle={composer} testId="session" model={hm(s)} placeholder={s.st === "ended" ? t("views:session.endedPlaceholder") : t("views:session.placeholder")}
+              ) : <Composer key={k} draftKey={draftKey(st.workspace?.id, "session", k)} handle={composer} testId="session" model={hm(s)} modelIcon={<HarnessMark harness={s.harness ?? s.h} />} placeholder={s.st === "ended" ? t("views:session.endedPlaceholder") : t("views:session.placeholder")}
                 /* while a turn runs Enter steers it (插话) and ⌥ Enter queues (排队); Stop and Esc interrupt it */
                 busy={run} steers onStop={() => interrupt(k)} onSend={(text, files, _refs, _mentions, _id, how) => sessSend(k, text, how === "queue" ? "排队" : "插话", files)}
                 queue={<QueueStrip sid={k} rows={s.queue} note={queueNote(s)} starting={s.starting} composer={composer} />}
@@ -748,11 +739,17 @@ export function SessionView({ k }: { k: string }) {
       </div>
       {/* the same panel as the chat rail: one width, a head on the top bar's line, the content scrolling under it */}
       <aside className={cn("hidden shrink-0 flex-col border-l border-sidebar-border bg-sidebar xl:flex", PANEL_W)} data-session-panel>
-        <div className="flex h-12 shrink-0 items-center border-b border-sidebar-border px-5 type-headline" data-session-panel-head>{t("views:session.info")}</div>
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-6 pt-5">{panel}</div>
+        <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border px-5 type-headline" data-session-panel-head>{t("views:session.info")}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-8 pt-5" data-session-panel-scroll>{!infoOpen && <SessionPanel k={k} />}</div>
       </aside>
       {debugOpen && s.item && <ItemDebugDialog item={s.item} session={k} onClose={() => setDebugOpen(false)} />}
-      <Dialog open={infoOpen} onOpenChange={setInfoOpen}><DialogContent className="max-h-[85dvh] overflow-y-auto"><DialogHeader><DialogTitle>{t("views:session.info")}</DialogTitle><DialogDescription>{t("views:session.infoDesc")}</DialogDescription></DialogHeader><div>{panel}</div></DialogContent></Dialog>
+      {/* narrower than the panel's room: the same panel as a sheet, from the bottom on a phone and from the side otherwise */}
+      <Sheet open={infoOpen} onOpenChange={setInfoOpen}>
+        <SheetContent side={phone ? "bottom" : "right"} showCloseButton={false} className={cn("gap-0 overflow-hidden bg-sidebar p-0", phone ? "max-h-[88dvh] rounded-t-2xl" : "w-[92vw] max-w-[380px]!")} data-session-sheet>
+          <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border px-5">{mark}<SheetTitle className="min-w-0 flex-1 truncate type-headline">{t("views:sessionPanel.sheet")}</SheetTitle><Button size="icon-sm" variant="ghost" className="text-muted-foreground" aria-label={t("common:action.close")} onClick={() => setInfoOpen(false)}><XIcon /></Button></div>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[max(2rem,env(safe-area-inset-bottom))] pt-4" data-session-sheet-body>{infoOpen && <SessionPanel k={k} />}</div>
+        </SheetContent>
+      </Sheet>
     </div>
   )
 }

@@ -37,6 +37,8 @@ import { MODULE_CARDS } from "@/vault/decisions"
 import { MailDraftCard } from "@/mail/draft"
 import { CardTools, InlineDecision, isToolCall, mapDecision, ToolApproval } from "@/thread/decide"
 import { isPeopleDecision, PeopleDecisionBody } from "@/people/pending"
+import { useTurnUsage } from "@/session/turn-usage"
+import { fmtEst, fmtN } from "@/stats/format"
 
 /* ───────── routing ───────── */
 /* a route change cross-fades the content area (view-transition-name: page) while the sidebar stays; without view
@@ -707,6 +709,8 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
   const ms = live ? now - (g.t0 ?? now) : (g.t1 ?? 0) - (g.t0 ?? 0)
   const cancelled = g.end === "cancelled"
   const items = trailOf(g.evs, g.at ?? [], g.t1, live)
+  /* a finished turn of an item's session: its tokens and estimated cost, as the Hub's stats keep them */
+  const usage = useTurnUsage(k, g.t0, g.t1, live || !g.end)
   return (
     <Collapsible open={open} onOpenChange={setOpen} data-work={live ? "live" : "done"} data-work-view={open ? view : undefined} className="relative anim-in">
       <CollapsibleTrigger className={cn("group/work flex w-full min-w-0 items-center gap-1.5 rounded-lg py-1 text-left type-callout hover:[&>svg]:text-foreground", open && items.length > 0 && "sm:pr-36")}>
@@ -714,6 +718,7 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
         <span className={cn("shrink-0", live ? "text-foreground" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")}</span>
         {(ms > 0 || live) && <span className="shrink-0 tabular-nums text-muted-foreground" data-work-clock>{live ? clock(ms) : fmtDur(ms)}</span>}
         {stats.length > 0 && <span className="min-w-0 truncate text-muted-foreground">· {stats.join(" · ")}</span>}
+        {usage && usage.total > 0 && <span className="ml-auto hidden shrink-0 pl-2 type-footnote tabular-nums text-tertiary sm:inline" data-work-usage>{t("views:sessionPanel.turnUsage", { tokens: fmtN(usage.total), usd: fmtEst(usage.est, usage.unpriced_tokens) })}</span>}
       </CollapsibleTrigger>
       {/* open, the work can be read as steps or on a timeline; the switch sits on the header's line, beside the trigger */}
       {open && items.length > 0 && <Segmented size="sm" value={view} onChange={setView} label={t("core:trace.view.label")} className="absolute right-0 top-0 z-1 max-sm:hidden"

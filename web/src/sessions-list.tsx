@@ -2,7 +2,8 @@
  * Read as a log, newest first: what is live sits on top, the rest falls into days. One line per conversation with its
  * parts in fixed columns (item, title, model, context, time), so the eye runs down a column instead of parsing a line
  * of dots. What every listed conversation shares (one harness, one model, one bot, session #1) is not repeated on
- * each row. */
+ * each row in words; the harness is only its small mark before the title, so a Codex conversation stands out. */
+import { HarnessMark, ModelMark } from "@/components/harness-mark"
 import { api } from "@/api"
 import { Button } from "@/components/ui/button"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
@@ -70,6 +71,7 @@ function SessRow({ k, s, cols, when, hit }: { k: string; s: Sess; cols: Cols; wh
       <span className="w-12 shrink-0 truncate sm:w-[4.5rem]">{s.item ? <ItemNo id={s.item} /> : <span className="type-footnote text-tertiary" data-session-unlinked>{t("views:sessions.unlinked")}</span>}</span>
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="flex min-w-0 items-baseline gap-2">
+          <HarnessMark harness={s.harness ?? s.h} title={s.h} className="size-3.5 self-center" />
           <span className={cn("truncate type-body", live(s) ? "font-medium text-foreground" : s.st === "ended" ? "text-foreground/70" : "text-foreground")} title={s.title}>{s.title}</span>
           {s.n > 1 && <span className="shrink-0 type-footnote tabular-nums text-tertiary">#{s.n}</span>}
           {s.ro && <LockIcon className="size-3 shrink-0 self-center text-tertiary" aria-label={t("views:sessions.readOnly")} />}
@@ -81,7 +83,7 @@ function SessRow({ k, s, cols, when, hit }: { k: string; s: Sess; cols: Cols; wh
       <span className="flex shrink-0 items-center gap-4 type-footnote text-muted-foreground">
         {live(s) && <span className={cn("whitespace-nowrap font-medium", s.st === "run" ? "text-blue" : "text-attention")}>{SS[s.st]?.[0]}</span>}
         {cols.bot && s.b && <span className="hidden sm:inline-flex" title={st.bots[s.b]?.n}><BotAvatar k={s.b} size={18} /></span>}
-        {cols.model && <span className="hidden w-36 truncate md:block" title={[s.h, s.m].filter(Boolean).join(" · ")} data-session-model>{s.m}</span>}
+        {cols.model && <span className="hidden w-36 min-w-0 items-center gap-1.5 md:flex" title={[s.h, s.m].filter(Boolean).join(" · ")} data-session-model><ModelMark model={s.m} className="size-3" /><span className="truncate">{s.m}</span></span>}
         <span className="hidden w-[4.25rem] sm:block"><Ctx s={s} /></span>
         <span className="whitespace-nowrap text-right sm:w-[4.5rem] tabular-nums text-tertiary">{when}</span>
       </span>
@@ -135,7 +137,7 @@ export function SessionsView() {
             ))}
           </ToggleGroup>
           <span className="flex-1" />
-          {(harnesses.length > 1 || hf !== "all") && <Select quiet className={cn("h-7 px-2 type-callout [&>svg]:opacity-60", hf !== "all" ? "bg-accent font-medium! text-foreground" : "text-muted-foreground")} testId="harness-filter" value={hf} onChange={(v) => { hf = v; reset() }} options={[{ v: "all", l: t("views:sessions.allHarness") }, ...harnesses.map((x) => ({ v: x, l: x }))]} />}
+          {(harnesses.length > 1 || hf !== "all") && <Select quiet className={cn("h-7 px-2 type-callout [&>svg]:opacity-60", hf !== "all" ? "bg-accent font-medium! text-foreground" : "text-muted-foreground")} testId="harness-filter" value={hf} onChange={(v) => { hf = v; reset() }} options={[{ v: "all", l: t("views:sessions.allHarness") }, ...harnesses.map((x) => ({ v: x, l: <span className="inline-flex items-center gap-1.5"><HarnessMark harness={x} className="size-3.5" />{x}</span> }))]} />}
         </div>
       </div>
       <SessionsHeatmap />

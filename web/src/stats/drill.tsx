@@ -156,16 +156,17 @@ export function ItemStatsRows({ id, render }: { id: string; render: (usage: stri
 }
 
 /** 会话页顶栏：“本会话 估 $1.88 · 38 回合”（stats.md §6.5）；TS Hub 上或还没有回合时不出现 */
-export function SessionStats({ id }: { id: string }) {
+export function SessionStats({ id, ctx }: { id: string; /** the context in use, %, when the harness reports it */ ctx?: number }) {
   const t = useT()
   const [d] = useStats(() => stats.session(id), [id])
-  if (d.s !== "ok" || (!d.v.turns && !d.v.usage.total && !d.v.usage.reported)) return null
+  const ctxTag = ctx != null && <span className={cn("hidden whitespace-nowrap px-1 type-footnote tabular-nums md:inline", ctx >= 80 ? "text-attention" : "text-muted-foreground")} data-session-ctx-head={ctx}>{t("views:sessionPanel.ctxShort", { pct: ctx })}</span>
+  if (d.s !== "ok" || (!d.v.turns && !d.v.usage.total && !d.v.usage.reported)) return ctxTag || null
   const u = d.v.usage
   const est = u.total ? t("stats:word.estShort", { usd: fmtUsd(u.est) }) : u.reported ? t("stats:word.quoteFloor", { usd: fmtUsd(u.reported) }) : ""
-  return (
+  return (<>{ctxTag}
     <span className="hidden whitespace-nowrap px-1 type-footnote tabular-nums text-muted-foreground md:inline" title={u.hit_rate != null ? t("stats:drill.sessionTitleHit", { tokens: fmtN(u.total), pct: fmtPct(u.hit_rate) }) : t("stats:drill.sessionTitle", { tokens: fmtN(u.total) })} data-session-stats>
       {est ? t("stats:drill.sessionLine", { est, count: d.v.turns }) : t("stats:drill.sessionLineNoEst", { count: d.v.turns })}
-    </span>
+    </span></>
   )
 }
 

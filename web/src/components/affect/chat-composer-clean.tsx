@@ -41,6 +41,8 @@ export type ChatComposerProps = Omit<HTMLAttributes<HTMLDivElement>, "children">
   tools?: ReactNode;
   /** A quiet label for where the message goes (harness and model) – not a picker */
   model?: string;
+  /** Steve: the harness's mark before the label */
+  modelIcon?: ReactNode;
   /** The right end: hints, the context ring and the send / stop / queue / steer buttons */
   end?: ReactNode;
   /** `data-composer` of the writing area (the message and its tools) */
@@ -52,7 +54,7 @@ export type ChatComposerProps = Omit<HTMLAttributes<HTMLDivElement>, "children">
   onFocusField?: () => void;
 };
 
-export function ChatComposer({ children, head, add, addLabel = "Add", onAdd, tools, model, end, testId, drop, disabled, onFocusField, className, ...rest }: ChatComposerProps) {
+export function ChatComposer({ children, head, add, addLabel = "Add", onAdd, tools, model, modelIcon, end, testId, drop, disabled, onFocusField, className, ...rest }: ChatComposerProps) {
   const [menu, setMenu] = useState(false);
   const body = useRef<HTMLElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
@@ -104,6 +106,7 @@ export function ChatComposer({ children, head, add, addLabel = "Add", onAdd, too
             <div className="ui-ccc__group ui-ccc__group--end">
               {model && (
                 <span className="ui-ccc__model" title={model} data-model>
+                  {modelIcon && <span className="ui-ccc__model-icon" aria-hidden="true">{modelIcon}</span>}
                   <span className="ui-ccc__model-name" dir="auto">{model}</span>
                 </span>
               )}
@@ -612,6 +615,9 @@ const css = /* css */ `
   color: var(--ui-ccc-muted);
 }
 .ui-ccc__model-name { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+/* Steve: the harness's mark before the label */
+.ui-ccc__model-icon { display: inline-grid; flex: none; place-items: center; margin-right: 6px; }
+.ui-ccc__model-icon > svg { width: 14px; height: 14px; }
 
 /* ---------- Menus: grow out of the corner next to their button ---------- */
 .ui-ccc__menu {

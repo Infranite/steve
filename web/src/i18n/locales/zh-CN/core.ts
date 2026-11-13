@@ -440,6 +440,21 @@ export default {
       none: "还没有记住什么", noneFor: "没有提到“{{q}}”的记忆", noneHere: "这里没有记忆",
       newMemory: "新记忆", newPlaceholder: "希望助手记住的事…", newCategory: "新记忆的分类", general: "通用",
     },
+    monitor: {
+      state: { idle: "空闲", running: "运行中", waiting: "等你", paused: "已暂停", finished: "已完成", failed: "失败", cancelled: "已取消" },
+      kind: { read: "读取", search: "搜索", edit: "编辑", run: "终端", think: "思考", web: "网页" },
+      failed: "失败", done: "完成", waitingOnYou: "等你处理", finishedIn: "用时 {{time}} 完成", files_other: "{{count}} 个文件",
+      wentWrong: "出错了", cancelledAfter: "{{time}} 后取消", noTask: "还没有任务", openAria: "{{what}}，展开",
+      costSoFar: "目前花费 {{usd}}", fold: "收起", runningFor: "已运行 {{time}}", finishedSteps: "已完成的步骤", details: "{{what}}：详情",
+      started: "开始", took: "用时", share: "占比", stateWord: "状态", decline: "拒绝", allow: "允许", retry: "重试",
+      pause: "暂停", resume: "继续", cancel: "停止", log: "日志",
+    },
+    ctxWin: {
+      title: "上下文窗口", nothing: "没有附带内容", tokensExact: "{{n}} token", remove: "移除 {{what}}", compacting: "正在压缩…",
+      ofWindow: "占窗口 {{pct}}%", saved: "省下 {{n}} token", left: "还剩 {{n}}", over: "超出上限 {{n}}", full: "窗口已满",
+      isCompacted: "{{what}} 已压缩", compactOf: "压缩 {{what}}", compacted: "已压缩", compact: "压缩", ofLimit: "/ {{n}} token",
+      sr: "已用 {{used}} / {{cap}} token，{{pct}}%", free: "空余 {{n}}",
+    },
     dial: {
       title: "Agent 权限", subtitle: "不问你就能做的事",
       ask: "总是询问", askHint: "没有你的同意什么都不做", risky: "有风险时问", riskyHint: "安全的直接做，有风险的等你",

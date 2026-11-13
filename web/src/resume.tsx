@@ -1,5 +1,6 @@
 /* The harness's own session behind a Steve session (ST-28): its id, the command that resumes it in the harness,
  * the working directory, and whether the harness's transcript of that id is on the Hub's machine. */
+import { HarnessMark } from "@/components/harness-mark"
 import { api, type RResume } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -77,7 +78,7 @@ export function ResumeCard({ k }: { k: string }) {
   if (!r) return <p className="type-footnote text-muted-foreground" data-resume="loading">{t("shell:resume.loading")}</p>
   return (
     <div className="flex flex-col gap-3" data-resume={r.id ? "ready" : "none"}>
-      <div className="flex items-center gap-2"><SquareTerminalIcon className="size-4 text-muted-foreground" /><span className="type-headline">{h}</span><span className="type-callout text-muted-foreground">{t("shell:resume.original")}</span></div>
+      <div className="flex items-center gap-2"><HarnessMark harness={s.harness ?? s.h} /><span className="type-headline">{h}</span><span className="type-callout text-muted-foreground">{t("shell:resume.original")}</span></div>
       {r.id ? <Field label={t("shell:resume.originalId")} value={r.id} what={t("shell:resume.what.id")} testId="id" /> : <p className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground" data-resume-pending>{t("shell:resume.idPending", { note: noIdNote(s) })}</p>}
       {r.id && (r.command
         ? <Field label={t("shell:resume.commandLabel")} value={r.command} what={t("shell:resume.what.command")} testId="command" />

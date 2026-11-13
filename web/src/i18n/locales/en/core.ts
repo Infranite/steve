@@ -457,6 +457,21 @@ export default {
       none: "Nothing remembered yet", noneFor: "No memory mentions “{{q}}”", noneHere: "No memories here",
       newMemory: "New memory", newPlaceholder: "Something the assistant should remember…", newCategory: "Category of the new memory", general: "General",
     },
+    monitor: {
+      state: { idle: "Idle", running: "Running", waiting: "Needs you", paused: "Paused", finished: "Finished", failed: "Failed", cancelled: "Cancelled" },
+      kind: { read: "Read", search: "Search", edit: "Edit", run: "Terminal", think: "Thinking", web: "Web" },
+      failed: "Failed", done: "Done", waitingOnYou: "Waiting on you", finishedIn: "Finished in {{time}}", files_one: "{{count}} file", files_other: "{{count}} files",
+      wentWrong: "Something went wrong", cancelledAfter: "Cancelled after {{time}}", noTask: "No task yet", openAria: "{{what}} – open",
+      costSoFar: "Cost so far {{usd}}", fold: "Fold away", runningFor: "Running for {{time}}", finishedSteps: "Finished steps", details: "{{what}} – details",
+      started: "Started", took: "Took", share: "Share", stateWord: "State", decline: "Decline", allow: "Allow", retry: "Try again",
+      pause: "Pause", resume: "Resume", cancel: "Stop", log: "Log",
+    },
+    ctxWin: {
+      title: "Context window", nothing: "Nothing attached", tokensExact: "{{n}} tokens", remove: "Remove {{what}}", compacting: "Compacting…",
+      ofWindow: "{{pct}}% of the window", saved: "Saved {{n}} tokens", left: "{{n}} left", over: "{{n}} over the limit", full: "Window is full",
+      isCompacted: "{{what}} is compacted", compactOf: "Compact {{what}}", compacted: "Compacted", compact: "Compact", ofLimit: "of {{n}} tokens",
+      sr: "{{used}} of {{cap}} tokens used, {{pct}} percent", free: "{{n}} free",
+    },
     dial: {
       title: "Agent permissions", subtitle: "What it may do without asking you",
       ask: "Always ask", askHint: "Nothing happens without your OK", risky: "If risky", riskyHint: "Safe actions run, risky ones wait for you",

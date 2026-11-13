@@ -61,6 +61,8 @@ export type ComposerProps = {
   placeholder: string; onSend: (t: string, files: string[], refs: RFile[], mentions: { kind: "party" | "bot"; id: string }[], clientId: string, how?: SendHow) => void | boolean | Promise<void | boolean>
   /** where the message goes (harness · model), a quiet label */
   model?: string
+  /** the harness's mark before that label */
+  modelIcon?: ReactNode
   /** the page's own toggles, after the plus */
   left?: ReactNode; autoFocus?: boolean; className?: string; testId?: string; disabled?: boolean
   /** `busy`: the other side is working. With `onStop` there is a stop button (and Esc), and sending still works: the
@@ -79,7 +81,7 @@ export const runLabels = (tr: ReturnType<typeof useT>, steers?: boolean): RunAct
 export function Composer(props: ComposerProps) {
   return <ComposerInput key={props.draftKey} {...props} />
 }
-function ComposerInput({ placeholder, onSend, model, left, autoFocus, className, testId, disabled, busy, onStop, steers, onCommand, handle, draftKey, queue, context }: ComposerProps) {
+function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus, className, testId, disabled, busy, onStop, steers, onCommand, handle, draftKey, queue, context }: ComposerProps) {
   const tr = useT()
   const [initial] = useState(() => readDraft(draftKey))
   const [v, setV] = useState(initial.text)
@@ -209,7 +211,7 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
       <ChatComposer className={className} testId={testId} drop={drag > 0} disabled={disabled} onFocusField={() => ta.current?.focus()}
         head={(queue || up.list.length > 0) ? <>{queue}{up.list.length > 0 && <PendingList list={up.list} onRemove={(key) => { if (!inFlight.current) up.remove(key) }} />}</> : undefined}
         add={add} addLabel={tr("core:composer.add")} onAdd={onAdd} tools={left && <span className="contents max-sm:[&_[data-slot=tabs-list]]:h-7! max-sm:[&_[data-slot=tabs-trigger]]:px-2 max-sm:[&_[data-slot=tabs-trigger]]:type-footnote">{left}</span>}
-        model={model}
+        model={model} modelIcon={modelIcon}
         end={<>
           {/* once something is typed during a turn, the buttons themselves say what it can do */}
           {!(queues && has) && <span className={cn("mr-1 hidden items-center gap-1 whitespace-nowrap type-footnote text-tertiary", chat || queues ? "lg:inline-flex" : "xl:inline-flex")} aria-hidden data-composer-hint>{hint}</span>}
