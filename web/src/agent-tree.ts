@@ -211,3 +211,89 @@ export function teamRange(rows: TeamRow[]): [number, number] | null {
   if (!xs.length) return null
   return [Math.min(...xs.map((s) => s.start)), Math.max(...xs.map((s) => s.end))]
 }
+
+/** one block on the collaboration's lanes: a unit's current attempt, one of its earlier attempts, a fork, or the
+ * coordinator itself. `select` is the node a click opens (an earlier attempt opens its step, which lists its tries) */
+export type LaneSpan = {
+  key: string; select: string; node: AgentNode; bot: string | null; start: number; end: number; status: AgentStatus
+  /** an earlier attempt of a step tried again */
+  earlier: boolean
+  /** the coordinator's own span; `cutStart`/`cutEnd` when it runs past the window on either side */
+  coordinator: boolean; cutStart: boolean; cutEnd: boolean
+  /** the blocks this one picked the work up from: a unit's direct dependencies (without the ones another of them
+   * already waited for), or the block a fork was started from */
+  after: string[]
+}
+export type TeamLanes = {
+  /** the lanes in order: the coordinator's Bot first, then every Bot in the order the work reached it */
+  bots: (string | null)[]; spans: LaneSpan[]
+  /** every step in the order of the work, placed or not: the list under the lanes says what each was and how it
+   * ended; `unplaced` are the ones with no span of time yet (not started, or no figures), not on the lanes */
+  rows: TeamRow[]; unplaced: TeamRow[]
+  /** the window the lanes show: the work's own first start to its last end, reaching now only while a step runs */
+  range: [number, number] | null; live: boolean; worked: number; steps: number
+  /** who started whom: a node's key to its parent's */
+  parent: Map<string, string>
+}
+
+/** the work graph's dependencies of `unit` that are not already implied through another of them */
+function directDeps(unit: WorkflowUnit, units: WorkflowUnit[]): string[] {
+  const by = new Map(units.map((u) => [u.id, u]))
+  const reach = (id: string, seen = new Set<string>()): Set<string> => {
+    for (const d of by.get(id)?.depends_on ?? []) if (!seen.has(d)) { seen.add(d); reach(d, seen) }
+    return seen
+  }
+  return unit.depends_on.filter((d) => !unit.depends_on.some((o) => o !== d && reach(o).has(d)))
+}
+
+/** the collaboration as lanes, one per Bot: every unit, attempt and fork that has a span of time is a block on its
+ * Bot's lane; the coordinator's own span sits on its Bot's lane and is cut to the window. An earlier cycle's work
+ * (`old`) is history and never reaches now. */
+export function teamLanes(root: AgentNode, stats: TreeStat[], now: number, old = false): TeamLanes {
+  const rows = teamRows(root, stats, now)
+  const parent = new Map<string, string>()
+  walk(root, (n) => { for (const c of n.children) parent.set(c.key, n.key) })
+  const segOf = new Map<string, string>()
+  const spans: LaneSpan[] = []
+  const units = root.children.flatMap((n) => n.unit ? [n.unit] : [])
+  for (const r of rows) {
+    const nodes = [...r.tries, r.node]
+    for (const s of r.segments) {
+      const node = nodes.find((n) => n.key === s.key) ?? r.node
+      segOf.set(node.key, s.key)
+      spans.push({ key: s.key, select: r.node.key, node, bot: node.bot, start: s.start, end: s.end, status: s.status, earlier: node !== r.node, coordinator: false, cutStart: false, cutEnd: false, after: [] })
+    }
+  }
+  for (const s of spans) {
+    if (s.earlier) continue
+    const n = s.node
+    if (n.kind === "unit" && n.unit) s.after = directDeps(n.unit, units).map((id) => `unit:${id}`).filter((k) => segOf.has(k))
+    else if (n.kind === "fork") { const p = parent.get(n.key); if (p && p !== root.key && segOf.has(p)) s.after = [p] }
+  }
+  const live = !old && spans.some((s) => isActive(s.status))
+  const steps = rows.filter((r) => r.depth === 0).length
+  const worked = rows.reduce((n, r) => n + r.ms, 0)
+  const unplaced = rows.filter((r) => !r.segments.length)
+  const rs = root.item ? stats.find((s) => s.item_id === root.item) : undefined
+  let range: [number, number] | null = spans.length ? [Math.min(...spans.map((s) => s.start)), Math.max(...spans.map((s) => s.end))] : null
+  let coordLive = false
+  if (rs?.first_turn) {
+    const start = msOf(rs.first_turn)
+    const closed = rs.done_at ? msOf(rs.done_at) : rs.dropped_at ? msOf(rs.dropped_at) : null
+    // the coordinator stays open while its work goes on: its span reaches now unless it closed. Over without a
+    // recorded close, it ends with the last of its work, or – with none – its end is unknown and drawn cut (never
+    // its working time added to a wall-clock start)
+    const lastWork = spans.length ? Math.max(...spans.map((s) => s.end)) : null
+    const known = closed ?? (isOver(root.status) ? lastWork : now)
+    if (!range) { coordLive = !old && isActive(root.status); range = [start, coordLive ? now : known ?? start + 60_000] }
+    if (live) range = [range[0], Math.max(range[1], now)]
+    const end = Math.max(start, known ?? range[1])
+    if (end > range[0] && start < range[1]) spans.unshift({
+      key: root.key, select: root.key, node: root, bot: root.bot, start: Math.max(start, range[0]), end: Math.min(end, range[1]), status: root.status,
+      earlier: false, coordinator: true, cutStart: start < range[0], cutEnd: end > range[1] || known === null, after: [],
+    })
+  } else if (live && range) range = [range[0], Math.max(range[1], now)]
+  const bots: (string | null)[] = []
+  for (const s of spans) if (!bots.includes(s.bot)) bots.push(s.bot)
+  return { bots, spans, rows, unplaced, range, live: live || coordLive, worked, steps, parent }
+}

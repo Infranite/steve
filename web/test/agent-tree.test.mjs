@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { buildAgentTree, workTime, findNode, rollup, summarize, teamRange, teamRows, unitStatus } from "../src/agent-tree.ts"
+import { buildAgentTree, workTime, findNode, rollup, summarize, teamLanes, teamRange, teamRows, unitStatus } from "../src/agent-tree.ts"
 
 const item = (id, extra = {}) => ({ id, t: `title ${id}`, b: "dev", st: "run", src: ["Steve", "chat"], waits: [], ...extra })
 const unit = (id, status, extra = {}) => ({ id, title: `unit ${id}`, goal: "", bot_id: "dev", kind: "work", depends_on: [], resources: [], required: true, status, attempt: 1, ...extra })
@@ -83,4 +83,37 @@ test("team rows: a retried step is one row with every attempt's span; forks foll
   assert.equal(rows[1].segments[0].end, T + 900_000, "a running fork reaches now")
   assert.deepEqual(rows[2].segments, [], "a step not started has no bar")
   assert.deepEqual(teamRange(rows), [T, T + 900_000])
+})
+
+test("team lanes: a lane per Bot, a window that fits the work, hand-offs from direct dependencies only", () => {
+  const T = 1_700_000_000_000
+  const wf = workflow([
+    unit("a", "succeeded", { item_id: "ST-2", bot_id: "dev" }),
+    unit("b", "succeeded", { item_id: "ST-3", bot_id: "doc", depends_on: ["a"] }),
+    unit("c", "succeeded", { item_id: "ST-4", bot_id: "rev", depends_on: ["a", "b"] }),
+    unit("d", "pending", { bot_id: "dev", depends_on: ["c"] }),
+  ], { current_cycle: false })
+  const items = [item("ST-1", { b: "lead" }), ...["ST-2", "ST-3", "ST-4"].map((id) => item(id, { src: ["Steve", "workflow"], parent: { item: "ST-1" }, st: "done" }))]
+  const tree = buildAgentTree("ST-1", items, wf, 8, "running")
+  const stat = (id, first, done, ms = 1000) => ({ item_id: id, parent_id: id === "ST-1" ? null : "ST-1", depth: 1, tokens: 1, est: 0, reported: 0, agent_ms: ms, first_turn: first, done_at: done, dropped_at: null })
+  const H = 3_600_000
+  const stats = [stat("ST-1", T - H, null), stat("ST-2", T, T + H), stat("ST-3", T + H, T + 2 * H), stat("ST-4", T + 2 * H, T + 3 * H)]
+  const lanes = teamLanes(tree, stats, T + 48 * H, true)
+  assert.deepEqual(lanes.bots, ["lead", "dev", "doc", "rev"], "the coordinator's Bot first, then in the order the work reached them")
+  assert.deepEqual(lanes.range, [T, T + 3 * H], "an earlier round's window is its own hours, not up to now")
+  assert.equal(lanes.live, false)
+  const coord = lanes.spans.find((s) => s.coordinator)
+  assert.deepEqual([coord.start, coord.end, coord.cutStart, coord.cutEnd], [T, T + 3 * H, true, true], "the coordinator is cut to the window")
+  assert.deepEqual(lanes.spans.find((s) => s.key === "unit:c").after, ["unit:b"], "a hand-off already implied through another dependency is not drawn")
+  assert.deepEqual(lanes.unplaced.map((r) => r.node.key), ["unit:d"], "a step not started is listed, not placed")
+  const now = T + 5 * H
+  const running = teamLanes(buildAgentTree("ST-1", items, { ...wf, current_cycle: true, units: wf.units.map((u) => u.id === "c" ? { ...u, status: "running", activity: { state: "confirmed" } } : u) }), [...stats.slice(0, 3), stat("ST-4", T + 2 * H, null)], now)
+  assert.equal(running.live, true)
+  assert.equal(running.range[1], now, "while a step runs the window reaches now")
+  const ended = teamLanes(buildAgentTree("ST-1", items, wf, 8, "done"), stats, T + 48 * H, true)
+  const end = ended.spans.find((s) => s.coordinator)
+  assert.deepEqual([end.end, end.cutEnd], [T + 3 * H, false], "a coordinator over without a recorded close ends with the last of its work")
+  const alone = teamLanes(buildAgentTree("ST-1", [items[0]], null, 8, "done"), [stat("ST-1", T, null, 5 * H)], T + 48 * H)
+  const lone = alone.spans.find((s) => s.coordinator)
+  assert.ok(lone.cutEnd && lone.end - lone.start < 5 * H, "with no work of its own and no close, its end is unknown: cut, never its working time from its start")
 })

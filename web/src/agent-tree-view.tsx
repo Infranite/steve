@@ -1,10 +1,11 @@
 /* ── the item page's collaboration area ──
- * One row per step the coordinator started, in the order the work goes: what it was asked, which Bot did it, how
- * it ended, and a bar for when it worked, on one time axis for all rows, so a sequence reads as a staircase and
- * parallel work as overlap. A step tried again stays one row: its earlier attempts are struck segments on the
- * same bar and "passed on try 3" under its title. A row selected shows its detail beside the page (a sheet on
- * narrow pages). */
-import { useEffect, useState, type ReactNode } from "react"
+ * A lane per Bot (affectUI Agent Lanes): the coordinator's span and every step, earlier try and fork its Bot ran,
+ * each a block on one time axis, so a sequence reads as a staircase across lanes and parallel work as overlap;
+ * hand-offs are curves from the steps a step waited for. The window is the one the work took, reaching now only
+ * while something runs. Under the lanes every step is a line saying what it was, who ran it, how it ended and how
+ * long it took – the lanes show when, the list what – including steps with no span of time yet. A block selected shows its
+ * detail beside the page (a sheet on narrow pages); an earlier try opens its step, which lists the tries. */
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { BanIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleCheckIcon, CircleDashedIcon, CirclePauseIcon, GitForkIcon, HourglassIcon, LoaderCircleIcon, MessageCircleQuestionIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, RotateCcwIcon, SquareIcon, TriangleAlertIcon, XIcon } from "lucide-react"
 import { api } from "@/api"
 import { stats as statsApi } from "@/api/stats"
@@ -20,7 +21,8 @@ import { fmtN, fmtUsd } from "@/stats/format"
 import { botName, loadItem, st } from "@/store"
 import { BotAvatar } from "@/ui"
 import { orderedUnits, type Workflow } from "@/workflow"
-import { buildAgentTree, workTime, findNode, isActive, isOver, rollup, summarize, teamRange, teamRows, type AgentNode, type AgentStatus, type Cost, type Segment, type TeamRow, type TreeItem, type TreeStat } from "@/agent-tree"
+import { buildAgentTree, workTime, findNode, isActive, isOver, rollup, summarize, teamLanes, type AgentNode, type AgentStatus, type Cost, type LaneSpan, type TreeItem, type TreeStat } from "@/agent-tree"
+import { AgentLanes, type LaneAgent, type LaneTask, type LaneTaskStatus } from "@/components/affect/agent-lanes"
 
 type Action = "pause" | "resume" | "retry" | "cancel" | "single_session"
 
@@ -208,58 +210,86 @@ export function AgentTree({ at, selected, onSelect, controls = true }: { at: Age
   return <section className="min-w-0" data-agent-tree data-workflow={at.workflow ? "" : undefined}>
     {controls && at.dialogs}
     {controls && <Notices at={at} />}
-    <TeamTimeline at={at} selected={selected} onSelect={onSelect} actions={controls && <WorkflowButtons at={at} />} />
+    <TeamLanes at={at} selected={selected} onSelect={onSelect} actions={controls && <WorkflowButtons at={at} />} />
     {at.workflow && <History workflow={at.workflow} />}
   </section>
 }
 
-/* a bar's fill by how its span ended; an attempt given up is hatched, not filled, so it never reads as done */
-const BAR: Partial<Record<AgentStatus, string>> = {
-  done: "bg-foreground/25", running: "bg-blue", starting: "bg-blue/60", unconfirmed: "bg-blue/60",
-  failed: "bg-destructive/80", asking: "bg-attention", blocked: "bg-attention/60",
-  stopped: "bg-[repeating-linear-gradient(135deg,var(--color-muted-foreground)_0_1px,transparent_1px_4px)] opacity-70 ring-1 ring-inset ring-muted-foreground/50",
+/** a lane block's look by how its span ended */
+const LANE: Record<AgentStatus, LaneTaskStatus> = {
+  done: "done", running: "running", starting: "starting", unconfirmed: "starting", asking: "waiting", blocked: "blocked", failed: "failed", stopped: "stopped",
+  paused: "paused", idle: "paused", proposed: "paused", pending: "paused", waiting: "paused",
 }
-const STEP_MS = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440].map((m) => m * 60_000)
-/** a few round times across the range for the axis */
-function ticks([a, b]: [number, number], max = 4): number[] {
-  const step = STEP_MS.find((s) => (b - a) / s <= max) ?? STEP_MS[STEP_MS.length - 1]
-  const out: number[] = []
-  for (let x = Math.ceil(a / step) * step; x <= b && out.length < 12; x += step) out.push(x)
-  return out
-}
-/** re-renders every half minute while something runs, so a running bar grows */
+/** re-renders while something runs, so a running block grows into now */
 function useNow(live: boolean) {
   const [now, setNow] = useState(() => Date.now())
-  useEffect(() => { if (!live) return; const id = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(id) }, [live])
+  useEffect(() => { if (!live) return; setNow(Date.now()); const id = setInterval(() => setNow(Date.now()), 10_000); return () => clearInterval(id) }, [live])
   return now
 }
-const ROW = "grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1.5 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)_4.5rem]"
 
-/** the item page's collaboration: one row per step in the order of the work, each with a bar on one time axis */
-export function TeamTimeline({ at, selected, onSelect, actions }: { at: AgentTreeState; selected: string | null; onSelect: (k: string | null) => void; actions?: ReactNode }) {
+/** the item page's collaboration: a lane per Bot, each step it ran a block on one time axis, hand-offs between them */
+export function TeamLanes({ at, selected, onSelect, actions }: { at: AgentTreeState; selected: string | null; onSelect: (k: string | null) => void; actions?: ReactNode }) {
   const t = useT()
   const { tree, summary } = at
-  const now = useNow(!!summary?.active)
+  const now = useNow(!!summary?.active && !at.old)
+  const [box, beside] = usePanelRoom(!!selected)
   if (!tree || !summary) return null
-  const rows = teamRows(tree, at.stats, now), range = teamRange(rows)
-  const span = range ? Math.max(range[1] - range[0], 60_000) : 1
-  const pos = (x: number) => range ? ((x - range[0]) / span) * 100 : 0
+  const lanes = teamLanes(tree, at.stats, now, at.old)
+  const { range } = lanes
   const total = at.total(tree.item), c = total?.known ? costOf(total, t) : null
   const days = !!range && new Date(range[0]).toDateString() !== new Date(range[1]).toDateString()
   const label = (x: number) => days ? `${monthDayShort(x)} ${hm(x)}` : hm(x)
-  const marks = range ? ticks(range) : []
-  const steps = rows.filter((r) => r.depth === 0).length
   /* how long it took against how long its agents worked: the gap is what running at once saved */
-  const worked = rows.reduce((n, r) => n + r.ms, 0)
-  const meta = [tree.bot ? t("views:agentTree.coordinator", { name: botName(tree.bot) }) : null, t("views:agentTree.steps", { count: steps }), t("views:agentTree.agents", { count: summary.agents }),
-    range && worked > 0 ? t("views:agentTree.timeSpan", { wall: longDur(range[1] - range[0]), work: longDur(worked) }) : null]
-  const tip = (r: TeamRow, s: Segment) => {
-    const cost = at.total(s.item), w = workTime(at.stat(s.item))
-    return [r.tries.length && s.attempt ? t("views:agentTree.attempt", { n: s.attempt }) : null, t(`views:agentTree.status.${s.status}`), `${label(s.start)}–${hm(s.end)}`,
-      w ? t("views:agentTree.worked", { time: clockDur(w) }) : null, cost?.known ? costOf(cost, t).text : null].filter(Boolean).join(" · ")
+  const meta = [tree.bot ? t("views:agentTree.coordinator", { name: botName(tree.bot) }) : null, t("views:agentTree.steps", { count: lanes.steps }), t("views:agentTree.agents", { count: summary.agents }),
+    range && lanes.worked > 0 ? t("views:agentTree.timeSpan", { wall: longDur(range[1] - range[0]), work: longDur(lanes.worked) }) : null]
+  const tip = (s: LaneSpan, tries: number) => {
+    const cost = at.total(s.node.item), w = workTime(at.stat(s.node.item))
+    return [s.node.title, s.coordinator ? t("views:agentTree.lanes.coordinating") : null, (s.earlier || tries) && s.node.attempt ? t("views:agentTree.attempt", { n: s.node.attempt }) : null, t(`views:agentTree.status.${s.status}`),
+      `${label(s.start)}–${hm(s.end)}`, w ? t("views:agentTree.worked", { time: clockDur(w) }) : null, cost?.known ? costOf(cost, t).text : null].filter(Boolean).join(" · ")
   }
-  return <section className="min-w-0" data-agent-team>
-    <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5" data-agent-header>
+  const laneId = (bot: string | null) => bot ?? ""
+  const agents: LaneAgent[] = lanes.bots.map((b) => ({ id: laneId(b), name: b ? botName(b) : t("views:agentTree.noBot"), model: model(b) || undefined,
+    avatar: <BotAvatar k={b} size={24} /> }))
+  const triesOf = (key: string) => lanes.spans.filter((s) => s.earlier && s.select === key).length
+  const tasks: LaneTask[] = lanes.spans.map((s) => {
+    const n = s.node, tries = s.earlier ? 0 : n.kind === "unit" ? (at.tree?.children.filter((x) => x.kind === "attempt" && x.unitId === n.unitId).length ?? 0) : 0
+    const status = !s.earlier && !s.coordinator && n.decisions > 0 && !isOver(s.status) ? "waiting" : LANE[s.status]
+    return {
+      id: s.key, agentId: laneId(s.bot), title: s.coordinator ? t("views:agentTree.lanes.coordinating") : n.title, status, start: s.start, end: s.end, after: s.after,
+      earlier: s.earlier, cutStart: s.cutStart, cutEnd: s.cutEnd, tip: tip(s, tries), label: `${s.bot ? botName(s.bot) : t("views:agentTree.noBot")}: ${tip(s, tries)}`,
+      attrs: s.earlier ? { "data-agent-try": s.key, "data-agent-try-of": s.select, "data-agent-bar": s.status, "data-agent-status": s.status }
+        : { "data-agent-node": s.key, "data-coord": s.coordinator ? "" : undefined, "data-agent-kind": n.kind, "data-agent-status": n.status, "data-agent-bar": s.status, "data-agent-tries": tries || triesOf(s.key) || undefined, "data-agent-from": n.kind === "fork" ? lanes.parent.get(n.key) : undefined },
+    }
+  })
+  const pad = range ? Math.max(range[1] - range[0], 60_000) * 0.02 : 0
+  /* every step as a line: title, Bot, how it ended (the try it passed on), its own state and working time; a step
+   * with no span of time is not on the lanes, so its line is its only node (`data-agent-node`) */
+  const placed = new Set(lanes.spans.map((x) => x.select))
+  const list = lanes.rows.length > 0 && <ul className="flex flex-col border-t border-border/60 p-2" data-agent-steps>{lanes.rows.map((r) => {
+    const n = r.node, I = ICON[n.status], on = selected === n.key, off = !placed.has(n.key)
+    const tried = r.tries.length > 0
+    const note = tried ? n.status === "done" ? t("views:agentTree.passedOn", { n: n.attempt ?? r.tries.length + 1 }) : t("views:agentTree.retried", { count: r.tries.length })
+      : off ? n.waitingOn.length ? t("views:workflow.waitingFor", { names: n.waitingOn.join(" · ") }) : isOver(n.status) ? t("views:agentTree.lanes.noTime") : t("views:agentTree.notStarted") : null
+    const word = n.status === "done" ? null : t(`views:agentTree.status.${n.status}`)
+    const node = off ? { "data-agent-node": n.key, "data-agent-kind": n.kind, "data-agent-status": n.status, "data-agent-tries": r.tries.length || undefined, "data-agent-from": n.kind === "fork" ? lanes.parent.get(n.key) : undefined } : {}
+    return <li key={n.key}><button type="button" onClick={() => onSelect(on ? null : n.key)} aria-pressed={on} data-agent-step={n.key} {...node}
+      className={cn("flex w-full min-w-0 items-start gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors duration-120 hover:bg-accent/60", on && "bg-accent")}>
+      <span className="flex min-w-0 flex-1 items-start gap-2.5" style={{ paddingLeft: r.depth * 16 }}>
+        <I className={cn("mt-[3px] size-3.5 shrink-0", STATUS_INK[n.status], isActive(n.status) && "motion-safe:animate-spin")} strokeWidth={2.25} aria-label={t(`views:agentTree.status.${n.status}`)} />
+        <span className="min-w-0">
+          <span className={cn("block truncate type-callout", n.status === "stopped" ? "text-muted-foreground" : "text-foreground")}>{n.title}</span>
+          <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 type-footnote text-tertiary">
+            <span className="flex min-w-0 items-center gap-1.5"><BotAvatar k={n.bot} size={14} /><span className="truncate">{[n.bot ? botName(n.bot) : t("views:agentTree.noBot"), note].filter(Boolean).join(" · ")}</span></span>
+            {word && <span className={cn("shrink-0", STATUS_INK[n.status])}>· {word}</span>}
+            {n.decisions > 0 && <span className="shrink-0 font-medium text-attention">· {t("views:agentTree.asking", { count: n.decisions })}</span>}
+          </span>
+        </span>
+      </span>
+      <span className="mt-px shrink-0 whitespace-nowrap text-right type-footnote tabular-nums text-muted-foreground" title={r.ms > 0 ? t("views:agentTree.worked", { time: clockDur(r.ms) }) : undefined}>{r.ms > 0 ? longDur(r.ms) : ""}</span>
+    </button></li>
+  })}</ul>
+  return <section ref={box} className="min-w-0" data-agent-team>
+    <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5" data-agent-header>
       <h2 className="type-label text-tertiary">{t("views:agentTree.title")}</h2>
       {at.old && <span className="rounded-md bg-muted px-1.5 type-label text-muted-foreground" data-agent-old>{t("views:agentTree.earlierRound")}</span>}
       <span className="type-footnote tabular-nums text-tertiary" data-agent-count>{meta.filter(Boolean).join(" · ")}{c && <span title={c.hint} data-agent-total> · {t("views:agentTree.cost", { usd: c.text })}</span>}</span>
@@ -268,41 +298,10 @@ export function TeamTimeline({ at, selected, onSelect, actions }: { at: AgentTre
       <TreePills at={at} onSelect={(k) => onSelect(k)} />
       {actions}
     </div>
-    <div className="relative -mx-2" data-agent-rows>
-      {range && <div className={cn(ROW, "px-2 max-sm:hidden")} aria-hidden data-agent-axis>
-        <span /><span className="relative h-5">{marks.map((x) => <span key={x} className="absolute top-0 -translate-x-1/2 type-footnote tabular-nums text-tertiary" style={{ left: `${pos(x)}%` }}>{label(x)}</span>)}</span><span />
-      </div>}
-      <ul>{rows.map((r) => {
-        const n = r.node, I = ICON[n.status], on = selected === n.key
-        const tried = r.tries.length > 0
-        const note = tried ? n.status === "done" ? t("views:agentTree.passedOn", { n: n.attempt ?? r.tries.length + 1 }) : t("views:agentTree.retried", { count: r.tries.length }) : null
-        const word = n.status === "done" ? null : t(`views:agentTree.status.${n.status}`)
-        return <li key={n.key}>
-          <button type="button" onClick={() => onSelect(on ? null : n.key)} aria-pressed={on} data-agent-node={n.key} data-agent-kind={n.kind} data-agent-status={n.status} data-agent-tries={r.tries.length || undefined}
-            className={cn(ROW, "group rounded-lg px-2 py-2 text-left transition-colors duration-120 hover:bg-accent/60", on && "bg-accent")}>
-            <span className="flex min-w-0 items-start gap-2.5" style={{ paddingLeft: r.depth * 16 }}>
-              <I className={cn("mt-[3px] size-3.5 shrink-0", STATUS_INK[n.status], isActive(n.status) && "motion-safe:animate-spin")} strokeWidth={2.25} aria-label={t(`views:agentTree.status.${n.status}`)} />
-              <span className="min-w-0">
-                <span className={cn("block truncate type-callout", n.status === "stopped" ? "text-muted-foreground" : "text-foreground")}>{n.title}</span>
-                <span className="flex min-w-0 items-center gap-1.5 type-footnote text-tertiary">
-                  <BotAvatar k={n.bot} size={14} /><span className="truncate">{[n.bot ? botName(n.bot) : t("views:agentTree.noBot"), note].filter(Boolean).join(" · ")}</span>
-                  {word && <span className={cn("shrink-0", STATUS_INK[n.status])}>· {word}</span>}
-                  {n.decisions > 0 && <span className="shrink-0 font-medium text-attention">· {t("views:agentTree.asking", { count: n.decisions })}</span>}
-                </span>
-              </span>
-            </span>
-            <span className="relative min-h-3 self-stretch max-sm:order-last max-sm:col-span-2 sm:-my-2" data-agent-track>
-              {marks.map((x) => <span key={x} aria-hidden className="absolute inset-y-0 w-px bg-border/60 max-sm:hidden" style={{ left: `${pos(x)}%` }} />)}
-              {r.segments.map((s) => <span key={s.key} className={cn("absolute top-1/2 h-2 -translate-y-1/2 rounded-full", BAR[s.status] ?? "bg-muted-foreground/30", on && s.status === "done" && "bg-foreground/45")}
-                style={{ left: `${pos(s.start)}%`, width: `max(4px, ${pos(s.end) - pos(s.start)}%)` }} title={tip(r, s)} data-agent-bar={s.status} />)}
-              {!r.segments.length && <span className="absolute inset-y-0 left-0 flex max-w-full items-center truncate type-footnote text-tertiary">{n.waitingOn.length ? t("views:workflow.waitingFor", { names: n.waitingOn.join(" · ") }) : t("views:agentTree.notStarted")}</span>}
-            </span>
-            <span className="self-center whitespace-nowrap text-right type-footnote tabular-nums text-muted-foreground max-sm:row-start-1 max-sm:col-start-2" title={r.ms > 0 ? t("views:agentTree.worked", { time: clockDur(r.ms) }) : undefined}>{r.ms > 0 ? longDur(r.ms) : ""}</span>
-          </button>
-        </li>
-      })}</ul>
-      {summary.active > 0 && range && <span aria-hidden className="pointer-events-none absolute inset-y-0 hidden w-px bg-blue/40 sm:block" style={{ left: `calc(0.5rem + 15rem + 1rem + (100% - 0.5rem * 2 - 15rem - 4.5rem - 2rem) * ${pos(now) / 100})` }} />}
-    </div>
+    {range ? <AgentLanes className="transition-[padding] duration-260 ease-(--ease-out)" style={{ paddingRight: beside }} agents={agents} tasks={tasks} range={[range[0] - pad, range[1] + pad]} now={lanes.live ? now : undefined} tick={label}
+      labels={{ now: t("views:agentTree.lanes.now"), needsYou: t("views:agentTree.lanes.needsYou"), lane: (a) => t("views:agentTree.lanes.laneOf", { name: a.name }) }}
+      selected={selected} onSelect={(task) => { const s = lanes.spans.find((x) => x.key === task.id); if (s) onSelect(selected === s.select ? null : s.select) }} footer={list} />
+      : list && <div className="rounded-xl bg-card shadow-[var(--lift)] [&>ul]:border-t-0">{list}</div>}
   </section>
 }
 
@@ -366,7 +365,7 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
       {node.kind === "fork" && item?.parent?.item && <p className="mt-1 type-footnote text-muted-foreground">{t("views:agentTree.forkedFrom", { id: item.parent.item })}</p>}
     </div>
     <div className="flex flex-wrap gap-2">
-      {node.item && <Button size="sm" variant="outline" nativeButton={false} render={<a href={`#/items/${encodeURIComponent(node.item)}`} />} data-agent-open-item>{node.kind === "root" ? t("views:agentTree.openItem") : t("views:workflow.openChild")}</Button>}
+      {node.item && node.item !== at.root && <Button size="sm" variant="outline" nativeButton={false} render={<a href={`#/items/${encodeURIComponent(node.item)}`} />} data-agent-open-item>{node.kind === "root" ? t("views:agentTree.openItem") : t("views:workflow.openChild")}</Button>}
       {node.session && <Button size="sm" variant="outline" nativeButton={false} render={<a href={`#/sessions/${encodeURIComponent(node.session)}`} />}>{t("views:workflow.openSession")}</Button>}
       {canAct && running && <Button size="sm" variant="outline" disabled={at.busy || at.old} onClick={() => void at.change("cancel", u!.id)} data-workflow-cancel={u!.id}><SquareIcon />{t("views:workflow.cancelUnit")}</Button>}
       {canAct && u!.status === "succeeded" && <Button size="sm" variant="outline" disabled={at.busy || at.old || u!.attempt >= w!.max_attempts} onClick={() => at.askRework(u!.id)} data-workflow-rework={u!.id}><RotateCcwIcon />{t("views:workflow.rework")}</Button>}
@@ -423,6 +422,32 @@ export function AgentDetailPanel({ at, node, onClose }: { at: AgentTreeState; no
   return <Sheet open onOpenChange={(open) => !open && onClose()}>
     <SheetContent side="bottom" className="max-h-[85dvh] overflow-y-auto rounded-t-2xl p-4 pb-[max(1rem,env(safe-area-inset-bottom))]" showCloseButton={false} data-agent-panel>
       <SheetTitle className="sr-only">{node.title}</SheetTitle><AgentDetail at={at} node={node} onClose={onClose} /></SheetContent></Sheet>
+}
+
+/** while the detail panel is open beside the page, how far the lanes must stay clear of it so that every block can
+ * still be picked (on pages a little wider than `lg` the panel covers the main column's right edge, where now is):
+ * measured against the panel itself, again whenever either of them changes size */
+function usePanelRoom(open: boolean) {
+  const ref = useRef<HTMLElement>(null)
+  const wide = useWide()
+  const [room, setRoom] = useState(0)
+  useLayoutEffect(() => {
+    if (!open || !wide) { setRoom(0); return }
+    const panel = document.querySelector<HTMLElement>("aside[data-agent-panel]")
+    const fit = () => {
+      // where the panel rests (its layout box: it slides in with a transform), and its gap to the page's edge,
+      // kept between it and the lanes too
+      const r = ref.current?.getBoundingClientRect(), left = panel?.offsetLeft, gap = panel ? document.documentElement.clientWidth - panel.offsetLeft - panel.offsetWidth : 0
+      setRoom(r && left !== undefined ? Math.max(0, Math.ceil(r.right - (left - gap))) : 0)
+    }
+    fit()
+    const ro = new ResizeObserver(fit)
+    if (ref.current) ro.observe(ref.current)
+    if (panel) ro.observe(panel)
+    addEventListener("resize", fit)
+    return () => { ro.disconnect(); removeEventListener("resize", fit) }
+  }, [open, wide])
+  return [ref, room] as const
 }
 
 /** the page is wide enough for a panel beside its content (Tailwind `lg`) */

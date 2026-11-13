@@ -1,4 +1,4 @@
-import { AgentDetailPanel, hasAgentTree, History, Notices, TeamTimeline, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
+import { AgentDetailPanel, hasAgentTree, History, Notices, TeamLanes, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
 import { itemState, type ItemState } from "@/item-state"
 import type { AgentStatus } from "@/agent-tree"
 import { clip } from "@/thread/topics"
@@ -616,8 +616,8 @@ export function ItemView({ id }: { id: string }) {
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-3" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
             {i.dependencyWait && !!i.deps?.length && <div className="mt-4"><DependencyWaitPanel key={`${i.id}:${i.dependencyWait.cycle}`} item={i.id} wait={i.dependencyWait} /></div>}
           </section>
-          {/* who works on it: one row per step on one time axis */}
-          {tree && <TeamTimeline at={at} selected={agent?.key ?? null} onSelect={selectAgent} />}
+          {/* who works on it: a lane per Bot, its steps as blocks on one time axis */}
+          {tree && <TeamLanes at={at} selected={agent?.key ?? null} onSelect={selectAgent} />}
           {/* the conversation: what people said and what came back, under day headings; runs of process lines fold to one line */}
           <section className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center justify-between gap-2">

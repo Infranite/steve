@@ -71,6 +71,7 @@ export default {
     coordinator: "{{name}} 协调", steps_other: "{{count}} 步", earlierRound: "上一轮", timeSpan: "历时 {{wall}}，agent 共工作 {{work}}",
     passedOn: "第 {{n}} 次通过", retried_other: "重试过 {{count}} 次", notStarted: "还没开始", earlierTries: "之前的尝试", openTry: "会话", worked: "实际工作 {{time}}",
     noFigures: "没有用量记录",
+    lanes: { coordinating: "协调全程", now: "现在", needsYou: "等你", laneOf: "{{name}} 的工作", noTime: "没有时间记录" },
     status: { idle: "空闲", proposed: "提议", pending: "待调度", waiting: "等待前置", starting: "启动中", running: "运行中", unconfirmed: "待确认", asking: "等你", paused: "已暂停", blocked: "受阻", done: "完成", failed: "失败", stopped: "已停止" },
   },
   workflow: {

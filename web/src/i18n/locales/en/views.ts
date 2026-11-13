@@ -81,6 +81,7 @@ export default {
     coordinator: "Coordinated by {{name}}", steps_one: "{{count}} step", steps_other: "{{count}} steps", earlierRound: "Earlier round", timeSpan: "{{wall}} from first to last, {{work}} of agent work",
     passedOn: "Passed on try {{n}}", retried_one: "Tried again once", retried_other: "Tried again {{count}} times", notStarted: "Not started", earlierTries: "Earlier tries", openTry: "Session", worked: "worked {{time}}",
     noFigures: "No usage on record",
+    lanes: { coordinating: "Coordinating", now: "now", needsYou: "Needs you", laneOf: "{{name}}'s work", noTime: "No time on record" },
     status: { idle: "Idle", proposed: "Proposed", pending: "Queued", waiting: "Waiting", starting: "Starting", running: "Running", unconfirmed: "Unconfirmed", asking: "Needs you", paused: "Paused", blocked: "Blocked", done: "Done", failed: "Failed", stopped: "Stopped" },
   },
   workflow: {
