@@ -11,6 +11,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { t, useT } from "@/i18n";
 
 /*
  * Memory Panel (Clean) – what an AI assistant remembers about someone, and a calm place to change it, in one self-contained file.
@@ -54,17 +55,40 @@ export type PanelText = {
   useMemory: string; offNote: string; category: string; all: string; search: string; closeSearch: string;
   none: string; noneFor: (q: string) => string; noneHere: string; newMemory: string; newPlaceholder: string; newCategory: string; general: string;
 };
-const TEXT: PanelText = {
-  paused: "Paused", cancel: "Cancel", save: "Save", edit: "Edit", pause: "Pause", resume: "Resume", forget: "Forget", undo: "Undo",
-  editAria: "Edit memory", editOf: (x) => `Edit “${x}”`, pauseOf: (x) => `Pause “${x}”`, resumeOf: (x) => `Resume “${x}”`, forgetOf: (x) => `Forget “${x}”`,
-  memories: (n) => (n === 1 ? "memory" : "memories"), pausedN: (n) => `${n} paused`, forgot: ["Forgot “", "”"],
-  editing: "Enter to save · Esc to cancel", adding: "Pick a category · Enter to save", other: "Other",
-  used: "used in answers", notUsed: "paused, not used in answers", memoryOff: "memory is off", off: "Memory is off",
-  useMemory: "Use memory", offNote: "The assistant won't use or save memories in new chats. Nothing here is deleted.",
-  category: "Category", all: "All", search: "Search memories", closeSearch: "Close search",
-  none: "Nothing remembered yet", noneFor: (q) => `No memory mentions “${q}”`, noneHere: "No memories here",
-  newMemory: "New memory", newPlaceholder: "Something the assistant should remember…", newCategory: "Category of the new memory", general: "General",
-};
+/* Steve: the default words come from Steve's i18n, built when shown so they follow the language */
+const TEXT = (): PanelText => ({
+  paused: t("core:affect.memory.paused"),
+  cancel: t("core:affect.memory.cancel"),
+  save: t("core:affect.memory.save"),
+  edit: t("core:affect.memory.edit"),
+  pause: t("core:affect.memory.pause"),
+  resume: t("core:affect.memory.resume"),
+  forget: t("core:affect.memory.forget"),
+  undo: t("core:affect.memory.undo"),
+  editAria: t("core:affect.memory.editAria"),
+  editing: t("core:affect.memory.editing"),
+  adding: t("core:affect.memory.adding"),
+  other: t("core:affect.memory.other"),
+  used: t("core:affect.memory.used"),
+  notUsed: t("core:affect.memory.notUsed"),
+  memoryOff: t("core:affect.memory.memoryOff"),
+  off: t("core:affect.memory.off"),
+  useMemory: t("core:affect.memory.useMemory"),
+  offNote: t("core:affect.memory.offNote"),
+  category: t("core:affect.memory.category"),
+  all: t("core:affect.memory.all"),
+  search: t("core:affect.memory.search"),
+  closeSearch: t("core:affect.memory.closeSearch"),
+  none: t("core:affect.memory.none"),
+  noneHere: t("core:affect.memory.noneHere"),
+  newMemory: t("core:affect.memory.newMemory"),
+  newPlaceholder: t("core:affect.memory.newPlaceholder"),
+  newCategory: t("core:affect.memory.newCategory"),
+  general: t("core:affect.memory.general"),
+  editOf: (x) => t("core:affect.memory.editOf", { x }), pauseOf: (x) => t("core:affect.memory.pauseOf", { x }), resumeOf: (x) => t("core:affect.memory.resumeOf", { x }), forgetOf: (x) => t("core:affect.memory.forgetOf", { x }),
+  memories: (n) => t("core:affect.memory.memories", { count: n }), pausedN: (n) => t("core:affect.memory.pausedN", { n }), forgot: [t("core:affect.memory.forgotBefore"), t("core:affect.memory.forgotAfter")],
+  noneFor: (q) => t("core:affect.memory.noneFor", { q }),
+});
 
 export type MemoryPanelProps = {
   memories: Memory[];
@@ -405,7 +429,7 @@ export function MemoryPanel({
   defaultEnabled = true,
   onEnabledChange,
   categories,
-  title = "Memory",
+  title = t("core:affect.memory.title"),
   maxHeight = 360,
   undoFor = 5000,
   addedSource,
@@ -418,7 +442,8 @@ export function MemoryPanel({
   renderMeta,
   focus,
 }: MemoryPanelProps) {
-  const text: PanelText = { ...TEXT, ...textIn };
+  useT(); // Steve: the default words follow a change of language
+  const text: PanelText = { ...TEXT(), ...textIn };
   const uid = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -599,7 +624,7 @@ export function MemoryPanel({
   const saveAdd = () => {
     const words = newText.trim().replace(/\s+/g, " ");
     if (!words) return;
-    const memory: Memory = { id: newId(), text: words, category: addCategory, source: addedSource ?? "You added", date: today() };
+    const memory: Memory = { id: newId(), text: words, category: addCategory, source: addedSource ?? t("core:affect.memory.added"), date: today() };
     setBorn({ [memory.id]: true });
     reveal.current = memory.id;
     if (filter !== null && filter !== memory.category) setFilter(null);

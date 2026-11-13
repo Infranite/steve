@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { t, useT } from "@/i18n";
 
 /*
  * Away Summary – the "While you were away" card for a chat thread, in a single self-contained file.
@@ -70,22 +71,23 @@ export type AwaySummaryProps = {
 
 /* ---------- Helpers ---------- */
 
-const LABELS: AwaySummaryLabels = {
-  title: "While you were away",
-  since: (t) => `since ${t}`,
-  done: (n) => `${n} done`,
-  needsYou: (n) => `${n} need${n === 1 ? "s" : ""} you`,
-  failed: (n) => `${n} failed`,
-  action: { "needs-you": "Decide", done: "Open", failed: "Retry" },
-  showMore: (n) => `Show ${n} more`,
-  showLess: "Show less",
-  gotIt: "Got it",
-  collapsed: (away, n) => `You were away ${away} · ${n} update${n === 1 ? "" : "s"}`,
-  empty: "Nothing happened while you were away",
-};
+/* Steve: the default words come from Steve's i18n, built when shown so they follow the language */
+const LABELS = (): AwaySummaryLabels => ({
+  title: t("core:affect.away.title"),
+  since: (time) => t("core:affect.away.since", { time }),
+  done: (n) => t("core:affect.away.done", { n }),
+  needsYou: (n) => t("core:affect.away.needsYou", { count: n }),
+  failed: (n) => t("core:affect.away.failed", { n }),
+  action: { "needs-you": t("core:affect.away.decide"), done: t("core:affect.away.open"), failed: t("core:affect.away.retry") },
+  showMore: (n) => t("core:affect.away.showMore", { n }),
+  showLess: t("core:affect.away.showLess"),
+  gotIt: t("core:affect.away.gotIt"),
+  collapsed: (away, n) => t("core:affect.away.collapsed", { away, count: n }),
+  empty: t("core:affect.away.empty"),
+});
 /** What needs you first, then what failed, then what's done */
 const RANK: Record<AwayKind, number> = { "needs-you": 0, failed: 1, done: 2 };
-const STATE: Record<AwayKind, string> = { "needs-you": "needs you", failed: "failed", done: "done" };
+const STATE = (): Record<AwayKind, string> => ({ "needs-you": t("core:affect.away.stateNeeds"), failed: t("core:affect.away.stateFailed"), done: t("core:affect.away.stateDone") });
 
 const toMs = (v: Date | number | string) => {
   const t = v instanceof Date ? v.getTime() : typeof v === "number" ? v : new Date(v).getTime();
@@ -157,7 +159,9 @@ export function AwaySummary({
   labels: given,
   className,
 }: AwaySummaryProps) {
-  const L = { ...LABELS, ...given, action: { ...LABELS.action, ...given?.action } };
+  useT(); // Steve: the default words follow a change of language
+  const D = LABELS();
+  const L = { ...D, ...given, action: { ...D.action, ...given?.action } };
   const uid = useId();
   const cardId = `${uid}-card`;
 
@@ -244,8 +248,8 @@ export function AwaySummary({
     const changed = items.filter((it) => before.has(it.id) && before.get(it.id) !== it.kind);
     const added = items.filter((it) => !before.has(it.id));
     if (!changed.length && !added.length) return;
-    const what = [...changed, ...added].map((it) => `${it.title}: ${STATE[it.kind]}`).join(". ");
-    setAnnounce(`${what}. ${n["needs-you"] ? L.needsYou(n["needs-you"]) : "Nothing needs you"}`);
+    const what = [...changed, ...added].map((it) => `${it.title}: ${STATE()[it.kind]}`).join(". ");
+    setAnnounce(`${what}. ${n["needs-you"] ? L.needsYou(n["needs-you"]) : t("core:affect.away.nothingNeeds")}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items]);
 
@@ -304,7 +308,7 @@ export function AwaySummary({
       <li key={it.id} className="ui-awc__row" data-kind={it.kind} data-row={it.id} data-detail={it.detail ? "" : undefined}>
         <span key={it.kind} className="ui-awc__mark" data-pop={mounted ? "" : undefined}>
           <Mark kind={it.kind} />
-          <span className="ui-awc__sr">{STATE[it.kind]}: </span>
+          <span className="ui-awc__sr">{STATE()[it.kind]}: </span>
         </span>
         <span className="ui-awc__text">
           <span className="ui-awc__name" dir="auto" title={it.title}>

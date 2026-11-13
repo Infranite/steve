@@ -200,7 +200,7 @@ export function ToolCallCard({
                       <path d="M2.75 8a5.25 5.25 0 1 0 1.6-3.77" />
                       <path d="M2.5 2.5v2.75h2.75" />
                     </svg>
-                    Retry
+                    {t("core:affect.tools.retry")}
                   </button>
                 )}
               </div>
@@ -231,7 +231,7 @@ export function ToolCallCard({
 export function ToolCallGroup({
   children,
   label,
-  runningLabel = "Using tools…",
+  runningLabel = t("core:affect.tools.using"),
   duration,
   defaultOpen = false,
   open: openProp,
@@ -259,7 +259,7 @@ export function ToolCallGroup({
   const sum = calls.length && calls.every((c) => c.duration != null) ? calls.reduce((t, c) => t + (c.duration ?? 0), 0) : null;
   const ms = running ? measured : (duration ?? sum ?? measured);
 
-  const count = `Used ${calls.length.toLocaleString("en-US")} ${calls.length === 1 ? "tool" : "tools"}`;
+  const count = t("core:affect.tools.used", { count: calls.length });
   const title = running ? runningLabel : (label ?? count);
   const icons = calls.slice(-3);
 

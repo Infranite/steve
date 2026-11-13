@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { t, useT } from "@/i18n";
 
 /*
  * Agent Inbox – every background task your agents are working on, as a calm board, in a single self-contained file.
@@ -81,30 +82,31 @@ export type AgentInboxLabels = {
   showAll: string;
   collapse: string;
 };
-const defaults: AgentInboxLabels = {
-  crumb: "Agents",
-  needs: "Needs you",
-  running: "Running",
-  done: "Done",
-  waitingState: "Waiting for you",
-  runningState: "Running",
-  doneState: "Done",
-  failedState: "Failed",
-  doneIn: "Done in",
-  empty: "Nothing here",
-  approve: "Approve",
-  reject: "Reject",
-  retry: "Retry",
-  open: "Open",
-  layout: "Layout",
-  board: "Board",
-  list: "List",
-  summary: "{needs} need you, {running} running",
-  progress: "{done} of {total} plan steps done",
-  paused: "Paused",
-  showAll: "Show all {count}",
-  collapse: "Show fewer",
-};
+/* Steve: the default words come from Steve's i18n, built when shown so they follow the language */
+const defaults = (): AgentInboxLabels => ({
+  crumb: t("core:affect.inbox.crumb"),
+  needs: t("core:affect.inbox.needs"),
+  running: t("core:affect.inbox.running"),
+  done: t("core:affect.inbox.done"),
+  waitingState: t("core:affect.inbox.waitingState"),
+  runningState: t("core:affect.inbox.runningState"),
+  doneState: t("core:affect.inbox.doneState"),
+  failedState: t("core:affect.inbox.failedState"),
+  doneIn: t("core:affect.inbox.doneIn"),
+  empty: t("core:affect.inbox.empty"),
+  approve: t("core:affect.inbox.approve"),
+  reject: t("core:affect.inbox.reject"),
+  retry: t("core:affect.inbox.retry"),
+  open: t("core:affect.inbox.open"),
+  layout: t("core:affect.inbox.layout"),
+  board: t("core:affect.inbox.board"),
+  list: t("core:affect.inbox.list"),
+  summary: t("core:affect.inbox.summary"),
+  progress: t("core:affect.inbox.progress"),
+  paused: t("core:affect.inbox.paused"),
+  showAll: t("core:affect.inbox.showAll"),
+  collapse: t("core:affect.inbox.collapse"),
+});
 
 export type AgentInboxView = "board" | "list";
 
@@ -264,7 +266,7 @@ export function AgentInbox({
   onReject,
   onRetry,
   onOpen,
-  title = "Agent inbox",
+  title = t("core:affect.inbox.title"),
   view,
   defaultView = "board",
   onViewChange,
@@ -275,7 +277,8 @@ export function AgentInbox({
   labels: labelsProp,
   className,
 }: AgentInboxProps) {
-  const L: AgentInboxLabels = { ...defaults, ...labelsProp };
+  useT(); // Steve: the default words follow a change of language
+  const L: AgentInboxLabels = { ...defaults(), ...labelsProp };
   const STATE: Record<AgentTaskStatus, string> = { waiting: L.waitingState, running: L.runningState, done: L.doneState, failed: L.failedState };
   const uid = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -528,13 +531,13 @@ export function AgentInbox({
         )}
       </div>}
 
-      {/* Steve: an empty column folds to a narrow rail on the board, so the columns with cards keep their width */}
-      <div className="ui-aic__lanes" style={{ "--ui-aic-cols": lanes.map((l) => (counts[l] ? "minmax(0, 1fr)" : "2.75rem")).join(" ") } as CSSProperties}>
+      {/* Steve: every column keeps its width, an empty one says so in a quiet line */}
+      <div className="ui-aic__lanes" style={{ "--ui-aic-cols": `repeat(${lanes.length}, minmax(0, 1fr))` } as CSSProperties}>
         {lanes.map((lane) => {
           const all = list.filter((t) => laneFor(t) === lane), n = cap?.[lane];
           const folds = n !== undefined && all.length > n + 2, shown = folds && !unfolded.includes(lane) ? all.slice(0, n) : all;
           return (
-          <section key={lane} className="ui-aic__lane" aria-label={L[lane]} data-lane={lane} data-board-col={lane} data-empty={counts[lane] ? undefined : ""} title={counts[lane] ? undefined : L[lane]}>
+          <section key={lane} className="ui-aic__lane" aria-label={L[lane]} data-lane={lane} data-board-col={lane} data-empty={counts[lane] ? undefined : ""}>
             <header className="ui-aic__lane-head">
               <span className="ui-aic__lane-spark" aria-hidden="true">
                 <Spark />
@@ -714,13 +717,6 @@ const css = /* css */ `
 .ui-aic[data-view="list"] .ui-aic__lane-head { grid-template-columns: 20px auto 1fr; gap: 4px; }
 .ui-aic[data-view="list"] .ui-aic__lane-name { text-align: left; }
 .ui-aic[data-view="list"] .ui-aic__count { justify-self: start; }
-/* Steve: on a wide board an empty column is a rail with its name down the side */
-@container ui-aic (min-width: 621px) {
-  .ui-aic[data-view="board"] .ui-aic__lane[data-empty] { min-height: 12rem; }
-  .ui-aic[data-view="board"] .ui-aic__lane[data-empty] .ui-aic__lane-head { display: flex; flex-direction: column; height: auto; padding: 12px 0; gap: 8px; }
-  .ui-aic[data-view="board"] .ui-aic__lane[data-empty] .ui-aic__lane-name { writing-mode: vertical-rl; }
-  .ui-aic[data-view="board"] .ui-aic__lane[data-empty] .ui-aic__cards { display: none; }
-}
 .ui-aic__lanes { animation: ui-aic-in 320ms ease both; }
 
 @keyframes ui-aic-spin { to { transform: rotate(360deg); } }
@@ -760,4 +756,6 @@ const css = /* css */ `
 }
 
 /* Steve: dark mode comes with the tokens above */
+/* Steve: in the dark a lighter surface is nearer – the columns sit between the page and the cards */
+:where(.dark, [data-theme="dark"]) .ui-aic { --ui-aic-lane: color-mix(in srgb, var(--aui-surface) 45%, transparent); }
 `;

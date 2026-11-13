@@ -938,6 +938,9 @@ const css = /* css */ `
 .ui-cwfc__title { flex: none; max-width: 100%; overflow: hidden; color: var(--ui-cwfc-ink); text-overflow: ellipsis; }
 .ui-cwfc__row[data-parent] .ui-cwfc__title { font-weight: 500; color: var(--ui-cwfc-strong); }
 .ui-cwfc__model { min-width: 0; overflow: hidden; font-size: 12px; color: var(--ui-cwfc-muted); text-overflow: ellipsis; }
+/* Steve: a long title gives way to its agent rather than leave a sliver of it – the title ends in an ellipsis, the agent stays whole */
+.ui-cwfc__title { flex: 0 1 auto; min-width: 0; }
+.ui-cwfc__model { flex: none; max-width: 40%; }
 .ui-cwfc__more { flex: none; height: 18px; margin-left: 6px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-cwfc-fill); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-cwfc-text); font-variant-numeric: tabular-nums; animation: ui-cwfc-pop 220ms var(--ui-cwfc-ease) both; }
 .ui-cwfc__flag { flex: none; height: 16px; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--ui-cwfc-top-bg); font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--ui-cwfc-top-fg); animation: ui-cwfc-pop 260ms var(--ui-cwfc-ease) both; }
 .ui-cwfc__state { display: grid; flex: none; place-items: center; width: 16px; margin-left: 4px; }

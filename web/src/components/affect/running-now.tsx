@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type FocusEvent, type KeyboardEvent, type ReactNode } from "react";
+import { t, useT } from "@/i18n";
 
 /*
  * Running Now (Clean) – a live status of background agent tasks, in a single self-contained file.
@@ -67,23 +68,24 @@ export type RunningNowProps = {
   className?: string;
 };
 
-const defaults: RunningNowLabels = {
-  title: "Background tasks",
-  running: "running",
-  needsYou: "need you",
-  needsYouOne: "needs you",
-  needsYouBadge: "Needs you",
-  paused: "Paused",
-  pausedCount: "paused",
-  done: "Done",
-  pause: "Pause",
-  resume: "Resume",
-  open: "Open",
-  openAll: "Open Tasks",
-  empty: "Nothing running right now",
-  idle: "No tasks running",
-  stepsOf: "{done} of {total} steps",
-};
+/* Steve: the default words come from Steve's i18n, built when shown so they follow the language */
+const defaults = (): RunningNowLabels => ({
+  title: t("core:affect.running.title"),
+  running: t("core:affect.running.running"),
+  needsYou: t("core:affect.running.needsYou"),
+  needsYouOne: t("core:affect.running.needsYouOne"),
+  needsYouBadge: t("core:affect.running.needsYouBadge"),
+  paused: t("core:affect.running.paused"),
+  pausedCount: t("core:affect.running.pausedCount"),
+  done: t("core:affect.running.done"),
+  pause: t("core:affect.running.pause"),
+  resume: t("core:affect.running.resume"),
+  open: t("core:affect.running.open"),
+  openAll: t("core:affect.running.openAll"),
+  empty: t("core:affect.running.empty"),
+  idle: t("core:affect.running.idle"),
+  stepsOf: t("core:affect.running.stepsOf"),
+});
 
 /* ---------- Helpers ---------- */
 
@@ -114,8 +116,9 @@ export function RunningNow({
   labels: labelsProp,
   className,
 }: RunningNowProps) {
+  useT(); // Steve: the default words follow a change of language
   // A custom needsYou without its singular is used for one task too, so the words never mix
-  const labels: RunningNowLabels = { ...defaults, ...(labelsProp?.needsYou && !labelsProp.needsYouOne ? { needsYouOne: labelsProp.needsYou } : null), ...labelsProp };
+  const labels: RunningNowLabels = { ...defaults(), ...(labelsProp?.needsYou && !labelsProp.needsYouOne ? { needsYouOne: labelsProp.needsYou } : null), ...labelsProp };
   const list = (Array.isArray(tasks) ? tasks : []).filter((t): t is RunningTask => !!t && typeof t === "object" && !!t.id);
   const [openState, setOpenState] = useState(defaultOpen);
   const open = openProp ?? openState;

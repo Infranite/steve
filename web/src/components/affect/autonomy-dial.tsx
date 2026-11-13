@@ -2,6 +2,7 @@
 "use client";
 
 import { Children, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { t, useT } from "@/i18n";
 
 /*
  * Autonomy Dial – how much an agent may do on its own, in a single self-contained file.
@@ -83,25 +84,26 @@ export const asksFirst = (action: AgentAction, level: AutonomyLevel, pinned: str
 
 /* ---------- Helpers ---------- */
 
-const TEXT: DialText = {
+/* Steve: the default words come from Steve's i18n, built when shown so they follow the language */
+const TEXT = (): DialText => ({
   levels: [
-    { label: "Always ask", hint: "Nothing happens without your OK" },
-    { label: "If risky", hint: "Safe actions run, risky ones wait for you" },
-    { label: "Full auto", hint: "Everything runs, except what you locked" },
+    { label: t("core:affect.dial.ask"), hint: t("core:affect.dial.askHint") },
+    { label: t("core:affect.dial.risky"), hint: t("core:affect.dial.riskyHint") },
+    { label: t("core:affect.dial.auto"), hint: t("core:affect.dial.autoHint") },
   ],
-  group: "Autonomy",
-  own: "Runs on its own",
-  ask: "Asks you first",
-  ownEmpty: "Every action waits for you",
-  askEmpty: "The agent runs everything itself",
-  risky: "Risky",
-  destructive: "Destructive",
-  current: "Current",
-  locked: "Always asks",
-  lock: (label) => `Always ask before: ${label}`,
-  unlock: (label) => `${label}: always asks – unlock`,
-  announce: (level, own, ask) => `${level}: ${own} on its own, ${ask} ask first`,
-};
+  group: t("core:affect.dial.group"),
+  own: t("core:affect.dial.own"),
+  ask: t("core:affect.dial.asks"),
+  ownEmpty: t("core:affect.dial.ownEmpty"),
+  askEmpty: t("core:affect.dial.askEmpty"),
+  risky: t("core:affect.dial.riskyTag"),
+  destructive: t("core:affect.dial.destructive"),
+  current: t("core:affect.dial.current"),
+  locked: t("core:affect.dial.locked"),
+  lock: (label) => t("core:affect.dial.lock", { label }),
+  unlock: (label) => t("core:affect.dial.unlock", { label }),
+  announce: (level, own, ask) => t("core:affect.dial.announce", { level, own, ask }),
+});
 const LEVEL_IDS: AutonomyLevel[] = [0, 1, 2];
 const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 /** A calm in-and-out – the rows settle without a snap */
@@ -183,8 +185,8 @@ export function AutonomyDial({
   pinned,
   defaultPinned = [],
   onPinnedChange,
-  title = "Agent permissions",
-  subtitle = "What it may do without asking you",
+  title = t("core:affect.dial.title"),
+  subtitle = t("core:affect.dial.subtitle"),
   className,
   text: textIn,
   lockable = true,
@@ -195,7 +197,8 @@ export function AutonomyDial({
   bullets = true,
   children,
 }: AutonomyDialProps) {
-  const text: DialText = { ...TEXT, ...textIn };
+  useT(); // Steve: the default words follow a change of language
+  const text: DialText = { ...TEXT(), ...textIn };
   const LEVELS = LEVEL_IDS.map((id) => ({ id, ...text.levels[id] }));
   const RISK: Record<ActionRisk, string> = { safe: "", risky: text.risky, destructive: text.destructive };
   const uid = useId();

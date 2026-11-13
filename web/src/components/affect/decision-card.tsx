@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { t, useT } from "@/i18n";
 
 /*
  * Decision Card – a question from an agent, asked the way Claude asks one, in a single self-contained file.
@@ -95,22 +96,23 @@ export type DecisionCardProps = {
   className?: string;
 };
 
-const LABELS: DecisionCardLabels = {
-  needsYou: "Needs you",
-  later: "Later",
-  show: "Show",
-  recommended: "Recommended",
-  approve: "Approve",
-  decline: "Decline",
-  own: "Something else…",
-  send: "Send",
-  answered: "Answered",
-  previous: "Previous decision",
-  next: "Next decision",
-  allDone: "Nothing else waits",
-  waiting: (n) => (n === 1 ? "1 decision waiting" : `${n.toLocaleString("en-US")} decisions waiting`),
-  of: (i, n) => `${i} of ${n}`,
-};
+/* Steve: the default words come from Steve's i18n, built when shown so they follow the language */
+const LABELS = (): DecisionCardLabels => ({
+  needsYou: t("core:affect.decision.needsYou"),
+  later: t("core:affect.decision.later"),
+  show: t("core:affect.decision.show"),
+  recommended: t("core:affect.decision.recommended"),
+  approve: t("core:affect.decision.approve"),
+  decline: t("core:affect.decision.decline"),
+  own: t("core:affect.decision.own"),
+  send: t("core:affect.decision.send"),
+  answered: t("core:affect.decision.answered"),
+  previous: t("core:affect.decision.previous"),
+  next: t("core:affect.decision.next"),
+  allDone: t("core:affect.decision.allDone"),
+  waiting: (n) => t("core:affect.decision.waiting", { count: n }),
+  of: (i, n) => t("core:affect.decision.of", { i, n }),
+});
 
 type Row = { id: string; title: string; summary?: string; recommended?: boolean; preview?: ReactNode; blocks?: DecisionBlock[]; attrs?: Record<string, string | undefined>; answer: DecisionAnswer };
 
@@ -157,7 +159,8 @@ const Blocks = ({ blocks }: { blocks: DecisionBlock[] }) => (
 /* ---------- The card ---------- */
 
 export function DecisionCard({ decisions, onDecide, onLater, defaultFolded = false, reveal, hold = false, later: withLater = true, labels, className }: DecisionCardProps) {
-  const L: DecisionCardLabels = { ...LABELS, ...labels };
+  useT(); // Steve: the default words follow a change of language
+  const L: DecisionCardLabels = { ...LABELS(), ...labels };
   // Answered here – hidden at once, until the array you pass drops them too
   const [gone, setGone] = useState<ReadonlySet<string>>(() => new Set());
   useEffect(() => {

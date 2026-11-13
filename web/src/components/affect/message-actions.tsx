@@ -2,6 +2,7 @@
 "use client";
 
 import { Fragment, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
+import { t, useT } from "@/i18n";
 
 /*
  * Message Actions (Clean) – the small bar under an AI chat message, in one self-contained file.
@@ -155,7 +156,9 @@ const cleanActions = (list: unknown): MessageActionKey[] =>
 /** A whole, finite number or the fallback */
 const whole = (n: unknown, fallback: number) => (typeof n === "number" && Number.isFinite(n) ? Math.floor(n) : fallback);
 const fmt = (n: number) => n.toLocaleString("en-US");
-const DEFAULT_REASONS = ["Not accurate", "Too long", "Didn't follow instructions", "Other"];
+/* Steve: the reasons in the reader's language; the last one opens the text field */
+const OTHER = () => t("core:affect.actions.other");
+const DEFAULT_REASONS = () => [t("core:affect.actions.notAccurate"), t("core:affect.actions.tooLong"), t("core:affect.actions.ignored"), OTHER()];
 
 export function MessageActions({
   text,
@@ -168,16 +171,17 @@ export function MessageActions({
   onRegenerate,
   regenerating = false,
   onFeedback,
-  reasons = DEFAULT_REASONS,
+  reasons = DEFAULT_REASONS(),
   onSpeak,
   speaking,
   speakDuration,
   quiet = true,
-  label = "Message actions",
-  copyLabels = { copy: "Copy", copied: "Copied" },
+  label = t("core:affect.actions.label"),
+  copyLabels = { copy: t("core:affect.actions.copy"), copied: t("core:affect.actions.copied") },
   more = [],
   className,
 }: MessageActionsProps) {
+  useT(); // Steve: the default words follow a change of language
   const uid = useId();
   const actions = cleanActions(actionsProp);
   const count = Math.max(1, whole(typeof versions === "number" ? versions : Array.isArray(versions) ? versions.length : 1, 1));
@@ -205,7 +209,7 @@ export function MessageActions({
     if (next === index) return;
     if (version === undefined) setInner(next);
     onVersionChange?.(next);
-    announce(`Version ${fmt(next + 1)} of ${fmt(count)}`);
+    announce(t("core:affect.actions.version", { i: fmt(next + 1), n: fmt(count) }));
   };
 
   /* ----- Status line for screen readers ----- */
@@ -235,7 +239,7 @@ export function MessageActions({
   const regenerate = () => {
     setSpin((s) => s + 1);
     onRegenerate?.();
-    announce("Regenerating");
+    announce(t("core:affect.actions.regenerating"));
   };
 
   /* ----- Feedback ----- */
@@ -248,7 +252,7 @@ export function MessageActions({
     setVote("up");
     setPanel(false);
     onFeedback?.("up");
-    announce("Marked as good response");
+    announce(t("core:affect.actions.markedGood"));
   };
   const thumbsDown = () => {
     if (vote === "down") {
@@ -263,13 +267,13 @@ export function MessageActions({
     setReason(null);
     setOther("");
     onFeedback?.("down");
-    announce("Marked as bad response. Tell us what went wrong below");
+    announce(t("core:affect.actions.markedBad"));
   };
   const send = () => {
     if (!reason || sent) return;
-    onFeedback?.("down", reason === "Other" ? other.trim() || "Other" : reason);
+    onFeedback?.("down", reason === OTHER() ? other.trim() || OTHER() : reason);
     setSent(true);
-    announce("Thanks for the feedback");
+    announce(t("core:affect.actions.thanks"));
   };
   useEffect(() => {
     if (!sent) return;
@@ -289,12 +293,12 @@ export function MessageActions({
   const duration = typeof speakDuration === "number" && speakDuration > 0 ? speakDuration : Math.max(2600, words * 380);
   useEffect(() => {
     if (speaking !== undefined || !innerSpeaking) return;
-    const t = window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       setInnerSpeaking(false);
       onSpeak?.(false);
-      announce("Finished reading");
+      announce(t("core:affect.actions.finished"));
     }, duration);
-    return () => window.clearTimeout(t);
+    return () => window.clearTimeout(timer);
     // onSpeak is read when the timer ends – a new function each render must not restart it
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [innerSpeaking, speaking, duration]);
@@ -302,7 +306,7 @@ export function MessageActions({
     const next = !playing;
     if (speaking === undefined) setInnerSpeaking(next);
     onSpeak?.(next);
-    announce(next ? "Reading aloud" : "Stopped reading");
+    announce(next ? t("core:affect.actions.reading") : t("core:affect.actions.stopped"));
   };
 
   const active = Boolean(copied) || panel || playing || regenerating;
@@ -366,8 +370,8 @@ export function MessageActions({
         <span className="ui-mac__regen" key="regenerate">
           {button({
             key: "regenerate",
-            tip: regenerating ? "Writing…" : "Regenerate",
-            labelText: "Regenerate response",
+            tip: regenerating ? t("core:affect.actions.writing") : t("core:affect.actions.regenerate"),
+            labelText: t("core:affect.actions.regenerateLabel"),
             onClick: regenerate,
             extra: { "data-busy": regenerating ? "" : undefined },
             children: (
@@ -379,12 +383,12 @@ export function MessageActions({
             ),
           })}
           <span className="ui-mac__versions" data-open={count > 1 ? "" : undefined} inert={count < 2}>
-            <span className="ui-mac__versions-clip" role="group" aria-label="Versions">
+            <span className="ui-mac__versions-clip" role="group" aria-label={t("core:affect.actions.versions")}>
               <button
                 type="button"
                 className="ui-mac__step"
                 data-dir="prev"
-                aria-label="Previous version"
+                aria-label={t("core:affect.actions.prev")}
                 disabled={index === 0}
                 onClick={() => goTo(index - 1)}
               >
@@ -401,7 +405,7 @@ export function MessageActions({
                 type="button"
                 className="ui-mac__step"
                 data-dir="next"
-                aria-label="Next version"
+                aria-label={t("core:affect.actions.next")}
                 disabled={index >= count - 1}
                 onClick={() => goTo(index + 1)}
               >
@@ -416,8 +420,8 @@ export function MessageActions({
         <Fragment key="feedback">
           {button({
           key: "up",
-          tip: vote === "up" ? "Thanks!" : "Good response",
-          labelText: "Good response",
+          tip: vote === "up" ? t("core:affect.actions.thanksTip") : t("core:affect.actions.good"),
+          labelText: t("core:affect.actions.good"),
           pressed: vote === "up",
           onClick: thumbsUp,
           children: (
@@ -428,8 +432,8 @@ export function MessageActions({
         })}
         {button({
           key: "down",
-          tip: "Bad response",
-          labelText: "Bad response",
+          tip: t("core:affect.actions.bad"),
+          labelText: t("core:affect.actions.bad"),
           pressed: vote === "down",
           expanded: panel,
           controls: `${uid}-feedback`,
@@ -445,8 +449,8 @@ export function MessageActions({
       );
     return button({
       key: "speak",
-      tip: playing ? "Stop" : "Read aloud",
-      labelText: playing ? "Stop reading" : "Read aloud",
+      tip: playing ? t("core:affect.actions.stop") : t("core:affect.actions.readAloud"),
+      labelText: playing ? t("core:affect.actions.stopReading") : t("core:affect.actions.readAloud"),
       pressed: playing,
       onClick: speak,
       children: (
@@ -497,7 +501,7 @@ export function MessageActions({
                 <span id={`${uid}-ask`} className="ui-mac__ask">
                   What went wrong?
                 </span>
-                <button type="button" className="ui-mac__close" aria-label="Close feedback" onClick={closePanel}>
+                <button type="button" className="ui-mac__close" aria-label={t("core:affect.actions.closeFeedback")} onClick={closePanel}>
                   <Glyph d={icons.close} />
                 </button>
               </div>
@@ -528,23 +532,23 @@ export function MessageActions({
                     {sent ? (
                       <>
                         <Glyph d={icons.tick} />
-                        Thanks!
+                        {t("core:affect.actions.thanksTip")}
                       </>
                     ) : (
-                      "Send"
+                      t("core:affect.actions.send")
                     )}
                   </Swap>
                 </button>
               </div>
-              {Array.isArray(reasons) && reasons.includes("Other") && (
-                <div className="ui-mac__fold" data-open={reason === "Other" && !sent ? "" : undefined} inert={reason !== "Other" || sent}>
+              {Array.isArray(reasons) && reasons.includes(OTHER()) && (
+                <div className="ui-mac__fold" data-open={reason === OTHER() && !sent ? "" : undefined} inert={reason !== OTHER() || sent}>
                   <div className="ui-mac__clip">
                     <input
                       className="ui-mac__input"
                       value={other}
-                      placeholder="Tell us more (optional)"
+                      placeholder={t("core:affect.actions.tellMore")}
                       dir="auto"
-                      aria-label="What went wrong, in your words"
+                      aria-label={t("core:affect.actions.whatWrong")}
                       onChange={(e) => setOther(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") send();

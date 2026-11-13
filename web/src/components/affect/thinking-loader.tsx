@@ -2,6 +2,8 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { t, useT } from "@/i18n";
+import { clockDur } from "@/i18n/format";
 
 /*
  * Thinking Loader (clean style) – a small "the model is working" chip, in a single self-contained file.
@@ -31,31 +33,27 @@ export type ThinkingLoaderProps = {
   className?: string;
 };
 
-const DEFAULT_PHASES = ["Thinking", "Searching the web", "Reading sources", "Writing response"];
+/* Steve: the phases and the done line in the reader's language */
+const DEFAULT_PHASES = () => [t("core:affect.thinking.think"), t("core:affect.thinking.search"), t("core:affect.thinking.read"), t("core:affect.thinking.write")];
 const RAYS = Array.from({ length: 8 }, (_, i) => i);
-// 75s reads "1m 15s", a long run "2h 05m" or "3d 4h"
-const took = (s: number) => {
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  const h = Math.floor(m / 60);
-  return h < 24 ? `${h}h ${String(m % 60).padStart(2, "0")}m` : `${Math.floor(h / 24)}d ${h % 24}h`;
-};
+// Steve: the transcript's own duration words ("1 分 15 秒")
+const took = (s: number) => clockDur(s * 1000);
 
 export function ThinkingLoader({
-  phases: phasesProp = DEFAULT_PHASES,
+  phases: phasesProp = DEFAULT_PHASES(),
   interval: intervalProp = 2200,
   phase,
   loop = false,
   done = false,
-  doneLabel = (s) => `Thought for ${took(s)}`,
+  doneLabel = (s) => t("core:affect.thinking.done", { time: took(s) }),
   size = "md",
   variant = "pill",
   className,
 }: ThinkingLoaderProps) {
+  useT(); // Steve: the default words follow a change of language
   // An empty or missing list still says something; 0 or NaN never spins the timer every frame
   const given = Array.isArray(phasesProp) ? phasesProp.map((p) => String(p ?? "")) : [];
-  const phases = given.length ? given : DEFAULT_PHASES.slice(0, 1);
+  const phases = given.length ? given : DEFAULT_PHASES().slice(0, 1);
   const interval = Number.isFinite(intervalProp) && intervalProp > 0 ? Math.max(intervalProp, 200) : 2200;
   const [step, setStep] = useState(0);
   const [started, setStarted] = useState(() => Date.now());

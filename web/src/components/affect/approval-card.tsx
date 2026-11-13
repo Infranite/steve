@@ -10,6 +10,8 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import { t, useT } from "@/i18n";
+import { clockDur } from "@/i18n/format";
 
 /*
  * Approval Card – an AI agent asks before it does something consequential, in a single self-contained file.
@@ -75,7 +77,8 @@ export type ApprovalCardProps = {
   className?: string;
 };
 
-const RISK_LABEL: Record<ApprovalRisk, string> = { low: "Low", medium: "Medium", high: "High" };
+/* Steve: words from Steve's i18n, built when shown so they follow the language */
+const RISK_LABEL = (): Record<ApprovalRisk, string> => ({ low: t("core:affect.risk.low"), medium: t("core:affect.risk.medium"), high: t("core:affect.risk.high") });
 
 export function ApprovalCard({
   title,
@@ -93,19 +96,20 @@ export function ApprovalCard({
   expiresIn,
   onExpire,
   allowAlways = true,
-  alwaysLabel = "Always allow this action",
-  approveLabel = "Approve",
-  denyLabel = "Deny",
-  editLabel = "Edit",
+  alwaysLabel = t("core:affect.approval.always"),
+  approveLabel = t("core:affect.approval.approve"),
+  denyLabel = t("core:affect.approval.deny"),
+  editLabel = t("core:affect.approval.edit"),
   shortcuts = true,
   label,
   actions = "card",
-  resolvedLabels = { approved: "Approved", denied: "Denied", expired: "Expired" },
+  resolvedLabels = { approved: t("core:affect.approval.approved"), denied: t("core:affect.approval.denied"), expired: t("core:affect.approval.expired") },
   approveAttrs,
   denyAttrs,
   attrs,
   className,
 }: ApprovalCardProps) {
+  useT(); // Steve: the default words follow a change of language
   const id = useId();
   const [inner, setInner] = useState<ApprovalStatus>(defaultStatus);
   const status = statusProp ?? inner;
@@ -321,7 +325,7 @@ export function ApprovalCard({
             <circle cx="8" cy="8" r="6" />
             <path d="M8 5v3.2l2 1.3" />
           </svg>
-          Expires in {clock(secondsLeft)}
+          {t("core:affect.approval.expiresIn", { time: clock(secondsLeft) })}
         </span>
       )}
       <div className="ui-apc__actions">
@@ -439,7 +443,7 @@ export function ApprovalCard({
               {risk && (
                 <span className="ui-apc__risk" data-risk={risk}>
                   <span className="ui-apc__risk-dot" aria-hidden="true" />
-                  {RISK_LABEL[risk]}
+                  {RISK_LABEL()[risk]}
                   <span className="ui-apc__risk-word"> risk</span>
                 </span>
               )}
@@ -469,7 +473,7 @@ export function ApprovalCard({
 
           {total > 0 && (
             <span className="ui-apc__sr" id={leaving ? undefined : timerId}>
-              {`Expires in ${spoken(secondsLeft)} unless approved. The timer pauses while the card is hovered or focused.`}
+              {t("core:affect.approval.expiresSr", { time: spoken(secondsLeft) })}
             </span>
           )}
         </div>
@@ -522,18 +526,18 @@ function clock(s: number) {
 }
 
 /** For screen readers: 42 seconds, 5 minutes, 26 hours */
+/* Steve: the page's own duration words */
 function spoken(s: number) {
-  const [n, unit] = s < 120 ? [s, "second"] : s < 7200 ? [Math.round(s / 60), "minute"] : [Math.round(s / 3600), "hour"];
-  return `${n} ${unit}${n === 1 ? "" : "s"}`;
+  return clockDur(s * 1000);
 }
 
 /** just now, 4 min ago, 2 h ago */
-function ago(t: number) {
-  const s = Math.floor((Date.now() - t) / 1000);
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  return `${Math.floor(s / 86400)} d ago`;
+function ago(at: number) {
+  const s = Math.floor((Date.now() - at) / 1000);
+  if (s < 60) return t("core:affect.approval.justNow");
+  if (s < 3600) return t("core:affect.approval.minAgo", { n: Math.floor(s / 60) });
+  if (s < 86400) return t("core:affect.approval.hAgo", { n: Math.floor(s / 3600) });
+  return t("core:affect.approval.dAgo", { n: Math.floor(s / 86400) });
 }
 
 /* ---------- Styles ---------- */
