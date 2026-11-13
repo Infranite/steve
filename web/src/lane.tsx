@@ -75,7 +75,7 @@ export function LaneSection({ project }: { project: string }) {
   useEffect(() => { setLane(null); setErr(null); api.lane(project).then(setLane, (e) => setErr(errMsg(e))) }, [project])
   return (
     <section data-lane>
-      <SectionLabel className="text-tertiary">{t("shell:lane.title")}</SectionLabel>
+      <SectionLabel>{t("shell:lane.title")}</SectionLabel>
       {err ? <Group><Row title={t("shell:lane.unrecognized")} sub={err} /></Group>
         : !lane ? <Group><Row title={<span className="inline-flex items-center gap-2 text-muted-foreground"><Spinner />{t("shell:lane.loading")}</span>} /></Group>
         : <Group>

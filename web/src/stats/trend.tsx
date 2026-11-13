@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { stats, type Filter, type Group, type Metric } from "@/api/stats"
 import { Segmented } from "@/ui"
 import { Select } from "@/view-shared"
-import { Chart, ChartBody, ChartHead, ChartTable, fold, seriesColor, TOOL, type Kind } from "@/stats/chart"
+import { Chart, ChartBody, ChartHead, ChartTable, fold, seriesColor, type Kind } from "@/stats/chart"
 import { Loading, ModeSwitch } from "@/stats/overview"
 import { t, useT } from "@/i18n"
 import { bucketName, fmtN, fmtPct, fmtRange, fmtUsd, oneDay, zoneName, useStats } from "@/stats/format"
@@ -54,7 +54,7 @@ export function Trend({ f, fkey, live, range, tz, picked, onPick, children }: { 
         legend={d && !one ? d.series.map((l, i) => ({ label: l.label, c: seriesColor(i, l.key), line: kind === "line" })) : undefined}
         right={<>
           <Segmented size="sm" value={tab} onChange={(v) => { setTab(v); setGroup(GROUP_KEYS[v][0]) }} options={TABS()} />
-          {GROUP_KEYS[tab].length > 1 && <Select value={g} onChange={(v) => setGroup(v as Group)} options={GROUP_KEYS[tab].map((v) => ({ v, l: groupLabel(v) }))} testId="trend-group" className={TOOL} />}
+          {GROUP_KEYS[tab].length > 1 && <Select value={g} onChange={(v) => setGroup(v as Group)} options={GROUP_KEYS[tab].map((v) => ({ v, l: groupLabel(v) }))} testId="trend-group" />}
           <ModeSwitch table={table} set={setTable} />
         </>} />
       <ChartBody>

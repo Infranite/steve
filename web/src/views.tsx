@@ -7,7 +7,7 @@ import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
 import { usePeopleOn } from "@/api/people"
 import { Files } from "@/attach"
-import { PANEL_W, SessionCards } from "@/chat2"
+import { SessionCards } from "@/chat2"
 import { Markdown } from "@/components/markdown"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
@@ -35,9 +35,8 @@ import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
 import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
-import { BotAvatar, BotName, permissionQuestion, Chips, closeSheet, useScrollMore, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle } from "@/ui"
+import { BotAvatar, BotName, permissionQuestion, Chips, closeSheet, useScrollMore, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle, Chevron, Panel, Section, Tile, PANEL_W } from "@/ui"
 import { ChoiceCards, Count, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
-import { Chevron, Panel, Section, Tile } from "@/settings-kit"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
 import { YoloPill, yoloState } from "@/yolo/switch"
 import { RunState } from "@/yolo/status"
@@ -84,9 +83,9 @@ export function InboxView() {
         <div className="flex flex-col gap-8">
           {types.map((ty) => {
             const g = xs.filter((c) => c.w.type === ty)
-            return g.length ? <section key={ty} className="anim-in"><SectionLabel className="text-tertiary">{WT[ty]}<Count n={g.length} /></SectionLabel><div className="flex flex-col gap-3">{g.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} />)}</div></section> : null
+            return g.length ? <section key={ty} className="anim-in"><SectionLabel>{WT[ty]}<Count n={g.length} /></SectionLabel><div className="flex flex-col gap-3">{g.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} />)}</div></section> : null
           })}
-          {sz.length > 0 && <section data-snoozed><SectionLabel className="text-tertiary">{t("views:inbox.snoozed")}<Count n={sz.length} /></SectionLabel>
+          {sz.length > 0 && <section data-snoozed><SectionLabel>{t("views:inbox.snoozed")}<Count n={sz.length} /></SectionLabel>
             <Group>{sz.map((i) => <Row key={i.id} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0">{i.t}</span></span>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: lang() === "zh-CN" ? i.snooze : nearTime(i.snoozeUntil) })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>)}</Group></section>}
         </div>
       </>}
@@ -700,11 +699,6 @@ export function ItemView({ id }: { id: string }) {
   )
 }
 
-/* a finished turn is one quiet line under the conversation; only a running or waiting turn keeps its box. On a phone the
- * run bar keeps the state and the time, not the step summary */
-const RUNBAR_QUIET = "[&_:is([data-runbar=done],[data-runbar=stop],[data-runbar=ended])]:min-h-8 [&_:is([data-runbar=done],[data-runbar=stop],[data-runbar=ended])]:border-0 [&_:is([data-runbar=done],[data-runbar=stop],[data-runbar=ended])]:bg-transparent [&_:is([data-runbar=done],[data-runbar=stop],[data-runbar=ended])]:px-0 [&_:is([data-runbar=done],[data-runbar=stop],[data-runbar=ended])]:py-1 max-sm:[&_[data-runbar]_[data-doing]]:hidden"
-/* the relation graph in a side panel: a muted field, not a frame holding framed cards */
-const GRAPH_FLAT = "[&_[data-graph]]:border-0 [&_[data-graph]]:bg-muted/60 [&_[data-graph-detail]]:border-0 [&_[data-graph-detail]]:bg-muted/60 [&_[data-graph-empty]]:border-0 [&_[data-graph-empty]]:bg-muted/60"
 export function SessionView({ k }: { k: string }) {
   const t = useT()
   const [mode, setMode] = useState<"插话" | "排队">("插话"), [renaming, setRenaming] = useState(false)
@@ -764,7 +758,7 @@ export function SessionView({ k }: { k: string }) {
           actions={<>{!s.ro && <SessionStats id={k} />}{/* the runtime line under the conversation says it too: below xl the title needs the room */}<span className="hidden xl:inline-flex">{ctx}</span><Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)}>{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
           footer={
             /* on the page's own frame and reading width: the composer and the transcript share one left edge */
-            <div className="mx-auto w-full max-w-[1104px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div className={cn("max-w-[760px]", RUNBAR_QUIET)}>
+            <div className="mx-auto w-full max-w-[1104px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div className="max-w-[760px]">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-tertiary" data-session-runtime>
                 <span>Harness <span className="text-muted-foreground">{s.h ?? t("views:session.unknown")}</span></span>
                 <NativeIdLine k={k} label={t("views:session.nativeId")} className="w-auto" />
@@ -790,10 +784,10 @@ export function SessionView({ k }: { k: string }) {
       {/* the same panel as the chat rail: one width, a head on the top bar's line, the content scrolling under it */}
       <aside className={cn("hidden shrink-0 flex-col border-l border-sidebar-border bg-sidebar xl:flex", PANEL_W)} data-session-panel>
         <div className="flex h-12 shrink-0 items-center border-b border-sidebar-border px-5 type-headline" data-session-panel-head>{t("views:session.info")}</div>
-        <div className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-6 pt-5", GRAPH_FLAT)}>{panel}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-6 pt-5">{panel}</div>
       </aside>
       {debugOpen && s.item && <ItemDebugDialog item={s.item} session={k} onClose={() => setDebugOpen(false)} />}
-      <Dialog open={infoOpen} onOpenChange={setInfoOpen}><DialogContent className="max-h-[85dvh] overflow-y-auto"><DialogHeader><DialogTitle>{t("views:session.info")}</DialogTitle><DialogDescription>{t("views:session.infoDesc")}</DialogDescription></DialogHeader><div className={GRAPH_FLAT}>{panel}</div></DialogContent></Dialog>
+      <Dialog open={infoOpen} onOpenChange={setInfoOpen}><DialogContent className="max-h-[85dvh] overflow-y-auto"><DialogHeader><DialogTitle>{t("views:session.info")}</DialogTitle><DialogDescription>{t("views:session.infoDesc")}</DialogDescription></DialogHeader><div>{panel}</div></DialogContent></Dialog>
     </div>
   )
 }

@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react"
 import { HubError, modReq } from "@/api"
-import { Row } from "@/ui"
-import { Panel, Section } from "@/settings-kit"
+import { Row, Panel, Section } from "@/ui"
 import { useT } from "@/i18n"
 import { monthDayTime } from "@/i18n/format"
 import { bytes } from "@/disk"

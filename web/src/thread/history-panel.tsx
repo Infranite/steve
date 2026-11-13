@@ -3,19 +3,19 @@
  * conversation on wide screens (in place of the rail), a sheet otherwise. IM conversations are one row away. */
 import { useEffect, useMemo, useRef, useState } from "react"
 import { cn } from "cn"
-import { HistoryIcon, ListIcon, XIcon } from "lucide-react"
-import { SearchField } from "@/search-field"
+import { HistoryIcon, ListIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { SidePanel, setHistory, useRail, useWide, wide } from "@/chat2"
+import { setHistory, useRail, useWide, wide } from "@/chat2"
 import { st, useStore, type Msg } from "@/store"
 import { openConversations } from "@/thread/conversations"
 import { historyState, jumpToMsg, loadOlder, mainThread, searchThread, useHistory } from "@/thread/history"
 import { snippet, topicsOf, type Topic } from "@/thread/topics"
 import { lang, t as tr, useT } from "@/i18n"
 import { date, hm } from "@/i18n/format"
+import { SearchField, SidePanel, PanelHead } from "@/ui"
 
 const DAY = 86400_000
 export function dayLabel(ts: number) {
@@ -76,10 +76,7 @@ function HistoryBody() {
   const open = (id: string, created?: number) => { setAt(id); jumpToMsg(id, created); if (!wide()) setHistory(false) }
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-history-body>
-      <div className="flex h-13 shrink-0 items-center gap-2 border-b border-sidebar-border px-4">
-        <span className="type-headline">{t("thread:history.title")}</span>
-        <Button variant="ghost" size="icon-sm" className="ml-auto text-muted-foreground" aria-label={t("thread:history.close")} onClick={() => setHistory(false)} data-history-close><XIcon /></Button>
-      </div>
+      <PanelHead title={t("thread:history.title")} closeLabel={t("thread:history.close")} onClose={() => setHistory(false)} closeTest="data-history-close" data-history-head />
       <SearchField className="mx-4 mb-1 mt-4 shrink-0" inputRef={input} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape" && q) { e.stopPropagation(); setQ("") } }} placeholder={t("thread:history.searchPlaceholder")} aria-label={t("thread:history.searchLabel")} data-history-search
         trailing={busy ? <Spinner className="size-3.5 text-muted-foreground" /> : hits && <span className="shrink-0 type-footnote tabular-nums text-tertiary" data-history-count>{t("thread:history.hits", { count: hits.length })}</span>} />
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-3" data-history-list>

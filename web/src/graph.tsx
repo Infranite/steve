@@ -5,9 +5,10 @@ import { ReactFlow, Controls, Handle, Position, MarkerType, type Edge, type Node
 import { FileTextIcon, TerminalIcon, GitBranchIcon, CircleHelpIcon } from "lucide-react"
 import { gRelation, gComps, gNear, ST, SS, st, botName, type GNode, type GEdge } from "@/store"
 import { itemDisplayStatus } from "@/item-workflow-relation"
-import { StatusDot } from "@/ui"
+import { StatusDot, Segmented } from "@/ui"
 import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
+import { cn } from "cn"
 
 const W = 232, H = 64
 
@@ -52,7 +53,9 @@ function layout(ids: string[], E: GEdge[], N: Record<string, GNode>, focus: stri
 }
 
 export function RelationGraph({ focus, scope = "comp", height = 420, hideSimple = true, onOpen, minimal = false }: {
-  focus?: string | null; scope?: "comp" | "near" | "all"; height?: number; hideSimple?: boolean; onOpen: (n: GNode) => void; minimal?: boolean
+  focus?: string | null; scope?: "comp" | "near" | "all"; height?: number; hideSimple?: boolean; onOpen: (n: GNode) => void
+  /** for a side panel: no zoom controls, and flat muted fields instead of lifted cards */
+  minimal?: boolean
 }) {
   const t = useT()
   const [mode, setMode] = useState<Mode>(focus && st.S[focus] ? "lineage" : "blocking")
@@ -78,14 +81,10 @@ export function RelationGraph({ focus, scope = "comp", height = 420, hideSimple 
   const relationLabel = (kind: string) => t(`shell:graph.${kind === "dependency" ? "dep" : kind === "source" ? "source" : "contains"}`)
   return (
     <div className="min-w-0 space-y-2" data-graph-mode={mode}>
-      {/* the two views as one segmented control (buttons, pressed state), like the page's own switchers */}
-      <div className="inline-flex gap-0.5 rounded-lg bg-muted p-0.5" role="group" aria-label={t("shell:graph.modeLabel")}>
-        {(["blocking", "lineage"] as const).map((m) => <button key={m} type="button" aria-pressed={mode === m} onClick={() => { setMode(m); setPicked(focus ?? null) }}
-          className={`h-7 rounded-md px-3 type-callout font-medium ${mode === m ? "bg-background text-foreground shadow-xs dark:bg-accent" : "text-muted-foreground hover:text-foreground"}`}>{m === "blocking" ? t("shell:graph.blocking") : t("shell:graph.lineage")}</button>)}
-      </div>
+      <Segmented pressed label={t("shell:graph.modeLabel")} value={mode} onChange={(m) => { setMode(m); setPicked(focus ?? null) }} options={[["blocking", t("shell:graph.blocking")], ["lineage", t("shell:graph.lineage")]] as const} />
       {/* nothing related in this view: say so instead of an empty canvas */}
-      {ids.length === 0 && <div className="flex min-h-40 items-center justify-center rounded-xl bg-muted/50 px-4 py-10 text-center type-callout text-muted-foreground" data-graph-empty>{t(mode === "blocking" ? "shell:graph.emptyBlocking" : "shell:graph.emptyLineage")}</div>}
-      {ids.length > 0 && <div className="hidden overflow-hidden rounded-xl bg-canvas-graph shadow-[var(--lift)] sm:block" style={{ height }} data-graph>
+      {ids.length === 0 && <div className="flex min-h-40 items-center justify-center rounded-xl bg-muted/60 px-4 py-10 text-center type-callout text-muted-foreground" data-graph-empty>{t(mode === "blocking" ? "shell:graph.emptyBlocking" : "shell:graph.emptyLineage")}</div>}
+      {ids.length > 0 && <div className={cn("hidden overflow-hidden rounded-xl sm:block", minimal ? "bg-muted/60" : "bg-canvas-graph shadow-[var(--lift)]")} style={{ height }} data-graph>
       <ReactFlow key={mode + ":" + ids.join()} nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.15, maxZoom: 1, minZoom: 0.6, nodes: start.map((id) => ({ id })) }} minZoom={0.3} maxZoom={1.6}
         nodesConnectable={false} elementsSelectable={false} proOptions={{ hideAttribution: true }} panOnScroll={false} zoomOnScroll={!minimal} preventScrolling={!minimal}
         onNodeClick={(_, node) => setPicked(node.id)}>
@@ -105,7 +104,7 @@ export function RelationGraph({ focus, scope = "comp", height = 420, hideSimple 
           {outgoing.length > 0 && <span className="mt-1 block break-words type-footnote text-muted-foreground">{outgoing.join(" · ")}</span>}
         </button>
       })}</div>
-      {detail && <div className="anim-in min-w-0 rounded-xl bg-card p-4 type-callout shadow-[var(--lift)]" data-graph-detail>
+      {detail && <div className={cn("anim-in min-w-0 rounded-xl p-4 type-callout", minimal ? "bg-muted/60" : "bg-card shadow-[var(--lift)]")} data-graph-detail>
         <p className="break-words font-medium">{detail.title}</p>
         <p className="mt-1 break-words type-footnote text-muted-foreground">{detail.k === "missing" ? t("shell:graph.missing") : detail.k === "work" ? t("shell:graph.work") : detail.k === "sess" ? t("shell:graph.session") : t("shell:graph.item")}{detail.project && ` · ${st.projects.find((p) => p.id === detail.project)?.name ?? detail.project}`}{detail.arch && ` · ${t("shell:graph.archived")}`}</p>
         {mode === "lineage" && detail.sourceAt != null && <p className="mt-1 type-footnote text-muted-foreground">{t("shell:graph.sourceAt", { n: detail.sourceAt })}</p>}

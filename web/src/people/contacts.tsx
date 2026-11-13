@@ -6,11 +6,11 @@ import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { go, Page, Group, Row, Segmented, SectionLabel, Empty, Chips, Tags } from "@/ui"
+import { go, Page, Group, Row, Segmented, SectionLabel, Empty, Chips, Tags, Meta } from "@/ui"
 import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
 import { myContactId, nameOf, people, type ContactBrief } from "@/api/people"
-import { ContactAvatar, Loading, PeopleGate, act, codes, joinList, label, relLabel, useLoad , SubMeta } from "@/people/common"
+import { ContactAvatar, Loading, PeopleGate, act, codes, joinList, label, relLabel, useLoad } from "@/people/common"
 import { t as tr, useT } from "@/i18n"
 import { DirectoryNotes, TeamRow, TeamsTab } from "@/people/teams"
 import { PendingContacts } from "@/people/pending"
@@ -69,7 +69,7 @@ function ContactList({ q, f }: { q: string; f: { rel?: string; kind?: string } }
     <Group>{xs.map((c) => (
       <Row key={c.id} icon={<ContactAvatar name={nameOf(c)} size={36} />} onClick={() => go("#/contacts/" + c.id)} data-contact-row={c.name}
         title={<span className="inline-flex items-center gap-1.5">{nameOf(c)}{c.important && <StarIcon className="size-3.5 fill-current text-tertiary" aria-label={t("people:contacts.important")} />}{c.kind === "virtual" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "virtual")}</Badge>}{c.kind === "bot" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "bot")}</Badge>}</span>}
-        sub={<SubMeta>{orgLine(c) && <span>{orgLine(c)}</span>}{c.rels.filter((r) => r !== "me").length > 0 && <span>{joinList(c.rels.filter((r) => r !== "me").map(relLabel))}</span>}<span>{t("people:contacts.accounts", { count: c.accounts })}</span>{c.items > 0 && <span>{t("people:contacts.items", { count: c.items })}</span>}</SubMeta>}>
+        sub={<Meta inline>{orgLine(c) && <span>{orgLine(c)}</span>}{c.rels.filter((r) => r !== "me").length > 0 && <span>{joinList(c.rels.filter((r) => r !== "me").map(relLabel))}</span>}<span>{t("people:contacts.accounts", { count: c.accounts })}</span>{c.items > 0 && <span>{t("people:contacts.items", { count: c.items })}</span>}</Meta>}>
         <Tags ids={c.tags} max={2} /><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
   )
 }
@@ -86,7 +86,7 @@ function OrgList() {
     <div className="flex flex-col gap-8">
       <Group>{data.map((o) => (
         <Row key={o.id} icon={<ContactAvatar name={o.name} type="org" size={36} />} onClick={() => go("#/orgs/" + o.id)} data-org-row={o.name} title={o.name}
-          sub={<SubMeta>{o.kind && <span>{label("orgKind", o.kind)}</span>}<span>{joinList(o.domains) || t("people:shared.noDomain")}</span>{(o.name_state === "placeholder" || o.name_state === "workspace") && <span>{t("people:orgs.unnamed")}</span>}</SubMeta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
+          sub={<Meta inline>{o.kind && <span>{label("orgKind", o.kind)}</span>}<span>{joinList(o.domains) || t("people:shared.noDomain")}</span>{(o.name_state === "placeholder" || o.name_state === "workspace") && <span>{t("people:orgs.unnamed")}</span>}</Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
       {teams.data && (chart.length > 0 || (teams.data.directory?.length ?? 0) > 0) && <section data-dept-tree>
         <SectionLabel>{own ? t("people:orgs.deptsOf", { name: own.name, n: chart.length }) : t("people:orgs.depts", { n: chart.length })}</SectionLabel>
         <DirectoryNotes ds={teams.data.directory} />

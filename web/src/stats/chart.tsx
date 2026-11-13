@@ -22,8 +22,6 @@ export const STATE = {
 } as const
 export const seriesColor = (i: number, key?: string) => (key === "other" ? OTHER : SERIES[i] ?? OTHER)
 
-/** a toolbar control (a Select, a date button) in the page's one control language: the muted fill of a Segmented, no outline */
-export const TOOL = "border-transparent bg-muted font-normal text-foreground hover:bg-accent"
 
 /** a legend key: a dot for bars and areas, a short stroke for lines, a tinted dot ringed in its colour for a band */
 export const Swatch = ({ c, line, band }: { c: string; line?: boolean; band?: boolean }) => <span aria-hidden className={cn("inline-block shrink-0 rounded-full", line ? "h-0.5 w-3" : band ? "size-2.5" : "size-2")}

@@ -11,10 +11,11 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { go, Group, Row, SectionLabel, Segmented, Empty } from "@/ui"
 import { looksLikeHandle, nameOf, people, type Contact, type MergeProposal, type PendingContact } from "@/api/people"
 import { tm, toast } from "@/store"
-import { ContactAvatar, Loading, FormSelect, act, joinList, useLoad } from "@/people/common"
+import { ContactAvatar, Loading, act, joinList, useLoad } from "@/people/common"
 import { t as tr, useT } from "@/i18n"
 import { orgLine } from "@/people/contacts"
 import type { Wait } from "@/store"
+import { Select } from "@/view-shared"
 
 /* 需要你判断 (domain-model.md §2.3): what Steve could not settle by itself — weak-evidence merges and people still
  * without a name after the lookups. Nobody is shown by a raw id: a nameless person is “未知飞书用户” with where they were
@@ -55,7 +56,7 @@ export function PendingContacts() {
         <SectionLabel right={<Segmented size="sm" value={order} onChange={(v) => { corder = v; setOrder(v) }} options={[["active", t("people:pending.order.active")], ["space", t("people:pending.order.space")]] as const} />}>{t("people:pending.judgeHead", { n: unk.length })}</SectionLabel>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <Input className="min-w-40 flex-1" aria-label={t("people:pending.searchAria")} placeholder={t("people:pending.searchPh")} value={query} disabled={busy} onChange={(e) => setQuery(e.target.value)} />
-          <FormSelect label={t("people:pending.filterAria")} value={filter} disabled={busy} onChange={setFilter} options={(["all", "nameless", "named"] as const).map((v) => ({ v, l: t(`people:pending.filter.${v}`) }))} />
+          <Select size="default" label={t("people:pending.filterAria")} value={filter} disabled={busy} onChange={setFilter} options={(["all", "nameless", "named"] as const).map((v) => ({ v, l: t(`people:pending.filter.${v}`) }))} />
         </div>
         <div className="mb-3 flex flex-wrap items-center gap-2" role="toolbar" aria-label={t("people:pending.bulk")}>
           <Button size="sm" variant="outline" disabled={busy || !visible.length} onClick={() => setSel((prev) => [...new Set([...prev, ...visible.map((c) => c.id)])])}>{t("people:pending.selectAll", { n: visible.length })}</Button>

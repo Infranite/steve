@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { st, tm, botName, projectName, tagName, pendingCards, sessionCards, unreadNotices, readNotices, dismissNotice, closeRel, WT, type Msg, type Steps } from "@/store"
-import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote } from "@/ui"
+import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote, SidePanel, PanelHead } from "@/ui"
 import type { RNotice } from "@/api"
 import { ResearchLive, researchSummary, researchStep } from "@/thread/parts"
 import { t, useT } from "@/i18n"
@@ -121,31 +121,6 @@ export function NoticeLine({ m, onOpen }: { m: Msg; onOpen: () => void }) {
 }
 
 /* ───────── right rail ───────── */
-/** one width for every panel beside the conversation (rail, history, a session's info): switching them never moves the column */
-export const PANEL_W = "w-[320px]"
-/** a Collapsible's content that eases its height open and shut (the base component does not yet) */
-/** a panel beside the conversation that slides open and shut: its width eases between 0 and PANEL_W, the content keeps its
- * width and stays mounted until the close has finished. `test` names the open panel only (closed, it is gone for tests). */
-export function SidePanel({ open, children, className, test }: { open: boolean; children: ReactNode; className?: string; test: Record<string, string> }) {
-  const [mounted, setMounted] = useState(open), [shown, setShown] = useState(open)
-  useEffect(() => {
-    if (open) {
-      setMounted(true)
-      let r = requestAnimationFrame(() => { r = requestAnimationFrame(() => setShown(true)) })
-      return () => cancelAnimationFrame(r)
-    }
-    setShown(false)
-    const h = setTimeout(() => setMounted(false), 280)
-    return () => clearTimeout(h)
-  }, [open])
-  if (!mounted) return null
-  return (
-    <div className={cn("flex shrink-0 justify-end overflow-hidden transition-[width] duration-260 ease-(--ease-out)", shown && open ? PANEL_W : "w-0")} inert={!open || undefined} data-side-panel>
-      <aside className={cn("flex shrink-0 flex-col overflow-hidden border-l border-sidebar-border bg-sidebar transition-opacity duration-260 ease-(--ease-out)", PANEL_W, shown && open ? "opacity-100" : "opacity-60", className)} {...(open ? test : {})}>{children}</aside>
-    </div>
-  )
-}
-
 const RAIL = "steve-chat-rail"
 const railPref = () => { const v = localStorage.getItem(RAIL); return v ? v === "1" : window.innerWidth >= 1280 }
 /* one panel beside the conversation at a time on wide screens: the rail (事项 and notices) or the history (ST-50); opening
@@ -204,10 +179,7 @@ export function ChatRail() {
   const { railOpen } = useRail(), t = useT()
   const isWide = useWide()
   /* the same head as 历史 beside it: one height with the conversation's bar, the name the toggle has, a close */
-  const head = <div className="flex h-13 shrink-0 items-center gap-2 border-b border-sidebar-border px-4" data-rail-head>
-    <span className="type-headline">{t("shell:chat.items")}</span>
-    <Button variant="ghost" size="icon-sm" className="ml-auto text-muted-foreground" aria-label={t("shell:chat.hideRail")} onClick={toggleRail} data-rail-close><XIcon /></Button>
-  </div>
+  const head = <PanelHead title={t("shell:chat.items")} closeLabel={t("shell:chat.hideRail")} onClose={toggleRail} closeTest="data-rail-close" data-rail-head />
   if (isWide) return <SidePanel open={railOpen} test={{ "data-rail": "aside" }}>{head}<div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-6 pt-4" data-rail-scroll><RailBody /></div></SidePanel>
   return (
     <Sheet open={sheetOpen} onOpenChange={(o) => { sheetOpen = o; bump() }}>

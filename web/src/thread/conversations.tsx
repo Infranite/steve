@@ -8,8 +8,7 @@ import { ArrowLeftIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, Exter
 import { conversationsApi, type ConvBadge, type ConvMessage, type ConvRow, type Reaction } from "@/api/conversations"
 import { st, msgOf, discardOut, useHubEvents, type Msg } from "@/store"
 import { matchesSpace } from "@/live-utils"
-import { Empty, go } from "@/ui"
-import { SearchField } from "@/search-field"
+import { Empty, go, SearchField, Segmented } from "@/ui"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { t as tr, useT } from "@/i18n"
@@ -120,12 +119,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
         <div className="flex flex-col gap-1"><DialogTitle>{t("thread:conv.list")}</DialogTitle>
         <DialogDescription>{t("thread:conv.listHelp")}</DialogDescription></div>
         <SearchField aria-label={t("thread:conv.search")} placeholder={t("thread:conv.searchPlaceholder")} value={query} onChange={e => setQuery(e.target.value)} />
-        {/* the system's segmented control in look (the same well, thumb and slide), built from buttons with aria-pressed:
-          * the filter is not a tab panel. As wide as the search on a phone */}
-        <div role="group" className="relative isolate grid h-8 w-full grid-cols-3 rounded-lg bg-muted p-[3px] sm:w-fit" aria-label={t("thread:conv.stateLabel")} data-conv-state={state}>
-          <span aria-hidden className="absolute inset-y-[3px] left-[3px] -z-10 w-[calc((100%-6px)/3)] rounded-md bg-card shadow-[var(--lift)] transition-transform duration-180 ease-(--ease-out) dark:bg-accent" style={{ transform: `translateX(${["open", "closed", "all"].indexOf(state) * 100}%)` }} />
-          {(["open", "closed", "all"] as const).map((key) => <button type="button" key={key} aria-pressed={state === key} onClick={() => setState(key)} className={cn("h-full min-w-20 rounded-md px-3 type-callout font-medium", state === key ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>{t(`thread:conv.state.${key}`)}</button>)}
-        </div>
+        <Segmented full className="sm:w-fit [&>button]:min-w-20" label={t("thread:conv.stateLabel")} value={state} onChange={setState} options={(["open", "closed", "all"] as const).map((key) => [key, t(`thread:conv.state.${key}`)] as const)} />
         {updates && <Button size="sm" variant="secondary" className="w-fit justify-self-start anim-in" onClick={() => load()}>{t("thread:conv.updated")}</Button>}
         {error && <div role="alert" className="flex items-center gap-2 type-callout text-destructive">{error}<Button size="sm" variant="outline" onClick={() => load()}>{t("common:action.retry")}</Button></div>}
         <div className="-mx-2 min-h-24 overflow-y-auto overscroll-contain px-2" style={{ maxHeight: "48dvh" }} aria-busy={loading}>

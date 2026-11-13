@@ -9,11 +9,10 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
-import { BotAvatar, Chips, Composer, Empty, KindTag, Page, Row, Segmented, Status, Tags, ThemeSwitch } from "@/ui"
+import { BotAvatar, Chips, Composer, Empty, KindTag, Page, Row, Segmented, Status, Tags, ThemeSwitch, Blank, Card, Chevron, EASE, LIFT, Notice, Panel, Pill, Section, Tile } from "@/ui"
 import { Select } from "@/view-shared"
 import { st, toast, kindTags, isKind } from "@/store"
 import { useT } from "@/i18n"
-import { Blank, Card, Chevron, EASE, LIFT, Notice, Panel, Pill, Section, Tile } from "@/settings-kit"
 
 /* ───────── colour read-back ───────── */
 function lum(hex: string) {

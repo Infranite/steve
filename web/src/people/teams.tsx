@@ -12,11 +12,11 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { st, tm } from "@/store"
 import { modReq as req } from "@/api"
-import { go, Page, Group, Row, SectionLabel, Empty, ItemNo, Status } from "@/ui"
+import { go, Page, Group, Row, SectionLabel, Empty, ItemNo, Status, Meta } from "@/ui"
 import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
 import { myContactId, people, type DirectoryStatus, type Team } from "@/api/people"
-import { ContactAvatar, Loading, PeopleGate, Section, act, codes, label, useLoad, visLabel , SubMeta } from "@/people/common"
+import { ContactAvatar, Loading, PeopleGate, Section, act, codes, label, useLoad, visLabel } from "@/people/common"
 import { useT } from "@/i18n"
 import { MemSection, ctxOf } from "@/people/contact"
 
@@ -25,7 +25,7 @@ export function TeamRow({ g, indent = 0, spaces }: { g: Team; indent?: number; s
   const sp = g.space_id ? spaces?.find((x) => x.id === g.space_id) : undefined
   return <Row icon={<span style={{ marginLeft: Math.min(indent, 6) * 20 }}><ContactAvatar name={g.name} type="team" size={32} /></span>} onClick={() => go("#/teams/" + g.id)} data-team-row={g.name}
     title={<span className="inline-flex items-center gap-1.5">{g.name}{g.visibility !== "workspace" && <span className="type-footnote text-muted-foreground">{visLabel(g.visibility)}</span>}</span>}
-    sub={<SubMeta><span>{t("people:teams.headcount", { count: g.headcount })}</span>{sp && <span>{t("people:teams.bound", { name: sp.name })}</span>}{g.purpose && <span className="max-w-[320px] truncate">{g.purpose}</span>}</SubMeta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
+    sub={<Meta inline><span>{t("people:teams.headcount", { count: g.headcount })}</span>{sp && <span>{t("people:teams.bound", { name: sp.name })}</span>}{g.purpose && <span className="max-w-[320px] truncate">{g.purpose}</span>}</Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
 }
 /** the channels module's groups; `null` when it is not installed (the bound-group parts hide) */
 const loadSpaces = () => req<{ id: string; name: string }[]>("GET", "/spaces").catch(() => null)
@@ -83,7 +83,7 @@ function TeamPage({ id }: { id: string }) {
   const cur = members.map((m) => ({ contact_id: m.contact_id, role: m.role }))
   const savePurpose = () => { if (purpose !== null && purpose !== g.purpose) void act(people.patchTeam(g.id, { purpose: purpose.slice(0, 400) })) }
   return (
-    <Page title={g.name} back={back} max={720} sub={<SubMeta><span>{label("teamKind", g.kind)}</span><span>{g.source_label}</span>{parent && <a href={"#/teams/" + parent.id} className="hover:text-foreground">{t("people:team.parent", { name: parent.name })}</a>}<span>{t("people:teams.headcount", { count: g.headcount })}</span>{g.status === "dissolved" && <span>{t("people:team.dissolved")}</span>}</SubMeta>}
+    <Page title={g.name} back={back} max={720} sub={<Meta inline><span>{label("teamKind", g.kind)}</span><span>{g.source_label}</span>{parent && <a href={"#/teams/" + parent.id} className="hover:text-foreground">{t("people:team.parent", { name: parent.name })}</a>}<span>{t("people:teams.headcount", { count: g.headcount })}</span>{g.status === "dissolved" && <span>{t("people:team.dissolved")}</span>}</Meta>}
       actions={v && g.status === "active" ? <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setDel(true)} data-del-team>{t("people:team.dissolve")}</Button> : undefined}>
       <AlertDialog open={del} onOpenChange={setDel}><AlertDialogContent>
         <AlertDialogHeader><AlertDialogTitle>{t("people:team.dissolveTitle", { name: g.name })}</AlertDialogTitle><AlertDialogDescription>{t("people:team.dissolveDesc")}</AlertDialogDescription></AlertDialogHeader>

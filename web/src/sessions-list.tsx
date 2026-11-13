@@ -8,10 +8,9 @@ import { Button } from "@/components/ui/button"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { t as tr, useT } from "@/i18n"
 import { hm, monthDay, weekday } from "@/i18n/format"
-import { SearchField } from "@/search-field"
 import { SessionsHeatmap } from "@/sessions-heatmap"
 import { SS, st, type Sess } from "@/store"
-import { BotAvatar, Empty, Group, ItemNo, openSheet, Page, SectionLabel, StatusDot } from "@/ui"
+import { BotAvatar, Empty, Group, ItemNo, openSheet, Page, SectionLabel, StatusDot, SearchField } from "@/ui"
 import { Count, Select } from "@/view-shared"
 import { cn } from "cn"
 import { LockIcon, UploadIcon } from "lucide-react"
@@ -65,7 +64,7 @@ function SessRow({ k, s, cols, when, hit }: { k: string; s: Sess; cols: Cols; wh
   const where = [ownHarness && s.h, deviceName(s.device) !== cols.usual.device && deviceName(s.device), s.src !== cols.usual.src && s.src].filter(Boolean).join(" · ")
   return (
     <a href={"#/sessions/" + k} data-session-row={k} data-session-status={s.st}
-      className="flex min-w-0 items-center gap-3 rounded-lg px-2 py-2 outline-none transition-colors duration-150 hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/50">
+      className="flex min-w-0 items-center gap-3 rounded-lg px-2 py-2 outline-none transition-colors duration-120 hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/50">
       <StatusDot s={s.st} />
       {/* the item column: its number, or that it has none */}
       <span className="w-12 shrink-0 truncate sm:w-[4.5rem]">{s.item ? <ItemNo id={s.item} /> : <span className="type-footnote text-tertiary" data-session-unlinked>{t("views:sessions.unlinked")}</span>}</span>
@@ -136,7 +135,7 @@ export function SessionsView() {
             ))}
           </ToggleGroup>
           <span className="flex-1" />
-          {(harnesses.length > 1 || hf !== "all") && <Select quiet className={cn("h-7 px-2 type-callout! [&>svg]:opacity-60", hf !== "all" ? "bg-accent font-medium! text-foreground" : "text-muted-foreground")} testId="harness-filter" value={hf} onChange={(v) => { hf = v; reset() }} options={[{ v: "all", l: t("views:sessions.allHarness") }, ...harnesses.map((x) => ({ v: x, l: x }))]} />}
+          {(harnesses.length > 1 || hf !== "all") && <Select quiet className={cn("h-7 px-2 type-callout [&>svg]:opacity-60", hf !== "all" ? "bg-accent font-medium! text-foreground" : "text-muted-foreground")} testId="harness-filter" value={hf} onChange={(v) => { hf = v; reset() }} options={[{ v: "all", l: t("views:sessions.allHarness") }, ...harnesses.map((x) => ({ v: x, l: x }))]} />}
         </div>
       </div>
       <SessionsHeatmap />

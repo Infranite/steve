@@ -12,8 +12,7 @@ import { api, modReq } from "@/api"
 import { HubChooser, useHubAddress } from "@/hub-ui"
 import { encodeQr, qrSvgPath } from "@/qr"
 import { toast } from "@/store"
-import { closeSheet, Row } from "@/ui"
-import { Panel, Section, Card, Notice, Pill, Loading, Tile, Chevron, FieldRow, LIFT } from "@/settings-kit"
+import { closeSheet, Row, Panel, Section, Card, Notice, Pill, Loading, Tile, Chevron, FieldRow, LIFT } from "@/ui"
 import { cn } from "cn"
 
 export const ACCESS_CAT = Object.defineProperties(["access", "", KeyRoundIcon, ""], {

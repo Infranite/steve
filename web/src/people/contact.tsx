@@ -17,10 +17,11 @@ import { date } from "@/i18n/format"
 import { go, Page, Group, Row, Meta, Empty, Tags, ItemNo, Status } from "@/ui"
 import { AskSteve, type Ctx } from "@/config-ui"
 import { nameOf, people, type Attr, type Contact, type Level, type Mem, type ProfileField } from "@/api/people"
-import { ContactAvatar, LevelSel, Loading, FormSelect, PeopleGate, Section, act, codes, day, joinList, label, relLabel, useLoad, visLabel , SubMeta } from "@/people/common"
+import { ContactAvatar, LevelSel, Loading, PeopleGate, Section, act, codes, day, joinList, label, relLabel, useLoad, visLabel } from "@/people/common"
 import { orgLine } from "@/people/contacts"
 import { MergeDialog } from "@/people/pending"
 import { HoldingsSection } from "@/people/holdings"
+import { Select } from "@/view-shared"
 
 const TOUCH_I: Record<string, any> = { mail: MailIcon, message: MessageSquareIcon, meeting: CalendarIcon, item: ListTodoIcon, event: ZapIcon }
 /** “我”的页先列这几项，没填的也占一行 */
@@ -110,7 +111,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
         <Section label={t("people:contact.teams", { n: c.teams.length })}>{c.teams.length ? <Group>{c.teams.map((g) => <Row key={g.id} icon={<ContactAvatar name={g.name} type="team" size={28} />} title={g.name} sub={`${label("teamKind", g.kind)} · ${label("role", g.role)}`} onClick={() => go("#/teams/" + g.id)} data-contact-team={g.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group> : <Empty title={t("people:contact.noTeams")} />}</Section>
         <Section label={t("people:shared.relatedItems", { n: items.data?.length ?? 0 })}>
           {!items.data ? <Loading /> : items.data.length ? <Group>{items.data.map((x) => { const i = st.items.find((y) => y.id === x.item_id); return (
-            <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={<SubMeta><span>{label("itemRole", x.role)}</span>{x.confidence < 1 && <span>{t("people:shared.inferred")}</span>}</SubMeta>} onClick={() => go("#/items/" + x.item_id)} data-party-item={x.item_id}>{i && <Status s={itemDisplayStatus(i)} />}</Row>) })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}
+            <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={<Meta inline><span>{label("itemRole", x.role)}</span>{x.confidence < 1 && <span>{t("people:shared.inferred")}</span>}</Meta>} onClick={() => go("#/items/" + x.item_id)} data-party-item={x.item_id}>{i && <Status s={itemDisplayStatus(i)} />}</Row>) })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}
         </Section>
         <Section label={t("people:contact.touches")}>
           {!tl.data ? <Loading /> : tl.data.length ? <div className="flex flex-col" data-touches>{tl.data.map((x, n) => { const I = TOUCH_I[x.kind] ?? ZapIcon; return (
@@ -219,7 +220,7 @@ function JobDialog({ c, onClose, onSaved }: { c: Contact; onClose: () => void; o
   }
   return <Dialog open onOpenChange={(v) => !v && !busy && onClose()}><DialogContent>
     <DialogHeader><DialogTitle>{t("people:job.title")}</DialogTitle><DialogDescription>{t("people:job.desc")}</DialogDescription></DialogHeader>
-    <div className="flex flex-col gap-1.5 type-callout font-medium">{t("people:shared.org")}<FormSelect label={t("people:job.orgAria")} className="w-full font-normal" value={orgId} onChange={choose} placeholder={t("people:job.pickOrg")} options={(orgs.data ?? []).map((o) => ({ v: o.id, l: o.name }))} /></div>
+    <div className="flex flex-col gap-1.5 type-callout font-medium">{t("people:shared.org")}<Select size="default" label={t("people:job.orgAria")} className="w-full font-normal" value={orgId} onChange={choose} placeholder={t("people:job.pickOrg")} options={(orgs.data ?? []).map((o) => ({ v: o.id, l: o.name }))} /></div>
     {orgs.err && <p role="alert" className="type-callout text-destructive">{t("people:job.orgFailed", { msg: orgs.err.message })}</p>}
     <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:job.dept")}<Input aria-label={t("people:job.dept")} value={dept} onChange={(e) => setDept(e.target.value)} maxLength={80} /></label>
     <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:job.position")}<Input aria-label={t("people:job.position")} value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} /></label>

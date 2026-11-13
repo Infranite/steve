@@ -8,13 +8,12 @@ import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { go, Page, Row, Meta, Empty, StatusDot } from "@/ui"
-import { Panel, Section, Note, Blank, Notice, Pill, Tile, Chevron, Loading as Spin } from "@/settings-kit"
+import { go, Page, Row, Meta, Empty, StatusDot, Panel, Section, Note, Blank, Notice, Pill, Tile, Chevron, Loading as Spin } from "@/ui"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { tm, toast } from "@/store"
 import { accountsApi, capLabel, kindLabel, KIND_LABEL, CONN_STATUS, connStatusOf, type RAccount, type RAdapter, type RConnection, type RMatchRule, type RUsage } from "@/api/accounts"
-import { useLoad, useBusy, report, Dots } from "@/accounts/load"
+import { useLoad, useBusy, report } from "@/accounts/load"
 import { NewAccountDialog, ConnectDialog, CredentialDialog } from "@/accounts/dialogs"
 import { NewVaultDialog } from "@/vault/new-item"
 import { MailSettingsSection } from "@/mail/settings"; import { MAIL_ADAPTERS } from "@/api/mail"
@@ -33,9 +32,9 @@ export function AcctRow({ a, showOwner }: { a: RAccount; showOwner?: boolean }) 
   return (
     <Row icon={<Ico I={iconOf(a)} />} onClick={() => go("#/accounts/" + a.id)} data-acct-row={a.handle}
       title={<span className="inline-flex flex-wrap items-center gap-1.5">{a.display_name || a.handle}<span className="type-footnote text-muted-foreground">{a.system.name} · {kindLabel(a.kind)}</span>{!a.verified && <Pill tone="attention">{t("accounts:row.unverified")}</Pill>}</span>}
-      sub={<Dots>{a.handle !== a.display_name && <span className="font-mono">{a.handle}</span>}{showOwner && !a.party.is_me && <span>{a.party.name}</span>}
+      sub={<Meta inline>{a.handle !== a.display_name && <span className="font-mono">{a.handle}</span>}{showOwner && !a.party.is_me && <span>{a.party.name}</span>}
         {c ? <span>{c.caps.length ? t("accounts:row.connectedCaps", { caps: c.caps.map(capLabel).join(t("accounts:listSep")) }) : t("accounts:row.connected")}</span> : <span>{t("accounts:row.source", { source: a.source_label || a.source })}</span>}
-        {a.vault_items.length > 0 && <span className="inline-flex items-center gap-1"><LockIcon className="size-3" aria-hidden />{t("accounts:row.vaultItems", { count: a.vault_items.length })}</span>}</Dots>}>
+        {a.vault_items.length > 0 && <span className="inline-flex items-center gap-1"><LockIcon className="size-3" aria-hidden />{t("accounts:row.vaultItems", { count: a.vault_items.length })}</span>}</Meta>}>
       {c && c.status !== "ok" && <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={CONN_STATUS[c.status]?.[1]} />{CONN_STATUS[c.status]?.[0]}</span>}
       <Chevron /></Row>
   )
@@ -205,7 +204,7 @@ function Connection({ c, adapter, label, onChange }: { c: RConnection; adapter: 
       {c.installed === false && <Notice data-conn-not-installed>{t("api:notInstalledNote")}</Notice>}
       <Panel>
         <Row title={<span className="inline-flex items-center gap-2"><StatusDot s={dot} />{s}</span>} data-conn-state
-          sub={<Dots><span>{adapter?.name ?? c.adapter}</span>{c.last_sync ? <span>{t("accounts:conn.lastSync", { time: tm(c.last_sync) })}</span> : null}{c.health.last_ok ? <span>{t("accounts:conn.lastOk", { time: tm(c.health.last_ok) })}</span> : null}</Dots>}>
+          sub={<Meta inline><span>{adapter?.name ?? c.adapter}</span>{c.last_sync ? <span>{t("accounts:conn.lastSync", { time: tm(c.last_sync) })}</span> : null}{c.health.last_ok ? <span>{t("accounts:conn.lastOk", { time: tm(c.health.last_ok) })}</span> : null}</Meta>}>
           <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy || c.installed === false} onClick={() => void act(() => accountsApi.test(c.id)).then((r) => { if (r) { toast(r.status === "ok" ? t("accounts:conn.testOk") : t("accounts:conn.testFailed")); onChange() } })} data-conn-test><RefreshCwIcon />{t("accounts:conn.test")}</Button></Row>
         {c.health.last_error && c.status !== "ok" && <Row title={t("accounts:conn.lastError")} sub={<span className="type-code break-words">{c.health.last_error}</span>}>{c.health.error_at ? <span className="type-footnote text-muted-foreground">{tm(c.health.error_at)}</span> : null}</Row>}
         {c.installed !== false && (c.status === "reauth" || c.status === "error") && <Row title={t("accounts:conn.reauth")} sub={c.auth === "oauth" ? t("accounts:conn.reauthOAuth") : t("accounts:conn.reauthCred")}><Button size="sm" disabled={busy} onClick={() => void reauth()} data-reauth>{t("accounts:conn.reauth")}</Button></Row>}

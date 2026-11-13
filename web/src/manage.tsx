@@ -26,13 +26,12 @@ import {
   setSetting, toast, finishOnboarding, emit, closedSt,
 } from "@/store"
 import { api, type RKindReview } from "@/api"
-import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute } from "@/ui"
+import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Note, Lead, Notice, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
 import { Select, ChoiceCards, ItemRowExport as ItemRow } from "@/view-shared"
 import { showTag } from "@/views"
 import { AskSteve } from "@/config-ui"
-import { Panel, Card, Section, Note, Lead, Notice, Pill, Tile, Chevron, Loading, LIFT, Blank, MetaLine, Strip, EASE } from "@/settings-kit"
 import { VAULT_CAT, VaultSettingsPane } from "@/vault/settings"
 import { STATS_CAT, StatsSettingsPane } from "@/stats/prices"
 import { AUDIT_CAT, AuditSettingsPane } from "@/audit-settings"
@@ -71,7 +70,7 @@ export function BotsView() {
       <div className="flex flex-col gap-8">
       {S && <Section label={t("manage:list.main")}>
         <Panel><Row icon={<BotAvatar k="steve" size={44} />} onClick={() => go("#/bots/steve")} data-bot-row="steve" className="py-3"
-          title={<span className="font-medium">{S.n}</span>} sub={<MetaLine className="mt-0.5"><span>{S.role}</span><span>{S.h}</span><span>{S.m}</span><span>{t("manage:bot.running", { count: runOf("steve") })}</span></MetaLine>}><Chevron /></Row></Panel>
+          title={<span className="font-medium">{S.n}</span>} sub={<Meta className="mt-0.5"><span>{S.role}</span><span>{S.h}</span><span>{S.m}</span><span>{t("manage:bot.running", { count: runOf("steve") })}</span></Meta>}><Chevron /></Row></Panel>
       </Section>}
       <Section label={<><span className="hidden sm:inline">{t("manage:list.others", { ws: st.workspace?.name, n: Object.keys(st.bots).length - 1 })}</span><span className="sm:hidden">{t("manage:list.othersShort", { n: Object.keys(st.bots).length - 1 })}</span></>} note={<Trans ns="manage" i18nKey="list.hint" components={{ code: <span className="font-mono" /> }} />}
         right={<Segmented size="sm" value={botFilter} onChange={(v) => { botFilter = v; r() }} options={[["全部", t("manage:list.filterAll")], ["启用", t("manage:list.filterOn")], ["停用", t("manage:list.filterOff")]] as const} />}>
@@ -80,7 +79,7 @@ export function BotsView() {
             <BotAvatar k={k} size={36} className={cn("transition-opacity", EASE, !b.on && "opacity-40 grayscale")} />
             <button type="button" className="min-w-0 flex-1 text-left" onClick={() => go("#/bots/" + k)} data-bot-row={k}>
               <div className="truncate type-body"><span className="font-medium">{t("manage:bot.name", { name: b.n })}</span> <span className="text-muted-foreground">· {b.role}</span></div>
-              <MetaLine className="mt-0.5"><span>{b.h}</span><span>{b.m}</span><span>{t("manage:bot.running", { count: runOf(k) })}</span>{b.project && <span>{t("manage:list.defaultProject", { name: b.ws })}</span>}<span>{t("manage:bot.memories", { count: b.memCount })}</span>{b.workspaces.length > 1 && <span>{t("manage:list.inWorkspaces", { count: b.workspaces.length })}</span>}{!b.on && <span>{t("manage:bot.disabled")}</span>}</MetaLine>
+              <Meta className="mt-0.5"><span>{b.h}</span><span>{b.m}</span><span>{t("manage:bot.running", { count: runOf(k) })}</span>{b.project && <span>{t("manage:list.defaultProject", { name: b.ws })}</span>}<span>{t("manage:bot.memories", { count: b.memCount })}</span>{b.workspaces.length > 1 && <span>{t("manage:list.inWorkspaces", { count: b.workspaces.length })}</span>}{!b.on && <span>{t("manage:bot.disabled")}</span>}</Meta>
             </button>
             <Switch checked={b.on} onCheckedChange={(v) => void saveBot(k, { on: v }, v ? t("manage:list.enabledToast", { name: b.n }) : t("manage:list.disabledToast", { name: b.n }))} aria-label={t("manage:bot.enableNamed", { name: b.n })} />
             <BotMenu k={k} />
@@ -220,7 +219,7 @@ export function BotView({ k }: { k: string }) {
         <span className="min-w-0"><span className="block truncate">{b.main ? b.n : t("manage:bot.name", { name: b.n })}</span>
           <span className="mt-0.5 block type-callout font-normal text-muted-foreground in-data-[slot=breadcrumb-page]:hidden">{b.role || t("manage:detail.noRole")}</span></span>
       </span>}
-      sub={<div className="pl-15 sm:pl-18"><MetaLine><span>{b.h}</span><span>{b.m}</span><span>{t("manage:detail.pers", { v: b.pers || t("manage:detail.unset") })}</span><span>{t("manage:detail.pro", { v: proLabel(t, b.pro) })}</span></MetaLine><RecentStats bot={k} className="mt-0.5 block type-footnote" /></div>}
+      sub={<div className="pl-15 sm:pl-18"><Meta><span>{b.h}</span><span>{b.m}</span><span>{t("manage:detail.pers", { v: b.pers || t("manage:detail.unset") })}</span><span>{t("manage:detail.pro", { v: proLabel(t, b.pro) })}</span></Meta><RecentStats bot={k} className="mt-0.5 block type-footnote" /></div>}
       actions={<>{!b.main && <><span className="hidden type-footnote text-muted-foreground sm:inline">{b.on ? t("manage:bot.enabled") : t("manage:bot.disabled")}</span><Switch checked={b.on} onCheckedChange={(v) => void saveBot(k, { on: v }, v ? t("manage:bot.enabled") : t("manage:bot.disabled"))} aria-label={t("manage:bot.enable")} /></>}<BotMenu k={k} /></>}>
       <Strip className="mb-8" watch={botTab}><Segmented className="min-w-max [&_[data-slot=tabs-list]]:w-full [&_[data-slot=tabs-trigger]]:flex-1" value={botTab} onChange={(v) => { botTab = v; r() }} options={tabs} /></Strip>
       {botTab === "概览" && (mine.length ? <Panel className="anim-in">{mine.map((i) => <ItemRow key={i.id} i={i} bot={false} />)}</Panel> : <Empty title={t("manage:detail.noRunning")} />)}

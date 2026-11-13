@@ -75,11 +75,11 @@ export function ProjectView({ id }: { id: string }) {
       actions={<Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { patchProject(p.id, { archived: !p.archived }, p.archived ? t("pages:projects.restored") : t("pages:projects.archived")); if (!p.archived) go("#/projects") }}><ArchiveIcon />{p.archived ? t("pages:projects.restore") : t("pages:projects.archive")}</Button>}>
       <div className="flex flex-col gap-8">
         <AskSteve key={p.id} ctx={{ kind: "project", id: p.id }} placeholder={t("pages:projects.askPh")} />
-        <section><SectionLabel className="text-tertiary">{t("pages:projects.active")}<Count n={mine.length} /></SectionLabel>{mine.length ? <Group>{mine.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group> : <p className="py-2 type-callout text-tertiary" data-proj-none>{t("pages:projects.noActive")}</p>}</section>
+        <section><SectionLabel>{t("pages:projects.active")}<Count n={mine.length} /></SectionLabel>{mine.length ? <Group>{mine.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group> : <p className="py-2 type-callout text-tertiary" data-proj-none>{t("pages:projects.noActive")}</p>}</section>
         <GitHubLine project={p.id} />
         {p.kind === "git" && <LaneSection project={p.id} />}
-        {done.length > 0 && <section><SectionLabel className="text-tertiary">{t("pages:projects.recentDone")}<Count n={done.length} /></SectionLabel><Group>{done.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group></section>}
-        <section className="flex flex-col gap-4"><SectionLabel className="mb-0 text-tertiary">{t("pages:projects.settings")}</SectionLabel>
+        {done.length > 0 && <section><SectionLabel>{t("pages:projects.recentDone")}<Count n={done.length} /></SectionLabel><Group>{done.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group></section>}
+        <section className="flex flex-col gap-4"><SectionLabel className="mb-0">{t("pages:projects.settings")}</SectionLabel>
           <FieldGroup className="gap-4">
             <Field className="gap-1.5"><FieldLabel className="type-label! text-tertiary">{t("pages:projects.name")}</FieldLabel><Input className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} /></Field>
             <Field className="gap-1.5"><FieldLabel className="type-label! text-tertiary">{t("pages:projects.desc")}</FieldLabel><Textarea className="min-h-20 rounded-lg" value={d} onChange={(e) => setD(e.target.value)} />

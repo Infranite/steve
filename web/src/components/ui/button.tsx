@@ -18,6 +18,8 @@ const buttonVariants = cva(
           "text-foreground/85 hover:bg-accent hover:text-foreground aria-expanded:bg-accent aria-expanded:text-foreground",
         destructive:
           "bg-destructive/10 text-destructive hover:bg-destructive/16 focus-visible:ring-destructive/20 dark:bg-destructive/16 dark:hover:bg-destructive/24",
+        /* consent to something with reach (full access): the attention hue, never the accent */
+        attention: "bg-attention text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.14),0_1px_2px_rgb(16_24_40/0.12)] hover:bg-[color-mix(in_oklch,var(--attention),black_9%)] dark:text-black/85 dark:hover:bg-[color-mix(in_oklch,var(--attention),white_8%)] disabled:bg-muted disabled:text-tertiary disabled:shadow-none disabled:opacity-100",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {

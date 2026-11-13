@@ -1,6 +1,6 @@
 /* Shared building blocks for the Steve prototype — see DESIGN.md.
  * Quiet chrome: grey scale everywhere, blue = selected/running, orange = needs you. */
-import { Children, Fragment, memo, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
+import { Children, Fragment, memo, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
 import { flushSync } from "react-dom"
 import { Robot } from "@/robot"
 import { cue } from "@/bus"
@@ -13,7 +13,7 @@ import { BookOpenIcon, ChartNoAxesColumnIcon,
   MessageCircleIcon, MoonIcon, PencilIcon, RadioIcon, SearchIcon, SettingsIcon, SquareTerminalIcon,
   SunIcon, TerminalIcon, ArrowUpRightIcon, UserIcon, UserRoundIcon, ContactRoundIcon, KeyRoundIcon, UsersRoundIcon, ServerIcon, CornerDownRightIcon, MonitorIcon, WorkflowIcon, HashIcon, BotIcon, AtSignIcon, SlashIcon, XIcon, SquareIcon, AlarmClockIcon, FolderIcon, EllipsisIcon, BellOffIcon, BanIcon,
   MailIcon,
-  CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
+  CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
   PlugIcon, MessagesSquareIcon,
 } from "lucide-react"
@@ -21,7 +21,7 @@ import { Button } from "@/components/ui/button"
 import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-trail"
 import { Item as UIItem, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSeparator, ItemTitle } from "@/components/ui/item"
 import { Empty as UIEmpty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
-import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card as UICard, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
@@ -132,11 +132,10 @@ export function AlertClose({ onClose, className }: { onClose: () => void; classN
 export function StatusDot({ s, className }: { s: string; className?: string }) {
   return <span aria-hidden className={cn("inline-block size-2 shrink-0 rounded-full", DOT[s] ?? "bg-tertiary", className)} />
 }
-const PILL: Record<string, string> = { run: "bg-blue/10 text-blue", wait: "bg-attention/12 text-attention", fail: "bg-destructive/10 text-destructive", done: "bg-success/10 text-success" }
 /** `pill`: a tinted capsule, for the one status a page is about */
 export function Status({ s, sess = false, pill = false, className }: { s: string; sess?: boolean; pill?: boolean; className?: string }) {
   const label = (sess ? SS : ST)[s]?.[0] ?? ""
-  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap type-footnote text-muted-foreground", pill && cn("h-6 rounded-full px-2.5 font-medium", PILL[s] ?? "bg-muted"), className)} data-status={s}><StatusDot s={s} />{label}</span>
+  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap type-footnote text-muted-foreground", pill && cn("h-6 rounded-full px-2.5 font-medium", s === "run" || s === "wait" || s === "fail" || s === "done" ? TONE[toneOf(s)].slice(0, 2) : "bg-muted"), className)} data-status={s}><StatusDot s={s} />{label}</span>
 }
 export function BotAvatar({ k, size = 24, className }: { k: string | null; size?: number; className?: string; style?: string; seed?: string }) {
   if (k && st.bots[k]) return <Robot k={k} size={size} className={className} />
@@ -177,18 +176,29 @@ export function Tags({ ids, className, onRemove, max }: { ids?: string[]; classN
   )
 }
 export const ItemNo = ({ id, className }: { id: string; className?: string }) => <span className={cn("shrink-0 type-footnote font-mono tabular-nums text-muted-foreground", className)} data-no>{id}</span>
-/** a "·" between parts, as its own element after each part but the last. The part keeps a dot-wide right margin and
- *  the dot, pulled back over it, takes no width of its own: it stays on the line of the part before it (a wrapped line
- *  never starts with one), and sits outside the part, so a part that truncates, has a border or a gap keeps it whole.
- *  Only after a part wider than the whole line can a dot open the next line; it then lies left of the box, clipped.
- *  Dots around a part that renders nothing collapse. */
-export const META_SEP = "overflow-x-clip [&>:not([data-meta-sep]):not(:last-child)]:mr-4 [&>[data-meta-sep]:first-child]:hidden [&>[data-meta-sep]:last-child]:hidden [&>[data-meta-sep]+[data-meta-sep]]:hidden"
-export const metaParts = (children: ReactNode) => Children.toArray(children).flatMap((c, n) => n ? [<span key={"sep" + n} data-meta-sep aria-hidden className="-ml-4 w-4 shrink-0 text-center text-tertiary">·</span>, c] : [c])
-export const Meta = ({ children, className }: { children: ReactNode; className?: string }) => (
-  <div className={cn("flex min-w-0 flex-wrap items-center gap-y-1 type-footnote text-muted-foreground", META_SEP, className)}>{metaParts(children)}</div>
-)
+/** a single line of facts, "a · b · c" (`one`): a "·" between parts, as its own element after each part but the last.
+ *  The part keeps a dot-wide right margin and the dot, pulled back over it, takes no width of its own, so a part that
+ *  truncates, has a border or a gap keeps it whole. Dots around a part that renders nothing collapse. */
+const META_SEP = "overflow-x-clip [&>:not([data-meta-sep]):not(:last-child)]:mr-4 [&>[data-meta-sep]:first-child]:hidden [&>[data-meta-sep]:last-child]:hidden [&>[data-meta-sep]+[data-meta-sep]]:hidden"
+const metaParts = (children: ReactNode) => Children.toArray(children).flatMap((c, n) => n ? [<span key={"sep" + n} data-meta-sep aria-hidden className="-ml-4 w-4 shrink-0 text-center text-tertiary">·</span>, c] : [c])
+/** facts in a line, "a · b · c". By default the line wraps: each dot belongs to the part after it, and the dot that
+ *  would start a wrapped line sits in a clipped gutter, so a line never ends or starts with a dangling "·". `one` keeps
+ *  them on one line (the parts are the flex row's own children, so they can truncate and yield). `inline` renders spans,
+ *  for a Row's subtitle, which is a <p>. */
+export function Meta({ children, className, one, inline }: { children: ReactNode; className?: string; one?: boolean; inline?: boolean }) {
+  const Box = inline ? "span" : "div"
+  if (one) return <Box className={cn("flex min-w-0 flex-nowrap items-center type-footnote text-muted-foreground", META_SEP, className)} data-meta>{metaParts(children)}</Box>
+  const xs = Children.toArray(children).filter(Boolean)
+  return (
+    <Box className={cn("block min-w-0 overflow-hidden type-footnote text-muted-foreground", className)} data-meta>
+      <Box className="-ml-4 flex min-w-0 flex-wrap items-center gap-y-1">
+        {xs.map((x, n) => <span key={n} data-meta-part className="inline-flex min-w-0 max-w-full items-center whitespace-nowrap empty:hidden before:inline-block before:w-4 before:shrink-0 before:text-center before:text-tertiary before:content-['·']">{x}</span>)}
+      </Box>
+    </Box>
+  )
+}
 export function SectionLabel({ children, right, className }: { children: ReactNode; right?: ReactNode; className?: string }) {
-  return <div className={cn("mb-2 flex min-h-6 items-center justify-between gap-2 type-label text-muted-foreground", className)}><span>{children}</span>{right}</div>
+  return <div className={cn("mb-2 flex min-h-6 items-center justify-between gap-2 px-1 type-label text-tertiary", className)}><span>{children}</span>{right}</div>
 }
 /** grouped list: shadcn ItemGroup in one hairline container, ItemSeparator between rows */
 export function Group({ children, className }: { children: ReactNode; className?: string }) {
@@ -218,8 +228,10 @@ export function Row({ title, sub, children, onClick, icon, className, controls =
     </UIItem>
   )
 }
-/** view switcher (shadcn Tabs) */
-export function Segmented<T extends string>({ value, onChange, options, className, iconOnly = false, size = "default", label }: { value: T; onChange: (v: T) => void; options: readonly (T | readonly [T, ReactNode, string?])[]; className?: string; iconOnly?: boolean; size?: "default" | "sm"; label?: string }) {
+/** view switcher (shadcn Tabs). `pressed`: the same control as a group of buttons with aria-pressed, for a filter that
+ *  does not switch tab panels; `full` stretches it to its container with equal segments. */
+export function Segmented<T extends string>({ value, onChange, options, className, iconOnly = false, size = "default", label, pressed = false, full = false }: { value: T; onChange: (v: T) => void; options: readonly (T | readonly [T, ReactNode, string?])[]; className?: string; iconOnly?: boolean; size?: "default" | "sm"; label?: string; pressed?: boolean; full?: boolean }) {
+  if (pressed || full) return <PressedSegments value={value} onChange={onChange} options={options} className={className} iconOnly={iconOnly} size={size} label={label} full={full} />
   return (
     <Tabs value={value} onValueChange={(v) => onChange(v as T)} className={className}>
       <TabsList aria-label={label} className={cn("bg-muted", size === "sm" && "h-7!")}>
@@ -231,6 +243,28 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
     </Tabs>
   )
 }
+/** Segmented as buttons: the well, the raised thumb sliding to the pressed one */
+function PressedSegments<T extends string>({ value, onChange, options, className, iconOnly, size, label, full }: { value: T; onChange: (v: T) => void; options: readonly (T | readonly [T, ReactNode, string?])[]; className?: string; iconOnly: boolean; size: "default" | "sm"; label?: string; full: boolean }) {
+  const box = useRef<HTMLDivElement>(null), [thumb, setThumb] = useState<[number, number] | null>(null)
+  useLayoutEffect(() => {
+    const el = box.current
+    if (!el) return
+    const place = () => { const on = el.querySelector<HTMLElement>('[aria-pressed="true"]'); setThumb(on ? [on.offsetLeft, on.offsetWidth] : null) }
+    place()
+    const ro = new ResizeObserver(place); ro.observe(el)
+    return () => ro.disconnect()
+  }, [value, options.length])
+  return (
+    <div ref={box} role="group" aria-label={label} className={cn("relative isolate inline-flex w-fit items-center rounded-lg bg-muted p-0.5", size === "sm" ? "h-7" : "h-8", full && "flex w-full", className)}>
+      {thumb && <span aria-hidden className="absolute inset-y-0.5 left-0 -z-10 rounded-md bg-(--raised) shadow-[0_1px_2px_rgb(16_24_40/0.08),0_0_0_1px_rgb(16_24_40/0.04)] transition-[translate,width] duration-180 ease-(--ease-out) dark:shadow-[inset_0_1px_0_rgb(255_255_255/0.06)]" style={{ width: thumb[1], translate: `${thumb[0]}px 0` }} />}
+      {options.map((o) => {
+        const [v, l, tip] = typeof o === "string" ? [o, o, undefined] : o
+        return <button key={v} type="button" aria-pressed={v === value} aria-label={tip} title={tip} data-seg={v} onClick={() => onChange(v as T)}
+          className={cn("h-full whitespace-nowrap rounded-md px-3 type-callout font-medium transition-colors duration-120 ease-(--ease-out)", full && "min-w-0 flex-1", iconOnly && "px-2", size === "sm" && "px-2.5 type-footnote font-medium", v === value ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>{l}</button>
+      })}
+    </div>
+  )
+}
 /** filters (shadcn ToggleGroup) — single choice, never empty */
 export function Chips<T extends string>({ value, onChange, options, className }: { value: T; onChange: (v: T) => void; options: readonly T[]; className?: string }) {
   return (
@@ -239,17 +273,194 @@ export function Chips<T extends string>({ value, onChange, options, className }:
     </ToggleGroup>
   )
 }
-/** `action`: what to do about it, inside the empty state rather than a page-height below it */
-export function Empty({ title, sub, icon, action }: { title: string; sub?: string; icon?: ReactNode; action?: ReactNode }) {
+/** `action`: what to do about it, inside the empty state rather than a page-height below it. `compact`: the same, sized
+ *  for a panel or a section on a muted fill instead of a whole page */
+export function Empty({ title, sub, icon, action, compact = false, className }: { title: string; sub?: ReactNode; icon?: ReactNode; action?: ReactNode; compact?: boolean; className?: string }) {
   return (
-    <UIEmpty className="px-4 py-16 anim-in sm:px-12">
-      <EmptyHeader>
-        {icon && <EmptyMedia variant="icon">{icon}</EmptyMedia>}
-        <EmptyTitle className="type-headline">{title}</EmptyTitle>
-        {sub && <EmptyDescription className="type-callout text-muted-foreground">{sub}</EmptyDescription>}
+    <UIEmpty className={cn("anim-in", compact ? "gap-3 rounded-xl bg-muted/60 px-4 py-8" : "px-4 py-16 sm:px-12", className)} data-empty={compact ? "compact" : "page"}>
+      <EmptyHeader className={cn(compact && "gap-1.5")}>
+        {icon && <EmptyMedia variant="icon" className={cn(compact && "mb-1 size-8 rounded-lg bg-background/70 [&_svg:not([class*='size-'])]:size-4")}>{icon}</EmptyMedia>}
+        <EmptyTitle className={compact ? "type-body font-medium" : "type-headline"}>{title}</EmptyTitle>
+        {sub && <EmptyDescription className={cn(compact ? "type-footnote" : "type-callout", "text-muted-foreground")}>{sub}</EmptyDescription>}
       </EmptyHeader>
       {action && <EmptyContent>{action}</EmptyContent>}
     </UIEmpty>
+  )
+}
+
+/* ───────── surfaces (visual system v2): a section is a quiet label over a panel; a panel is one lifted card that
+ * holds rows with hairlines only between them; notes, notices and an inline "nothing here" are muted fills, never a
+ * box drawn inside a box ───────── */
+/** a lifted surface: the card of visual system v2 (white in light, one step up with a top highlight in dark) */
+export const LIFT = "rounded-xl bg-card shadow-[var(--lift)]"
+
+/** rows in a card. The rows keep their own hover wash, inset by the card's 4px so the corners stay concentric
+ *  (12 outside, 8 inside); the hairlines between rows line up with the text. */
+export function Panel({ children, className, ...rest }: { children: ReactNode; className?: string } & Omit<ComponentProps<"div">, "children">) {
+  if (!Children.toArray(children).filter(Boolean).length) return null
+  return (
+    <div data-panel className={cn(LIFT, "p-1", className)} {...rest}>
+      <Group className="mx-0 [&>[data-slot=item-separator]]:mx-3 [&>[data-slot=item]]:px-3 [&>div>[data-slot=item]]:px-3">{children}</Group>
+    </div>
+  )
+}
+
+/** a card for content that is not a list of rows */
+export function Card({ children, className, ...rest }: { children: ReactNode; className?: string } & Omit<ComponentProps<"div">, "children">) {
+  return <div className={cn(LIFT, "p-4", className)} {...rest}>{children}</div>
+}
+
+/** a section: its label (with an optional control on the right), what it holds, and an optional note under it */
+export function Section({ label, right, note, children, className, ...rest }: { label?: ReactNode; right?: ReactNode; note?: ReactNode; children: ReactNode; className?: string } & Omit<ComponentProps<"section">, "children">) {
+  return (
+    <section className={cn("min-w-0", className)} {...rest}>
+      {label != null && <SectionLabel right={right}>{label}</SectionLabel>}
+      {children}
+      {note && <Note>{note}</Note>}
+    </section>
+  )
+}
+
+/** a short explanation under a panel or a field */
+export function Note({ children, className, ...rest }: { children: ReactNode; className?: string } & Omit<ComponentProps<"div">, "children">) {
+  return <div className={cn("mt-2 px-1 type-footnote text-muted-foreground", className)} {...rest}>{children}</div>
+}
+
+/** the lead paragraph of a pane, above its first section */
+export function Lead({ children, className, ...rest }: { children: ReactNode; className?: string } & Omit<ComponentProps<"p">, "children">) {
+  return <p className={cn("type-callout text-muted-foreground", className)} {...rest}>{children}</p>
+}
+
+/** "nothing here yet" in one line, inline in a section (with an icon and an action it is `Empty compact`; a page-sized
+ *  empty state is `Empty`) */
+export function Blank({ children, className, ...rest }: { children: ReactNode; className?: string } & Omit<ComponentProps<"div">, "children">) {
+  return <div className={cn("rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground", className)} {...rest}>{children}</div>
+}
+
+/** the tints of a state: the status color at a tenth for the fill and in full for the icon and the words of a pill.
+ *  Item and session states (run, wait, fail, done, quiet) map onto the same four hues. */
+const TONE = {
+  info: ["bg-blue/10", "text-blue", InfoIcon],
+  attention: ["bg-attention/12", "text-attention", TriangleAlertIcon],
+  destructive: ["bg-destructive/10", "text-destructive", CircleAlertIcon],
+  success: ["bg-success/10", "text-success", CircleCheckIcon],
+  neutral: ["bg-muted/70", "text-muted-foreground", InfoIcon],
+} as const
+export type Tone = keyof typeof TONE | "run" | "wait" | "fail" | "done" | "quiet"
+const toneOf = (t: Tone): keyof typeof TONE => (t === "run" ? "info" : t === "wait" ? "attention" : t === "fail" ? "destructive" : t === "done" ? "success" : t === "quiet" ? "neutral" : t)
+/** a tinted notice: the status color at a tenth for the fill and in full for the icon; the words stay readable */
+export function Notice({ tone = "neutral", children, action, className, icon = true, ...rest }: { tone?: Tone; children: ReactNode; action?: ReactNode; className?: string; icon?: boolean } & Omit<ComponentProps<"div">, "children">) {
+  const [bg, fg, I] = TONE[toneOf(tone)]
+  return (
+    <div className={cn("flex items-start gap-2.5 rounded-xl px-4 py-3 type-callout text-foreground/90", bg, className)} {...rest}>
+      {icon && <I className={cn("mt-0.5 size-4 shrink-0", fg)} strokeWidth={2} aria-hidden />}
+      <div className="min-w-0 flex-1">{children}</div>
+      {action && <div className="-my-1 shrink-0">{action}</div>}
+    </div>
+  )
+}
+
+/** the status pill: a small tinted capsule for a state or a mark beside a title */
+export function Pill({ tone = "neutral", children, className, ...rest }: { tone?: Tone; children: ReactNode; className?: string } & Omit<ComponentProps<"span">, "children">) {
+  const k = toneOf(tone), [bg, fg] = TONE[k]
+  return <span className={cn("inline-flex h-5 shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 type-label leading-none", bg, k === "neutral" ? "text-muted-foreground" : fg, className)} {...rest}>{children}</span>
+}
+
+/** the icon tile at the start of a row: one size everywhere (32px, the button radius) */
+export function Tile({ I, className, children }: { I?: any; className?: string; children?: ReactNode }) {
+  return <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground", className)} aria-hidden>{I ? <I className="size-4" strokeWidth={1.75} /> : children}</span>
+}
+
+/** the chevron at the end of a row that opens something */
+export const Chevron = () => <ChevronRightIcon className="size-4 shrink-0 text-tertiary" aria-hidden />
+
+/** loading, centred where the content will be */
+export const Loading = ({ className }: { className?: string }) => <div className={cn("flex justify-center py-16", className)}><Spinner className="size-5 text-muted-foreground" /></div>
+
+/** the motion of things that open in place: 180ms on the system's ease-out (a chevron turning with its panel) */
+export const EASE = "duration-180 ease-(--ease-out)"
+
+/** what opens under a row or a toggle: its height eases open and shut (the content is mounted only while open or
+ *  closing, so what was hidden is not in the page) and it fades with it. Horizontal padding keeps a lifted panel's
+ *  ring unclipped. */
+export function Reveal({ open, children, className, ...rest }: { open: boolean; children: ReactNode; className?: string } & Omit<ComponentProps<typeof CollapsibleContent>, "children" | "className">) {
+  return (
+    <Collapsible open={open}>
+      <CollapsibleContent className={cn("-mx-1 px-1 transition-[height,opacity] data-ending-style:opacity-0 data-starting-style:opacity-0", className)} {...rest}>
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+/** a chevron that turns with what it opens: right → down, or down → up with `flip` */
+export const Turn = ({ open, flip, className }: { open: boolean; flip?: boolean; className?: string }) => (
+  <ChevronRightIcon className={cn("size-4 shrink-0 text-tertiary transition-transform", EASE, flip ? (open ? "-rotate-90" : "rotate-90") : open && "rotate-90", className)} aria-hidden />
+)
+
+/** a field and its button as the last row of a panel: one way to add or enter something, everywhere */
+export function FieldRow({ children, className, ...rest }: { children: ReactNode; className?: string } & Omit<ComponentProps<"form">, "children">) {
+  return <form className={cn("flex min-w-0 flex-wrap items-center gap-2 px-3 py-2.5 sm:flex-nowrap [&_[data-slot=input]]:h-8 [&_[data-slot=input]]:min-w-0 [&_[data-slot=input]]:flex-1", className)} {...rest}>{children}</form>
+}
+
+/** a strip that may be wider than the screen (tabs, a long segmented control): it scrolls sideways with a fade on
+ *  the side that has more, and keeps the selected tab in view */
+export function Strip({ children, className, watch }: { children: ReactNode; className?: string; watch?: unknown }) {
+  const [ref, more] = useScrollMore<HTMLDivElement>("x")
+  useEffect(() => {
+    const el = ref.current, on = el?.querySelector<HTMLElement>('[aria-selected="true"], [data-active], [aria-pressed="true"]')
+    if (!el || !on) return
+    const a = el.getBoundingClientRect(), b = on.getBoundingClientRect()
+    if (b.left < a.left || b.right > a.right) el.scrollLeft += b.left - a.left - (a.width - b.width) / 2
+  }, [watch])
+  const mask = more === "end" ? "linear-gradient(to right, black 85%, transparent)" : more === "start" ? "linear-gradient(to left, black 85%, transparent)" : more ? "linear-gradient(to right, transparent, black 12%, black 88%, transparent)" : undefined
+  return <div ref={ref} className={cn("-mx-1 max-w-[calc(100%+0.5rem)] overflow-x-auto px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden", className)} style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined} data-more={more}>{children}</div>
+}
+
+/** the search field: a quiet wash rather than a frame, the icon inside, a soft ring on focus without a border jump.
+ *  `sm` for a toolbar beside other small controls. */
+export function SearchField({ className, trailing, inputRef, size = "default", ...input }: Omit<InputHTMLAttributes<HTMLInputElement>, "size"> & { trailing?: ReactNode; inputRef?: Ref<HTMLInputElement>; size?: "default" | "sm" }) {
+  return (
+    <label className={cn("flex min-w-0 items-center gap-2 rounded-lg bg-foreground/5 transition-[background-color,box-shadow] duration-180 ease-(--ease-out) focus-within:bg-transparent focus-within:ring-1 focus-within:ring-ring/45 focus-within:shadow-[0_0_0_4px_color-mix(in_srgb,var(--ring)_12%,transparent)]", size === "sm" ? "h-8 px-2.5" : "h-9 px-3", className)} data-search-field>
+      <SearchIcon className={cn("shrink-0 text-tertiary", size === "sm" ? "size-3.5" : "size-4")} aria-hidden />
+      <input ref={inputRef} {...input} className={cn("min-w-0 flex-1 bg-transparent outline-none placeholder:text-tertiary", size === "sm" ? "type-callout" : "type-body")} />
+      {trailing}
+    </label>
+  )
+}
+
+/** the width of a panel beside a page */
+export const PANEL_W = "w-[320px]"
+/** a panel beside a page that slides open and shut: its width eases between 0 and PANEL_W, the content keeps its
+ *  width (so it doesn't reflow while it moves) and leaves the page once closed */
+export function SidePanel({ open, children, className, test }: { open: boolean; children: ReactNode; className?: string; test: Record<string, string> }) {
+  const [mounted, setMounted] = useState(open), [shown, setShown] = useState(open)
+  useEffect(() => {
+    if (open) {
+      setMounted(true)
+      let r = requestAnimationFrame(() => { r = requestAnimationFrame(() => setShown(true)) })
+      return () => cancelAnimationFrame(r)
+    }
+    setShown(false)
+    const h = setTimeout(() => setMounted(false), 280)
+    return () => clearTimeout(h)
+  }, [open])
+  if (!mounted) return null
+  return (
+    <div className={cn("flex shrink-0 justify-end overflow-hidden transition-[width] duration-260 ease-(--ease-out)", shown && open ? PANEL_W : "w-0")} inert={!open || undefined} data-side-panel>
+      <aside className={cn("flex shrink-0 flex-col overflow-hidden border-l border-sidebar-border bg-sidebar transition-opacity duration-260 ease-(--ease-out)", PANEL_W, shown && open ? "opacity-100" : "opacity-60", className)} {...(open ? test : {})}>{children}</aside>
+    </div>
+  )
+}
+/** the head of a side panel (or the sheet that stands in for it on a phone): one height with the page's bar, the
+ *  panel's name, a close */
+export function PanelHead({ title, onClose, closeLabel, closeTest, children, className, ...rest }: { title: ReactNode; onClose: () => void; closeLabel: string; closeTest?: string; children?: ReactNode; className?: string } & Record<`data-${string}`, unknown>) {
+  return (
+    <div className={cn("flex h-13 shrink-0 items-center gap-2 border-b border-sidebar-border px-4", className)} {...rest}>
+      <span className="min-w-0 truncate type-headline">{title}</span>
+      {children}
+      <Button variant="ghost" size="icon-sm" className="ml-auto text-muted-foreground" aria-label={closeLabel} onClick={onClose} data-panel-close {...(closeTest ? { [closeTest]: "" } : {})}><XIcon /></Button>
+    </div>
   )
 }
 
@@ -880,9 +1091,21 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
   if (g.t === "ask") return <TranscriptPermission e={e} />
   if (g.t === "away") return <div className="flex items-center gap-2 type-footnote text-muted-foreground" data-away><CornerDownRightIcon className="size-3.5 shrink-0" strokeWidth={1.5} />{t("core:transcript.away")}</div>
   if (g.t === "sys" && e[2] === "faulted") return <FaultedLine k={k} text={e[1]} />
-  if (g.t === "sys") return <div className="flex items-center gap-3 type-footnote text-muted-foreground"><span className="h-px flex-1 bg-border/70" /><span className="max-w-[80%] text-center">{e[1]}</span><span className="h-px flex-1 bg-border/70" /></div>
+  if (g.t === "sys") return <SysRow text={String(e[1] ?? "")} />
   return null
 }, (a, b) => a.k === b.k && a.live === b.live && a.g.idx === b.g.idx && a.g.t === b.g.t && a.g.t1 === b.g.t1 && a.g.end === b.g.end && a.g.files?.length === b.g.files?.length && sameEvs(a.g.evs, b.g.evs))
+/** an event in the conversation (started, queued, compacted…): a short one is a centred line between rules, truncated
+ *  with the whole text on hover; a longer notice is a left-aligned muted fill with an icon, two lines at most */
+export function SysRow({ text, className }: { text: string; className?: string }) {
+  if (text.length <= 40 && !text.includes("\n")) return (
+    <div className={cn("flex items-center gap-3 type-footnote text-muted-foreground", className)} data-sys="line"><span className="h-px flex-1 bg-border/70" /><span className="min-w-0 max-w-[80%] truncate text-center" title={text}>{text}</span><span className="h-px flex-1 bg-border/70" /></div>
+  )
+  return (
+    <div className={cn("flex items-start gap-2 rounded-lg bg-muted/60 px-3 py-2 type-footnote text-muted-foreground", className)} title={text} data-sys="notice">
+      <InfoIcon className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.75} aria-hidden /><span className="min-w-0 flex-1 line-clamp-2 break-words">{text}</span>
+    </div>
+  )
+}
 const PROMPT = ["u", "hi", "q"]
 /** when the turn holding tuple `at` started: its prompt's time; 0 when no prompt opened it (the work's first step stands in) */
 function turnStart(s: Sess, at: number) {
@@ -955,7 +1178,9 @@ function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: stri
   )
 }
 
-/** the session's state at a glance, above the composer: running and doing what, waiting on you, or done and how it went */
+/** the session's state at a glance, above the composer: running and doing what, waiting on you, or done and how it went.
+ *  Only a running or waiting turn keeps its tinted box; a finished one (done, stopped, ended) is one quiet line. On a
+ *  phone the bar keeps the state and the time, not the step summary. */
 export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
   const t = useT()
   const s = st.S[k], run = s?.st === "run"
@@ -973,13 +1198,13 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
   const what = run ? <Doing evs={turn} /> : tone === "wait" ? t("core:runBar.waitWhat") : stats.join(" · ")
   return (
     <div role="status" aria-live="polite" data-runbar={tone}
-      className={cn("mb-2 flex min-h-10 items-center gap-2.5 rounded-xl px-3.5 py-2 type-callout transition-colors duration-180 ease-(--ease-out)",
-        tone === "run" ? "bg-blue/8" : tone === "wait" ? "bg-attention/10" : "bg-muted/60")}>
+      className={cn("mb-2 flex items-center gap-2.5 rounded-xl type-callout transition-colors duration-180 ease-(--ease-out)",
+        tone === "run" ? "min-h-10 bg-blue/8 px-3.5 py-2" : tone === "wait" ? "min-h-10 bg-attention/10 px-3.5 py-2" : "min-h-8 py-1")}>
       {run ? <span className="flex size-4 shrink-0 items-center justify-center"><StatusDot s="run" /></span>
         : tone === "wait" ? <StatusDot s="wait" className="mx-1" /> : tone === "done" ? <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /> : tone === "stop" ? <CircleSlashIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /> : <StatusDot s="ended" className="mx-1" />}
       <span className={cn("shrink-0 font-medium", tone === "run" ? "text-blue" : tone === "wait" ? "text-attention" : "text-foreground/85")}>{label}</span>
       {/* plain text in its own box: a flex row cuts text off without the ellipsis */}
-      {what && <span className={cn("flex min-w-0 items-baseline gap-1.5 truncate", run ? "text-foreground/85" : "text-muted-foreground")} data-doing>{typeof what === "string" ? <span className="min-w-0 truncate">{what}</span> : what}</span>}
+      {what && <span className={cn("flex min-w-0 items-baseline gap-1.5 truncate max-sm:hidden", run ? "text-foreground/85" : "text-muted-foreground")} data-doing>{typeof what === "string" ? <span className="min-w-0 truncate">{what}</span> : what}</span>}
       <span className="ml-auto shrink-0 type-footnote tabular-nums text-muted-foreground">{run ? clock(now - t0) : endAt && t0 ? t("core:runBar.took", { dur: fmtDur(endAt - t0) }) : ""}</span>
       {run && onStop && <Button size="xs" variant="outline" className="shrink-0 bg-card" onClick={onStop} data-interrupt><SquareIcon className="fill-current" />{t("core:runBar.interrupt")}</Button>}
     </div>
@@ -1161,7 +1386,7 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
         : <QuestionnaireSubmit data-answer disabled={busy}>{t("core:card.answer")}</QuestionnaireSubmit>}</QuestionnaireActions>
     </Questionnaire>
   </> }
-  return <Card size="sm" className="gap-0 py-0 shadow-[var(--lift)] anim-in" data-decision={w.type} data-decision-wrap={i.id || w.decision} aria-busy={busy}>{busy && <div role="status" className="px-4 py-2 type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}{body}</Card>
+  return <UICard size="sm" className="gap-0 py-0 anim-in" data-decision={w.type} data-decision-wrap={i.id || w.decision} aria-busy={busy}>{busy && <div role="status" className="px-4 py-2 type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}{body}</UICard>
 }
 
 export function ItemRef({ id }: { id: string }) {

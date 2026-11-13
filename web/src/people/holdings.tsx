@@ -8,9 +8,9 @@ import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { api } from "@/api"
-import { go, Group, Row, SectionLabel } from "@/ui"
+import { go, Group, Row, SectionLabel, Meta } from "@/ui"
 import { ownership, objectHref, type Holding, type ObjectInfo, type ObjectType } from "@/api/ownership"
-import { Loading, Section, SubMeta, act, joinList, label, useLoad } from "@/people/common"
+import { Loading, Section, act, joinList, label, useLoad } from "@/people/common"
 import { useT } from "@/i18n"
 import { OwnerChip, changedToast } from "@/people/owner-chip"
 
@@ -32,7 +32,7 @@ export function HoldingsSection({ person, name, isMe, isBot }: { person: string;
           <SectionLabel>{t("people:holdings.accounts", { n: nAcc })}</SectionLabel>
           {nAcc ? <Group>{h.accounts.flatMap((g) => g.accounts.map((a) => (
             <Row key={a.id} title={<span className="font-mono type-callout">{a.handle}</span>}
-              sub={<SubMeta><span>{g.system}</span><span>{a.kind_label}</span>{a.name && a.name !== a.handle && <span>{a.name}</span>}</SubMeta>}
+              sub={<Meta inline><span>{g.system}</span><span>{a.kind_label}</span>{a.name && a.name !== a.handle && <span>{a.name}</span>}</Meta>}
               onClick={() => go("#/accounts/" + a.id)} data-holding-acct={a.handle}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)))}</Group>
             : <div className="py-1 type-callout text-muted-foreground">{t("people:holdings.noAccounts")}</div>}
         </div>
@@ -55,7 +55,7 @@ function HoldingRow({ x, person }: { x: Holding; person: string }) {
   return (
     <Row icon={<ObjIcon t={o.object_type} />} onClick={href ? () => go(href) : undefined} controls data-holding={o.name}
       title={<span className="inline-flex items-center gap-1.5">{o.name}{x.status !== "confirmed" && <Badge variant="secondary" className="bg-attention/12 text-attention">{t("people:shared.pending")}</Badge>}</span>}
-      sub={<><SubMeta><span>{o.type_label}</span><span>{x.role_label}</span><span>{label("source", x.source)}</span>{others.length > 0 && <span>{t("people:holdings.alsoOwners", { names: joinList(others) })}</span>}</SubMeta>{o.detail && <span className="block truncate">{clip(o.detail)}</span>}</>}>
+      sub={<><Meta inline><span>{o.type_label}</span><span>{x.role_label}</span><span>{label("source", x.source)}</span>{others.length > 0 && <span>{t("people:holdings.alsoOwners", { names: joinList(others) })}</span>}</Meta>{o.detail && <span className="block truncate">{clip(o.detail)}</span>}</>}>
       {x.status !== "confirmed" && x.decision_id && <span className="flex gap-1" onClick={(e) => e.stopPropagation()}>
         <Button size="xs" variant="outline" onClick={() => void act(api.decide(x.decision_id!, "yes"), t("people:holdings.confirmed"))} data-holding-yes>{t("common:action.confirm")}</Button>
         <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void act(api.decide(x.decision_id!, "no"), t("people:holdings.ignored"))}>{t("people:shared.wrong")}</Button></span>}

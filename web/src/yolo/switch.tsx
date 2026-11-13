@@ -141,7 +141,7 @@ export function YoloDialog() {
         <DialogFooter className="min-w-0 gap-2 *:h-auto *:min-h-8 *:min-w-0 *:whitespace-normal">
           <Button variant="ghost" onClick={closeSheet}>{action ? t("common:action.cancel") : t("yolo:switch.done")}</Button>
           {action && <Button disabled={busy || (needsOk && !ok) || (turningOn && !pv && !err)} data-yolo-apply={sel}
-            className={cn(sel === "full" && "bg-attention text-white hover:bg-attention/90")} variant={sel === "off" ? "outline" : "default"}
+            variant={sel === "full" ? "attention" : sel === "off" ? "outline" : "default"}
             onClick={() => void run(async () => { await yoloSet(sel, turningOn && all); closeSheet() })}>{action}</Button>}
         </DialogFooter>
       </DialogContent>

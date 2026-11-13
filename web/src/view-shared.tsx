@@ -26,10 +26,12 @@ export function ProjectChip({ id, className, plain }: { id: string | null; class
   return <a href={"#/projects/" + p.id} onClick={(e) => e.stopPropagation()} className={cn("inline-flex items-center gap-1 text-foreground/80 hover:text-foreground hover:underline", className)} data-project-chip={p.id}><FolderIcon className="size-3.5" strokeWidth={1.75} />{p.name}</a>
 }
 
-export function Select({ value, options, onChange, align = "start", testId, quiet, className }: { value: string; options: { v: string; l: ReactNode; disabled?: boolean }[]; onChange: (v: string) => void; align?: "start" | "end"; testId?: string; quiet?: boolean; className?: string }) {
+/** the system's picker. A toolbar filter by default (`sm`, the muted fill every control shares); `size="default"` for a
+ *  form field; `quiet` for one that shows as plain text until hovered. `label` names it for assistive tech and tests. */
+export function Select({ value, options, onChange, align = "start", testId, quiet, className, label, disabled, placeholder, size = "sm" }: { value: string; options: { v: string; l: ReactNode; disabled?: boolean }[]; onChange: (v: string) => void; align?: "start" | "end"; testId?: string; quiet?: boolean; className?: string; label?: string; disabled?: boolean; placeholder?: string; size?: "sm" | "default" }) {
   return (
-    <UISelect items={Object.fromEntries(options.map((o) => [o.v, o.l]))} value={value} onValueChange={(v) => v != null && onChange(String(v))}>
-      <SelectTrigger size="sm" className={cn("min-w-0 max-w-full rounded-lg bg-transparent font-normal", quiet ? "-ml-px border-transparent px-2 hover:bg-accent [&>svg]:opacity-0 hover:[&>svg]:opacity-100" : "border-border", className)} data-select={testId}><SelectValue className="min-w-0 overflow-hidden" /></SelectTrigger>
+    <UISelect items={Object.fromEntries(options.map((o) => [o.v, o.l]))} value={value || (placeholder ? null : value)} onValueChange={(v) => v != null && onChange(String(v))} disabled={disabled}>
+      <SelectTrigger size={size} aria-label={label} className={cn("min-w-0 max-w-full rounded-lg font-normal", size === "default" ? "type-callout" : "type-footnote", quiet ? "-ml-px bg-transparent px-2 hover:bg-accent [&>svg]:opacity-0 hover:[&>svg]:opacity-100" : "text-foreground", className)} data-select={testId}><SelectValue placeholder={placeholder} className="min-w-0 overflow-hidden truncate" /></SelectTrigger>
       <SelectContent align={align === "end" ? "end" : "start"} className="min-w-44">{options.map((o) => <SelectItem key={o.v} value={o.v} disabled={o.disabled}>{o.l}</SelectItem>)}</SelectContent>
     </UISelect>
   )
@@ -92,12 +94,12 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
         {/* a card waiting on you says what it asks and takes you to it; otherwise the row says what is going on now */}
         {!closed && w && (
           <div className="mt-0.5 flex min-w-0 items-center gap-2 pl-14">
-            <Meta className="min-w-0 flex-1 flex-nowrap overflow-hidden [&>*:first-child]:min-w-0 [&>*:first-child]:truncate"><span className="type-callout text-foreground/80" data-item-wait={w.type}>{waitLine(w)}{i.waits.length > 1 && <span className="text-muted-foreground">{t("shell:item.andMore", { count: i.waits.length })}</span>}</span>{extra}</Meta>
+            <Meta one className="min-w-0 flex-1 overflow-hidden [&>*:first-child]:min-w-0 [&>*:first-child]:truncate"><span className="type-callout text-foreground/80" data-item-wait={w.type}>{waitLine(w)}{i.waits.length > 1 && <span className="text-muted-foreground">{t("shell:item.andMore", { count: i.waits.length })}</span>}</span>{extra}</Meta>
             {!pick && <Button size="xs" variant="outline" className="shrink-0" onClick={(e) => { e.stopPropagation(); go("#/items/" + i.id) }} data-item-wait-go={i.id}>{t("shell:item.goAct", { act: WACT[w.type] ?? t("shell:item.handle") })}</Button>}
           </div>
         )}
         {!closed && !w && (i.now || relation || extra.length > 0) && (
-          <Meta className="mt-0.5 flex-nowrap pl-14">
+          <Meta one className="mt-0.5 pl-14">
             {/* beside a "now" line the relation keeps its width and the line truncates; alone it yields to the counts after it */}
             {relation && <span className={cn("min-w-0 max-w-[60%] truncate type-callout font-medium text-foreground/80", i.now && relation.kind !== "paused" && relation.kind !== "previous" && "shrink-0")} data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</span>}
             {i.now && relation?.kind !== "paused" && relation?.kind !== "previous" && <span className="min-w-0 truncate type-callout" data-item-now>{i.now}</span>}

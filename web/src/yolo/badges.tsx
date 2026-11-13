@@ -130,7 +130,7 @@ function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project
             <AlertDialogDescription className="flex flex-col gap-2"><span className="text-foreground">{fullGives()}</span><span>{fullKeeps()}</span></AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter className="min-w-0 *:h-auto *:min-h-8 *:min-w-0 *:whitespace-normal"><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
-            <AlertDialogAction className="bg-attention text-white hover:bg-attention/90" onClick={() => void yoloScope(type, id, "full")} data-yolo-scope-full-ok>{t("yolo:level.full")}</AlertDialogAction></AlertDialogFooter>
+            <AlertDialogAction variant="attention" onClick={() => void yoloScope(type, id, "full")} data-yolo-scope-full-ok>{t("yolo:level.full")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
     </>

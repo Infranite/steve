@@ -23,8 +23,6 @@ import { CoreKpis, DrillPanel, FlowChart, StatusBars, type Drill } from "@/stats
 import { RunState } from "@/yolo/status"
 import { StatsItemView } from "@/stats/drill"
 import { EventExplorer } from "@/stats/events"
-import { TOOL } from "@/stats/chart"
-import { cn } from "cn"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 import { fmtN, fmtRange, fmtUsd, hhmm, oneDay, time, zoneName, useStats } from "@/stats/format"
@@ -53,7 +51,7 @@ function CustomRange({ f, set }: { f: Filter; set: (f: Filter) => void }) {
   const bad = !from || !to || from > to || (Date.parse(to) - Date.parse(from)) / 86400000 + 1 > 366
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger render={<Button size="sm" variant="ghost" className={cn(TOOL, "rounded-lg")} data-custom-range />}><CalendarIcon className="text-muted-foreground" />{f.range === "custom" && f.from && f.to ? fmtRange(f.from, f.to) : t("stats:page.pickDates")}</PopoverTrigger>
+      <PopoverTrigger render={<Button size="sm" variant="secondary" className="rounded-lg font-normal" data-custom-range />}><CalendarIcon className="text-muted-foreground" />{f.range === "custom" && f.from && f.to ? fmtRange(f.from, f.to) : t("stats:page.pickDates")}</PopoverTrigger>
       <PopoverContent align="start" className="w-72">
         <div className="flex flex-col gap-3">
           <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("stats:page.from")}<Input type="date" value={from} max={today} onChange={(e) => setFrom(e.target.value)} aria-label={t("stats:page.fromAria")} /></label>
@@ -91,8 +89,8 @@ export function StatsView() {
     <div className="flex flex-wrap items-center gap-2" data-stats-toolbar>
       <Segmented size="sm" value={f.range === "custom" ? "custom" : f.range} onChange={(v) => { setPicked(null); setDrill(null); if (v !== "custom") setF({ ...f, range: v, from: undefined, to: undefined }); else setF({ ...f, range: "custom", from: f.from ?? localDay(new Date(Date.now() - 13 * 86400000)), to: f.to ?? localDay() }) }} options={RANGES()} />
       {f.range === "custom" && <CustomRange f={f} set={(x) => { setPicked(null); setDrill(null); setF(x) }} />}
-      <Select value={f.project ?? ""} onChange={(v) => setF({ ...f, project: v || undefined })} options={[{ v: "", l: t("stats:page.allProjects") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} testId="stats-project" className={TOOL} />
-      <Select value={f.bot ?? ""} onChange={(v) => setF({ ...f, bot: v || undefined })} options={[{ v: "", l: t("stats:page.allBots") }, ...bots.map((k) => ({ v: k, l: st.bots[k].n }))]} testId="stats-bot" className={TOOL} />
+      <Select value={f.project ?? ""} onChange={(v) => setF({ ...f, project: v || undefined })} options={[{ v: "", l: t("stats:page.allProjects") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} testId="stats-project" />
+      <Select value={f.bot ?? ""} onChange={(v) => setF({ ...f, bot: v || undefined })} options={[{ v: "", l: t("stats:page.allBots") }, ...bots.map((k) => ({ v: k, l: st.bots[k].n }))]} testId="stats-bot" />
       {s.s === "ok" && <span className="type-footnote tabular-nums text-tertiary" data-updated>{t("stats:page.updatedAt", { time: hhmm(s.at) })}</span>}
     </div>
   )

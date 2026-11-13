@@ -8,7 +8,6 @@ import { Spinner } from "@/components/ui/spinner"
 import { stats, type Filter, type ItemOnly, type ItemSort } from "@/api/stats"
 import { go, ItemNo, StatusDot } from "@/ui"
 import { Select } from "@/view-shared"
-import { TOOL } from "@/stats/chart"
 import { Est } from "@/stats/kpi"
 import { Table, num, th } from "@/stats/tables"
 import { t, useT } from "@/i18n"
@@ -24,7 +23,7 @@ export function ItemsTable({ f, fkey, live, only, sort0 = "est", panel }: { f: F
   const [cursor, setCursor] = useState<string[]>([])
   const at = cursor[cursor.length - 1]
   const [d] = useStats(() => stats.items(f, sort, at, 50, only), [fkey, sort, at, only], live)
-  const sorter = <Select value={sort} onChange={(v) => { setSort(v as ItemSort); setCursor([]) }} options={SORTS().map(([v, l]) => ({ v, l }))} testId="items-sort" className={TOOL} />
+  const sorter = <Select value={sort} onChange={(v) => { setSort(v as ItemSort); setCursor([]) }} options={SORTS().map(([v, l]) => ({ v, l }))} testId="items-sort" />
   const count = d.s === "ok" ? <span data-items-total={d.v.total}>{only === "done" ? t("stats:items.totalDone", { count: d.v.total }) : only === "created" ? t("stats:items.totalCreated", { count: d.v.total }) : t("stats:items.totalActive", { count: d.v.total })}</span> : null
   const body = (
     <div data-items-table className={panel ? "pb-3" : undefined}>
