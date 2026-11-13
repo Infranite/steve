@@ -25,7 +25,7 @@ import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
   st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
-  setSetting, toast, finishOnboarding, emit, closedSt,
+  setSetting, toast, emit, closedSt,
 } from "@/store"
 import { api, type RKindReview } from "@/api"
 import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Notice, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
@@ -345,8 +345,6 @@ const PH_KEYS: Record<string, "phGeneral" | "phItems" | "phTags" | "phModels" | 
   general: "phGeneral", items: "phItems", tags: "phTags", models: "phModels", notify: "phNotify", look: "phLook", data: "phData",
 }
 const Sel = ({ v, o, on, testId, label }: { v: string; o: [string, string][]; on: (v: string) => void; testId?: string; label?: string }) => <SetSelect testId={testId} label={label} value={v} options={o} onChange={on} />
-/** a row title with the Later pill after it, which moves to its own line when the two do not fit (phones) */
-const Soon = ({ children }: { children: ReactNode }) => { const t = useT(); return <span className="flex flex-wrap items-center gap-x-2 gap-y-1">{children}<Pill>{t("manage:settings.later")}</Pill></span> }
 export function SettingsView() {
   const t = useT()
   const [, cat] = useRoute()
@@ -419,25 +417,27 @@ function Pane({ id }: { id: string }) {
     </Panel>
   </div>
   if (id === "items") return <div className="flex flex-col gap-8">
-    <Section label={t("manage:items.section")}><Panel>
-      <Row title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : "auto"} onChange={(v) => setSetting({ accDefault: v })} options={[["manual", t("manage:acc.manual")], ["auto", t("manage:acc.auto")]] as const} /></Row>
-      <Row title={t("manage:items.prefix")} sub={t("manage:items.prefixSub")}><span className="font-mono type-callout">{st.prefix}-{st.noSeq + 1}</span></Row>
-      <Row title={t("manage:items.depsAfter")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter} o={[["自动开始", t("manage:items.depsAuto")], ["提醒我开始", t("manage:items.depsRemind")]]} on={(v) => setSetting({ depsAfter: v })} /></Row>
-      <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays} o={[...[7, 30, 90].map((d): [string, string] => [String(d), t("common:dur.days", { count: d })]), ["0", t("manage:items.archNever")]]} on={(v) => setSetting({ archDays: v })} /></Row></Panel></Section>
+    {/* the pane's title already says 事项: the first group goes without a label; the number prefix lives in 工作空间 */}
+    <Panel>
+      <Row className="max-sm:flex-col max-sm:items-stretch max-sm:gap-2" title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : "auto"} onChange={(v) => setSetting({ accDefault: v })} options={[["manual", t("manage:acc.manual")], ["auto", t("manage:acc.auto")]] as const} /></Row>
+      <Row title={t("manage:items.depsAfter")} sub={t("manage:items.depsAfterSub")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter} o={[["自动开始", t("manage:items.depsAuto")], ["提醒我开始", t("manage:items.depsRemind")]]} on={(v) => setSetting({ depsAfter: v })} /></Row>
+      <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays} o={[...[7, 30, 90].map((d): [string, string] => [String(d), t("common:dur.days", { count: d })]), ["0", t("manage:items.archNever")]]} on={(v) => setSetting({ archDays: v })} /></Row></Panel>
     <Section label={t("manage:items.sessions")}><Panel>
       <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? "0"} o={[["0", t("manage:items.handoffOff")], ["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
   </div>
   if (id === "notify") return <NotifyPane />
   if (id === "look") return <div className="flex flex-col gap-8">
-    <Section label={t("manage:look.avatars")} note={t("manage:look.avatarsHint")}>
-      <Card className="flex flex-wrap items-start gap-2 p-3" data-avatar-preview>{Object.keys(st.bots).map((k) => <a key={k} href={"#/bots/" + k} className="flex w-20 flex-col items-center gap-1.5 rounded-lg px-1 py-2 hover:bg-accent"><Robot k={k} size={44} /><span className="max-w-full truncate type-footnote text-muted-foreground">{st.bots[k].n}</span></a>)}</Card></Section>
     <Section label={t("manage:look.ui")}><Panel>
-      <Row title={t("manage:look.theme")} sub={t("manage:look.themeSub")}><ThemeSwitch labels /></Row>
+      <Row title={t("manage:look.theme")}><ThemeSwitch labels /></Row>
       <LanguageRow />
       <Row title={t("manage:look.fontSize")}><Segmented size="sm" value={c.fontSize} onChange={(v) => setSetting({ fontSize: v })} options={[["标准", t("manage:look.fontNormal")], ["大", t("manage:look.fontLarge")]]} /></Row>
       <Row title={t("manage:look.reduceMotion")} sub={t("manage:look.reduceMotionSub")}><SetSwitch testId="reduce-motion" label={t("manage:look.reduceMotion")} checked={c.reduceMotion === "开"} onChange={(v) => setSetting({ reduceMotion: v ? "开" : "关" })} /></Row>
     </Panel></Section>
-    <AppearanceSection /></div>
+    <AppearanceSection />
+    {/* the Bots' avatars are set on each Bot: one row that shows them and leads there, not a gallery */}
+    <Panel><Row title={t("manage:look.avatars")} sub={t("manage:look.avatarsHint")} onClick={() => go("#/bots")} data-avatar-preview>
+      <span className="hidden items-center gap-1 sm:flex" aria-hidden>{Object.keys(st.bots).slice(0, 5).map((k) => <Robot key={k} k={k} size={22} />)}</span><Chevron /></Row></Panel>
+  </div>
   if (id === "data") return <div className="flex flex-col gap-8">
     <HubData />
     <WorkspaceDisk />
@@ -449,13 +449,7 @@ function Pane({ id }: { id: string }) {
     <Section label={t("manage:data.danger")} data-danger-zone><Panel className="shadow-[var(--lift),0_0_0_1px_color-mix(in_srgb,var(--destructive)_18%,transparent)]">
       <DangerRow testId="clear-mem" title={t("manage:data.clearMem")} sub={t("manage:data.clearMemSub")} label={t("manage:data.clear")} what={t("manage:data.clearWhat")} onOk={() => void api.clearMemories().then(() => toast(t("manage:data.cleared")))} /></Panel></Section>
   </div>
-  if (id === "about") return <div className="flex flex-col gap-8">
-    <AboutVersions />
-    <Section label={t("manage:about.release")}><Panel>
-    <Row title={t("manage:about.publish")} sub={t("manage:about.publishSub")} />
-    <Row title={t("manage:about.onboard")} sub={t("manage:about.onboardSub")}><Button size="sm" variant="outline" onClick={() => { finishOnboarding(); localStorage.removeItem("steve-onboarded"); st.onboard = 0; emit(); go("#/") }}>{t("manage:about.start")}</Button></Row>
-    </Panel></Section>
-  </div>
+  if (id === "about") return <AboutVersions />
   return null
 }
 /* the settings-notifications pattern of affectUI: each kind of message is a switch, and its time unfolds under it
@@ -469,16 +463,17 @@ function NotifyPane() {
   const last = useRef({ digestAt: digest ? c.digestAt : DIGEST_AT[0], quiet: quiet ? c.quiet : QUIET[0] })
   if (digest) last.current.digestAt = c.digestAt
   if (quiet) last.current.quiet = c.quiet
-  return <div className="flex flex-col gap-8">
+  /* nothing is pushed yet: the notice says so once, instead of a pill on every row */
+  return <div className="flex flex-col gap-6">
     <Notice>{t("manage:notify.none")}</Notice>
-    <Section label={t("manage:notify.digest")}><Panel data-notify-digest>
-      <Row title={<Soon>{t("manage:notify.digestDaily")}</Soon>} sub={t("manage:notify.digestSub")}><SetSwitch testId="digest" label={t("manage:notify.digestDaily")} checked={digest} onChange={(v) => setSetting({ digestAt: v ? last.current.digestAt : "不发" })} /></Row>
+    <Panel data-notify-digest>
+      <Row title={t("manage:notify.digestDaily")} sub={t("manage:notify.digestSub")}><SetSwitch testId="digest" label={t("manage:notify.digestDaily")} checked={digest} onChange={(v) => setSetting({ digestAt: v ? last.current.digestAt : "不发" })} /></Row>
       {digest && <Row className="anim-in" title={t("manage:notify.digestTime")}><Sel testId="digest-at" label={t("manage:notify.digestTime")} v={c.digestAt} o={DIGEST_AT.map((x): [string, string] => [x, x])} on={(v) => setSetting({ digestAt: v })} /></Row>}
-    </Panel></Section>
-    <Section label={t("manage:notify.quiet")}><Panel data-notify-quiet>
-      <Row title={<Soon>{t("manage:notify.quietOn")}</Soon>} sub={t("manage:notify.quietSub")}><SetSwitch testId="quiet" label={t("manage:notify.quietOn")} checked={quiet} onChange={(v) => setSetting({ quiet: v ? last.current.quiet : "关闭" })} /></Row>
+    </Panel>
+    <Panel data-notify-quiet>
+      <Row title={t("manage:notify.quietOn")} sub={t("manage:notify.quietSub")}><SetSwitch testId="quiet" label={t("manage:notify.quietOn")} checked={quiet} onChange={(v) => setSetting({ quiet: v ? last.current.quiet : "关闭" })} /></Row>
       {quiet && <Row className="anim-in" title={t("manage:notify.quietHours")}><Sel testId="quiet-hours" label={t("manage:notify.quietHours")} v={c.quiet} o={QUIET.map((x): [string, string] => [x, x])} on={(v) => setSetting({ quiet: v })} /></Row>}
-    </Panel></Section>
+    </Panel>
   </div>
 }
 /* the settings-general pattern of affectUI: name and prefix as rows with their field on the right, the description as a
@@ -529,9 +524,9 @@ function WorkspacePane() {
       <Row icon={<Tile I={FolderIcon} />} title={t("manage:ws.projects", { count: st.projects.length })} onClick={() => go("#/projects")}><Chevron /></Row>
       <Row icon={<Tile I={BotIcon} />} title={t("manage:ws.bots", { count: Object.keys(st.bots).length })} onClick={() => go("#/bots")}><Chevron /></Row>
       <Row icon={<Tile I={ListTodoIcon} />} title={t("manage:ws.items", { count: st.items.length })} onClick={() => go("#/items")}><Chevron /></Row></Panel></Section>
-    <Section label={t("manage:ws.all", { n: st.workspaces.length })}>
-      <Panel>{st.workspaces.map((x) => <Row key={x.id} title={x.name} sub={x.description || undefined}>{x.id === w.id ? <Pill tone="info">{t("manage:ws.current")}</Pill> : <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void import("@/store").then((m) => m.switchWorkspace(x.id))}>{t("manage:ws.switch")}</Button>}</Row>)}</Panel>
-      <Button size="sm" variant="outline" className="mt-3" onClick={() => openSheet("newWorkspace")}><PlusIcon />{t("manage:ws.new")}</Button></Section>
+    <Section label={st.workspaces.length > 1 ? t("manage:ws.all", { n: st.workspaces.length }) : undefined}>
+      {st.workspaces.length > 1 && <Panel>{st.workspaces.map((x) => <Row key={x.id} title={x.name} sub={x.description || undefined}>{x.id === w.id ? <Pill tone="info">{t("manage:ws.current")}</Pill> : <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void import("@/store").then((m) => m.switchWorkspace(x.id))}>{t("manage:ws.switch")}</Button>}</Row>)}</Panel>}
+      <Button size="sm" variant="outline" className={st.workspaces.length > 1 ? "mt-3" : undefined} onClick={() => openSheet("newWorkspace")}><PlusIcon />{t("manage:ws.new")}</Button></Section>
   </div>
 }
 /* the danger zone of affectUI's settings-general: the action in red, and confirming opens in place under the row
@@ -558,15 +553,14 @@ function DangerRow({ title, sub, label, what, onOk, testId }: { title: string; s
 /* ═════════ 标签 ═════════ */
 let tagCat = "全部"
 /* the items whose category Steve filled in unsure: switch it or confirm it, then they leave the list */
-function KindsReview() {
+function KindsReview({ xs, setXs }: { xs: RKindReview[] | null; setXs: (x: RKindReview[]) => void }) {
   const t = useT()
-  const [xs, setXs] = useState<RKindReview[] | null>(null), [busy, setBusy] = useState(false)
-  useEffect(() => { void loadKindsReview().then(setXs) }, [])
   const done = async (ids: string[]) => { const left = await kindsReviewed(ids); if (left) setXs(left) }
   const rows = (xs ?? []).filter((x) => st.items.some((i) => i.id === x.id))
-  return <Section data-kinds-review right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={async () => { setBusy(true); await kindsBackfill(); setXs(await loadKindsReview()); setBusy(false) }} data-kinds-backfill>{t("manage:kinds.backfill")}</Button>}
-    label={rows.length ? t("manage:kinds.pending", { n: rows.length }) : t("manage:kinds.fill")}>
-    {rows.length ? <>
+  /* nothing to confirm is the usual case: then there is nothing here, not a box that says so */
+  if (!rows.length) return null
+  return <Section data-kinds-review label={t("manage:kinds.pending", { n: rows.length })}>
+    <>
       <p className="mb-3 px-1 type-callout text-muted-foreground">{t("manage:kinds.intro")}</p>
       <Panel>{rows.map((x) => { const i = it(x.id); return (
         <Row key={x.id} title={<span className="inline-flex min-w-0 items-center gap-2"><ItemNo id={i.id} /><span className="truncate">{i.t}</span></span>} sub={x.why || undefined} data-kind-review={x.id}>
@@ -574,7 +568,7 @@ function KindsReview() {
           <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void done([x.id])} data-kind-ok={x.id}>{t("manage:kinds.ok")}</Button>
         </Row>) })}</Panel>
       {rows.length > 1 && <div className="mt-2 flex justify-end"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void done(rows.map((x) => x.id))} data-kind-ok-all>{t("manage:kinds.okAll")}</Button></div>}
-    </> : <Blank>{xs ? t("manage:kinds.allSet") : t("manage:kinds.reading")}</Blank>}
+    </>
   </Section>
 }
 function TagsPane() {
@@ -584,14 +578,17 @@ function TagsPane() {
   const cats = ["全部", ...TAG_CATS.filter((c) => st.tags.some((tg) => tg.cat === c))]
   const d = del ? tag(del) : null, m = merge ? tag(merge) : null
   const domain = st.tags.filter((x) => !isKind(x))
+  const [review, setReview] = useState<RKindReview[] | null>(null), [checking, setChecking] = useState(false)
+  useEffect(() => { void loadKindsReview().then(setReview) }, [])
+  const backfill = <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={checking} onClick={async () => { setChecking(true); await kindsBackfill(); const left = await loadKindsReview(); setReview(left); setChecking(false); if (!left?.length) toast(t("manage:kinds.allSet")) }} data-kinds-backfill>{checking && <Spinner className="size-3" />}{t("manage:kinds.backfill")}</Button>
   return <div className="flex flex-col gap-8" data-tags-pane>
-    <KindsReview />
+    <KindsReview xs={review} setXs={setReview} />
     <div className="flex flex-wrap items-center gap-2"><Segmented size="sm" value={cats.includes(tagCat) ? tagCat : "全部"} onChange={(v) => { tagCat = v; r() }} options={cats.map((c) => [c, catLabel(t, c)] as const)} /><span className="flex-1" /><Button size="sm" onClick={() => openSheet("tag", {})} data-new-tag-btn><PlusIcon />{t("manage:tags.new")}</Button></div>
     {!st.tags.length && <Empty title={t("manage:tags.empty")} sub={t("manage:tags.emptySub")} />}
     {TAG_CATS.filter((c) => tagCat === "全部" || c === tagCat).map((c) => { const kind = c === KIND_CAT; const xs = kind ? kindTags() : st.tags.filter((tg) => tg.cat === c); return xs.length ? (
-      <Section key={c} label={<>{kind ? t("manage:tags.kindSection") : catLabel(t, c)} <span className="tabular-nums">· {xs.length}</span></>} note={kind ? t("manage:tags.intro") : undefined}>
+      <Section key={c} label={<>{kind ? t("manage:tags.kindSection") : catLabel(t, c)} <span className="tabular-nums">· {xs.length}</span></>} right={kind ? backfill : undefined} note={kind ? t("manage:tags.intro") : undefined}>
         <Panel>{xs.map((tg) => (
-          <Row key={tg.id} title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{kind ? <KindTag id={tg.id} /> : <span className="font-medium">{tagLabel(tg)}</span>}<span className="type-footnote tabular-nums text-muted-foreground">{t("manage:tags.uses", { count: tagUses(tg.id) })}</span>{kind ? <Pill>{t("manage:tags.builtin")}</Pill> : tg.by === "Steve" && <span className="type-footnote text-tertiary">{t("manage:tags.bySteve", { created: tg.created })}</span>}</span>} sub={tagDesc(tg)} data-tag-row={tg.name}>
+          <Row key={tg.id} title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{kind ? <KindTag id={tg.id} /> : <span className="font-medium">{tagLabel(tg)}</span>}<span className="type-footnote tabular-nums text-muted-foreground">{t("manage:tags.uses", { count: tagUses(tg.id) })}</span>{!kind && tg.by === "Steve" && <span className="type-footnote text-tertiary">{t("manage:tags.bySteve", { created: tg.created })}</span>}</span>} sub={tagDesc(tg)} data-tag-row={tg.name}>
             <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-tag-menu={tg.name} />}><MoreHorizontalIcon /></DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-40">
                 <DropdownMenuItem onClick={() => showTag(tg.id)} data-show-tag>{t("manage:tags.showItems")}</DropdownMenuItem>

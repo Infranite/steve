@@ -13,6 +13,7 @@ export default {
     addPlain: "其他账号（只记录，不接入）",
     connectedSection: "已接入 Steve · {{n}}",
     connectedEmpty: "还没有接入的账号。到“连接”页按步骤连接飞书、GitHub 或邮箱。",
+    allEmpty: "还没有账号。连接飞书、GitHub 或邮箱后，它们会出现在这里；只想记一笔的账号（比如云服务控制台）用右上角的“添加账号”。",
     integrations: "连接",
     integrationsSub: "飞书、GitHub、邮箱等服务的连接，以及每个连接能做什么，在“连接”页统一管理",
     companySection: "本公司的机器人 · {{n}}",

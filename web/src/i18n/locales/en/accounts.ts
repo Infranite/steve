@@ -12,6 +12,7 @@ export default {
     addPlain: "Other account (record only, not connected)",
     connectedSection: "Connected to Steve · {{n}}",
     connectedEmpty: "No connected accounts yet. Go to Connections to connect Feishu, GitHub or email step by step.",
+    allEmpty: "No accounts yet. Connect Feishu, GitHub or email and they show up here; to just note down an account (a cloud console, say), use Add account at the top.",
     integrations: "Connections",
     integrationsSub: "Connections to Feishu, GitHub, email and other services, and what each one can do, are managed on the Connections page",
     companySection: "Company bots · {{n}}",
