@@ -16,11 +16,11 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { useT } from "@/i18n"
 import { clockDur } from "@/i18n/format"
 import { cn } from "@/lib/utils"
-import { fmtEst, fmtUsd } from "@/stats/format"
+import { fmtN, fmtUsd } from "@/stats/format"
 import { botName, loadItem, st } from "@/store"
-import { BotAvatar, useNow } from "@/ui"
+import { BotAvatar } from "@/ui"
 import { orderedUnits, type Workflow } from "@/workflow"
-import { buildAgentTree, elapsed, findNode, isActive, isOver, rollup, summarize, type AgentNode, type AgentStatus, type Cost, type TreeItem, type TreeStat } from "@/agent-tree"
+import { buildAgentTree, workTime, findNode, isActive, isOver, rollup, summarize, type AgentNode, type AgentStatus, type Cost, type TreeItem, type TreeStat } from "@/agent-tree"
 
 type Action = "pause" | "resume" | "retry" | "cancel" | "single_session"
 
@@ -135,19 +135,25 @@ export function AgentStatusPill({ s, className }: { s: AgentStatus; className?: 
     <I className={cn("size-3", isActive(s) && "motion-safe:animate-spin")} strokeWidth={2.25} />{t(`views:agentTree.status.${s}`)}</span>
 }
 
-/** the estimate, saying so when part of the tokens ran on models without a price; a Hub's own figure when there is no estimate */
-const usd = (c: Cost) => c.unpriced ? fmtEst(c.est, c.unpriced) : fmtUsd(c.est || c.reported)
+/** what it cost: the estimate, "≥" when part of the tokens ran on models without a price, and only the token count
+ * when none of them has a price (an estimate of "$0" there would be wrong); `hint` says which */
+function costOf(c: Cost, t: ReturnType<typeof useT>): { text: string; hint?: string } {
+  if (c.est >= 0.01 || (c.est > 0 && !c.unpriced)) return c.unpriced ? { text: "≥" + fmtUsd(c.est), hint: t("views:agentTree.unpricedPart", { n: fmtN(c.unpriced) }) } : { text: fmtUsd(c.est) }
+  if (c.unpriced) return { text: t("views:agentTree.tokens", { n: fmtN(c.unpriced) }), hint: t("views:agentTree.unpricedAll") }
+  return { text: fmtUsd(c.reported || c.est) }
+}
 const model = (bot: string | null) => bot && st.bots[bot] ? st.bots[bot].m || st.bots[bot].h : ""
 
-function figures(at: AgentTreeState, n: AgentNode, now: number, t: ReturnType<typeof useT>) {
-  const cost = at.total(n.item), time = elapsed(at.stat(n.item), n.status, now)
-  return [cost?.known ? t("views:agentTree.cost", { usd: usd(cost) }) : null, time != null ? clockDur(time) : null].filter(Boolean).join(" · ")
+/** cost and working time, one line; the hint explains an unpriced cost */
+function figures(at: AgentTreeState, n: AgentNode, t: ReturnType<typeof useT>) {
+  const cost = at.total(n.item), time = workTime(at.stat(n.item)), c = cost?.known ? costOf(cost, t) : null
+  return { text: [c?.text, time ? clockDur(time) : null].filter(Boolean).join(" · "), hint: c?.hint }
 }
 
 function Card({ at, n, selected, onSelect, open, toggle }: { at: AgentTreeState; n: AgentNode; selected: boolean; onSelect: () => void; open: boolean; toggle: () => void }) {
-  const t = useT(), now = useNow(isActive(n.status))
+  const t = useT()
   const kind = n.unit && n.unit.kind !== "work" ? t(`views:workflow.${n.unit.kind}`) : n.kind === "fork" ? t("views:agentTree.fork") : null
-  const line = figures(at, n, now, t)
+  const line = figures(at, n, t)
   return (
     <div role="button" tabIndex={0} aria-pressed={selected} onClick={onSelect} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect() } }}
       className={cn("group/card @container/card relative w-full min-w-0 cursor-pointer rounded-xl border bg-card p-3 text-left shadow-xs transition-[box-shadow,opacity] duration-150 hover:shadow-md focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-blue/30 motion-safe:animate-in motion-safe:fade-in-0",
@@ -166,9 +172,9 @@ function Card({ at, n, selected, onSelect, open, toggle }: { at: AgentTreeState;
       {n.waitingOn.length > 0 && <p className="mt-1.5 truncate text-[12px] text-muted-foreground" data-agent-waiting>{t("views:workflow.waitingFor", { names: n.waitingOn.join(" · ") })}</p>}
       {n.decisions > 0 && <p className="mt-1.5 text-[12px] font-medium text-attention">{t("views:agentTree.asking", { count: n.decisions })}</p>}
       {n.kind === "attempt" && <p className="mt-1.5 text-[12px] text-muted-foreground">{t("views:agentTree.attempt", { n: n.attempt })}</p>}
-      <div className={cn("mt-2 min-h-5 items-center gap-2 text-[12px] tabular-nums text-muted-foreground", line || n.children.length > 0 ? "flex" : "hidden @max-[200px]/card:flex")}>
+      <div className={cn("mt-2 min-h-5 items-center gap-2 text-[12px] tabular-nums text-muted-foreground", line.text || n.children.length > 0 ? "flex" : "hidden @max-[200px]/card:flex")}>
         <AgentStatusPill s={n.status} className="hidden @max-[200px]/card:inline-flex" />
-        <span className="min-w-0 flex-1 truncate" data-agent-figures>{line}</span>
+        <span className="min-w-0 flex-1 truncate" title={line.hint} data-agent-figures>{line.text}</span>
         {n.children.length > 0 && <button type="button" onClick={(e) => { e.stopPropagation(); toggle() }} onKeyDown={(e) => e.stopPropagation()} aria-expanded={open}
           aria-label={t(open ? "views:agentTree.collapse" : "views:agentTree.expand", { count: n.children.length })}
           className="-mr-1 inline-flex h-5 items-center gap-0.5 rounded px-1 hover:bg-accent hover:text-foreground" data-agent-toggle={n.key}>
@@ -201,8 +207,10 @@ function Rail(p: { at: AgentTreeState; nodes: AgentNode[]; selected: string | nu
   </ul>
 }
 
-const COLUMN = 204
-/** the coordinator, then its children on a bus while they fit side by side, otherwise on a rail */
+const COLUMN = 204, CELL = 236, GAP = 12, INDENT = 32
+/** the coordinator, then its children: side by side under it while they fit in one row; in rows of a grid hung
+ * from one trunk when there are more (a long work graph keeps the page's width instead of becoming a column);
+ * on a narrow page, a rail */
 function Canvas({ at, selected, onSelect }: { at: AgentTreeState; selected: string | null; onSelect: (k: string) => void }) {
   const ref = useRef<HTMLDivElement>(null), [width, setWidth] = useState(0)
   const [closed, setClosed] = useState<Set<string>>(new Set())
@@ -216,12 +224,15 @@ function Canvas({ at, selected, onSelect }: { at: AgentTreeState; selected: stri
   const root = at.tree!
   const toggle = (k: string) => setClosed((s) => { const x = new Set(s); if (x.has(k)) x.delete(k); else x.add(k); return x })
   const open = !closed.has(root.key), kids = open ? root.children : []
-  const bus = kids.length > 1 && width >= kids.length * COLUMN
+  const cols = Math.max(1, Math.floor((width - INDENT + GAP) / (CELL + GAP)))
+  const mode = kids.length > 1 && width >= kids.length * COLUMN ? "bus" : kids.length > 1 && cols >= 2 ? "grid" : "rail"
   const props = { at, selected, onSelect, closed, toggle }
-  return <div ref={ref} className="min-w-0" data-agent-canvas={bus ? "bus" : "rail"}>
-    {bus ? <div className="flex flex-col items-center">
-      <div className="w-full max-w-[300px]"><Card at={at} n={root} selected={selected === root.key} onSelect={() => onSelect(root.key)} open={open} toggle={() => toggle(root.key)} /></div>
-      <span aria-hidden className={cn("relative h-5 w-px", LINE)}><span className="absolute -top-[3px] -left-[3px] size-[7px] rounded-full border border-blue/60 bg-background" /></span>
+  const rootCard = <Card at={at} n={root} selected={selected === root.key} onSelect={() => onSelect(root.key)} open={open} toggle={() => toggle(root.key)} />
+  const dot = "absolute size-[7px] rounded-full border border-blue/60 bg-background"
+  return <div ref={ref} className="min-w-0" data-agent-canvas={mode}>
+    {mode === "bus" ? <div className="flex flex-col items-center">
+      <div className="w-full max-w-[300px]">{rootCard}</div>
+      <span aria-hidden className={cn("relative h-5 w-px", LINE)}><span className={cn(dot, "-top-[3px] -left-[3px]")} /></span>
       <div className="flex w-full" data-agent-bus>
         {kids.map((c, i) => <div key={c.key} className="relative min-w-0 flex-1 px-1.5 pt-5">
           <span aria-hidden className={cn("absolute top-0 h-px", LINE)} style={{ left: i === 0 ? "50%" : 0, right: i === kids.length - 1 ? "50%" : 0 }} />
@@ -229,7 +240,25 @@ function Canvas({ at, selected, onSelect }: { at: AgentTreeState; selected: stri
           <Branch {...props} n={c} />
         </div>)}
       </div>
-    </div> : <Branch {...props} n={root} />}
+    </div> : mode === "grid" ? (() => {
+      // rows of `cols` cells; each row's bus runs from the trunk to the middle of its last cell
+      const cell = (width - INDENT - (cols - 1) * GAP) / cols
+      const rows = Array.from({ length: Math.ceil(kids.length / cols) }, (_, r) => kids.slice(r * cols, r * cols + cols))
+      return <div data-agent-grid>
+        <div className="max-w-[320px]">{rootCard}</div>
+        {rows.map((row, r) => <div key={r} className="relative pt-4" style={{ paddingLeft: INDENT }}>
+          {r === 0 && <span aria-hidden className={cn(dot, "top-[-3px]")} style={{ left: 13 }} />}
+          <span aria-hidden className={cn("absolute top-0 w-px", LINE)} style={{ left: 16, height: r === rows.length - 1 ? 9 : "100%" }} />
+          <span aria-hidden className={cn("absolute top-2 h-px", LINE)} style={{ left: 16, width: INDENT - 16 + (row.length - 1) * (cell + GAP) + cell / 2 }} />
+          <div className="grid items-start" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, columnGap: GAP, rowGap: GAP }}>
+            {row.map((c) => <div key={c.key} className="relative min-w-0">
+              <span aria-hidden className={cn("absolute -top-2 left-1/2 h-2 w-px", LINE)} />
+              <Branch {...props} n={c} />
+            </div>)}
+          </div>
+        </div>)}
+      </div>
+    })() : <Branch {...props} n={root} />}
   </div>
 }
 
@@ -266,7 +295,7 @@ export function AgentTree({ at, selected, onSelect }: { at: AgentTreeState; sele
           {summary.asking.map((n) => <a key={n.key} href={`#/items/${encodeURIComponent(n.item!)}`} className="rounded-lg px-2 py-1.5 type-callout hover:bg-accent">{n.title} · {t("views:workflow.handleDecision")}</a>)}
         </PopoverContent>
       </Popover>}
-      {total?.known && <span className="type-footnote tabular-nums text-foreground" data-agent-total>{t("views:agentTree.cost", { usd: usd(total) })}</span>}
+      {total?.known && (() => { const c = costOf(total, t); return <span className="type-footnote tabular-nums text-foreground" title={c.hint} data-agent-total>{t("views:agentTree.cost", { usd: c.text })}</span> })()}
       {canAct && <div className="flex items-center gap-1">
         <Button size="sm" variant="outline" disabled={at.busy || workflow!.paused && (at.unavailable || at.old)} onClick={() => void at.change(workflow!.paused ? "resume" : "pause")} data-workflow-toggle>
           {workflow!.paused ? <PlayIcon /> : <PauseIcon />}{workflow!.paused ? t("views:workflow.resume") : t("views:workflow.pause")}</Button>
@@ -315,11 +344,11 @@ function History({ workflow }: { workflow: Workflow }) {
 
 /** the selected agent: what it was asked, what it reported, and what can be done with it */
 export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: AgentNode; onClose: () => void }) {
-  const t = useT(), now = useNow(isActive(node.status))
+  const t = useT()
   const w = at.workflow, u = node.kind === "unit" ? node.unit : undefined
   const canAct = !!w && !at.single && !!u
   const running = !!u && (u.status === "running" || u.status === "dispatching")
-  const line = figures(at, node, now, t)
+  const line = figures(at, node, t)
   const item = node.item ? st.items.find((i) => i.id === node.item) : undefined
   return <div className="flex min-w-0 flex-col gap-4" data-agent-detail={node.key}>
     <div className="flex items-start gap-2.5">
@@ -331,7 +360,8 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
       <Button variant="ghost" size="icon-sm" className="-mr-1 text-muted-foreground" aria-label={t("common:action.close")} onClick={onClose} data-agent-detail-close><XIcon /></Button>
     </div>
     <div>
-      <div className="flex flex-wrap items-center gap-2"><AgentStatusPill s={node.status} />{line && <span className="type-footnote tabular-nums text-muted-foreground">{line}</span>}</div>
+      <div className="flex flex-wrap items-center gap-2"><AgentStatusPill s={node.status} />{line.text && <span className="type-footnote tabular-nums text-muted-foreground" data-agent-figures>{line.text}</span>}</div>
+      {line.hint && <p className="mt-1 type-footnote text-muted-foreground">{line.hint}</p>}
       <h3 className="mt-2 break-words type-callout font-medium">{node.title}</h3>
       {node.kind === "attempt" && <p className="mt-1 type-footnote text-muted-foreground">{t("views:workflow.priorAttempt")}</p>}
       {node.kind === "fork" && item?.parent?.item && <p className="mt-1 type-footnote text-muted-foreground">{t("views:agentTree.forkedFrom", { id: item.parent.item })}</p>}
@@ -361,7 +391,7 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
       {u.outputs.map((o, n) => <div key={n} className="mt-1 type-footnote"><span className="mr-2 text-muted-foreground">{t(o.role === "record" ? "views:workflow.outputRecord" : o.role === "result" ? "views:workflow.outputResult" : "views:workflow.outputUnspecified")}</span><span>{o.title}</span>{o.location && <p className="break-all font-mono text-muted-foreground">{o.location}</p>}</div>)}</section>}
     {!!u?.checks?.length && <ul className="space-y-1 type-footnote">{u.checks.map((c, n) => <li key={n} className={cn("flex items-start gap-1.5", !c.passed && "text-destructive")}><CircleCheckIcon className="mt-0.5 size-3 shrink-0" /><span>{c.name} · {c.passed ? t("views:workflow.checkPassed") : t("views:workflow.checkFailed")}{c.operated && ` · ${t("views:workflow.operated")}`}</span></li>)}</ul>}
     {node.children.length > 0 && <p className="flex items-center gap-1.5 type-footnote text-muted-foreground"><GitForkIcon className="size-3.5" />{t("views:agentTree.started", { count: node.children.length })}</p>}
-    {isOver(node.status) && !line && <p className="type-footnote text-muted-foreground">{t("views:agentTree.noFigures")}</p>}
+    {isOver(node.status) && !line.text && <p className="type-footnote text-muted-foreground">{t("views:agentTree.noFigures")}</p>}
   </div>
 }
 

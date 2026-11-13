@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { buildAgentTree, elapsed, findNode, rollup, summarize, unitStatus } from "../src/agent-tree.ts"
+import { buildAgentTree, workTime, findNode, rollup, summarize, unitStatus } from "../src/agent-tree.ts"
 
 const item = (id, extra = {}) => ({ id, t: `title ${id}`, b: "dev", st: "run", src: ["Steve", "chat"], waits: [], ...extra })
 const unit = (id, status, extra = {}) => ({ id, title: `unit ${id}`, goal: "", bot_id: "dev", kind: "work", depends_on: [], resources: [], required: true, status, attempt: 1, ...extra })
@@ -49,7 +49,7 @@ test("a missing root or a cycle of parents cannot hang the page", () => {
   assert.deepEqual(tree.children[0].children, [], "A is already placed")
 })
 
-test("cost rolls up the Hub's whole subtree; time runs until the end", () => {
+test("cost rolls up the Hub's whole subtree; time is the agent's working time", () => {
   const stat = (item_id, parent_id, est, extra = {}) => ({ item_id, parent_id, depth: 0, tokens: est ? 100 : 0, est, reported: 0, agent_ms: 5, first_turn: null, done_at: null, dropped_at: null, ...extra })
   const r = rollup([stat("A", null, 1), stat("B", "A", 0.5), stat("C", "B", 0.25), stat("D", "A", 0)])
   assert.equal(r.get("A").est, 1.75)
@@ -57,10 +57,8 @@ test("cost rolls up the Hub's whole subtree; time runs until the end", () => {
   assert.equal(r.get("D").known, false)
   const u = rollup([stat("A", null, 1, { unpriced_tokens: 0 }), stat("B", "A", 0, { unpriced_tokens: 7_400_000 })])
   assert.equal(u.get("A").unpriced, 7_400_000, "unpriced tokens under a node are part of its total")
-  assert.equal(elapsed(stat("A", null, 0, { first_turn: 1000, done_at: 4000 }), "done", 9000), 3000)
-  assert.equal(elapsed(stat("A", null, 0, { first_turn: 1000 }), "running", 9000), 8000)
-  assert.equal(elapsed(stat("A", null, 0, { first_turn: 1000 }), "failed", 9000), 5, "an ended node without an end mark shows its agent time")
-  assert.equal(elapsed(undefined, "running", 9000), null)
+  assert.equal(workTime(stat("A", null, 0, { first_turn: 1000, agent_ms: 3000 })), 3000, "working time, not time since the first turn")
+  assert.equal(workTime(undefined), null)
 })
 
 test("an item closed as failed is a failed node, not one still to start", () => {

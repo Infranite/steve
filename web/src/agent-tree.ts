@@ -160,11 +160,8 @@ export function rollup(stats: TreeStat[]): Map<string, Cost> {
   return out
 }
 
-/** wall time from the first turn to the end (or now while it is not over); the agent's own working time when
- * there is no first turn on record */
-export function elapsed(s: TreeStat | undefined, status: AgentStatus, now: number): number | null {
-  if (!s) return null
-  const end = s.done_at ?? s.dropped_at ?? (isOver(status) ? null : now)
-  if (s.first_turn != null && end != null) return Math.max(0, end - s.first_turn)
-  return s.agent_ms
+/** how long the agent actually worked on it (its turns), not how long it has been open: a coordinator that has
+ * waited on its units for a day did not work for a day */
+export function workTime(s: TreeStat | undefined): number | null {
+  return s?.agent_ms ?? null
 }
