@@ -93,6 +93,8 @@ try {
     if (scale !== 1) await enlargeText(page, scale)
     const apply = page.locator('[data-yolo-apply="full"]')
     assert.ok(await apply.isDisabled(), "full access still needs explicit acknowledgement")
+    // on a phone the dialog slides up as a sheet: check the layout where it rests, not where it passes
+    await settle(page)
     await layout(page, "[data-yolo-dialog]", '[data-slot="dialog-footer"]')
     await shot(page, `yolo-${width}-${height}-${scale}x-${locale}-top`)
     const scroll = page.locator("[data-yolo-scroll]")
@@ -144,6 +146,7 @@ try {
         await page.locator('[data-yolo-apply="off"]').waitFor()
       } else assert.equal(await page.locator("[data-yolo-stored]").count(), 0, "nothing stored to mention when the mode is off")
     }
+    await settle(page)
     await layout(page, "[data-yolo-dialog]", '[data-slot="dialog-footer"]')
     await page.locator('[data-slot="dialog-footer"] button').first().click()
     await page.locator("[data-yolo-dialog]").waitFor({ state: "detached" })
@@ -162,6 +165,7 @@ try {
     await page.locator('[data-yolo-scope-opt="full"]').click()
     await page.locator("[data-yolo-scope-confirm]").waitFor()
     if (scale === 2) await enlargeText(page, scale, '[data-yolo-scope-confirm]')
+    await settle(page)
     await layout(page, "[data-yolo-scope-confirm]", '[data-slot="alert-dialog-footer"]')
     await shot(page, `yolo-${type}-confirm-${scale}x`)
     // dialogs open with a short scale-in (visual system v2): measure where the footer rests, not where it passes

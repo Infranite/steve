@@ -33,7 +33,7 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./i18n") return { __esModule: true, ...i18n }
       if (id === "./composer-draft") return composerDraft
       if (id === "./bus") return { cue: (x) => cues.push(x) }
-      if (id === "sonner") return { toast: (x) => notices.push(x) }
+      if (id === "./components/ui/toaster") return { toast: (x) => notices.push(x) }
       if (id === "react") return {}
       if (id === "./api/yolo") return { yoloApi: { status: async () => null, actions: async () => ({ windows: [] }) } }
       throw new Error(id)

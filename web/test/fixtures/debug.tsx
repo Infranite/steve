@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { createRoot } from "react-dom/client"
-import { Toaster } from "sonner"
+import { Toaster } from "@/components/ui/toaster"
 import "../../src/index.css"
 import { api, type RItemDetail, type RSession, type State } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"

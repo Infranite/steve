@@ -70,7 +70,7 @@ try {
     /* a failed submit says so and can be tried again */
     await setHub(page, "s.fail = true")
     await form.locator('[data-a2ui-button="ok"]').click()
-    await page.getByText(/没提交成功：Hub 暂时连不上/).waitFor()
+    await page.locator("[data-toast-id]").getByText(/没提交成功：Hub 暂时连不上/).waitFor() // the toast; its screen-reader copy says the same
     assert.equal(await form.getAttribute("data-a2ui-state"), "open")
     assert.equal(await form.locator('[data-a2ui-button="ok"]').isEnabled(), true)
     await setHub(page, "s.fail = false; s.calls = 0")
@@ -100,7 +100,7 @@ try {
     const key = await choose.evaluate((el) => el.closest("[data-a2ui]").getAttribute("data-a2ui"))
     await setHub(page, `s.thread.find((m) => m.id === "choose").meta.a2ui = { "${key}:pick": { name: "choose", label: "就这样", sourceComponentId: "go", context: {}, data: { "$local": { plan: ["b"] } }, at: Date.now(), message: "elsewhere" } }`)
     await choose.locator('[data-a2ui-button="go"]').click()
-    await page.getByText("这个界面已经提交过了").waitFor()
+    await page.locator("[data-toast-id]").getByText("这个界面已经提交过了").waitFor()
     await page.locator('[data-a2ui-surface="pick"][data-a2ui-state="submitted"]').waitFor()
     assert.equal(await choose.locator('[data-a2ui-option="b"] input').isChecked(), true)
 

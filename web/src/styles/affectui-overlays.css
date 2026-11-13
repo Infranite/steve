@@ -1,0 +1,86 @@
+/* Steve's floating layers on affectUI (components/ui: dialog, alert-dialog, sheet, popover, dropdown-menu,
+ * tooltip, toaster). Colors come from the --aui-* map in affectui-theme.css, so both themes follow Steve's tokens. */
+
+/* Toasts sit just above the composer or a phone's tab bar, or clear of an open dialog's card (ui/toaster.tsx measures
+ * it into --steve-toast-bottom and --steve-toast-x, and moves them to the top when the card leaves no room) */
+.ui-tsc.steve-toaster:not([data-inline])[data-y="bottom"] {
+  bottom: max(var(--steve-toast-bottom, 20px), env(safe-area-inset-bottom));
+  transition: bottom 180ms var(--ease-out), left 180ms var(--ease-out);
+}
+/* beside a sidebar, over the composer's column; on a phone affectUI's full width with 12px gutters stays */
+@media (min-width: 601px) {
+  .ui-tsc.steve-toaster:not([data-inline])[data-x="center"] { --steve-toast-half: calc(var(--ui-tsc-width) / 2 + var(--ui-tsc-offset));
+    left: clamp(var(--steve-toast-half), var(--steve-toast-x, 50vw), 100vw - var(--steve-toast-half)); }
+}
+
+/* The dimming behind a dialog or a sheet */
+:root { --steve-scrim: rgb(0 0 0 / 0.16); }
+.dark { --steve-scrim: rgb(0 0 0 / 0.5); }
+
+/* Dialog, Alert Dialog, Sheet (affect/dialog-clean.tsx's look): its colours from Steve's tokens in both modes */
+.ui-dlgc.ui-dlgc, [data-slot="sheet-content"] {
+  --ui-dlgc-scrim: var(--steve-scrim);
+  --ui-dlgc-surface: var(--popover);
+  --ui-dlgc-strong: var(--foreground);
+  --ui-dlgc-ink: var(--foreground);
+  --ui-dlgc-text: var(--muted-foreground);
+  --ui-dlgc-icon: var(--muted-foreground);
+  --ui-dlgc-line: var(--border);
+  --ui-dlgc-wash: var(--accent);
+  --ui-dlgc-focus: var(--aui-focus);
+  --ui-dlgc-ease: var(--ease-out);
+}
+/* Base UI's viewport is the layer: under the menus and selects that open from a dialog (they portal to the body at
+ * z-50 after it), and pointer events only while it is open */
+.ui-dlgc.ui-dlgc { z-index: 50; }
+.ui-dlgc[data-ending-style] { pointer-events: none; animation: ui-dlgc-scrim-out 200ms ease both; }
+.ui-dlgc[data-ending-style] > .ui-dlgc__panel { animation: ui-dlgc-out 150ms ease-in both; }
+/* the title and quiet line keep their rhythm whatever wraps them */
+.ui-dlgc__title.ui-dlgc__title { font-family: var(--font-sans); }
+/* the close × on the title's line */
+.ui-dlgc__close.ui-dlgc__close { position: absolute; z-index: 1; }
+
+/* A phone (or a narrow window): the card is a sheet from the bottom, as affectUI's – full width, the top corners
+ * round, sliding up. Unlayered, so it wins over the width classes a call site gives its dialog for wider screens. The
+ * command palette keeps its place near the top. */
+@container ui-dlgc (max-width: 520px) {
+  .ui-dlgc > .ui-dlgc__panel:not([data-command-palette]) {
+    width: calc(100% + 32px);
+    max-width: none;
+    max-height: calc(100% + 8px);
+    margin: auto -16px -24px;
+    border-end-start-radius: 0;
+    border-end-end-radius: 0;
+    padding-bottom: max(20px, env(safe-area-inset-bottom));
+  }
+  .ui-dlgc[data-ending-style] > .ui-dlgc__panel:not([data-command-palette]) { animation: ui-dlgc-sheet-out 200ms cubic-bezier(0.4, 0, 1, 1) both; }
+}
+/* the command palette (command-palette.tsx) sits near the top, not in the middle */
+.ui-dlgc:has(> [data-command-palette]) { align-items: flex-start; }
+.ui-dlgc > [data-command-palette] { top: auto; margin-top: calc(16dvh - 24px); }
+@media (min-width: 640px) { .ui-dlgc > [data-command-palette] { margin-top: calc(20dvh - 24px); } }
+
+/* Dropdown Menu (affect/dropdown-menu-clean.tsx's look on Base UI's menu) */
+.ui-dmc.ui-dmc {
+  --ui-dmc-glow: var(--accent);
+  --ui-dmc-danger-glow: color-mix(in srgb, var(--destructive) 10%, transparent);
+  --ui-dmc-ease: var(--ease-out);
+}
+/* the gliding highlight marks the row the arrow keys are on; a focus ring on the same row would draw it twice. Under
+ * forced colours, where the highlight is not painted, the ring stays. */
+@media not (forced-colors: active) {
+  .ui-dmc__item[data-highlighted]:focus-visible { outline: none; box-shadow: none; }
+}
+.ui-dmc__panel[data-ending-style] { animation: steve-dmc-out 120ms ease-in both; }
+@keyframes steve-dmc-out { to { opacity: 0; transform: scale(0.97); } }
+@media (prefers-reduced-motion: reduce) { .ui-dmc__panel[data-ending-style] { animation: none; } }
+
+/* Tooltip (affect/tooltip-clean.tsx): Steve's inverse label – the ink colour behind the background's – in both modes */
+.ui-tipc.ui-tipc {
+  --ui-tipc-bg: color-mix(in srgb, var(--foreground) 94%, transparent);
+  --ui-tipc-ink: var(--background);
+  --ui-tipc-muted: color-mix(in srgb, var(--background) 62%, transparent);
+  --ui-tipc-ease: var(--ease-out);
+}
+/* a shortcut written into a tooltip's text (<Kbd>⌘B</Kbd>) reads like affectUI's own */
+.ui-tipc [data-slot="kbd"] { height: auto; min-width: 0; padding: 0; background: none; box-shadow: none; color: var(--ui-tipc-muted); font: inherit; letter-spacing: 0.02em; }

@@ -5,6 +5,7 @@
 @import "./styles/affectui-theme.css";
 @import "./styles/affectui-placement.css";
 @import "./styles/affectui-forms.css";
+@import "./styles/affectui-overlays.css";
 @source "../../node_modules/streamdown/dist/*.js";
 @source "../../node_modules/@streamdown/code/dist/*.js";
 
@@ -242,15 +243,6 @@
 :root { interpolate-size: allow-keywords; }
 details::details-content { transition: height 260ms var(--ease-out), content-visibility 260ms allow-discrete; height: 0; overflow: clip; }
 details[open]::details-content { height: auto; }
-
-/* a toast (sonner) is a compact floating card centred over the content: the popover surface with the floating
- * layers' edge in either theme. Unlayered and more specific than sonner's own [data-sonner-toast][data-styled] rules. */
-[data-sonner-toaster] [data-sonner-toast].steve-toast {
-  left: 0; right: 0; margin-inline: auto; width: fit-content; max-width: calc(100vw - 2rem);
-  justify-content: center; gap: 8px; border: 0; border-radius: 12px; padding: 10px 14px;
-  background: var(--popover); color: var(--popover-foreground); box-shadow: var(--sh-lg);
-  font-size: 13px; line-height: 20px; font-weight: 500;
-}
 
 /* Markdown in messages and cards — sized to the type scale, not a document */
 .md { overflow-wrap: anywhere; }

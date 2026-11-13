@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { Toaster } from "sonner"
+import { Toaster } from "@/components/ui/toaster"
 import { stats } from "../../src/api/stats"
 import { api, type RDecision, type RItem, type RItemDetail, type RSession, type State } from "../../src/api"
 import { SidebarProvider, SidebarInset } from "../../src/components/ui/sidebar"

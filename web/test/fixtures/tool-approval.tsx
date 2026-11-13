@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { Toaster } from "sonner"
+import { Toaster } from "@/components/ui/toaster"
 import { api } from "../../src/api"
 import { st, useStore, type Item, type Wait } from "../../src/store"
 import { DecisionCard } from "../../src/ui"

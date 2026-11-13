@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { Toaster } from "sonner"
+import { Toaster } from "@/components/ui/toaster"
 import "../../src/manage" // the app loads manage first (it imports this pane back)
 import { ModelsSettingsPane } from "../../src/models-settings"
 import { refresh } from "../../src/store"

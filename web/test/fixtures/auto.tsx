@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { Toaster } from "sonner"
+import { Toaster } from "@/components/ui/toaster"
 import { AutoRoute } from "../../src/auto/automation"
 import { SidebarInset, SidebarProvider } from "../../src/components/ui/sidebar"
 import { useRoute } from "../../src/ui"

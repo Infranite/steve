@@ -106,6 +106,8 @@ export default {
     acceptedNoRelease: "Accepted, not released this time",
   },
   toast: {
+    region: "Notifications",
+    dismiss: "Dismiss notification",
     updateAvailable: "Steve {{version}} is available",
     updateView: "Upgrade",
     meetingSkipped: "Skipped. To meet again, restart onboarding in Settings · General",

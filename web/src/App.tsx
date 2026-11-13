@@ -1,9 +1,9 @@
 import { lazyView } from "@/lazy"
 import { ChatView } from "@/chat-view"
-import { Toaster, toast as sonnerToast } from "sonner"
 import { useEffect, useState } from "react"
 import { Trans } from "react-i18next"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { Toaster, toast as notify } from "@/components/ui/toaster"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
@@ -14,7 +14,7 @@ import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer
 import { CommandPalette } from "@/command-palette"
 import { st, useStore, start } from "@/store"
 import { useT } from "@/i18n"
-import { useRoute, getSheet, resolvedTheme, openSheet } from "@/ui"
+import { useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
 const InboxView = lazyView(() => import("@/views").then((m) => ({ default: m.InboxView })))
 const ItemsView = lazyView(() => import("@/views").then((m) => ({ default: m.ItemsView })))
@@ -127,7 +127,7 @@ export default function App() {
   useEffect(() => { if (hub === "ok") return start() }, [hub])
   const [a = "", b, c] = useRoute()
   /* an “撤销” toast belongs to the page it was raised on */
-  useEffect(() => { sonnerToast.dismiss() }, [a, b, c])
+  useEffect(() => { notify.dismiss() }, [a, b, c])
   /* #/hub/add and #/hub/pair (a shell's menu, a link): the dialog is opened and the route left; before the page is
    * signed in, "add" is the list on the screen that is shown instead */
   const [intent, setIntent] = useState<"" | "add" | "pair">("")
@@ -209,7 +209,7 @@ export default function App() {
         {sh?.kind === "newWorkspace" && <NewWorkspaceDialog />}
         {sh?.kind === "yolo" && <YoloDialog />}
         <CommandPalette open={sh?.kind === "command"} />
-        <Toaster visibleToasts={1} theme={resolvedTheme()} position="bottom-center" offset={124} mobileOffset={76} toastOptions={{ className: "steve-toast" }} />
+        <Toaster />
       </SidebarProvider>
     </TooltipProvider>
   )

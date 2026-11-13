@@ -4,7 +4,7 @@ import { readEventPages } from "./event-pages"
  * everything here is filled from /api/state, item details and session events are loaded on demand, and every action
  * calls the Hub — the SSE stream then refreshes what changed. */
 import { useEffect, useRef, useSyncExternalStore } from "react"
-import { toast as sonner } from "sonner"
+import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { blockSlots, type FeedRow } from "./feed-order"
 import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
@@ -177,7 +177,7 @@ const raw = { state: null as State | null, details: new Map<string, RItemDetail>
 const ls = new Set<() => void>()
 export function emit() { st.ver++; ls.forEach((f) => f()) }
 export function useStore() { return useSyncExternalStore((cb) => { ls.add(cb); return () => ls.delete(cb) }, () => st.ver) }
-export function toast(t: string, opts?: Parameters<typeof sonner>[1]) { sonner(t, opts) }
+export function toast(t: string, opts?: ToastOptions) { notify(t, opts) }
 /** Tell the instance manager once per version (per browser) that a newer Steve can be installed from Settings · 关于. */
 export function announceUpdate(update: StateUpdate | null) {
   if (!update?.owner) return

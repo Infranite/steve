@@ -1,63 +1,71 @@
-import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip"
+import * as React from "react"
+import { mergeProps } from "@base-ui/react/merge-props"
+import { useRender } from "@base-ui/react/use-render"
+import { Tooltip as TooltipPrimitive } from "@/components/affect/tooltip-clean"
 import { cn } from "cn"
 
-function TooltipProvider({
-  delay = 0,
-  ...props
-}: TooltipPrimitive.Provider.Props) {
+/* Tooltip: affectUI's Tooltip (a small label in the top layer, shown after a short rest, at once under keyboard focus and
+ * for the neighbours of one that is open) behind the Base UI-shaped parts Steve's call sites use:
+ *   <Tooltip><TooltipTrigger render={<Button … />}>…</TooltipTrigger><TooltipContent side="right">…</TooltipContent></Tooltip>
+ * The Tooltip picks its TooltipContent out of its children (directly or in a fragment, not inside another component)
+ * and hands it to the trigger, which wraps itself in the affectUI Tooltip. */
+
+type Side = "top" | "bottom" | "left" | "right" | "inline-start" | "inline-end"
+type Align = "start" | "center" | "end"
+
+const sideOf = (s: Side) => (s === "inline-start" ? "left" : s === "inline-end" ? "right" : s)
+
+type ContentProps = React.ComponentProps<"span"> & { side?: Side; sideOffset?: number; align?: Align }
+type RootProps = { children?: React.ReactNode; open?: boolean; defaultOpen?: boolean; onOpenChange?: (open: boolean) => void; disabled?: boolean }
+
+const Delay = React.createContext(500)
+const Content = React.createContext<{ content: ContentProps | null; root: RootProps }>({ content: null, root: {} })
+
+function TooltipProvider({ delay = 500, children }: { delay?: number; children?: React.ReactNode }) {
+  return <Delay.Provider value={delay}>{children}</Delay.Provider>
+}
+
+/** The TooltipContent among a Tooltip's children (fragments included) and the rest */
+function split(children: React.ReactNode): [ContentProps | null, React.ReactNode[]] {
+  let content: ContentProps | null = null
+  const rest: React.ReactNode[] = []
+  for (const c of React.Children.toArray(children)) {
+    if (React.isValidElement(c) && c.type === TooltipContent) content = c.props as ContentProps
+    else if (React.isValidElement<{ children?: React.ReactNode }>(c) && c.type === React.Fragment) {
+      const [inner, more] = split(c.props.children)
+      content ??= inner
+      rest.push(...more)
+    } else rest.push(c)
+  }
+  return [content, rest]
+}
+
+function Tooltip(root: RootProps) {
+  const [content, rest] = split(root.children)
+  // the content must be a child of the Tooltip itself (or of a fragment in it): one inside another component is not
+  // seen, and the trigger would show no tooltip
+  if (import.meta.env.DEV && !content && root.children != null && !root.disabled)
+    console.warn("Tooltip: no TooltipContent among its direct children – the trigger shows no tooltip")
+  return <Content.Provider value={{ content, root }}>{rest}</Content.Provider>
+}
+
+function TooltipTrigger({ render, ref, delay: own, ...props }: useRender.ComponentProps<"button"> & { delay?: number }) {
+  const { content, root } = React.useContext(Content)
+  const delay = React.useContext(Delay)
+  const trigger = useRender({ defaultTagName: "button", render, ref, props: mergeProps<"button">({ "data-slot": "tooltip-trigger" } as React.ComponentProps<"button">, props) })
+  if (!content) return trigger
+  const { side = "top", sideOffset = 6, align = "center", className, hidden, children } = content
   return (
-    <TooltipPrimitive.Provider
-      data-slot="tooltip-provider"
-      delay={delay}
-      {...props}
-    />
+    <TooltipPrimitive content={children} side={sideOf(side)} align={align} offset={sideOffset} delay={own ?? delay}
+      disabled={root.disabled || !!hidden} open={root.open} onOpenChange={root.onOpenChange} className={cn("steve-tip", className)}>
+      {trigger}
+    </TooltipPrimitive>
   )
 }
 
-function Tooltip({ ...props }: TooltipPrimitive.Root.Props) {
-  return <TooltipPrimitive.Root data-slot="tooltip" {...props} />
-}
-
-function TooltipTrigger({ ...props }: TooltipPrimitive.Trigger.Props) {
-  return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />
-}
-
-function TooltipContent({
-  className,
-  side = "top",
-  sideOffset = 4,
-  align = "center",
-  alignOffset = 0,
-  children,
-  ...props
-}: TooltipPrimitive.Popup.Props &
-  Pick<
-    TooltipPrimitive.Positioner.Props,
-    "align" | "alignOffset" | "side" | "sideOffset"
-  >) {
-  return (
-    <TooltipPrimitive.Portal>
-      <TooltipPrimitive.Positioner
-        align={align}
-        alignOffset={alignOffset}
-        side={side}
-        sideOffset={sideOffset}
-        className="isolate z-50"
-      >
-        <TooltipPrimitive.Popup
-          data-slot="tooltip-content"
-          className={cn(
-            "z-50 inline-flex w-fit max-w-xs origin-(--transform-origin) items-center gap-1.5 rounded-xl bg-foreground px-3 py-1.5 text-xs text-background has-data-[slot=kbd]:pr-1.5 data-[side=bottom]:slide-in-from-top-1 data-[side=inline-end]:slide-in-from-left-1 data-[side=inline-start]:slide-in-from-right-1 data-[side=left]:slide-in-from-right-1 data-[side=right]:slide-in-from-left-1 data-[side=top]:slide-in-from-bottom-1 **:data-[slot=kbd]:relative **:data-[slot=kbd]:isolate **:data-[slot=kbd]:z-50 **:data-[slot=kbd]:rounded-lg data-[state=delayed-open]:animate-in data-[state=delayed-open]:fade-in-0 data-[state=delayed-open]:zoom-in-95 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
-            className
-          )}
-          {...props}
-        >
-          {children}
-          <TooltipPrimitive.Arrow className="z-50 size-2.5 translate-y-[calc(-50%-2px)] rotate-45 rounded-[2px] bg-foreground fill-foreground data-[side=bottom]:top-1 data-[side=inline-end]:top-1/2! data-[side=inline-end]:-left-1 data-[side=inline-end]:translate-x-[1.5px] data-[side=inline-end]:-translate-y-1/2 data-[side=inline-start]:top-1/2! data-[side=inline-start]:-right-1 data-[side=inline-start]:translate-x-[-1.5px] data-[side=inline-start]:-translate-y-1/2 data-[side=left]:top-1/2! data-[side=left]:-right-1 data-[side=left]:translate-x-[-1.5px] data-[side=left]:-translate-y-1/2 data-[side=right]:top-1/2! data-[side=right]:-left-1 data-[side=right]:translate-x-[1.5px] data-[side=right]:-translate-y-1/2 data-[side=top]:-bottom-2.5" />
-        </TooltipPrimitive.Popup>
-      </TooltipPrimitive.Positioner>
-    </TooltipPrimitive.Portal>
-  )
+/** Its props are read by the Tooltip around it; it draws nothing itself */
+function TooltipContent(_props: ContentProps): React.ReactNode {
+  return null
 }
 
 export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider }

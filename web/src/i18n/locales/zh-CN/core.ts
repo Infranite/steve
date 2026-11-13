@@ -121,6 +121,8 @@ export default {
     acceptedNoRelease: "已验收，这次不发布",
   },
   toast: {
+    region: "通知",
+    dismiss: "关闭通知",
     updateAvailable: "Steve 有新版本 {{version}}",
     updateView: "去升级",
     meetingSkipped: "已跳过。想重新认识，到 设置 · 通用 重新开始首次引导",
