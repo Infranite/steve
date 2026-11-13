@@ -39,7 +39,15 @@ api.state = async () => structuredClone(state)
 api.events = async () => []
 api.searchSessions = async (s: string) => (s === "缓存" ? ["s20", "s4"] : [])
 /* a year of activity: quiet weekends, a busier last two months, a few heavy days */
-stats.series = async (f, metric) => {
+stats.series = async (f, metric, _group, hourly) => {
+  if (hourly) {
+    /* one day by hour: a working day's shape, hours after now not yet come */
+    const day = f.from!, now = new Date(), today = day === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
+    let h0 = [...day].reduce((a, c) => a + c.charCodeAt(0), 0)
+    const rnd = () => ((h0 = (h0 * 9301 + 49297) % 233280) / 233280)
+    const values = Array.from({ length: 24 }, (_, h) => (today && h > now.getHours() ? null : h < 8 || h > 23 ? (rnd() < 0.1 ? 1 : 0) : rnd() < 0.6 ? Math.round(rnd() * 6) * (metric === "tokens" ? 180_000 : 1) : 0))
+    return { bucket: "hour", buckets: values.map((_, h) => `${day}T${String(h).padStart(2, "0")}:00`), series: [{ key: "total", label: "", values }] }
+  }
   const out: string[] = [], vals: number[] = []
   const d = new Date(f.from + "T00:00"), end = new Date(f.to + "T00:00")
   let seed = 7
