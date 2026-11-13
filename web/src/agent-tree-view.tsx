@@ -3,8 +3,8 @@
  * a bar for how far it got, its working time and cost, and the one thing to do about it (Away Summary's way: decide,
  * retry, open). A step's earlier tries fold into its row. The header counts what needs you, failed, runs and is done,
  * with the coordinator, the time it took against the time its agents worked, and the estimated cost. A row picked
- * shows its detail beside the page (a sheet on narrow pages), which lists the tries. "查看全图" opens the call tree
- * (Run Inspector) and the hand-offs (Agent Handoff) in a large dialog (collab-graph.tsx). */
+ * shows its detail beside the page (a sheet on narrow pages), which lists the tries. "查看全图" opens the steps as a
+ * dependency graph in a large dialog (collab-graph.tsx). */
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { BanIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleCheckIcon, CircleDashedIcon, CirclePauseIcon, GitForkIcon, HourglassIcon, LoaderCircleIcon, MessageCircleQuestionIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, RotateCcwIcon, SquareIcon, TriangleAlertIcon, WorkflowIcon, XIcon } from "lucide-react"
 import { api } from "@/api"
@@ -22,6 +22,8 @@ import { cn } from "@/lib/utils"
 import { fmtN, fmtUsd } from "@/stats/format"
 import { botName, loadItem, st } from "@/store"
 import { BotAvatar } from "@/ui"
+import { Markdown } from "@/components/markdown"
+import { OutDialog, type OutOpen } from "@/item-outputs"
 import { orderedUnits, type Workflow } from "@/workflow"
 import type { ItemState } from "@/item-state"
 import { buildAgentTree, workTime, findNode, isActive, isOver, rollup, summarize, teamLanes, type AgentNode, type AgentStatus, type Cost, type TeamRow, type TreeItem, type TreeStat } from "@/agent-tree"
@@ -203,7 +205,7 @@ const ROW: Record<AgentStatus, AttemptStatus> = {
 }
 /** done steps shown before "show the other N steps": the latest few */
 const DONE_SHOWN = 3
-const sumCost = (cs: (Cost | undefined)[]): Cost | undefined => cs.reduce<Cost | undefined>((s, c) => !c ? s : !s ? { ...c } : { est: s.est + c.est, unpriced: s.unpriced + c.unpriced, reported: s.reported + c.reported, tokens: s.tokens + c.tokens, known: s.known || c.known }, undefined)
+export const sumCost = (cs: (Cost | undefined)[]): Cost | undefined => cs.reduce<Cost | undefined>((s, c) => !c ? s : !s ? { ...c } : { est: s.est + c.est, unpriced: s.unpriced + c.unpriced, reported: s.reported + c.reported, tokens: s.tokens + c.tokens, known: s.known || c.known }, undefined)
 /** one line of plain text: Markdown's marks and code fences dropped */
 const clip1 = (s: string) => s.replace(/```[\s\S]*?```/g, " ").replace(/^\s*#+\s*/gm, "").replace(/[`*_>#|]/g, "").replace(/\s+/g, " ").trim()
 
@@ -248,7 +250,7 @@ export function stepViews(at: AgentTreeState, rows: TeamRow[], now: number, t: R
 /** the item page's collaboration: one row per step (its earlier tries folded into it) – who ran it, what it is doing
  * or how it ended, a bar for how far it got, its working time and cost, and the one thing to do about it. What needs
  * you, failed or runs always shows; of the steps done only the latest few, the rest a click away. A row picked shows
- * its detail beside the page; "查看全图" opens who called what and what was handed on. */
+ * its detail beside the page; "查看全图" opens the steps as a dependency graph. */
 export function TeamSteps({ at, selected, onSelect, actions }: { at: AgentTreeState; selected: string | null; onSelect: (k: string | null) => void; actions?: ReactNode }) {
   const t = useT()
   const { tree, summary } = at
@@ -335,16 +337,16 @@ export function TeamSteps({ at, selected, onSelect, actions }: { at: AgentTreeSt
           labels={stepLabels(t)} />
         : <p className="type-callout text-muted-foreground">{t("views:agentTree.noSteps")}</p>}
     </div>
-    {graph && <GraphDialog at={at} onClose={() => setGraph(false)} onSelect={(k) => { setGraph(false); onSelect(k) }} />}
+    {graph && <GraphDialog at={at} onClose={() => setGraph(false)} />}
   </section>
 }
 
-/* the full picture is a big module (Run Inspector, Agent Handoff): loaded the first time someone opens it */
+/* the full picture (the graph library and the timeline) is a big module: loaded the first time someone opens it */
 const CollabGraph = lazy(() => import("@/collab-graph"))
-/** "查看全图": the call tree and the hand-offs, in a large dialog (a sheet from the bottom on phones) */
-function GraphDialog({ at, onClose, onSelect }: { at: AgentTreeState; onClose: () => void; onSelect: (k: string) => void }) {
+/** "查看全图": the steps as a dependency graph, in a large dialog (a sheet from the bottom on phones) */
+function GraphDialog({ at, onClose }: { at: AgentTreeState; onClose: () => void }) {
   const t = useT(), wide = useWide()
-  const body = <Suspense fallback={<div className="flex items-center gap-2 p-6 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><CollabGraph at={at} onSelect={onSelect} /></Suspense>
+  const body = <Suspense fallback={<div className="flex items-center gap-2 p-6 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><CollabGraph at={at} /></Suspense>
   if (wide) return <Dialog open onOpenChange={(o) => !o && onClose()}>
     <DialogContent className="flex h-[min(88dvh,960px)] w-[calc(100vw-4rem)] max-w-[1440px]! flex-col gap-3 overflow-hidden rounded-2xl p-5 sm:max-w-[1440px]" data-agent-graph>
       <DialogTitle className="type-headline">{t("views:agentTree.graph.title")}</DialogTitle>
@@ -400,8 +402,16 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
   const running = !!u && (u.status === "running" || u.status === "dispatching")
   const line = figures(at, node, t)
   const item = node.item ? st.items.find((i) => i.id === node.item) : undefined
+  /* the step's own item (not the page's): its outputs open in the viewer, so its detail loads with the selection */
+  const child = node.item && node.item !== at.root ? item : undefined
+  useEffect(() => { if (node.item && node.item !== at.root) void loadItem(node.item) }, [node.item, at.root])
+  const [view, setView] = useState<OutOpen | null>(null)
   /* a unit's earlier attempts are folded into its row; their outcome shows here */
   const tries = node.kind === "unit" && at.tree ? at.tree.children.filter((c) => c.kind === "attempt" && c.unitId === node.unitId) : []
+  const whole = tries.length ? (() => {
+    const c = sumCost([...tries, node].map((x) => at.total(x.item))), ms = [...tries, node].reduce((n, x) => n + (workTime(at.stat(x.item)) ?? 0), 0)
+    return [c?.known ? costOf(c, t).text : null, ms ? clockDur(ms) : null].filter(Boolean).join(" · ")
+  })() : ""
   return <div className="flex min-w-0 flex-col gap-4" data-agent-detail={node.key}>
     <div className="flex items-start gap-2.5">
       <BotAvatar k={node.bot} size={36} />
@@ -412,7 +422,9 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
       <Button variant="ghost" size="icon-sm" className="-mr-1 text-muted-foreground" aria-label={t("common:action.close")} onClick={onClose} data-agent-detail-close><XIcon /></Button>
     </div>
     <div>
-      <div className="flex flex-wrap items-center gap-2"><AgentStatusPill s={node.status} />{line.text && <span className="type-footnote tabular-nums text-muted-foreground" data-agent-figures>{line.text}</span>}</div>
+      <div className="flex flex-wrap items-center gap-2"><AgentStatusPill s={node.status} />{line.text && <span className="type-footnote tabular-nums text-muted-foreground" data-agent-figures>{tries.length ? t("views:agentTree.thisTry", { x: line.text }) : line.text}</span>}</div>
+      {/* a step tried before: what all its tries took together, the figure its card in the full view shows */}
+      {tries.length > 0 && whole && <p className="mt-1 type-footnote tabular-nums text-muted-foreground" data-agent-figures-all>{t("views:agentTree.allTries", { count: tries.length + 1, x: whole })}</p>}
       {line.hint && <p className="mt-1 type-footnote text-muted-foreground">{line.hint}</p>}
       <h3 className="mt-3 break-words type-body font-medium">{node.title}</h3>
       {node.kind === "attempt" && <p className="mt-1 type-footnote text-muted-foreground">{t("views:workflow.priorAttempt")}</p>}
@@ -442,13 +454,41 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
         <AgentStatusPill s={a.status} /><span className="shrink-0 tabular-nums">{t("views:agentTree.attempt", { n: a.attempt })}</span>
         <span className="min-w-0 flex-1 truncate type-footnote tabular-nums text-muted-foreground" title={a.reason ?? undefined}>{[f.text, a.reason].filter(Boolean).join(" · ")}</span>
         {a.session && <a href={`#/sessions/${encodeURIComponent(a.session)}`} className="shrink-0 type-footnote text-muted-foreground hover:text-foreground">{t("views:agentTree.openTry")}</a>}</li> })}</ul></section>}
-    {u?.goal && <section><h4 className="mb-1.5 type-label text-tertiary">{t("views:agentTree.goal")}</h4><p className="whitespace-pre-wrap break-words type-callout">{u.goal}</p></section>}
-    {u?.summary && <section><h4 className="mb-1.5 type-label text-tertiary">{t("views:agentTree.summary")}</h4><p className="whitespace-pre-wrap break-words type-callout">{u.summary}</p></section>}
+    {u?.summary && u.summary.trim() !== node.reason?.trim() && <section data-agent-summary><h4 className="mb-1.5 type-label text-tertiary">{t("views:agentTree.summary")}</h4><Folded key={node.key + ":summary"}><Markdown text={u.summary} className="break-words type-callout" /></Folded></section>}
     {!!u?.outputs?.length && <section data-workflow-outputs><h4 className="mb-1.5 type-label text-tertiary">{t("views:workflow.outputs")}</h4>
-      {u.outputs.map((o, n) => <div key={n} className="mt-1 type-callout"><span className="mr-2 text-muted-foreground">{t(o.role === "record" ? "views:workflow.outputRecord" : o.role === "result" ? "views:workflow.outputResult" : "views:workflow.outputUnspecified")}</span><span>{o.title}</span>{o.location && <p className="break-all type-code text-muted-foreground">{o.location}</p>}</div>)}</section>}
+      {u.outputs.map((o, n) => {
+        const role = <span className="mr-2 text-muted-foreground">{t(o.role === "record" ? "views:workflow.outputRecord" : o.role === "result" ? "views:workflow.outputResult" : "views:workflow.outputUnspecified")}</span>
+        /* what Steve keeps of it: the step's item's output with the same title (or place), which opens in the viewer */
+        const kept = child?.outs?.find((x) => x[1] === o.title) ?? (o.location ? child?.outs?.find((x) => x[2] === o.location) : undefined)
+        return kept ? <button key={n} type="button" onClick={() => setView({ o: kept })} className="-mx-2 mt-0.5 flex w-[calc(100%+1rem)] min-w-0 items-start gap-1 rounded-lg px-2 py-1 text-left type-callout hover:bg-accent" data-workflow-output={n} data-output-open>
+            <span className="min-w-0 flex-1">{role}<span className="break-words">{o.title}</span>{o.location && <span className="block break-all type-code text-muted-foreground">{o.location}</span>}</span><ChevronRightIcon className="mt-0.5 size-4 shrink-0 text-tertiary" /></button>
+          : <div key={n} className="mt-1 type-callout" data-workflow-output={n}>{role}<span className="break-words">{o.title}</span>{o.location && <p className="break-all type-code text-muted-foreground">{o.location}</p>}</div>
+      })}</section>}
+    {child && view && <OutDialog item={child.id} outs={child.outs ?? []} anns={child.anns ?? []} view={view} setView={setView} />}
     {!!u?.checks?.length && <ul className="space-y-1 type-footnote">{u.checks.map((c, n) => <li key={n} className={cn("flex items-start gap-1.5", !c.passed && "text-destructive")}><CircleCheckIcon className="mt-0.5 size-3 shrink-0" /><span>{c.name} · {c.passed ? t("views:workflow.checkPassed") : t("views:workflow.checkFailed")}{c.operated && ` · ${t("views:workflow.operated")}`}</span></li>)}</ul>}
+    {u?.goal && <section data-agent-goal><h4 className="mb-1.5 type-label text-tertiary">{t("views:agentTree.goal")}</h4><Folded key={node.key + ":goal"}><Markdown text={u.goal} className="break-words type-callout" /></Folded></section>}
     {node.children.length > 0 && <p className="flex items-center gap-1.5 type-footnote text-muted-foreground"><GitForkIcon className="size-3.5" />{t("views:agentTree.started", { count: node.children.length })}</p>}
     {isOver(node.status) && !line.text && <p className="type-footnote text-muted-foreground">{t("views:agentTree.noFigures")}</p>}
+  </div>
+}
+
+/** a long text (a step's goal or its report) shown up to a few lines, the rest a click away */
+function Folded({ children }: { children: ReactNode }) {
+  const t = useT()
+  const ref = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false), [long, setLong] = useState(false)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const fit = () => setLong(el.scrollHeight > el.clientHeight + 4)
+    fit()
+    const ro = new ResizeObserver(fit); ro.observe(el); if (el.firstElementChild) ro.observe(el.firstElementChild)
+    return () => ro.disconnect()
+  }, [])
+  return <div>
+    <div ref={ref} className={cn("relative", !open && "max-h-48 overflow-hidden", !open && long && "[mask-image:linear-gradient(to_bottom,black_70%,transparent)]")}>{children}</div>
+    {(long || open) && <button type="button" onClick={() => setOpen(!open)} className="mt-1 inline-flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" aria-expanded={open} data-folded-toggle>
+      {open ? t("views:agentTree.showLess") : t("views:agentTree.showAll")}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-180", open && "rotate-180")} /></button>}
   </div>
 }
 

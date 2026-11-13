@@ -17,11 +17,9 @@ import { Select } from "@/view-shared"
 import { fmtN, fmtUsd } from "@/stats/format"
 import { ParallelAttempts, type Attempt } from "@/components/affect/parallel-attempts-clean"
 import { stepLabels } from "@/agent-tree-view"
-import { handoffLabels, inspectorLabels } from "@/collab-graph"
+import { StepGraph, type StepCard } from "@/collab-graph"
 import { fleetLabels } from "@/items-collab"
 import { longDur } from "@/i18n/format"
-import { RunInspector, type RunSpan } from "@/components/affect/run-inspector-clean"
-import { AgentHandoff, type HandoffAgent, type Handoff, type HandoffTask } from "@/components/affect/agent-handoff-clean"
 import { AgentFleet, type FleetAgent } from "@/components/affect/agent-fleet-clean"
 import { AgentInbox, type AgentTask } from "@/components/affect/agent-inbox"
 import { RunningNow, type RunningTask } from "@/components/affect/running-now"
@@ -79,36 +77,20 @@ const stepRows = (t: T): Attempt[] => {
     row("s5", S(t, "stepDocs"), S(t, "botDocs"), "gpt-6.1-mini", "queued", t("views:workflow.waitingFor", { names: S(t, "stepBuild") }), 0, "", ""),
   ]
 }
-const runSample = (t: T): RunSpan => {
-  const call = (id: string, kind: RunSpan["kind"], name: string, start: number, end: number, extra: Partial<RunSpan> = {}): RunSpan => ({ id, kind, name, status: "done", start, end, ...extra })
-  const agent = (id: string, name: string, model: string, task: string, status: RunSpan["status"], start: number, end: number | undefined, cost: number, tokens: number, children: RunSpan[], extra: Partial<RunSpan> = {}): RunSpan =>
-    ({ id, kind: "agent", name, model, task, status, start, end, cost, tokensIn: tokens, children, time: longDur((end ?? 905_000) - start), ...extra })
-  return agent("root", "Steve", "gpt-6.1-sol", S(t, "st27"), "running", 0, undefined, 0.42, 38_000, [
-    call("r1", "llm", t("core:trace.think"), 0, 4_000), call("r2", "tool", "steve_workflow", 4_000, 6_000),
-    agent("a1", S(t, "botDocs"), "gpt-6.1-mini", S(t, "stepSpec"), "done", 6_000, 726_000, 0.41, 61_000, [
-      call("a1c1", "tool", "Read", 8_000, 9_000), call("a1c2", "llm", t("core:trace.think"), 9_000, 40_000), call("a1c3", "tool", "Write", 40_000, 42_000, { input: "docs/work-area.md" })]),
-    agent("a2", S(t, "botDev"), "gpt-6.1-sol", S(t, "stepBuild"), "running", 730_000, undefined, 1.12, 140_000, [
-      call("a2c1", "tool", "Edit", 732_000, 735_000), call("a2c2", "tool", "Bash", 736_000, 790_000, { input: "pnpm test", status: "failed", error: "2 tests failed" }), call("a2c3", "tool", "Bash", 800_000, 900_000, { input: "pnpm test" })]),
-    agent("a3", S(t, "botReview"), "claude-opus-5", S(t, "stepColors"), "waiting", 740_000, undefined, 0.22, 20_000, [call("a3c1", "llm", t("core:trace.note"), 741_000, 760_000)], { ask: S(t, "stepAsk") }),
-  ])
+/* the full view's graph: seven steps, two of them at the same time, one passed on its second try, one failed, one
+ * waits for you, two not started; the dependencies already without the ones implied through another step */
+const graphSample = (t: T): StepCard[] => {
+  const card = (id: string, title: string, bot: string, state: StepCard["state"], depends: string[], figures: string, tries = 0, passedOn?: number): StepCard =>
+    ({ id, bot: null, botLabel: bot, mark: bot.slice(0, 1), title, state, depends, figures, tries, passedOn })
+  return [
+    card("spec", S(t, "stepSpec"), S(t, "botDocs"), "done", [], `${longDur(12 * MIN)} · $0.41`, 1, 2),
+    card("build", S(t, "stepBuild"), S(t, "botDev"), "running", ["spec"], `${longDur(27 * MIN)} · $1.12`),
+    card("colors", S(t, "stepColors"), S(t, "botReview"), "needsYou", ["spec"], `${longDur(6 * MIN)} · $0.22`),
+    card("shots", S(t, "stepShots"), S(t, "botDocs"), "failed", ["build"], `${longDur(4 * MIN)} · $0.05`, 1),
+    card("review", S(t, "stepReview"), S(t, "botReview"), "notStarted", ["build", "colors"], ""),
+    card("docs", S(t, "stepDocs"), S(t, "botDocs"), "notStarted", ["review", "shots"], ""),
+  ]
 }
-const handoffSample = (t: T): { agents: HandoffAgent[]; tasks: HandoffTask[]; handoffs: Handoff[] } => ({
-  agents: [
-    { id: "spec", name: S(t, "botDocs"), model: "gpt-6.1-mini", description: S(t, "stepSpec"), cost: 0.41 },
-    { id: "build", name: S(t, "botDev"), model: "gpt-6.1-sol", description: S(t, "stepBuild"), cost: 1.12 },
-    { id: "review", name: S(t, "botReview"), model: "claude-opus-5", description: S(t, "stepReview"), cost: 0.22 },
-  ],
-  tasks: [
-    { id: "spec", title: S(t, "stepSpec"), status: "done", agent: "spec", note: t("views:agentTree.passedOn", { n: 2 }) },
-    { id: "build", title: S(t, "stepBuild"), status: "working", agent: "build", note: S(t, "stepDoing") },
-    { id: "review", title: S(t, "stepReview"), status: "todo", agent: "review" },
-  ],
-  handoffs: [
-    { id: "spec->build", from: "spec", to: "build", task: S(t, "stepSpec"), items: [{ id: "o1", label: S(t, "outSpec"), kind: "file" }, { id: "o2", label: S(t, "outContract"), kind: "fact" }, { id: "o3", label: S(t, "outNotes"), kind: "note" }] },
-    { id: "spec->review", from: "spec", to: "review", task: S(t, "stepSpec"), items: [{ id: "o4", label: S(t, "outDecision"), kind: "decision" }] },
-    { id: "build->review", from: "build", to: "review", task: S(t, "stepBuild"), items: [{ id: "o5", label: S(t, "outBuild"), kind: "file" }] },
-  ],
-})
 const fleetSample = (t: T): FleetAgent[] => [
   { id: "ST-27", name: S(t, "st27"), model: `ST-27 · Steve`, task: S(t, "st27Desc"), status: "running", cost: 0.42, time: longDur(6 * MIN), children: [
     { id: "f1", name: S(t, "botDocs"), model: "gpt-6.1-mini", task: S(t, "stepSpec"), status: "done", cost: 0.41, time: longDur(12 * MIN) },
@@ -229,7 +211,7 @@ function SampleComposer({ running, text: first = "", queue = [], ctx }: { runnin
   )
 }
 
-const IDS: Id[] = ["parallel-attempts", "run-inspector", "agent-handoff", "agent-fleet", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel", "chat-composer", "display", "form-controls"]
+const IDS: Id[] = ["parallel-attempts", "collab-graph", "agent-fleet", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel", "chat-composer", "display", "form-controls"]
 
 export function DesignShowroom() {
   const t = useT()
@@ -301,12 +283,9 @@ export function DesignShowroom() {
           </State>
         </Exhibit>
 
-        <Exhibit id="run-inspector" wide>
-          <State label={L(t, "inspector")}><Card><RunInspector run={runSample(t)} now={905_000} startedAt={NOW - 905_000} formatCost={fmtUsd} formatTook={longDur} labels={inspectorLabels(t)} /></Card></State>
-        </Exhibit>
-
-        <Exhibit id="agent-handoff" wide>
-          <State label={L(t, "handoff")}><Card><AgentHandoff {...handoffSample(t)} inbound labels={handoffLabels(t)} /></Card></State>
+        <Exhibit id="collab-graph" wide>
+          <State label={L(t, "graph")}><StepGraph cards={graphSample(t)} picked={null} onPick={noop} down={false} className="h-[420px]" /></State>
+          <State label={L(t, "graphPicked")}><StepGraph cards={graphSample(t)} picked="build" onPick={noop} down={false} className="h-[420px]" /></State>
         </Exhibit>
 
         <Exhibit id="agent-fleet" wide>

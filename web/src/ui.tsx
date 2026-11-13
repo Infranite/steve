@@ -873,13 +873,13 @@ function segsOf(s: Sess, range?: [number, number], skip?: [number, number][]): S
 }
 /** a session's work, turn by turn, with the steps Steve shows for it: what the call tree of the collaboration draws
  * (collab-graph.tsx); the live one is the running session's last, unfinished work */
-export function sessionWork(k: string): { evs: any[]; at: number[]; items: TrailItem[]; t0: number; t1?: number; live: boolean }[] {
+export function sessionWork(k: string): { evs: any[]; at: number[]; items: TrailItem[]; t0: number; t1?: number; live: boolean; cancelled: boolean }[] {
   const s = st.S[k]
   if (!s?.loaded) return []
   const segs = segsOf(s), last = segs[segs.length - 1]
   return segs.filter((g) => g.t === "work").map((g) => {
     const live = s.st === "run" && g === last && !g.end
-    return { evs: g.evs, at: g.at ?? [], items: trailOf(g.evs, g.at ?? [], g.t1, live), t0: g.t0 || (g.at ?? []).find(Boolean) || 0, t1: g.t1, live }
+    return { evs: g.evs, at: g.at ?? [], items: trailOf(g.evs, g.at ?? [], g.t1, live), t0: g.t0 || (g.at ?? []).find(Boolean) || 0, t1: g.t1, live, cancelled: g.end === "cancelled" }
   })
 }
 type TP = { k: string; compact?: boolean; tail?: number; range?: [number, number]; skip?: [number, number][] }

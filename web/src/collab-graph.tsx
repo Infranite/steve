@@ -1,170 +1,337 @@
-/* ── "查看全图": the whole collaboration of an item, two ways ──
- * 调用树 (affectUI Run Inspector): the coordinator is the root, every step, earlier try and fork an agent under it,
- * and under each agent its own calls – thinking, notes and tool calls from its sessions' events, the way a turn's
- * timeline draws them (thread/turn-trace.tsx) – with its cost, tokens and working time from the Hub's figures
- * (GET /stats/tree). The sessions load when this opens, not before.
- * 交接 (affectUI Agent Handoff): the steps in the order of the work, each with the agent that ran it; under each,
- * what it received – every step it depends on, with the outputs that step reported (files, results, records).
- * Nothing here is invented: no lost items, no dragging work to another agent. */
-import { useEffect, useMemo, useState } from "react"
-import { ArrowUpRightIcon } from "lucide-react"
-import { Button } from "@/components/ui/button"
+/* ── "查看全图": the whole collaboration of an item, as the steps it was split into ──
+ * What it is for: (1) the structure – which steps, which waits for which, what could run at the same time, whether it
+ * ended up as one chain; (2) the problems – which step failed, how many tries and why, where the time and money went;
+ * (3) the outputs – what each step delivered and what the next one used.
+ * So one view: the work graph's steps as a dependency graph. A step is a small card (its Bot, its title, how it ended,
+ * its working time and cost); earlier tries are not cards of their own but a stack behind their step. An arrow means
+ * "the next step waits for this one", drawn only where no other path already says so (A→C is left out beside
+ * A→B→C). Steps are placed by how many steps come before them, so the ones that could run at the same time share a
+ * column (a row on a phone) and a chain reads as a line. The coordinator is not a card: the header names it with the
+ * totals. A step picked opens its detail beside the graph (under it on a phone): its goal, result, outputs, checks,
+ * reasons and tries (AgentDetail, the item page's own), the steps before and after it, and – folded until asked for –
+ * its tool calls on a timeline (thread/turn-trace.tsx). Pan by dragging, zoom with the wheel or a pinch. */
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { ReactFlow, Controls, Handle, Position, MarkerType, type Edge, type Node, type NodeProps, type ReactFlowInstance } from "@xyflow/react"
+import { ChevronRightIcon } from "lucide-react"
 import { Spinner } from "@/components/ui/spinner"
-import { RunInspector, type RunInspectorLabels, type RunSpan, type RunSpanStatus } from "@/components/affect/run-inspector-clean"
-import { AgentHandoff, type Handoff, type HandoffAgent, type HandoffItemKind, type HandoffLabels, type HandoffTask } from "@/components/affect/agent-handoff-clean"
-import { t as t0, useT } from "@/i18n"
-import { clockDur, longDur } from "@/i18n/format"
-import { fmtUsd } from "@/stats/format"
+import { useT } from "@/i18n"
+import { longDur } from "@/i18n/format"
+import { cn } from "@/lib/utils"
 import { botName, loadEvents, st } from "@/store"
-import { BotAvatar, Segmented, sessionWork } from "@/ui"
-import { turnSpans } from "@/thread/turn-trace"
-import { orderedUnits, type WorkflowUnit } from "@/workflow"
-import { isActive, isOver, walk, workTime, type AgentNode, type AgentStatus } from "@/agent-tree"
-import { model, type AgentTreeState } from "@/agent-tree-view"
+import { BotAvatar, sessionWork } from "@/ui"
+import { directDeps, teamLanes, type AgentNode } from "@/agent-tree"
+import { AgentDetail, costOf, stepViews, sumCost, type AgentTreeState, type StepView } from "@/agent-tree-view"
+import type { WorkflowUnit } from "@/workflow"
 
 type T = ReturnType<typeof useT>
-const msOf = (x: number) => (x < 1e12 ? x * 1000 : x)
-const SPAN: Record<AgentStatus, RunSpanStatus> = {
-  done: "done", failed: "failed", stopped: "stopped", running: "running", starting: "running", unconfirmed: "running", asking: "waiting",
-  idle: "idle", paused: "paused", proposed: "queued", pending: "queued", waiting: "queued", blocked: "queued",
+
+/* ───────── the graph's shape: pure, so the showroom draws the same with its sample data ───────── */
+
+/** how a step's card reads: seven states, no more */
+export type StepState = "done" | "running" | "needsYou" | "failed" | "stopped" | "paused" | "notStarted"
+/** one card: everything it shows, already worked out */
+export type StepCard = {
+  id: string; bot: string | null; botLabel: string; title: string; state: StepState
+  /** earlier tries of this step (a stack behind the card) */
+  tries: number
+  /** the try it passed on, when it passed after earlier ones */
+  passedOn?: number
+  /** working time and cost, one muted line */
+  figures: string; costHint?: string
+  /** the steps it waits for directly (no A→C beside A→B→C) */
+  depends: string[]
+  /** the showroom's cards have no Bot in the store: a letter for the avatar */
+  mark?: string
 }
 
-/** how long a call or an agent took: tenths of a second while it is short */
-const took = (ms: number) => ms < 50 ? "<" + t0("common:dur.seconds", { count: 0.1 }) : ms < 10_000 ? t0("common:dur.seconds", { count: Math.round(ms / 100) / 10 }) : longDur(ms)
+const W = 224, H = 116, GAP_LEVEL = 56, GAP_DOWN = 32, GAP_SIBLING = 20
 
-/** the sessions an agent of the tree worked in: its item's, else the one it names */
+/** every step's level: 0 with nothing to wait for, else one more than the latest step it waits for */
+export function levels(cards: StepCard[]): Map<string, number> {
+  const by = new Map(cards.map((c) => [c.id, c])), out = new Map<string, number>()
+  const level = (id: string, seen: Set<string>): number => {
+    if (out.has(id)) return out.get(id)!
+    if (seen.has(id)) return 0 // the Hub rejects cycles; an old malformed graph still draws
+    seen.add(id)
+    const deps = (by.get(id)?.depends ?? []).filter((d) => by.has(d))
+    const n = deps.length ? 1 + Math.max(...deps.map((d) => level(d, seen))) : 0
+    out.set(id, n)
+    return n
+  }
+  for (const c of cards) level(c.id, new Set())
+  return out
+}
+
+/** where each card goes: a column per level (a row when `down`), the cards of a level ordered by where the steps they
+ * wait for sit, so lines cross as little as they can; every level centred on the same line, so a chain is straight.
+ * `per`: a long chain on a wide screen wraps after this many levels into another band below, like a line of text,
+ * so its cards stay readable instead of shrinking to fit one line */
+export function placeSteps(cards: StepCard[], down: boolean, per = Infinity): { pos: Map<string, { x: number; y: number }>; band: Map<string, number>; size: [number, number] } {
+  const lv = levels(cards), order = new Map(cards.map((c, n) => [c.id, n])), by = new Map(cards.map((c) => [c.id, c]))
+  const cols: string[][] = []
+  for (const c of cards) (cols[lv.get(c.id)!] ??= []).push(c.id)
+  const slot = new Map<string, number>()
+  cols.forEach((col, n) => {
+    if (n > 0) {
+      const bary = (id: string) => { const ps = by.get(id)!.depends.filter((d) => slot.has(d)).map((d) => slot.get(d)!); return ps.length ? ps.reduce((a, b) => a + b, 0) / ps.length : 0 }
+      col.sort((a, b) => bary(a) - bary(b) || order.get(a)! - order.get(b)!)
+    }
+    col.forEach((id, i) => slot.set(id, i - (col.length - 1) / 2))
+  })
+  const pos = new Map<string, { x: number; y: number }>(), band = new Map<string, number>()
+  if (down) {
+    for (const c of cards) { const l = lv.get(c.id)!; pos.set(c.id, { x: slot.get(c.id)! * (W + GAP_SIBLING) - W / 2, y: l * (H + GAP_DOWN) }); band.set(c.id, 0) }
+    const wmax = Math.max(1, ...cols.map((c) => c.length))
+    return { pos, band, size: [wmax * (W + GAP_SIBLING) - GAP_SIBLING, cols.length * (H + GAP_DOWN) - GAP_DOWN] }
+  }
+  /* each band as tall as its tallest column, the bands one under another */
+  const bands = Math.ceil(cols.length / per), tall: number[] = []
+  for (let r = 0; r < bands; r++) tall.push(Math.max(1, ...cols.slice(r * per, (r + 1) * per).map((c) => c.length)) * (H + GAP_SIBLING) - GAP_SIBLING)
+  const top = tall.map((_, r) => tall.slice(0, r).reduce((a, h) => a + h + GAP_LEVEL * 1.5, 0))
+  for (const c of cards) {
+    const l = lv.get(c.id)!, r = Math.floor(l / per), k = l - r * per
+    pos.set(c.id, { x: k * (W + GAP_LEVEL), y: top[r] + tall[r] / 2 + slot.get(c.id)! * (H + GAP_SIBLING) - H / 2 })
+    band.set(c.id, r)
+  }
+  const n = Math.min(per, cols.length)
+  return { pos, band, size: [n * (W + GAP_LEVEL) - GAP_LEVEL, top[bands - 1] + tall[bands - 1]] }
+}
+/** how many levels a band holds in a `w`×`h` box: the fewest bands whose cards come out (nearly) as large as they can */
+export function bandWidth(cards: StepCard[], w: number, h: number): number {
+  const n = Math.max(1, ...levels(cards).values()) + 1
+  let best = n, zoom = 0
+  for (let k = 1; k <= Math.min(4, n); k++) {
+    const per = Math.ceil(n / k), [sw, sh] = placeSteps(cards, false, per).size
+    const z = Math.min(1, (w * 0.88) / sw, (h * 0.88) / sh)
+    if (z > zoom + 0.06) { zoom = z; best = per }
+  }
+  return best
+}
+
+/* ───────── the card ───────── */
+
+const TONE: Record<StepState, string> = {
+  done: "bg-success/10 text-success", running: "bg-blue/10 text-blue", needsYou: "bg-attention/12 text-attention", failed: "bg-destructive/10 text-destructive",
+  stopped: "bg-muted text-muted-foreground", paused: "bg-muted text-muted-foreground", notStarted: "bg-muted text-muted-foreground",
+}
+export const STEP_DOT: Record<StepState, string> = {
+  done: "bg-success", running: "bg-blue dot-running", needsYou: "bg-attention", failed: "bg-destructive", stopped: "bg-tertiary", paused: "bg-tertiary", notStarted: "bg-tertiary",
+}
+
+type CardData = { c: StepCard; picked: boolean; dim: boolean; down: boolean }
+const RADIUS = "rounded-[calc(var(--radius-xl)-2px)]"
+/** a step: its Bot, what it was, how it ended (and on which try), what it took. A step tried before has its earlier
+ * tries as cards stacked behind it. The look is the Agent Tree's card (agent-tree-clean): a hairline-lifted card,
+ * a 22px avatar tile, a tinted status chip */
+function StepNode({ data }: NodeProps<Node<CardData>>) {
+  const { c, picked, dim, down } = data, t = useT()
+  const tries = c.passedOn ? t("views:agentTree.passedOn", { n: c.passedOn }) : c.tries ? t("views:agentTree.retried", { count: c.tries }) : ""
+  const stack = Math.min(2, c.tries)
+  return <div className={cn("relative transition-opacity duration-180", dim && "opacity-45")} style={{ width: W, height: H }}>
+    {/* the earlier tries, a card or two behind this one */}
+    {Array.from({ length: stack }, (_, n) => <span key={n} aria-hidden className={cn("absolute inset-0 bg-card shadow-[var(--lift)] ring-1 ring-border", RADIUS)} data-step-stack
+      style={{ transform: `translate(${(stack - n) * 5}px, ${(stack - n) * 5}px)`, opacity: 1 - (stack - n) * 0.2 }} />)}
+    <div className={cn("relative flex h-full cursor-pointer flex-col gap-1.5 bg-card px-2.5 pt-2.5 pb-2 shadow-[var(--lift)] transition-shadow duration-180 hover:shadow-[var(--lift-hover)]", RADIUS,
+      picked && "ring-2 ring-blue")} data-step-node={c.id} data-step-state={c.state} data-step-tries={c.tries || undefined} data-step-picked={picked || undefined}>
+      <Handle type="target" position={down ? Position.Top : Position.Left} className="!size-1 !min-h-0 !min-w-0 !border-0 !bg-transparent" />
+      <div className="flex min-w-0 items-center gap-2">
+        {c.mark ? <span className="grid size-[22px] shrink-0 place-items-center rounded-md bg-muted type-label text-muted-foreground">{c.mark}</span> : <BotAvatar k={c.bot} size={22} />}
+        <span className="min-w-0 flex-1 truncate type-footnote font-medium text-foreground">{c.botLabel}</span>
+      </div>
+      <p className={cn("line-clamp-2 min-h-8 break-words text-[12px] leading-4", c.state === "notStarted" ? "text-muted-foreground" : "text-foreground/85")} title={c.title}>{c.title}</p>
+      <div className="mt-auto flex min-w-0 items-center gap-1.5">
+        <span className={cn("inline-flex h-[18px] shrink-0 items-center gap-1 rounded-[4px] pr-1.5 pl-1 text-[11px] leading-4 font-medium whitespace-nowrap", TONE[c.state])} data-step-chip>
+          <span className={cn("size-1.5 rounded-full", STEP_DOT[c.state])} />{t(`views:agentTree.graph.state.${c.state}`)}</span>
+        {tries && <span className={cn("min-w-0 truncate text-[11px] leading-4 font-medium", c.passedOn ? "text-muted-foreground" : "text-attention")} data-step-tries-label>{tries}</span>}
+      </div>
+      <div className="min-h-4 truncate text-[11px] leading-4 tabular-nums text-muted-foreground" title={c.costHint} data-step-figures>{c.figures}</div>
+      <Handle type="source" position={down ? Position.Bottom : Position.Right} className="!size-1 !min-h-0 !min-w-0 !border-0 !bg-transparent" />
+    </div>
+  </div>
+}
+const nodeTypes = { step: StepNode }
+
+/** the graph itself: the cards where `placeSteps` puts them, an arrow per direct dependency – solid once the step
+ * before is done, dashed while the next one still waits for it; a step picked lights its arrows and fades the rest */
+export function StepGraph({ cards, picked, onPick, down, className }: { cards: StepCard[]; picked: string | null; onPick: (id: string | null) => void; down: boolean; className?: string }) {
+  const rf = useRef<ReactFlowInstance<Node<CardData>, Edge> | null>(null)
+  const box = useRef<HTMLDivElement>(null)
+  /* the box's size, for how the levels wrap into bands */
+  const [room, setRoom] = useState<[number, number] | null>(null)
+  useLayoutEffect(() => {
+    const el = box.current
+    if (!el) return
+    const fit = () => setRoom((r) => r && Math.abs(r[0] - el.clientWidth) < 40 && Math.abs(r[1] - el.clientHeight) < 40 ? r : [el.clientWidth, el.clientHeight])
+    fit()
+    const ro = new ResizeObserver(fit); ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  const per = useMemo(() => down || !room ? Infinity : bandWidth(cards, room[0], room[1]), [cards, down, room?.[0], room?.[1]])
+  const { pos, band } = useMemo(() => placeSteps(cards, down, per), [cards, down, per])
+  /* the box grew or shrank (a detail panel opened or closed beside it): the whole graph is framed again */
+  const framed = useRef(room)
+  useEffect(() => {
+    if (!room || framed.current === room) return
+    const first = !framed.current
+    framed.current = room
+    if (!first) void rf.current?.fitView({ padding: 0.12, maxZoom: 1, minZoom: 0.35, duration: 200 })
+  }, [room])
+  const near = useMemo(() => {
+    if (!picked) return null
+    const c = cards.find((x) => x.id === picked)
+    return new Set([picked, ...(c?.depends ?? []), ...cards.filter((x) => x.depends.includes(picked)).map((x) => x.id)])
+  }, [cards, picked])
+  const nodes: Node<CardData>[] = cards.map((c) => ({ id: c.id, type: "step", position: pos.get(c.id)!, data: { c, picked: c.id === picked, dim: !!near && !near.has(c.id), down }, draggable: false, width: W, height: H }))
+  const state = new Map(cards.map((c) => [c.id, c.state]))
+  const edges: Edge[] = cards.flatMap((c) => c.depends.filter((d) => state.has(d)).map((d): Edge => {
+    const ready = state.get(d) === "done", hot = d === picked || c.id === picked
+    const color = hot ? "var(--blue)" : "color-mix(in srgb, var(--muted-foreground) 60%, transparent)"
+    /* an arrow into the next band goes round the cards, not through them */
+    return { id: `${d}>${c.id}`, source: d, target: c.id, type: band.get(d) !== band.get(c.id) ? "smoothstep" : "default", style: { stroke: color, strokeWidth: hot ? 1.75 : 1.25, strokeDasharray: ready ? undefined : "4 4", opacity: near && !hot ? 0.35 : 1 },
+      markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color } }
+  }))
+  /* a step picked whose card the panel now covers (or that sits off screen) comes back into view, at the same zoom */
+  useEffect(() => {
+    const r = rf.current, el = box.current, p = picked ? pos.get(picked) : undefined
+    if (!r || !el || !p) return
+    const id = setTimeout(() => {
+      const { x, y, zoom } = r.getViewport(), w = el.clientWidth, h = el.clientHeight
+      const sx = p.x * zoom + x, sy = p.y * zoom + y
+      if (sx < 8 || sy < 8 || sx + W * zoom > w - 8 || sy + H * zoom > h - 8) void r.setCenter(p.x + W / 2, p.y + H / 2, { zoom, duration: 260 })
+    }, 450)
+    return () => clearTimeout(id)
+  }, [picked, pos])
+  return <div ref={box} className={cn("relative min-h-0 overflow-hidden rounded-xl bg-canvas-graph", className)} data-step-graph={down ? "down" : "right"}
+    data-step-edges={edges.map((e) => e.id).join(" ")}>
+    {room && <ReactFlow key={(down ? "d:" : "r:") + per + ":" + cards.map((c) => c.id).join()} nodes={nodes} edges={edges} nodeTypes={nodeTypes} onInit={(r) => { rf.current = r }}
+      fitView fitViewOptions={{ padding: 0.12, maxZoom: 1, minZoom: 0.35 }} minZoom={0.25} maxZoom={1.6}
+      nodesConnectable={false} nodesDraggable={false} elementsSelectable={false} proOptions={{ hideAttribution: true }} panOnScroll={false} zoomOnScroll zoomOnPinch preventScrolling
+      onNodeClick={(_, n) => onPick(n.id === picked ? null : n.id)} onPaneClick={() => onPick(null)}>
+      <Controls showInteractive={false} position="bottom-right" />
+    </ReactFlow>}
+  </div>
+}
+
+/* ───────── the dialog's content, from an item's collaboration ───────── */
+
+const STATE: Record<string, StepState> = {
+  done: "done", running: "running", starting: "running", unconfirmed: "running", failed: "failed", stopped: "stopped", paused: "paused",
+}
+/** a step of the item page's list as a card */
+function cardOf(x: StepView, units: WorkflowUnit[], t: T): StepCard {
+  const n = x.node, cost = x.cost?.known ? costOf(x.cost, t) : null, tries = x.row.tries.length
+  const state: StepState = x.needsYou ? "needsYou" : STATE[n.status] ?? "notStarted"
+  return {
+    id: n.key, bot: n.bot, botLabel: n.bot ? botName(n.bot) : t("views:agentTree.noBot"), title: n.title, state, tries,
+    passedOn: state === "done" && tries ? n.attempt ?? tries + 1 : undefined,
+    figures: [x.row.ms > 0 ? longDur(x.row.ms) : "", cost?.text ?? ""].filter(Boolean).join(" · "), costHint: cost?.hint,
+    depends: n.unit ? directDeps(n.unit, units).map((id) => `unit:${id}`) : [],
+  }
+}
+
+/** re-renders while something runs, so working times move on */
+function useNow(live: boolean) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => { if (!live) return; const id = setInterval(() => setNow(Date.now()), 10_000); return () => clearInterval(id) }, [live])
+  return now
+}
+function useMatch(query: string) {
+  const [on, setOn] = useState(() => matchMedia(query).matches)
+  useEffect(() => { const m = matchMedia(query), f = () => setOn(m.matches); m.addEventListener("change", f); return () => m.removeEventListener("change", f) }, [query])
+  return on
+}
+
+export default function CollabGraph({ at }: { at: AgentTreeState }) {
+  const t = useT()
+  const now = useNow(!!at.summary?.active && !at.old)
+  const wide = useMatch("(min-width: 1024px)"), down = !useMatch("(min-width: 640px)")
+  const [picked, setPicked] = useState<string | null>(null)
+  if (!at.tree) return null
+  const tree = at.tree
+  const lanes = teamLanes(tree, at.stats, now, at.old)
+  const steps = stepViews(at, lanes.rows, now, t).filter((x) => x.node.kind === "unit" && x.row.depth === 0)
+  const units = at.workflow?.units ?? []
+  const cards = steps.map((x) => cardOf(x, units, t))
+  const node = picked ? steps.find((x) => x.node.key === picked)?.node ?? null : null
+  /* the totals: the coordinator, how many steps, how long it took against how long its agents worked, what it all
+   * cost (the coordinator's own turns included), how many tries went again and what failed */
+  const total = at.total(tree.item) ?? sumCost(steps.map((x) => x.cost)), c = total?.known ? costOf(total, t) : null
+  const retries = steps.reduce((n, x) => n + x.row.tries.length, 0), failed = cards.filter((x) => x.state === "failed").length
+  const head = [tree.bot ? t("views:agentTree.coordinator", { name: botName(tree.bot) }) : null, t("views:agentTree.steps", { count: cards.length }),
+    lanes.range && lanes.worked > 0 ? t("views:agentTree.timeSpan", { wall: longDur(lanes.range[1] - lanes.range[0]), work: longDur(lanes.worked) }) : null,
+    c ? t("views:agentTree.cost", { usd: c.text }) : null].filter(Boolean)
+  const detail = node && <StepDetail at={at} node={node} cards={cards} onPick={setPicked} />
+  return <div className="flex min-h-0 flex-1 flex-col gap-3" data-collab-graph>
+    <div className="flex flex-col gap-0.5" data-collab-head>
+      <p className="type-callout tabular-nums text-muted-foreground">
+        {at.old && <span className="mr-2 rounded-md bg-muted px-1.5 py-0.5 type-label">{t("views:agentTree.earlierRound")}</span>}
+        {head.join(" · ")}
+        {retries > 0 && <> · <span className="text-attention" data-collab-retries>{t("views:agentTree.graph.retries", { count: retries })}</span></>}
+        {failed > 0 && <> · <span className="text-destructive" data-collab-failed>{t("views:agentTree.graph.failedSteps", { count: failed })}</span></>}
+      </p>
+      <p className="type-footnote text-tertiary">{t(down ? "views:agentTree.graph.howDown" : "views:agentTree.graph.howRight")}</p>
+    </div>
+    {cards.length === 0 ? <p className="type-callout text-muted-foreground">{t("views:agentTree.noSteps")}</p>
+      : wide ? <div className="flex min-h-0 flex-1 gap-3">
+        <StepGraph cards={cards} picked={picked} onPick={setPicked} down={false} className="min-w-0 flex-1" />
+        {detail && <aside className="w-[400px] shrink-0 overflow-y-auto rounded-xl bg-card p-5 shadow-[var(--lift)]" aria-label={node!.title} data-collab-detail={node!.key}>{detail}</aside>}
+      </div>
+      : <div className="flex min-h-0 flex-1 flex-col gap-3">
+        <StepGraph cards={cards} picked={picked} onPick={setPicked} down={down} className={detail ? "h-[38%] shrink-0" : "flex-1"} />
+        {detail && <div className="min-h-0 flex-1 overflow-y-auto rounded-xl bg-card p-4 shadow-[var(--lift)]" aria-label={node!.title} data-collab-detail={node!.key}>{detail}</div>}
+      </div>}
+  </div>
+}
+
+/** a picked step: the item page's detail (goal, result, outputs, checks, reasons, tries, its actions), then the steps
+ * it waited for and the ones that waited for it, and its tool calls, folded */
+function StepDetail({ at, node, cards, onPick }: { at: AgentTreeState; node: AgentNode; cards: StepCard[]; onPick: (id: string | null) => void }) {
+  const t = useT()
+  const me = cards.find((c) => c.id === node.key)
+  const before = cards.filter((c) => me?.depends.includes(c.id)), after = cards.filter((c) => c.depends.includes(node.key))
+  const link = (c: StepCard) => <button key={c.id} type="button" onClick={() => onPick(c.id)} className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left type-callout hover:bg-accent" data-collab-link={c.id}>
+    <span className={cn("size-1.5 shrink-0 rounded-full", STEP_DOT[c.state])} /><span className="min-w-0 flex-1 truncate">{c.title}</span><span className="shrink-0 type-footnote text-muted-foreground">{c.botLabel}</span></button>
+  return <div className="flex min-w-0 flex-col gap-5">
+    <AgentDetail at={at} node={node} onClose={() => onPick(null)} />
+    {(before.length > 0 || after.length > 0) && <div className="flex flex-col gap-3" data-collab-neighbours>
+      {before.length > 0 && <section><h4 className="mb-1 type-label text-tertiary">{t("views:agentTree.graph.before")}</h4><div className="-mx-2">{before.map(link)}</div></section>}
+      {after.length > 0 && <section><h4 className="mb-1 type-label text-tertiary">{t("views:agentTree.graph.after")}</h4><div className="-mx-2">{after.map(link)}</div></section>}
+    </div>}
+    <StepTrace key={node.key} node={node} />
+  </div>
+}
+
+/* the timeline (Trace Waterfall) is a big component: loaded the first time someone asks for it */
+const TurnTrace = lazy(() => import("@/thread/turn-trace"))
+/** the sessions a step worked in: its item's, else the one it names */
 function sessionsOf(n: AgentNode): string[] {
   const item = n.item ? st.items.find((i) => i.id === n.item) : undefined
   return [...new Set([...(item?.ss ?? []), ...(n.session ? [n.session] : [])])].filter((k) => !!st.S[k])
 }
-
-/** the tree as Run Inspector spans: an agent per node, its own calls under it, times in ms from `base` */
-function runOf(at: AgentTreeState, root: AgentNode, base: number, t: T): RunSpan {
-  const agent = (n: AgentNode): RunSpan => {
-    const s = at.stat(n.item)
-    const calls: RunSpan[] = sessionsOf(n).flatMap((k) => sessionWork(k).flatMap((w, j) => turnSpans(w.evs, w.at, w.items, base, w.t1, w.live, t).map((c): RunSpan => ({
-      id: `${n.key}:${k}:${j}:${c.id}`, kind: c.kind === "llm" ? "llm" : "tool", name: c.name, detail: c.detail, tool: c.kind === "llm" ? undefined : c.name,
-      status: c.status === "running" ? "running" : c.status === "failed" ? "failed" : "done", start: c.start, end: c.end,
-      input: c.input, output: c.output, error: c.error,
-    }))))
-    const first = s?.first_turn ? msOf(s.first_turn) - base : calls.length ? Math.min(...calls.map((c) => c.start)) : 0
-    const closed = s?.done_at ? msOf(s.done_at) - base : s?.dropped_at ? msOf(s.dropped_at) - base : null
-    const lastCall = calls.length ? Math.max(...calls.map((c) => c.end ?? c.start)) : null
-    const status: RunSpanStatus = n.decisions > 0 && !isOver(n.status) ? "waiting" : SPAN[n.status]
-    const end = isActive(n.status) || status === "waiting" ? undefined : closed ?? (lastCall !== null ? Math.max(first, lastCall) : s?.agent_ms ? first + s.agent_ms : first)
-    const item = n.item ? st.items.find((i) => i.id === n.item) : undefined
-    const worked = workTime(s)
-    return {
-      id: n.key, kind: "agent", name: n.bot ? botName(n.bot) : t("views:agentTree.noBot"), model: model(n.bot) || undefined, task: n.title, icon: <BotAvatar k={n.bot} size={20} />,
-      status, start: Math.max(0, first), end, cost: s?.est || undefined, tokensIn: s?.tokens || undefined, time: worked ? clockDur(worked) : "",
-      ask: status === "waiting" ? item?.waits[0]?.q : undefined, error: n.status === "failed" ? n.reason ?? undefined : undefined,
-      children: [...calls.sort((a, b) => a.start - b.start), ...n.children.map(agent)],
-    }
-  }
-  return agent(root)
-}
-
-/** where the run starts: the first turn any of its agents took, or the first call any of them made */
-function startOf(at: AgentTreeState, root: AgentNode): number {
-  const xs: number[] = []
-  walk(root, (n) => {
-    const s = at.stat(n.item)
-    if (s?.first_turn) xs.push(msOf(s.first_turn))
-    for (const k of sessionsOf(n)) { const ts = st.S[k]?.ts ?? []; const f = ts.find(Boolean); if (f) xs.push(f) }
-  })
-  return xs.length ? Math.min(...xs) : Date.now()
-}
-
-/** an output as a thing handed on: a record as a note, a file (by its kind or a path), a result as a fact (a
- * decision when its kind says so); the Bot names the kind freely, so anything else is a note */
-function kindOf(o: NonNullable<WorkflowUnit["outputs"]>[number]): HandoffItemKind {
-  if (o.role === "record") return "note"
-  if (/file|code|diff|patch|doc|image|screenshot|pdf/i.test(o.kind) || (o.location && !/^https?:/.test(o.location))) return "file"
-  if (o.role === "result") return /decision/i.test(o.kind) ? "decision" : "fact"
-  return "note"
-}
-
-const tr = (t: T) => t as unknown as (k: string, o?: object) => string
-/** Agent Handoff's words, translated */
-export function handoffLabels(t: T): Partial<HandoffLabels> {
-  const L = (k: string, o?: Record<string, unknown>) => tr(t)(`views:agentTree.graph.handoffs.${k}`, o)
-  return { none: L("none"), idle: L("idle"), working: L("working"), ready: L("ready"), done: L("done"), warning: L("warning"), upNext: L("upNext"), nothing: L("nothing"), allLost: L("allLost"), empty: L("empty"),
-    handingOn: L("handingOn"), close: L("close"), tools: L("tools"), lost: L("lost"), restore: L("restore"),
-    more: (n) => L("more", { count: Number(n) }), costSoFar: (usd) => L("costSoFar", { usd }), with: (name) => L("with", { name }), received: (name) => L("received", { name }), from: (name) => L("from", { name }) }
-}
-/** Run Inspector's words (and its Agent Tree's), translated */
-export function inspectorLabels(t: T): Partial<RunInspectorLabels> {
-  const I = (k: string, o?: Record<string, unknown>) => tr(t)(`views:agentTree.graph.inspector.${k}`, o)
-  return { whole: I("whole"), title: t("views:agentTree.title"), less: I("less"), tool: I("tool"), model: I("model"), stillRunning: I("stillRunning"), noOutput: I("noOutput"), calledWith: I("calledWith"), prompt: I("prompt"),
-    callsOf: (name) => I("callsOf", { name }), more: (n) => I("more", { count: n }),
-    facts: { duration: I("duration"), cost: I("cost"), tokens: I("tokens"), modelCalls: I("modelCalls"), toolCalls: I("toolCalls"), errors: I("errors") },
-    state: { failed: I("failed"), running: I("running"), done: I("done"), queued: I("queued") },
-    tree: { status: { queued: I("status.queued"), running: I("status.running"), waiting: I("status.waiting"), done: I("status.done"), failed: I("status.failed"), stopped: I("status.stopped"), idle: t("views:agentTree.status.idle"), paused: t("views:agentTree.status.paused") },
-      agents: (n) => I("agents", { count: n }), running: (n) => I("running", { count: n }), needsYou: (n) => I("needsYou", { count: n }), failed: (n) => I("failed", { count: n }),
-      needsYouList: I("needsYouList"), failedList: I("failedList"), branch: I("branch"), showSubs: (n, name) => I("showSubs", { count: n, name }), foldSubs: (name) => I("foldSubs", { name }), beside: (name) => I("beside", { name }) } }
-}
-
-function Handoffs({ at, t }: { at: AgentTreeState; t: T }) {
-  const w = at.workflow, tree = at.tree
-  const [wide, setWide] = useState(() => matchMedia("(min-width: 1024px)").matches)
-  useEffect(() => { const m = matchMedia("(min-width: 1024px)"), on = () => setWide(m.matches); m.addEventListener("change", on); return () => m.removeEventListener("change", on) }, [])
-  if (!w || !tree) return <p className="p-4 type-callout text-muted-foreground">{t("views:agentTree.graph.handoffs.none")}</p>
-  const units = orderedUnits(w.units)
-  const node = (u: WorkflowUnit) => tree.children.find((c) => c.key === `unit:${u.id}`)
-  const costOfUnit = (u: WorkflowUnit) => {
-    const ns = tree.children.filter((c) => c.unitId === u.id)
-    const xs = ns.map((x) => at.total(x.item)).filter((c) => c?.known)
-    return xs.length ? xs.reduce((s, c) => s + c!.est, 0) : undefined
-  }
-  const agents: HandoffAgent[] = units.map((u) => ({ id: u.id, name: botName(u.bot_id), model: model(u.bot_id) || undefined, avatar: <BotAvatar k={u.bot_id} size={18} />, description: u.title, cost: costOfUnit(u) }))
-  const tasks: HandoffTask[] = units.map((u) => {
-    const n = node(u), s = n?.status ?? "pending"
-    const status: HandoffTask["status"] = s === "done" ? "done" : s === "failed" ? "warning" : isActive(s) ? "working" : "todo"
-    const item = n?.item ? st.items.find((i) => i.id === n.item) : undefined
-    const note = status === "working" ? item?.now || undefined : status === "warning" ? n?.reason ?? undefined : status === "done" && u.attempt > 1 ? t("views:agentTree.passedOn", { n: u.attempt }) : undefined
-    return { id: u.id, title: u.title, description: u.goal, status, agent: u.id, note, logo: <BotAvatar k={u.bot_id} size={14} /> }
-  })
-  const handoffs: Handoff[] = units.flatMap((u) => u.depends_on.map((d) => units.find((x) => x.id === d)).filter((x): x is WorkflowUnit => !!x).map((d) => ({
-    id: `${d.id}->${u.id}`, from: d.id, to: u.id, task: d.title,
-    items: (d.outputs ?? []).map((o, k) => ({ id: `${d.id}:${k}`, label: o.title, kind: kindOf(o) })),
-  })))
-  return <div className="min-h-0 flex-1 overflow-auto p-1" data-agent-handoff>
-    <div style={{ minWidth: wide ? Math.max(0, agents.length * 180) : undefined }}>
-      <AgentHandoff className="steve-handoff" agents={agents} tasks={tasks} handoffs={handoffs} inbound
-        labels={handoffLabels(t)} />
-    </div>
-  </div>
-}
-
-function CallTree({ at, t, onSelect }: { at: AgentTreeState; t: T; onSelect: (k: string) => void }) {
-  const tree = at.tree!
-  const ks = useMemo(() => { const out: string[] = []; walk(tree, (n) => out.push(...sessionsOf(n))); return [...new Set(out)] }, [tree])
-  useEffect(() => { for (const k of ks) void loadEvents(k) }, [ks.join()])
-  const loading = ks.filter((k) => !st.S[k]?.loaded).length
-  const [picked, setPicked] = useState<string | null>(null)
-  const base = startOf(at, tree)
-  const run = runOf(at, tree, base, t)
-  const pickedNode = picked ? (() => { let hit: AgentNode | null = null; walk(tree, (n) => { if (n.key === picked) hit = n }); return hit as AgentNode | null })() : null
-  return <div className="flex min-h-0 flex-1 flex-col gap-2">
-    <div className="flex min-h-7 flex-wrap items-center gap-2 type-footnote text-muted-foreground">
-      {loading > 0 && <span className="inline-flex items-center gap-1.5" data-agent-graph-loading><Spinner className="size-3" />{t("views:agentTree.graph.loading")}</span>}
-      <span className="flex-1" />
-      {pickedNode && pickedNode.kind !== "root" && <Button size="xs" variant="outline" onClick={() => onSelect(pickedNode.kind === "attempt" ? tree.children.find((c) => c.kind === "unit" && c.unitId === pickedNode.unitId)?.key ?? pickedNode.key : pickedNode.key)} data-agent-graph-detail>
-        {pickedNode.title}<ArrowUpRightIcon /></Button>}
-    </div>
-    <div className="mx-auto min-h-0 w-full max-w-[1040px] flex-1 overflow-auto p-1" data-agent-inspector>
-      <RunInspector run={run} startedAt={base} selected={picked} onSelectedChange={setPicked} formatCost={fmtUsd} formatTook={took}
-        labels={inspectorLabels(t)} />
-    </div>
-  </div>
-}
-
-export default function CollabGraph({ at, onSelect }: { at: AgentTreeState; onSelect: (k: string) => void }) {
+const SHOWN_TURNS = 3
+/** a step's tool calls, turn by turn on the session's own timeline; its sessions load when this opens */
+function StepTrace({ node }: { node: AgentNode }) {
   const t = useT()
-  const [tab, setTab] = useState<"tree" | "handoff">("tree")
-  if (!at.tree) return null
-  return <div className="flex min-h-0 flex-1 flex-col gap-3">
-    <Segmented size="sm" value={tab} onChange={setTab} label={t("views:agentTree.graph.title")} options={[["tree", t("views:agentTree.graph.tree")], ["handoff", t("views:agentTree.graph.handoff")]] as const} />
-    {tab === "tree" ? <CallTree at={at} t={t} onSelect={onSelect} /> : <Handoffs at={at} t={t} />}
-  </div>
+  const [open, setOpen] = useState(false), [all, setAll] = useState(false)
+  const ks = sessionsOf(node)
+  useEffect(() => { if (open) for (const k of ks) void loadEvents(k) }, [open, ks.join()])
+  const loading = ks.some((k) => !st.S[k]?.loaded)
+  const turns = open ? ks.flatMap((k) => sessionWork(k).map((w) => ({ k, w }))).sort((a, b) => a.w.t0 - b.w.t0) : []
+  const shown = all ? turns : turns.slice(-SHOWN_TURNS)
+  const when = (ms: number) => new Date(ms).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
+  return <section data-collab-trace={open ? "open" : "closed"}>
+    <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} disabled={!ks.length} className="flex items-center gap-1.5 type-label text-tertiary hover:text-foreground disabled:hover:text-tertiary" data-collab-trace-toggle>
+      <ChevronRightIcon className={cn("size-3.5 transition-transform duration-180", open && "rotate-90")} />{t("views:agentTree.graph.trace")}
+      {!ks.length && <span className="font-normal">· {t("views:agentTree.graph.noSession")}</span>}
+    </button>
+    {open && <div className="mt-2 flex flex-col gap-3">
+      {loading && <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground" data-collab-trace-loading><Spinner className="size-3" />{t("views:agentTree.graph.loading")}</span>}
+      {!loading && !turns.length && <p className="type-footnote text-muted-foreground">{t("views:agentTree.graph.noTurns")}</p>}
+      {turns.length > shown.length && <button type="button" onClick={() => setAll(true)} className="self-start type-footnote text-muted-foreground hover:text-foreground">{t("views:agentTree.graph.earlierTurns", { count: turns.length - shown.length })}</button>}
+      {shown.map(({ k, w }, n) => <div key={k + ":" + w.t0} className="min-w-0">
+        <div className="mb-1 type-footnote tabular-nums text-muted-foreground">{t("views:agentTree.graph.turn", { n: turns.length - shown.length + n + 1 })}{w.t0 ? ` · ${when(w.t0)}` : ""}</div>
+        <Suspense fallback={<Spinner className="size-3.5" />}><TurnTrace k={k} evs={w.evs} at={w.at} items={w.items} t0={w.t0} t1={w.t1} live={w.live} cancelled={w.cancelled} /></Suspense>
+      </div>)}
+    </div>}
+  </section>
 }

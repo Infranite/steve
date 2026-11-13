@@ -236,8 +236,9 @@ export type TeamLanes = {
   parent: Map<string, string>
 }
 
-/** the work graph's dependencies of `unit` that are not already implied through another of them */
-function directDeps(unit: WorkflowUnit, units: WorkflowUnit[]): string[] {
+/** the work graph's dependencies of `unit` that are not already implied through another of them (no A→C beside
+ * A→B→C): the collaboration's lanes and the full view's graph draw only these */
+export function directDeps(unit: WorkflowUnit, units: WorkflowUnit[]): string[] {
   const by = new Map(units.map((u) => [u.id, u]))
   const reach = (id: string, seen = new Set<string>()): Set<string> => {
     for (const d of by.get(id)?.depends_on ?? []) if (!seen.has(d)) { seen.add(d); reach(d, seen) }
