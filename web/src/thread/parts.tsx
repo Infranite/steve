@@ -194,6 +194,19 @@ export function Updates({ m }: { m: Msg }) {
   return <div className="mt-3 flex flex-col gap-3 border-l-2 border-border pl-4" data-updates={m.id}>{us.map((u, n) => <UpdateRow key={n} u={u} />)}</div>
 }
 
+/** the decisions a thread already shows in place: each item card's open one and the questions in its updates
+ *  (the card above the composer leaves these out, so one question is never asked twice on the page) */
+export function threadDecisions(list: Msg[]): Set<string> {
+  const out = new Set<string>()
+  for (const m of list) {
+    if (m.card) { const w = st.items.find((x) => x.id === m.card!.item)?.waits[0]; if (w) out.add(w.decision); continue }
+    for (const u of [...(m.updates ?? []), ...(m.update ? [m.update] : [])]) {
+      if (u.decision && (u.kind === "ask" || u.kind === "fail" || u.kind === "deliver") && st.items.find((x) => x.id === u.item)?.waits.some((w) => w.decision === u.decision)) out.add(u.decision)
+    }
+  }
+  return out
+}
+
 /* ───────── an item's one living card (§5.2) ───────── */
 type Look = { label: string; dot: string; tone: "run" | "wait" | "fail" | "done" | "quiet"; version?: string }
 /** what the card says the item is doing now: live from the item, with the card for what the item no longer shows (released) */

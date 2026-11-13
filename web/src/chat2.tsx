@@ -11,9 +11,9 @@ import { Trail, type TrailItem } from "@/components/work-trail"
 import { toolClass } from "@/thread/tools"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
-import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { st, tm, botName, projectName, tagName, pendingCards, sessionCards, unreadNotices, readNotices, dismissNotice, closeRel, WT, type Msg, type Steps } from "@/store"
+import { ThinkingLoader } from "@/components/affect/thinking-loader"
 import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote, SidePanel, PanelHead } from "@/ui"
 import type { RNotice } from "@/api"
 import { ResearchLive, researchSummary, researchStep } from "@/thread/parts"
@@ -101,7 +101,8 @@ export function LiveSteps() {
     </div>
   )
   if (d?.text) return null
-  return <div className="flex items-center gap-2 self-start px-1 type-callout text-muted-foreground" data-live-steps={st.phase || "start"}><Spinner className="size-3.5" /><span className="shimmer">{PHASE[st.phase]?.() ?? t("shell:chat.phase.start")}</span></div>
+  /* affectUI Thinking Loader, its label the phase the Hub reports: a new phase rolls in */
+  return <div className="flex items-center self-start px-1 type-callout" data-live-steps={st.phase || "start"}><ThinkingLoader variant="plain" size="sm" phases={[PHASE[st.phase]?.() ?? t("shell:chat.phase.start")]} phase={0} /></div>
 }
 
 /** a failure notification's line in the conversation; it leaves once closed by hand or by a later release of its item */

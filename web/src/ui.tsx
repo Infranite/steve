@@ -9,9 +9,9 @@ import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { BookOpenIcon, ChartNoAxesColumnIcon,
-  ArrowUpIcon, CheckIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon,
+  ArrowUpIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon,
   MessageCircleIcon, MoonIcon, PencilIcon, RadioIcon, SearchIcon, SettingsIcon, SquareTerminalIcon,
-  SunIcon, TerminalIcon, ArrowUpRightIcon, UserIcon, UserRoundIcon, ContactRoundIcon, KeyRoundIcon, UsersRoundIcon, ServerIcon, CornerDownRightIcon, MonitorIcon, WorkflowIcon, HashIcon, BotIcon, AtSignIcon, SlashIcon, XIcon, SquareIcon, AlarmClockIcon, FolderIcon, EllipsisIcon, BellOffIcon, BanIcon,
+  SunIcon, TerminalIcon, ArrowUpRightIcon, UserIcon, UserRoundIcon, ContactRoundIcon, KeyRoundIcon, UsersRoundIcon, ServerIcon, CornerDownRightIcon, MonitorIcon, WorkflowIcon, HashIcon, BotIcon, AtSignIcon, SlashIcon, XIcon, SquareIcon, FolderIcon,
   MailIcon,
   CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
@@ -22,7 +22,7 @@ import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-tr
 import { ThinkingLoader } from "@/components/affect/thinking-loader"
 import { Item as UIItem, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSeparator, ItemTitle } from "@/components/ui/item"
 import { Empty as UIEmpty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
-import { Card as UICard, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card as UICard, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
@@ -32,17 +32,14 @@ import { Sidebar as UISidebar, SidebarContent, SidebarFooter, SidebarGroup, Side
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group"
 import { CodeBlock, CodeBlockContent, CodeBlockLine } from "@/components/ui/code-block"
-import { Questionnaire, QuestionnaireItem, QuestionnaireTitle, QuestionnaireChoices, QuestionnaireChoice, QuestionnaireActions, QuestionnaireSubmit } from "@/components/ui/questionnaire"
-import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Spinner } from "@/components/ui/spinner"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Markdown } from "@/components/markdown"
-import { PermissionDetails, PermissionRecord } from "@/components/permission"
+import { PermissionRecord } from "@/components/permission"
 import { LOADED_WEB_VERSION, permissionDecision, useStore } from "@/store"
 import { shortVersion } from "@/updates"
-import { st, emit, briefHead, pendingCards, acceptChoosesRelease, ST, SS, WT, FAIL_CHOICE, SNOOZE_KEYS, snoozeLabel, tagCatLabel, tagLabel, tagDesc, botName, decide, dismiss, setSt, snooze, tag, isKind, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
+import { st, emit, briefHead, pendingCards, ST, SS, WT, tagCatLabel, tagLabel, tagDesc, botName, decide, tag, isKind, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import { YoloPill } from "@/yolo/switch"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
@@ -52,8 +49,8 @@ import type { RFile } from "@/api"
 import { MemConfirm, memAsk } from "@/knowledge/parts"
 import { FLOW_SUBJECTS, FlowDecisionBody } from "@/auto/decision"
 import { MODULE_CARDS } from "@/vault/decisions"
-import { OutContext } from "@/channels/out-context"
 import { MailDraftCard } from "@/mail/draft"
+import { CardTools, InlineDecision, isToolCall, mapDecision, ToolApproval } from "@/thread/decide"
 import { useMentions } from "@/people/mention"
 import { clearSentDraft, draftToSend, readDraft, saveDraft } from "@/composer-draft"
 import { isPeopleDecision, PeopleDecisionBody } from "@/people/pending"
@@ -214,6 +211,8 @@ export function Group({ children, className }: { children: ReactNode; className?
  *  then a cover button under the content, and the children sit above it. */
 /** a tool permission question as the Hub words it (“允许执行：<command>”), led in the UI language */
 export const permissionQuestion = (q: string) => (lang() === "zh-CN" ? q : q.replace(/^允许执行(?:[：:]\s*(?=\S))?/, (m) => t("core:wait.allowRun") + (m.length > 4 ? ": " : "")))
+/** the command a tool permission question asks about, without the Hub's prefix */
+export const permissionCommand = (q: string) => q.replace(/^允许执行[：:]\s*/, "")
 export function Row({ title, sub, children, onClick, icon, className, controls = false, ...rest }: { title: ReactNode; sub?: ReactNode; children?: ReactNode; onClick?: () => void; icon?: ReactNode; className?: string; controls?: boolean; [k: string]: any }) {
   const id = useId(), cover = !!onClick && controls
   return (
@@ -1345,11 +1344,9 @@ export function ReplyBlock({ r }: { r: Reply }) {
 }
 
 /* ───────── decisions ───────── */
-/** the buttons of a failure card in their order, with their look; the words are FAIL_CHOICE */
-const FAIL: Record<string, "ghost" | "outline" | "default"> = { look: "ghost", drop: "outline", tosteve: "outline", delivered: "outline", release_waive: "outline", release_retry: "outline", retry: "default", release_live: "default", continue: "default" }
 export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?: Item["wait"] & {}; showItem?: boolean }) {
   const t = useT()
-  const [rework, setRework] = useState(false), [txt, setTxt] = useState(""), [localBusy, setBusy] = useState(false), [free, setFree] = useState(false)
+  const [localBusy, setBusy] = useState(false)
   const busy = localBusy || st.pendingActions.has("decision:" + w.decision)
   const act = async (c: string, t?: string) => { if (busy) return; setBusy(true); try { await decide(i.id, c, t, w.decision) } finally { setBusy(false) } }
   const head = (title: ReactNode) => (
@@ -1360,23 +1357,8 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
         {showItem && (i.id ? <><span className="text-tertiary">·</span><a href={"#/items/" + i.id} className="min-w-0 truncate hover:text-foreground hover:underline"><span className="font-mono tabular-nums">{i.id}</span> {i.t}</a></>
           : w.session ? <><span className="text-tertiary">·</span><a href={"#/sessions/" + w.session} className="min-w-0 truncate hover:text-foreground hover:underline" data-orphan-session={w.session}>{t("core:card.sessionTitle", { title: i.t })}</a></> : null)}
       </CardDescription>
-      <CardAction className="flex max-w-full items-center gap-1 type-footnote text-muted-foreground"><span className="truncate">{t("core:card.waited", { bot: botName(w.by === "steve" ? "steve" : w.by), since: w.since })}</span>
-        {i.id && <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("core:card.snooze")} className="-mr-1.5 text-muted-foreground" data-snooze={i.id} />}><AlarmClockIcon /></DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-40">
-            <DropdownMenuRadioGroup value="" onValueChange={(v) => snooze(i.id, v as (typeof SNOOZE_KEYS)[number])}>{SNOOZE_KEYS.map((x) => <DropdownMenuRadioItem key={x} value={x} data-snooze-opt={x}>{snoozeLabel(x)}</DropdownMenuRadioItem>)}</DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>}
-        {/* cards that no longer matter: withdraw this one, or give up on the whole item */}
-        <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("common:action.more")} className="-mr-1.5 text-muted-foreground" data-decision-more={i.id} />}><EllipsisIcon /></DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-52">
-            {!(w.subject === "mail_draft" && w.options.includes("confirmed_not_sent")) && <DropdownMenuItem disabled={busy} onClick={() => void dismiss(i.id, w.decision)} data-dismiss={i.id}><BellOffIcon />{t(w.subject === "tool_call" ? "core:card.dismissTool" : "core:card.dismiss")}</DropdownMenuItem>}
-            {i.id && <><DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" disabled={busy} onClick={() => setSt(i.id, "drop")} data-drop-item={i.id}><BanIcon />{t("core:card.dropItem")}</DropdownMenuItem></>}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </CardAction>
+      {/* who waits since when, remind me later, withdraw the card or give up the item */}
+      <CardAction className="flex max-w-full items-center"><CardTools i={i} w={w} /></CardAction>
       </div>
       {title && <CardTitle className="col-span-full min-w-0 break-words type-headline">{title}</CardTitle>}
       <YoloBadge decision={w.decision} subject={w.subject} />
@@ -1384,72 +1366,15 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
     </CardHeader>
   )
   const foot = (c: ReactNode) => <CardFooter className="flex-wrap justify-end gap-2 bg-muted/50 px-4 py-3! dark:bg-muted/40">{c}</CardFooter>
-  const draft = <>{w.subject === "chan_message" && (w.type === "approve" || w.type === "fail") && <OutContext id={w.subjectId} />}
-    {w.draft ? <div className="max-h-72 overflow-auto break-words type-body text-muted-foreground"><Markdown text={w.draft} /></div> : null}</>
   let body: ReactNode = null
   if (FLOW_SUBJECTS.includes(w.subject)) body = <FlowDecisionBody w={w} act={(c) => void act(c)} busy={busy} head={head} foot={foot} />
   else if (w.type === "confirm" && w.subject === "mem") body = <>{head(memAsk(w.q))}<MemConfirm q={w.q} draft={w.draft} busy={busy} act={(c, t) => void act(c, t)} /></>
   else if (isPeopleDecision(w)) body = <>{head(w.q)}<PeopleDecisionBody w={w} busy={busy} act={(c) => void act(c)} /></>
   else if (w.subject === "mail_draft") body = <MailDraftCard w={w} act={act} busy={busy} head={head} foot={foot} />
   else if (MODULE_CARDS[w.subject]) body = MODULE_CARDS[w.subject]({ w, act, busy, head, foot })
-  else if (w.type === "accept") body = <>
-    {head(w.q)}
-    <CardContent className="pb-4">{draft}
-      {rework && <Textarea autoFocus className="mt-3 min-h-20 rounded-lg" placeholder={t("core:card.reworkPlaceholder", { bot: botName(i.b) })} value={txt} onChange={(e) => setTxt(e.target.value)} data-rework />}</CardContent>
-    {foot(rework ? <><Button variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button disabled={busy} onClick={() => act("rework", txt.trim())}>{t("core:card.sendRework")}</Button></>
-      : <><Button variant="outline" onClick={() => setRework(true)}>{t("core:card.rework")}</Button>{acceptChoosesRelease(i)
-        ? <><Button variant="outline" disabled={busy} onClick={() => act("pass", "no-release")} data-pass-no-release>{t("core:card.passNoRelease")}</Button><Button disabled={busy} onClick={() => act("pass", "release")} data-pass data-pass-release><CheckIcon />{t("core:card.passRelease")}</Button></>
-        : <Button disabled={busy} onClick={() => act("pass")} data-pass><CheckIcon />{t("core:card.pass")}</Button>}</>)}
-  </>
-  else if (w.type === "approve" && w.subject === "tool_call") {
-    const opts = w.options.map((o) => { const [id, name, kind] = o.split("|"); return { id, name, kind } })
-    const always = opts.find((o) => o.kind === "allow_always"), once = opts.find((o) => o.kind === "allow_once")
-    body = <>
-      {head(t("core:card.allowTool"))}
-      <CardContent className="min-w-0 pb-3"><PermissionDetails title={w.q.replace(/^允许执行[：:]\s*/, "")} input={w.draft} /></CardContent>
-      {foot(<><Button variant="ghost" className="mr-auto text-muted-foreground" disabled={busy} onClick={() => act("deny")}>{t("core:card.deny")}</Button>
-        {always && <Button variant="outline" disabled={busy} onClick={() => act(always.id)} title={always.name}>{t("core:card.allowAlways")}</Button>}
-        {once && <Button disabled={busy} onClick={() => act(once.id)} data-allow>{t("core:card.allowOnce")}</Button>}</>)}
-    </>
-  }
-  else if (w.type === "approve") body = <>
-    {head(w.q)}
-    <CardContent className="pb-4">{draft}{rework && <Textarea autoFocus className="mt-3 min-h-16 rounded-lg" placeholder={t("core:card.rejectPlaceholder")} value={txt} onChange={(e) => setTxt(e.target.value)} />}</CardContent>
-    {foot(rework ? <><Button variant="ghost" onClick={() => setRework(false)}>{t("common:action.cancel")}</Button><Button variant="outline" disabled={busy} onClick={() => act("no", txt.trim())}>{t("core:card.reject")}</Button></>
-      : <><Button variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setRework(true)}>{t("core:card.rejectMore")}</Button>{w.subject === "chan_message" && w.options.includes("rewrite") && <Button variant="outline" disabled={busy} onClick={() => act("rewrite")} data-rewrite>{t("core:card.rewriteFirst")}</Button>}<Button disabled={busy} onClick={() => act("yes")} data-approve>{t(w.subject === "release" ? "core:card.approveRelease" : "core:card.approve")}</Button></>)}
-  </>
-  else if (w.type === "propose") body = <>
-    {head(w.q)}
-    <CardContent className="pb-4">{draft}</CardContent>
-    {foot(<><Button variant="outline" disabled={busy} onClick={() => act("no")}>{t("core:card.notNeeded")}</Button><Button disabled={busy} onClick={() => act("yes")} data-propose-yes>{t("core:card.start")}</Button></>)}
-  </>
-  else if (w.type === "fail") body = <>
-    {head(w.q)}
-    <CardContent className="pb-4">{draft}{rework && <Textarea autoFocus className="mt-3 min-h-16 rounded-lg" placeholder={t("core:card.nextPlaceholder")} value={txt} onChange={(e) => setTxt(e.target.value)} />}</CardContent>
-    {foot(<>{w.options.filter((o) => FAIL[o]).sort((a, b) => Object.keys(FAIL).indexOf(a) - Object.keys(FAIL).indexOf(b)).map((o) => (
-      <Button key={o} variant={FAIL[o]} disabled={busy} className={cn(o === "look" && "mr-auto text-muted-foreground")} onClick={() => (o === "continue" && !rework ? setRework(true) : act(o, o === "continue" ? txt.trim() : undefined))} data-fail={o}>{o === "continue" && rework ? t("core:card.sendContinue") : FAIL_CHOICE[o]}</Button>))}</>)}
-  </>
-  else if (w.type === "ask" && w.subject === "design_implementation") body = <>
-    {head(w.q)}
-    <CardContent className="pb-4">{draft}<Textarea className="mt-3 min-h-20 rounded-lg" placeholder={t("core:card.designFeedback")} value={txt} onChange={(e) => setTxt(e.target.value)} data-design-feedback /></CardContent>
-    {foot(w.options.map((o, n) => <Button key={o} variant={n === 0 ? "default" : "outline"} disabled={busy || (n === 2 && !txt.trim())} onClick={() => void act(o, txt.trim())} data-design-choice={n}>{t(n === 0 ? "core:card.designImplement" : n === 1 ? "core:card.designKeep" : "core:card.designRevise")}</Button>))}
-  </>
-  /* a typed answer is not one of the questionnaire's answer controls, so its validation would block the submit; send it directly */
-  else if (w.type === "ask") { const typed = free || !w.opts?.length; body = <>
-    {head(null)}
-    <Questionnaire className="gap-0" onSubmit={(ev) => { ev.preventDefault(); const v = String(new FormData(ev.currentTarget).get("answer") ?? ""); if (v) void act("answer", v) }}>
-      <QuestionnaireItem name="answer" required={!typed} className={cn("gap-3 px-(--card-spacing) pb-4", w.busy ? "mt-2" : "-mt-2")}>
-        <QuestionnaireTitle className="mb-1! break-words type-headline">{w.q}</QuestionnaireTitle>
-        {!free && !!w.opts?.length && <QuestionnaireChoices className="-mx-2 gap-0.5">
-          {w.opts.map((o) => <QuestionnaireChoice key={o} value={o} className="min-h-10 rounded-lg border-transparent px-2 py-2.5 hover:bg-accent data-checked:border-transparent data-checked:bg-blue/8">{o}</QuestionnaireChoice>)}
-        </QuestionnaireChoices>}
-        {typed && <Textarea autoFocus className="min-h-16 rounded-lg" placeholder={t("core:card.answerPlaceholder")} value={txt} onChange={(e) => setTxt(e.target.value)} data-free-answer />}
-      </QuestionnaireItem>
-      <QuestionnaireActions className="flex justify-end gap-2 bg-muted/50 px-4 py-3 dark:bg-muted/40">{!!w.opts?.length && <Button type="button" variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setFree(!free)}>{t(free ? "core:card.fromOptions" : "core:card.ownAnswer")}</Button>}{typed
-        ? <Button type="button" data-answer disabled={busy || !txt.trim()} onClick={() => void act("answer", txt.trim())}>{t("core:card.answer")}</Button>
-        : <QuestionnaireSubmit data-answer disabled={busy}>{t("core:card.answer")}</QuestionnaireSubmit>}</QuestionnaireActions>
-    </Questionnaire>
-  </> }
+  /* everything else is affectUI's Decision Card (a tool permission its Approval Card), wired to the same answers */
+  else if (isToolCall(w)) return <ToolApproval i={i} w={w} showItem={showItem} />
+  else { const m = mapDecision(i, w, "inline", showItem); return m ? <InlineDecision m={m} /> : null }
   return <UICard size="sm" className="gap-0 py-0 anim-in" data-decision={w.type} data-decision-wrap={i.id || w.decision} aria-busy={busy}>{busy && <div role="status" className="px-4 py-2 type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}{body}</UICard>
 }
 
