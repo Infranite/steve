@@ -1,2 +1,0 @@
-- Settings → Appearance has colors and type: seven accents (Indigo, Blue, Violet, Green, Orange, Rose, Graphite), three neutrals (Slate, Gray, Sand), the text and monospace fonts and three corner radii, with a live preview. Each choice shows at once, works in light and dark, and is kept on this device.
-- Themes are JSON manifests over a whitelist of design tokens, the built-ins included; `registerTheme` adds one from elsewhere after checking it. The format is in docs/deployment.md, "Appearance and themes". The design page shows the current appearance's tokens.

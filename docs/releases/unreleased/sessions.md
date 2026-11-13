@@ -1,0 +1,14 @@
+- A session's page is redesigned. The transcript and the composer form one centred column. The side panel is one quiet column (a sheet on narrower screens, from the bottom on a phone) that shows only what the harness reported:
+  - the harness and model, the state, the number and the item;
+  - how full the context is (ⓘ opens the harness's own context-window view), the estimated cost, the working time and turns, the age, and the tokens with their cache, input and output split;
+  - the outputs delivered to its item and the files it changed;
+  - its item, what is upstream and downstream, and the item's other sessions;
+  - the knowledge it was given, each document once with its source and level;
+  - folded: Bot, harness, model, reasoning effort, device, working directory and how to resume it in its harness.
+- Harnesses show their marks (Claude Code, Codex, a terminal for others), and models show their maker's mark: in session headers, composers, the sessions list and its filter, Bot settings, the New Bot dialog and Settings → Models.
+- While a turn runs, the session composer shows Stop (Esc does the same). Once you type, 插话 (Enter) tells the working agent now, and 排队 (Option-Enter, or Alt-Enter on Windows and Linux) sends the message when the turn ends. This replaces the 插话/排队 toggle and the 中断 button. Queued messages sit inside the composer, next one first, each with 编辑, 撤回 and 立即发送. The composer shows the harness and model and a context ring that turns orange from 80%. When a harness reports no context use, the runtime line says so.
+- A turn can be read as Steps or on a Timeline. The timeline puts the turn, each thinking stretch and each tool call on one time axis, marks the slowest call, shows failures in red and grows live. Click a row for its timing, input, output or error. In the steps view, an opened tool call shows what went in and what came back, each with a copy button. An edit shows its coloured diff. An item's session turns show their tokens and estimated cost, the Hub's figures for the whole turn.
+- While a session runs, the bar above the composer names the step under way and rolls over as the work moves on.
+- The 会话 list reads as a log. Running sessions and those waiting on you come first, and the rest are grouped by day, one aligned line each. A harness, device, source, Bot or model that every row shares is said once. 运行中 is now 进行中 and includes sessions waiting on you. Long histories load 60 at a time.
+- Above the list, an activity chart shows how much work happened each day, by 任务 (distinct items an agent worked on) or Token, over 7 days, 1 month, 3 months or 1 year (remembered). The shorter spans are a bar per day, and the year is a contribution calendar. It uses the new `active` metric of `GET /api/stats/series`. A Hub without the stats module shows no chart.
+- Chinese durations under a second read 毫秒 instead of ms.
