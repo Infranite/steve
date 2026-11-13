@@ -17,7 +17,7 @@ import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 
 /* ───────── view types (from the prototype) ───────── */
-export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
+export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
 export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** last activity (ms) */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
@@ -246,6 +246,8 @@ function toolEv(t: Ev, v: any) {
     if (Array.isArray(args.plan)) t[12] = args.plan.map((x: any) => [String(x.step ?? ""), !!x.done])
     if (typeof args.summary === "string") t[10] = args.summary.split("\n")[0].slice(0, 160)
     if (typeof args.question === "string") t[10] = args.question
+    /* [14]: what went into one of Steve's own tools, as the Hub stored it, for the call's card and timeline */
+    if (steve && Object.keys(args).length) t[14] = args
   }
   return t
 }
@@ -263,9 +265,10 @@ export function toEv(evs: REvent[], running: boolean): { ev: Ev[]; seqs: number[
       continue
     }
     if (e.kind === "tool") {
-      const v = d.tool ?? {}, id = String(v.id ?? ""), had = tools.get(id)
-      if (had) { toolEv(had, v); continue }
-      const t = toolEv([], v); tools.set(id, t); push(t, e.seq); continue
+      const v = d.tool ?? {}, id = String(v.id ?? ""), had = tools.get(id), over = v.phase === "succeeded" || v.phase === "failed"
+      /* [13]: when the call ended (the update that settled it), so a turn's timeline can draw each call as long as it took */
+      if (had) { const ended = had[13]; toolEv(had, v); if (ended != null || over) had[13] = ended ?? e.ts; continue }
+      const t = toolEv([], v); if (over) t[13] = e.ts; tools.set(id, t); push(t, e.seq); continue
     }
     if (e.kind === "system") { push(d.faulted ? ["sys", d.text, "faulted"] : ["sys", d.text], e.seq); continue }
     if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }

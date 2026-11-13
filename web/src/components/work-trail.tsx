@@ -10,6 +10,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Markdown } from "@/components/markdown"
 import { Spinner } from "@/components/ui/spinner"
 import { useT } from "@/i18n"
+import { ToolCallCard } from "@/components/affect/tool-call-card"
 
 export type StepState = "run" | "done" | "fail"
 export type Chip = { label: string; title?: string; icon?: any; mono?: boolean }
@@ -28,6 +29,9 @@ export type ToolStep = {
   /** always shown under the line: a plan's steps */
   below?: ReactNode
   attrs?: Record<string, string | undefined>
+  /** the call as a Tool Call Card (an agent's transcript): the tool's own name, what went in and came out, its time.
+   *  The line's words (verb, subject, diff) become the card's summary; `body` is not used then */
+  card?: { name: string; icon?: ReactNode; args?: unknown; result?: unknown; resultView?: ReactNode; error?: string; t0?: number; ms?: number }
 }
 export type TrailItem = ToolStep
   | { t: "think"; key: string; text: string; live: boolean; /** how long it took; while it runs, when it began */ ms?: number; t0?: number; attrs?: Record<string, string | undefined> }
@@ -35,9 +39,9 @@ export type TrailItem = ToolStep
   | { t: "line"; key: string; state: StepState; label: ReactNode; detail?: ReactNode; body?: ReactNode; attrs?: Record<string, string | undefined> }
 
 /* ───────── markers on the line ───────── */
-function Marker({ s }: { s: StepState | "end" | "cancel" }) {
+function Marker({ s }: { s: StepState | "end" | "cancel" | "card" }) {
   return (
-    <span className="absolute left-0 top-0.5 flex size-4 items-center justify-center" aria-hidden data-trail-marker={s}>
+    <span className={cn("absolute left-0 flex size-4 items-center justify-center", s === "card" ? "top-1.5" : "top-0.5")} aria-hidden data-trail-marker={s}>
       {s === "run" ? <Spinner className="size-3.5 text-foreground/70" />
         : s === "fail" ? <XIcon className="size-3.5 text-destructive" strokeWidth={2.25} />
         : s === "end" ? <CircleCheckIcon className="size-3.5 text-success" strokeWidth={1.75} />
@@ -47,7 +51,7 @@ function Marker({ s }: { s: StepState | "end" | "cancel" }) {
   )
 }
 /** a step's place on the line: the marker, and the line on to the next step (not past the last) */
-function Row({ s, children, className, ...rest }: { s: StepState | "end" | "cancel"; children: ReactNode; className?: string; [k: string]: any }) {
+function Row({ s, children, className, ...rest }: { s: StepState | "end" | "cancel" | "card"; children: ReactNode; className?: string; [k: string]: any }) {
   return (
     <li className={cn("relative min-w-0 pl-6 before:absolute before:left-[7.5px] before:top-[21px] before:-bottom-px before:w-px before:bg-foreground/12 last:before:hidden", className)} {...rest}>
       <Marker s={s} />{children}
@@ -117,6 +121,7 @@ const sec = (ms: number) => Math.max(0, Math.round(ms / 1000))
 /* ───────── steps ───────── */
 function ToolRow({ s, live }: { s: ToolStep; live: boolean }) {
   const t = useT(), running = live && s.state === "run", st: StepState = s.state === "run" && !live ? "done" : s.state
+  if (s.card) return <CardRow s={s} running={running} st={st} />
   const head = <>
     <span className={cn("shrink-0", running && "shimmer", st === "fail" && "text-destructive")}>{s.verb[running ? 0 : 1]}</span>
     {s.subj && <span className={cn("min-w-0 truncate text-foreground/85", s.mono && "font-mono type-footnote")} title={s.full ?? s.subj}>{s.subj}</span>}
@@ -126,6 +131,22 @@ function ToolRow({ s, live }: { s: ToolStep; live: boolean }) {
   return (
     <Row s={st} data-step data-step-kind={s.attrs?.kind} data-running={running || undefined} data-failed={st === "fail" || undefined} {...attrsOf(s.attrs)}>
       <Fold head={head} body={s.body && <div className="pb-1">{s.body}</div>} />
+      {s.below}
+    </Row>
+  )
+}
+/** a call as a Tool Call Card on the line: its status, timer and duration are the card's, so the marker stays a dot */
+function CardRow({ s, running, st }: { s: ToolStep; running: boolean; st: StepState }) {
+  const c = s.card!
+  const summary = <>
+    <span className={cn(running && "shimmer", st === "fail" && "text-destructive")}>{s.verb[running ? 0 : 1]}</span>
+    {s.subj && <span className={cn("ml-1.5 text-foreground/85", s.mono && "font-mono type-footnote")}>{s.subj}</span>}
+    {s.extra && <span className="ml-1.5 inline-flex">{s.extra}</span>}
+  </>
+  return (
+    <Row s="card" data-step data-step-kind={s.attrs?.kind} data-running={running || undefined} data-failed={st === "fail" || undefined} data-tool-card={c.name} {...attrsOf(s.attrs)} className="-mt-0.5">
+      <ToolCallCard variant="line" name={c.name} icon={c.icon} summary={summary} status={running ? "running" : st === "fail" ? "error" : "success"}
+        args={c.args} result={c.result} resultView={c.resultView} error={c.error} startedAt={running ? c.t0 : undefined} duration={running ? undefined : c.ms} />
       {s.below}
     </Row>
   )

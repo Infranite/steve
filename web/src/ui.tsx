@@ -1,6 +1,6 @@
 /* Shared building blocks for the Steve prototype — see DESIGN.md.
  * Quiet chrome: grey scale everywhere, blue = selected/running, orange = needs you. */
-import { Children, Fragment, memo, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
+import { Children, Fragment, Suspense, lazy, memo, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
 import { flushSync } from "react-dom"
 import { Robot } from "@/robot"
 import { cue } from "@/bus"
@@ -19,6 +19,7 @@ import { BookOpenIcon, ChartNoAxesColumnIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-trail"
+import { ThinkingLoader } from "@/components/affect/thinking-loader"
 import { Item as UIItem, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSeparator, ItemTitle } from "@/components/ui/item"
 import { Empty as UIEmpty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Card as UICard, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
@@ -968,15 +969,6 @@ function Detail({ text }: { text: string }) {
     </CodeBlock>
   )
 }
-/** a command and what it printed, as a terminal */
-function Terminal({ cmd, out, failed }: { cmd: string; out: string; failed: boolean }) {
-  return (
-    <div className={cn("mt-1 mb-1.5 max-w-160 overflow-hidden rounded-lg bg-code type-code text-foreground shadow-[var(--lift)]", failed && "bg-destructive/6")} data-terminal>
-      <div className="whitespace-pre-wrap break-all px-3.5 pt-2.5 pb-2"><span className={cn("select-none", failed ? "text-destructive" : "text-tertiary")}>$ </span>{cmd}</div>
-      {out && <pre className={cn("max-h-72 overflow-auto whitespace-pre-wrap break-all px-3.5 pb-2.5 text-muted-foreground", failed && "text-destructive/90")}>{out}</pre>}
-    </div>
-  )
-}
 const DELEGATE = ["Task", "Agent"]
 /* Steve's tools that tell or ask you something: each stays its own line, never merged */
 const SAY = ["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish"]
@@ -1003,43 +995,60 @@ function trailOf(evs: any[], ts: number[], t1: number | undefined, live: boolean
       : t(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : undefined
     const plan: [string, boolean][] | undefined = e[12]?.length ? e[12] : undefined
     const diff = e[1] === "edit" && e[6] != null ? <span className="shrink-0 type-footnote font-mono tabular-nums"><span className="text-success">+{e[6]}</span>{e[7] ? <span className="ml-1 text-destructive">−{e[7]}</span> : null}</span> : undefined
-    const body = plan ? (j === lastPlan ? undefined : <SubSteps steps={plan} live={false} />) : v.I === TerminalIcon ? <Terminal cmd={v.full ?? v.subj} out={String(e[4] ?? "").trim()} failed={state === "fail"} /> : e[4] ? <Detail text={e[4]} /> : undefined
-    return { t: "tool", key, state, verb, subj: DELEGATE.includes(tool) ? e[10] ?? v.subj : v.subj, mono: v.mono, full: v.full, group, merged, chip, extra: diff, body,
+    /* the call as a Tool Call Card: the tool's own name, what Steve has of its input (the command, file, query or brief)
+     * and what came back, its time from the update that started it to the one that settled it ([13]) */
+    const out = String(e[4] ?? "").trim().replace(/^```[a-z]*\n?/, "").replace(/\n?```$/, "").trim(), t0 = ts[j] || undefined
+    const card = { name: (tool || String(e[2] ?? "")).replace(/^mcp__steve__/, "").replace(/^mcp__[^_]+__/, ""), icon: <v.I strokeWidth={1.5} />,
+      args: e[1] === "steve" ? e[14] ?? (e[10] || undefined) : v.I === TerminalIcon ? v.full ?? v.subj : DELEGATE.includes(tool) ? e[10] ?? e[11] : e[11] ?? (e[3] && e[3] !== "Steve" ? e[3] : undefined),
+      result: state === "fail" ? undefined : plan ? (j === lastPlan ? undefined : plan.map(([x, d]) => (d ? "✓ " : "○ ") + x).join("\n")) : out || undefined,
+      resultView: plan && j !== lastPlan ? <SubSteps steps={plan} live={false} /> : e[1] === "edit" && out ? <Detail text={out} /> : undefined,
+      error: state === "fail" ? out || undefined : undefined, t0, ms: e[13] && t0 && e[13] > t0 ? e[13] - t0 : undefined }
+    return { t: "tool", key, state, verb, subj: DELEGATE.includes(tool) ? e[10] ?? v.subj : v.subj, mono: v.mono, full: v.full, group, merged, chip, extra: diff, card,
       below: plan && j === lastPlan ? <SubSteps steps={plan} live={live} /> : undefined, attrs: { kind: e[1] } }
   })
 }
-/** what the agent is doing right now, in a few words */
-function Doing({ evs }: { evs: any[] }) {
-  const t = useT()
+/** what the agent is doing right now, in a few words: "运行 npm test", "正在思考" */
+function doing(evs: any[]) {
   const run = evs.findLast((e) => e[0] === "tool" && e[5] === 1)
-  if (run) { const v = stepView(run); return <><span className="shrink-0">{v.verb}</span>{v.subj && <span className={cn("min-w-0 truncate text-muted-foreground", v.mono && "font-mono type-footnote")}>{v.subj}</span>}</> }
+  if (run) { const v = stepView(run); return v.subj ? `${v.verb} ${v.subj}` : v.verb }
   const last = evs[evs.length - 1]
-  return <span>{t(!last ? "core:transcript.preparing" : last[0] === "th" ? "core:transcript.thinking" : last[0] === "a" ? "core:transcript.replying" : last[0] === "ask" ? "core:transcript.awaitingApproval" : "core:transcript.processing")}</span>
+  return t(!last ? "core:transcript.preparing" : last[0] === "th" ? "core:transcript.thinking" : last[0] === "a" ? "core:transcript.replying" : last[0] === "ask" ? "core:transcript.awaitingApproval" : "core:transcript.processing")
 }
 /* a folded block stays as the reader left it, across re-renders and remounts */
-const workOpen = new Map<string, boolean>()
+const workOpen = new Map<string, boolean>(), workView = new Map<string, "steps" | "timeline">()
+/* the timeline (Trace Waterfall) is a big component: loaded the first time someone asks for it */
+const TurnTrace = lazy(() => import("@/thread/turn-trace"))
 function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
   const t = useT()
   const key = k + ":" + g.idx
   const [open, setOpenS] = useState(() => workOpen.get(key) ?? live)
   useEffect(() => { if (!workOpen.has(key)) setOpenS(live) }, [live, key])
   const setOpen = (v: boolean) => { workOpen.set(key, v); setOpenS(v) }
+  const [view, setViewS] = useState(() => workView.get(key) ?? "steps")
+  const setView = (v: "steps" | "timeline") => { workView.set(key, v); setViewS(v) }
   const now = useNow(live)
   const stats = workStats(g.evs)
   const ms = live ? now - (g.t0 ?? now) : (g.t1 ?? 0) - (g.t0 ?? 0)
   const cancelled = g.end === "cancelled"
   const items = trailOf(g.evs, g.at ?? [], g.t1, live)
   return (
-    <Collapsible open={open} onOpenChange={setOpen} data-work={live ? "live" : "done"} className="anim-in">
-      <CollapsibleTrigger className="group/work flex w-full min-w-0 items-center gap-1.5 rounded-lg py-1 text-left type-callout hover:[&>svg]:text-foreground">
+    <Collapsible open={open} onOpenChange={setOpen} data-work={live ? "live" : "done"} data-work-view={open ? view : undefined} className="relative anim-in">
+      <CollapsibleTrigger className={cn("group/work flex w-full min-w-0 items-center gap-1.5 rounded-lg py-1 text-left type-callout hover:[&>svg]:text-foreground", open && items.length > 0 && "sm:pr-36")}>
         <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-muted-foreground transition-transform duration-180 ease-(--ease-out) group-aria-expanded/work:rotate-0" />
         <span className={cn("shrink-0", live ? "text-foreground" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")}</span>
         {(ms > 0 || live) && <span className="shrink-0 tabular-nums text-muted-foreground" data-work-clock>{live ? clock(ms) : fmtDur(ms)}</span>}
         {stats.length > 0 && <span className="min-w-0 truncate text-muted-foreground">· {stats.join(" · ")}</span>}
       </CollapsibleTrigger>
+      {/* open, the work can be read as steps or on a timeline; the switch sits on the header's line, beside the trigger */}
+      {open && items.length > 0 && <Segmented size="sm" value={view} onChange={setView} label={t("core:trace.view.label")} className="absolute right-0 top-0 z-1 max-sm:hidden"
+        options={[["steps", t("core:trace.view.steps")], ["timeline", t("core:trace.view.timeline")]] as const} />}
       <CollapsibleContent>
+        {open && items.length > 0 && <Segmented size="sm" value={view} onChange={setView} label={t("core:trace.view.label")} className="mt-1 sm:hidden"
+          options={[["steps", t("core:trace.view.steps")], ["timeline", t("core:trace.view.timeline")]] as const} />}
         <div className="mt-1 flex flex-col">
-          <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled ? { s: "cancel", label: t("core:transcript.interrupted") } : { s: "end", label: t("core:trail.finished") }} />
+          {view === "timeline"
+            ? <Suspense fallback={<div className="flex items-center gap-2 py-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><TurnTrace k={k} evs={g.evs} at={g.at ?? []} items={items} t0={g.t0} t1={g.t1} live={live} cancelled={cancelled} /></Suspense>
+            : <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled ? { s: "cancel", label: t("core:transcript.interrupted") } : { s: "end", label: t("core:trail.finished") }} />}
         </div>
       </CollapsibleContent>
     </Collapsible>
@@ -1226,7 +1235,7 @@ function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: stri
     <div className="flex flex-col gap-4" data-transcript={k}>
       {from > 0 && <button type="button" onClick={() => setFull(true)} className="self-start type-footnote text-muted-foreground hover:text-foreground" data-show-all>{t("core:transcript.moreSegs", { count: from })}</button>}
       {segs.map((g, n) => n < from ? null : <SegView key={k + ":" + g.idx + ":" + g.t} k={k} g={g} live={n === liveIdx} />)}
-      {s.st === "run" && liveIdx < 0 && tailOpen && <div className="flex items-center gap-2 type-callout text-blue"><span className="flex size-4 items-center justify-center"><span className="size-2 rounded-full bg-blue dot-running" /></span><span className="shimmer">{t(last?.t === "a" ? "core:transcript.replying" : "core:transcript.startingShort")}</span></div>}
+      {s.st === "run" && liveIdx < 0 && tailOpen && <div className="flex" data-transcript-pending><ThinkingLoader variant="plain" size="sm" phases={[t(last?.t === "a" ? "core:transcript.replying" : "core:transcript.startingShort")]} phase={0} className="[--ui-tl-ray:var(--blue)]!" /></div>}
     </div>
   )
 }
@@ -1248,14 +1257,16 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
   const stats = workStats(turn)
   const tone = run ? "run" : s.st === "wait" ? "wait" : end?.[1] === "cancelled" ? "stop" : s.st === "ended" ? "ended" : "done"
   const label = starting ? t("core:transcript.startingShort") : t(`core:runBar.${tone}`)
-  const what = run ? <Doing evs={turn} /> : tone === "wait" ? t("core:runBar.waitWhat") : stats.join(" · ")
+  const what = run ? null : tone === "wait" ? t("core:runBar.waitWhat") : stats.join(" · ")
   return (
-    <div role="status" aria-live="polite" data-runbar={tone}
+    /* running, the Thinking Loader inside is the live region that speaks each step; the bar itself would say it twice */
+    <div role={run ? undefined : "status"} aria-live={run ? undefined : "polite"} data-runbar={tone}
       className={cn("mb-2 flex items-center gap-2.5 rounded-xl type-callout transition-colors duration-180 ease-(--ease-out)",
         tone === "run" ? "min-h-10 bg-blue/8 px-3.5 py-2" : tone === "wait" ? "min-h-10 bg-attention/10 px-3.5 py-2" : "min-h-8 py-1")}>
-      {run ? <span className="flex size-4 shrink-0 items-center justify-center"><StatusDot s="run" /></span>
+      {/* running: a Thinking Loader whose label is the step under way, rolling over as the steps change */}
+      {run ? <span className="flex min-w-0 flex-1 items-center" data-doing><ThinkingLoader variant="plain" size="sm" phases={[starting ? label : doing(turn)]} phase={0} className="min-w-0 [--ui-tl-ray:var(--blue)]! [--ui-tl-ink:var(--foreground)]!" /></span>
         : tone === "wait" ? <StatusDot s="wait" className="mx-1" /> : tone === "done" ? <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /> : tone === "stop" ? <CircleSlashIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /> : <StatusDot s="ended" className="mx-1" />}
-      <span className={cn("shrink-0 font-medium", tone === "run" ? "text-blue" : tone === "wait" ? "text-attention" : "text-foreground/85")}>{label}</span>
+      {!run && <span className={cn("shrink-0 font-medium", tone === "wait" ? "text-attention" : "text-foreground/85")}>{label}</span>}
       {/* plain text in its own box: a flex row cuts text off without the ellipsis */}
       {what && <span className={cn("flex min-w-0 items-baseline gap-1.5 truncate max-sm:hidden", run ? "text-foreground/85" : "text-muted-foreground")} data-doing>{typeof what === "string" ? <span className="min-w-0 truncate">{what}</span> : what}</span>}
       <span className="ml-auto shrink-0 type-footnote tabular-nums text-muted-foreground">{run ? clock(now - t0) : endAt && t0 ? t("core:runBar.took", { dur: fmtDur(endAt - t0) }) : ""}</span>

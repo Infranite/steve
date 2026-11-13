@@ -55,8 +55,8 @@ export default {
     /* "11-05": the month and day of a date further away, zero-padded */
     monthDayShort: "{{mm}}-{{dd}}",
     range: "{{from}} – {{to}}",
-    lessThanMs: "<1 ms",
-    ms: "{{n}} ms",
+    lessThanMs: "<1 毫秒",
+    ms: "{{n}} 毫秒",
     /* a number already rounded for display, "1.5 秒" */
     secondsN: "{{n}} 秒",
   },
