@@ -18,6 +18,7 @@ import { VitalsSection, VitalsStrip } from "@/devices-vitals"
 import { NodeTags } from "@/devices-tags"
 import { CODE, TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
+import { hm } from "@/i18n/format"
 import { useHubAddress } from "@/hub-ui"
 
 const onDevice = (id: string) => Object.keys(st.S).filter((k) => st.S[k].device === id && !st.S[k].ro)
@@ -251,7 +252,7 @@ export function PairDialog() {
         {error && <p role="alert" className="type-callout text-destructive">{error}</p>}
         <Button className="justify-self-start self-start max-sm:w-full max-sm:justify-self-stretch" disabled={busy || !!pairing && now < pairing.expires} onClick={() => void act(async () => { setPairing(await api.createPairing()) })}>{t("shell:devices.createCode")}</Button>
         {pairing && <div className="anim-in space-y-2 rounded-xl bg-muted/60 p-4 type-callout">
-          {now < pairing.expires ? <><p className="text-muted-foreground">{t("shell:devices.codeExpires", { time: new Date(pairing.expires).toLocaleTimeString() })}</p><code className={CODE}>{pairing.code}</code></> : <p className="text-muted-foreground">{t("shell:devices.codeExpired")}</p>}
+          {now < pairing.expires ? <><p className="text-muted-foreground">{t("shell:devices.codeExpires", { time: hm(pairing.expires) })}</p><code className={CODE}>{pairing.code}</code></> : <p className="text-muted-foreground">{t("shell:devices.codeExpired")}</p>}
           {pairing.pin && <><p className="text-muted-foreground">{t("shell:devices.hubPin")}</p><code className={CODE}>{pairing.pin}</code></>}
           <p className="text-muted-foreground">{t("shell:devices.setupCommand")}</p><code className={CODE} data-setup-command>steve setup node --hub {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
           <p className="text-muted-foreground">{t("shell:devices.pairCommand")}</p><code className={CODE} data-pair-command>steve-node pair {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>

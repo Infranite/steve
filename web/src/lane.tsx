@@ -13,6 +13,7 @@ import { errMsg } from "@/github/index"
 import { Disclosure, Fact, Meta, Panel, Pill, Row, Section } from "@/ui"
 import { useEffect, useState } from "react"
 import { t, useT } from "@/i18n"
+import { hm } from "@/i18n/format"
 import { QueueNow, QueueSettings } from "@/merge-queue"
 
 /* labels are functions so they follow a language change */
@@ -49,7 +50,7 @@ export function Unknown({ f }: { f: RLaneFact<unknown> }) {
 }
 
 const names = (ms: RLaneMember[]) => ms.map((m) => m.label).join(t("shell:list.sep"))
-const clock = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+const clock = (ms: number) => hm(ms)
 const unitState = (u: RLaneUnit) => u.merged ? t("shell:lane.batch.releasing") : u.approved ? t("shell:lane.batch.merging") : t("shell:lane.batch.waiting")
 const carried = (u: RLaneUnit) => [names(u.members), u.deferred.length ? t("shell:lane.batch.carries", { names: names(u.deferred) }) : ""].filter(Boolean).join(" · ")
 

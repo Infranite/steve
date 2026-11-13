@@ -102,7 +102,6 @@ export default {
       noMatch: "没有匹配的信号",
       today: "今天还没有信号",
       week: "7 天里没有信号",
-      sub: "接入邮件、日程等账号后，收到的事件和处理结果会出现在这里。",
       todaySub: "今天收到的事件和 Bot 怎么处理的会出现在这里。",
       seeWeek: "看最近 7 天",
       connectTitle: "还没有能产生信号的账号",

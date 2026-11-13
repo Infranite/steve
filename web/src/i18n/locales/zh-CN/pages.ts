@@ -243,9 +243,7 @@ export default {
     },
     /* placeholders inside a command, for what Steve does not know */
     repoPlaceholder: "<Steve 源码目录>",
-    commitPlaceholder: "<提交前 7 位>",
     timePlaceholder: "<时间>",
-    oldDirPlaceholder: "<旧版本目录>",
     verify: { title: "回到本页核对", note: "点「我已完成升级，核对版本」，确认后端、前端都是 {{v}} 且服务健康。" },
     local: {
       label: "本机签名安装",

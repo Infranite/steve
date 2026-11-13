@@ -244,9 +244,7 @@ export default {
       release_script: "To upgrade here with one click later: switch the service to run ops/run-managed.sh (managed install); on macOS, also move the key from Keychain to a separate dir store first. See “Managed Release bundles and automatic upgrades” in the README.",
     },
     repoPlaceholder: "<Steve source dir>",
-    commitPlaceholder: "<first 7 of commit>",
     timePlaceholder: "<time>",
-    oldDirPlaceholder: "<old version dir>",
     verify: { title: "Come back and check", note: "Click “I've upgraded, check versions” to confirm the backend and frontend are both {{v}} and the service is healthy." },
     local: {
       label: "Locally signed install",

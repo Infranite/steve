@@ -28,6 +28,10 @@ const LINES: &[&str] = &[
     "core.now.workflow_queued",
     "core.now.workflow_failed_held",
     "core.now.workflow_failed",
+    "core.now.closed_waived",
+    "core.now.closed_auto",
+    "core.now.closed_accepted",
+    "core.now.closed_failed",
 ];
 
 /// One work unit in a list of them (`names`, `held`), the more specific first.
@@ -123,6 +127,8 @@ mod tests {
     #[test]
     fn fixed_lines_read_in_english() {
         assert_eq!(en("协作已暂停"), "Collaboration paused");
+        assert_eq!(en("已验收"), "Accepted");
+        assert_eq!(en("失败：构建没过"), "Failed: 构建没过");
         assert_eq!(
             en("协作已暂停，等你决定：等测试环境"),
             "Collaboration paused, waiting for your decision: 等测试环境"

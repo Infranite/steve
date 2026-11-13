@@ -92,7 +92,6 @@ export default {
     reauthCred: "Re-enter credentials",
     receiving: "Receiving",
     pausedSub: "Paused: nothing is received meanwhile, and nothing is caught up after resuming",
-    receivingSub: "When paused, nothing is received, and nothing is caught up after resuming",
     resumed: "Resumed",
     paused: "Paused",
     allow: "Allow Steve to",

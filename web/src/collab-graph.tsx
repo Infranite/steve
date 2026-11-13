@@ -15,7 +15,7 @@ import { ReactFlow, Controls, Handle, Position, MarkerType, type Edge, type Node
 import { ChevronRightIcon } from "lucide-react"
 import { Spinner } from "@/components/ui/spinner"
 import { useT } from "@/i18n"
-import { longDur } from "@/i18n/format"
+import { longDur, monthDayTime } from "@/i18n/format"
 import { cn } from "@/lib/utils"
 import { botName, loadEvents, st } from "@/store"
 import { BotAvatar, sessionWork } from "@/ui"
@@ -318,7 +318,7 @@ function StepTrace({ node }: { node: AgentNode }) {
   const loading = ks.some((k) => !st.S[k]?.loaded)
   const turns = open ? ks.flatMap((k) => sessionWork(k).map((w) => ({ k, w }))).sort((a, b) => a.w.t0 - b.w.t0) : []
   const shown = all ? turns : turns.slice(-SHOWN_TURNS)
-  const when = (ms: number) => new Date(ms).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
+  const when = (ms: number) => monthDayTime(ms)
   return <section data-collab-trace={open ? "open" : "closed"}>
     <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} disabled={!ks.length} className="flex items-center gap-1.5 type-label text-tertiary hover:text-foreground disabled:hover:text-tertiary" data-collab-trace-toggle>
       <ChevronRightIcon className={cn("size-3.5 transition-transform duration-180", open && "rotate-90")} />{t("views:agentTree.graph.trace")}

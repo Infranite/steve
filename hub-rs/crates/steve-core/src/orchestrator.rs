@@ -1186,7 +1186,7 @@ impl Tx<'_> {
             &item.id,
             "steve",
             "sys",
-            &format!("Steve 建立事项，交给{}{where_}{kind}", bot.display()),
+            &format!("Steve 建立事项，交给 {}{where_}{kind}", bot.display()),
             None,
         )?;
         let mut detail = json!({"bot": bot.id, "project": item.project_id});
@@ -3993,7 +3993,7 @@ impl Tx<'_> {
                 .decision_resolve(&d.id, json!({"reassigned": true}), "expired", None)?;
         }
         self.db()
-            .timeline_add(id, actor, "sys", &format!("换成{}", b.display()), None)?;
+            .timeline_add(id, actor, "sys", &format!("换成 {}", b.display()), None)?;
         let prev = if handoff.is_empty() {
             String::new()
         } else {
@@ -4431,7 +4431,7 @@ impl Tx<'_> {
                     &i.id,
                     "steve",
                     "sys",
-                    &format!("{} Bot 已删除，交给{}", b.name, target.display()),
+                    &format!("{} Bot 已删除，交给 {}", b.name, target.display()),
                     None,
                 )?;
                 moved.push(i.id.clone());

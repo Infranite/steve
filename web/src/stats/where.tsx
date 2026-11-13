@@ -90,7 +90,7 @@ function TopItems({ f, fkey, live }: { f: Filter; fkey: string; live: boolean })
         : <>
           <div className="-mx-2 flex flex-col" role="list" data-top-items>
             <div className="hidden grid-cols-[minmax(0,1fr)_7rem_6rem_9rem] items-center gap-x-4 px-2 pb-1.5 type-footnote text-muted-foreground @3xl/stats:grid" aria-hidden>
-              <span>{t("stats:col.item")}</span><span className="text-right">{t("stats:v2.where.colAgent")}</span><span className="text-right">tokens</span><span className="inline-flex items-center justify-end gap-1">{t("stats:col.cost")}<Est /></span>
+              <span>{t("stats:col.item")}</span><span className="text-right">{t("stats:v2.where.colAgent")}</span><span className="text-right">{t("stats:col.tokens")}</span><span className="inline-flex items-center justify-end gap-1">{t("stats:col.cost")}<Est /></span>
             </div>
             {rows.map((r) => <TopRow key={r.item_id} r={r} max={max} />)}
           </div>

@@ -876,9 +876,9 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 && let Some(node) = node_of_strict(&self.store, &session.id)?
                 && !eligible(&node)?
             {
-                return Err(CoreError::Msg(
-                    "协作会话绑定的 Node 不可用或不再获授权。".into(),
-                ));
+                return Err(CoreError::Msg(steve_i18n::t!(
+                    "hub.workflow.node_unavailable"
+                )));
             }
         }
         if eligible("local")? {

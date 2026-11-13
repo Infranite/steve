@@ -89,7 +89,6 @@ export default {
     reauthCred: "重新填写凭据",
     receiving: "接收中",
     pausedSub: "已暂停：期间不接收，恢复后不补收",
-    receivingSub: "暂停后不再接收，恢复后不补收",
     resumed: "已恢复",
     paused: "已暂停",
     allow: "允许 Steve",

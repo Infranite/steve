@@ -161,6 +161,7 @@
   "modules.system.bank": "Bank card",
   "modules.system.feishu_tenant": "Feishu tenant",
   "modules.system.ext_ws": "Other chat app",
+  "modules.stewards.device_runner": "Runs sessions",
   "modules.stewards.type.account": "Account",
   "modules.stewards.type.connection": "Connection",
   "modules.stewards.type.device": "Device",

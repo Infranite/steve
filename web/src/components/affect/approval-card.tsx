@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { t, useT } from "@/i18n";
-import { clockDur } from "@/i18n/format";
+import { ago, clockDur } from "@/i18n/format";
 
 /*
  * Approval Card – an AI agent asks before it does something consequential, in a single self-contained file.
@@ -79,6 +79,7 @@ export type ApprovalCardProps = {
 
 /* Steve: words from Steve's i18n, built when shown so they follow the language */
 const RISK_LABEL = (): Record<ApprovalRisk, string> => ({ low: t("core:affect.risk.low"), medium: t("core:affect.risk.medium"), high: t("core:affect.risk.high") });
+const RISK_WORD = (): Record<ApprovalRisk, string> => ({ low: t("core:affect.risk.lowFull"), medium: t("core:affect.risk.mediumFull"), high: t("core:affect.risk.highFull") });
 
 export function ApprovalCard({
   title,
@@ -443,8 +444,8 @@ export function ApprovalCard({
               {risk && (
                 <span className="ui-apc__risk" data-risk={risk}>
                   <span className="ui-apc__risk-dot" aria-hidden="true" />
-                  {RISK_LABEL()[risk]}
-                  <span className="ui-apc__risk-word"> risk</span>
+                  <span className="ui-apc__risk-word">{RISK_WORD()[risk]}</span>
+                  <span className="ui-apc__risk-short">{RISK_LABEL()[risk]}</span>
                 </span>
               )}
             </div>
@@ -505,7 +506,7 @@ export function ApprovalCard({
           </span>
           <span className="ui-apc__row-status">
             {resolvedLabel}
-            {status === "approved" && always && <span className="ui-apc__row-extra"> · Always</span>}
+            {status === "approved" && always && <span className="ui-apc__row-extra"> · {t("core:affect.approval.alwaysShort")}</span>}
             {decidedAt !== null && <span className="ui-apc__row-time"> · {ago(decidedAt)}</span>}
           </span>
         </div>
@@ -529,15 +530,6 @@ function clock(s: number) {
 /* Steve: the page's own duration words */
 function spoken(s: number) {
   return clockDur(s * 1000);
-}
-
-/** just now, 4 min ago, 2 h ago */
-function ago(at: number) {
-  const s = Math.floor((Date.now() - at) / 1000);
-  if (s < 60) return t("core:affect.approval.justNow");
-  if (s < 3600) return t("core:affect.approval.minAgo", { n: Math.floor(s / 60) });
-  if (s < 86400) return t("core:affect.approval.hAgo", { n: Math.floor(s / 3600) });
-  return t("core:affect.approval.dAgo", { n: Math.floor(s / 86400) });
 }
 
 /* ---------- Styles ---------- */
@@ -698,6 +690,9 @@ const css = /* css */ `
 }
 .ui-apc__risk-word {
   white-space: pre;
+}
+.ui-apc__risk-short {
+  display: none;
 }
 .ui-apc__risk[data-risk="medium"] {
   background: var(--ui-apc-med-bg);
@@ -1071,6 +1066,7 @@ const css = /* css */ `
   .ui-apc__pending > .ui-apc__card { padding: 14px; }
   .ui-apc__head { gap: 10px; }
   .ui-apc__risk-word { display: none; }
+  .ui-apc__risk-short { display: inline; }
   .ui-apc__row-time { display: none; }
   .ui-apc__details { column-gap: 12px; }
 }

@@ -188,7 +188,7 @@ async fn at_bot_picks_the_bot_and_skips_chat() {
     k.core.say(WS, "@Steve开发 修一下登录", &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(
-        ms[1].text, "按你指定的，交给Steve 开发 Bot 了。 标签：bug。",
+        ms[1].text, "按你指定的，交给 Steve 开发 Bot 了。 标签：bug。",
         "“@Steve开发” (as the composer writes it) names “Steve 开发”"
     );
     let item = k
@@ -199,13 +199,13 @@ async fn at_bot_picks_the_bot_and_skips_chat() {
     assert_eq!(item.bot_id.as_deref(), Some("dev"));
     k.core.say(WS, "@Steve 修", &[]).unwrap();
     let ms = settle(&k, 4).await;
-    assert_eq!(ms[3].text, "按你指定的，交给Steve Bot 了。 标签：feat。");
+    assert_eq!(ms[3].text, "按你指定的，交给 Steve Bot 了。 标签：feat。");
     k.db()
         .bot_patch("dev", json!({"name": "开发"}).as_object().unwrap(), "me")
         .unwrap();
     k.core.say(WS, "@开发Bot 修一下登录", &[]).unwrap();
     let ms = settle(&k, 6).await;
-    assert_eq!(ms[5].text, "按你指定的，交给开发 Bot 了。 标签：bug。");
+    assert_eq!(ms[5].text, "按你指定的，交给 开发 Bot 了。 标签：bug。");
     let item = k
         .db()
         .item(ms[5].item_id.as_deref().unwrap())

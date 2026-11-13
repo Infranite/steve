@@ -499,7 +499,7 @@ export function MessageActions({
             <div className="ui-mac__panel" role="group" aria-labelledby={`${uid}-ask`} onKeyDown={onPanelKey}>
               <div className="ui-mac__panel-head">
                 <span id={`${uid}-ask`} className="ui-mac__ask">
-                  What went wrong?
+                  {t("core:affect.actions.askWrong")}
                 </span>
                 <button type="button" className="ui-mac__close" aria-label={t("core:affect.actions.closeFeedback")} onClick={closePanel}>
                   <Glyph d={icons.close} />

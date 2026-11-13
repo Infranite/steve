@@ -95,5 +95,9 @@
   "knowledge.use.draft": "一封邮件草稿",
   "knowledge.use.flow": "一次自动化运行",
   "knowledge.change.not_undoable": "这项改动已经撤销过，或者还没有可撤销的内容",
-  "knowledge.change.answered": "这个冲突已经处理过了"
+  "knowledge.change.answered": "这个冲突已经处理过了",
+  "knowledge.doc_prefix.notes": "笔记",
+  "knowledge.doc_prefix.files": "文件",
+  "knowledge.doc_prefix.items": "事项记录",
+  "knowledge.doc_prefix.chat": "会话记录"
 }

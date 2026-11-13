@@ -268,5 +268,6 @@
   "hub.dep_wait.owner_only": "The main item's owner manages its waits for prerequisites",
   "hub.dep_wait.no_session": "The current owner has no live session to resume",
   "hub.dep_wait.work_running": "Collaboration work is still running or its stop is not confirmed; pause the work graph and confirm it stopped before registering a wait for prerequisites",
-  "hub.session.node_parked": "This session is bound to a Node, but Nodes are not enabled here (STEVE_NODE_MODE): the message is queued and will not go to the old runner."
+  "hub.session.node_parked": "This session is bound to a Node, but Nodes are not enabled here (STEVE_NODE_MODE): the message is queued and will not go to the old runner.",
+  "hub.workflow.node_unavailable": "The Node this collaboration's sessions are bound to is unavailable or no longer authorized."
 }

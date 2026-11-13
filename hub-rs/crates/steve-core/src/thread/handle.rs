@@ -697,9 +697,9 @@ impl Core {
         };
         /* the router's sentence, unless the code picked another bot than it named */
         let head = match &named {
-            Some(b) => format!("按你指定的，交给{} Bot 了。", b.name),
+            Some(b) => format!("按你指定的，交给 {} Bot 了。", b.name),
             None if r.bot_from_project => {
-                format!("好，交给{}了，做完请你验收。", self.bot_name(&item))
+                format!("好，交给 {} 了，做完请你验收。", self.bot_name(&item))
             }
             None if !r.reply.is_empty() => r.reply.clone(),
             None => "好，交给它了，做完请你验收。".into(),

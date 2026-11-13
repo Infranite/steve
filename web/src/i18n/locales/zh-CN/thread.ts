@@ -111,7 +111,7 @@ export default {
     collapse: "收起",
     reply: "它的回复",
     latest: "· 看最新进展",
-    reworkPlaceholder: "哪里不对？写给{{bot}}",
+    reworkPlaceholder: "哪里不对？写给 {{bot}}",
     sendRework: "发回返工",
     rework: "返工…",
     pass: "验收通过",

@@ -268,5 +268,6 @@
   "hub.dep_wait.owner_only": "请由主事项负责人管理前置等待",
   "hub.dep_wait.no_session": "没有当前负责人可续跑的有效会话",
   "hub.dep_wait.work_running": "协作工作仍在执行或停止尚未确认，请先暂停工作图并确认停止后再登记前置等待",
-  "hub.session.node_parked": "该会话绑定在 Node 上，但 Node 未启用（STEVE_NODE_MODE），消息已排队，不会交给旧运行器。"
+  "hub.session.node_parked": "该会话绑定在 Node 上，但 Node 未启用（STEVE_NODE_MODE），消息已排队，不会交给旧运行器。",
+  "hub.workflow.node_unavailable": "协作会话绑定的 Node 不可用或不再获授权。"
 }

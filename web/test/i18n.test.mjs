@@ -207,3 +207,40 @@ test("a new persona's defaults introduce it coherently in the Hub's words, whate
     assert.equal(introOf(p, "你"), "我是新身份，我是 AI 助手。", l)
   })
 })
+
+const CJK1 = /[　-〿㐀-鿿＀-￯]/
+/** en values that are meant to carry Chinese: the language's own name, and the words the Hub reads in what you type */
+const EN_CJK = new Set(["common:lang.zh-CN", "knowledge:cand.footer"])
+
+test("en values are English: no Chinese outside the listed ones", () => {
+  const bad = []
+  for (const ns of i18n.NAMESPACES) for (const [k, v] of leaves(en[ns])) if (CJK1.test(v) && !EN_CJK.has(`${ns}:${k}`)) bad.push(`${ns}:${k} ${JSON.stringify(v)}`)
+  assert.deepEqual(bad, [], "translate these, or list them in EN_CJK with the reason")
+  for (const k of EN_CJK) { const [ns, path] = k.split(":"); assert.ok(CJK1.test(new Map(leaves(en[ns])).get(path) ?? ""), `${k} no longer has Chinese; remove it from EN_CJK`) }
+})
+
+test("zh-CN puts a space between Chinese and Latin letters or digits, as everywhere else", () => {
+  const bad = []
+  for (const ns of i18n.NAMESPACES) for (const [k, v] of leaves(zh[ns])) {
+    const s = v.replace(/\{\{[^}]*\}\}/g, "").replace(/<[^>]*>/g, "")
+    if (/[一-鿿][A-Za-z0-9]|[A-Za-z0-9][一-鿿]/.test(s)) bad.push(`${ns}:${k} ${JSON.stringify(v)}`)
+  }
+  assert.deepEqual(bad, [])
+})
+
+/* keys read as whole objects rather than through t(): the built-in themes' names (themes/builtin.ts) */
+const READ_AS_OBJECTS = ["manage:look.names."]
+
+test("every key is used: a redesign that drops a text drops its key", () => {
+  const code = sources(SRC).map((f) => readFileSync(f, "utf8")).join("\n")
+  /* a key built at run time, `ns:area.${x}` or "ns:area." + x, uses every key under its fixed part */
+  const built = [...code.matchAll(/[`"']([a-z]+:[\w.-]*?)\$\{/g), ...code.matchAll(/["'`]([a-z]+:[\w.-]*\.)["'`]\s*\+/g)].map((m) => m[1])
+  const prefixes = [...built, ...READ_AS_OBJECTS]
+  const unused = []
+  for (const ns of i18n.NAMESPACES) for (const k of new Set(keys(zh[ns]))) {
+    const full = `${ns}:${k}`
+    if (code.includes(`"${full}"`) || code.includes(`'${full}'`) || code.includes("`" + full + "`") || prefixes.some((p) => full.startsWith(p))) continue
+    unused.push(full)
+  }
+  assert.deepEqual(unused, [], "remove these from both languages")
+})
